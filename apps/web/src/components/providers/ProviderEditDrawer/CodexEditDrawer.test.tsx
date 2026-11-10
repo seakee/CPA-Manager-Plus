@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import '@/i18n';
+import i18n from '@/i18n';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 
 const authState = vi.hoisted(() => ({
@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   updateConfigValue: vi.fn(),
   clearCache: vi.fn(),
   showNotification: vi.fn(),
+  showConfirmation: vi.fn(),
   updateCodexConfig: vi.fn(),
   getCodexConfigs: vi.fn(),
 }));
@@ -29,7 +30,10 @@ vi.mock('@/stores', () => ({
       updateConfigValue: mocks.updateConfigValue,
       clearCache: mocks.clearCache,
     }),
-  useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+  useNotificationStore: () => ({
+    showNotification: mocks.showNotification,
+    showConfirmation: mocks.showConfirmation,
+  }),
 }));
 
 vi.mock('@/components/ui/Drawer', () => ({
@@ -146,8 +150,6 @@ describe('CodexEditDrawer load baseline guard', () => {
       { apiKey: 'codex-key', baseUrl: 'https://api.openai.com/v1' },
     ]);
     const onClose = vi.fn();
-    const confirmMock = vi.fn(() => false);
-    vi.stubGlobal('window', { confirm: confirmMock });
 
     let renderer: ReactTestRenderer;
     await act(async () => {
@@ -165,10 +167,16 @@ describe('CodexEditDrawer load baseline guard', () => {
     expect(findSaveButton(renderer!.root)?.props.disabled).toBe(true);
 
     act(() => findDrawerCloseButton(renderer!.root)?.props.onClick());
-    expect(confirmMock).toHaveBeenCalledOnce();
+    expect(mocks.showConfirmation).toHaveBeenCalledOnce();
+    expect(mocks.showConfirmation.mock.calls[0][0]).toMatchObject({
+      title: i18n.t('common.unsaved_changes_title'),
+      variant: 'danger',
+    });
     expect(onClose).not.toHaveBeenCalled();
 
-    vi.unstubAllGlobals();
+    act(() => mocks.showConfirmation.mock.calls[0][0].onConfirm());
+    expect(onClose).toHaveBeenCalledTimes(1);
+
     act(() => renderer!.unmount());
   });
 

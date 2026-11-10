@@ -82,14 +82,11 @@ const messages = {
     '等待憑證冷卻的最長時間，並非請求逾時；0 表示不等待冷卻。',
     'Максимальное ожидание охлаждения учётных данных, не тайм-аут запроса. Ноль отключает ожидание.',
   ],
-  fields: ['Fields: {count}', '{count} 个配置字段', '{count} 個設定欄位', 'Полей: {count}'],
+  // The overview stat grid renders the count in its own <dd>; a label that
+  // also interpolated it read as "个配置字段 / 39".
+  fields: ['Fields', '配置字段', '設定欄位', 'Поля'],
   mapped: ['Configuration reference', '配置字段说明', '設定欄位說明', 'Справочник настроек'],
-  ownerGroups: [
-    'Ownership groups: {count}',
-    '{count} 组归属说明',
-    '{count} 組歸屬說明',
-    'Групп владельцев: {count}',
-  ],
+  ownerGroups: ['Ownership groups', '归属分组', '歸屬分組', 'Группы владельцев'],
   connected: ['Connected controls', '已接入操作', '已接入操作', 'Подключённые операции'],
   retryControls: [
     'Retry count and cooldown wait',
@@ -691,6 +688,34 @@ const messages = {
   ownerDetailDeployment: ['Listener, TLS, discovery and management settings are owned by the system page.', '监听、TLS、发现与管理设置由系统页面负责。', '監聽、TLS、探索與管理設定由系統頁面負責。', 'Прослушивание, TLS, обнаружение и управление — на странице системы.'],
   ownerDetailPlugins: ['Plugin enablement and configuration are owned by the plugins page.', '插件启停与配置由插件页面负责。', '外掛啟停與設定由外掛頁面負責。', 'Включение и настройка плагинов — на странице плагинов.'],
   ownerDetailLegacy: ['Format and historical switches are not new product controls.', '格式与历史开关不属于新产品开关。', '格式與歷史開關不屬於新產品開關。', 'Формат и исторические переключатели не являются новыми настройками.'],
+  requestMonitoring: ['Request monitoring', '请求监控', '請求監控', 'Мониторинг запросов'],
+  requestMonitoringHelp: [
+    'Records CPA request usage for this Console. Turning it off keeps the CPA connection and every other setting; the monitoring page stays in the sidebar and explains how to turn it back on.',
+    '记录 CPA 的请求用量。关闭后保留 CPA 连接与其他全部配置；监控页仍留在侧栏，并提示如何重新开启。',
+    '記錄 CPA 的請求用量。關閉後保留 CPA 連線與其他全部設定；監控頁仍留在側欄，並提示如何重新開啟。',
+    'Записывает использование запросов CPA для этой консоли. При выключении подключение CPA и все остальные настройки сохраняются; страница мониторинга остаётся в боковом меню и подсказывает, как включить его снова.',
+  ],
+  requestMonitoringOn: ['On', '已开启', '已開啟', 'Включён'],
+  requestMonitoringOff: ['Off', '未开启', '未開啟', 'Выключен'],
+  requestMonitoringSaving: ['Saving…', '保存中…', '儲存中…', 'Сохранение…'],
+  requestMonitoringEnable: [
+    'Turn request monitoring on',
+    '开启请求监控',
+    '開啟請求監控',
+    'Включить мониторинг запросов',
+  ],
+  requestMonitoringUnavailable: [
+    'Request monitoring can be read and switched only while this Console is served by its Manager Server.',
+    '只有由 Manager Server 提供服务的控制台才能读取与切换请求监控。',
+    '只有由 Manager Server 提供服務的主控台才能讀取與切換請求監控。',
+    'Читать и переключать мониторинг запросов можно только в консоли, которую обслуживает её Manager Server.',
+  ],
+  requestMonitoringFailed: [
+    'Request monitoring was not changed. The submitted configuration was left exactly as stored; try again.',
+    '请求监控未修改，本次写入的配置保持原样，请重试。',
+    '請求監控未變更，本次寫入的設定保持原樣，請重試。',
+    'Мониторинг запросов не изменён. Отправленная конфигурация осталась прежней; попробуйте ещё раз.',
+  ],
 } satisfies Record<string, readonly [string, string, string, string]>;
 
 export function configurationText(key: keyof typeof messages, count?: number): string {

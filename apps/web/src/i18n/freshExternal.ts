@@ -134,6 +134,36 @@ const messages = {
   usageWritesBlocked: ['Writes blocked by this version', '该版本阻止写入', '該版本阻止寫入', 'Запись заблокирована этой версией'],
   usageWritesAllowed: ['Writes allowed', '允许写入', '允許寫入', 'Запись разрешена'],
   usageBlockedReason: ['Collection blocked by', '采集中断原因', '擷取中斷原因', 'Причина остановки сбора'],
+  usageBlockedAuthority: [
+    'the Manager has no collection authority for this installation',
+    'Manager 尚未取得该安装的采集授权',
+    'Manager 尚未取得此安裝的擷取授權',
+    'у Manager нет прав на сбор для этой установки',
+  ],
+  usageBlockedCollector: [
+    'the Collector could not start',
+    '采集器未能启动',
+    '擷取器未能啟動',
+    'сборщик не запустился',
+  ],
+  usageBlockedStatistics: [
+    'usage statistics are turned off on the CPA',
+    'CPA 的用量统计已关闭',
+    'CPA 的用量統計已關閉',
+    'статистика использования на CPA отключена',
+  ],
+  usageBlockedExternalAuthority: [
+    'the saved CPA credential could not be verified',
+    '无法验证已保存的 CPA 凭据',
+    '無法驗證已儲存的 CPA 憑證',
+    'не удалось проверить сохранённые учётные данные CPA',
+  ],
+  usageBlockedUnknown: [
+    'the last attempt was stopped for a reason this Console cannot name',
+    '上次尝试因本控制台无法识别的原因此中断',
+    '上次嘗試因本控制台無法識別的原因此中斷',
+    'последняя попытка прервана по неизвестной этой консоли причине',
+  ],
   usageEnableAction: ['Enable usage statistics on your CPA', '在你的 CPA 上启用用量统计', '在你的 CPA 上啟用用量統計', 'Включить статистику на вашем CPA'],
   usageConfirmTitle: ['Enable usage statistics on your CPA?', '要在你的 CPA 上启用用量统计吗？', '要在你的 CPA 上啟用用量統計嗎？', 'Включить статистику использования на вашем CPA?'],
   usageConfirmHelp: [
@@ -269,6 +299,25 @@ export function externalWorkspaceText(key: keyof typeof messages): string {
   const index =
     language === 'zh-TW' ? 2 : language === 'ru' ? 3 : language.startsWith('zh') ? 1 : 0;
   return messages[key][index];
+}
+
+// blockedReasonText names why the Collector refused to start. The Manager
+// reports a stable code, never a sentence for a person: a known code reads as
+// its cause, and one this Console does not know still reads as an explanation
+// instead of the wire word.
+export function blockedReasonText(reason: string | undefined): string {
+  switch (reason) {
+    case 'usage_collection_authority_unavailable':
+      return externalWorkspaceText('usageBlockedAuthority');
+    case 'usage_collector_unavailable':
+      return externalWorkspaceText('usageBlockedCollector');
+    case 'usage_statistics_disabled':
+      return externalWorkspaceText('usageBlockedStatistics');
+    case 'external_cpa_authority_unavailable':
+      return externalWorkspaceText('usageBlockedExternalAuthority');
+    default:
+      return externalWorkspaceText('usageBlockedUnknown');
+  }
 }
 
 // collectorStateText names the Collector phase the Manager reports. The raw value

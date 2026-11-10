@@ -213,6 +213,33 @@ func (r *repository) Load(ctx context.Context) (Record, error) {
 	}
 	return v, tx.Commit()
 }
+
+// enableCollectorAtCompletion turns request monitoring on for the installation
+// that just completed. The row itself is rewritten in place so every other
+// field — including the protected CPA credential envelope — stays byte for byte
+// what the install path stored. A row that is absent or already enabled is left
+// alone: this transition only supplies the default the pending fence withheld.
+func enableCollectorAtCompletion(ctx context.Context, tx *sql.Tx) error {
+	var data string
+	switch err := tx.QueryRowContext(ctx, "select value from settings where key='manager_config_v1'").Scan(&data); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	}
+	var cfg model.ManagerConfig
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		return err
+	}
+	if cfg.Collector.Enabled != nil && *cfg.Collector.Enabled {
+		return nil
+	}
+	enabled := true
+	cfg.Collector.Enabled = &enabled
+	cfg.UpdatedAtMS = time.Now().UnixMilli()
+	return write(ctx, tx, "manager_config_v1", cfg)
+}
+
 func write(ctx context.Context, tx *sql.Tx, k string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -441,6 +468,14 @@ func (r *repository) UpdateTx(ctx context.Context, id bootstrap.FreshIdentity, r
 		disabled := false
 		cfg := model.ManagerConfig{CPAConnection: *v.Connection, Collector: model.ManagerCollectorConfig{Enabled: &disabled}, UpdatedAtMS: time.Now().UnixMilli()}
 		err = write(ctx, tx, "manager_config_v1", cfg)
+	}
+	if err == nil && v.Operation.ProductComplete && !before.Operation.ProductComplete {
+		// Completion is where a new installation's own defaults take effect.
+		// The pending fence above requires a stopped Collector while the
+		// operation is incomplete, so without this transition request
+		// monitoring would begin disabled and stay disabled: the install path
+		// never writes an enabled value on its own.
+		err = enableCollectorAtCompletion(ctx, tx)
 	}
 	if err == nil && v.Connection != nil && v.Operation.ProductComplete && (!before.Operation.ProductComplete || before.Connection == nil) {
 		// Fresh keeps pending installs free of the legacy setup row so an

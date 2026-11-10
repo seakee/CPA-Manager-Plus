@@ -250,8 +250,10 @@ export function AiProvidersVertexEditPage() {
     isExcludedModelsDirty;
   const canGuard = !loading && !saving && !invalidIndexParam && !invalidIndex;
 
-  const { allowNextNavigation } = useUnsavedChangesGuard({
-    enabled: canGuard,
+  const { allowNextNavigation, blocker: unsavedChangesBlocker } = useUnsavedChangesGuard({
+    // Registering a blocker at all makes react-router warn on manual
+    // address-bar edits, so a clean editor registers none.
+    enabled: canGuard && isDirty,
     shouldBlock: ({ currentLocation, nextLocation }) =>
       isDirty && currentLocation.pathname !== nextLocation.pathname,
     dialog: {
@@ -339,7 +341,9 @@ export function AiProvidersVertexEditPage() {
   ]);
 
   return (
-    <SecondaryScreenShell
+    <>
+      {unsavedChangesBlocker}
+      <SecondaryScreenShell
       ref={swipeRef}
       contentClassName={layoutStyles.content}
       title={title}
@@ -458,6 +462,7 @@ export function AiProvidersVertexEditPage() {
           </>
         )}
       </Card>
-    </SecondaryScreenShell>
+      </SecondaryScreenShell>
+    </>
   );
 }

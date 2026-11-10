@@ -1,5 +1,6 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { NavigationType, type BlockerFunction } from 'react-router-dom';
 import { useUnsavedChangesGuard } from './useUnsavedChangesGuard';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -14,13 +15,20 @@ const { mocks } = vi.hoisted(() => ({
       proceed: vi.fn(),
       reset: vi.fn(),
     },
+    useBlocker: vi.fn<(shouldBlock: BlockerFunction) => void>(),
     showConfirmation: vi.fn(),
   },
 }));
 
 vi.mock('react-router-dom', () => ({
+  NavigationType: { Pop: 'POP', Push: 'PUSH', Replace: 'REPLACE' },
   useLocation: () => mocks.location,
-  useBlocker: () => mocks.blocker,
+  // The same blocker object on every render, like a router that did not change
+  // state; the guard must not re-prompt or re-render off that identity.
+  useBlocker: (shouldBlock: BlockerFunction) => {
+    mocks.useBlocker(shouldBlock);
+    return mocks.blocker;
+  },
 }));
 
 vi.mock('@/stores', () => ({
@@ -36,16 +44,31 @@ const dialog = {
 
 function Harness({
   onConfirmNavigation,
+  enabled,
+  shouldBlock = true,
 }: {
   onConfirmNavigation?: () => boolean | void | Promise<boolean | void>;
+  enabled?: boolean;
+  shouldBlock?: boolean;
 }) {
-  useUnsavedChangesGuard({
-    shouldBlock: true,
+  const { blocker } = useUnsavedChangesGuard({
+    enabled,
+    shouldBlock,
     dialog,
     onConfirmNavigation,
   });
-  return null;
+  return <>{blocker}</>;
 }
+
+const rerender = async (
+  renderer: ReactTestRenderer,
+  onConfirmNavigation?: () => boolean | void | Promise<boolean | void>
+) => {
+  await act(async () => {
+    renderer.update(<Harness onConfirmNavigation={onConfirmNavigation} />);
+    await Promise.resolve();
+  });
+};
 
 const blockNavigation = async (
   renderer: ReactTestRenderer,
@@ -59,10 +82,7 @@ const blockNavigation = async (
     key: 'next',
     state: null,
   };
-  await act(async () => {
-    renderer.update(<Harness onConfirmNavigation={onConfirmNavigation} />);
-    await Promise.resolve();
-  });
+  await rerender(renderer, onConfirmNavigation);
   const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as {
     onConfirm: () => void;
   };
@@ -76,6 +96,7 @@ describe('useUnsavedChangesGuard', () => {
     mocks.blocker.location = undefined;
     mocks.blocker.proceed.mockClear();
     mocks.blocker.reset.mockClear();
+    mocks.useBlocker.mockClear();
     mocks.showConfirmation.mockClear();
   });
 
@@ -125,5 +146,62 @@ describe('useUnsavedChangesGuard', () => {
       expect(mocks.blocker.proceed).not.toHaveBeenCalled();
       act(() => renderer.unmount());
     }
+  });
+
+  it('prompts once per blocked location, not once per render', async () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<Harness />);
+    });
+    await blockNavigation(renderer);
+    expect(mocks.showConfirmation).toHaveBeenCalledTimes(1);
+
+    // A router that re-renders without changing state must not re-prompt, and
+    // must not loop: nothing here feeds a blocker value back into state.
+    await rerender(renderer);
+    await rerender(renderer);
+    expect(mocks.showConfirmation).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('registers no router blocker while the guard is disabled', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<Harness enabled={false} />);
+    });
+
+    // A registered blocker alone makes react-router warn on every manual hash
+    // edit, so a clean page must not register one at all.
+    expect(mocks.useBlocker).not.toHaveBeenCalled();
+    expect(mocks.showConfirmation).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('registers the router blocker once the page has unsaved changes', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<Harness enabled />);
+    });
+
+    expect(mocks.useBlocker).toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('never blocks when the page reports nothing unsaved', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<Harness enabled shouldBlock={false} />);
+    });
+
+    const shouldBlockFunction = mocks.useBlocker.mock.calls[0]?.[0];
+    expect(shouldBlockFunction).toBeDefined();
+    expect(
+      shouldBlockFunction?.({
+        currentLocation: mocks.location,
+        nextLocation: { ...mocks.location, pathname: '/codex-inspection' },
+        historyAction: NavigationType.Pop,
+      })
+    ).toBe(false);
+    act(() => renderer.unmount());
   });
 });

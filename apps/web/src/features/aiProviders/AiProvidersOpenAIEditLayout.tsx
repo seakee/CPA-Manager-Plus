@@ -502,8 +502,10 @@ export function AiProvidersOpenAIEditLayout() {
   }, [hasIndexParam, params.index]);
   const canGuard = !resolvedLoading && !saving && !invalidIndexParam && !invalidIndex;
 
-  const { allowNextNavigation } = useUnsavedChangesGuard({
-    enabled: canGuard,
+  const { allowNextNavigation, blocker: unsavedChangesBlocker } = useUnsavedChangesGuard({
+    // Registering a blocker at all makes react-router warn on manual
+    // address-bar edits, so a clean editor registers none.
+    enabled: canGuard && isDirty,
     shouldBlock: ({ nextLocation }) => {
       const nextPath = nextLocation.pathname;
       const isWithinRoot = nextPath === editorRootPath || nextPath.startsWith(`${editorRootPath}/`);
@@ -622,7 +624,9 @@ export function AiProvidersOpenAIEditLayout() {
   ]);
 
   return (
-    <Outlet
+    <>
+      {unsavedChangesBlocker}
+      <Outlet
       context={
         {
           hasIndexParam,
@@ -650,6 +654,7 @@ export function AiProvidersOpenAIEditLayout() {
           mergeDiscoveredModels,
         } satisfies OpenAIEditOutletContext
       }
-    />
+      />
+    </>
   );
 }

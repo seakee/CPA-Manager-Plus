@@ -306,6 +306,55 @@ describe('FreshGatewayWorkspace', () => {
     expect(maybeTestId('gateway-no-matches')).toBeDefined();
   });
 
+  it('labels the overview statistics with the count rendered beside them', async () => {
+    const { client } = fakeClient(buildView());
+    await mount(client);
+    const overview = testId('gateway-overview');
+    const labels = overview
+      .findAll((node) => node.type === 'dt')
+      .map((node) => [node.props.children].flat().join(''));
+    expect(labels).toEqual([c('fields'), c('ruleFamilies'), c('ownerGroups'), c('dirty')]);
+    expect(labels.join(' ')).not.toContain('{count}');
+    expect(overview.findAll((node) => node.type === 'dd')[0]?.props.children).toBe(
+      buildView().fields.length
+    );
+  });
+
+  it('names the number of drafts the discard dialog throws away', async () => {
+    const { client } = fakeClient(buildView());
+    await mount(client);
+    await openTab('retry');
+    const row = testId('gateway-field-routing.retry.request-retry');
+    await act(async () => row.findByType('input').props.onChange({ target: { value: '5' } }));
+
+    const discard = renderer.root.findAll(
+      (node) => node.type === 'button' && [node.props.children].flat(2).includes(c('discard'))
+    )[0];
+    await act(async () => discard.props.onClick());
+
+    const help = testId('gateway-discard-help');
+    const text = [help.props.children].flat().join('');
+    expect(text).toBe(c('discardHelp', 1));
+    expect(text).toContain('1');
+    expect(text).not.toContain('{count}');
+  });
+
+  it('gives the search box and group fields the shared input class', async () => {
+    const { client } = fakeClient(buildView());
+    await mount(client);
+    const search = renderer.root.findByProps({ type: 'search' });
+    expect(search.props.className).toBe('input');
+
+    await openTab('retry');
+    expect(testId('gateway-field-routing.retry.request-retry').findByType('input').props.className).toBe(
+      'input'
+    );
+
+    await act(async () => search.props.onChange({ target: { value: 'disable-image-generation' } }));
+    const select = testId('gateway-field-multimedia.disable-image-generation').findByType('select');
+    expect(select.props.className).toBe('input');
+  });
+
   it('saves one group with only the edited leaves and reports the draft as dirty', async () => {
     const { client, calls } = fakeClient(buildView());
     const { onDirtyChange } = await mount(client);

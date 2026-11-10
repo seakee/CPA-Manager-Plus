@@ -188,7 +188,7 @@ export function OpenAIEditDrawer({
   onSaved,
 }: OpenAIEditDrawerProps) {
   const { t } = useTranslation();
-  const { showNotification } = useNotificationStore();
+  const { showNotification, showConfirmation } = useNotificationStore();
   const config = useConfigStore((state) => state.config);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
 
@@ -342,11 +342,21 @@ export function OpenAIEditDrawer({
   }, [baseline, form]);
 
   const handleClose = useCallback(() => {
-    if (isDirty && !saving) {
-      if (!window.confirm(t('common.unsaved_changes_message'))) return;
+    if (!isDirty || saving) {
+      onClose();
+      return;
     }
-    onClose();
-  }, [isDirty, onClose, saving, t]);
+    // The drawer is one surface of the provider editor, so its discard prompt
+    // must be the same in-app dialog the rest of the app uses.
+    showConfirmation({
+      title: t('common.unsaved_changes_title'),
+      message: t('common.unsaved_changes_message'),
+      confirmText: t('common.leave'),
+      cancelText: t('common.stay'),
+      variant: 'danger',
+      onConfirm: onClose,
+    });
+  }, [isDirty, onClose, saving, showConfirmation, t]);
 
   // Model discovery
   const discoveryConnection = useDiscoveryAuthStore((state) =>

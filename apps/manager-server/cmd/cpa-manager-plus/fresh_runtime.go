@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -1244,11 +1245,78 @@ func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, cli
 	return observed, false, nil
 }
 
+// freshDatabaseStatusProvider reports the Manager database files and the WAL
+// checkpoint state observed for them. The legacy service starts SQLite WAL
+// maintenance before it builds its AppContext
+// (cmd/cpa-manager-plus/main.go); the Fresh service returns from main() before
+// that point, so a v2 installation would never checkpoint its WAL and its
+// System database card could only ever report an unobserved checkpoint. The
+// maintenance is started on the host lifetime by the Fresh application and
+// looked up here by database path, because this provider is a value the legacy
+// context holds.
 type freshDatabaseStatusProvider struct {
 	dbPath string
 }
 
+// freshDatabaseMaintenance is the one maintenance instance this process started
+// per database path. Only the Fresh application starts it, and only this file
+// reads it.
+var freshDatabaseMaintenance = struct {
+	mu    sync.Mutex
+	paths map[string]*sqliterepo.WALMaintenance
+}{paths: map[string]*sqliterepo.WALMaintenance{}}
+
+// startFreshDatabaseMaintenance starts the Fresh installation's WAL maintenance
+// on the host lifetime. Repeated calls are no-ops, so a completion replay or a
+// retried usage start cannot open a second maintainer.
+func startFreshDatabaseMaintenance(ctx context.Context, dbPath string) {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	defer freshDatabaseMaintenance.mu.Unlock()
+	if _, started := freshDatabaseMaintenance.paths[key]; started {
+		return
+	}
+	maintenance, err := sqliterepo.NewWALMaintenance(key)
+	if err != nil {
+		log.Printf("[startup] SQLite WAL maintenance unavailable; the database card reports an unobserved checkpoint: %v", err)
+		return
+	}
+	maintenance.Start(ctx)
+	freshDatabaseMaintenance.paths[key] = maintenance
+}
+
+func freshDatabaseMaintenanceFor(dbPath string) *sqliterepo.WALMaintenance {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return nil
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	defer freshDatabaseMaintenance.mu.Unlock()
+	return freshDatabaseMaintenance.paths[key]
+}
+
+// freshDatabaseMaintenanceKey resolves the file the maintenance and the card
+// both name, so a relative and an absolute spelling of one database cannot
+// produce two maintainers.
+func freshDatabaseMaintenanceKey(dbPath string) (string, bool) {
+	trimmed := strings.TrimSpace(dbPath)
+	if trimmed == "" {
+		return "", false
+	}
+	absolute, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", false
+	}
+	return absolute, true
+}
+
 func (p freshDatabaseStatusProvider) Snapshot() sqliterepo.WALMaintenanceSnapshot {
+	if maintenance := freshDatabaseMaintenanceFor(p.dbPath); maintenance != nil {
+		return maintenance.Snapshot()
+	}
 	return sqliterepo.InspectDatabaseFiles(p.dbPath)
 }
 

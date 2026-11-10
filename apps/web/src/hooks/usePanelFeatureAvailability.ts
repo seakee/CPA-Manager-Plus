@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import {
   isUsageServiceId,
   normalizeUsageServiceBase,
@@ -147,6 +147,7 @@ type PanelFeatureAvailabilityRequestInput = {
   managementKey: string;
   usageServiceRevision: number;
   panelBase: string;
+  revision: number;
 };
 
 type PanelFeatureAvailabilityRequest = {
@@ -189,17 +190,41 @@ let cachedAvailability: PanelFeatureAvailability | null = null;
 let inFlightAvailabilityRequest: PanelFeatureAvailabilityRequest | null = null;
 let latestAvailabilityRequestKey = '';
 
+// A Manager config write can change what this panel is allowed to offer (for
+// example switching request monitoring on or off). Consumers refresh through a
+// revision counter instead of keeping the value read at login: the key below
+// changes, so the next render probes again and every mounted consumer sees the
+// new answer.
+let availabilityRevision = 0;
+const availabilityListeners = new Set<() => void>();
+
+function subscribeAvailability(listener: () => void): () => void {
+  availabilityListeners.add(listener);
+  return () => {
+    availabilityListeners.delete(listener);
+  };
+}
+
+export function refreshPanelFeatureAvailability(): void {
+  availabilityRevision += 1;
+  cachedAvailabilityKey = '';
+  cachedAvailability = null;
+  for (const listener of [...availabilityListeners]) listener();
+}
+
 const buildAvailabilityRequestKey = ({
   apiBase,
   managementKey,
   usageServiceRevision,
   panelBase,
+  revision,
 }: PanelFeatureAvailabilityRequestInput): string =>
   [
     normalizeBase(panelBase),
     normalizeBase(apiBase),
     managementKey,
     String(usageServiceRevision),
+    String(revision),
   ].join('\u001f');
 
 const isConfirmedExternalPanelProbeFailure = (error: unknown): boolean =>
@@ -317,6 +342,11 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const usageServiceRevision = useUsageServiceStore((state) => state.revision);
+  const revision = useSyncExternalStore(
+    subscribeAvailability,
+    () => availabilityRevision,
+    () => availabilityRevision
+  );
   const panelBase = useMemo(
     () =>
       /\/api\/v2\/cpamp$/i.test(apiBase.trim()) ? normalizeBase(apiBase) : detectApiBaseFromLocation(),
@@ -328,8 +358,9 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
       managementKey,
       usageServiceRevision,
       panelBase,
+      revision,
     }),
-    [apiBase, managementKey, panelBase, usageServiceRevision]
+    [apiBase, managementKey, panelBase, revision, usageServiceRevision]
   );
   const requestKey = useMemo(() => buildAvailabilityRequestKey(requestInput), [requestInput]);
   const [state, setState] = useState<{

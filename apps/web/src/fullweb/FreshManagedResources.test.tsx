@@ -6,7 +6,6 @@ import { FreshManagedResources } from './FreshManagedResources';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
 import i18n from '../i18n';
-import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import { gatewayViewFixture } from './gatewayViewFixture';
 
@@ -227,7 +226,9 @@ describe('Fresh resources within the original Console', () => {
       });
       expect(panel('keys').props.lang).toBe(language);
       const view = JSON.stringify(renderer.toJSON());
-      expect(view).toContain(k('secretTitle'));
+      // The dialog header carries the title; the panel repeats only what the
+      // operator has to act on, so the heading exists once per dialog.
+      expect(view).toContain(t('keysCreated'));
       expect(view).toContain(secret);
       expect(pending).toHaveBeenLastCalledWith(true);
     }

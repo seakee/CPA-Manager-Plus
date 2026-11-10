@@ -78,6 +78,10 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
+	// WAL maintenance is the other background owner of this installation's
+	// database. The legacy startup creates it in main(), which the Fresh service
+	// returns from earlier, so it starts here with the same host lifetime.
+	startFreshDatabaseMaintenance(runCtx, a.cfg.DBPath)
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
 	if a.usageStarted {

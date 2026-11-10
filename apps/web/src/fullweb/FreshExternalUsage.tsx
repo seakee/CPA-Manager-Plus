@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal } from '../components/ui/Modal';
 import { FullWebIcon } from './FullWebIcon';
 import {
+  blockedReasonText,
   collectorStateText,
   externalWorkspaceText as x,
   versionSupportText,
@@ -175,9 +176,7 @@ export function FreshExternalUsage({
         {state.blockedReason && (
           <div data-testid="external-usage-blocked">
             <dt>{x('usageBlockedReason')}</dt>
-            <dd>
-              <code>{state.blockedReason}</code>
-            </dd>
+            <dd>{blockedReasonText(state.blockedReason)}</dd>
           </div>
         )}
       </dl>

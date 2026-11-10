@@ -16,12 +16,31 @@ vi.mock('../components/ui/Modal', () => ({
     ) : null,
 }));
 
+const monitoring = vi.hoisted(() => ({
+  enabled: true,
+  loaded: true,
+  saving: false,
+  failed: false,
+  writable: true,
+  setEnabled: vi.fn(async () => undefined),
+}));
+
+vi.mock('../hooks/useRequestMonitoringSwitch', () => ({
+  useRequestMonitoringSwitch: () => monitoring,
+}));
+
 describe('FreshSystemWorkspace component', () => {
   let renderer: ReactTestRenderer;
 
   beforeEach(async () => {
     await i18n.changeLanguage('zh-CN');
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    monitoring.enabled = true;
+    monitoring.loaded = true;
+    monitoring.saving = false;
+    monitoring.failed = false;
+    monitoring.writable = true;
+    monitoring.setEnabled.mockClear();
   });
 
   afterEach(async () => {
@@ -77,6 +96,48 @@ describe('FreshSystemWorkspace component', () => {
     await act(async () => closeBtn.props.onClick());
 
     expect(renderer.root.findAllByProps({ 'data-testid': 'recovery-modal' })).toHaveLength(0);
+  });
+
+  it('switches request monitoring through the shared write path', async () => {
+    await mount();
+
+    const state = renderer.root.findByProps({ 'data-testid': 'system-request-monitoring-state' });
+    expect(state.children.join('')).toBe(c('requestMonitoringOn'));
+
+    const switchNode = renderer.root.findByProps({
+      'data-testid': 'system-request-monitoring-switch',
+    });
+    const input = switchNode.findByType('input');
+    expect(input.props.checked).toBe(true);
+    await act(async () => input.props.onChange({ target: { checked: false } }));
+    expect(monitoring.setEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the switch reachable when monitoring is off and reports a failed write', async () => {
+    monitoring.enabled = false;
+    monitoring.failed = true;
+    await mount();
+
+    const state = renderer.root.findByProps({ 'data-testid': 'system-request-monitoring-state' });
+    expect(state.children.join('')).toBe(c('requestMonitoringOff'));
+    const switchNode = renderer.root.findByProps({
+      'data-testid': 'system-request-monitoring-switch',
+    });
+    expect(switchNode.findByType('input').props.checked).toBe(false);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-request-monitoring-error' })
+    ).toBeDefined();
+  });
+
+  it('explains why request monitoring cannot be switched without a Manager service', async () => {
+    monitoring.writable = false;
+    await mount();
+
+    const switchNode = renderer.root.findByProps({
+      'data-testid': 'system-request-monitoring-switch',
+    });
+    expect(switchNode.findAllByType('input')).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).toContain(c('requestMonitoringUnavailable'));
   });
 
   it('does not invent a host service health result', async () => {

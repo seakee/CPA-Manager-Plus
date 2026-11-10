@@ -31,6 +31,7 @@ import { SystemPage } from '@/pages/SystemPage';
 import { RuntimeStatusPage } from '@/pages/RuntimeStatusPage';
 import { ManagerUpdatePage } from '@/pages/ManagerUpdatePage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore, useConfigStore } from '@/stores';
@@ -48,13 +49,39 @@ function LegacyAccountsRedirect({ healthMode }: { healthMode: 'local' | 'server'
 
 function PluginGate({ children }: { children: ReactElement }) {
   const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
+  const apiBase = useAuthStore((state) => state.apiBase);
+  const [checked, setChecked] = useState(supportsPlugin);
+  const probedRef = useRef('');
+  // The plugin capability travels on a CPA management response header, so a
+  // cold load into `/console/plugins` has not seen it yet. Deciding from the
+  // initial `false` would send a supporting CPA's own page to the dashboard;
+  // one probe settles the answer before this route redirects anywhere.
+  useEffect(() => {
+    if (__DEMO_SITE__ && isDemoMode()) return;
+    if (supportsPlugin || !apiBase || probedRef.current === apiBase) return;
+    probedRef.current = apiBase;
+    let cancelled = false;
+    void pluginsApi
+      .list()
+      .catch(() => undefined)
+      .then(() => {
+        if (!cancelled) setChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, supportsPlugin]);
+
   if (__DEMO_SITE__ && isDemoMode()) {
     return children;
   }
-  if (!supportsPlugin) {
-    return <Navigate to="/" replace />;
+  if (supportsPlugin) {
+    return children;
   }
-  return children;
+  if (!checked) {
+    return <LoadingSpinner />;
+  }
+  return <Navigate to="/" replace />;
 }
 
 function FeatureGate({
@@ -81,6 +108,39 @@ function FeatureGate({
   }
 
   return children;
+}
+
+/**
+ * Request monitoring is a switch, not a missing feature: when only the
+ * collector is off, the monitoring page itself owns the "not started" state and
+ * its enable action. Redirecting away from it here made the Gateway workspace's
+ * ownership link bounce back and left the user with no way to turn it on.
+ *
+ * Data sub-pages cannot render without the collector, so they pass
+ * `unavailablePath` and land on the monitoring page that explains the switch.
+ */
+export function MonitoringGate({
+  children,
+  unavailablePath,
+}: {
+  children: ReactElement;
+  unavailablePath?: string;
+}) {
+  const availability = usePanelFeatureAvailability();
+
+  if (availability.checking) {
+    return <LoadingSpinner />;
+  }
+
+  if (availability.requestMonitoringAvailable) {
+    return children;
+  }
+
+  if (!unavailablePath && availability.reason === 'monitoring_disabled') {
+    return children;
+  }
+
+  return <Navigate to={unavailablePath ?? '/config'} replace />;
 }
 
 function LogsGate({ children }: { children: ReactElement }) {
@@ -176,17 +236,17 @@ const mainRoutes: RouteObject[] = [
   {
     path: '/monitoring',
     element: (
-      <FeatureGate feature="requestMonitoring">
+      <MonitoringGate>
         <MonitoringCenterPage />
-      </FeatureGate>
+      </MonitoringGate>
     ),
   },
   {
     path: '/monitoring/account-actions',
     element: (
-      <FeatureGate feature="requestMonitoring">
+      <MonitoringGate unavailablePath="/monitoring">
         <AccountActionCandidatesPage />
-      </FeatureGate>
+      </MonitoringGate>
     ),
   },
   {

@@ -549,6 +549,15 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	// every entry point into that router is covered by one gate.
 	bridged := strings.TrimPrefix(resource, "cpamp/")
 	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(bridged, r.Method) {
+		// The model list is the one bridged read a CPA answers with its own
+		// gateway vocabulary. The legacy route forwards the caller's own header,
+		// and the console's header is the Admin credential a CPA does not accept
+		// as a gateway key, so that read is answered server-side with the client
+		// key the CPA already holds instead of being forwarded.
+		if consoleModelListResource(bridged, r.Method) {
+			a.consoleModelList(w, r)
+			return
+		}
 		parsed, err := url.Parse("/" + bridged)
 		if err != nil || parsed.Path == "" || parsed.Path == "/" {
 			http.NotFound(w, r)

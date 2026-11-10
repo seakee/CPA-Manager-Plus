@@ -370,8 +370,10 @@ export function AiProvidersClaudeEditLayout() {
   }, [hasIndexParam, params.index]);
   const canGuard = !resolvedLoading && !saving && !invalidIndexParam && !invalidIndex;
 
-  const { allowNextNavigation } = useUnsavedChangesGuard({
-    enabled: canGuard,
+  const { allowNextNavigation, blocker: unsavedChangesBlocker } = useUnsavedChangesGuard({
+    // Registering a blocker at all makes react-router warn on manual
+    // address-bar edits, so a clean editor registers none.
+    enabled: canGuard && isDirty,
     shouldBlock: ({ nextLocation }) => {
       const nextPath = nextLocation.pathname;
       const isWithinRoot = nextPath === editorRootPath || nextPath.startsWith(`${editorRootPath}/`);
@@ -558,7 +560,9 @@ export function AiProvidersClaudeEditLayout() {
   ]);
 
   return (
-    <Outlet
+    <>
+      {unsavedChangesBlocker}
+      <Outlet
       context={
         {
           hasIndexParam,
@@ -582,6 +586,7 @@ export function AiProvidersClaudeEditLayout() {
           mergeDiscoveredModels,
         } satisfies ClaudeEditOutletContext
       }
-    />
+      />
+    </>
   );
 }

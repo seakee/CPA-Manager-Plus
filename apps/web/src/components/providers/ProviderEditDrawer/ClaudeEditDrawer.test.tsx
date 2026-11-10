@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   updateConfigValue: vi.fn(),
   clearCache: vi.fn(),
   showNotification: vi.fn(),
+  showConfirmation: vi.fn(),
   onSaved: vi.fn(),
   onClose: vi.fn(),
   updateClaudeConfig: vi.fn(),
@@ -57,7 +58,10 @@ vi.mock('@/stores', () => ({
       clearCache: mocks.clearCache,
       isCacheValid: () => true,
     }),
-  useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+  useNotificationStore: () => ({
+    showNotification: mocks.showNotification,
+    showConfirmation: mocks.showConfirmation,
+  }),
 }));
 
 vi.mock('@/services/api', async () => {

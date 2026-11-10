@@ -140,7 +140,7 @@ describe('External rebind dialog', () => {
     expect(rebound).toHaveBeenCalledWith({ reverified: true });
   });
 
-  it('shows the server detail of a refused rebind and keeps the request ID for a replay', async () => {
+  it('reads a refused rebind in the operator language and keeps the server detail as a diagnostic', async () => {
     let attempt = 0;
     const { client, calls } = stubClient(async () => {
       attempt += 1;
@@ -170,7 +170,8 @@ describe('External rebind dialog', () => {
     });
     await typeKey(renderer, 'wrong-key');
     await submit(renderer);
-    expect(textOf(renderer, 'rebind-error')).toContain('already committed');
+    expect(textOf(renderer, 'rebind-error')).toBe(x('rebindRefusedHelp'));
+    expect(textOf(renderer, 'rebind-error-detail')).toContain('already committed');
     // The input is cleared only on success, so a lost answer is not re-keyed.
     await submit(renderer);
     expect(calls).toHaveLength(2);

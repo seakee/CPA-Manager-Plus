@@ -6,7 +6,7 @@ import { newExternalRequestId } from './externalState';
 
 type RebindOutcome =
   | { kind: 'none' }
-  | { kind: 'error'; message: string; stale: boolean }
+  | { kind: 'error'; message: string; stale: boolean; detail?: string }
   | { kind: 'unauthorized' }
   | { kind: 'succeeded'; reverified: boolean };
 
@@ -55,16 +55,19 @@ export function FreshRebindDialog({
     }
   }, [open]);
 
-  function failureMessage(error: unknown): { message: string; stale: boolean } {
+  // The page answers in the operator's language. A refusal that carries the
+  // backend's own English diagnostic shows it as a secondary line: the reason
+  // the operator acts on is always the localized one.
+  function failureMessage(error: unknown): { message: string; stale: boolean; detail?: string } {
     if (!(error instanceof PublicApiError))
       return { message: x('rebindFailedHelp'), stale: false };
     switch (error.code) {
       case 'external_rebind_refused':
-        return { message: error.detail || x('rebindRefusedHelp'), stale: false };
+        return { message: x('rebindRefusedHelp'), stale: false, detail: error.detail };
       case 'external_rebind_stale_generation':
         return { message: x('rebindStaleHelp'), stale: true };
       case 'external_management_key_rejected':
-        return { message: error.detail || x('blockerKeyRejectedHelp'), stale: false };
+        return { message: x('blockerKeyRejectedHelp'), stale: false, detail: error.detail };
       case 'external_target_moved':
         return { message: x('blockerTargetMovedHelp'), stale: false };
       case 'external_cpa_version_unsupported':
@@ -181,9 +184,16 @@ export function FreshRebindDialog({
             onChange={(event) => setManagementKey(event.target.value)}
           />
           {outcome.kind === 'error' && (
-            <p className="key-notice key-notice-warning" role="alert" data-testid="rebind-error">
-              {outcome.message}
-            </p>
+            <>
+              <p className="key-notice key-notice-warning" role="alert" data-testid="rebind-error">
+                {outcome.message}
+              </p>
+              {outcome.detail && (
+                <p className="key-field-help" data-testid="rebind-error-detail">
+                  {x('details')}: <code>{outcome.detail}</code>
+                </p>
+              )}
+            </>
           )}
           {outcome.kind === 'unauthorized' && (
             <p

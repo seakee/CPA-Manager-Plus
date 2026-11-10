@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   mergeDiscoveredModels: vi.fn(),
   navigate: vi.fn(),
   showNotification: vi.fn(),
+  showConfirmation: vi.fn(),
   apiCallRequest: vi.fn(),
 }));
 
@@ -34,7 +35,10 @@ vi.mock('@/hooks/useEdgeSwipeBack', () => ({
 }));
 
 vi.mock('@/stores', () => ({
-  useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+  useNotificationStore: () => ({
+    showNotification: mocks.showNotification,
+    showConfirmation: mocks.showConfirmation,
+  }),
 }));
 
 vi.mock('@/services/api', () => ({

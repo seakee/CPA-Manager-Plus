@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   fetchConfig: vi.fn().mockResolvedValue({}),
   monitoring: true,
   prices: true,
+  monitoringReason: '',
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores', () => {
@@ -42,6 +43,7 @@ vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
   usePanelFeatureAvailability: () => ({
     requestMonitoringAvailable: state.monitoring,
     modelPricesAvailable: state.prices,
+    reason: state.monitoringReason,
   }),
 }));
 vi.mock('@/services/api', () => ({ pluginsApi: { list: vi.fn() } }));
@@ -85,6 +87,7 @@ beforeEach(() => {
   memory.clear();
   state.monitoring = true;
   state.prices = true;
+  state.monitoringReason = '';
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => memory.get(key) ?? null,
@@ -201,6 +204,20 @@ describe('original MainLayout console navigation', () => {
     const labels = renderer!.root.findAllByType('button').map((node) => node.props['aria-label']);
     expect(labels).not.toContain('nav.group_observe');
     expect(labels).not.toContain('nav.group_clients');
+  });
+
+  it('keeps the monitoring entry when only the collector is switched off', async () => {
+    state.monitoring = false;
+    state.prices = false;
+    state.monitoringReason = 'monitoring_disabled';
+    await mount('/monitoring');
+
+    expect(navLinks().map((node) => node.props.href)).toContain('/monitoring');
+    expect(
+      renderer!.root
+        .findAllByType('button')
+        .map((node) => node.props['aria-label'])
+    ).toContain('nav.group_observe');
   });
 
   it('shows the nested provider task after its existing parent breadcrumb', async () => {
