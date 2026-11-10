@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { fullWebText as t } from '../i18n/fullweb';
+import { fullWebI18n, fullWebText as t } from '../i18n/fullweb';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
 import { createPublicApiClient, PublicApiError } from './publicApi';
 import type { RoutingContext } from './routingContext';
@@ -12,6 +12,7 @@ import './consoleWorkspace.css';
 import { activateFreshSession, clearFreshSession, rememberedFreshCredential } from './freshSession';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import { useConsoleDocumentTitle } from './useConsoleDocumentTitle';
+import { useFullWebLanguage } from './useFullWebLanguage';
 
 const defaultClient = createPublicApiClient();
 const LegacyConsolePage = lazy(() =>
@@ -40,7 +41,11 @@ export function FreshConsolePage({
   const [light, setLight] = useState(true);
   const installationPendingRef = useRef(false);
   const requestId = useRef(0);
+  const language = useFullWebLanguage();
   useConsoleDocumentTitle();
+  // The stored failure key is translated at render: subscribing to the Fresh
+  // language (not an unrelated re-render) is what retranslates it.
+  const errorText = error ? fullWebI18n.getFixedT(language)(error) : '';
   useEffect(
     () => () => {
       requestId.current++;
@@ -142,7 +147,7 @@ export function FreshConsolePage({
           adapter={{
             address: new URL(context.basePath, window.location.origin).toString(),
             credentialPlaceholder: bootstrapJourneyText('loginKeyPlaceholder'),
-            error: error ? t(error) : '',
+            error: errorText,
             authenticate: readOperation,
             restore: async () => {
               const candidate = rememberedFreshCredential(context);
@@ -168,7 +173,7 @@ export function FreshConsolePage({
           <div className="wizard-container">
             {error && (
               <p className="alert alert-warn" role="alert">
-                {t(error)}
+                {errorText}
               </p>
             )}
             {operation.strategy?.strategy === 'connect_external' ||

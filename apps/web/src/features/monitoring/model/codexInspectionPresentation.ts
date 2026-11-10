@@ -638,6 +638,13 @@ export const toServerInspectionLogViewEntry = (
   };
 };
 
+// A nested parameter points at a label key. If that key disappears the log must
+// still read like text, so fall back to its last segment instead of the path.
+const readableKeyTail = (key: string) => {
+  const tail = key.slice(key.lastIndexOf('.') + 1).replace(/_/g, ' ');
+  return tail.charAt(0).toUpperCase() + tail.slice(1);
+};
+
 /**
  * A stored log keeps the template, not the text: format it in the language the
  * page shows now, including the labels nested in its parameters.
@@ -651,7 +658,9 @@ export const formatStoredLogMessage = (
   const params = Object.fromEntries(
     Object.entries(entry.messageParams).map(([name, value]) => [
       name,
-      typeof value === 'object' ? t(value.key) : value,
+      typeof value === 'object'
+        ? t(value.key, { defaultValue: readableKeyTail(value.key) })
+        : value,
     ])
   );
   return t(entry.messageKey, params);

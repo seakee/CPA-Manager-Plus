@@ -83,7 +83,7 @@ function SystemPageContent({
   hasUnsavedChanges = false,
   workspace,
 }: SystemPageProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const auth = useAuthStore();
@@ -119,10 +119,7 @@ function SystemPageContent({
 
   const apiKeysCache = useRef<string[]>([]);
 
-  const otherLabel = useMemo(
-    () => (i18n.language?.toLowerCase().startsWith('zh') ? '其他' : 'Other'),
-    [i18n.language]
-  );
+  const otherLabel = useMemo(() => t('system_info.models_group_unclassified'), [t]);
   const groupedModels = useMemo(() => classifyModels(models, { otherLabel }), [models, otherLabel]);
   const modelStatusText = useMemo(
     () => (modelStatus ? formatModelStatus(modelStatus, t) : ''),

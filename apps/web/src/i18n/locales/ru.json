@@ -4829,6 +4829,7 @@
     "models_error": "Не удалось загрузить список моделей",
     "models_gateway_pending": "Доступ к шлюзу ожидает настройки",
     "models_count": "Доступно моделей: {{count}}",
+    "models_group_unclassified": "Другие",
     "version_check_title": "Проверка обновлений",
     "version_check_desc": "Вызовите эндпоинт /latest-version, чтобы сравнить с версией сервера и узнать о доступных обновлениях.",
     "version_current_label": "Текущая версия",

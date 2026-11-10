@@ -537,6 +537,30 @@ describe('Fresh installation and Console authority boundary', () => {
     await login();
     expect(has('legacy-console')).toBe(false);
   });
+  it('retranslates a console sign-in error after the language changes', async () => {
+    await act(async () => {
+      await i18n.changeLanguage('zh-CN');
+    });
+    read.mockImplementation(() => Promise.resolve(new Response('', { status: 401 })));
+    await mount();
+    expect(hasLogin()).toBe(true);
+    await login();
+    const adapterError = () =>
+      (renderer.root.findByType(LoginPage).props.consoleAuth as { error: string }).error;
+    expect(adapterError()).toBe(i18n.t('fullweb.authError', { lng: 'zh-CN' }));
+
+    await act(async () => {
+      await i18n.changeLanguage('en');
+      await vi.dynamicImportSettled();
+    });
+    expect(adapterError()).toBe(i18n.t('fullweb.authError', { lng: 'en' }));
+
+    await act(async () => {
+      await i18n.changeLanguage('zh-CN');
+      await vi.dynamicImportSettled();
+    });
+  });
+
   it.each([
     { adminInitialized: false },
     { revision: 0 },

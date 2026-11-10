@@ -4821,6 +4821,7 @@
     "models_error": "取得模型清單失敗",
     "models_gateway_pending": "閘道接入等待設定",
     "models_count": "可用模型 {{count}} 個",
+    "models_group_unclassified": "其他",
     "version_check_title": "版本檢查",
     "version_check_desc": "檢查伺服器版本，並提示是否有可用更新。",
     "version_current_label": "目前版本",

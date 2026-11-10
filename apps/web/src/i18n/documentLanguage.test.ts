@@ -12,7 +12,11 @@ describe('document language', () => {
     vi.stubGlobal('document', { documentElement: root });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Both instances are module singletons: leave them where the next suite
+    // expects them instead of depending on test order.
+    await legacyI18n.changeLanguage('zh-CN');
+    setFullWebLanguage('zh-CN');
     vi.unstubAllGlobals();
   });
 

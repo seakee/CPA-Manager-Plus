@@ -1171,6 +1171,28 @@ describe('Server Codex inspection log details', () => {
     expect(copied).toContain('"healthEvidence":"消费额度或积分已用尽"');
   });
 
+  it('never shows a raw translation key when a stored log label is missing', () => {
+    const viewEntry = toLocalInspectionLogViewEntry(
+      {
+        id: 'local-missing-label',
+        level: 'info',
+        message: 'fallback',
+        messageKey: 'monitoring.codex_inspection_log_result',
+        messageParams: {
+          account: 'a@example.com',
+          action: { key: 'monitoring.codex_inspection_action_retired' },
+          status: 200,
+          percent: '1.0%',
+        },
+        timestamp: Date.UTC(2026, 6, 23, 12, 0, 0),
+      },
+      summaryT
+    );
+
+    expect(viewEntry.message).not.toContain('monitoring.');
+    expect(viewEntry.message).toContain('Codex inspection action retired');
+  });
+
   it('formats local structured details with the same presentation as server logs', () => {
     const viewEntry = toLocalInspectionLogViewEntry(
       {
