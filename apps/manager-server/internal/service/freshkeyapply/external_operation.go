@@ -40,6 +40,19 @@ func (s *Service) externalPrerequisites(ctx context.Context, install ExternalIns
 	if w == nil {
 		return ErrExternalUnavailable
 	}
+	// One operation at a time, decided here by the same rule `BeginOperation`
+	// applies to the submit that follows. Without it the read-only answer would
+	// say ready for an intent the write then refuses with `key_operation_conflict`,
+	// which is exactly the limit the preflight exists to name before the click.
+	// An unsettled journal already blocks every later operation of the connection,
+	// so nothing this call could report would be reachable.
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return err
+	}
+	if latest != nil && latest.Outcome != "committed" {
+		return repo.ErrConflict
+	}
 	// No step is written before this gate: an intent this Manager could never
 	// send would stay pending and block every later operation of the connection,
 	// so the version is asked before the intent exists.

@@ -46,6 +46,13 @@ type keyWire interface {
 	KeySnapshot(context.Context, string) (cpa.KeySnapshot, error)
 	WriteKeySet(context.Context, string, []string) error
 	SampleKeySet(context.Context, []string, []string) (bool, error)
+	// ValidKeySet reports whether this destination would accept one client-key
+	// list as its own. It is the policy `WriteKeySet` applies before it sends
+	// anything, asked ahead of the attempt: a step whose end state the destination
+	// could never hold must be refused while nothing is journaled, because after
+	// the attempt is recorded the refusal leaves an unknown effect that blocks
+	// every later operation of the installation.
+	ValidKeySet([]string) bool
 }
 type OperationResult struct {
 	Operation    *repo.Operation `json:"operation"`
@@ -219,6 +226,24 @@ func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper,
 		}
 		if mode == "replace" && slices.Contains(snap.Keys, next) {
 			return cpa.ErrSourceConflict
+		}
+		// The write replaces the whole list, so the list each step leaves behind is a
+		// fact this Manager states before anything is journaled. Walk the steps in
+		// the order they will run — a replace adds before it revokes — and ask the
+		// destination's own policy, the same one `WriteKeySet` applies, whether that
+		// end state can exist. Otherwise the attempt would be recorded first, the
+		// write refused before it was sent, and the journal would hold an unknown
+		// effect no read-back can settle.
+		steps := []string{"revoke"}
+		if mode == "replace" {
+			steps = []string{"add", "revoke"}
+		}
+		live := snap.Keys
+		for _, step := range steps {
+			live = keySetAfter(live, step, old, next)
+			if !w.ValidKeySet(live) {
+				return cpa.ErrSourceConflict
+			}
 		}
 		known, e := s.keys.AllStaged(ctx, snap.Keys)
 		if e != nil {

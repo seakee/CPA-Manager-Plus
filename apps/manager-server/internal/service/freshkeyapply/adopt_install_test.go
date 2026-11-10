@@ -265,3 +265,31 @@ func TestAdoptionRegistrationRefusesAnotherInstallationsJournal(t *testing.T) {
 		t.Fatalf("adopted records after the refusal = %d", adopted)
 	}
 }
+
+// An adopted destination's keys are the source CPA's own shapes, and the private
+// chat proof is the S1/S2 install proof: it admits a credential this Manager
+// minted, by canonical length first and by the installation's staged secret
+// second. Reading `Configured` as membership for adoption is what lets the install
+// observation answer at all; the length gate is what keeps that reading from
+// widening this consumer, so a non-canonical adopted credential is refused before
+// the destination is asked anything.
+func TestChatAdmissionStaysFailClosedForAnAdoptedDestinationsKeys(t *testing.T) {
+	s, cpa, _ := adoptedFixture(t, adoptedSourceKeys...)
+	ctx := t.Context()
+	if _, err := s.RegisterAdoption(ctx, adoptedSourceKeys); err != nil {
+		t.Fatal(err)
+	}
+	reads := cpa.v8Reads
+	for _, candidate := range []string{
+		adoptedSourceKeys[0],
+		adoptedSourceKeys[1],
+		model.MaskedImportedClientKey(adoptedSourceKeys[0]),
+	} {
+		if _, err := s.Admit(ctx, candidate, 9, strings.Repeat("a", 64)); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("an adopted key of %d characters was admitted: %v", len(candidate), err)
+		}
+	}
+	if cpa.v8Reads != reads {
+		t.Fatalf("a refused candidate reached the destination's config")
+	}
+}

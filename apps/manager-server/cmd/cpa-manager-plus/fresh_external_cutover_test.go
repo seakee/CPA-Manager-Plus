@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -288,4 +289,39 @@ func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestExternalKeyPreflightAnswersARefusedCredentialLocally extends the rejection
+// gate to the key drawer. The preflight is a management read like any other, so on
+// External it must not become the retry loop the gate exists to prevent: once the
+// user's CPA refused the stored credential, the read-only answer names the rebind
+// where the operator is choosing, and the CPA is not asked again.
+func TestExternalKeyPreflightAnswersARefusedCredentialLocally(t *testing.T) {
+	app, fake := newExternalProbeApp(t)
+	fake.management.Store(strings.Repeat("f", 64))
+	first := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+	if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("first read = %d %s", first.Code, first.Body.String())
+	}
+	before := fake.requests.Load()
+	for range 3 {
+		response := gatewayRequest(t, app, http.MethodGet,
+			"api-keys/"+strings.Repeat("a", 32)+"/revocation/"+strings.Repeat("b", 32)+"/replace", "", "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("preflight = %d %s", response.Code, response.Body.String())
+		}
+		var reply struct {
+			Ready  bool   `json:"ready"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &reply); err != nil {
+			t.Fatalf("preflight body = %s (%v)", response.Body.String(), err)
+		}
+		if reply.Ready || reply.Reason != freshconfig.ReasonManagementRejected {
+			t.Fatalf("preflight after the refusal = %v %q", reply.Ready, reply.Reason)
+		}
+	}
+	if sent := fake.requests.Load() - before; sent != 0 {
+		t.Fatalf("the preflight presented the refused key %d more times", sent)
+	}
 }

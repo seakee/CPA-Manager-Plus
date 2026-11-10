@@ -113,15 +113,36 @@ func (a *freshApplication) preflightClientKeyOperation(w http.ResponseWriter, r 
 		w.WriteHeader(409)
 		return
 	}
+	// The preflight is asked again on every selection the drawer shows, so it is a
+	// poll. A credential the user's CPA already refused is never presented by it:
+	// five failed authentications ban the address for thirty minutes, and the
+	// answer is the same blocker the submit would give, written locally.
+	grant := a.externalReadGrant(r.Context())
+	if grant.Refused {
+		keyOperationPreflightReply(w, false, freshconfig.ReasonManagementRejected)
+		return
+	}
 	err := a.keyApply.Preflight(r.Context(), target, keeper, mode, op.Strategy.TargetGeneration)
+	// The first 401 a preflight meets is the refusal of the credential it
+	// presented, so it is filed against this request's grant like every other
+	// browser-driven read of the user's CPA.
+	a.noteExternalRejection(r.Context(), grant, err)
 	reason := ""
 	if err != nil {
 		_, reason = keyOperationCode(err)
 	}
+	keyOperationPreflightReply(w, err == nil, reason)
+}
+
+// keyOperationPreflightReply writes the readiness verdict the drawer renders. Every
+// limit keeps this one shape, including the typed External blockers: the page
+// names each of them in place and disables the submit, so a refusal is never a
+// second error channel the drawer would have to translate.
+func keyOperationPreflightReply(w http.ResponseWriter, ready bool, reason string) {
 	writeFreshJSON(w, struct {
 		Ready  bool   `json:"ready"`
 		Reason string `json:"reason"`
-	}{err == nil, reason})
+	}{ready, reason})
 }
 
 func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {

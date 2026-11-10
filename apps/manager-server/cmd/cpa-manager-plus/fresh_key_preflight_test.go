@@ -67,4 +67,36 @@ func TestKeyOperationPreflightNamesEveryLimitBeforeSubmit(t *testing.T) {
 			t.Fatalf("unknown destination key = %v %q", ready, reason)
 		}
 	})
+
+	// A whole-list write can only state a list the destination holds. The managed
+	// posture takes two keys, so replacing one of two would have to send three:
+	// the write itself would be refused before it left the Manager, after the
+	// attempt had already been journaled. The preflight must therefore answer the
+	// same conflict the prepare does, and nothing may reach the destination.
+	t.Run("a list past the destination's bound is named", func(t *testing.T) {
+		harness := newManagedInstallHarness(t)
+		spare := harness.createKey(t, strings.Repeat("b", 32))
+		harness.destination.seed(harness.installKey.Secret, spare.CreatedSecret)
+		next := harness.createKey(t, strings.Repeat("c", 32))
+		ready, reason := preflight(t, harness, string(harness.installKey.ID), string(next.Key.ID), "replace")
+		if ready || reason != "key_operation_source_conflict" {
+			t.Fatalf("bound = %v %q", ready, reason)
+		}
+		if harness.destination.writes != 0 {
+			t.Fatalf("preflight wrote the destination (%d writes)", harness.destination.writes)
+		}
+		// The prediction and the submit are the same verdict, so a page that
+		// ignored the preflight still learns the limit without an attempt.
+		blocked := harness.call(t, http.MethodPost, "api-keys/"+string(harness.installKey.ID)+"/revocation",
+			`{"requestId":"`+strings.Repeat("d", 32)+`","keeperId":"`+string(next.Key.ID)+`","mode":"replace"}`)
+		if blocked.Code != http.StatusConflict || errorCode(t, blocked) != "key_operation_source_conflict" {
+			t.Fatalf("submit = %d %s", blocked.Code, blocked.Body.String())
+		}
+		if harness.destination.writes != 0 {
+			t.Fatalf("the refused replace wrote %d times", harness.destination.writes)
+		}
+		if got := harness.destination.installed(); len(got) != 2 {
+			t.Fatalf("destination keys after the refused replace = %v", got)
+		}
+	})
 }
