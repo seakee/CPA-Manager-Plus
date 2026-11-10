@@ -40,6 +40,7 @@ This specification defines the token contracts, layout conventions, and automate
     - `--floating-shadow-xl`: form select popovers (`Select`, including its input-focus accent ring).
     - `--floating-shadow-dialog`: centered modal dialogs (`.modal`).
     - `--floating-shadow-drawer`: side drawer panels (`Drawer` panel edge shadow, Codex inspection config drawer).
+  - The dark theme deepens the scale instead of reusing the light values: every tier keeps its light offsets and adds a heavier drop layer plus a hairline ring (`0 0 0 1px rgb(255 255 255 / 0.06)` for `sm`, `0.08` for `md`, the accent ring for `lg` and above), because against a near-black page the drop layer alone barely reads and the ring carries the separation.
   - Overlay backdrops use the `--overlay-scrim*` tokens from `themes.scss`:
     - `--overlay-scrim`: centered modal dialog backdrop (`.modal-overlay`).
     - `--overlay-scrim-backdrop`: mobile navigation sidebar backdrop (`.sidebar-backdrop`).
