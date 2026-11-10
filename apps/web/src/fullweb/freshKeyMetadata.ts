@@ -27,8 +27,19 @@ const installSecret = /^sk-[A-Za-z0-9]{64}$/;
 // secret is any non-control token of at most 4096 UTF-8 bytes, as the server
 // counts them, so a non-ASCII or astral source key renders and copies the same way.
 const adoptedMask = /^…(?:[\s\S]{4})?$/u;
-const adoptedSecret = /^[^\x00-\x20\x7f]+$/u;
 const adoptedSecretMaxBytes = 4096;
+
+// adoptedToken is the server's `validExternalKey` in the same terms: any code
+// point above the space, except delete, and at most 4096 UTF-8 bytes. It is a
+// predicate rather than a character class because a control range written as a
+// regular expression reads as one literal control character to a linter.
+function adoptedToken(secret: string): boolean {
+  for (const character of secret) {
+    const code = character.codePointAt(0)!;
+    if (code < 0x21 || code === 0x7f) return false;
+  }
+  return secret !== '' && new TextEncoder().encode(secret).length <= adoptedSecretMaxBytes;
+}
 
 /** maskedPreviewOf is the only rendering a saved secret may produce. */
 export function maskedPreviewOf(secret: string): string {
@@ -46,7 +57,7 @@ export function maskedPreviewOf(secret: string): string {
 export function maskedPreviewFor(origin: KeyOrigin, secret: string): string {
   if (origin === 'workspace') return workspaceSecret.test(secret) ? 'cpamp_sk_…' + secret.slice(-4) : '';
   if (origin === 'installer') return installSecret.test(secret) ? 'sk-…' + secret.slice(-4) : '';
-  if (!adoptedSecret.test(secret) || new TextEncoder().encode(secret).length > adoptedSecretMaxBytes) return '';
+  if (!adoptedToken(secret)) return '';
   const characters = Array.from(secret);
   return characters.length >= 16 ? '…' + characters.slice(-4).join('') : '…';
 }
