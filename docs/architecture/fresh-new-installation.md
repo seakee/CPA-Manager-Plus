@@ -287,11 +287,23 @@ initial-install journal as a `new_managed` install.
 - The journal's `KeyID` is the first registered adopted key, bound to the staged
   run, Runtime generation and provider seed. That binding is what
   `freshkeyapply.operationTarget` compares, so the gateway configuration page, the
-  plugin runtime switch, chat/`initial-install` observation and the revoke/replace
-  journal all answer for an adopted installation exactly as for a New Managed one.
-  Registering does not relax any check: a journal another installation owns, or a
-  destination key this Manager already retired, is `ErrAdoptionConflict` and never
-  a silent rebind.
+  plugin runtime switch and the revoke/replace journal all answer for an adopted
+  installation exactly as for a New Managed one. Registering does not relax any
+  check: a journal another installation owns, or a destination key this Manager
+  already retired, is `ErrAdoptionConflict` and never a silent rebind.
+- The `initial-install` observation reads an adopted destination by **membership**:
+  `cpa.Transport.Configured` answers whether the staged secret is one of the keys
+  the CPA serves, because an adopted `access.api-keys` is the source CPA's list
+  and the single-key reading could never be true there. Membership is the only
+  configured fact an adoption can state — `AuthSweep` remains the live proof — and
+  the relaxation is confined to the adopted posture: a New Managed destination
+  still requires the list to be exactly the staged key.
+- Chat admission does **not** widen with it. `freshkeyapply.Service.Admit` is the
+  private S1/S2 install proof, and its first gate is the canonical Key workspace
+  length (`privateChatKeyLength`), so an adopted credential — any printable token
+  of the source CPA's shape — is `ErrUnavailable` before the destination is asked
+  anything. Gateway traffic for an adopted destination is admitted by the
+  installation authority, not by that proof.
 - Registration is idempotent by digest: a retried or resumed completion replays the
   existing rows (`secret_hash` is the fence) instead of creating a second identity,
   and a destination key that is already this workspace's own key keeps that one
@@ -354,6 +366,36 @@ committed New Managed connection and an authenticated Runtime status matching
 the recorded identity, generation, and artifact. Private attested installs
 continue to use their explicit host-permit profile.
 
+#### Revoking and replacing a Client Key
+
+A revoke or replace is one journaled operation made of one or two whole-list
+writes, because the CPA v8 API has no single-key endpoint. `Prepare` journals the
+sorted digests of the destination's key list as `snapshotSha256`, and every later
+step compares the live list with that snapshot before it writes: `Continue`
+refuses with `cpa.ErrSourceConflict` when the destination drifted, and the step's
+post-check compares it with the set the step should leave.
+
+Each write is a whole-list PUT, so the list it states is a fact this Manager owes
+before it journals anything. The operation is walked in the order its steps will
+run — a replace adds the keeper before it revokes the target — and each step's
+end state is asked of the destination's own posture, the same policy
+`WriteKeySet` applies. A New Managed destination holds at most two Client Keys,
+so replacing one of two would have to write three: that selection is refused
+with `cpa.ErrSourceConflict` *before* the first attempt is recorded, because a
+refused write after the attempt would leave the journal at an unknown effect that
+no read-back can settle. An adopted destination keeps whatever the source CPA
+had, up to the adoption bound (`adoptMaxClientKeys`), so a three-key installation
+revokes one key and leaves the other two; every key that is not the one the step
+removes must be a credential this Manager staged and still keeps, since a
+credential it never registered, or one it already retired, is the operator's own
+change and is never dropped by a whole-list write.
+
+The same rules are asked as a read —
+`GET api-keys/<target>/revocation/<keeper>/<mode>` — which answers `{ready, reason}`
+with the code the matching `POST` would refuse with, so the drawer names the
+limit where the operator is choosing instead of offering a submit that can only
+end in a conflict. That read writes nothing and journals nothing.
+
 ### Trust boundary and durable authority
 
 The managed profile is selected by the server-owned Fresh checkpoint, not by a
@@ -388,10 +430,15 @@ profile the Manager constructed — the managed destination for the default
 Compose install, the attested private target for the host-permit profile — and
 takes the asking surface as an argument, so each surface keeps the contract it
 shipped with instead of a second inline check. Initial install, key
-revoke/replace and the private chat consumer all ask it and refuse an adopted,
-External or uncommitted checkpoint. The gateway configuration page asks the
-same discriminator under its own surface: on a managed install it refuses the
-same checkpoints, while on a private host-permit install it keeps the attested
+revoke/replace and the private chat consumer all ask it. Under the managed
+profile it answers for a `new_managed` and an `adopt_existing` checkpoint alike —
+that is the install-derived authority an adoption registers — while under the
+private profile the same surfaces still require the attested `new_managed`
+strategy, so an adopted, External or uncommitted checkpoint is refused there;
+chat admission then narrows further at its own length gate, since the proof it
+carries is the one this Manager minted. The gateway configuration page asks the
+same discriminator under its own surface: on a managed install it answers with
+the managed profile, while on a private host-permit install it keeps the attested
 private target scope its page and field journal shipped with, including an
 adopted checkpoint that names that target. On an External install the page and
 the key surfaces ask the same discriminator under `ProfileExternal`: the target
@@ -455,26 +502,20 @@ installed. Revoking the only credential is refused with `ErrLastKey`, because
 that would leave the user's CPA accepting unauthenticated clients.
 
 A write is a whole-list PUT, so the only set it may rewrite is the set it
-verified. `Prepare` journals the sorted digests of the destination's key list as
-`snapshotSha256`, and every later step compares the live list with that snapshot
-before it writes: `Continue` refuses with `cpa.ErrSourceConflict` when the
-destination drifted, and the step's post-check compares it with the set the step
-should leave. A key list is not limited to the two credentials a rotation names —
-an adopted destination keeps whatever the source CPA had, so a three-key
-installation revokes one key and leaves the other two, and every key that is not
-the one the step removes must be a credential this Manager staged and still
-keeps. A credential it never registered, or one it already retired, is the
-operator's own change and is never dropped by a whole-list write. The same rule
-is asked as a read — `GET api-keys/<target>/revocation/<keeper>/<mode>` returns
-`{ready, reason}` with the code the matching `POST` would refuse with — so the
-drawer names the limit where the operator is choosing instead of offering a
-submit that can only end in a conflict. That read writes nothing and journals
-nothing.
+verified: `snapshotSha256`, the drift comparison and the post-check are the ones
+described under **Revoking and replacing a Client Key**. Connect External shares
+that read-only preflight route
+(`GET api-keys/<target>/revocation/<keeper>/<mode>`) but keeps its own membership
+rule — the user's credential is accepted by the rule Connect External itself
+applies, with no two-key bound and no requirement that the other keys were staged
+by this Manager — because the destination is not one this Manager installed.
 
-The External Apply refuses while a journal entry has not settled, and re-reads the document
-digest and the membership immediately before its own PUT, so a credential the
-user revoked on their CPA is not knowingly added back. That read is not a
-compare-and-swap: a whole-list PUT replaces whatever the CPA holds when it
+The External Apply refuses while a journal entry has not settled, and re-reads the
+document digest and the membership immediately before its own PUT, so a
+credential the user revoked on their CPA is not knowingly added back. The
+preflight asks the same unsettled-journal rule, so the drawer cannot offer a
+selection whose submit would answer `key_operation_conflict`. The pre-PUT read is
+not a compare-and-swap: a whole-list PUT replaces whatever the CPA holds when it
 arrives, so a change that lands between the re-read and the PUT is still
 overwritten — the check narrows the window, it does not close it. The gateway
 configuration page keeps #1090's External semantics: scalars are best-effort with
