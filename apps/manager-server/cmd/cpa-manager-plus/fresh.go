@@ -582,6 +582,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			w.WriteHeader(http.StatusConflict)
 			return
 		}
+		if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), next.Operation); err != nil {
+			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
+		}
 		// Completion is the moment the install-derived CPA authority exists, so
 		// the same idempotent startup path as a resumed install runs now: it
 		// backfills keys staged before completion and starts collection,
@@ -951,6 +954,14 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 		go reconciler.Run(ctx)
 	}
 	if opened.Record.Operation.ProductComplete {
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(ctx, opened.Record.Operation); err != nil {
+			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
+		} else if seeded && app.runtimeExternal == nil && app.runtime != nil && app.runtimeSettings != nil {
+			reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, log.Printf)
+			if err := reconciler.ReconcileOnce(ctx); err != nil {
+				log.Printf("[runtime-reconcile] %v", err)
+			}
+		}
 		if err := app.migrateManagedDestination(ctx); err != nil {
 			// Migration is durable and idempotent; keep the completed Fresh
 			// server available while a typed blocker waits for the next startup.

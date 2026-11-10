@@ -10,6 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 // completedRuntimeTestApplication promotes the shared Fresh fixture to a
@@ -139,5 +140,47 @@ func TestUnreadableDesiredLifecycleLocksOnlyTheRuntimeDomain(t *testing.T) {
 	}
 	if _, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err == nil || found {
 		t.Fatal("damaged desired lifecycle was reported as usable")
+	}
+}
+
+func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreservesExplicitStop(t *testing.T) {
+	app, op := completedRuntimeTestApplication(t)
+	offlineAfterRestart := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+	offlineAfterRestart.Generation = 991234 // new Supervisor generation after container restart
+	offlineAfterRestart.State = model.RuntimeStateOffline
+	offlineAfterRestart.Recovery = &model.RuntimeRecoveryObservation{
+		State:             model.RuntimeRecoveryStateInactive,
+		AttemptsRemaining: 0,
+	}
+	client := &freshRuntimeTestClient{status: offlineAfterRestart}
+	app.runtime = client
+	app.runtimeExternal = nil
+
+	seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op)
+	if err != nil || !seeded {
+		t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+	}
+	reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, nil)
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce after restart = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Supervisor starts after restart = %d, want 1", client.starts)
+	}
+
+	// Once an operator explicitly stops the Runtime, a later restart must not
+	// overwrite desired=stopped back to running.
+	if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredStopped); err != nil {
+		t.Fatal(err)
+	}
+	seededAgain, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op)
+	if err != nil || seededAgain {
+		t.Fatalf("ensureManagedRuntimeDesiredRunning after explicit stop = (%v, %v), want (false, nil)", seededAgain, err)
+	}
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce while stopped = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Supervisor restarted an explicitly stopped runtime: starts=%d", client.starts)
 	}
 }

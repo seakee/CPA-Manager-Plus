@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -137,4 +138,20 @@ func (a *freshApplication) installInitialClientKey(ctx context.Context, op boots
 		return freshstrategy.InitialClientKey{}, err
 	}
 	return freshstrategy.InitialClientKey{KeyID: string(key.ID), Secret: key.Secret}, nil
+}
+
+// ensureManagedRuntimeDesiredRunning seeds the durable Running desired state
+// once a Manager-owned installation (New Managed or Adopt) completes, while
+// preserving any explicit operator Stop already persisted in runtime_desired_v1.
+func (a *freshApplication) ensureManagedRuntimeDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (bool, error) {
+	if a == nil || a.runtime == nil || a.runtimeSettings == nil || !op.ProductComplete || !freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
+		return false, nil
+	}
+	if _, found, err := a.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx); err != nil || found {
+		return false, err
+	}
+	if _, err := a.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(ctx, model.EmbeddedRuntimeDesiredRunning); err != nil {
+		return false, err
+	}
+	return true, nil
 }

@@ -41,6 +41,7 @@ export function FreshApiKeys({
   reloadToken?: number;
 }) {
   const [keys, setKeys] = useState<Key[] | null>(null);
+  const [gatewayPending, setGatewayPending] = useState(true);
   // A typed External blocker is the page's own contract. It is kept apart from
   // the generic failure so the page names the state and offers its way out
   // instead of collapsing everything into "key state is unavailable".
@@ -132,11 +133,12 @@ export function FreshApiKeys({
         !Array.isArray(result.keys) ||
         !result.keys.every(validKey) ||
         new Set(result.keys.map((key) => key.id)).size !== result.keys.length ||
-        result.gatewayPending !== true ||
+        typeof result.gatewayPending !== 'boolean' ||
         typeof result.revocationAvailable !== 'boolean'
       )
         throw new Error();
       setKeys(result.keys);
+      setGatewayPending(result.gatewayPending);
       setRevocationAvailable(result.revocationAvailable);
       if (alive.current) setBlocker(null);
       try {
@@ -980,13 +982,15 @@ export function FreshApiKeys({
             </footer>
           )}
         </div>
-        <aside className="key-gateway-note">
-          <FullWebIcon name="shield" />
-          <div>
-            <strong>{k('unavailable')}</strong>
-            <p>{k('unavailableHelp')}</p>
-          </div>
-        </aside>
+        {gatewayPending && (
+          <aside className="key-gateway-note">
+            <FullWebIcon name="shield" />
+            <div>
+              <strong>{k('unavailable')}</strong>
+              <p>{k('unavailableHelp')}</p>
+            </div>
+          </aside>
+        )}
       </div>
       {selected && (
         <FreshKeyDetails
@@ -994,6 +998,7 @@ export function FreshApiKeys({
           key={selected}
           id={selected}
           client={client}
+          gatewayPending={gatewayPending}
           credential={credential}
           onUnauthorized={onUnauthorized}
           onPending={(value) => {

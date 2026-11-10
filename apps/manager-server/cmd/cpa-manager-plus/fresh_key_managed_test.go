@@ -337,6 +337,15 @@ func TestCompletedDefaultInstallOwnsKeyInstallAdmissionAndGatewayConfig(t *testi
 	if got := harness.destination.installed(); len(got) != 1 || got[0] != harness.installKey.Secret {
 		t.Fatalf("destination keys = %v", got)
 	}
+	listWhenAdmitted := harness.call(t, http.MethodGet, "api-keys", "")
+	if listWhenAdmitted.Code != http.StatusOK || !strings.Contains(listWhenAdmitted.Body.String(), `"gatewayPending":false`) {
+		t.Fatalf("admitted api-keys list = %d %s", listWhenAdmitted.Code, listWhenAdmitted.Body.String())
+	}
+	legacyHarness := newLegacyManagedInstallHarness(t)
+	listWhenPending := legacyHarness.call(t, http.MethodGet, "api-keys", "")
+	if listWhenPending.Code != http.StatusOK || !strings.Contains(listWhenPending.Body.String(), `"gatewayPending":true`) {
+		t.Fatalf("unadmitted api-keys list = %d %s", listWhenPending.Code, listWhenPending.Body.String())
+	}
 
 	// The install route sees that key as already installed: it observes the live
 	// destination instead of installing a second key, and writes nothing.

@@ -54,9 +54,11 @@ func (a *freshApplication) freshAuthority(w http.ResponseWriter, r *http.Request
 	writeFreshJSON(w, freshAuthorityReplyFor(op, admitted))
 }
 
-// gatewayAdmissionProven consults the install-derived CPA authority. A private
-// attested profile, an External/Adopt installation and an installation without
-// a committed managed destination all fail closed.
+// gatewayAdmissionProven consults the install-derived CPA authority. Both
+// Manager-owned strategies (New Managed and Adopt) run under ProfileManaged and
+// are admitted through their destination posture; Connect External does not
+// route model traffic through CPAMP Ingress, and private attested or incomplete
+// installations fail closed.
 func (a *freshApplication) gatewayAdmissionProven(ctx context.Context) bool {
 	if a == nil || a.keyApply == nil {
 		return false

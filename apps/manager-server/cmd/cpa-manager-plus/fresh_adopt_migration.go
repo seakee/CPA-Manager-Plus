@@ -351,6 +351,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(decision.status)
 		return
 	}
+	if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), decision.next.Operation); err != nil {
+		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
+	}
 	// Completion is the moment the install-derived CPA authority exists, so the
 	// same idempotent startup path as a resumed install runs now.
 	a.startUsageCollection(decision.next.Operation)

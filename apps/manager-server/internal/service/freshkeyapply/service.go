@@ -116,14 +116,15 @@ func (s *Service) target(ctx context.Context, p Permit) (model.RuntimeObservedSt
 		return v, ErrUnavailable
 	}
 	if p.Profile == ProfileManaged {
-		// The committed installation pins identity, generation and artifact.
-		// A stale target is a generation conflict; a runtime that is not ready
-		// or a different artifact is unavailable, exactly as for the private
-		// profile.
-		if string(v.Identity) != p.Identity || strconv.FormatUint(uint64(v.Generation), 10) != p.Generation {
+		// The committed installation pins the Runtime identity. Supervisor mints
+		// runtimeGeneration once per process from crypto/rand (so every container
+		// or Supervisor restart produces a new non-zero generation) and
+		// ActivateUpdate switches ActiveGatewayArtifact in place, so neither
+		// install-time value is identity across restarts or completed updates.
+		if string(v.Identity) != p.Identity {
 			return v, ErrGeneration
 		}
-		if v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil || string(v.ActiveGatewayArtifact.ArtifactID) != p.ArtifactID {
+		if v.Generation == 0 || v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil || !v.ActiveGatewayArtifact.ArtifactID.IsValid() {
 			return v, ErrUnavailable
 		}
 		return v, nil

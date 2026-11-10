@@ -278,6 +278,9 @@ func (p proofPosture) matches(data []byte) bool {
 	if p.adopt {
 		return p.matchesAdopt(data)
 	}
+	if p.managed {
+		return p.matchesManaged(data)
+	}
 	host := p.host
 	if host == "" {
 		host = "127.0.0.1"

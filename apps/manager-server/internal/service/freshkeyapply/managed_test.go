@@ -37,6 +37,8 @@ type managedCPA struct {
 	keyWrites   int
 	dirtyConfig bool
 	authOpen    bool
+	extraRoots  map[string]any
+	pluginsOn   bool
 }
 
 func (m *managedCPA) config() []byte {
@@ -63,6 +65,12 @@ func (m *managedCPA) config() []byte {
 		// is the managed posture.
 		"plugins":       map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"},
 		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": usage}},
+	}
+	if m.pluginsOn {
+		body["plugins"] = map[string]any{"enabled": true, "dir": "/runtime/supervisor/plugins", "configs": map[string]any{"sample": map[string]any{"enabled": true}}}
+	}
+	for k, v := range m.extraRoots {
+		body[k] = v
 	}
 	data, _ := json.Marshal(body)
 	return data
@@ -246,16 +254,18 @@ func TestManagedLoneKeyRevocationIsRefused(t *testing.T) {
 }
 
 func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
-	for _, scenario := range []string{"identity", "generation", "artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-artifact", "invalid-artifact", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			switch scenario {
 			case "identity":
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
-			case "generation":
-				s.runtime.(*observedRuntime).status.Generation = 10
-			case "artifact":
-				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+			case "zero-generation":
+				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
+			case "invalid-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -268,7 +278,7 @@ func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
 				t.Fatalf("drifted target wrote: %v keys=%v", err, cpa.snapshot())
 			}
 			switch scenario {
-			case "identity", "generation":
+			case "identity":
 				if !errors.Is(err, ErrGeneration) {
 					t.Fatalf("drifted target code %v", err)
 				}
@@ -376,7 +386,7 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
 		t.Fatal("restored destination not proven")
 	}
-	for _, scenario := range []string{"identity", "generation", "artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-artifact", "invalid-artifact", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
@@ -385,10 +395,12 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 			switch scenario {
 			case "identity":
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
-			case "generation":
-				s.runtime.(*observedRuntime).status.Generation = 10
-			case "artifact":
-				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+			case "zero-generation":
+				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
+			case "invalid-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -404,6 +416,36 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 				t.Fatalf("%s drift wrote", scenario)
 			}
 		})
+	}
+}
+
+func TestManagedAuthoritySurvivesSupervisorRestartUpdateAndOperatorEdits(t *testing.T) {
+	s, cpa, _, installedID := managedFixture(t)
+	if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
+		t.Fatal(err)
+	}
+	// Operator adds an AI provider, edits routing/requests, and enables plugins.
+	cpa.mu.Lock()
+	cpa.pluginsOn = true
+	cpa.extraRoots = map[string]any{
+		"api-keys": map[string]any{
+			"openai-compatibility": []any{
+				map[string]any{"name": "mock", "base-url": "http://127.0.0.1:38339/v1", "keys": []any{map[string]any{"api-key": "sk-mock"}}},
+			},
+		},
+		"routing":  map[string]any{"strategy": "round-robin"},
+		"requests": map[string]any{"passthrough-headers": true},
+	}
+	cpa.mu.Unlock()
+	// Supervisor restarts with a new random generation and an updated CPA artifact.
+	s.runtime.(*observedRuntime).status.Generation = 884219
+	s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+
+	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
+		t.Fatal("managed admission lost after operator config edit and Supervisor restart")
+	}
+	if key, err := s.ConfigTarget(t.Context(), 9); err != nil || key == "" {
+		t.Fatalf("ConfigTarget failed after Supervisor restart: %v", err)
 	}
 }
 

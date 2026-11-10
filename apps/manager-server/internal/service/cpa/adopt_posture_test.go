@@ -19,10 +19,14 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 	if !adopt.matches([]byte(adoptDestinationConfig)) {
 		t.Fatal("adopted destination rejected")
 	}
-	// The same document is refused by the New Managed template: that posture
-	// pins an exact root count, so it can never stand in for an adoption.
-	if managedProofPosture.matches([]byte(adoptDestinationConfig)) {
-		t.Fatal("managed template accepted an adopted destination")
+	// An adoption may also carry source server settings (such as commercial-mode)
+	// that Supervisor never stages on a New Managed listener.
+	adoptedServer := strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"commercial-mode":true`, 1)
+	if !adopt.matches([]byte(adoptedServer)) {
+		t.Fatal("adopted destination with commercial-mode rejected")
+	}
+	if managedProofPosture.matches([]byte(adoptedServer)) {
+		t.Fatal("managed posture accepted a non-staged server setting")
 	}
 	// The plugin switch is the operator's: the plugin page opens for an adopted
 	// installation, so saving either value must leave the posture proven. What

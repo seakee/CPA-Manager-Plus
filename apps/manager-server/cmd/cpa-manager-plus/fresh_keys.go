@@ -96,6 +96,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 				return
 			}
 		}
+		gatewayPending := !(op.Routing.Committed && a.gatewayAdmissionProven(r.Context()))
 		writeFreshJSON(w, struct {
 			Keys                []freshkeys.Key `json:"keys"`
 			GatewayPending      bool            `json:"gatewayPending"`
@@ -104,7 +105,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			// for: the keys are the Manager's own records, and none of them
 			// claims an observed effect.
 			PresenceUnverified bool `json:"presenceUnverified"`
-		}{keys, true, a.keyApply.KeyOperationsEnabled(), unverified})
+		}{keys, gatewayPending, a.keyApply.KeyOperationsEnabled(), unverified})
 	case strings.HasPrefix(resource, "api-keys/requests/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(resource, "api-keys/requests/")
 		key, err := a.keys.Lookup(r.Context(), id)
