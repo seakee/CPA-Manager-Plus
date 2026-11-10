@@ -523,7 +523,7 @@ func TestLegacyManagedInstallWithoutInstallKeyStaysClosedUntilAKeyIsInstalled(t 
 }
 
 // Every surface that accepted the private attested identity still refuses a
-// checkpoint this installation does not own: incomplete, External and unowned.
+// checkpoint this installation does not own: incomplete and unowned.
 func TestKeySurfaceRefusesCheckpointsTheAuthorityDoesNotOwn(t *testing.T) {
 	committedRouting := func(r *freshstore.Record) {
 		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID,
@@ -543,15 +543,6 @@ func TestKeySurfaceRefusesCheckpointsTheAuthorityDoesNotOwn(t *testing.T) {
 				TargetIdentity: string(env.status.Identity), TargetGeneration: uint64(env.status.Generation),
 				TargetArtifactID: string(env.status.ActiveGatewayArtifact.ArtifactID),
 			}
-		}},
-		{"external", false, func(r *freshstore.Record, env managedInstallEnv) {
-			committedRouting(r)
-			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
-				Strategy: bootstrap.ConnectExternal, Stage: "committed",
-				TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
-			}
-			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: env.endpoint, ManagementKey: env.protected}
-			r.Operation.ProductComplete = true
 		}},
 		{"unowned", true, func(r *freshstore.Record, _ managedInstallEnv) {
 			committedRouting(r)

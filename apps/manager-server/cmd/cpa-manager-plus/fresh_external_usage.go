@@ -241,7 +241,7 @@ func (a *freshApplication) externalUsageRoute(w http.ResponseWriter, r *http.Req
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !op.ProductComplete || a.externalSource == nil {
+	if !op.ProductComplete || op.Strategy.Strategy != bootstrap.ConnectExternal || a.externalSource == nil {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}

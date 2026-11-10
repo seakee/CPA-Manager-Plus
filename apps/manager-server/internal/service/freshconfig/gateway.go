@@ -446,12 +446,23 @@ type authority struct {
 	endpoint string
 }
 
-// resolve proves the profile this service was constructed with and returns the
-// authority for exactly the committed target generation. A record that does not
-// match that authority is never a write path. A managed-only scope resolves to a
-// closed refusal on every other profile.
+func (s *Service) usesExternal(op bootstrap.FreshOperation) bool {
+	if s.external == nil {
+		return false
+	}
+	if !s.managed {
+		return true
+	}
+	return op.Strategy.Strategy == bootstrap.ConnectExternal
+}
+
+// resolve proves the active profile for this installation checkpoint and
+// returns the authority for the committed target generation. A record that does
+// not match that authority is never a write path. A managed-only scope resolves
+// to a closed refusal on every other profile.
 func (s *Service) resolve(ctx context.Context, r freshstore.Record, sc scope) (authority, error) {
-	if sc.managedOnly && s.external != nil && !s.managed {
+	externalProfile := s.usesExternal(r.Operation)
+	if sc.managedOnly && externalProfile {
 		// The plugin root belongs to the Supervisor-owned destination this Manager
 		// stages. An External installation owns neither, so the scope is answered
 		// before the External authority is even asked: the user's CPA receives no
@@ -473,10 +484,10 @@ func (s *Service) resolve(ctx context.Context, r freshstore.Record, sc scope) (a
 		// A transient proof failure on a managed install is not the same fact as
 		// "this install does not own the plugin root": reporting the profile
 		// reason would tell the operator their install is the wrong shape and
-		// hide the switch. This service's own profile is managed, so a proof that
-		// could not be taken right now stays ErrProofUnavailable and the caller
-		// retries instead of concluding anything about the install.
-		if err != nil && s.managed {
+		// hide the switch. This service's active profile is managed, so a proof
+		// that could not be taken right now stays ErrProofUnavailable and the
+		// caller retries instead of concluding anything about the install.
+		if err != nil && s.managed && !externalProfile {
 			return authority{
 				mode:    auth.mode,
 				capable: Capability{Mode: auth.mode, Reason: ReasonUnavailable},
@@ -496,23 +507,7 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 		return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonUnavailable}}, cpa.ErrProofUnavailable
 	}
 	switch {
-	case s.managed:
-		if s.targets == nil || !s.targets(op) || op.Strategy.TargetGeneration == 0 {
-			return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonNotInstalled}}, cpa.ErrProofUnavailable
-		}
-		secret, err := s.target(ctx, op.Strategy.TargetGeneration)
-		if err != nil || secret == "" {
-			return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonUnavailable}}, cpa.ErrProofUnavailable
-		}
-		return authority{
-			mode:   ModeManaged,
-			wire:   s.wire,
-			secret: secret,
-			capable: Capability{
-				Mode: ModeManaged, Readable: true, Writable: true, RulesWritable: true,
-			},
-		}, nil
-	case s.external != nil:
+	case s.usesExternal(op):
 		// The profile question is asked of the one discriminator, so the page can
 		// never accept a checkpoint the key surfaces refuse.
 		if s.targets == nil || !s.targets(op) || op.Strategy.TargetGeneration == 0 {
@@ -555,6 +550,22 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 			// prove.
 			capable: Capability{
 				Mode: ModeExternal, Readable: true, Writable: true, RulesWritable: false, Reason: ReasonRulesExternal,
+			},
+		}, nil
+	case s.managed:
+		if s.targets == nil || !s.targets(op) || op.Strategy.TargetGeneration == 0 {
+			return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonNotInstalled}}, cpa.ErrProofUnavailable
+		}
+		secret, err := s.target(ctx, op.Strategy.TargetGeneration)
+		if err != nil || secret == "" {
+			return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonUnavailable}}, cpa.ErrProofUnavailable
+		}
+		return authority{
+			mode:   ModeManaged,
+			wire:   s.wire,
+			secret: secret,
+			capable: Capability{
+				Mode: ModeManaged, Readable: true, Writable: true, RulesWritable: true,
 			},
 		}, nil
 	default:

@@ -71,6 +71,7 @@ type externalRebindStore interface {
 // installation, and reaching it is a reconnect rather than a rebind.
 func (s *Service) Rebind(ctx context.Context, store externalRebindStore, admin *security.Protector, generation uint64,
 	baseURL string, managementKey string) (ExternalRebindResult, error) {
+	s = s.active()
 	if s == nil || s.profile != ProfileExternal || store == nil || admin == nil {
 		return ExternalRebindResult{}, ErrExternalUnavailable
 	}

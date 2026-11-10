@@ -22,7 +22,8 @@ type Verdict struct {
 // It neither reads the five-second UI observation nor installs/replaces a Key.
 func (s *Service) Admit(ctx context.Context, candidate string, generation uint64, binding string) (Verdict, error) {
 	deny := Verdict{}
-	if !identity.IsValidSHA256Hex(binding) || len(candidate) != 73 {
+	s = s.active()
+	if s == nil || !identity.IsValidSHA256Hex(binding) || len(candidate) != 73 {
 		return deny, ErrUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)

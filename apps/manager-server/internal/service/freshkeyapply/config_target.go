@@ -11,6 +11,7 @@ import (
 // ConfigTarget consumes existing S1/S2 target/permit checks. It grants no Key
 // mutation. The serial Host must exclude every K/U writer for the source lease.
 func (s *Service) ConfigTarget(ctx context.Context, generation uint64) (string, error) {
+	s = s.active()
 	if s == nil {
 		return "", ErrUnavailable
 	}
@@ -72,6 +73,7 @@ func (s *Service) ConfigTarget(ctx context.Context, generation uint64) (string, 
 // that needs the authority itself must call the same profile through ConfigTarget
 // and must not copy this predicate's observations.
 func (s *Service) DefaultInstallCPAAuthorityProven(ctx context.Context) bool {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged {
 		return false
 	}

@@ -106,7 +106,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// The projection and identity workers maintain attribution independently of
 	// the Collector authority, so they start once the keys are attributable.
 	if !a.usageWorkersStarted {
-		if a.startIdentityWorker != nil {
+		if a.startIdentityWorker != nil && checkpoint.Strategy != bootstrap.ConnectExternal {
 			a.startIdentityWorker(ctx)
 		}
 		a.usageProjection.Start(ctx)

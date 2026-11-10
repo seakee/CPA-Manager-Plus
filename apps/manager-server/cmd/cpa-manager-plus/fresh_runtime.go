@@ -261,17 +261,41 @@ func freshRuntimeResolveOperation(
 	return operation, false
 }
 
-// runtimeStatusClient returns the read-only observation client. External is
-// status-only and never fills a.runtime, so the status surface falls back to it
-// here.
-func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
-	if a.runtime != nil {
+func (a *freshApplication) runtimeModeFor(op bootstrap.FreshOperation) model.RuntimeMode {
+	if a == nil || a.runtime == nil || op.Strategy.Strategy == bootstrap.ConnectExternal {
+		return model.RuntimeModeExternal
+	}
+	return model.RuntimeModeEmbedded
+}
+
+func (a *freshApplication) effectiveRuntimeMode(ctx context.Context) model.RuntimeMode {
+	if a == nil || a.runtime == nil {
+		return model.RuntimeModeExternal
+	}
+	if a.runtimeExternal == nil || a.store == nil {
+		return model.RuntimeModeEmbedded
+	}
+	op, err := a.current(ctx)
+	if err != nil {
+		return model.RuntimeModeExternal
+	}
+	return a.runtimeModeFor(op)
+}
+
+func (a *freshApplication) runtimeStatusClientFor(mode model.RuntimeMode) runtimeservice.RuntimeClient {
+	if a == nil {
+		return nil
+	}
+	if mode == model.RuntimeModeEmbedded {
 		return a.runtime
 	}
-	if a.runtimeExternal != nil {
-		return a.runtimeExternal
-	}
-	return nil
+	return a.runtimeExternal
+}
+
+// runtimeStatusClient returns the read-only observation client for the active
+// installation profile.
+func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
+	return a.runtimeStatusClientFor(a.effectiveRuntimeMode(context.Background()))
 }
 
 type freshDatabaseStatusProvider struct {
@@ -296,11 +320,16 @@ func (c freshRuntimeClientAdapter) client() (runtimeservice.RuntimeClient, error
 }
 
 func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
-	client, err := c.client()
-	if err != nil {
-		return model.RuntimeObservedStatus{}, err
+	mode := model.RuntimeModeExternal
+	var client runtimeservice.RuntimeClient
+	if c.app != nil {
+		mode = c.app.effectiveRuntimeMode(ctx)
+		client = c.app.runtimeStatusClientFor(mode)
 	}
-	if c.app != nil && c.app.runtime == nil {
+	if client == nil {
+		return model.RuntimeObservedStatus{}, errors.New("CPA runtime client is not configured")
+	}
+	if c.app != nil && mode == model.RuntimeModeExternal {
 		gate := &c.app.legacyCredentialGate
 		requestCtx := ctx
 		if !hasExternalCredentialHold(ctx, gate) {
@@ -392,8 +421,8 @@ func (a *freshApplication) refreshRuntimeOperations(
 	observedOK := false
 	if observed != nil {
 		status, observedOK = *observed, true
-	} else if client := a.runtimeStatusClient(); client != nil {
-		status, err = client.Status(ctx)
+	} else if a.runtime != nil {
+		status, err = a.runtime.Status(ctx)
 		observedOK = err == nil
 	}
 	now := time.Now().UTC()
@@ -499,11 +528,9 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusPreconditionRequired)
 		return
 	}
-	mode := string(model.RuntimeModeExternal)
-	if a.runtime != nil && a.runtimeExternal == nil {
-		mode = string(model.RuntimeModeEmbedded)
-	}
-	statusClient := a.runtimeStatusClient()
+	runtimeMode := a.runtimeModeFor(op)
+	mode := string(runtimeMode)
+	statusClient := a.runtimeStatusClientFor(runtimeMode)
 	if statusClient == nil {
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unavailable", a.runtimeJournal))
 		return
@@ -592,7 +619,7 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		a.submitRuntimeOperation(w, r)
+		a.submitRuntimeOperation(w, r, op)
 		return
 	}
 	if !strings.HasPrefix(resource, "runtime/operations/") || r.Method != http.MethodGet {
@@ -617,7 +644,7 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 	// A page reopened after a Manager interruption must be able to learn the
 	// outcome of the operation it started. Resolution only observes; this route
 	// never resends the mutation.
-	if freshRuntimeOperationsPending(data) {
+	if a.runtimeModeFor(op) == model.RuntimeModeEmbedded && freshRuntimeOperationsPending(data) {
 		if resolved, resolveErr := a.refreshRuntimeOperations(r.Context(), nil); resolveErr == nil {
 			data = resolved
 		}
@@ -638,7 +665,7 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 	writeFreshJSON(w, operation.response())
 }
 
-func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http.Request) {
+func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
 	var request struct {
 		Action    string `json:"action"`
 		RequestID string `json:"requestId"`
@@ -653,7 +680,7 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		freshRuntimeOperationError(w, http.StatusBadRequest, "invalid_action")
 		return
 	}
-	if a.runtimeExternal != nil || a.runtime == nil {
+	if a.runtimeModeFor(op) != model.RuntimeModeEmbedded || a.runtime == nil {
 		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
 		return
 	}

@@ -218,11 +218,12 @@ type freshApplication struct {
 	privateCollector func(context.Context) bool
 	// startIdentityWorker starts the Embedded identity reconciliation loop; a
 	// field so the completion path can be proven to start it once.
-	startIdentityWorker func(context.Context)
+	startIdentityWorker               func(context.Context)
+	disableEmbeddedProxyMutationsOnce sync.Once
+	clearEmbeddedProxyMutations       func()
 	// externalSource is the committed Connect External authority. It is the only
 	// source of an External management credential; no environment fallback exists.
 	externalSource freshkeyapply.ExternalSource
-	// The Adopt migration copy runs on its own worker, never on the commit
 	// request: adoptMigrationMu makes the start single-flight per installation
 	// and guards the flag that says a run is in flight.
 	adoptMigrationMu      sync.Mutex
@@ -292,48 +293,42 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		}
 		return managerCfg.CPAConnection.CPABaseURL, managerCfg.CPAConnection.ManagementKey, nil
 	}
-	if cfg.EmbeddedRuntimeConfigured() {
+	alreadyExternal := opened.Record.Operation.Strategy.Strategy == bootstrap.ConnectExternal
+	a.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(externalConnection)
+	if cfg.EmbeddedRuntimeConfigured() && !alreadyExternal {
 		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
 		runtime = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, tokenSource)
 		a.artifact = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
-	} else {
-		a.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(externalConnection)
-		// An External CPA stays rule-read-only on the gateway page: without an
-		// exclusive write window CPAMP writes only best-effort scalars there. The
-		// target comes from the External authority, never from a raw settings
-		// read: only the authority proves the committed connection and carries the
-		// typed refusal of a rotated management credential.
-		a.externalSource = externalInstallSource(st, opened.Protector)
-		a.keyApply = freshkeyapply.NewExternal(a.keyRepo, a.keys, a.externalSource)
-		a.gatewayConfig = freshconfig.New(st, nil, a.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
-		a.gatewayConfig.EnableExternal(a.keyApply.ExternalTarget)
-		// External stays strictly read-only and status-only: it never becomes the
-		// lifecycle/strategy Runtime of this application. The Runtime status page
-		// observes it through runtimeStatusClient and offers no lifecycle actions.
 	}
-	runtimeMode := model.RuntimeModeExternal
-	if cfg.EmbeddedRuntimeConfigured() {
-		runtimeMode = model.RuntimeModeEmbedded
-	}
-	legacyContext.CPAUpdateService = cpaupdateservice.New(legacyStore, freshRuntimeClientAdapter{app: a}, runtimeMode).WithModeResolver(func() model.RuntimeMode {
-		if a.runtime != nil {
-			return model.RuntimeModeEmbedded
-		}
-		return model.RuntimeModeExternal
+	legacyContext.CPAUpdateService = cpaupdateservice.New(
+		legacyStore,
+		freshRuntimeClientAdapter{app: a},
+		a.runtimeModeFor(opened.Record.Operation),
+	).WithModeResolver(func() model.RuntimeMode {
+		return a.effectiveRuntimeMode(context.Background())
 	})
 	// Attach the same durable mutation services as the normal Embedded app
 	// before publishing its routes. An incomplete graph must never fall back to
-	// unjournaled API-key rotation or credential deletion.
-	identityWiring, err := wireFreshIdentityMutations(legacyContext, runtime)
-	if err != nil {
-		log.Printf("Fresh Console mutation services unavailable: %v", err)
-	} else {
-		a.identityWorker, err = newFreshIdentityReconcileWorker(legacyContext, identityWiring)
+	// unjournaled API-key rotation or credential deletion; a committed External
+	// install owns no Supervisor-managed CPA and never wires Embedded fences.
+	var err error
+	if !alreadyExternal {
+		var identityWiring freshIdentityWiring
+		identityWiring, err = wireFreshIdentityMutations(legacyContext, runtime)
 		if err != nil {
-			log.Printf("Fresh identity reconciliation unavailable: %v", err)
-		} else if worker := a.identityWorker; worker != nil {
-			a.startIdentityWorker = func(ctx context.Context) { go worker.Run(ctx) }
+			log.Printf("Fresh Console mutation services unavailable: %v", err)
+		} else {
+			a.identityWorker, err = newFreshIdentityReconcileWorker(legacyContext, identityWiring)
+			if err != nil {
+				log.Printf("Fresh identity reconciliation unavailable: %v", err)
+			} else if worker := a.identityWorker; worker != nil {
+				a.startIdentityWorker = func(ctx context.Context) { go worker.Run(ctx) }
+			}
 		}
+	}
+	a.clearEmbeddedProxyMutations = func() {
+		legacyContext.ProxyService.SetAPIKeyMutationService(nil)
+		legacyContext.ProxyService.SetCredentialDeleteService(nil)
 	}
 	// An unavailable Embedded writer must not remove unrelated Console reads,
 	// and External has no identity worker to install. Always construct the
@@ -365,15 +360,29 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		}
 	}
 	if a.keyApply == nil && runtime != nil && h1Valid {
-		// Default Compose installations derive CPA management authority from
-		// the committed destination and the protected Manager connection.
+		// Official single-image deployments inject Supervisor runtime env at
+		// container start before the wizard chooses a strategy. Select Managed vs
+		// External from the durable Fresh strategy checkpoint rather than from the
+		// presence of runtime env alone.
 		supervisorRoots := cfg.TrustedSupervisorRoots()
 		a.managedSource = managedInstallSource(st, opened.Protector, cfg.CPAUpstreamURL)
-		a.keyApply = freshkeyapply.NewManaged(a.keyRepo, a.keys, runtime, cfg.CPAUpstreamURL, a.managedSource)
-		a.keyApply.SetTrustedSupervisorRoots(supervisorRoots)
+		a.externalSource = externalInstallSource(st, opened.Protector)
+		managedAuthority := freshkeyapply.NewManaged(a.keyRepo, a.keys, runtime, cfg.CPAUpstreamURL, a.managedSource)
+		managedAuthority.SetTrustedSupervisorRoots(supervisorRoots)
+		externalAuthority := freshkeyapply.NewExternal(a.keyRepo, a.keys, a.externalSource)
+		a.keyApply = freshkeyapply.NewStrategySelector(
+			func(op bootstrap.FreshOperation) *freshkeyapply.Service {
+				if op.Strategy.Strategy == bootstrap.ConnectExternal {
+					return externalAuthority
+				}
+				return managedAuthority
+			},
+			func() (bootstrap.FreshOperation, bool) {
+				op, loadErr := a.current(context.Background())
+				return op, loadErr == nil
+			},
+		)
 		a.gatewayConfig = freshconfig.New(st, a.keyApply.ConfigTarget, a.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
-		// The destination address is the managed installation's own CPA, not the
-		// private loopback profile the default Transport dials.
 		a.gatewayConfig.EnableManaged(cfg.CPAUpstreamURL)
 		a.gatewayConfig.SetTrustedSupervisorRoots(supervisorRoots)
 		// New Managed and Adopt prove different destination postures, so the page
@@ -385,6 +394,16 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			}
 			return cpa.PostureForWithSupervisorRoots(install.Strategy, supervisorRoots)
 		})
+		a.gatewayConfig.EnableExternal(a.keyApply.ExternalTarget)
+	}
+	if a.keyApply == nil && runtime == nil {
+		// Standalone Manager deployments without an Embedded Runtime — or restarts
+		// after Connect External was already committed — wire External status and
+		// authority only, never becoming a lifecycle Runtime.
+		a.externalSource = externalInstallSource(st, opened.Protector)
+		a.keyApply = freshkeyapply.NewExternal(a.keyRepo, a.keys, a.externalSource)
+		a.gatewayConfig = freshconfig.New(st, nil, a.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
+		a.gatewayConfig.EnableExternal(a.keyApply.ExternalTarget)
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this
 	// installation must be able to show that its saved connection serves the
@@ -1011,13 +1030,7 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	app.runCtx = ctx
 	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
 	h.SetFreshHandler(app)
-	// The reconciler worker itself is cheap and decides nothing until the store
-	// answers; LoadEmbeddedRuntimeDesiredState is the real gate and re-reads the
-	// committed checkpoint on every cycle, so an operation that commits
-	// `connect_external` after this process started stops being driven. Starting it
-	// unconditionally keeps that gate in one place instead of splitting the
-	// decision between startup and each cycle.
-	if desired := app.desiredStateStore(); app.runtime != nil && desired != nil {
+	if desired := app.desiredStateStore(); app.effectiveRuntimeMode(ctx) == model.RuntimeModeEmbedded && app.runtime != nil && desired != nil {
 		reconciler := runtimeservice.NewReconciler(app.runtime, desired, runtimeservice.DefaultReconcileInterval, log.Printf)
 		go reconciler.Run(ctx)
 	}
