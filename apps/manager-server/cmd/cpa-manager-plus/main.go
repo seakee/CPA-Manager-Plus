@@ -264,6 +264,10 @@ func runServerWithOptions(options legacypreflight.Options) {
 		waitForReadOnlyStartup(ctx, server, serverResult)
 		return
 	}
+	if cfg.EmbeddedRuntimeConfigured() {
+		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
+		startupHandler.SetUpgradeArtifact(runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource))
+	}
 
 	if !options.Initialize {
 		if _, statErr := os.Lstat(paths.Database); os.IsNotExist(statErr) {

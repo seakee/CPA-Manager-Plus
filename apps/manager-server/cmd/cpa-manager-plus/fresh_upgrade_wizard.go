@@ -27,11 +27,16 @@ const (
 // verify action is the surface's one write, and it delegates to the same
 // completion gate the command line runs.
 func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
+	var artifact upgradewizard.ArtifactRuntime
+	if a.artifact != nil {
+		artifact = a.artifact
+	}
 	return &upgradewizard.Handler{
 		LegacyRoot:   configuredLegacyRoot,
 		PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 		Database:     func() string { return a.cfg.DBPath },
 		Timeout:      upgradewizard.DefaultTimeout,
+		Artifact:     artifact,
 	}
 }
 

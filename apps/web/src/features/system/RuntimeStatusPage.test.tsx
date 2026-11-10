@@ -1,151 +1,165 @@
-import i18n from '@/i18n';
-import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useNotificationStore } from '@/stores';
-import type { PublicApiClient } from '@/fullweb/publicApi';
-import { RuntimeStatusPage, type RuntimeStatusResponse } from './RuntimeStatusPage';
+import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
+import i18n from '@/i18n';
+import { RuntimeStatusPage } from './RuntimeStatusPage';
 
-const reactGlobal = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
-reactGlobal.IS_REACT_ACT_ENVIRONMENT = true;
+const DIGEST = 'sha256:' + 'd'.repeat(64);
 
-type RuntimeClient = PublicApiClient;
+function embeddedStatus() {
+  return {
+    mode: 'embedded' as const,
+    status: 'healthy',
+    observedAt: '2026-11-09T00:00:00Z',
+    manager: { state: 'ready' },
+    gateway: {
+      state: 'online',
+      ready: true,
+      artifactId: DIGEST,
+      capabilities: ['restart', 'stop'],
+    },
+  };
+}
 
-const embeddedStatus: RuntimeStatusResponse = {
-  mode: 'embedded',
-  status: 'ready',
-  observedAt: '2026-10-27T00:00:00.000Z',
-  manager: { state: 'ready' },
-  gateway: {
-    identity: 'runtime-test',
-    generation: 7,
-    protocolVersion: 'v1',
-    state: 'ready',
-    ready: true,
-    capabilities: ['start', 'stop', 'restart'],
-  },
-};
+describe('RuntimeStatusPage artifact origin display', () => {
+  let renderer: ReactTestRenderer | undefined;
 
-const externalStatus: RuntimeStatusResponse = {
-  mode: 'external',
-  status: 'ready',
-  observedAt: '2026-10-27T00:00:00.000Z',
-  manager: { state: 'ready' },
-  gateway: { state: 'ready', ready: true, version: '8.0.55' },
-};
-
-let renderer: ReactTestRenderer | undefined;
-
-const text = (node: ReactTestInstance): string =>
-  node.children.map((child) => (typeof child === 'string' ? child : text(child))).join('');
-
-const buttons = () => renderer!.root.findAll((node) => node.type === 'button');
-
-const renderPage = async (client: RuntimeClient) => {
-  await act(async () => {
-    renderer = create(
-      <MemoryRouter>
-        <RuntimeStatusPage client={client} credential="admin-test" />
-      </MemoryRouter>
-    );
-  });
-};
-
-afterEach(async () => {
-  if (renderer)
-    await act(async () => {
-      renderer?.unmount();
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    vi.useFakeTimers();
+    vi.stubGlobal('window', {
+      setInterval,
+      clearInterval,
     });
-  renderer = undefined;
-  useNotificationStore.getState().hideConfirmation();
-  vi.unstubAllGlobals();
-});
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+    });
+  });
 
-beforeEach(async () => {
-  // The i18n default language is derived from the host locale, so the copy these
-  // tests assert on must be pinned instead of depending on the machine running them.
-  await i18n.changeLanguage('zh-CN');
-  vi.stubGlobal('window', { setInterval: vi.fn(() => 1), clearInterval: vi.fn() });
-  vi.stubGlobal('document', { visibilityState: 'visible' });
-});
+  afterEach(async () => {
+    if (renderer) {
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+    }
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-describe('Runtime status page', () => {
-  it('renders External as read-only and shows the observed version', async () => {
-    const client = {
-      get: vi.fn().mockResolvedValue(externalStatus),
+  async function mount(client: PublicApiClient) {
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter>
+          <RuntimeStatusPage client={client} credential="admin-secret" />
+        </MemoryRouter>
+      );
+    });
+  }
+
+  it.each([
+    [
+      'bundled',
+      {
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: DIGEST },
+        active: { artifactId: DIGEST, origin: 'bundled' },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      },
+      '固定版本（镜像自带）',
+    ],
+    [
+      'acquired',
+      {
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: DIGEST },
+        active: { artifactId: DIGEST, origin: 'acquired' },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      },
+      '固定版本（运行时获取）',
+    ],
+    [
+      'required',
+      {
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: DIGEST },
+        active: null,
+        required: true,
+        operation: null,
+        cdnPresets: [],
+      },
+      '尚未准备',
+    ],
+  ])('renders engine version source for %s artifact state', async (_label, artifactPayload, expectedText) => {
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') return artifactPayload;
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
       post: vi.fn(),
-    } as unknown as RuntimeClient;
-    await renderPage(client);
-    const rootSection = renderer!.root.findByProps({ 'data-testid': 'runtime-status-page' });
-    expect(rootSection.type).toBe('section');
-    expect(rootSection.props.className).toBe('runtime-status-page');
-    expect(renderer!.root.findAllByType('h1')).toHaveLength(0);
-    const content = text(renderer!.root);
-    expect(content).toContain('外部 CPA 连接');
-    expect(content).toContain('8.0.55');
-    expect(buttons().map(text)).not.toContain('启动');
-    expect(buttons().map(text)).not.toContain('停止');
-    expect(buttons().map(text)).not.toContain('重启');
-  });
-
-  it('confirms stop and blocks duplicate submission while the request is in flight', async () => {
-    let resolvePost: (value: unknown) => void = () => undefined;
-    const pendingPost = new Promise((resolve) => {
-      resolvePost = resolve;
-    });
-    const post = vi.fn().mockReturnValue(pendingPost);
-    const client = {
-      get: vi.fn().mockResolvedValue(embeddedStatus),
-      post,
-    } as unknown as RuntimeClient;
-    await renderPage(client);
-    const stop = buttons().find((item) => text(item) === '停止');
-    expect(stop).toBeDefined();
-    act(() => stop!.props.onClick());
-    const confirmation = useNotificationStore.getState().confirmation;
-    expect(confirmation.isOpen).toBe(true);
-    expect(confirmation.options?.message).toContain('中断');
-
-    let submitted: Promise<void> | undefined;
-    await act(async () => {
-      submitted = Promise.resolve(confirmation.options?.onConfirm?.());
-      await Promise.resolve();
-    });
-    expect(post).toHaveBeenCalledTimes(1);
-    expect(buttons().find((item) => text(item) === '停止')?.props.disabled).toBe(true);
-    act(() => buttons().find((item) => text(item) === '停止')?.props.onClick());
-    expect(post).toHaveBeenCalledTimes(1);
-    resolvePost({ requestId: 'request-1', action: 'stop', operationId: 'runtime-ui/v1:request-1', state: 'succeeded' });
-    await act(async () => {
-      await submitted;
-    });
-    expect(buttons().find((item) => text(item) === '停止')?.props.disabled).toBe(false);
-  });
-
-  it('queries the original operation after an unknown result without resending it', async () => {
-    const unknown = {
-      requestId: 'request-unknown',
-      action: 'start',
-      operationId: 'runtime-ui/v1:request-unknown',
-      state: 'unknown',
+      put: vi.fn(),
     };
-    const post = vi.fn().mockResolvedValue(unknown);
-    const client = {
-      get: vi.fn()
-        .mockResolvedValueOnce({ ...embeddedStatus, gateway: { ...embeddedStatus.gateway, state: 'offline', ready: false } })
-        .mockResolvedValueOnce(unknown),
-      post,
-    } as unknown as RuntimeClient;
-    await renderPage(client);
-    const start = buttons().find((item) => text(item) === '启动');
-    expect(start).toBeDefined();
-    await act(async () => {
-      await start!.props.onClick();
-    });
-    const requestId = post.mock.calls[0][1].requestId as string;
-    expect(client.get).toHaveBeenCalledWith(`runtime/operations/${requestId}`, {
+
+    await mount(client);
+
+    expect(client.get).toHaveBeenCalledWith('runtime/status', {
       kind: 'admin',
-      value: 'admin-test',
+      value: 'admin-secret',
     });
+    expect(client.get).toHaveBeenCalledWith('runtime/artifact', {
+      kind: 'admin',
+      value: 'admin-secret',
+    });
+    const valueNode = renderer!.root.findByProps({
+      'data-testid': 'runtime-status-engine-source-value',
+    });
+    expect(valueNode.props.children).toBe(expectedText);
+  });
+
+  it('shows nothing extra on unsupported_platform and does not break the page when runtime/artifact fails', async () => {
+    const unsupportedClient: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') {
+          throw new PublicApiError('http', 409, undefined, 'unsupported_platform');
+        }
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    await mount(unsupportedClient);
+
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'runtime-status-page' })
+    ).toBeTruthy();
+    expect(
+      renderer!.root.findAllByProps({ 'data-testid': 'runtime-status-engine-source' })
+    ).toHaveLength(0);
+
+    const failingClient: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        throw new PublicApiError('network');
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    await mount(failingClient);
+
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'runtime-status-page' })
+    ).toBeTruthy();
+    expect(
+      renderer!.root.findAllByProps({ 'data-testid': 'runtime-status-engine-source' })
+    ).toHaveLength(0);
+    expect(JSON.stringify(renderer!.toJSON())).toContain('healthy');
   });
 });

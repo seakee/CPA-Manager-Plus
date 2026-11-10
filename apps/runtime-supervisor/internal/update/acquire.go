@@ -55,7 +55,17 @@ type AcquireStageResult struct {
 	CreatedStage bool
 }
 
-var acquirePostRenameHook func(finalPath string) error
+var (
+	acquirePostRenameHook         func(finalPath string) error
+	acquireRemoveCreatedStageHook func(finalPath string) error
+)
+
+// SetAcquireStageHooksForTesting configures fault-injection hooks around stage
+// publication and uncommitted stage removal in tests.
+func SetAcquireStageHooksForTesting(postRename, removeCreated func(finalPath string) error) {
+	acquirePostRenameHook = postRename
+	acquireRemoveCreatedStageHook = removeCreated
+}
 
 // Acquire verifies and atomically stages the pinned CPA version and exact
 // executable artifactId from any transport (official GitHub, CDN prefix, or
@@ -207,18 +217,17 @@ func (s *Store) AcquireStage(
 				return nil
 			}()
 			if postRenameErr != nil {
-				_ = s.RemoveCreatedStage(version)
-				return AcquireStageResult{}, postRenameErr
+				return AcquireStageResult{}, errors.Join(postRenameErr, s.RemoveCreatedStage(version))
 			}
 		}
 	}
 	verified, verifiedComplete, _, err := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID)
 	if err != nil || !verifiedComplete {
-		if createdStage {
-			_ = s.RemoveCreatedStage(version)
-		}
 		if err == nil {
 			err = fmt.Errorf("%w: finalized stage disappeared", ErrStaging)
+		}
+		if createdStage {
+			err = errors.Join(err, s.RemoveCreatedStage(version))
 		}
 		return AcquireStageResult{}, err
 	}
@@ -233,13 +242,28 @@ func (s *Store) RemoveCreatedStage(version string) error {
 		return fmt.Errorf("%w: invalid stage version for removal", ErrStaging)
 	}
 	finalPath := filepath.Join(s.root, version)
+	if acquireRemoveCreatedStageHook != nil {
+		if hookErr := acquireRemoveCreatedStageHook(finalPath); hookErr != nil {
+			return fmt.Errorf("%w: remove uncommitted stage: %v", ErrStaging, hookErr)
+		}
+	}
+	var chmodErr error
 	if info, err := os.Lstat(finalPath); err == nil && info.IsDir() {
-		_ = os.Chmod(finalPath, 0o700)
+		chmodErr = os.Chmod(finalPath, 0o700)
 	}
-	if err := os.RemoveAll(finalPath); err != nil {
-		return fmt.Errorf("%w: remove uncommitted stage: %v", ErrStaging, err)
+	removeErr := os.RemoveAll(finalPath)
+	if _, statErr := os.Lstat(finalPath); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		if removeErr == nil {
+			removeErr = statErr
+		}
+		return fmt.Errorf("%w: remove uncommitted stage: %v", ErrStaging, errors.Join(chmodErr, removeErr))
 	}
-	_ = syncDirectory(s.root)
+	if removeErr != nil {
+		return fmt.Errorf("%w: remove uncommitted stage: %v", ErrStaging, errors.Join(chmodErr, removeErr))
+	}
+	if syncErr := syncDirectory(s.root); syncErr != nil {
+		return fmt.Errorf("%w: sync staging root after removing uncommitted stage: %v", ErrStaging, syncErr)
+	}
 	return nil
 }
 

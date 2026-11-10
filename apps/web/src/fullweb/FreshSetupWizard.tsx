@@ -21,6 +21,17 @@ import {
 } from './freshAdoption';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
+import { FreshArtifactStep } from './FreshArtifactStep';
+import {
+  formatArtifactError,
+  formatArtifactPinnedMismatch,
+  isArtifactPinnedMismatch,
+  isArtifactReady,
+  isArtifactRecoveryRequired,
+  mapArtifactErrorCode,
+  readArtifactStatus,
+  type ArtifactStatus,
+} from './freshArtifact';
 
 type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
 type Target = {
@@ -49,6 +60,12 @@ type Pending = {
   stage: 'admin' | 'strategy' | 'route' | 'complete';
   previous?: string;
 };
+class WizardArtifactError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WizardArtifactError';
+  }
+}
 function attemptID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -102,6 +119,7 @@ export function FreshSetupWizard({
   // this persisted value, so a retry cannot silently turn plugins on.
   const [plugins, setPlugins] = useState(initialOperation.strategy?.pluginsEnabled === true);
   const [target, setTarget] = useState<Target | null>(null);
+  const [artifactGate, setArtifactGate] = useState<ArtifactStatus | null>(null);
   const [busy, setBusy] = useState(false);
   // The install-generated Client Key is shown once, on the completion screen of
   // the run that committed the destination. It lives in memory only: never in
@@ -219,10 +237,12 @@ export function FreshSetupWizard({
     } catch (err) {
       if (alive.current) {
         setError(
-          err instanceof BootstrapTransportError &&
-            err.code === 'managed_destination_verification_required'
-            ? s('runtimeVerifyRequired')
-            : j('setupError')
+          err instanceof WizardArtifactError
+            ? err.message
+            : err instanceof BootstrapTransportError &&
+                err.code === 'managed_destination_verification_required'
+              ? s('runtimeVerifyRequired')
+              : j('setupError')
         );
         setUnknown(pending.current !== null);
       }
@@ -240,8 +260,31 @@ export function FreshSetupWizard({
       return;
     }
     await task(async () => {
+      if (strategy === 'new_managed' || strategy === 'adopt_existing') {
+        let artifactStatus: ArtifactStatus;
+        try {
+          artifactStatus = await readArtifactStatus(transport);
+        } catch (err) {
+          throw new WizardArtifactError(formatArtifactError(err).text);
+        }
+        if (!isArtifactReady(artifactStatus)) {
+          setArtifactGate(artifactStatus);
+          setSavedKey(false);
+          setStep(2);
+          if (isArtifactRecoveryRequired(artifactStatus)) {
+            setError(
+              mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version).text
+            );
+          } else if (isArtifactPinnedMismatch(artifactStatus)) {
+            setError(formatArtifactPinnedMismatch(artifactStatus.pinned.version).text);
+          }
+          return;
+        }
+        setArtifactGate(null);
+      } else {
+        setArtifactGate(null);
+      }
       if (strategy === 'adopt_existing') {
-        // An adoption's own source form comes next, so this step only settles the
         // installation's own facts. The Admin key is committed here because the
         // strategy write that follows is authorized by it, and the console route
         // is prepared just before completion.
@@ -269,7 +312,7 @@ export function FreshSetupWizard({
     // An adoption is executed by the shared flow, which owns its two-POST commit
     // and its resumable migration. This path stays the New Managed and External
     // one.
-    if (strategy === 'adopt_existing') return;
+    if (strategy === 'adopt_existing' || artifactGate) return;
     if (pending.current || (!operation.adminInitialized && !savedKey)) return;
     await task(async () => {
       setStep(3);
@@ -385,7 +428,7 @@ export function FreshSetupWizard({
   // flow owns the source form, the inventory confirmation, the resumable
   // migration and the completion, so the review and execute steps below never
   // render for it.
-  if (strategy === 'adopt_existing' && step >= 2 && !complete) {
+  if (strategy === 'adopt_existing' && step >= 2 && !complete && !artifactGate) {
     return (
       <section className="cpamp-installation" data-testid="fresh-setup-wizard" aria-busy={busy}>
         <div className="wizard-card">
@@ -517,6 +560,7 @@ export function FreshSetupWizard({
                   onClick={() => {
                     setStrategy(value);
                     setTarget(null);
+                    setArtifactGate(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />
@@ -689,7 +733,16 @@ export function FreshSetupWizard({
               )}
             </div>
           )}
-          {(step === 2 || complete) && (
+          {step === 2 && !complete && artifactGate && (
+            <FreshArtifactStep
+              transport={transport}
+              initialStatus={artifactGate}
+              onReady={() => {
+                void review();
+              }}
+            />
+          )}
+          {((step === 2 && !artifactGate) || complete) && (
             <>
               <dl className="journey-summary">
                 {summary.map(([label, value, testID]) => (
@@ -845,6 +898,7 @@ export function FreshSetupWizard({
                   onClick={() => {
                     setStep(step - 1);
                     setSavedKey(false);
+                    setArtifactGate(null);
                     setError('');
                   }}
                 >
@@ -877,7 +931,7 @@ export function FreshSetupWizard({
                   type="button"
                   className="btn btn-primary"
                   data-testid="setup-execute"
-                  disabled={busy || !savedKey}
+                  disabled={busy || !savedKey || !!artifactGate}
                   onClick={() => void execute()}
                 >
                   {s('submit')}

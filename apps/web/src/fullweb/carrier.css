@@ -855,6 +855,7 @@ input {
   padding: 18px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
+  color: var(--text-primary);
   border-radius: var(--app-radius-md);
   margin-top: 16px;
   min-height: 96px;
@@ -1267,6 +1268,111 @@ input {
   align-items: center;
   gap: 16px;
   min-height: 64px;
+}
+
+.artifact-step {
+  display: grid;
+  gap: 20px;
+}
+
+.artifact-step-header {
+  display: grid;
+  gap: 8px;
+}
+
+.artifact-step-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.artifact-step-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.artifact-probe-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-subtle);
+  font-size: 14px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.artifact-options {
+  display: grid;
+  gap: 12px;
+}
+
+.artifact-cdn-controls,
+.artifact-upload-controls {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-surface);
+}
+
+.artifact-third-party-note {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--amber-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--amber-soft);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.artifact-file-input {
+  display: none;
+}
+
+.artifact-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border: 1px solid var(--info-border);
+  border-radius: var(--app-radius-md);
+  background: var(--accent-soft);
+  font-size: 14px;
+  color: var(--text-primary);
+  flex-wrap: wrap;
+}
+
+.artifact-progress-phase {
+  font-weight: 600;
+}
+
+.artifact-progress-bytes {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.artifact-error-remedy {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.artifact-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 /* Match the existing CPAMP Setup screen's primary action scale while the

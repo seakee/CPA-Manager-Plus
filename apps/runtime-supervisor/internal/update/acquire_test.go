@@ -814,6 +814,62 @@ func TestStoreAcquireStageRemovesNewlyCreatedStageOnPostRenameFailure(t *testing
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("stage root after post-rename failure = %v, %v; want newly created stage removed", entries, err)
 	}
+
+	// When RemoveCreatedStage itself fails after a post-rename error, the returned
+	// error joins both the post-rename failure and the cleanup failure while the
+	// leftover stage remains on disk; a subsequent AcquireStage still verifies and
+	// reuses matching bytes or refuses a conflicting artifactId.
+	postErr := errors.New("injected post-rename failure 2")
+	cleanupErr := errors.New("injected stage cleanup failure")
+	acquirePostRenameHook = func(finalPath string) error {
+		_ = store.prepareFinalizedExecutionDirectoryForTest(finalPath)
+		return postErr
+	}
+	acquireRemoveCreatedStageHook = func(string) error {
+		return cleanupErr
+	}
+	defer func() {
+		acquireRemoveCreatedStageHook = nil
+	}()
+	_, joinedErr := store.AcquireStage(
+		t.Context(),
+		"8.0.55",
+		wantArtifactID,
+		CopyUploadArchive(bytes.NewReader(archive), int64(len(archive))),
+		nil,
+		nil,
+	)
+	if !errors.Is(joinedErr, ErrStaging) || !strings.Contains(joinedErr.Error(), postErr.Error()) || !strings.Contains(joinedErr.Error(), cleanupErr.Error()) {
+		t.Fatalf("AcquireStage() with post-rename + cleanup failure = %v; want both %q and %q", joinedErr, postErr, cleanupErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "8.0.55")); statErr != nil {
+		t.Fatalf("expected leftover stage to remain when RemoveCreatedStage failed: %v", statErr)
+	}
+	acquirePostRenameHook = nil
+	acquireRemoveCreatedStageHook = nil
+
+	otherID := artifact.ID("sha256:" + strings.Repeat("c", 64))
+	if _, conflictErr := store.AcquireStage(
+		t.Context(),
+		"8.0.55",
+		otherID,
+		CopyUploadArchive(bytes.NewReader(archive), int64(len(archive))),
+		nil,
+		nil,
+	); !errors.Is(conflictErr, ErrArtifactConflict) {
+		t.Fatalf("AcquireStage() with conflicting artifactId against leftover stage = %v, want ErrArtifactConflict", conflictErr)
+	}
+	reusedRes, reuseErr := store.AcquireStage(
+		t.Context(),
+		"8.0.55",
+		wantArtifactID,
+		CopyUploadArchive(bytes.NewReader(archive), int64(len(archive))),
+		nil,
+		nil,
+	)
+	if reuseErr != nil || reusedRes.CreatedStage || reusedRes.Metadata.ArtifactID != wantArtifactID {
+		t.Fatalf("AcquireStage() reusing verified leftover stage = %+v, %v", reusedRes, reuseErr)
+	}
 }
 
 func newTLSServerClientForOfficialHosts(server *httptest.Server) *http.Client {
@@ -830,4 +886,8 @@ func newTLSServerClientForOfficialHosts(server *httptest.Server) *http.Client {
 	// httptest TLS certificates are valid for example.com and 127.0.0.1.
 	baseTransport.TLSClientConfig.ServerName = "example.com"
 	return &http.Client{Transport: baseTransport}
+}
+
+func (s *Store) prepareFinalizedExecutionDirectoryForTest(finalPath string) error {
+	return s.prepareFinalizedExecutionDirectory(finalPath)
 }

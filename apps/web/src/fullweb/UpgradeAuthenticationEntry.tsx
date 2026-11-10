@@ -5,6 +5,7 @@ import { FullWebIcon } from './FullWebIcon';
 import { createUpgradeWizardRead, createUpgradeWizardVerify, FreshUpgradeFlow } from './FreshUpgradeFlow';
 import { upgradeEntryText as text } from '../i18n/upgradeEntry';
 import './upgradeEntry.css';
+import { createUpgradeArtifactTransport } from './upgradeArtifactTransport';
 import {
   rememberUpgradeCredential,
   rememberedUpgradeCredential,
@@ -32,6 +33,7 @@ export function UpgradeAuthenticationEntry() {
   const heading = useRef<HTMLHeadingElement>(null);
   const credential = useRef('');
   const request = useRef<AbortController | null>(null);
+  const session = useRef<AbortController | null>(null);
   const sequence = useRef(0);
   const restored = useRef(false);
   const expiresAt = useRef(0);
@@ -40,6 +42,8 @@ export function UpgradeAuthenticationEntry() {
     (message: UpgradeAuthenticationError['reason'] | 'expired' | '' = '') => {
       ++sequence.current;
       request.current?.abort();
+      session.current?.abort();
+      session.current = null;
       credential.current = '';
       expiresAt.current = 0;
       setRevision('');
@@ -57,13 +61,20 @@ export function UpgradeAuthenticationEntry() {
       request.current = controller;
       // Renewal keeps the shell mounted, but hides the previous observation
       // and disables its actions until the server has verified it again.
-      if (!source) setRevision('');
+      if (!source) {
+        session.current?.abort();
+        session.current = null;
+        setRevision('');
+      }
       setChecking(true);
       setError('');
       const timeout = window.setTimeout(() => controller.abort(), 10_000);
       try {
         const verified = await verifyUpgradeCredential(key, controller.signal, source);
         if (sequence.current !== current || controller.signal.aborted) return false;
+        if (!session.current || session.current.signal.aborted) {
+          session.current = new AbortController();
+        }
         credential.current = key;
         expiresAt.current = Date.now() + 60_000;
         if (!source) rememberUpgradeCredential(key, remember);
@@ -113,7 +124,14 @@ export function UpgradeAuthenticationEntry() {
   // holds no credential of its own and no second way to write.
   const wizardRead = useMemo(() => createUpgradeWizardRead(() => credential.current), []);
   const wizardVerify = useMemo(() => createUpgradeWizardVerify(() => credential.current), []);
-
+  const wizardArtifact = useMemo(
+    () =>
+      createUpgradeArtifactTransport(
+        () => credential.current,
+        () => session.current?.signal
+      ),
+    []
+  );
   const inJourney = Boolean(revision);
   useEffect(() => {
     // Entering the journey moves focus once. Background checks and appearance
@@ -125,6 +143,8 @@ export function UpgradeAuthenticationEntry() {
     () => () => {
       ++sequence.current;
       request.current?.abort();
+      session.current?.abort();
+      session.current = null;
       credential.current = '';
     },
     []
@@ -237,6 +257,7 @@ export function UpgradeAuthenticationEntry() {
         <FreshUpgradeFlow
           read={wizardRead}
           verify={wizardVerify}
+          artifact={wizardArtifact}
           language={language}
           onRecordedOperation={setRecorded}
         />

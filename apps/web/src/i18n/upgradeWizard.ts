@@ -198,7 +198,8 @@ const en = {
   verifyTargetExternal: 'Target: an External CPA, administered by its owner',
   verifyTargetManaged: 'Target: the CPA this Manager owns',
   verifyReasonLabel: 'Recorded reason',
-
+  cpaImportReadyTitle: 'CPA engine is ready for import',
+  cpaImportReadyHelp: 'The pinned CPA engine is active. Run the import on the Manager host:',
   stagePreflight: 'Preflight',
   stageCopyIn: 'Copy-in',
   stageReconcile: 'Reconciliation',
@@ -392,7 +393,8 @@ const zh: typeof en = {
   verifyTargetExternal: '目标：由所有者管理的 External CPA',
   verifyTargetManaged: '目标：由本 Manager 拥有的 CPA',
   verifyReasonLabel: '已记录的原因',
-
+  cpaImportReadyTitle: 'CPA 引擎已就绪，可执行导入',
+  cpaImportReadyHelp: '固定版本 CPA 引擎已激活。请在 Manager 宿主机上执行导入命令：',
   stagePreflight: '预检',
   stageCopyIn: '复制入库',
   stageReconcile: '对账',
@@ -584,7 +586,8 @@ const tw: typeof en = {
   verifyTargetExternal: '目標：由擁有者管理的 External CPA',
   verifyTargetManaged: '目標：由本 Manager 擁有的 CPA',
   verifyReasonLabel: '已記錄的原因',
-
+  cpaImportReadyTitle: 'CPA 引擎已就緒，可執行匯入',
+  cpaImportReadyHelp: '固定版本 CPA 引擎已啟用。請在 Manager 主機上執行匯入命令：',
   stagePreflight: '預檢',
   stageCopyIn: '複製寫入',
   stageReconcile: '對帳',
@@ -795,7 +798,8 @@ const ru: typeof en = {
   verifyTargetExternal: 'Цель: внешний CPA, которым управляет его владелец',
   verifyTargetManaged: 'Цель: CPA, которым владеет этот Manager',
   verifyReasonLabel: 'Записанная причина',
-
+  cpaImportReadyTitle: 'Движок CPA готов к импорту',
+  cpaImportReadyHelp: 'Фиксированный движок CPA активен. Выполните импорт на хосте Manager:',
   stagePreflight: 'Проверка',
   stageCopyIn: 'Копирование',
   stageReconcile: 'Сверка',

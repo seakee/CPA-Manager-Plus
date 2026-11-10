@@ -495,6 +495,22 @@ async function adoptServer(
       );
     if (!/^Fresh /.test(String((init?.headers as Record<string, string>).Authorization)))
       return new Response(null, { status: 401 });
+    if (resource === 'runtime/artifact') {
+      return Response.json({
+        schemaVersion: 1,
+        pinned: {
+          version: '8.0.55',
+          artifactId: runtime.activeGatewayArtifact.artifactId,
+        },
+        active: {
+          artifactId: runtime.activeGatewayArtifact.artifactId,
+          origin: 'bundled',
+        },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      });
+    }
     if (resource === 'installation/runtime') {
       if (runtimeStage) {
         // The lost first POST's staging lands here: between the page's decision

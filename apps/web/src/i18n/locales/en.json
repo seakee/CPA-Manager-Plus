@@ -259,7 +259,11 @@
     "version_unverified": "Unverified",
     "writes": "Writes",
     "writes_blocked": "Blocked by this version",
-    "writes_allowed": "Not blocked by this version"
+    "writes_allowed": "Not blocked by this version",
+    "engine_source": "Engine version source",
+    "engine_source_bundled": "Pinned version (bundled in image)",
+    "engine_source_acquired": "Pinned version (acquired at runtime)",
+    "engine_source_required": "Not prepared yet"
   },
   "cpa_updates": {
     "title": "CPA Engine",

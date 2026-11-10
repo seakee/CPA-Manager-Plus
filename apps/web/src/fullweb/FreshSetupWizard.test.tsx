@@ -53,6 +53,13 @@ async function input(id: string, value: string | boolean) {
 async function setup(
   options: {
     external?: boolean;
+    adopt?: boolean;
+    artifactRequired?: boolean;
+    artifactRecheck503?: boolean;
+    artifactRecoveryRequired?: boolean;
+    artifactPinnedMismatch?: boolean;
+    artifactErrorCode?: string;
+    artifactErrorStatus?: number;
     lost?: string;
     unresolved?: boolean;
     runtimePending?: boolean;
@@ -75,12 +82,71 @@ async function setup(
   let recovered = false;
   let externalRejected = false;
   let verificationRefused = false;
+  let artifactRequired = options.artifactRequired === true;
+  let artifactRecheckFail = false;
   const transport = vi.fn<typeof fetch>(async (url, init) => {
     const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (resource === 'claim/exchange')
       return Response.json({ token: 'installation-session', operation });
     expect(init?.headers).toMatchObject({ Authorization: 'Fresh installation-session' });
+    if (resource === 'runtime/artifact') {
+      if (artifactRecheckFail) {
+        return Response.json({ code: 'runtime_unavailable' }, { status: 503 });
+      }
+      if (options.artifactErrorCode) {
+        return Response.json(
+          { code: options.artifactErrorCode },
+          { status: options.artifactErrorStatus ?? 409 }
+        );
+      }
+      return Response.json({
+        schemaVersion: 1,
+        pinned: {
+          version: '8.0.55',
+          artifactId: runtime.activeGatewayArtifact.artifactId,
+        },
+        active: artifactRequired
+          ? null
+          : {
+              artifactId: options.artifactPinnedMismatch
+                ? 'sha256:' + 'f'.repeat(64)
+                : runtime.activeGatewayArtifact.artifactId,
+              origin: 'bundled',
+            },
+        required: artifactRequired,
+        operation: options.artifactRecoveryRequired
+          ? {
+              id: 'op-recovery',
+              source: 'upload',
+              phase: 'failed',
+              receivedBytes: 1024,
+              totalBytes: 1024,
+              code: 'recovery_required',
+            }
+          : null,
+        cdnPresets: [],
+      });
+    }
+    if (resource === 'runtime/artifact/probe') {
+      return Response.json({ reachable: true, code: '' });
+    }
+    if (resource === 'runtime/artifact/acquire') {
+      artifactRequired = false;
+      if (options.artifactRecheck503) {
+        artifactRecheckFail = true;
+      }
+      return Response.json({
+        operation: {
+          id: 'op-acquire',
+          source: body.source || 'github',
+          phase: 'succeeded',
+          receivedBytes: 1024,
+          totalBytes: 1024,
+          code: '',
+        },
+      });
+    }
     if (resource === 'installation/runtime')
       return Response.json({
         ...runtime,
@@ -220,6 +286,7 @@ async function setup(
     renderer = create(<FreshSetupWizard initialOperation={initialOperation} transport={client} />);
   });
   if (options.external) await click('choose-connect_external');
+  if (options.adopt) await click('choose-adopt_existing');
   await click('setup-next');
   await input('admin-key-input', admin);
   await input('route-target-input', '/private');
@@ -531,6 +598,14 @@ it('uses the maintained shell and shared CSS classes across configuration, revie
         if (name) expect(defined.has(name), `Missing CSS class .${name}`).toBe(true);
     }
   };
+  await setup({ artifactRequired: true });
+  check();
+  await click('setup-review');
+  check();
+  await click('artifact-source-cdn');
+  check();
+  await click('artifact-source-upload');
+  check();
   await setup({ external: true });
   check();
   await click('setup-review');
@@ -614,4 +689,149 @@ it('never offers or submits the plugin opt-in for an External connection', async
   expect(
     renderer.root.findAllByProps({ 'data-testid': 'review-plugins' })
   ).toHaveLength(0);
+});
+
+it('shows FreshArtifactStep and blocks execute when artifact is required, then continues to review on ready', async () => {
+  const { transport } = await setup({ artifactRequired: true });
+  await click('setup-review');
+
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(0);
+  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
+
+  // Prepare engine -> onReady re-runs review() automatically -> shows review summary
+  await click('artifact-acquire-btn');
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(1);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(true);
+});
+
+it('proceeds unchanged when artifact is not required with no extra request beyond the status read', async () => {
+  const { transport } = await setup({ artifactRequired: false });
+  const callsBeforeReview = transport.mock.calls.length;
+  await click('setup-review');
+
+  const reviewResources = transport.mock.calls
+    .slice(callsBeforeReview)
+    .map(([url]) => new URL(String(url)).pathname.split('/api/v2/')[1]);
+  expect(reviewResources).toEqual(['runtime/artifact', 'installation/runtime']);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(1);
+});
+
+it('never reads runtime/artifact for External and shows mapped error on unsupported_platform for Managed', async () => {
+  const { transport: externalTransport } = await setup({
+    external: true,
+    artifactErrorCode: 'unsupported_platform',
+    artifactErrorStatus: 409,
+  });
+  await click('setup-review');
+  expect(
+    externalTransport.mock.calls.some(([url]) => String(url).includes('/runtime/artifact'))
+  ).toBe(false);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(1);
+
+  const { transport: managedTransport } = await setup({
+    external: false,
+    artifactErrorCode: 'unsupported_platform',
+    artifactErrorStatus: 409,
+  });
+  await click('setup-review');
+  expect(
+    managedTransport.mock.calls.some(([url]) => String(url).endsWith('/runtime/artifact'))
+  ).toBe(true);
+  const alertNode = renderer.root.findByProps({ role: 'alert' });
+  expect(JSON.stringify(alertNode.children)).not.toContain('初始化尚未完成');
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+});
+
+it('runs the adopt artifact gate before committing admin key or observing target', async () => {
+  const { transport } = await setup({ adopt: true, artifactRequired: true });
+  await click('setup-review');
+
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'adopt-source-url' })).toHaveLength(0);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))
+  ).toBe(false);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
+
+  await click('artifact-acquire-btn');
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'adopt-source-url' })).toHaveLength(1);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))
+  ).toBe(true);
+  // observeTarget still only runs when staging inventory, not during review gate
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
+});
+
+it.each([false, true])(
+  'keeps gate and Execute disabled with no admin commit when post-acquire status re-check returns 503 (adopt=%s)',
+  async (adopt) => {
+    const { transport } = await setup({
+      adopt,
+      artifactRequired: true,
+      artifactRecheck503: true,
+    });
+    await click('setup-review');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+    expect(byID('setup-execute').props.disabled).toBe(true);
+
+    // Acquisition succeeds, triggering onReady -> review() re-checks GET runtime/artifact -> 503
+    await click('artifact-acquire-btn');
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'adopt-source-url' })).toHaveLength(0);
+    expect(byID('setup-execute').props.disabled).toBe(true);
+
+    // Even if onClick is invoked directly on setup-execute, no admin/commit or strategy write goes out
+    await click('setup-execute');
+    expect(
+      transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))
+    ).toBe(false);
+    expect(
+      transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+    ).toBe(false);
+  }
+);
+
+it('keeps gate active and shows restart guidance when status reports recovery_required even with active artifact', async () => {
+  const { transport } = await setup({
+    artifactRequired: false,
+    artifactRecoveryRequired: true,
+  });
+  await click('setup-review');
+
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
+});
+
+it('keeps gate active and blocks execute when active.artifactId does not match pinned.artifactId', async () => {
+  const { transport } = await setup({
+    artifactRequired: false,
+    artifactPinnedMismatch: true,
+  });
+  await click('setup-review');
+
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(byID('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
 });

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -908,6 +909,142 @@ func TestAcquireArtifactPreCommitFailureStageCleanupOwnership(t *testing.T) {
 	if _, err := existingEnv.stageStore.ResolveFinalized(existingEnv.pinnedVersion); err != nil {
 		t.Fatalf("pre-existing prepare_update stage was removed on pre-commit failure: %v", err)
 	}
+
+	// 3. Injected RemoveCreatedStage failure joins both the original pre-commit error and the cleanup error,
+	// logs once on both sync UploadArtifact and async AcquireArtifact failure paths, keeps the original
+	// operation code (install_failed), leaves the stage on disk, and the next acquisition safely verifies/reuses
+	// matching bytes while refusing tampered or conflicting artifacts.
+	var logBuf bytes.Buffer
+	origLogOut := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(origLogOut) })
+
+	injectedCleanupErr := fmt.Errorf("injected stage removal failure")
+	cleanupFailEnv := newSlimAcquireTestEnv(t, WithAcquisitionStageCleanupHook(func(string) error {
+		return injectedCleanupErr
+	}))
+	injectedCommitErr := fmt.Errorf("%w: injected pre-rename commit failure", selection.ErrSelectionNotPublished)
+	faultCleanup := &faultSelectionStore{
+		Store:     cleanupFailEnv.selectionStore,
+		commitErr: injectedCommitErr,
+	}
+	cleanupFailEnv.executor.mu.Lock()
+	cleanupFailEnv.executor.selections = faultCleanup
+	cleanupFailEnv.executor.mu.Unlock()
+
+	cleanupOp, cleanupRetErr := cleanupFailEnv.executor.UploadArtifact(
+		t.Context(),
+		bytes.NewReader(cleanupFailEnv.archive),
+		int64(len(cleanupFailEnv.archive)),
+	)
+	if ArtifactErrorCode(cleanupRetErr) != ArtifactCodeInstallFailed ||
+		cleanupOp.Phase != ArtifactPhaseFailed ||
+		cleanupOp.Code != ArtifactCodeInstallFailed {
+		t.Fatalf("UploadArtifact() with cleanup failure = %+v, %v (code %q); want install_failed", cleanupOp, cleanupRetErr, ArtifactErrorCode(cleanupRetErr))
+	}
+	if !errorsIs(cleanupRetErr, injectedCommitErr) || !errorsIs(cleanupRetErr, injectedCleanupErr) {
+		t.Fatalf("returned error = %v; want both %v and %v", cleanupRetErr, injectedCommitErr, injectedCleanupErr)
+	}
+	syncLogged := logBuf.String()
+	if !bytes.Contains([]byte(syncLogged), []byte(injectedCommitErr.Error())) ||
+		!bytes.Contains([]byte(syncLogged), []byte(injectedCleanupErr.Error())) {
+		t.Fatalf("sync failure log = %q; want both %q and %q", syncLogged, injectedCommitErr, injectedCleanupErr)
+	}
+	if !cleanupFailEnv.stageStore.HasAcquiredStage(cleanupFailEnv.pinnedVersion, cleanupFailEnv.pinnedID) {
+		t.Fatal("expected newly created stage to remain on disk when RemoveCreatedStage failed")
+	}
+	if _, err := os.Stat(filepath.Join(cleanupFailEnv.selectionRoot, "selection.json")); !os.IsNotExist(err) {
+		t.Fatalf("selection.json should not exist after pre-rename commit failure: %v", err)
+	}
+
+	// Restore working selection store and verify subsequent acquisition safety against the leftover stage:
+	// a tampered upload is refused with artifact_mismatch, while a valid upload verifies and commits cleanly.
+	cleanupFailEnv.executor.mu.Lock()
+	cleanupFailEnv.executor.selections = cleanupFailEnv.selectionStore
+	cleanupFailEnv.executor.mu.Unlock()
+	tamperedArchive := buildAcquireTarGzip(t,
+		acquireArchiveEntry{name: "cli-proxy-api", typeflag: tar.TypeReg, data: []byte("#!/bin/sh\necho tampered\n")},
+		acquireArchiveEntry{name: "LICENSE", typeflag: tar.TypeReg, data: []byte("MIT License\n")},
+	)
+	if _, err := cleanupFailEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(tamperedArchive), int64(len(tamperedArchive))); ArtifactErrorCode(err) != ArtifactCodeArtifactMismatch {
+		t.Fatalf("tampered upload against leftover stage = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactMismatch)
+	}
+	recoveredOp, err := cleanupFailEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(cleanupFailEnv.archive), int64(len(cleanupFailEnv.archive)))
+	if err != nil || recoveredOp.Phase != ArtifactPhaseSucceeded {
+		t.Fatalf("valid upload against leftover stage = %+v, %v; want succeeded", recoveredOp, err)
+	}
+
+	// 4. Async AcquireArtifact path also logs both the primary failure and the stage cleanup failure.
+	logBuf.Reset()
+	var asyncEnv *acquireTestEnv
+	asyncEnv = newSlimAcquireTestEnv(
+		t,
+		WithOfficialAcquisitionSource(&stubAcquireSource{
+			downloadFn: func(_ context.Context, _ string, dst io.Writer, _ runtimeupdate.ProgressFunc) error {
+				_, writeErr := dst.Write(asyncEnv.archive)
+				return writeErr
+			},
+		}),
+		WithAcquisitionStageCleanupHook(func(string) error {
+			return injectedCleanupErr
+		}),
+	)
+	faultAsync := &faultSelectionStore{
+		Store:     asyncEnv.selectionStore,
+		commitErr: injectedCommitErr,
+	}
+	asyncEnv.executor.mu.Lock()
+	asyncEnv.executor.selections = faultAsync
+	asyncEnv.executor.mu.Unlock()
+
+	if _, started, err := asyncEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); err != nil || !started {
+		t.Fatalf("async AcquireArtifact() started=%v, err=%v", started, err)
+	}
+	asyncSettled := awaitAcquisitionTerminal(t, asyncEnv.executor)
+	if asyncSettled.Operation == nil || asyncSettled.Operation.Phase != ArtifactPhaseFailed ||
+		asyncSettled.Operation.Code != ArtifactCodeInstallFailed {
+		t.Fatalf("async settled = %+v, want failed with %q", asyncSettled, ArtifactCodeInstallFailed)
+	}
+	asyncLogged := logBuf.String()
+	if !bytes.Contains([]byte(asyncLogged), []byte(injectedCommitErr.Error())) ||
+		!bytes.Contains([]byte(asyncLogged), []byte(injectedCleanupErr.Error())) {
+		t.Fatalf("async failure log = %q; want both %q and %q", asyncLogged, injectedCommitErr, injectedCleanupErr)
+	}
+
+	// 5. Async AcquireArtifact post-publication failure + RemoveCreatedStage failure inside AcquireStage logs both errors.
+	logBuf.Reset()
+	postPubErr := fmt.Errorf("injected post-publication stage failure")
+	stageRemoveErr := fmt.Errorf("injected RemoveCreatedStage failure")
+	runtimeupdate.SetAcquireStageHooksForTesting(
+		func(string) error { return postPubErr },
+		func(string) error { return stageRemoveErr },
+	)
+	defer runtimeupdate.SetAcquireStageHooksForTesting(nil, nil)
+
+	var asyncPostPubEnv *acquireTestEnv
+	asyncPostPubEnv = newSlimAcquireTestEnv(
+		t,
+		WithOfficialAcquisitionSource(&stubAcquireSource{
+			downloadFn: func(_ context.Context, _ string, dst io.Writer, _ runtimeupdate.ProgressFunc) error {
+				_, writeErr := dst.Write(asyncPostPubEnv.archive)
+				return writeErr
+			},
+		}),
+	)
+	if _, started, err := asyncPostPubEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); err != nil || !started {
+		t.Fatalf("async post-publication AcquireArtifact() started=%v, err=%v", started, err)
+	}
+	postPubSettled := awaitAcquisitionTerminal(t, asyncPostPubEnv.executor)
+	if postPubSettled.Operation == nil || postPubSettled.Operation.Phase != ArtifactPhaseFailed ||
+		postPubSettled.Operation.Code != ArtifactCodeInstallFailed {
+		t.Fatalf("async post-publication settled = %+v, want failed with %q", postPubSettled, ArtifactCodeInstallFailed)
+	}
+	postPubLogged := logBuf.String()
+	if !bytes.Contains([]byte(postPubLogged), []byte(postPubErr.Error())) ||
+		!bytes.Contains([]byte(postPubLogged), []byte(stageRemoveErr.Error())) {
+		t.Fatalf("async post-publication failure log = %q; want both %q and %q", postPubLogged, postPubErr, stageRemoveErr)
+	}
+	runtimeupdate.SetAcquireStageHooksForTesting(nil, nil)
 }
 
 func TestUploadArtifactAdmissionAndAlwaysVerifiesUploadedBytes(t *testing.T) {

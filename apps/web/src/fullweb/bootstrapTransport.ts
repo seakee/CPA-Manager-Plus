@@ -370,6 +370,10 @@ const methods = {
   strategy: 'POST',
   'installation/runtime': 'GET',
   'installation/adoption': 'GET',
+  'runtime/artifact': 'GET',
+  'runtime/artifact/probe': 'POST',
+  'runtime/artifact/acquire': 'POST',
+  'runtime/artifact/upload': 'PUT',
   complete: 'POST',
 } as const;
 type Resource = keyof typeof methods;
@@ -389,6 +393,10 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
           'strategy',
           'installation/runtime',
           'installation/adoption',
+          'runtime/artifact',
+          'runtime/artifact/probe',
+          'runtime/artifact/acquire',
+          'runtime/artifact/upload',
           'complete',
         ].includes(resource)) ||
       (resource !== 'claim/exchange' && !token)
@@ -399,8 +407,11 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       (canonicalBase ? canonicalBase + '/api/v2/' : API) + resource,
       window.location.origin
     );
+    const isGzipUpload = resource === 'runtime/artifact/upload';
     const headers: Record<string, string> = { Accept: 'application/json' };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (body !== undefined) {
+      headers['Content-Type'] = isGzipUpload ? 'application/gzip' : 'application/json';
+    }
     if (token) headers.Authorization = `Fresh ${token}`;
     // A read that never answers is not a read that succeeds: the progress loop
     // only counts answers, so a hung request would spin forever behind a screen
@@ -409,7 +420,10 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     const bounded =
       resource === 'operation' ||
       resource === 'installation/runtime' ||
-      resource === 'installation/adoption';
+      resource === 'installation/adoption' ||
+      resource === 'runtime/artifact' ||
+      resource === 'runtime/artifact/probe' ||
+      resource === 'runtime/artifact/acquire';
     const controller = bounded ? new AbortController() : undefined;
     const deadline = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : undefined;
     let response: Response;
@@ -424,7 +438,13 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
           headers,
           ...(body === undefined
             ? {}
-            : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
+            : {
+                body: isGzipUpload
+                  ? (body as BodyInit)
+                  : resource === 'strategy'
+                    ? runtimeRequestJSON(body)
+                    : JSON.stringify(body),
+              }),
           ...(controller ? { signal: controller.signal } : {}),
           mode: 'same-origin',
           credentials: 'omit',
@@ -460,6 +480,13 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
               (refusal.retryable as number) > 0
             )
               retryable = refusal.retryable as number;
+          } else if (resource === 'runtime/artifact' || resource.startsWith('runtime/artifact/')) {
+            if (
+              typeof refusal?.code === 'string' &&
+              refusal.code.length > 0 &&
+              refusal.code.length <= 64
+            )
+              code = refusal.code;
           } else {
             if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
             if (Array.isArray(refusal?.Unsupported))
@@ -808,6 +835,9 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       } catch {
         throw new BootstrapTransportError('Adoption response unavailable', 'response');
       }
+    },
+    uploadArtifact<T = unknown>(body: BodyInit): Promise<T> {
+      return request<T>('runtime/artifact/upload', body);
     },
     request,
     clear() {

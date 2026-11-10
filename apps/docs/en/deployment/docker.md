@@ -13,7 +13,7 @@ The root `Dockerfile` provides two targets sharing byte-identical `cpamp-launche
 | Target | Bundled components | Current S1 support |
 | --- | --- | --- |
 | `full` (current Compose default) | All CPAMP components + pinned official CPA `v8.0.55` | Completes **Fresh New / New Managed** offline as well as **External** |
-| `slim` | CPAMP components only (no `cli-proxy-api` binary) | Supports **External** only until runtime CPA acquisition ships |
+| `slim` | CPAMP components only (no `cli-proxy-api` binary) | Supports **External**, or prepares the pinned CPA in the setup wizard (**Fresh New** and **Adopt** on the review step, **Upgrade Managed** at the `cpa-import` step; via official GitHub, a CDN prefix, or upload, with SHA-256 digest verification) |
 
 ### Run With `docker run` Or Docker Compose
 
@@ -59,7 +59,7 @@ docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initiali
 
 `initialize` is a one-shot host-authorized operation. It prints `/.well-known/cpamp-bootstrap/ui#handoff=...`. Append the **entire output, including the fragment**, to your public origin and open it in a browser. This short-lived claim credential must not enter screenshots or service logs. To reissue/resume, stop the writable Manager first, run `docker compose run --rm --no-deps -u 10002:10002 --entrypoint cpa-manager-plus cpa-manager-plus initialize`, then `up -d` again; do not delete the database to reset installation.
 
-In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (new managed CPA, requires `full`), **Adopt** (qualify and migrate an existing CPA), or **External** (connect to an independently operated CPA, supported on both `full` and `slim`). Adopt/External are not unconditional success paths: resolve the wizard's source, version, credential, or evidence refusals and stop if admission fails; do not edit installation records manually. External requires at least CPA `v8.0.55`; see [Runtime Model](../guide/runtime-model.md).
+In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (new managed CPA; on `slim`, the wizard prepares the pinned CPA engine before Managed setup completes), **Adopt** (qualify and migrate an existing CPA; on `slim`, the wizard also prepares the pinned CPA engine first), or **External** (connect to an independently operated CPA, supported on both `full` and `slim`). Adopt/External are not unconditional success paths: resolve the wizard's source, version, credential, or evidence refusals and stop if admission fails; do not edit installation records manually. External requires at least CPA `v8.0.55`; see [Runtime Model](../guide/runtime-model.md).
 
 For New Managed, save the one-time first Client Key and verify model requests through the public entry before sending production traffic. Admin Key, CPA Management Key, and Client Key are different credentials. A successful process `/health` is not installation completion or Gateway readiness: require the wizard's completion, routing verification, and client connectivity.
 ## 1.x Stable: Manual Deployment Reference

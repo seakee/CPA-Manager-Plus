@@ -13,7 +13,7 @@
 | 构建目标 | 内置组件 | 当前支持范围 |
 | --- | --- | --- |
 | `full`（当前 Compose 默认） | CPAMP 全套组件 + 官方固定版本 CPA `v8.0.55` | 支持离线完成 **Fresh New / New Managed（新建托管 CPA）** 与 **External（连接外部 CPA）** |
-| `slim` | 仅 CPAMP 组件（不含 `cli-proxy-api` 二进制） | 在运行时 CPA 获取能力交付前，**仅支持 External（连接外部 CPA）** |
+| `slim` | 仅 CPAMP 组件（不含 `cli-proxy-api` 二进制） | 支持 **External**，也可在向导中准备固定版本 CPA（**Fresh New / Adopt** 在确认页，**Upgrade Managed** 在 `cpa_import` 步骤；支持官方 GitHub、CDN 前缀或浏览器上传，并校验 SHA-256 摘要） |
 
 ### 单容器运行或 Docker Compose 启动
 
@@ -59,7 +59,7 @@ docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initiali
 
 `initialize` 是一次性宿主授权命令，输出形如 `/.well-known/cpamp-bootstrap/ui#handoff=...`。将**包含 `#handoff=...` 在内的完整输出**拼到 `CPAMP_PUBLIC_ORIGIN` 后在浏览器打开；该短时认领凭证不得贴入截图或日志。若需重发或恢复认领，先停写库进程，再执行 `docker compose run --rm --no-deps -u 10002:10002 --entrypoint cpa-manager-plus cpa-manager-plus initialize`，随后重新 `up -d`；禁止删库重来。
 
-在浏览器中先设置并保存 CPAMP Admin Key，再选择安装模式：**New Managed**（新建托管 CPA，需 `full` 镜像）、**Adopt**（收纳迁移既有 CPA）或 **External**（连接独立维护的外部 CPA，`full` 与 `slim` 均支持）。Adopt / External 不是无条件成功路径：遇到向导提示的源配置、版本、凭据或证据拒绝时必须按提示修正或中止，不得手改安装记录绕过。External 要求外部 CPA 至少为 `v8.0.55`，详见[运行时模型说明](../guide/runtime-model.md)。
+在浏览器中先设置并保存 CPAMP Admin Key，再选择安装模式：**New Managed**（新建托管 CPA；`slim` 镜像会在安装完成前先由向导准备固定版本 CPA 引擎）、**Adopt**（收纳迁移既有 CPA；`slim` 镜像同样会先由向导准备固定版本 CPA 引擎）或 **External**（连接独立维护的外部 CPA，`full` 与 `slim` 均支持）。Adopt / External 不是无条件成功路径：遇到向导提示的源配置、版本、凭据或证据拒绝时必须按提示修正或中止，不得手改安装记录绕过。External 要求外部 CPA 至少为 `v8.0.55`，详见[运行时模型说明](../guide/runtime-model.md)。
 
 New Managed 完成后请立即保存一次性首把 Client Key，并通过统一入口完成首次模型请求验证后再接入业务流量。Admin Key、CPA Management Key 与 Client Key 职责不同，不可混用。进程 `/health` 返回 200 不代表安装完成或网关已放行，必须以向导完成、路由校验与客户端实测为准。
 ## 1.x Stable：手动部署参考

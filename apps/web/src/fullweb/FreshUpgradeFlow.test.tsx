@@ -12,8 +12,8 @@ import {
   type UpgradeWizardResource,
   type UpgradeWizardVerify,
 } from './FreshUpgradeFlow';
+import type { ArtifactOperation, ArtifactStatus, ArtifactTransport } from './freshArtifact';
 import { blockedCodeText, upgradeWizardText as t } from '../i18n/upgradeWizard';
-
 // The wizard is a reader. These tests drive the four steps with injected reads:
 // the routes themselves are proven by the Go handler tests, so nothing here
 // touches a server or the browser credential.
@@ -122,10 +122,20 @@ describe('Full Web upgrade wizard', () => {
     vi.unstubAllGlobals();
   });
 
-  async function mount(read: UpgradeWizardRead, verify?: UpgradeWizardVerify) {
+  async function mount(
+    read: UpgradeWizardRead,
+    verify?: UpgradeWizardVerify,
+    artifact?: ArtifactTransport
+  ) {
     await act(async () => {
       renderer = create(
-        <FreshUpgradeFlow read={read} verify={verify} language="en" pollDelays={[10]} />
+        <FreshUpgradeFlow
+          read={read}
+          verify={verify}
+          artifact={artifact}
+          language="en"
+          pollDelays={[10]}
+        />
       );
     });
   }
@@ -879,5 +889,151 @@ describe('Full Web upgrade wizard', () => {
       createUpgradeWizardVerify(() => '', transport)(new AbortController().signal)
     ).rejects.toMatchObject({ failure: 'authentication' });
     expect(transport).not.toHaveBeenCalled();
+  });
+
+  it('renders FreshArtifactStep only on cpa_import when artifact transport is provided, and shows host hint when ready', async () => {
+    const digest = 'sha256:' + 'd'.repeat(64);
+    const makeArtifactStatus = (overrides: Partial<ArtifactStatus> = {}): ArtifactStatus => ({
+      schemaVersion: 1,
+      pinned: { version: '8.0.55', artifactId: digest },
+      active: null,
+      required: true,
+      operation: null,
+      cdnPresets: [],
+      ...overrides,
+    });
+
+    let currentArtifactStatus = makeArtifactStatus();
+    const artifactTransport: ArtifactTransport = {
+      readStatus: vi.fn(async () => currentArtifactStatus),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-acq-1',
+        source: 'github',
+        phase: 'succeeded',
+        receivedBytes: 1024,
+        totalBytes: 1024,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+
+    // 1. Missing transport on cpa_import -> no artifact panel and never ready, host waiting instructions remain.
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      )
+    );
+    expect(allByTestId('fresh-artifact-step')).toHaveLength(0);
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    expect(byTestId('upgrade-progress-waiting')).toBeTruthy();
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
+    // 2. Non-cpa_import actions (external_connect, copy_in, reconcile, verify) -> no artifact panel even with transport.
+    for (const nextAction of ['external_connect', 'copy_in', 'reconcile', 'verify']) {
+      await mount(
+        resumeRead(() =>
+          statusDocument({
+            stage: nextAction === 'verify' ? 'cpa_import' : nextAction,
+            nextAction,
+            domainsDone: ['source_copy'],
+          })
+        ),
+        vi.fn(),
+        artifactTransport
+      );
+      expect(allByTestId('fresh-artifact-step')).toHaveLength(0);
+      expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+    }
+    expect(artifactTransport.readStatus).not.toHaveBeenCalled();
+
+    // 3. Mismatched active.artifactId !== pinned.artifactId on cpa_import -> never ready, shows pinned_mismatch error.
+    currentArtifactStatus = makeArtifactStatus({
+      active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+      required: false,
+    });
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      ),
+      vi.fn(),
+      artifactTransport
+    );
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(byTestId('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
+    // 3b. Both active.artifactId !== pinned.artifactId AND recovery_required -> recovery_required wins, onReady not called, acquire/upload absent.
+    currentArtifactStatus = makeArtifactStatus({
+      active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+      required: false,
+      operation: {
+        id: 'op-rec-mismatch',
+        source: 'upload',
+        phase: 'failed',
+        receivedBytes: 512,
+        totalBytes: 512,
+        code: 'recovery_required',
+      },
+    });
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      ),
+      vi.fn(),
+      artifactTransport
+    );
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(byTestId('artifact-error').props['data-error-code']).toBe('recovery_required');
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    expect(allByTestId('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByTestId('artifact-upload-btn')).toHaveLength(0);
+    expect(allByTestId('artifact-source-github')).toHaveLength(0);
+    expect(allByTestId('artifact-source-upload')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
+    // 4. On cpa_import with artifact transport -> panel renders, not ready while required === true, then shows host hint on ready.
+    currentArtifactStatus = makeArtifactStatus();
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      ),
+      vi.fn(),
+      artifactTransport
+    );
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    expect(artifactTransport.readStatus).toHaveBeenCalledTimes(3);
+
+    // Acquire succeeds -> onReady -> shows host hint to run `upgrade cpa-import`.
+    currentArtifactStatus = makeArtifactStatus({
+      active: { artifactId: digest, origin: 'acquired' },
+      required: false,
+    });
+    await press('artifact-acquire-btn');
+    expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+    expect(view()).toContain('upgrade cpa-import');
   });
 });

@@ -436,16 +436,44 @@ func TestEnableArtifactRoutesNoOpWhenExecutorNil(t *testing.T) {
 
 func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersion(t *testing.T) {
 	for _, tc := range []struct {
-		name            string
-		manifestContent string
+		name             string
+		manifestMode     string
+		goos             string
+		goarch           string
+		wantArtifactCode string
+		wantHTTPStatus   int
 	}{
 		{
-			name:            "v-prefixed version manifest from adoption harness",
-			manifestContent: `{"schemaVersion":1,"engine":"cpa","version":"v8.0.55","artifactId":"%s"}`,
+			name:             "v-prefixed version manifest from adoption harness returns 500 install_failed on artifact routes",
+			manifestMode:     "v-prefixed",
+			goos:             "linux",
+			goarch:           "amd64",
+			wantArtifactCode: lifecycle.ArtifactCodeInstallFailed,
+			wantHTTPStatus:   http.StatusInternalServerError,
 		},
 		{
-			name:            "no manifest configured",
-			manifestContent: "",
+			name:             "configured missing manifest file returns 500 install_failed on artifact routes",
+			manifestMode:     "missing-file",
+			goos:             "linux",
+			goarch:           "amd64",
+			wantArtifactCode: lifecycle.ArtifactCodeInstallFailed,
+			wantHTTPStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:             "unset manifest path returns 409 unsupported_platform on artifact routes",
+			manifestMode:     "unset",
+			goos:             "linux",
+			goarch:           "amd64",
+			wantArtifactCode: lifecycle.ArtifactCodeUnsupportedPlatform,
+			wantHTTPStatus:   http.StatusConflict,
+		},
+		{
+			name:             "unsupported platform darwin/amd64 returns 409 unsupported_platform on GET, probe, acquire, and upload",
+			manifestMode:     "canonical",
+			goos:             "darwin",
+			goarch:           "amd64",
+			wantArtifactCode: lifecycle.ArtifactCodeUnsupportedPlatform,
+			wantHTTPStatus:   http.StatusConflict,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -457,15 +485,27 @@ func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersi
 			}
 			sum := sha256.Sum256(binary)
 			artifactID := "sha256:" + hex.EncodeToString(sum[:])
+			archive := buildRouteTarGzip(t, binary, []byte("MIT License\n"))
 
 			var manifestPath string
-			if tc.manifestContent != "" {
+			switch tc.manifestMode {
+			case "canonical":
 				manifestPath = filepath.Join(targetRoot, "artifact.json")
-				if err := os.WriteFile(manifestPath, []byte(fmt.Sprintf(tc.manifestContent, artifactID)), 0o600); err != nil {
+				content := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"8.0.55","artifactId":%q}`, artifactID)
+				if err := os.WriteFile(manifestPath, []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}
+			case "v-prefixed":
+				manifestPath = filepath.Join(targetRoot, "artifact.json")
+				content := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"v8.0.55","artifactId":%q}`, artifactID)
+				if err := os.WriteFile(manifestPath, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-file":
+				manifestPath = filepath.Join(targetRoot, "missing-artifact.json")
+			case "unset":
+				manifestPath = ""
 			}
-
 			env := map[string]string{
 				"CPAMP_RUNTIME_ADDR":          "127.0.0.1:0",
 				"CPAMP_RUNTIME_IDENTITY":      "isolated-adopt-runtime",
@@ -486,10 +526,11 @@ func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersi
 			}
 			t.Cleanup(func() { _ = rh.Close() })
 
-			if err := enableArtifactRoutes(cfg, rh); err != nil {
+			if err := enableArtifactRoutes(cfg, rh, lifecycle.WithAcquisitionPlatform(tc.goos, tc.goarch)); err != nil {
 				t.Fatalf("enableArtifactRoutes() error = %v", err)
 			}
 
+			// /v1/runtime/status stays 200 in every configuration.
 			req := httptest.NewRequest(http.MethodGet, "/v1/runtime/status", nil)
 			req.Header.Set("Authorization", "Bearer isolated-runtime-transport-token")
 			req.Header.Set(protocol.ArtifactObservationHeader, protocol.ArtifactObservationFeature)
@@ -504,6 +545,31 @@ func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersi
 			}
 			if status.RuntimeIdentity != "isolated-adopt-runtime" || status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != artifactID {
 				t.Fatalf("/v1/runtime/status = %+v, want identity isolated-adopt-runtime and artifact %s", status, artifactID)
+			}
+
+			// All four artifact routes return the expected error class (409 unsupported_platform vs 500 install_failed).
+			for _, route := range []struct {
+				method      string
+				path        string
+				contentType string
+				body        []byte
+			}{
+				{method: http.MethodGet, path: artifactStatusPath},
+				{method: http.MethodPost, path: artifactProbePath, contentType: "application/json", body: []byte(`{}`)},
+				{method: http.MethodPost, path: artifactAcquirePath, contentType: "application/json", body: []byte(`{"source":"github"}`)},
+				{method: http.MethodPut, path: artifactUploadPath, contentType: "application/gzip", body: archive},
+			} {
+				artReq := httptest.NewRequest(route.method, route.path, bytes.NewReader(route.body))
+				artReq.Header.Set("Authorization", "Bearer isolated-runtime-transport-token")
+				if route.contentType != "" {
+					artReq.Header.Set("Content-Type", route.contentType)
+				}
+				artRec := httptest.NewRecorder()
+				rh.ServeHTTP(artRec, artReq)
+				if artRec.Code != tc.wantHTTPStatus {
+					t.Fatalf("%s %s status = %d (%s), want %d", route.method, route.path, artRec.Code, artRec.Body.String(), tc.wantHTTPStatus)
+				}
+				assertArtifactErrorCode(t, artRec, tc.wantArtifactCode)
 			}
 		})
 	}

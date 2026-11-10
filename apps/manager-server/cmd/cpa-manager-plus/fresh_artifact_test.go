@@ -623,6 +623,48 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 		}
 	}
 
+	// Verify both P3-2 unavailability classes (409 unsupported_platform and 500 install_failed)
+	// pass through unchanged across all four Manager artifact routes (GET, probe, acquire, upload).
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{
+		{http.StatusConflict, "unsupported_platform"},
+		{http.StatusInternalServerError, "install_failed"},
+	} {
+		upstreamStatus = tc.status
+		upstreamCode = tc.code
+		for _, route := range []struct {
+			method      string
+			resource    string
+			contentType string
+			body        string
+		}{
+			{http.MethodGet, "runtime/artifact", "", ""},
+			{http.MethodPost, "runtime/artifact/probe", "application/json", "{}"},
+			{http.MethodPost, "runtime/artifact/acquire", "application/json", `{"source":"github"}`},
+			{http.MethodPut, "runtime/artifact/upload", "application/gzip", "gzip"},
+		} {
+			rec := doArtifactRequest(
+				t,
+				http.HandlerFunc(app.canonicalAPI),
+				route.method,
+				"/control/api/v2/"+route.resource,
+				"Bearer "+strategyTestAdmin,
+				route.contentType,
+				strings.NewReader(route.body),
+				int64(len(route.body)),
+			)
+			if rec.Code != tc.status {
+				t.Fatalf("%s %s passthrough status for %s = %d, want %d", route.method, route.resource, tc.code, rec.Code, tc.status)
+			}
+			var got freshArtifactErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.Code != tc.code {
+				t.Fatalf("%s %s passthrough body for %s = %s, want code %q", route.method, route.resource, tc.code, rec.Body.String(), tc.code)
+			}
+		}
+	}
+
 	// Shut down the fake Supervisor: all 4 routes must return 503 runtime_unavailable.
 	supervisor.Close()
 	for _, route := range []struct {
