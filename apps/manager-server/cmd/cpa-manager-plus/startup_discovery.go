@@ -379,6 +379,11 @@ func (o *discoveryObservation) observe(
 	consume func(bootstrap.PublicDiscovery),
 ) {
 	for {
+		// A canceled request is never answered from remembered evidence.
+		if ctx.Err() != nil {
+			consume(bootstrapdiscovery.Unavailable())
+			return
+		}
 		identity, identified := upgradeservice.LegacySourceIdentity(databasePath)
 		if identified {
 			if projection, ok := o.cachedProjection(databasePath, identity); ok {

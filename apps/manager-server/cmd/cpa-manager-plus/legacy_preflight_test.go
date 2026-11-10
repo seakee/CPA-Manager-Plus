@@ -140,8 +140,9 @@ func TestReadOnlyDiscoveryObservesTheSourceWithoutFencingIt(t *testing.T) {
 	}
 
 	// A writer that holds the marker is never described as a quiet source, even
-	// though the projection is already remembered for this unchanged source.
-	writer, err := processlock.AcquireExisting(path)
+	// though the projection is already remembered for this unchanged source. The
+	// read-only acquire keeps the marker's metadata, so only the probe can refuse.
+	writer, err := processlock.AcquireExistingReadOnly(path)
 	if err != nil {
 		t.Fatalf("take the ownership marker as a writer: %v", err)
 	}
