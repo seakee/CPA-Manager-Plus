@@ -23,9 +23,12 @@ const workspaceSecret = /^cpamp_sk_[a-f0-9]{64}$/;
 const installSecret = /^sk-[A-Za-z0-9]{64}$/;
 // An adopted key carries the source CPA's own shape: the mask is the ellipsis and,
 // from sixteen characters up, the last four characters — a quarter of the secret
-// at most — and the ellipsis alone below that.
+// at most — and the ellipsis alone below that. Characters are code points and the
+// secret is any non-control token of at most 4096 UTF-8 bytes, as the server
+// counts them, so a non-ASCII or astral source key renders and copies the same way.
 const adoptedMask = /^…(?:[\s\S]{4})?$/u;
-const adoptedSecret = /^[\x21-\x7E]{1,4096}$/;
+const adoptedSecret = /^[^\x00-\x20\x7f]+$/u;
+const adoptedSecretMaxBytes = 4096;
 
 /** maskedPreviewOf is the only rendering a saved secret may produce. */
 export function maskedPreviewOf(secret: string): string {
@@ -43,8 +46,9 @@ export function maskedPreviewOf(secret: string): string {
 export function maskedPreviewFor(origin: KeyOrigin, secret: string): string {
   if (origin === 'workspace') return workspaceSecret.test(secret) ? 'cpamp_sk_…' + secret.slice(-4) : '';
   if (origin === 'installer') return installSecret.test(secret) ? 'sk-…' + secret.slice(-4) : '';
-  if (!adoptedSecret.test(secret)) return '';
-  return secret.length >= 16 ? '…' + secret.slice(-4) : '…';
+  if (!adoptedSecret.test(secret) || new TextEncoder().encode(secret).length > adoptedSecretMaxBytes) return '';
+  const characters = Array.from(secret);
+  return characters.length >= 16 ? '…' + characters.slice(-4).join('') : '…';
 }
 
 /**

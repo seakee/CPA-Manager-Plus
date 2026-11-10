@@ -68,6 +68,17 @@ describe('maskedPreviewFor and validSavedSecret', () => {
     expect(validSavedSecret(workspaceKey, 'cpamp_sk_' + 'a'.repeat(60) + '1a2b')).toBe(true);
     expect(validSavedSecret(workspaceKey, 'sk-' + 'a'.repeat(64))).toBe(false);
   });
+
+  it('counts characters as the server does for non-ASCII source keys', () => {
+    // The server masks by code point and accepts any non-control token.
+    const cjk = 'sk-源密钥-0123456789';
+    const astral = 'sk-source-key-01😀😀😀😀';
+    expect(maskedPreviewFor('adopted', cjk)).toBe('…6789');
+    expect(maskedPreviewFor('adopted', astral)).toBe('…😀😀😀😀');
+    expect(validKey({ ...adoptedKey, maskedPreview: '…😀😀😀😀' })).toBe(true);
+    expect(validSavedSecret({ ...adoptedKey, maskedPreview: '…6789' }, cjk)).toBe(true);
+    expect(maskedPreviewFor('adopted', 'x'.repeat(4097))).toBe('');
+  });
 });
 
 describe('keyDisplayName', () => {
