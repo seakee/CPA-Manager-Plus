@@ -35,6 +35,7 @@ type freshRuntimeTestClient struct {
 	starts        int
 	stops         int
 	restarts      int
+	startRequests []model.RuntimeMutationRequest
 }
 
 func (c *freshRuntimeTestClient) Status(_ context.Context) (model.RuntimeObservedStatus, error) {
@@ -43,6 +44,7 @@ func (c *freshRuntimeTestClient) Status(_ context.Context) (model.RuntimeObserve
 
 func (c *freshRuntimeTestClient) Start(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
 	c.starts++
+	c.startRequests = append(c.startRequests, request)
 	if c.startResult.OperationID == "" {
 		c.startResult = freshRuntimeResult(request, model.RuntimeOperationStart, model.RuntimeOperationSucceeded)
 	}

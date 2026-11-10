@@ -565,7 +565,7 @@ finally:
 if not rows:
     raise SystemExit("operation journal contains no Manager Start evidence")
 for operation_id, state in rows:
-    if not operation_id.startswith("runtime-reconcile/v1:"):
+    if not operation_id.startswith("runtime-reconcile/v2:"):
         raise SystemExit(f"unexpected Start operation ID: {operation_id!r}")
     if state != "succeeded":
         raise SystemExit(f"Manager Start is not succeeded: {(operation_id, state)!r}")
@@ -634,7 +634,7 @@ manager_a="$(snapshot_manager_database scenario-a-manager)"
 read -r desired_a revision_a updated_at_a < <(desired_observation "${manager_a}")
 assert_equal "${desired_a}" running "fresh desired lifecycle"
 journal_a="$(snapshot_runtime_journal scenario-a-journal)"
-assert_equal "$(journal_count "${journal_a}" start "${generation_a}" 'runtime-reconcile/v1:' succeeded -)" 1 "fresh reconcile Start evidence"
+assert_equal "$(journal_count "${journal_a}" start "${generation_a}" 'runtime-reconcile/v2:' succeeded -)" 1 "fresh reconcile Start evidence"
 assert_equal "$(journal_count "${journal_a}" auto_recovery - - - -)" 0 "fresh auto-recovery evidence"
 assert_equal "$(journal_count "${journal_a}" activate_update - - - -)" 0 "fresh activation evidence"
 assert_manager_starts_are_reconcile_operations "${journal_a}"
@@ -691,7 +691,7 @@ assert_execution_corridor "${pid_b}" 7.3.4
 private_gateway_b="$(private_gateway_signature)"
 wait_public_gateway_signature "${private_gateway_b}" 60 >/dev/null
 journal_b="$(snapshot_runtime_journal scenario-c-activation-journal)"
-assert_equal "$(journal_count "${journal_b}" start "${generation_a}" 'runtime-reconcile/v1:' succeeded -)" 1 "activation generation Start count"
+assert_equal "$(journal_count "${journal_b}" start "${generation_a}" 'runtime-reconcile/v2:' succeeded -)" 1 "activation generation Start count"
 assert_equal "$(journal_count "${journal_b}" activate_update "${generation_a}" runtime19-activate-b succeeded -)" 1 "B activation journal evidence"
 
 scenario 'D — Runtime recreate / selected B persistence'
@@ -706,7 +706,7 @@ assert_selection 7.3.4 "${artifact_b}"
 assert_equal "$(gateway_config_digest)" "${config_digest_a}" "Runtime recreate Gateway config digest"
 assert_equal "$(runtime_secret_digest)" "${secret_digest_a}" "Runtime recreate secret digest"
 journal_before_b_reconcile="$(snapshot_runtime_journal scenario-d-before-reconcile)"
-assert_equal "$(journal_count "${journal_before_b_reconcile}" start "${generation_b}" 'runtime-reconcile/v1:' - -)" 0 "new generation pre-reconcile Start count"
+assert_equal "$(journal_count "${journal_before_b_reconcile}" start "${generation_b}" 'runtime-reconcile/v2:' - -)" 0 "new generation pre-reconcile Start count"
 "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
 paused_manager_pid=""
 status_b_recreated="$(wait_runtime_observation ready armed "${artifact_b}" local 120)"
@@ -718,7 +718,7 @@ wait_public_health 90
 private_gateway_b_recreated="$(private_gateway_signature)"
 wait_public_gateway_signature "${private_gateway_b_recreated}" 60 >/dev/null
 journal_b_recreated="$(snapshot_runtime_journal scenario-d-recreated-journal)"
-assert_equal "$(journal_count "${journal_b_recreated}" start "${generation_b}" 'runtime-reconcile/v1:' succeeded -)" 1 "selected B generation Start evidence"
+assert_equal "$(journal_count "${journal_b_recreated}" start "${generation_b}" 'runtime-reconcile/v2:' succeeded -)" 1 "selected B generation Start evidence"
 manager_b_recreated="$(snapshot_manager_database scenario-d-manager)"
 read -r desired_b revision_b updated_at_b < <(desired_observation "${manager_b_recreated}")
 assert_equal "${desired_b}" running "Runtime recreate desired lifecycle"
@@ -788,7 +788,7 @@ manual_operation_count="$(journal_count "${journal_manual}" - - - - -)"
 sleep 12
 journal_manual_fenced="$(snapshot_runtime_journal scenario-g-fenced-journal)"
 assert_equal "$(journal_count "${journal_manual_fenced}" - - - - -)" "${manual_operation_count}" "same-generation manual fence journal size"
-assert_equal "$(journal_count "${journal_manual_fenced}" start "${generation_b}" 'runtime-reconcile/v1:' succeeded -)" 1 "same-generation manual fence Start count"
+assert_equal "$(journal_count "${journal_manual_fenced}" start "${generation_b}" 'runtime-reconcile/v2:' succeeded -)" 1 "same-generation manual fence Start count"
 manager_manual="$(snapshot_manager_database scenario-g-manager)"
 read -r desired_manual revision_manual updated_at_manual < <(desired_observation "${manager_manual}")
 assert_equal "${desired_manual}" running "manual-intervention desired lifecycle"
@@ -817,7 +817,7 @@ generation_repaired="$(printf '%s' "${status_new_generation_inactive}" | json_ui
 assert_not_equal "${generation_repaired}" "${generation_b}" "manual repair new RuntimeGeneration"
 assert_selection 7.3.4 "${artifact_b}"
 journal_before_repaired_start="$(snapshot_runtime_journal scenario-g-before-repaired-start)"
-assert_equal "$(journal_count "${journal_before_repaired_start}" start "${generation_repaired}" 'runtime-reconcile/v1:' - -)" 0 "repaired generation pre-reconcile Start count"
+assert_equal "$(journal_count "${journal_before_repaired_start}" start "${generation_repaired}" 'runtime-reconcile/v2:' - -)" 0 "repaired generation pre-reconcile Start count"
 "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
 paused_manager_pid=""
 status_repaired="$(wait_runtime_observation ready armed "${artifact_b}" local 120)"
@@ -831,7 +831,7 @@ private_gateway_repaired="$(private_gateway_signature)"
 wait_public_health 90
 wait_public_gateway_signature "${private_gateway_repaired}" 60 >/dev/null
 journal_repaired="$(snapshot_runtime_journal scenario-g-repaired-generation-journal)"
-assert_equal "$(journal_count "${journal_repaired}" start "${generation_repaired}" 'runtime-reconcile/v1:' succeeded -)" 1 "repaired generation exact B Start evidence"
+assert_equal "$(journal_count "${journal_repaired}" start "${generation_repaired}" 'runtime-reconcile/v2:' succeeded -)" 1 "repaired generation exact B Start evidence"
 assert_equal "$(journal_count "${journal_repaired}" auto_recovery "${generation_b}" 'auto-recovery-' failed process_recovery_start_failed)" 3 "manual recovery history after new generation"
 
 scenario 'H — full persisted stack restart / final isolation audit'
@@ -854,11 +854,11 @@ assert_equal "${revision_final}" "${revision_a}" "full restart desired revision"
 assert_equal "${updated_at_final}" "${updated_at_a}" "full restart desired timestamp"
 
 journal_final="$(snapshot_runtime_journal scenario-h-final-journal)"
-assert_equal "$(journal_count "${journal_final}" start "${generation_a}" 'runtime-reconcile/v1:' succeeded -)" 1 "initial generation Start continuity"
-assert_equal "$(journal_count "${journal_final}" start "${generation_b}" 'runtime-reconcile/v1:' succeeded -)" 1 "selected B generation Start continuity"
-assert_equal "$(journal_count "${journal_final}" start "${generation_repaired}" 'runtime-reconcile/v1:' succeeded -)" 1 "repaired generation Start continuity"
-assert_equal "$(journal_count "${journal_final}" start "${generation_final}" 'runtime-reconcile/v1:' succeeded -)" 1 "full restart generation Start continuity"
-assert_equal "$(journal_count "${journal_final}" start - 'runtime-reconcile/v1:' succeeded -)" 4 "total generation-scoped Start continuity"
+assert_equal "$(journal_count "${journal_final}" start "${generation_a}" 'runtime-reconcile/v2:' succeeded -)" 1 "initial generation Start continuity"
+assert_equal "$(journal_count "${journal_final}" start "${generation_b}" 'runtime-reconcile/v2:' succeeded -)" 1 "selected B generation Start continuity"
+assert_equal "$(journal_count "${journal_final}" start "${generation_repaired}" 'runtime-reconcile/v2:' succeeded -)" 1 "repaired generation Start continuity"
+assert_equal "$(journal_count "${journal_final}" start "${generation_final}" 'runtime-reconcile/v2:' succeeded -)" 1 "full restart generation Start continuity"
+assert_equal "$(journal_count "${journal_final}" start - 'runtime-reconcile/v2:' succeeded -)" 4 "total generation-scoped Start continuity"
 assert_equal "$(journal_count "${journal_final}" activate_update - - - -)" 2 "activation history continuity"
 assert_equal "$(journal_count "${journal_final}" auto_recovery - - - -)" 4 "auto-recovery history continuity"
 assert_equal "$(journal_count "${journal_final}" stop - - - -)" 0 "no explicit Stop side effects"

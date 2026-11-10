@@ -95,6 +95,24 @@ record therefore keeps loading after a Runtime stop or a Config save, and
 unreadable compatibility bytes lock only the domain that reads them, never the
 Manager record.
 
+A Manager-owned installation (New Managed, or an adoption with
+`network_existing`) also derives its lifecycle from that row after a container
+restart, `compose down`/`up` or a host reboot. Completion seeds
+`runtime_desired_v1=running` once, and never overwrites an existing row, so the
+only installation that stays down is one an operator stopped on the Runtime page
+before the restart. An incomplete Manager-owned installation has no such row: it
+derives an in-memory Running obligation instead, and only once its pinned engine
+artifact reports ready. Every automatic Start fences the artifact the Fresh
+checkpoint committed — not the artifact the Supervisor reports at that moment —
+so a selection change inside one generation is refused rather than launched. A
+Start the Supervisor records as failed is replayed under its original operation
+ID; a *new* attempt is issued only after that durable failure, after its retry
+delay, and at most `DefaultReconcileStartAttempts` times per generation, because
+the Supervisor's ownership fence turns a second spawn into a state conflict
+instead of a second child. After the last attempt the Runtime stays stopped until
+an operator starts it; recovery, an ambiguous selection or an incomplete staged
+destination never auto-starts at all.
+
 ## Admin and transport boundary
 
 Only administrator keys are supported. Generated keys reuse the existing secure

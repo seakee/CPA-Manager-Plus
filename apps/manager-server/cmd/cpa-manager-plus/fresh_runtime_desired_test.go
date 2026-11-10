@@ -144,6 +144,46 @@ func TestUnreadableDesiredLifecycleLocksOnlyTheRuntimeDomain(t *testing.T) {
 	}
 }
 
+// The reconcile Start fences the artifact the Manager committed, and that value
+// comes from the Fresh checkpoint, never from the Runtime observation. Deriving it
+// from the observation would make the fence unable to detect the selection change
+// it exists to catch.
+func TestCommittedArtifactComesFromTheFreshCheckpointNotTheObservation(t *testing.T) {
+	harness := newManagedInstallHarness(t)
+	app := harness.app
+	committed := managedInstallRuntimeStatus().ActiveGatewayArtifact.ArtifactID
+
+	authority, ok := app.desiredStateStore().(runtimeservice.CommittedArtifactStore)
+	if !ok {
+		t.Fatal("the Manager-owned desired state store does not publish the committed artifact")
+	}
+	// The observation changes, the committed target does not: the Supervisor's
+	// current selection is not the Manager's authority.
+	for _, status := range []model.RuntimeObservedStatus{
+		freshRuntimeReadyStatus(),
+		freshRuntimeReadyStatus(model.RuntimeCapabilityStart),
+		managedInstallRuntimeStatus(),
+	} {
+		app.runtime = &freshRuntimeTestClient{status: status}
+		artifactID, found, err := authority.LoadEmbeddedRuntimeCommittedArtifact(t.Context())
+		if err != nil || !found || artifactID != committed {
+			t.Fatalf("committed artifact for observation %+v = (%q, %v, %v), want %q",
+				status.State, artifactID, found, err, committed)
+		}
+	}
+
+	// An unmigrated or operator-managed checkpoint was never staged by this
+	// Manager, so it carries no committed engine of its own.
+	unmanaged, _ := completedRuntimeTestApplication(t)
+	unmanagedAuthority, ok := unmanaged.desiredStateStore().(runtimeservice.CommittedArtifactStore)
+	if !ok {
+		t.Fatal("the completed desired state store does not publish the committed artifact")
+	}
+	if artifactID, found, err := unmanagedAuthority.LoadEmbeddedRuntimeCommittedArtifact(t.Context()); err != nil || found || artifactID != "" {
+		t.Fatalf("unmigrated managed checkpoint committed artifact = (%q, %v, %v), want none", artifactID, found, err)
+	}
+}
+
 func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreservesExplicitStop(t *testing.T) {
 	app, op := completedRuntimeTestApplication(t)
 	offlineAfterRestart := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
@@ -284,6 +324,11 @@ func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerat
 	}
 	if client.starts != 1 {
 		t.Fatalf("Supervisor starts for incomplete managed = %d, want 1", client.starts)
+	}
+	// The automatic Start carries the artifact the checkpoint committed, so it
+	// refuses to launch a selection the installation never staged.
+	if got, want := client.startRequests[0].ExpectedActiveArtifactID, model.RuntimeArtifactID("sha256:"+strings.Repeat("a", 64)); got != want {
+		t.Fatalf("automatic Start expected artifact = %q, want %q", got, want)
 	}
 	if _, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
 		t.Fatalf("runtime_desired_v1 persisted before ProductComplete: found=%v err=%v", found, err)

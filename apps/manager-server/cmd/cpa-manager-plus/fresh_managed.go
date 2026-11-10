@@ -181,6 +181,14 @@ type freshDesiredStateStore struct {
 	app *freshApplication
 }
 
+// freshDesiredStateStore answers both Runtime reconcile questions the Manager
+// owns: what lifecycle the installation wants, and which engine artifact it
+// committed to.
+var (
+	_ runtimeservice.DesiredStateStore      = freshDesiredStateStore{}
+	_ runtimeservice.CommittedArtifactStore = freshDesiredStateStore{}
+)
+
 func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore {
 	if a == nil || a.runtimeSettings == nil {
 		return nil
@@ -202,6 +210,36 @@ func (s freshDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Cont
 		return desired, found, err
 	}
 	return s.app.incompleteManagedDesiredRunning(ctx)
+}
+
+// LoadEmbeddedRuntimeCommittedArtifact reports the engine artifact the committed
+// Manager-owned installation pinned. It reads the Fresh checkpoint — the
+// Manager's own committed target — and never a Runtime observation, because the
+// observation is exactly what the reconcile Start has to fence against: an
+// automatic restart that took its expectation from the Supervisor's current
+// selection could not detect a selection change at all.
+//
+// A checkpoint that is not a verified Manager-owned destination, or that carries
+// no canonical artifact, has nothing to commit, so the answer is "not found" and
+// the Supervisor Start stays unfenced. An unreadable checkpoint is an error: the
+// reconcile refuses to start rather than starting an engine it cannot name.
+func (s freshDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
+	if s.app == nil || s.app.store == nil {
+		return "", false, nil
+	}
+	record, err := s.app.store.Load(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	checkpoint := record.Operation.Strategy
+	if !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(checkpoint) {
+		return "", false, nil
+	}
+	artifactID := model.RuntimeArtifactID(checkpoint.TargetArtifactID)
+	if !artifactID.IsValid() {
+		return "", false, nil
+	}
+	return artifactID, true, nil
 }
 
 func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {

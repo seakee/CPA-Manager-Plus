@@ -156,7 +156,7 @@ generations = []
 for operation_id, generation, state in rows:
     if isinstance(operation_id, bytes):
         operation_id = operation_id.decode("utf-8")
-    if not operation_id.startswith("runtime-reconcile/v1:"):
+    if not operation_id.startswith("runtime-reconcile/v2:"):
         raise SystemExit(f"non-reconcile Start operation ID: {operation_id!r}")
     if state != "succeeded":
         raise SystemExit(f"Start operation is not succeeded: {(operation_id, state)!r}")
