@@ -3,13 +3,13 @@
 Use a reverse proxy when one domain needs to serve both the CPAMP panel and CPA APIs. HTTP panels and HTTP APIs can be proxied; RESP Pub/Sub and RESP pop cannot go through a normal HTTP reverse proxy.
 
 ::: warning The v2 Beta entry differs from 1.x
-The v2 Beta single image publishes only port `18317`, routed by Ingress: the console is at `/console` (for example `https://your-domain.com/console`; the entry has no trailing slash and `/console/` returns 404), the frontend calls `/console/api/v2/*`, and `/management.html` returns 404. v2 therefore does not need the 1.x path split on this page; forward the whole domain to `18317`. The table, Nginx example, and troubleshooting entries below describe the 1.x Stable `/management.html` panel.
+The v2 Beta single image publishes only port `18317`, routed by Ingress: the console lives under the **Control Base Path** chosen at installation (the wizard defaults to `/console`, for example `https://your-domain.com/console`) and its frontend calls `/api/v2/*` under the same path; installing with another valid path moves both. The console path itself has no trailing slash (`/console/` returns 404 under the default), returns a page only on browser-style navigation (`Accept: text/html`), and `/management.html` returns 404 in v2. v2 therefore does not need the 1.x path split on this page; forward the whole domain to `18317`, and the reverse proxy does not need to rewrite the console path. The table, Nginx example, and troubleshooting entries below describe the 1.x Stable `/management.html` panel.
 :::
 
 This guide uses a 1.x Stable same-domain setup:
 
 - CPAMP 1.x panel: `https://your-domain.com/management.html`
-- CPAMP v2 Beta console: `https://your-domain.com/console`
+- CPAMP v2 Beta console: `https://your-domain.com/console` (default control base path; trust the wizard's completion page)
 - CPA / CLI Proxy API: `https://your-domain.com/v1/...`
 - CPA OAuth callbacks, Codex API, Amp routes, and other CPA-side endpoints
 
@@ -236,7 +236,7 @@ server {
     location ^~ /v8/management/ { return 404; }
 
     # /models is provided through CPAMP's compatibility proxy
-    # If CPAMP has not completed setup yet, this path may return 412
+    # If CPAMP has not completed setup yet, this path returns 428 (usage service is not configured)
     location = /models          { proxy_pass http://cpamp; }
 
     # ===== CPA / CLI Proxy API =====
@@ -354,7 +354,7 @@ For Linux Docker environments, it is usually better to put CPA and CPAMP in the 
 
 After configuring Nginx, test in this order. The commands below target the 1.x Stable `/management.html` panel.
 
-The v2 Beta console entry is `/console` and has no trailing slash (`/console/` returns 404). It only returns the page on browser-style navigation, so the check must declare `Accept: text/html`:
+The v2 Beta console entry is the control base path chosen at installation (default `/console`, used in the commands below) and has no trailing slash (`/console/` returns 404). It only returns the page on browser-style navigation, so the check must declare `Accept: text/html`:
 
 ```bash
 # The v2 Beta console should return 200; the entry has no trailing slash
@@ -425,9 +425,9 @@ Normal API request: CPA API Key
 
 Do not mix these three keys.
 
-### `/models` returns 412
+### `/models` returns 428
 
-This usually means CPAMP has not completed first setup yet. Open:
+This usually means CPAMP has not completed first setup yet (no usable usage-service configuration). Open:
 
 ```text
 https://your-domain.com/management.html

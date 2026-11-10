@@ -12,7 +12,7 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   cpamp-manager reset-admin-key --db-path /data/usage.sqlite
 ```
 
-保存终端仅显示一次的新 Admin Key；命令成功后才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`，通过原公开入口的 `/console`（例如 `http://<host>:18317/console`）登录。v2 不提供 `/management.html`。不要删除数据卷、锁文件或安装记录；失败时保持停止，核对真实数据路径。不要让输出进入公开日志。
+保存终端仅显示一次的新 Admin Key；命令成功后才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`，通过原公开入口下安装时设置的控制台地址（默认 `/console`，例如 `http://<host>:18317/console`）登录。v2 不提供 `/management.html`。不要删除数据卷、锁文件或安装记录；失败时保持停止，核对真实数据路径。不要让输出进入公开日志。
 
 linux/amd64 Native 在停止完整 launcher/systemd 服务、完成备份后，从包根目录执行：
 
@@ -35,7 +35,7 @@ sudo ./bin/cpa-manager-plus reset-admin-key --db-path "$PWD/data/usage.sqlite"
 2. 在对应 Docker 或原生包环境中运行 `reset-admin-key`。
 3. 只记录终端输出的新 CPAMP 管理员密钥，不要把它提交到仓库或发到聊天中。
 4. 重启 Manager Server。
-5. 打开 `:18317/management.html`，用新密钥登录并确认 CPA 连接正常。
+5. 1.x Stable 打开 `:18317/management.html`；v2 Beta 打开安装时设置的控制台地址（默认 `/console`），用新密钥登录并确认 CPA 连接正常。
 
 下面的命令按部署方式分类。只执行与你当前部署匹配的一组。
 

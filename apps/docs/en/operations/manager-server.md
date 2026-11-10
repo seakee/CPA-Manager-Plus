@@ -1,6 +1,6 @@
 # Manager Server Guide
 
-Manager Server is the backend for the full CPAMP experience. In 1.x Stable it hosts the `management.html` panel; in v2 Beta it hosts the `/console` console on the public origin, and v2 does not serve `/management.html` (404). It stores local SQLite data, consumes the CPA usage queue through the collector, and protects management capabilities with the CPAMP Admin Key.
+Manager Server is the backend for the full CPAMP experience. In 1.x Stable it hosts the `management.html` panel; in v2 Beta it hosts the console, whose browser entry is the **Control Base Path** chosen at installation (the wizard defaults to `/console` and accepts another valid path, with the frontend API following at `<control-base-path>/api/v2/*`). v2 does not serve `/management.html` (404). It stores local SQLite data, consumes the CPA usage queue through the collector, and protects management capabilities with the CPAMP Admin Key.
 
 Most users do not need to read this page from top to bottom. Start with the document that matches your task:
 
@@ -16,11 +16,11 @@ This page is mainly for advanced deployments that need environment variables, cu
 When you open this entry point, you are using Manager Server mode:
 
 ```text
-v2 Beta:      http://<host>:18317/console
+v2 Beta:      http://<host>:18317/console     (default control base path; trust the completion page)
 1.x Stable:   http://<host>:18317/management.html
 ```
 
-v2 Beta does not serve `/management.html`; it returns 404. The first-setup flow described below belongs to 1.x Stable; v2 Beta first installation uses the host `initialize` Handoff, see [v2 Docker](../deployment/docker.md).
+v2 Beta does not serve `/management.html`; it returns 404. The v2 address above is the wizard default: if you chose another control base path during installation, both the browser entry and the frontend API move under that path. The first-setup flow described below belongs to 1.x Stable; v2 Beta first installation uses the host `initialize` Handoff, see [v2 Docker](../deployment/docker.md).
 
 When CPA itself serves this entry point, you are using the CPAMP Lightweight Panel:
 

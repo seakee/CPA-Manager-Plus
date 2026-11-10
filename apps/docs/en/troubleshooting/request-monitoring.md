@@ -3,11 +3,11 @@
 First confirm that you opened CPAMP Full Mode:
 
 ```text
-v2 Beta:      http://<cpamp-host>:18317/console
+v2 Beta:      http://<cpamp-host>:18317/console     (default control base path)
 1.x Stable:   http://<cpamp-host>:18317/management.html
 ```
 
-v2 Beta does not serve `/management.html`; it returns 404 and is not the v2 entry.
+The v2 Beta entry is the control base path chosen at installation; the value above is the wizard default, so use your own path if you chose one (the frontend API lives under the same path). v2 Beta does not serve `/management.html`; it returns 404 and is not the v2 entry.
 
 The Lightweight Panel on CPA `:8317/management.html` does not store request history, so Monitoring is unavailable there by design.
 

@@ -12,7 +12,7 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   cpamp-manager reset-admin-key --db-path /data/usage.sqlite
 ```
 
-Save the new Admin Key shown once in the terminal. Only after success run `docker compose -f docker-compose.v2-embedded.yml up -d` and sign in at `/console` on the original public entry (for example `http://<host>:18317/console`); v2 does not serve `/management.html`. Do not delete volumes, lock files, or installation records. On failure, leave services stopped and check the actual data path. Keep output out of public logs.
+Save the new Admin Key shown once in the terminal. Only after success run `docker compose -f docker-compose.v2-embedded.yml up -d` and sign in at the control base path chosen at installation on the original public entry (default `/console`, for example `http://<host>:18317/console`); v2 does not serve `/management.html`. Do not delete volumes, lock files, or installation records. On failure, leave services stopped and check the actual data path. Keep output out of public logs.
 
 For linux/amd64 Native, stop the complete launcher/systemd service and back up first, then run from the package root:
 
@@ -35,7 +35,7 @@ The reset command modifies the local SQLite database directly. Stop Manager Serv
 2. Run `reset-admin-key` in the matching Docker or native environment.
 3. Record the new CPAMP Admin Key from the terminal, but never commit or share it.
 4. Restart Manager Server.
-5. Open `:18317/management.html`, log in with the new key, and confirm the CPA connection.
+5. In 1.x Stable open `:18317/management.html`; in v2 Beta open the control base path chosen at installation (default `/console`), log in with the new key, and confirm the CPA connection.
 
 The commands below are grouped by deployment. Run only the group that matches your setup.
 

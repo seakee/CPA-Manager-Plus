@@ -13,7 +13,7 @@ Open the [Monitoring Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/moni
 
 ## Availability
 
-Monitoring is available only in the Manager Server-hosted panel or console and requires CPA usage publishing. The CPAMP Lightweight Panel does not connect to Manager Server or read its SQLite data; open the Full Mode entry when monitoring is required: `http://<cpamp-host>:18317/console` for v2 Beta, `http://<cpamp-host>:18317/management.html` for 1.x Stable.
+Monitoring is available only in the Manager Server-hosted panel or console and requires CPA usage publishing. The CPAMP Lightweight Panel does not connect to Manager Server or read its SQLite data; open the Full Mode entry when monitoring is required: the control base path chosen at installation for v2 Beta (default `http://<cpamp-host>:18317/console`), `http://<cpamp-host>:18317/management.html` for 1.x Stable.
 
 If the page says request monitoring is disabled, enable it in [Configuration](./configuration.md) under Manager Server configuration.
 

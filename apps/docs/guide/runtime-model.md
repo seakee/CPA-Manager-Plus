@@ -16,13 +16,13 @@ v2 Beta 的完整模式不等同于下方 1.x 的单 Manager 部署。内置官�
 
 外部 Management Key 轮换后，用面板重新绑定并证明当前连接；已被 CPA 拒绝的凭证不应反复重试。Manager 的 `data.key` 与加密数据库必须成套保留。Adopt 的资格拒绝或未完成迁移不是 External 自动降级许可；按向导报告处理，不以更换环境变量或手改记录代替证明。
 
-v2 Beta 的浏览器入口是公开 origin 下的控制台 **`/console`**（例如 `http://<host>:18317/console`）。v2 不提供 CPAMP 的 `/management.html`，访问该路径会返回 404；Embedded 的 `8317` 与 `9081` 只在容器内，不要另外公开。
+v2 Beta 的浏览器入口是公开 origin 下的控制台，位于安装时设置的**控制台地址（Control Base Path）**：安装向导默认 **`/console`**（例如 `http://<host>:18317/console`），也可以在向导里改成其他合法路径，前端 API 随之为 `<控制台路径>/api/v2/*`。以向导完成页“登录并进入 CPAMP”指向的地址为准；该路径不能与 `/v1`、`/models`、`/management.html` 等保留路径冲突，向导会拒绝冲突值。v2 不提供 CPAMP 的 `/management.html`，访问该路径会返回 404；Embedded 的 `8317` 与 `9081` 只在容器内，不要另外公开。
 
 安装：[v2 Docker](../deployment/docker.md) / [linux/amd64 Native](../deployment/native.md)；维护：[备份](../operations/backup.md) / [许可证与发布资产](../reference/releases.md)。
 
 ## 1.x Stable 与轻量面板参考
 
-本节描述 1.x Stable：完整模式由 Manager Server 在 `:18317/management.html` 托管面板。v2 Beta 请使用上文的 `/console` 入口，不要把本节的 `:18317/management.html` 当成 v2 入口。
+本节描述 1.x Stable：完整模式由 Manager Server 在 `:18317/management.html` 托管面板。v2 Beta 请使用上文控制台地址（默认 `/console`），不要把本节的 `:18317/management.html` 当成 v2 入口。
 
 CPA 负责接收和转发真实模型请求，CPAMP 负责管理 CPA，并在完整模式下保存请求历史、分析成本和处理账号状态。
 
@@ -30,7 +30,7 @@ CPA 负责接收和转发真实模型请求，CPAMP 负责管理 CPA，并在完
 
 1. Codex、Claude Code、OpenCode 等客户端始终连接 CPA，不连接 CPAMP。
 2. CPAMP 轻量面板从 CPA 的 `:8317/management.html` 打开，使用 CPA Management Key。
-3. CPAMP 完整模式从 `:18317/management.html` 打开，使用 CPAMP 管理员密钥。
+3. CPAMP 完整模式从它自己的控制台打开（使用 CPAMP 管理员密钥）：v2 Beta 是安装时设置的控制台地址（默认 `/console`），1.x Stable 是 `:18317/management.html`。
 
 ## 请求应该发到哪里
 
@@ -41,7 +41,7 @@ CPA 负责接收和转发真实模型请求，CPAMP 负责管理 CPA，并在完
 | 使用 CPAMP 完整模式    | CPAMP `:18317/management.html`  | CPAMP 管理员密钥   |
 | CPAMP 完整模式连接 CPA | setup 或配置中心填写的 CPA 地址 | CPA Management Key |
 
-不要把这三类密钥混用。登录失败时，先确认当前打开的是 `8317` 还是 `18317`。
+不要把这三类密钥混用。登录失败时，先确认当前打开的是 `8317` 还是 CPAMP 控制台。表中“完整模式”一行的 `:18317/management.html` 属于 1.x Stable；v2 Beta 使用本节开头说明的控制台地址（默认 `/console`）。
 
 ## 两种模式的区别
 

@@ -11,7 +11,7 @@ Clients need the CPA address and a normal CPA API Key. Do not point Codex, Claud
 | Model      | Use the model name or alias exposed by CPA providers.                                     |
 | Monitoring | CPAMP can collect and display events only when requests pass through CPA.                 |
 
-With a same-domain reverse proxy, client requests to `/v1/*`, `/v1beta/*`, and `/backend-api/codex/*` should go to CPA. Sending normal model requests to CPAMP only creates extra 401, 404, or 412 troubleshooting.
+With a same-domain reverse proxy, client requests to `/v1/*`, `/v1beta/*`, and `/backend-api/codex/*` should go to CPA. Sending normal model requests to CPAMP only creates extra 401, 404, or 428 troubleshooting.
 
 ## Codex
 

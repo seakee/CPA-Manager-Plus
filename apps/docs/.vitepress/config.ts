@@ -24,7 +24,8 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: '选择适合的模式', link: '/guide/choosing-a-panel' },
       { text: '快速开始', link: '/guide/getting-started' },
       { text: '安装轻量面板', link: '/deployment/cpa-panel' },
-      { text: '安装完整模式', link: '/deployment/installer' },
+      { text: '安装完整模式（1.x 安装器）', link: '/deployment/installer' },
+      { text: '安装 v2 Beta（Docker）', link: '/deployment/docker' },
     ],
   },
   {
@@ -90,7 +91,8 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Choose A Mode', link: '/en/guide/choosing-a-panel' },
       { text: 'Quick Start', link: '/en/guide/getting-started' },
       { text: 'Install Lightweight Panel', link: '/en/deployment/cpa-panel' },
-      { text: 'Install Full Mode', link: '/en/deployment/installer' },
+      { text: 'Install Full Mode (1.x installer)', link: '/en/deployment/installer' },
+      { text: 'Install v2 Beta (Docker)', link: '/en/deployment/docker' },
     ],
   },
   {

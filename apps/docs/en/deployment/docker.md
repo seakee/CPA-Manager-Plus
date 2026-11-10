@@ -63,7 +63,7 @@ In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (n
 
 For New Managed, save the one-time first Client Key and verify model requests through the public entry before sending production traffic. Admin Key, CPA Management Key, and Client Key are different credentials. A successful process `/health` is not installation completion or Gateway readiness: require the wizard's completion, routing verification, and client connectivity.
 
-After the wizard completes, later logins open `/console` on the same public origin (for example `http://<host>:18317/console`). v2 does not serve `/management.html`; it returns 404 and is not the v2 entry.
+After the wizard completes, later logins open the **control base path** chosen at installation on the same public origin (the wizard defaults to `/console`, for example `http://<host>:18317/console`; a custom path moves both the console and its frontend API `<control-base-path>/api/v2/*`, so trust the "Sign in and enter CPAMP" link on the completion page). v2 does not serve `/management.html`; it returns 404 and is not the v2 entry.
 
 ## 1.x Stable: Manual Deployment Reference
 
@@ -71,7 +71,7 @@ Docker is the simplest path for a new deployment. The CPAMP image contains Manag
 
 If you want the script to check the environment and generate Compose files for you, start with [One-Click Installer](./installer.md). The rest of this page is for manual Compose maintenance or merging CPAMP into an existing deployment.
 
-For new 1.x Stable deployments, use the Manager Server-hosted panel (v2 Beta uses `/console` on the public origin described above):
+For new 1.x Stable deployments, use the Manager Server-hosted panel (v2 Beta uses the control base path above, default `/console`):
 
 ```text
 http://<host>:18317/management.html

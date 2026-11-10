@@ -144,7 +144,7 @@ The lightweight panel does not connect to or read a separately running Manager S
 When you need request history, cost analytics, or server-side automation:
 
 1. Start Manager Server with [Docker Deployment](./docker.md) or [Native Packages](./native.md).
-2. Open the Full Mode entry: `http://<cpamp-host>:18317/console` for v2 Beta, `http://<cpamp-host>:18317/management.html` for 1.x Stable.
+2. Open the Full Mode entry: the control base path chosen at installation for v2 Beta (default `http://<cpamp-host>:18317/console`), `http://<cpamp-host>:18317/management.html` for 1.x Stable.
 3. Complete setup or log in with the CPAMP Admin Key.
 4. Configure the CPA address, CPA Management Key, and request collection.
 

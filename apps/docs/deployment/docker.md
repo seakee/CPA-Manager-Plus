@@ -63,7 +63,7 @@ docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initiali
 
 New Managed 完成后请立即保存一次性首把 Client Key，并通过统一入口完成首次模型请求验证后再接入业务流量。Admin Key、CPA Management Key 与 Client Key 职责不同，不可混用。进程 `/health` 返回 200 不代表安装完成或网关已放行，必须以向导完成、路由校验与客户端实测为准。
 
-安装向导完成后，后续登录直接打开同一公开 origin 的 `/console`（例如 `http://<host>:18317/console`）。v2 不提供 `/management.html`，访问返回 404，它不是 v2 入口。
+安装向导完成后，后续登录直接打开同一公开 origin 下安装时设置的**控制台地址**（向导默认 `/console`，例如 `http://<host>:18317/console`；如果改过控制台路径，控制台和前端 API `<控制台路径>/api/v2/*` 一起变，以向导完成页“登录并进入 CPAMP”为准）。v2 不提供 `/management.html`，访问返回 404，它不是 v2 入口。
 
 ## 1.x Stable：手动部署参考
 
@@ -71,7 +71,7 @@ Docker 是新部署最省心的方式。CPAMP 镜像包含 Manager Server 和内
 
 想让脚本检查环境并生成 Compose 文件，可以先看 [一键安装脚本](./installer.md)。下面的内容适合手动维护 Compose 或把 CPAMP 合入已有部署。
 
-1.x Stable 新部署建议使用 Manager Server 托管面板（v2 Beta 使用上文公开 origin 的 `/console`）：
+1.x Stable 新部署建议使用 Manager Server 托管面板（v2 Beta 使用上文控制台地址，默认 `/console`）：
 
 ```text
 http://<host>:18317/management.html

@@ -3,13 +3,13 @@
 如果你想用同一个域名访问 CPAMP 面板和 CPA API，就需要明确分流规则。HTTP 面板和 HTTP API 可以走反向代理；RESP Pub/Sub / RESP pop 不能走普通 HTTP 反向代理。
 
 ::: warning v2 Beta 的入口与 1.x 不同
-v2 Beta 单镜像只公开 `18317` 一个端口，由 Ingress 统一路由：控制台在 `/console`（例如 `https://your-domain.com/console`，入口不带尾斜杠，`/console/` 返回 404），前端调用 `/console/api/v2/*`，`/management.html` 返回 404。因此 v2 不需要本页的 1.x 路径分流，把整个域名转发到 `18317` 即可。下表、Nginx 示例和排障项描述的是 1.x Stable 的 `/management.html` 面板。
+v2 Beta 单镜像只公开 `18317` 一个端口，由 Ingress 统一路由：控制台位于安装时设置的**控制台地址（Control Base Path）**下，向导默认 `/console`（例如 `https://your-domain.com/console`），前端调用同一路径下的 `/api/v2/*`；如果安装时换成别的合法路径，控制台和前端 API 一起移动。控制台路径本身不带尾斜杠（默认值下 `/console/` 返回 404），且只在浏览器式导航（`Accept: text/html`）下返回页面；`/management.html` 在 v2 返回 404。因此 v2 不需要本页的 1.x 路径分流，把整个域名转发到 `18317` 即可，反向代理不需要改写控制台路径。下表、Nginx 示例和排障项描述的是 1.x Stable 的 `/management.html` 面板。
 :::
 
 本文按 1.x Stable 的同域名部署来说明：
 
 - CPAMP 1.x 面板：`https://your-domain.com/management.html`
-- CPAMP v2 Beta 控制台：`https://your-domain.com/console`
+- CPAMP v2 Beta 控制台：`https://your-domain.com/console`（默认控制台地址，以向导完成页为准）
 - CPA / CLI Proxy API：`https://your-domain.com/v1/...`
 - CPA OAuth 回调、Codex API、Amp 路由等 CPA 侧接口
 
@@ -233,7 +233,7 @@ server {
     location ^~ /v8/management/ { return 404; }
 
     # /models 由 CPAMP 提供兼容代理
-    # 如果 CPAMP 尚未完成 setup，访问此路径可能返回 412
+    # 如果 CPAMP 尚未完成 setup，访问此路径返回 428（usage service is not configured）
     location = /models          { proxy_pass http://cpamp; }
 
     # ===== CPA / CLI Proxy API =====
@@ -351,7 +351,7 @@ Linux Docker 环境则建议把 CPA 和 CPAMP 放到同一个 Docker network，�
 
 配置完成后按顺序验证。下面的命令面向 1.x Stable 的 `/management.html` 面板。
 
-v2 Beta 的控制台入口是 `/console`，不带尾斜杠（`/console/` 返回 404），并且只在浏览器式导航下返回页面，所以验证时必须声明 `Accept: text/html`：
+v2 Beta 的控制台入口是安装时设置的控制台地址（默认 `/console`，以下命令按默认值举例），不带尾斜杠（`/console/` 返回 404），并且只在浏览器式导航下返回页面，所以验证时必须声明 `Accept: text/html`：
 
 ```bash
 # v2 Beta 控制台应返回 200；入口不带尾斜杠
@@ -420,9 +420,9 @@ CPAMP Full Docker / Manager Server 模式下：
 
 不要混用这三个密钥。
 
-### `/models` 返回 412
+### `/models` 返回 428
 
-通常说明 CPAMP 尚未完成首次 setup。先访问：
+通常说明 CPAMP 尚未完成首次 setup（没有可用的用量服务配置）。先访问：
 
 ```text
 https://your-domain.com/management.html

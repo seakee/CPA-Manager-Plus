@@ -71,7 +71,7 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
 
 这段是参数模板，替换所有尖括号后运行；`--plugins false` 是显式关闭插件的示例，按实际意图选择。`cpa-import` 的资格或目标证明拒绝时停止，保留报告，不手工复制凭证到 Runtime。成功后**保持 Runtime Supervisor 和目标 CPA 运行且为 Ready，仅保持长驻 Manager Server 停止**；一次性 Manager CLI 的 `upgrade verify` 需要实时读取 Runtime 的身份和 active artifact，不能先停止 Runtime。示例中已启动的 Ingress 可以保留，但应在宿主机防火墙或反向代理隔离公开流量；Ingress 存活不能替代 Runtime 的实时证明，也不能当成产品就绪。
 
-在此状态分别运行上面的 `upgrade_cli verify`、`upgrade_cli status`；只有持久化阶段确认为 `complete`，才执行 `docker compose -f docker-compose.v2-embedded.yml up -d` 启动完整栈并恢复公开流量。保留原 1.x 数据与升级备份直到完整验收。公开 origin、`/console` 浏览器登录、Client Key、历史/coverage 和实际模型请求都需核对，`/health` 不能代替它们。
+在此状态分别运行上面的 `upgrade_cli verify`、`upgrade_cli status`；只有持久化阶段确认为 `complete`，才执行 `docker compose -f docker-compose.v2-embedded.yml up -d` 启动完整栈并恢复公开流量。保留原 1.x 数据与升级备份直到完整验收。公开 origin、控制台浏览器登录（安装时设置的控制台地址，默认 `/console`）、Client Key、历史/coverage 和实际模型请求都需核对，`/health` 不能代替它们。
 
 ### 精确回滚到原 1.x 数据
 

@@ -1,6 +1,6 @@
 # Manager Server 指南
 
-Manager Server 是完整 CPAMP 体验的后端。1.x Stable 中它托管 `management.html` 面板；v2 Beta 中它托管公开 origin 的 `/console` 控制台，v2 不提供 `/management.html`（访问返回 404）。它保存本地 SQLite，用采集器消费 CPA 用量队列，并用 CPAMP 管理员密钥保护管理能力。
+Manager Server 是完整 CPAMP 体验的后端。1.x Stable 中它托管 `management.html` 面板；v2 Beta 中它托管控制台，浏览器入口是安装时设置的**控制台地址（Control Base Path）**，向导默认 `/console`（可在向导里改路径，前端 API 随之为 `<控制台路径>/api/v2/*`）。v2 不提供 `/management.html`（访问返回 404）。它保存本地 SQLite，用采集器消费 CPA 用量队列，并用 CPAMP 管理员密钥保护管理能力。
 
 普通用户通常不需要从头阅读本页。根据目标直接进入对应文档：
 
@@ -16,11 +16,11 @@ Manager Server 是完整 CPAMP 体验的后端。1.x Stable 中它托管 `manage
 当你打开下面入口时，使用的是 Manager Server 模式：
 
 ```text
-v2 Beta:      http://<host>:18317/console
+v2 Beta:      http://<host>:18317/console     （默认控制台地址，以向导完成页为准）
 1.x Stable:   http://<host>:18317/management.html
 ```
 
-v2 Beta 不提供 `/management.html`，访问返回 404。下文的首次 setup 流程属于 1.x Stable；v2 Beta 的首次安装使用 Host `initialize` Handoff，见 [v2 Docker](../deployment/docker.md)。
+v2 Beta 不提供 `/management.html`，访问返回 404。上表的 v2 地址是向导默认值；如果在安装向导里改了控制台路径，浏览器和前端 API 都改到新路径下。下文的首次 setup 流程属于 1.x Stable；v2 Beta 的首次安装使用 Host `initialize` Handoff，见 [v2 Docker](../deployment/docker.md)。
 
 当 CPA 自己托管下面入口时，属于 CPAMP 轻量面板：
 

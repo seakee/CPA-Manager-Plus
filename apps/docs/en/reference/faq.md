@@ -4,11 +4,11 @@ CPA Manager Plus provides full monitoring and analytics through Manager Server. 
 
 The CPAMP analytics browser entry depends on the version:
 
-- **v2 Beta**: `/console` on the public origin, for example `http://<host>:18317/console`. v2 does not serve `/management.html`, which returns 404.
+- **v2 Beta**: the Control Base Path chosen at installation; the wizard defaults to `/console`, for example `http://<host>:18317/console`. Trust the address behind "Sign in and enter CPAMP" on the completion page. v2 does not serve `/management.html`, which returns 404.
 - **1.x Stable**: the Manager Server-hosted panel, for example `http://<host>:18317/management.html`.
 
 ```text
-v2 Beta:      http://<host>:18317/console
+v2 Beta:      http://<host>:18317/console     (default control base path)
 1.x Stable:   http://<host>:18317/management.html
 ```
 
@@ -21,19 +21,19 @@ v2 Beta:      http://<host>:18317/console
 | Replace the official UI with a clearer interface and no additional service      | [CPAMP Lightweight Panel](../deployment/cpa-panel.md) |
 | No Docker, but all features are required                                        | CPAMP Full Mode (native package)                      |
 
-The CPAMP Lightweight Panel is an enhanced alternative to the official Management Center and is hosted directly by CPA. It does not configure Manager Server or read Manager Server SQLite data. Use Docker or native packages to run Manager Server and open its browser entry: `/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable.
+The CPAMP Lightweight Panel is an enhanced alternative to the official Management Center and is hosted directly by CPA. It does not configure Manager Server or read Manager Server SQLite data. Use Docker or native packages to run Manager Server and open its browser entry: the control base path chosen at installation for v2 Beta (default `/console`), `:18317/management.html` for 1.x Stable.
 
 ## Which Address Should I Open?
 
 The CPAMP Full Mode entry depends on the version.
 
-v2 Beta (the console under the public origin):
+v2 Beta (the control base path chosen at installation under the public origin; the wizard defaults to `/console`):
 
 ```text
-http://<host>:18317/console
+http://<host>:18317/console     (default; replace it if you chose another path)
 ```
 
-v2 does not serve `/management.html`; that path returns 404.
+The console and its frontend API move together: the frontend calls `<control-base-path>/api/v2/*`. v2 does not serve `/management.html`; that path returns 404.
 
 1.x Stable (the Manager Server-hosted panel):
 
@@ -97,7 +97,7 @@ The repair canonicalizes both rows to the connection you provide, keeps it encry
 
 Changing the CPA panel repository only changes the frontend served by CPA.
 
-Request monitoring and historical analytics require Manager Server. The Docker example below is 1.x Stable, with its entry at `:18317/management.html`; for v2 Beta see [v2 Docker Installation](../deployment/docker.md), where the entry is `/console` on the public origin:
+Request monitoring and historical analytics require Manager Server. The Docker example below is 1.x Stable, with its entry at `:18317/management.html`; for v2 Beta see [v2 Docker Installation](../deployment/docker.md), where the entry is the control base path chosen at installation (default `/console`):
 
 ```bash
 docker run -d \
@@ -229,7 +229,7 @@ Do not use a public HTTPS reverse proxy domain.
 
 No. RESP Pub/Sub and RESP pop must connect directly to the CPA API port. HTTP queue can go through an HTTP proxy.
 
-For same-domain deployment, read [Reverse Proxy](../deployment/reverse-proxy.md). The 1.x Stable path split below does not apply to v2 Beta, whose single image exposes one public entry with the console at `/console` (forward the whole origin to `18317`):
+For same-domain deployment, read [Reverse Proxy](../deployment/reverse-proxy.md). The 1.x Stable path split below does not apply to v2 Beta, whose single image exposes one public entry with the console under the control base path chosen at installation (default `/console`; forward the whole origin to `18317`):
 
 ```text
 /management.html        -> CPAMP
@@ -334,17 +334,17 @@ curl -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 
 The CPA Management Key is not accepted for CPAMP Manager Server-only APIs.
 
-## `/models` Returns 412 Or 503
+## `/models` Returns 428 Or 503
 
-1.x Stable: a `412` means Manager Server setup is not complete. Open:
+1.x Stable: `/models` and `/v1/models` are compatibility-proxied by Manager Server. Before setup completes (no usable usage-service configuration) they return `428 Precondition Required` with the body `usage service is not configured`. Open:
 
 ```text
 http://<cpamp-host>:18317/management.html
 ```
 
-Finish setup first.
+Finish setup first. `412` is not this path's status code.
 
-v2 Beta: it does not return `412`. While installation is unfinished or the Gateway is not admitted, `/models` is answered by the public ingress with `503 gateway pending configuration`. After completing the wizard, check Gateway status and the Client Key at `/console` on the public origin; `:18317/management.html` returns 404 in v2.
+v2 Beta: while installation is unfinished or the Gateway is not admitted, `/v1/models` is answered by the public ingress with `503 gateway pending configuration`. After completing the wizard, check Gateway status and the Client Key in the console on the public origin (default `/console`; trust the wizard's completion page). Once admitted, `/v1/*` is forwarded to CPA and the status is CPA's own; this page does not promise a specific code. `:18317/management.html` returns 404 in v2.
 
 ## Usage From A Downtime Window Is Missing
 
@@ -371,7 +371,7 @@ This is expected.
 The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. For monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection, open the Full Mode entry:
 
 ```text
-v2 Beta:      http://<cpamp-host>:18317/console
+v2 Beta:      http://<cpamp-host>:18317/console     (default control base path)
 1.x Stable:   http://<cpamp-host>:18317/management.html
 ```
 
@@ -402,4 +402,4 @@ No. The live demo uses frontend mock data and does not need CPA, Manager Server,
 
 ## What Is management.html In A Release?
 
-`management.html` is the single-file management panel shipped in release packages and loaded by CPA as the CPAMP Lightweight Panel; each v2 Beta prerelease ships it too. The 1.x Stable Manager Server hosts it at `:18317/management.html`; v2 Beta Full Mode instead serves the `/console` console and does not serve `/management.html` (404). The online documentation remains on GitHub Pages and is not distributed with install packages.
+`management.html` is the single-file management panel shipped in release packages and loaded by CPA as the CPAMP Lightweight Panel; each v2 Beta prerelease ships it too. The 1.x Stable Manager Server hosts it at `:18317/management.html`; v2 Beta Full Mode instead serves the console under the Control Base Path (default `/console`) and does not serve `/management.html` (404). The online documentation remains on GitHub Pages and is not distributed with install packages.

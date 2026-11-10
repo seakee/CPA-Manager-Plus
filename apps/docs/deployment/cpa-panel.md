@@ -144,7 +144,7 @@ External 完整模式不是这个无后端的轻量面板：它需要 Manager，
 需要请求历史、成本分析或服务端自动化时：
 
 1. 按 [Docker 部署](./docker.md) 或 [原生包部署](./native.md) 启动 Manager Server。
-2. 打开完整模式入口：v2 Beta 是 `http://<cpamp-host>:18317/console`，1.x Stable 是 `http://<cpamp-host>:18317/management.html`。
+2. 打开完整模式入口：v2 Beta 是安装时设置的控制台地址（默认 `http://<cpamp-host>:18317/console`），1.x Stable 是 `http://<cpamp-host>:18317/management.html`。
 3. 使用 CPAMP Admin Key 完成 setup 或登录。
 4. 配置 CPA 地址、CPA Management Key 和请求采集。
 

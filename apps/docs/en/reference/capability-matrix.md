@@ -23,7 +23,7 @@ Use this page to confirm which features each usage option provides and what evid
 | Login credential                                 | CPA Management Key          | CPAMP Admin Key |
 | Backups, migration state, and pprof              | ❌                          | ✅              |
 
-The CPAMP Lightweight Panel is an enhanced WebUI hosted directly by CPA and requires no additional service, just like the official panel. It does not connect to or read Manager Server. Use the Manager Server entry for the server-backed capabilities in this table: `/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable.
+The CPAMP Lightweight Panel is an enhanced WebUI hosted directly by CPA and requires no additional service, just like the official panel. It does not connect to or read Manager Server. Use the Manager Server entry for the server-backed capabilities in this table: the control base path chosen at installation for v2 Beta (default `/console`), `:18317/management.html` for 1.x Stable.
 
 > **The Live Demo is not a runtime mode.** It only previews the interface with fictional data. It cannot connect to, manage, or monitor a real CPA instance and does not mean the capabilities in this matrix are actually running.
 
@@ -33,7 +33,7 @@ Docker and native packages provide the same Full Mode capabilities; only the ins
 
 | Installation                    | Best for                              | Entry                                                                                                   |
 | ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Docker deployment (recommended) | Most new users and server deployments | v2 Beta: `http://<cpamp-host>:18317/console`<br>1.x Stable: `http://<cpamp-host>:18317/management.html` |
+| Docker deployment (recommended) | Most new users and server deployments | v2 Beta: `http://<cpamp-host>:18317/console` (default control base path)<br>1.x Stable: `http://<cpamp-host>:18317/management.html` |
 | Native package deployment       | Hosts where Docker is not used        | Same as above                                                                                           |
 
 v2 Beta does not serve `/management.html`; it returns 404 and is not the v2 entry.

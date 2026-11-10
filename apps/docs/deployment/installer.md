@@ -3,7 +3,7 @@
 ::: warning 1.x Stable 安装器，不是 v2 Beta 安装入口
 `bin/install-cpamp.sh` 默认继续安装 **1.x Stable**。本页的安装、升级、修复、重置及原生包参数描述的是 1.x；不要通过改镜像名或版本参数把这个单容器安装流程当成 v2 迁移。
 
-试用 **v2 Beta Embedded** 请改用同一次 Prerelease 随附的 `docker-compose.v2-embedded.yml` 与 `embedded-release-pairing.json`，三镜像固定为 `<tag>@sha256:<digest>`，见 [v2 Docker 安装](./docker.md)。v2 Beta 的浏览器入口是公开 origin 的 `/console`（例如 `http://<host>:18317/console`），本页的 `:18317/management.html` 只属于 1.x Stable。已有 1.x 实例先按 [升级与回滚](../operations/update.md) 升到精确的 `v1.14.10` 基线，再离线 copy-in；目标 CPA 最低 `v8.0.55`。无 Docker 的 v2 Beta 仅提供 [linux/amd64 原生包](./native.md)。
+试用 **v2 Beta Embedded** 请改用同一次 Prerelease 随附的 `docker-compose.v2-embedded.yml` 与 `embedded-release-pairing.json`，三镜像固定为 `<tag>@sha256:<digest>`，见 [v2 Docker 安装](./docker.md)。v2 Beta 的浏览器入口是安装时设置的控制台地址（向导默认 `/console`，例如 `http://<host>:18317/console`），本页的 `:18317/management.html` 只属于 1.x Stable。已有 1.x 实例先按 [升级与回滚](../operations/update.md) 升到精确的 `v1.14.10` 基线，再离线 copy-in；目标 CPA 最低 `v8.0.55`。无 Docker 的 v2 Beta 仅提供 [linux/amd64 原生包](./native.md)。
 :::
 
 

@@ -55,10 +55,10 @@ CPAMP 轻量面板使用同一个 CPA 端口和 Management API，用 CPAMP 的�
 | ---------------------------- | ------------------------------------------- | ---------------------------- |
 | 官方 Management Center       | `http://<cpa-host>:8317/management.html`    | 希望继续使用上游原生 UI      |
 | CPAMP 轻量面板               | `http://<cpa-host>:8317/management.html`    | 只想替换 UI，不增加服务      |
-| CPAMP 完整模式（v2 Beta）    | `http://<cpamp-host>:18317/console`         | 需要监控、成本、巡检和自动化 |
+| CPAMP 完整模式（v2 Beta）    | `http://<cpamp-host>:18317/console`（默认）  | 需要监控、成本、巡检和自动化 |
 | CPAMP 完整模式（1.x Stable） | `http://<cpamp-host>:18317/management.html` | 需要监控、成本、巡检和自动化 |
 
-完整模式的入口随版本不同：v2 Beta 是公开 origin 的 `/console`（例如 `http://<cpamp-host>:18317/console`），v2 不提供 `/management.html`，访问会返回 404；1.x Stable 仍是 `:18317/management.html`。CPA 托管的 `:8317` 面板不会连接或读取 Manager Server。即使另外启动了 Manager Server，也必须打开它自己的完整模式入口才能使用请求历史、成本分析、模型价格和服务端巡检。
+完整模式的入口随版本不同：v2 Beta 是公开 origin 下安装时设置的控制台地址（向导默认 `/console`，例如 `http://<cpamp-host>:18317/console`；如果改过控制台地址，控制台和前端 API 都跟着变），v2 不提供 `/management.html`，访问会返回 404；1.x Stable 仍是 `:18317/management.html`。CPA 托管的 `:8317` 面板不会连接或读取 Manager Server。即使另外启动了 Manager Server，也必须打开它自己的完整模式入口才能使用请求历史、成本分析、模型价格和服务端巡检。
 
 ## 完整模式的安装方式
 
@@ -67,7 +67,7 @@ CPAMP 轻量面板使用同一个 CPA 端口和 Management API，用 CPAMP 的�
 - **Docker 部署（推荐）**：适合大多数新用户和服务器部署。
 - **原生包部署**：适合不使用 Docker 的 Linux、macOS 或 Windows 主机。
 
-两种方式都使用 CPAMP 管理员密钥登录。入口按版本区分：v2 Beta 是公开 origin 的 `/console`，1.x Stable 是 `:18317/management.html`。
+两种方式都使用 CPAMP 管理员密钥登录。入口按版本区分：v2 Beta 是安装时设置的控制台地址（默认 `/console`），1.x Stable 是 `:18317/management.html`。
 
 ## 先体验再决定
 
@@ -77,7 +77,7 @@ CPAMP 轻量面板使用同一个 CPA 端口和 Management API，用 CPAMP 的�
 
 1. 已有 CPA，只想更换 UI：安装 CPAMP 轻量面板。
 2. 需要历史监控或成本分析：部署 Manager Server。
-3. 改为访问完整模式入口（v2 Beta 为公开 origin 的 `/console`，1.x Stable 为 `:18317/management.html`），完成 CPA 连接和采集配置。
+3. 改为访问完整模式入口（v2 Beta 为安装时设置的控制台地址，默认 `/console`；1.x Stable 为 `:18317/management.html`），完成 CPA 连接和采集配置。
 4. CPA 端口仍可保留轻量面板，但两个入口的能力相互独立。
 
 ## 下一步

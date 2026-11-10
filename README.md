@@ -69,7 +69,7 @@ CPA / CLIProxyAPI can serve either the official Management Center or the CPAMP L
 | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- | --------------------------------------- |
 | Official [CLI Proxy API Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) | Keeping the upstream UI maintained by the CPA project       | CPA `:8317/management.html`             |
 | CPAMP Lightweight Panel                                                                                      | Replacing only the UI without another service or database   | CPA `:8317/management.html`             |
-| CPAMP Full Mode (v2 Beta)                                                                                    | Request history, cost analytics, inspection, and automation | Manager Server `/console`               |
+| CPAMP Full Mode (v2 Beta)                                                                                    | Request history, cost analytics, inspection, and automation | Manager Server console (default `/console`) |
 | CPAMP Full Mode (1.x Stable)                                                                                 | Request history, cost analytics, inspection, and automation | Manager Server `:18317/management.html` |
 
 See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/guide/choosing-a-panel.html) for the comparison, or [install the CPAMP Lightweight Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/cpa-panel.html) directly in CPA.
@@ -162,7 +162,7 @@ volumes:
 docker compose up -d
 ```
 
-Open the 1.x Stable panel at `http://<host>:18317/management.html`, retrieve the CPAMP Admin Key from the Manager Server log, then enter the CPA URL and CPA Management Key during setup. The `:latest` tag is 1.x Stable; on the v2 Beta image the entry is `http://<host>:18317/console` and `/management.html` returns 404.
+Open the 1.x Stable panel at `http://<host>:18317/management.html`, retrieve the CPAMP Admin Key from the Manager Server log, then enter the CPA URL and CPA Management Key during setup. The `:latest` tag is 1.x Stable; on the v2 Beta image the entry is the control base path chosen at installation (the wizard defaults to `http://<host>:18317/console`, so trust the completion page if you changed it), and `/management.html` returns 404.
 
 ### CPAMP Only
 

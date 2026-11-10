@@ -45,7 +45,7 @@ http://<host>:18317/management.html
 
 使用安装器保存或输出的 CPAMP 管理员密钥登录。详细说明见 [安装完整模式](../deployment/installer.md)。
 
-`bin/install-cpamp.sh` 默认安装 1.x Stable，入口就是上面的 `:18317/management.html`。v2 Beta 请按 [v2 Docker](../deployment/docker.md) 或 [linux/amd64 原生包](../deployment/native.md) 安装；v2 的浏览器入口是公开 origin 的 `/console`（例如 `http://<host>:18317/console`），`:18317/management.html` 在 v2 返回 404。
+`bin/install-cpamp.sh` 默认安装 1.x Stable，入口就是上面的 `:18317/management.html`。v2 Beta 请按 [v2 Docker](../deployment/docker.md) 或 [linux/amd64 原生包](../deployment/native.md) 安装；v2 的浏览器入口是安装时设置的控制台地址（向导默认 `/console`，例如 `http://<host>:18317/console`），`:18317/management.html` 在 v2 返回 404。
 
 ## 首次连接 CPA
 
@@ -67,7 +67,7 @@ http://<host>:18317/management.html
 ### 完整模式
 
 - 1.x Stable：可以用 CPAMP 管理员密钥登录 `:18317/management.html`。
-- v2 Beta：可以打开公开 origin 的 `/console`（例如 `http://<host>:18317/console`）并登录；`:18317/management.html` 返回 404 属于预期。
+- v2 Beta：可以打开向导完成页给出的控制台地址（默认 `/console`，例如 `http://<host>:18317/console`）并登录；`:18317/management.html` 返回 404 属于预期。
 - 仪表盘显示 CPA 已连接。
 - 发送一条真实请求后，请求监控出现记录。
 - 用量分析可以看到对应的 Token 和成本估算。

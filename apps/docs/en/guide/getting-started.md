@@ -45,7 +45,7 @@ http://<host>:18317/management.html
 
 Log in with the CPAMP Admin Key saved or printed by the installer. See [Install Full Mode](../deployment/installer.md) for details.
 
-`bin/install-cpamp.sh` installs 1.x Stable by default, and its entry is the `:18317/management.html` URL above. For v2 Beta, install from [v2 Docker](../deployment/docker.md) or the [linux/amd64 native package](../deployment/native.md); the v2 browser entry is `/console` on the public origin (for example `http://<host>:18317/console`), and `:18317/management.html` returns 404 in v2.
+`bin/install-cpamp.sh` installs 1.x Stable by default, and its entry is the `:18317/management.html` URL above. For v2 Beta, install from [v2 Docker](../deployment/docker.md) or the [linux/amd64 native package](../deployment/native.md); the v2 browser entry is the control base path chosen at installation (the wizard defaults to `/console`, for example `http://<host>:18317/console`), and `:18317/management.html` returns 404 in v2.
 
 ## First CPA Connection
 
@@ -67,7 +67,7 @@ If the installer did not save a CPA connection, enter these values when Full Mod
 ### Full Mode
 
 - 1.x Stable: you can log in to `:18317/management.html` with the CPAMP Admin Key.
-- v2 Beta: you can open `/console` on the public origin (for example `http://<host>:18317/console`) and log in; `:18317/management.html` returning 404 is expected.
+- v2 Beta: you can open the control base path shown on the wizard's completion page (default `/console`, for example `http://<host>:18317/console`) and log in; `:18317/management.html` returning 404 is expected.
 - Dashboard shows that CPA is connected.
 - Monitoring shows an event after a real request passes through CPA.
 - Usage Analytics shows the corresponding tokens and estimated cost.
