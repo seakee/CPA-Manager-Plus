@@ -1,6 +1,13 @@
 # Client Configuration
 
-Clients need the CPA address and a normal CPA API Key. Do not point Codex, Claude Code, OpenCode, or OpenAI SDKs at CPAMP; CPAMP observes and manages, but it does not serve normal model traffic.
+Clients need the CPA address and a normal CPA API Key. With 1.x, or v2 connected to an external CPA, do not point Codex, Claude Code, OpenCode, or OpenAI SDKs at CPAMP; CPAMP observes and manages, but it does not serve normal model traffic.
+
+::: tip Base URL by version
+
+- **v2 Beta with the embedded CPA** (new install or adopted CPA): the client Base URL is the CPAMP public origin, such as `https://cpamp.example.com/v1`. Ingress routes `/v1/*` and the other model paths to the CPA inside the container; port `8317` stays internal, so do not connect to it directly or expose it.
+- **v2 Beta connected to an external CPA**: keep using that CPA's existing public address.
+- **1.x**: follow the rest of this page.
+  :::
 
 ## General Rules
 
