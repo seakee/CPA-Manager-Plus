@@ -34,9 +34,10 @@
     box-shadow: none;
   }
 
+  /* The shared `:focus-visible` rule paints the only keyboard ring, so the border
+     must keep the resting colour here instead of adding a second accent frame. */
   :global(.input:focus) {
     background: var(--bg-primary);
-    border-color: var(--primary-color);
   }
 
   :global(textarea.input) {

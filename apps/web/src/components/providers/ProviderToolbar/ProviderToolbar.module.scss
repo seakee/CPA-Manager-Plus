@@ -66,9 +66,10 @@ $toolbar-control-height: var(--control-height-sm);
     color: var(--text-primary);
   }
 
+  /* The tab strip clips on overflow, so the ring is drawn inside the tab. */
   &:focus-visible {
-    outline: 0;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 26%, transparent);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -438,7 +439,8 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
 
   &:focus-visible {
-    outline: 0;
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -476,9 +478,10 @@ $toolbar-control-height: var(--control-height-sm);
     color: var(--primary-color);
   }
 
+  /* Inside the segmented group, so the ring is drawn inside the button. */
   &:focus-visible {
-    outline: 0;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 26%, transparent);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -524,9 +527,15 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   text-align: left;
 
-  &:hover,
+  &:hover {
+    background: var(--surface-subtle-hover);
+    color: var(--text-primary);
+  }
+
+  /* Menu rows sit inside a padded floating layer, so the ring is drawn inside the row. */
   &:focus-visible {
-    outline: 0;
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
     background: var(--surface-subtle-hover);
     color: var(--text-primary);
   }
@@ -600,7 +609,7 @@ $toolbar-control-height: var(--control-height-sm);
     border-color: var(--primary-solid);
     background: var(--primary-solid);
     color: var(--primary-contrast);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-contrast) 42%, transparent);
+    box-shadow: none;
   }
 
   @include mobile {

@@ -1,5 +1,6 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { LogsPage } from './LogsPage';
 
 const mocks = vi.hoisted(() => ({
@@ -105,5 +106,41 @@ describe('LogsPage error log listing', () => {
 
     await renderErrorTab();
     expect(pageText()).not.toContain(bannerText);
+  });
+
+  it('drops the banner while a refresh of a previously empty listing is in flight', async () => {
+    const initial = createDeferred<{ files: Array<{ name: string }> }>();
+    mocks.fetchErrorLogs.mockReturnValue(initial.promise);
+
+    await renderErrorTab();
+    await act(async () => initial.resolve({ files: [] }));
+    expect(pageText()).toContain(bannerText);
+
+    const refresh = createDeferred<{ files: Array<{ name: string }> }>();
+    mocks.fetchErrorLogs.mockReturnValue(refresh.promise);
+    await act(async () => {
+      void triggerHeaderRefresh();
+    });
+    expect(pageText()).not.toContain(bannerText);
+
+    await act(async () => refresh.resolve({ files: [{ name: 'error-2026-11-10.log' }] }));
+    expect(pageText()).not.toContain(bannerText);
+  });
+
+  it('drops the banner when refreshing a previously empty listing fails', async () => {
+    mocks.fetchErrorLogs.mockResolvedValue({ files: [] });
+
+    await renderErrorTab();
+    expect(pageText()).toContain(bannerText);
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.fetchErrorLogs.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      void triggerHeaderRefresh();
+    });
+    consoleError.mockRestore();
+
+    expect(pageText()).not.toContain(bannerText);
+    expect(pageText()).toContain('logs.error_logs_load_error');
   });
 });

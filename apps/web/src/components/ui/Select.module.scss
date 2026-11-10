@@ -43,15 +43,19 @@
     box-shadow: 0 0 0 1px var(--app-input-border-focus) inset;
   }
 
-  &:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: 1px;
-  }
-
   &[aria-expanded='true'] {
     background-color: var(--app-input-bg-focus);
     border-color: var(--app-input-border-focus);
     box-shadow: 0 0 0 1px var(--app-input-border-focus) inset;
+  }
+
+  /* The outline is the only keyboard ring; the accent border and inset ring stack a
+     second frame around it, so keyboard focus falls back to the resting border. */
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+    border-color: var(--app-input-border);
+    box-shadow: none;
   }
 }
 

@@ -533,10 +533,13 @@ input {
   transition: border-color 0.15s ease;
 }
 
+/* The wrapper is the only focus carrier: one 2px outline, neutral border, no inset ring. */
 .input-wrap:focus-within {
-  border-color: var(--app-input-border-focus);
+  border-color: var(--app-input-border);
   background: var(--app-input-bg-focus);
-  box-shadow: inset 0 0 0 1px var(--app-input-border-focus);
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: 1px;
+  box-shadow: none;
 }
 
 .form-input {
@@ -559,9 +562,13 @@ input {
   box-shadow: inset 0 0 0 1px var(--app-input-border-focus);
 }
 
+/* The outline is the only keyboard ring; the accent border and inset ring stack a
+   second frame around it, so keyboard focus falls back to the resting border. */
 .form-input:focus-visible {
   outline: 2px solid var(--app-input-border-focus);
   outline-offset: 1px;
+  border-color: var(--app-input-border);
+  box-shadow: none;
 }
 
 .form-input:disabled {
@@ -577,6 +584,12 @@ input {
   border: 0;
   padding: 6px 0;
   box-shadow: none;
+}
+
+/* The field is transparent inside the wrapper, so the muted fill has to be painted here. */
+.input-wrap:has(> .form-input:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-subtle);
 }
 
 /* The wrapper paints the focus ring via :focus-within; the field must not add a second one. */

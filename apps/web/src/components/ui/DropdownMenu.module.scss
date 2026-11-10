@@ -34,11 +34,10 @@
 }
 
 .trigger:focus-visible {
-  outline: none;
-  border-color: var(--focus-border);
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: 1px;
   background: var(--focus-bg);
   color: var(--focus-text);
-  box-shadow: inset 0 0 0 1px var(--focus-inset);
 }
 
 .trigger:disabled {
@@ -92,9 +91,14 @@
   background: var(--surface-subtle-hover);
 }
 
-.item:focus,
-.item:focus-visible {
+.item:focus:not(:focus-visible) {
   outline: none;
+}
+
+/* Menu rows sit inside a padded floating layer, so the ring is drawn inside the row. */
+.item:focus-visible {
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: -2px;
 }
 
 .itemDanger {
