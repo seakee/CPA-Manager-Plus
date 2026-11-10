@@ -3,7 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +25,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // TestWALStoreWithoutAdmissionStillProjectsUnavailable is the negative half of
@@ -180,22 +181,17 @@ func TestLegacyWALVolumeProjectsUnsupportedUpgradeAndKeepsWritePathsClosed(t *te
 	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
 	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
 
-	// Prove the ownership fence is held while the HTTP response is written and
-	// released once the request finishes.
+	// The observation must not fence the source, and therefore must not rewrite
+	// the ownership marker the discovery cache is keyed on.
+	locked := paths.Database + ".manager.lock"
+	markerBefore := discoveryMarkerState(t, locked)
 	rec := httptest.NewRecorder()
-	checkedFence := false
-	h.ServeHTTP(fenceCheckingDiscoveryWriter{rec, func() {
-		checkedFence = true
-		contender, lockErr := processlock.AcquireExisting(paths.Database)
-		if contender != nil {
-			_ = contender.Close()
-		}
-		if !errors.Is(lockErr, processlock.ErrLocked) {
-			t.Fatalf("legacy WAL discovery wrote response without holding fence: %v", lockErr)
-		}
-	}}, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
-	if !checkedFence || rec.Code != http.StatusOK {
-		t.Fatalf("fenced legacy WAL discovery status=%d body=%s", rec.Code, rec.Body.String())
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"unsupported_upgrade"`) {
+		t.Fatalf("legacy WAL discovery status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if markerAfter := discoveryMarkerState(t, locked); markerAfter != markerBefore {
+		t.Fatalf("legacy WAL discovery rewrote the ownership marker: %s -> %s", markerBefore, markerAfter)
 	}
 
 	server := httptest.NewServer(h)
@@ -751,4 +747,175 @@ func TestAdmitStartupReadsAPendingWALSourceWithoutTouchingIt(t *testing.T) {
 	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
 		t.Fatalf("startup admission mutated the source tree:\nbefore=%v\nafter=%v", before, after)
 	}
+}
+
+// discoveryMarkerState is the ownership marker as the discovery cache sees it:
+// permission bits plus the POSIX change stamp, which a chmod refreshes.
+func discoveryMarkerState(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stat the ownership marker: %v", err)
+	}
+	stamp, err := copyinmarker.ChangeStamp(path)
+	if err != nil {
+		t.Fatalf("change stamp of the ownership marker: %v", err)
+	}
+	return fmt.Sprintf("%s:%d:%s", info.Mode(), info.Size(), stamp)
+}
+
+// TestRepeatedDiscoveryObservationsAreServedFromTheCache is the polling
+// contract on a writable volume: three identical GETs must be answered by one
+// observation, and the source — including the ownership marker the cache is
+// keyed on — must not be rewritten by any of them. A method other than GET is
+// refused before the source is read at all.
+func TestRepeatedDiscoveryObservationsAreServedFromTheCache(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	dir, paths := legacyWALVolumeWithPendingWAL(t, "cached-legacy-key-123456")
+	before := readSourceTree(t, dir)
+	locked := paths.Database + ".manager.lock"
+	markerBefore := discoveryMarkerState(t, locked)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	request := func(method string) (int, string) {
+		t.Helper()
+		resp, err := server.Client().Do(mustRequest(t, method, server.URL+bootstrapdiscovery.Path))
+		if err != nil {
+			t.Fatalf("%s discovery: %v", method, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s discovery: %v", method, err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	for poll := 0; poll < 3; poll++ {
+		if status, body := request(http.MethodGet); status != http.StatusOK ||
+			!strings.Contains(body, `"status":"unsupported_upgrade"`) {
+			t.Fatalf("poll %d discovery = %d: %s", poll, status, body)
+		}
+	}
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("%d observations for three identical GETs, want 1: the cache never warmed", ran)
+	}
+
+	if status, _ := request(http.MethodPost); status != http.StatusMethodNotAllowed {
+		t.Fatalf("POST discovery = %d, want 405", status)
+	}
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("refusing a POST ran an observation (%d total)", ran)
+	}
+
+	if markerAfter := discoveryMarkerState(t, locked); markerAfter != markerBefore {
+		t.Fatalf("discovery rewrote the ownership marker: %s -> %s", markerBefore, markerAfter)
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("discovery mutated the source tree")
+	}
+}
+
+func mustRequest(t *testing.T, method string, target string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	return req
+}
+
+// TestAdmitStartupReadsAPendingOperationThroughAPrivateCopy pins the branch that
+// reads an operation recorded only in a journal: the table is in the database
+// file, the row is not, and the answer must still name the unfinished operation
+// without creating usage.sqlite-shm or rewriting the store.
+func TestAdmitStartupReadsAPendingOperationThroughAPrivateCopy(t *testing.T) {
+	dir, paths := nativeV2StoreWithPendingOperation(t)
+	if err := os.Remove(paths.Database + "-shm"); err != nil {
+		t.Fatalf("drop the stale -shm: %v", err)
+	}
+	before := readSourceTree(t, dir)
+
+	admission, err := legacypreflight.AdmitStartup(t.Context(), paths, legacypreflight.Options{
+		UpgradeAdmission: legacypreflight.DatabaseUpgradeAdmission{DatabasePath: paths.Database},
+	})
+	if err != nil {
+		t.Fatalf("admit a store with a recorded operation in its journal: %v", err)
+	}
+	if admission.UpgradeStage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admitted stage = %q, want the operation recorded only in the journal", admission.UpgradeStage)
+	}
+	if err := admission.Close(); err != nil {
+		t.Fatalf("release the admission: %v", err)
+	}
+
+	if _, err := os.Lstat(paths.Database + "-shm"); !os.IsNotExist(err) {
+		t.Fatalf("startup admission created usage.sqlite-shm (err=%v)", err)
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("startup admission mutated the store:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+// nativeV2StoreWithPendingOperation builds a native v2 store whose single
+// Upgrade operation row exists only in a pending journal: the schema is
+// checkpointed, the row is written with autocheckpoint off, and the writer exits
+// without closing.
+func nativeV2StoreWithPendingOperation(t *testing.T) (string, sqliterepo.InspectionPaths) {
+	t.Helper()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "usage.sqlite")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNativeV2PendingOperationFixtureProcess$")
+	cmd.Env = append(os.Environ(), "CPAMP_V2_PENDING_OPERATION="+database)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("native v2 pending operation fixture: %v %s", err, output)
+	}
+	wal, err := os.Lstat(database + "-wal")
+	if err != nil || wal.Size() == 0 {
+		t.Fatalf("the fixture did not keep a pending journal (err=%v)", err)
+	}
+	paths := legacypreflight.DefaultPaths(database)
+	if err := os.WriteFile(paths.DataKey, []byte("v2-data-key-bytes-preserved"), 0o600); err != nil {
+		t.Fatalf("write v2 data.key: %v", err)
+	}
+	if err := os.WriteFile(database+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write v2 lock marker: %v", err)
+	}
+	return dir, paths
+}
+
+// TestNativeV2PendingOperationFixtureProcess is the seeding half of
+// nativeV2StoreWithPendingOperation: the schema is checkpointed by a clean close,
+// the operation row is committed with autocheckpoint off, and the process exits
+// without closing, so the row is still in the journal.
+func TestNativeV2PendingOperationFixtureProcess(t *testing.T) {
+	database := os.Getenv("CPAMP_V2_PENDING_OPERATION")
+	if database == "" {
+		t.Skip("helper process")
+	}
+	seed, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatalf("create the native v2 schema: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("checkpoint the native v2 schema: %v", err)
+	}
+	wal, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open the pending journal fixture: %v", err)
+	}
+	for _, stmt := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`insert into upgrade_operations (id, stage, created_at_ms, updated_at_ms) values (1, 'reconcile', 1, 1)`,
+	} {
+		if _, err := wal.Exec(stmt); err != nil {
+			t.Fatalf("seed the pending operation: %v", err)
+		}
+	}
+	os.Exit(0)
 }

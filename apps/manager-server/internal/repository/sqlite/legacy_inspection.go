@@ -694,10 +694,16 @@ func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []
 		_ = os.RemoveAll(staging)
 		return "", copyErr
 	}
+	if err := inspectCopyableSource(files, ""); err != nil {
+		return discard(err)
+	}
 	if err := copyInspectionFile(ctx, paths.Database, databasePath); err != nil {
 		return discard(err)
 	}
 	for _, suffix := range sidecars {
+		if err := inspectCopyableSource(files, suffix); err != nil {
+			return discard(err)
+		}
 		if err := copyInspectionFile(ctx, paths.Database+suffix, databasePath+suffix); err != nil {
 			return discard(err)
 		}
@@ -844,12 +850,46 @@ func inspectionTempDirectory(paths InspectionPaths) (string, error) {
 	return tempDir, nil
 }
 
+// inspectCopyableSource refuses a member the inventory already called
+// unsupported. Copying it would follow a symlink out of the source or block on a
+// FIFO until the context expired, so the copy is decided from the inventory the
+// caller hashed, not from whatever the path names now.
+func inspectCopyableSource(files []InspectionFile, suffix string) error {
+	role := map[string]string{"": "database", "-wal": "wal", "-shm": "shm", "-journal": "journal"}[suffix]
+	if role == "" {
+		return errors.New("inspection copy requested an unknown member")
+	}
+	for _, file := range files {
+		if file.Role != role {
+			continue
+		}
+		if file.State == "unsupported" {
+			return errors.New("inspection source holds an unsupported " + role + " file")
+		}
+		return nil
+	}
+	return nil
+}
+
 func copyInspectionFile(ctx context.Context, source, destination string) error {
+	// Re-check the member before reading it: the inventory above was taken
+	// earlier, and a path swapped for a symlink or a FIFO since then must not be
+	// followed or waited on.
+	inspected, err := os.Lstat(source)
+	if err != nil || !inspected.Mode().IsRegular() {
+		return errors.New("inspection copy source unavailable")
+	}
+	if _, err := processlock.InspectDatabaseFile(source); err != nil {
+		return errors.New("inspection copy source unavailable")
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return errors.New("inspection copy source unavailable")
 	}
 	defer input.Close()
+	if err := processlock.OpenedDatabase(input, inspected); err != nil {
+		return errors.New("inspection copy source unavailable")
+	}
 	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return errors.New("inspection copy destination unavailable")

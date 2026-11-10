@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
@@ -233,6 +235,13 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 		return
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The discovery document is a GET, and an unauthenticated caller of any
+		// other method must be refused before this process stamps the source with
+		// an observation it will never read.
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		h.discoveryObserver.observe(ctx, paths.Database,
@@ -258,9 +267,20 @@ func observeReadOnlyDiscovery(
 	legacyRoot string,
 	consume func(bootstrap.PublicDiscovery),
 ) (bootstrap.PublicDiscovery, bool) {
+	// This path describes a source this process is not admitted on, so it takes
+	// no ownership fence: a shared probe proves no writer holds the marker, works
+	// where the marker cannot be opened for writing at all, and leaves the marker
+	// the cache keys on untouched. A write fence here would chmod the source on
+	// every unauthenticated request and would refresh the marker's change stamp,
+	// which is exactly the identity the cache needs to stay stable.
+	discoveryOptions := options
+	discoveryOptions.ObserveOnly = true
+	// Operator assertions are never inherited by public discovery: a source that
+	// is claimed stopped is still only a rollback-mode read snapshot here.
+	discoveryOptions.SourceStopped = false
 	projection := bootstrapdiscovery.Unavailable()
 	answered := false
-	legacypreflight.WithFencedInspection(ctx, paths, options, func(report legacypreflight.Report, err error) {
+	legacypreflight.WithFencedInspection(ctx, paths, discoveryOptions, func(report legacypreflight.Report, err error) {
 		result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: report, InspectionError: err})
 		if result.Status != bootstrap.PublicUnavailable || err == nil {
 			answered = true
@@ -281,7 +301,9 @@ func observeReadOnlyDiscovery(
 		projection = legacyDiscoveryProjection(obs)
 		consume(projection)
 	})
-	return projection, reusable
+	// A fail-closed projection names this moment, not the source: it is never
+	// remembered, whichever stage produced it.
+	return projection, reusable && projection.Status != bootstrap.PublicUnavailable
 }
 
 // legacyDiscoveryProjection maps the bounded legacy verdict onto the public
@@ -318,6 +340,9 @@ func legacyDiscoveryProjection(obs upgradeservice.LegacyDiscoveryObservation) bo
 type discoveryObservation struct {
 	mu      sync.Mutex
 	sources map[string]*discoveryObservationState
+	// ran counts the observations this instance actually executed, so a poll can
+	// be shown to be answered from memory.
+	ran int
 }
 
 type discoveryObservationState struct {
@@ -355,14 +380,14 @@ func (o *discoveryObservation) observe(
 ) {
 	for {
 		identity, identified := upgradeservice.LegacySourceIdentity(databasePath)
+		if identified {
+			if projection, ok := o.cachedProjection(databasePath, identity); ok {
+				consume(projection)
+				return
+			}
+		}
 		o.mu.Lock()
 		state := o.sourceState(databasePath)
-		if identified && state.cached.ready && state.cached.identity == identity {
-			projection := state.cached.projection
-			o.mu.Unlock()
-			consume(projection)
-			return
-		}
 		if state.flight != nil {
 			done := state.flight.done
 			o.mu.Unlock()
@@ -378,6 +403,7 @@ func (o *discoveryObservation) observe(
 		}
 		flight := &discoveryObservationFlight{done: make(chan struct{})}
 		state.flight = flight
+		o.ran++
 		o.mu.Unlock()
 
 		projection, reusable := read(consume)
@@ -393,6 +419,35 @@ func (o *discoveryObservation) observe(
 		close(flight.done)
 		return
 	}
+}
+
+// cachedProjection answers from memory only while the source still looks the way
+// the observation that produced it left it, and only while no writer holds the
+// marker. The check is a shared, non-blocking probe: it proves the same
+// quiescence the observation proves, takes no write access, and changes nothing
+// the identity is keyed on, so a poll costs one open instead of one copy.
+func (o *discoveryObservation) cachedProjection(databasePath string, identity string) (bootstrap.PublicDiscovery, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	state := o.sourceState(databasePath)
+	if !state.cached.ready || state.cached.identity != identity {
+		return bootstrap.PublicDiscovery{}, false
+	}
+	if err := processlock.ProbeExisting(databasePath); errors.Is(err, processlock.ErrLocked) {
+		// Another process is writing the source: a remembered projection would
+		// describe a source that is no longer quiet.
+		return bootstrap.PublicDiscovery{}, false
+	}
+	return state.cached.projection, true
+}
+
+// observations reports how many fenced observations this instance chose to run.
+// A memoised projection is served without adding to it, which is what a poll
+// must not do.
+func (o *discoveryObservation) observations() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.ran
 }
 
 func (o *discoveryObservation) sourceState(databasePath string) *discoveryObservationState {

@@ -19,5 +19,5 @@ func WithAuthenticatedInspection(ctx context.Context, paths sqlite.InspectionPat
 		consume(Report{}, sqlite.ErrLegacyAdminUnauthorized)
 		return
 	}
-	WithFencedInspection(ctx, paths, Options{adminKey: key, observeOnly: true}, consume)
+	WithFencedInspection(ctx, paths, Options{adminKey: key, ObserveOnly: true}, consume)
 }

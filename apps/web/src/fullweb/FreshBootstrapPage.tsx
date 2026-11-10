@@ -437,7 +437,7 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                         <div className="alert-title">{discoveryText('ownershipChownTitle')}</div>
                         <div className="alert-desc">{discoveryText('ownershipChownDesc')}</div>
                         <div className="code-block" data-testid="legacy-ownership-command">
-                          {`docker stop <1x_container>
+                          {`docker stop <v2_container>
 docker run --rm -u 0:0 --entrypoint sh -v <1x_volume>:/data seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'
 docker start <v2_container>`}
                         </div>

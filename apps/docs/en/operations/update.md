@@ -127,10 +127,10 @@ linux/amd64 Native uses the matching package's `bin/cpa-manager-plus upgrade ...
 1.x containers write `/data/usage.sqlite.manager.lock` and `/data/data.key` (`0600`) as `root` (`0:0`), whereas the v2 single-image Manager runs as unprivileged `10002:10002` and Runtime Supervisor requires `/data/runtime` to stay owned by `0:0`. If a 1.x volume is mounted at `/data`, v2 stays in read-only guidance mode (`/.well-known/cpamp-bootstrap/ui`) with `source_ownership_unavailable` and did not modify the 1.x database and key files:
 
 1. **Recommended (standard upgrade)**: stop the container, mount the original 1.x volume read-only at `/legacy:ro`, attach a new empty volume to `/data`, and run `upgrade preflight` and `upgrade run` above.
-2. **Read-only Upgrade entry inspection only**: a Docker named volume has no `/data` path on the host, so do not run `chown /data/...` from the host. Stop the 1.x container, run one one-off container that mounts the volume and changes ownership only on the database and key files, then start the v2 container again and re-check on the guidance page:
+2. **Read-only Upgrade entry inspection only**: a Docker named volume has no `/data` path on the host, so do not run `chown /data/...` from the host. Stop the v2 container that is running with this volume, run one one-off container that mounts the volume and changes ownership only on the database and key files, then start the v2 container again and re-check on the guidance page:
 
    ```bash
-   docker stop <1x_container>
+   docker stop <v2_container>
    docker run --rm -u 0:0 --entrypoint sh -v <1x_volume>:/data seakee/cpa-manager-plus:<v2_tag> \
      -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'
    docker start <v2_container>

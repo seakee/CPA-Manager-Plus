@@ -242,7 +242,7 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	// own. The copy is therefore only paid by a store that records operations and
 	// still carries a journal, which is a v2 store after a crash — never a 1.x
 	// volume, which has no such table to find.
-	present, err := recordedUpgradeTablePresent(ctx, admissionDataSourceName(path, true))
+	present, err := RecordedOperationTablePresent(ctx, path)
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
@@ -938,11 +938,16 @@ func containsRecordedDomain(domains []string, want string) bool {
 	return false
 }
 
-// admissionDataSourceName mirrors the bounded inspection DSN: read-only, no
-// persistence, and immutable only when there is no live WAL to join.
-// recordedUpgradeTablePresent reports whether the database file names the
-// operation table. The handle is immutable, so the answer describes the file as
-// written and never the journal beside it.
+// RecordedOperationTablePresent reports whether the database file names the
+// Upgrade operation table. The handle is immutable, so the answer describes the
+// file as written and never the journal beside it: a source that records no
+// operation — every 1.x volume — is answered without copying it or creating
+// anything beside it.
+func RecordedOperationTablePresent(ctx context.Context, databasePath string) (bool, error) {
+	return recordedUpgradeTablePresent(ctx, admissionDataSourceName(databasePath, true))
+}
+
+// recordedUpgradeTablePresent asks one read-only handle whether the table exists.
 func recordedUpgradeTablePresent(ctx context.Context, dsn string) (bool, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

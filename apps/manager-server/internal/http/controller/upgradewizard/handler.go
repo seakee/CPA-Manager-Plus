@@ -37,6 +37,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -1219,6 +1220,17 @@ func readRecordedStatusPreserved(ctx context.Context, databasePath string, sourc
 	}
 	// The private copy must stay out of both trees this read preserves: the data
 	// root that owns the database and the configured 1.x source root.
+	// The table is looked up in the database file alone first: an immutable handle
+	// creates no -shm, so a 1.x volume — which never records an operation — is
+	// answered by the read-only status document instead of a full copy on every
+	// poll.
+	present, probeErr := legacypreflight.RecordedOperationTablePresent(ctx, databasePath)
+	if probeErr != nil {
+		return statusDocument{}, false, probeErr
+	}
+	if !present {
+		return document, false, nil
+	}
 	if err := upgradeservice.ValidateScratchDir("", strings.TrimSpace(sourceRoot), filepath.Dir(databasePath)); err != nil {
 		return statusDocument{}, false, err
 	}

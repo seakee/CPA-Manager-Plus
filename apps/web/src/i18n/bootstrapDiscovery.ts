@@ -18,7 +18,7 @@ const en = {
   ownershipChownTitle:
     'Option 2: Open the read-only Upgrade entry on this stopped volume — fix only the Manager file ownership',
   ownershipChownDesc:
-    'To verify your 1.x administrator key and read the operation status on this volume, stop the 1.x container, run one one-off container that mounts the volume and changes ownership only on the database and key files (never on /data/runtime, which must stay 0:0), start the v2 container again, and re-check:',
+    'To verify your 1.x administrator key and read the operation status on this volume, stop the v2 container, run one one-off container that mounts the volume and changes ownership only on the database and key files (never on /data/runtime, which must stay 0:0), start the v2 container again, and re-check:',
   recheckButton: 'Recheck source status',
 };
 
@@ -35,7 +35,7 @@ const zh: typeof en = {
     '停止当前容器，保持原 1.x（v1.14.10）数据卷只读不变并挂载到 /legacy:ro，为 /data 挂载全新空卷后，在宿主机执行离线预检与升级：',
   ownershipChownTitle: '方式二：仅修复已停止数据卷上的数据库文件属主，进入只读升级入口',
   ownershipChownDesc:
-    '若需在该卷上验证原 1.x 管理员密钥并查看升级状态：先停止 1.x 容器，用一个一次性容器挂载该卷、仅修改 usage.sqlite* 与 data.key 的属主（切勿改动 /data/runtime，它必须保持 0:0），再启动 v2 容器并点击下方重新检查：',
+    '若需在该卷上验证原 1.x 管理员密钥并查看升级状态：先停止 v2 容器，用一个一次性容器挂载该卷、仅修改 usage.sqlite* 与 data.key 的属主（切勿改动 /data/runtime，它必须保持 0:0），再启动 v2 容器并点击下方重新检查：',
   recheckButton: '重新检查来源状态',
 };
 
@@ -52,7 +52,7 @@ const tw: typeof en = {
     '停止目前容器，保持原 1.x（v1.14.10）資料卷唯讀不變並掛載至 /legacy:ro，為 /data 掛載全新空卷後，在主機執行離線預檢與升級：',
   ownershipChownTitle: '方式二：僅修復已停止資料卷上的資料庫檔案擁有者，進入唯讀升級入口',
   ownershipChownDesc:
-    '若需在該資料卷上驗證原 1.x 管理員金鑰並檢視升級狀態：先停止 1.x 容器，用一個一次性容器掛載該資料卷、僅修改 usage.sqlite* 與 data.key 的擁有者（切勿改動 /data/runtime，它必須維持 0:0），再啟動 v2 容器並點擊下方重新檢查：',
+    '若需在該資料卷上驗證原 1.x 管理員金鑰並檢視升級狀態：先停止 v2 容器，用一個一次性容器掛載該資料卷、僅修改 usage.sqlite* 與 data.key 的擁有者（切勿改動 /data/runtime，它必須維持 0:0），再啟動 v2 容器並點擊下方重新檢查：',
   recheckButton: '重新檢查來源狀態',
 };
 
@@ -72,7 +72,7 @@ const ru: typeof en = {
   ownershipChownTitle:
     'Вариант 2: открыть вход обновления только для чтения на остановленном томе — исправьте только владельца файлов Manager',
   ownershipChownDesc:
-    'Чтобы проверить исходный ключ администратора 1.x и увидеть состояние обновления на этом томе: остановите контейнер 1.x, запустите один разовый контейнер с этим томом и смените владельца только файлов базы данных и ключа (никогда не меняйте /data/runtime — он должен принадлежать 0:0), затем запустите контейнер v2 и нажмите повторную проверку:',
+    'Чтобы проверить исходный ключ администратора 1.x и увидеть состояние обновления на этом томе: остановите контейнер v2, запустите один разовый контейнер с этим томом и смените владельца только файлов базы данных и ключа (никогда не меняйте /data/runtime — он должен принадлежать 0:0), затем запустите контейнер v2 и нажмите повторную проверку:',
   recheckButton: 'Проверить состояние источника снова',
 };
 

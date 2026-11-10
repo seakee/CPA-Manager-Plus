@@ -1168,7 +1168,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       const ownershipCommand = textOf(
         findByTestId(renderer.root, 'legacy-ownership-command')
       );
-      expect(ownershipCommand).toContain('docker stop <1x_container>');
+      expect(ownershipCommand).toContain('docker stop <v2_container>');
       expect(ownershipCommand).toContain(
         `seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'`
       );
