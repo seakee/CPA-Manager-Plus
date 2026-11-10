@@ -153,6 +153,7 @@ type freshApplication struct {
 	runtime            runtimeservice.RuntimeClient
 	artifact           *runtimeservice.ArtifactClient
 	runtimeExternal    *runtimeservice.ExternalClient
+	embeddedModeLock   sync.Mutex
 	embeddedExecution  freshEmbeddedExecutionGate
 	desiredState       runtimeservice.DesiredStateStore
 	runtimeSettings    setting.Repository
@@ -449,7 +450,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// Pending/missing evidence retains the existing typed strategy blockers. The
 	// strategy's post-Start destination read-back must not race the spawn, so its
 	// Runtime client waits for the Supervisor's readiness observation first.
-	a.strategy = freshstrategy.NewProduction(freshstrategy.Options{Runtime: freshReadyStartRuntime(runtime), Protector: opened.Protector, DestinationBaseURL: cfg.CPAUpstreamURL, InitialClientKey: a.installInitialClientKey})
+	a.strategy = freshstrategy.NewProduction(freshstrategy.Options{Runtime: freshReadyStartRuntime(a.embeddedRuntimeClient()), Protector: opened.Protector, DestinationBaseURL: cfg.CPAUpstreamURL, InitialClientKey: a.installInitialClientKey})
 	// Normal Fresh initialization is authorized by the admitted installation
 	// and its Admin/session. Retain the opt-in private harness restriction only
 	// for hosts explicitly running that profile.
@@ -896,9 +897,23 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		writeFreshJSON(w, op)
 		return
 	}
-	var abortExternalCommit func()
+	a.embeddedModeLock.Lock()
+	defer a.embeddedModeLock.Unlock()
+	current, err := a.store.Load(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if current.Operation.Identity != op.Identity ||
+		current.Operation.Revision != op.Revision ||
+		current.Operation.ProductComplete ||
+		current.Operation.Strategy.Stage == "committed" {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	var finishExternalCommit func(committed bool)
 	if request.Strategy == bootstrap.ConnectExternal {
-		abortExternalCommit = a.beginExternalCommit()
+		finishExternalCommit = a.beginExternalCommit()
 	}
 	next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
 		if request.Strategy == bootstrap.ConnectExternal && a.externalPermit != nil && !a.externalPermit(record.Operation, request.ExpectedRevision, externalBaseURL, request.ManagementKey, request.AttemptID) {
@@ -922,8 +937,8 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		return nil
 	})
 	if err != nil {
-		if abortExternalCommit != nil {
-			abortExternalCommit()
+		if finishExternalCommit != nil {
+			finishExternalCommit(false)
 		}
 		if errors.Is(err, errFreshExternalPermitRevoked) {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -932,8 +947,8 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	if request.Strategy == bootstrap.ConnectExternal {
-		a.completeExternalCommit()
+	if finishExternalCommit != nil {
+		finishExternalCommit(true)
 	}
 	if result.InitialClientKey != "" {
 		// The managed install just committed its destination, so its plugin answer

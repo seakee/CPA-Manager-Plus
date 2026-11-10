@@ -273,6 +273,7 @@ type freshEmbeddedExecutionGate struct {
 	closed             bool
 	cancels            map[uint64]context.CancelFunc
 	nextID             uint64
+	externalCommitted  chan struct{}
 	reconcilerCancel   context.CancelFunc
 	reconcilerDone     chan struct{}
 }
@@ -334,20 +335,46 @@ func (a *freshApplication) enterEmbeddedExecution(ctx context.Context) (context.
 	return callCtx, release, nil
 }
 
-func (a *freshApplication) cancelEmbeddedExecutionLocked() (chan struct{}, chan struct{}) {
+func (a *freshApplication) externalCommittedSignal() <-chan struct{} {
 	gate := &a.embeddedExecution
-	if gate.reconcilerCancel != nil {
-		gate.reconcilerCancel()
+	gate.mu.Lock()
+	if gate.externalCommitted == nil {
+		gate.externalCommitted = make(chan struct{})
+		if gate.closed {
+			close(gate.externalCommitted)
+		}
 	}
+	ch := gate.externalCommitted
+	gate.mu.Unlock()
+	return ch
+}
+
+func (a *freshApplication) cancelInFlightEmbeddedCallsLocked() chan struct{} {
+	gate := &a.embeddedExecution
 	for id, cancel := range gate.cancels {
 		cancel()
 		delete(gate.cancels, id)
 	}
-	var drained chan struct{}
 	if gate.inFlight > 0 {
-		drained = gate.drained
+		return gate.drained
 	}
-	return drained, gate.reconcilerDone
+	return nil
+}
+
+func (a *freshApplication) retireEmbeddedReconcilerLocked() chan struct{} {
+	gate := &a.embeddedExecution
+	if gate.externalCommitted == nil {
+		gate.externalCommitted = make(chan struct{})
+	}
+	select {
+	case <-gate.externalCommitted:
+	default:
+		close(gate.externalCommitted)
+	}
+	if gate.reconcilerCancel != nil {
+		gate.reconcilerCancel()
+	}
+	return gate.reconcilerDone
 }
 
 func (a *freshApplication) markEmbeddedExecutionClosed() {
@@ -357,49 +384,48 @@ func (a *freshApplication) markEmbeddedExecutionClosed() {
 	gate := &a.embeddedExecution
 	gate.mu.Lock()
 	gate.closed = true
-	_, _ = a.cancelEmbeddedExecutionLocked()
+	gate.committingExternal = false
+	_ = a.cancelInFlightEmbeddedCallsLocked()
+	_ = a.retireEmbeddedReconcilerLocked()
 	gate.mu.Unlock()
 }
 
-func (a *freshApplication) beginExternalCommit() func() {
+func (a *freshApplication) beginExternalCommit() func(committed bool) {
 	if a == nil {
-		return func() {}
+		return func(bool) {}
 	}
 	gate := &a.embeddedExecution
 	gate.mu.Lock()
 	gate.committingExternal = true
-	drained, reconcilerDone := a.cancelEmbeddedExecutionLocked()
+	drained := a.cancelInFlightEmbeddedCallsLocked()
 	gate.mu.Unlock()
 	if drained != nil {
 		<-drained
 	}
-	if reconcilerDone != nil {
-		<-reconcilerDone
-	}
-	return func() {
-		gate.mu.Lock()
-		if !gate.closed {
+	var once sync.Once
+	return func(committed bool) {
+		once.Do(func() {
+			if !committed {
+				gate.mu.Lock()
+				if !gate.closed {
+					gate.committingExternal = false
+				}
+				gate.mu.Unlock()
+				return
+			}
+			gate.mu.Lock()
+			gate.closed = true
 			gate.committingExternal = false
-		}
-		gate.mu.Unlock()
-	}
-}
-
-func (a *freshApplication) completeExternalCommit() {
-	if a == nil {
-		return
-	}
-	gate := &a.embeddedExecution
-	gate.mu.Lock()
-	gate.closed = true
-	gate.committingExternal = false
-	drained, reconcilerDone := a.cancelEmbeddedExecutionLocked()
-	gate.mu.Unlock()
-	if drained != nil {
-		<-drained
-	}
-	if reconcilerDone != nil {
-		<-reconcilerDone
+			drainedAfter := a.cancelInFlightEmbeddedCallsLocked()
+			reconcilerDone := a.retireEmbeddedReconcilerLocked()
+			gate.mu.Unlock()
+			if drainedAfter != nil {
+				<-drainedAfter
+			}
+			if reconcilerDone != nil {
+				<-reconcilerDone
+			}
+		})
 	}
 }
 
@@ -514,6 +540,20 @@ func (c gatedEmbeddedRuntimeClient) ObserveUpdateOperation(ctx context.Context, 
 	}
 	defer release()
 	out, err := client.ObserveUpdateOperation(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) StageDestination(ctx context.Context, request model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	dest, ok := client.(runtimeservice.DestinationClient)
+	if !ok {
+		return model.RuntimeOperationResult{}, errEmbeddedRuntimeDisabled
+	}
+	out, err := dest.StageDestination(callCtx, request)
 	return out, c.wrapErr(err)
 }
 
@@ -1309,7 +1349,7 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	done := make(chan struct{})
 	gate := &a.embeddedExecution
 	gate.mu.Lock()
-	if gate.closed || gate.committingExternal {
+	if gate.closed {
 		gate.mu.Unlock()
 		cancel()
 		close(done)
@@ -1337,9 +1377,10 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 		defer close(done)
 		reconciler.Run(workerCtx)
 	}()
-	watchInterval := time.Second
-	if interval > 0 && interval < watchInterval {
-		watchInterval = interval
+	externalCommitted := a.externalCommittedSignal()
+	watchInterval := interval
+	if watchInterval < time.Second {
+		watchInterval = time.Second
 	}
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
@@ -1349,6 +1390,10 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 			<-done
 			return
 		case <-done:
+			return
+		case <-externalCommitted:
+			cancel()
+			<-done
 			return
 		case <-ticker.C:
 			op, err := a.current(ctx)

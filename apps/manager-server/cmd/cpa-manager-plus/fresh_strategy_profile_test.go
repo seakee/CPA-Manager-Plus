@@ -1327,3 +1327,614 @@ func TestFreshRuntimeClientAdapterStartRejectsExternalModeWithoutExternalCalls(t
 		t.Fatalf("adapter.Start in ConnectExternal mode contacted Supervisor %d times", got)
 	}
 }
+
+// TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime verifies P1:
+// (A) a ConnectExternal attempt that fails preflight/execution or rolls back at
+// store commit does not disable Embedded runtime reads/mutations or kill the
+// Embedded reconciler, so switching to NewManaged still succeeds;
+// (B) a racing ConnectExternal request that ends 409 Conflict after a
+// NewManaged commit leaves the committed Managed installation's runtime
+// operations and reconciler working.
+func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T) {
+	const management = externalAuthorityManagement
+	const artifactID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	t.Run("failed_preflight_and_aborted_store_commit_preserve_managed_flow", func(t *testing.T) {
+		var rejectExternalAuth atomic.Bool
+		rejectExternalAuth.Store(true)
+		externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if rejectExternalAuth.Load() {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("X-CPA-Version", "v8.0.55")
+			switch r.URL.Path {
+			case "/v8/management/config":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+			case "/v8/management/config.yaml":
+				_, _ = w.Write([]byte(`{"config-version":8}`))
+			default:
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}
+		}))
+		t.Cleanup(externalServer.Close)
+
+		var supervisorStatusHits atomic.Int32
+		var supervisorRestartHits atomic.Int32
+		var stagedManagementKey atomic.Value
+		managedDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key, _ := stagedManagementKey.Load().(string)
+			if key == "" || r.Header.Get("Authorization") != "Bearer "+key {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+		}))
+		t.Cleanup(managedDest.Close)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				supervisorStatusHits.Add(1)
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"ready","capabilities":["start","restart","stage_destination"],"cpaObservedVersion":"v8.0.55","activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"}}`))
+			case "/v1/runtime/operations/stage-destination":
+				var req struct {
+					OperationID   string `json:"operationId"`
+					ManagementKey string `json:"managementKey"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				stagedManagementKey.Store(req.ManagementKey)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"stage_destination","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			case "/v1/runtime/operations/start":
+				var req struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"start","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			case "/v1/runtime/operations/restart":
+				var req struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				supervisorRestartHits.Add(1)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"restart","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("rollback-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   managedDest.URL,
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Runtime:             freshReadyStartRuntime(app.embeddedRuntimeClient()),
+			Protector:           opened.Protector,
+			DestinationBaseURL:  managedDest.URL,
+			Qualification:       bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+			QualifiedArtifactID: model.RuntimeArtifactID(artifactID),
+			InitialClientKey:    installTestClientKey,
+		})
+		app.desiredState = staticDesiredRunningStore{}
+
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := app.keys.Create(t.Context(), strings.Repeat("d", 32)); err != nil {
+			t.Fatal(err)
+		}
+
+		reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
+		defer cancelReconciler()
+		reconcilerExited := make(chan struct{})
+		go func() {
+			defer close(reconcilerExited)
+			app.runFreshEmbeddedReconciler(reconcilerCtx, 30*time.Millisecond)
+		}()
+
+		// 1. Failed ConnectExternal execution (bad management key -> 401 from External CPA).
+		postStrategy := func(reqBody freshstrategy.Request) *httptest.ResponseRecorder {
+			cur, loadErr := app.store.Load(t.Context())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			payload, marshalErr := json.Marshal(struct {
+				Identity         bootstrap.FreshIdentity `json:"identity"`
+				ExpectedRevision uint64                  `json:"expectedRevision"`
+				AttemptID        string                  `json:"attemptId"`
+				freshstrategy.Request
+			}{
+				Identity:         cur.Operation.Identity,
+				ExpectedRevision: cur.Operation.Revision,
+				AttemptID:        strings.Repeat("a", 32),
+				Request:          reqBody,
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.canonicalAPI(out, req)
+			return out
+		}
+
+		failedAuthRes := postStrategy(freshstrategy.Request{
+			Strategy:      bootstrap.ConnectExternal,
+			BaseURL:       externalServer.URL,
+			ManagementKey: management,
+		})
+		if failedAuthRes.Code == http.StatusOK {
+			t.Fatalf("expected failed ConnectExternal preflight/auth to be rejected, got 200: %s", failedAuthRes.Body.String())
+		}
+
+		// 2. ConnectExternal passes Execute, enters beginExternalCommit, and fails inside store.Update
+		// (externalPermit returns true before Execute/after Execute and false inside store.Update).
+		rejectExternalAuth.Store(false)
+		var permitChecks atomic.Int32
+		app.externalPermit = func(bootstrap.FreshOperation, uint64, string, string, string) bool {
+			return permitChecks.Add(1) <= 2
+		}
+		revokedRes := postStrategy(freshstrategy.Request{
+			Strategy:      bootstrap.ConnectExternal,
+			BaseURL:       externalServer.URL,
+			ManagementKey: management,
+		})
+		if revokedRes.Code != http.StatusServiceUnavailable {
+			t.Fatalf("revoked-permit ConnectExternal = %d %s, want 503", revokedRes.Code, revokedRes.Body.String())
+		}
+		app.externalPermit = nil
+
+		// Embedded reconciler must still be running after both failed ConnectExternal attempts.
+		select {
+		case <-reconcilerExited:
+			t.Fatal("reconciler exited after failed ConnectExternal attempt")
+		default:
+		}
+
+		// Embedded installation runtime probe must still succeed.
+		instReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil)
+		instReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		instRes := httptest.NewRecorder()
+		app.canonicalAPI(instRes, instReq)
+		if instRes.Code != http.StatusOK || !strings.Contains(instRes.Body.String(), `"state":"ready"`) {
+			t.Fatalf("GET installation/runtime after failed ConnectExternal = %d %s, want 200 state=ready", instRes.Code, instRes.Body.String())
+		}
+
+		// Switching to NewManaged (staged -> committed) must succeed.
+		managedReq := freshstrategy.Request{
+			Strategy:                  bootstrap.NewManaged,
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 1,
+			ExpectedArtifactID:        model.RuntimeArtifactID(artifactID),
+		}
+		stagedRes := postStrategy(managedReq)
+		if stagedRes.Code != http.StatusOK || !strings.Contains(stagedRes.Body.String(), `"stage":"staged"`) {
+			t.Fatalf("POST strategy (NewManaged stage 1) after failed ConnectExternal = %d %s, want 200 staged", stagedRes.Code, stagedRes.Body.String())
+		}
+		managedRes := postStrategy(managedReq)
+		if managedRes.Code != http.StatusOK || !strings.Contains(managedRes.Body.String(), `"initialClientKey"`) {
+			t.Fatalf("POST strategy (NewManaged stage 2) after failed ConnectExternal = %d %s, want 200 committed", managedRes.Code, managedRes.Body.String())
+		}
+		// Mark ProductComplete and verify Embedded runtime/status, runtime/operations, and reconciler all work.
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), cur.Operation.Identity, cur.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		statusReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		statusReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		statusRes := httptest.NewRecorder()
+		app.canonicalAPI(statusRes, statusReq)
+		if statusRes.Code != http.StatusOK || !strings.Contains(statusRes.Body.String(), `"mode":"embedded"`) || !strings.Contains(statusRes.Body.String(), `"status":"ready"`) {
+			t.Fatalf("GET runtime/status after NewManaged commit = %d %s, want 200 embedded/ready", statusRes.Code, statusRes.Body.String())
+		}
+
+		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+			strings.NewReader(`{"action":"restart","requestId":"44444444-4444-4444-8444-444444444444"}`))
+		opReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		opReq.Header.Set("Content-Type", "application/json")
+		opRes := httptest.NewRecorder()
+		app.canonicalAPI(opRes, opReq)
+		if opRes.Code != http.StatusOK || supervisorRestartHits.Load() != 1 {
+			t.Fatalf("POST runtime/operations (restart) = %d %s (restartHits=%d), want 200", opRes.Code, opRes.Body.String(), supervisorRestartHits.Load())
+		}
+
+		hitsBefore := supervisorStatusHits.Load()
+		time.Sleep(80 * time.Millisecond)
+		if supervisorStatusHits.Load() <= hitsBefore {
+			t.Fatal("expected reconciler to continue polling Supervisor after failed ConnectExternal rollback")
+		}
+		select {
+		case <-reconcilerExited:
+			t.Fatal("reconciler exited unexpectedly on committed NewManaged install")
+		default:
+		}
+	})
+
+	t.Run("racing_external_ending_409_after_new_managed_commit_preserves_embedded_runtime", func(t *testing.T) {
+		externalEntered := make(chan struct{})
+		releaseExternal := make(chan struct{})
+		var enteredOnce sync.Once
+		var releaseOnce sync.Once
+		externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			enteredOnce.Do(func() { close(externalEntered) })
+			<-releaseExternal
+			w.Header().Set("X-CPA-Version", "v8.0.55")
+			switch r.URL.Path {
+			case "/v8/management/config":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+			case "/v8/management/config.yaml":
+				_, _ = w.Write([]byte(`{"config-version":8}`))
+			default:
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}
+		}))
+		t.Cleanup(externalServer.Close)
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseExternal) }) })
+
+		var supervisorRestartHits atomic.Int32
+		var stagedManagementKey atomic.Value
+		managedDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key, _ := stagedManagementKey.Load().(string)
+			if key == "" || r.Header.Get("Authorization") != "Bearer "+key {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+		}))
+		t.Cleanup(managedDest.Close)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"ready","capabilities":["start","restart","stage_destination"],"cpaObservedVersion":"v8.0.55","activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"}}`))
+			case "/v1/runtime/operations/stage-destination":
+				var req struct {
+					OperationID   string `json:"operationId"`
+					ManagementKey string `json:"managementKey"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				stagedManagementKey.Store(req.ManagementKey)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"stage_destination","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			case "/v1/runtime/operations/start":
+				var req struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"start","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			case "/v1/runtime/operations/restart":
+				var req struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				supervisorRestartHits.Add(1)
+				_, _ = w.Write([]byte(`{"operationId":"` + req.OperationID + `","operationType":"restart","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("race409-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   managedDest.URL,
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Runtime:             freshReadyStartRuntime(app.embeddedRuntimeClient()),
+			Protector:           opened.Protector,
+			DestinationBaseURL:  managedDest.URL,
+			Qualification:       bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+			QualifiedArtifactID: model.RuntimeArtifactID(artifactID),
+			InitialClientKey:    installTestClientKey,
+		})
+		app.desiredState = staticDesiredRunningStore{}
+
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := app.keys.Create(t.Context(), strings.Repeat("e", 32)); err != nil {
+			t.Fatal(err)
+		}
+
+		reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
+		defer cancelReconciler()
+		reconcilerExited := make(chan struct{})
+		go func() {
+			defer close(reconcilerExited)
+			app.runFreshEmbeddedReconciler(reconcilerCtx, 30*time.Millisecond)
+		}()
+
+		// Launch racing ConnectExternal request that blocks inside externalServer during Execute.
+		extPayload, err := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         rec.Operation.Identity,
+			ExpectedRevision: rec.Operation.Revision,
+			AttemptID:        strings.Repeat("b", 32),
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalServer.URL,
+				ManagementKey: management,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		extDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(extPayload))
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.canonicalAPI(out, req)
+			extDone <- out
+		}()
+		<-externalEntered
+
+		// Commit NewManaged (staged -> committed) while ConnectExternal is in flight.
+		postMgd := func(rev uint64) *httptest.ResponseRecorder {
+			mgdPayload, marshalErr := json.Marshal(struct {
+				Identity         bootstrap.FreshIdentity `json:"identity"`
+				ExpectedRevision uint64                  `json:"expectedRevision"`
+				freshstrategy.Request
+			}{
+				Identity:         rec.Operation.Identity,
+				ExpectedRevision: rev,
+				Request: freshstrategy.Request{
+					Strategy:                  bootstrap.NewManaged,
+					ExpectedRuntimeIdentity:   "runtime-01",
+					ExpectedRuntimeGeneration: 1,
+					ExpectedArtifactID:        model.RuntimeArtifactID(artifactID),
+				},
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			mgdReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(mgdPayload))
+			mgdReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			mgdReq.Header.Set("Content-Type", "application/json")
+			mgdRes := httptest.NewRecorder()
+			app.canonicalAPI(mgdRes, mgdReq)
+			return mgdRes
+		}
+		if res1 := postMgd(rec.Operation.Revision); res1.Code != http.StatusOK || !strings.Contains(res1.Body.String(), `"stage":"staged"`) {
+			t.Fatalf("POST strategy (NewManaged stage 1) = %d %s, want 200 staged", res1.Code, res1.Body.String())
+		}
+		stagedRec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res2 := postMgd(stagedRec.Operation.Revision); res2.Code != http.StatusOK || !strings.Contains(res2.Body.String(), `"initialClientKey"`) {
+			t.Fatalf("POST strategy (NewManaged stage 2) = %d %s, want 200 committed", res2.Code, res2.Body.String())
+		}
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), cur.Operation.Identity, cur.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Release the racing ConnectExternal request; it must end 409 Conflict without touching the Embedded gate.
+		releaseOnce.Do(func() { close(releaseExternal) })
+		extRes := <-extDone
+		if extRes.Code != http.StatusConflict {
+			t.Fatalf("racing ConnectExternal after NewManaged commit = %d %s, want 409", extRes.Code, extRes.Body.String())
+		}
+
+		// Verify runtime/operations and reconciler on the committed NewManaged install still work.
+		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+			strings.NewReader(`{"action":"restart","requestId":"55555555-5555-4555-8555-555555555555"}`))
+		opReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		opReq.Header.Set("Content-Type", "application/json")
+		opRes := httptest.NewRecorder()
+		app.canonicalAPI(opRes, opReq)
+		if opRes.Code != http.StatusOK || supervisorRestartHits.Load() != 1 {
+			t.Fatalf("POST runtime/operations after racing 409 ConnectExternal = %d %s (restartHits=%d), want 200", opRes.Code, opRes.Body.String(), supervisorRestartHits.Load())
+		}
+		select {
+		case <-reconcilerExited:
+			t.Fatal("reconciler exited after racing 409 ConnectExternal")
+		default:
+		}
+	})
+}
+
+// TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling verifies P2:
+// runFreshEmbeddedReconciler does not poll SQLite at sub-second intervals while
+// running, and retires immediately via the in-memory externalCommitted signal
+// when ConnectExternal commits even when configured with a multi-hour interval.
+func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
+	const management = externalAuthorityManagement
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-CPA-Version", "v8.0.55")
+		switch r.URL.Path {
+		case "/v8/management/config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+		case "/v8/management/config.yaml":
+			_, _ = w.Write([]byte(`{"config-version":8}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	t.Cleanup(externalServer.Close)
+
+	initialStatus := make(chan struct{})
+	var initialOnce sync.Once
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"healthy"}`))
+		initialOnce.Do(func() { close(initialStatus) })
+	}))
+	t.Cleanup(supervisor.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+	if err := os.WriteFile(tokenPath, []byte("signal-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:8317",
+	}, nil)
+	app.strategy = freshstrategy.New(freshstrategy.Options{
+		Protector:     opened.Protector,
+		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+	})
+	app.desiredState = staticDesiredRunningStore{}
+
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	countingStore := &nthLoadFailingStore{Store: app.store}
+	app.store = countingStore
+
+	reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
+	defer cancelReconciler()
+	reconcilerExited := make(chan struct{})
+	// Use a 10-hour reconcile interval so neither the reconciler ticker nor the
+	// fallback watch ticker can fire during the test.
+	go func() {
+		defer close(reconcilerExited)
+		app.runFreshEmbeddedReconciler(reconcilerCtx, 10*time.Hour)
+	}()
+
+	select {
+	case <-initialStatus:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial reconcile cycle did not complete")
+	}
+	time.Sleep(20 * time.Millisecond)
+	loadsAfterInit := countingStore.calls.Load()
+	time.Sleep(150 * time.Millisecond)
+	if got := countingStore.calls.Load(); got != loadsAfterInit {
+		t.Fatalf("store.Load calls during 150ms idle window = %d, want %d (no 25ms polling)", got, loadsAfterInit)
+	}
+
+	// Commit ConnectExternal and verify reconciler retires immediately via the in-memory signal.
+	payload, err := json.Marshal(struct {
+		Identity         bootstrap.FreshIdentity `json:"identity"`
+		ExpectedRevision uint64                  `json:"expectedRevision"`
+		AttemptID        string                  `json:"attemptId"`
+		freshstrategy.Request
+	}{
+		Identity:         rec.Operation.Identity,
+		ExpectedRevision: rec.Operation.Revision,
+		AttemptID:        strings.Repeat("c", 32),
+		Request: freshstrategy.Request{
+			Strategy:      bootstrap.ConnectExternal,
+			BaseURL:       externalServer.URL,
+			ManagementKey: management,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+	commitReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	commitReq.Header.Set("Content-Type", "application/json")
+	commitRes := httptest.NewRecorder()
+	app.canonicalAPI(commitRes, commitReq)
+	if commitRes.Code != http.StatusOK {
+		t.Fatalf("POST strategy (ConnectExternal) = %d %s, want 200", commitRes.Code, commitRes.Body.String())
+	}
+
+	select {
+	case <-reconcilerExited:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("reconciler did not retire immediately via externalCommitted signal")
+	}
+}
