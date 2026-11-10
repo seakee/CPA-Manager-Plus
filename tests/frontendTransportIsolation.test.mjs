@@ -6,7 +6,11 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { createPublicApiClient } from '../apps/web/src/fullweb/publicApi.ts';
 import { resolveRoutingContext } from '../apps/web/src/fullweb/routingContext.ts';
-import { FRESH_LANGUAGE_STORAGE_KEY } from '../apps/web/src/fullweb/freshLanguage.ts';
+import {
+  FRESH_LANGUAGE_STORAGE_KEY,
+  activateFreshLanguage,
+  persistFreshLanguage,
+} from '../apps/web/src/fullweb/freshLanguage.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'apps/web');
@@ -176,24 +180,55 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
     for (const file of files) {
       const source = readFileSync(path.join(src, file), 'utf8');
       // The interface language is the one non-secret preference the Bootstrap
-      // entry shares with the Console, so it owns the only storage read here.
-      // The Console store, the legacy endpoint table and every session/auth
-      // module stay out of this graph; freshLanguage.test.ts pins the key and
-      // the menu order to the Console values.
-      if (file === 'fullweb/freshLanguage.ts') {
-        // The shared language preference is the only storage this entry owns,
-        // and only through localStorage under that one key: no session or auth
-        // storage, no legacy endpoint.
-        expect(source).not.toMatch(/\/v0\/management|sessionStorage/);
-        expect(source.match(/localStorage\.\w+/g)).toEqual([
-          'localStorage.getItem',
-          'localStorage.setItem',
-        ]);
-        expect(source).not.toMatch(/localStorage\.(?:get|set)Item\((?!\s*FRESH_LANGUAGE_STORAGE_KEY)/);
-        expect(source).toContain(`'${FRESH_LANGUAGE_STORAGE_KEY}'`);
-        continue;
-      }
+      // entry shares with the Console, so this one file legitimately persists
+      // it. Which keys it may touch is enforced by behavior, not by counting
+      // source text: see the storage recorder test below. The Console store,
+      // the legacy endpoint table and every session/auth module stay out of
+      // this graph.
+      if (file === 'fullweb/freshLanguage.ts') continue;
       expect(source, file).not.toMatch(/localStorage|sessionStorage|\/v0\/management/);
+    }
+  });
+
+  it('keeps the Bootstrap storage exception on the language key alone', () => {
+    const touched = [];
+    let stored = null;
+    const only = (key) => {
+      if (key !== FRESH_LANGUAGE_STORAGE_KEY) throw new Error(`unexpected storage key ${key}`);
+    };
+    vi.stubGlobal('navigator', { languages: ['zh-HK'], language: 'zh-HK' });
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => {
+        only(key);
+        touched.push(`read ${key}`);
+        return stored;
+      },
+      setItem: (key, value) => {
+        only(key);
+        touched.push(`write ${key}`);
+        stored = value;
+      },
+      removeItem: (key) => {
+        only(key);
+        touched.push(`remove ${key}`);
+      },
+      clear: () => {
+        throw new Error('the Bootstrap entry must never clear browser storage');
+      },
+    });
+    try {
+      // Activation and the header switch are the entry's whole storage surface.
+      expect(activateFreshLanguage()).toBe('zh-TW');
+      persistFreshLanguage('ru');
+      // Every read and write the entry made named the one shared language key;
+      // any other key would already have thrown inside the stub above.
+      expect(touched.length).toBeGreaterThan(0);
+      expect(touched.every((entry) => entry.endsWith(` ${FRESH_LANGUAGE_STORAGE_KEY}`))).toBe(true);
+      expect(touched.some((entry) => entry.startsWith('read '))).toBe(true);
+      expect(touched.some((entry) => entry.startsWith('write '))).toBe(true);
+      expect(JSON.parse(stored).state.language).toBe('ru');
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

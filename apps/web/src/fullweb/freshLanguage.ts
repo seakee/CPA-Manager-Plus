@@ -20,6 +20,16 @@ export function isFreshLanguage(value: string): value is Language {
   return (FRESH_LANGUAGES as readonly string[]).includes(value);
 }
 
+// The Bootstrap entry's only storage touchpoint. Both entries share one key,
+// and this typed accessor exposes no way to name another: a read or write of
+// any other key has to reintroduce a raw `localStorage` call. The runtime gate
+// in tests/frontendTransportIsolation.test.mjs records every key this entry
+// actually touches while it activates and persists the language.
+const languageStorage = {
+  read: (): string | null => localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY),
+  write: (value: string): void => localStorage.setItem(FRESH_LANGUAGE_STORAGE_KEY, value),
+};
+
 interface PersistedPayload {
   state: Record<string, unknown>;
   version: number;
@@ -31,7 +41,7 @@ function persistedPayload(): PersistedPayload {
   if (typeof localStorage === 'undefined') return empty;
   let parsed: unknown;
   try {
-    const raw = localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY);
+    const raw = languageStorage.read();
     if (!raw) return empty;
     try {
       parsed = JSON.parse(raw);
@@ -66,8 +76,7 @@ export function persistFreshLanguage(language: Language): void {
   if (typeof localStorage === 'undefined') return;
   try {
     const payload = persistedPayload();
-    localStorage.setItem(
-      FRESH_LANGUAGE_STORAGE_KEY,
+    languageStorage.write(
       JSON.stringify({ state: { ...payload.state, language }, version: payload.version })
     );
   } catch {

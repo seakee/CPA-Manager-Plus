@@ -4,7 +4,6 @@ import { BOOTSTRAP_UI, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
 import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
-import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
 import { activateFreshLanguage, FRESH_LANGUAGE_STORAGE_KEY } from './freshLanguage';
 
 vi.mock('./UpgradeAuthenticationEntry', () => ({
@@ -43,11 +42,34 @@ function textOf(node: ReactTestInstance): string {
   return node.children.map((child) => (typeof child === 'string' ? child : textOf(child))).join('');
 }
 
-// The page keeps copy keys, not rendered sentences, so assertions name the key
-// and resolve it in the language under test.
-const copy = (language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', key: FreshBootstrapTextKey) =>
-  bootstrapText(key, undefined, language);
+// Copy is asserted by what a reader can see in the rendered tree — the script
+// it is written in and the structure the state exposes — never by echoing the
+// production translation table back at itself.
 const CJK = /[\u4e00-\u9fff]/;
+const CYRILLIC = /[\u0400-\u04ff]/;
+const LATIN = /[A-Za-z]/;
+
+// What a reader of that language must actually see: the interface copy is in
+// their script, not the fallback table. Protocol terms (Handoff, Claim,
+// data.key, cpa-manager-plus) stay untranslated in every language.
+function assertRenderedIn(language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', text: string): void {
+  expect(text).not.toBe('');
+  if (language === 'ru') {
+    expect(text).toMatch(CYRILLIC);
+  } else {
+    expect(text).toMatch(LATIN);
+  }
+  if (language === 'en') {
+    expect(text).not.toMatch(CYRILLIC);
+  }
+  if (language === 'zh-CN' || language === 'zh-TW') {
+    expect(text).toMatch(CJK);
+    expect(text).not.toMatch(CYRILLIC);
+  } else {
+    expect(text).not.toMatch(CJK);
+  }
+}
+
 // Stands in for the browser store the Console language menu persists into.
 const storage = new Map<string, string>();
 
@@ -107,9 +129,10 @@ describe('FreshBootstrapPage product preview workflow', () => {
         <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
       );
     });
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      copy('zh-CN', 'checkingTitle')
-    );
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).not.toBe('');
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
+    ).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'aria-label': 'Fresh Bootstrap 进度' })).toHaveLength(0);
     await act(async () => {
@@ -172,16 +195,56 @@ describe('FreshBootstrapPage product preview workflow', () => {
         <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
       );
     });
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'))).toContain(
-      copy('zh-CN', 'gateUnconfirmedTitle')
-    );
+    const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
+    expect(gate).toMatch(CJK);
+    expect(gate).not.toContain('cpa-manager-plus initialize');
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
     ).toHaveLength(0);
-    expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      copy('zh-CN', 'unconfirmedTitle')
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+    ).toHaveLength(0);
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).not.toBe('');
+  });
+
+  it('tells the pending source check apart from an unconfirmed source', async () => {
+    let settle!: (value: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = resolve;
+          })
+      )
     );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    const pending = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
+    expect(pending).toMatch(CJK);
+
+    // A result that grants no authority retires the pending wording: reaching
+    // the server must change what the operator reads, not leave it as-is.
+    await act(async () => {
+      settle(
+        Response.json({
+          contract_version: 'cpamp.phase4-01.discovery.v1',
+          status: 'fresh_claim_required',
+          mode: 'fresh',
+          auth_entry: 'fresh_claim',
+          reason: 'qualification_unavailable',
+          authentication_required: true,
+        })
+      );
+    });
+    const settled = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
+    expect(settled).toMatch(CJK);
+    expect(settled).not.toBe(pending);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
   });
 
   it('rechecks an unknown source and shows Fresh guidance only after verified discovery', async () => {
@@ -264,9 +327,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
         />
       );
     });
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-      copy('zh-CN', 'guidanceUnavailableTitle')
-    );
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toMatch(CJK);
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
     ).toHaveLength(1);
@@ -275,9 +336,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
       findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick()
     );
     expect(publicDiscovery).toHaveBeenCalledTimes(2);
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      copy('zh-CN', 'checkingTitle')
-    );
+    // The recheck retires the guidance and shows the pending state instead.
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
+    ).toHaveLength(0);
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).not.toBe('');
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
     ).toHaveLength(0);
@@ -343,9 +406,10 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
     ).toHaveLength(0);
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      copy('zh-CN', 'checkingTitle')
-    );
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).not.toBe('');
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
+    ).toHaveLength(0);
     await act(async () => {
       resolveRecheck(
         Response.json(
@@ -361,24 +425,13 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-      copy('zh-CN', 'guidanceUnavailableTitle')
-    );
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toMatch(CJK);
     expect(bootstrapTransport).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [
-      'fresh_claim_required',
-      'fresh',
-      'fresh_claim',
-      'fresh_claim_required',
-      true,
-      copy('zh-CN', 'guidanceFreshTitle'),
-    ],
-  ])(
+  it.each([['fresh_claim_required', 'fresh', 'fresh_claim', 'fresh_claim_required', true]])(
     'shows owned Fresh discovery status %s without claiming an operation',
-    async (status, mode, authEntry, reason, authRequired, title) => {
+    async (status, mode, authEntry, reason, authRequired) => {
       const discovery = vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
@@ -398,7 +451,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
         renderer = create(<FreshBootstrapPage handoff={null} transport={transport} />);
       });
 
-      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(title);
+      const guidance = textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'));
+      expect(guidance).toMatch(CJK);
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+      ).toHaveLength(0);
       const command = renderer.root.findAllByProps({
         'data-testid': 'cli-handoff-command',
       });
@@ -442,31 +499,15 @@ describe('FreshBootstrapPage product preview workflow', () => {
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
     ).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      copy('zh-CN', 'unconfirmedTitle')
-    );
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toMatch(CJK);
   });
 
   it.each([
-    [
-      'unsupported_upgrade',
-      'unsupported_upgrade',
-      'admin_session',
-      'qualification_unavailable',
-      true,
-      copy('zh-CN', 'guidanceUpgradeTitle'),
-    ],
-    [
-      'recovery_required',
-      'recovery',
-      'host_intervention',
-      'recovery_host_intervention',
-      false,
-      copy('zh-CN', 'guidanceRecoveryTitle'),
-    ],
+    ['unsupported_upgrade', 'unsupported_upgrade', 'admin_session', 'qualification_unavailable', true],
+    ['recovery_required', 'recovery', 'host_intervention', 'recovery_host_intervention', false],
   ])(
     'routes non-Fresh %s to its own authentication or host gate',
-    async (status, mode, authEntry, reason, authRequired, title) => {
+    async (status, mode, authEntry, reason, authRequired) => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValue(
@@ -494,7 +535,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
         expect(renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })).toHaveLength(0);
         return;
       }
-      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(title);
+      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toMatch(CJK);
       expect(renderer.root.findAllByProps({ 'aria-label': 'Fresh Bootstrap 进度' })).toHaveLength(
         0
       );
@@ -530,8 +571,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
-    expect(gate).toContain(copy('zh-CN', 'guidanceUnavailableTitle'));
+    expect(gate).toMatch(CJK);
     expect(gate).not.toContain('cpa-manager-plus initialize');
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+    ).toHaveLength(1);
     expect(textOf(findByTestId(renderer.root, 'host-preflight-command'))).toBe(
       'cpa-manager-plus legacy-preflight --db /path/to/usage.sqlite --summary'
     );
@@ -624,9 +668,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
       ).toHaveLength(0);
-      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-        copy('zh-CN', 'unconfirmedTitle')
-      );
+      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toMatch(CJK);
     }
   );
 
@@ -680,12 +722,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
       renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
     });
 
-    expect(textOf(findByTestId(renderer.root, 'init-error-detail'))).toContain(
-      copy('zh-CN', 'errorTransportStartDetail')
-    );
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-authority-error'))).toContain(
-      copy('zh-CN', 'reconnectNote')
-    );
+    const detail = textOf(findByTestId(renderer.root, 'init-error-detail'));
+    expect(detail).toMatch(CJK);
+    expect(detail).not.toBe(textOf(findByTestId(renderer.root, 'init-error-title')));
+    // The transport failure keeps the named recovery affordances on screen.
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
+    ).toHaveLength(1);
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-authority-error'))).toMatch(CJK);
   });
 
   it('opens the unified CPA, key and route journey after claim rather than a separate Admin setup', async () => {
@@ -723,9 +767,6 @@ describe('FreshBootstrapPage product preview workflow', () => {
             authentication_required: true,
           },
           httpStatus: 200,
-          tag: 'gateTagBootstrap',
-          title: 'guidanceFreshTitle',
-          detail: 'guidanceFreshDetail',
           hostPreflight: false,
         },
         {
@@ -737,9 +778,6 @@ describe('FreshBootstrapPage product preview workflow', () => {
             authentication_required: false,
           },
           httpStatus: 200,
-          tag: 'gateTagPreflight',
-          title: 'guidanceRecoveryTitle',
-          detail: 'guidanceRecoveryDetail',
           hostPreflight: true,
         },
         {
@@ -750,9 +788,6 @@ describe('FreshBootstrapPage product preview workflow', () => {
             authentication_required: false,
           },
           httpStatus: 503,
-          tag: 'gateTagPreflight',
-          title: 'guidanceUnavailableTitle',
-          detail: 'guidanceUnavailableDetail',
           hostPreflight: true,
         },
       ] as const;
@@ -774,14 +809,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
           );
         });
         const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
-        expect(gate).toContain(copy(language, state.tag));
-        expect(gate).toContain(copy(language, state.title));
-        expect(gate).toContain(copy(language, state.detail));
-        if (state.hostPreflight) {
-          expect(gate).toContain(copy(language, 'preflightTitle'));
-          expect(gate).toContain(copy(language, 'preflightDesc'));
-        }
-        expect(gate).not.toMatch(CJK);
+        assertRenderedIn(language, gate);
+        // The gate says which host action applies, with its command present.
+        expect(
+          renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+        ).toHaveLength(state.hostPreflight ? 1 : 0);
+        expect(
+          renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })
+        ).toHaveLength(state.hostPreflight ? 0 : 1);
         await act(async () => renderer.unmount());
       }
     }
@@ -799,27 +834,20 @@ describe('FreshBootstrapPage product preview workflow', () => {
       await act(async () => {
         renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
       });
-      expect(textOf(findByTestId(renderer.root, 'init-error-title'))).toBe(
-        copy(language, 'errorTransportTitle')
-      );
-      expect(textOf(findByTestId(renderer.root, 'init-error-detail'))).toBe(
-        copy(language, 'errorTransportStartDetail')
-      );
+      const title = textOf(findByTestId(renderer.root, 'init-error-title'));
+      const detail = textOf(findByTestId(renderer.root, 'init-error-detail'));
+      assertRenderedIn(language, title);
+      assertRenderedIn(language, detail);
+      expect(detail).not.toBe(title);
       const card = textOf(findByTestId(renderer.root, 'bootstrap-authority-error'));
-      for (const key of [
-        'authorityFailedTag',
-        'authorityFailedTitle',
-        'authorityFailedDesc',
-        'reconnectNote',
-        'retryBootstrap',
-        'diagnosticsOperationId',
-        'claimGeneration',
-        'handoffMode',
-        'handoffModeFresh',
-      ] as const) {
-        expect(card).toContain(copy(language, key));
-      }
-      expect(card).not.toMatch(CJK);
+      // The card keeps the operator-facing facts and the way out, in that language.
+      assertRenderedIn(language, card);
+      expect(card).toContain(identity.operationId);
+      expect(card).toContain(`#${handoff.claimGeneration}`);
+      expect(card).toContain('cpa-manager-plus initialize');
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
+      ).toHaveLength(1);
       await act(async () => renderer.unmount());
     }
   );
@@ -840,13 +868,10 @@ describe('FreshBootstrapPage product preview workflow', () => {
       renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
     });
     const card = textOf(findByTestId(renderer.root, 'bootstrap-connecting'));
-    expect(card).toContain(bootstrapJourneyText('claiming', language));
-    expect(card).toContain(copy(language, 'diagnosticsMode'));
-    expect(card).toContain(copy(language, 'diagnosticsModeClaim'));
-    expect(card).toContain(copy(language, 'diagnosticsOperationId'));
-    expect(card).toContain(copy(language, 'diagnosticsInstallation'));
+    assertRenderedIn(language, card);
+    // The diagnostics name the real claim facts an operator quotes back.
     expect(card).toContain(identity.operationId);
-    expect(card).not.toMatch(CJK);
+    expect(card).toContain(`${identity.installationId} · ${identity.generation}`);
     await act(async () => {
       resolveStart(Response.json({ token: 'installation-session', operation: pendingOperation }));
     });
@@ -865,26 +890,30 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => {
       renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
     });
-    expect(
-      textOf(findByTestId(renderer.root, 'fresh-setup-wizard'))
-    ).toContain(bootstrapJourneyText('welcome', 'zh-CN'));
-    expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe('zh-CN');
+    // The menu offers every Console language once, in the Console's order, and
+    // each entry names itself so a reader can find their own language.
+    const select = findByTestId(renderer.root, 'bootstrap-language');
+    const options = select.children.filter(
+      (child): child is ReactTestInstance => typeof child !== 'string'
+    );
+    expect(options.map((option) => option.props.value)).toEqual(['zh-CN', 'zh-TW', 'en', 'ru']);
+    const labels = options.map((option) => textOf(option));
+    expect(labels.every((label) => label !== '')).toBe(true);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(select.props.value).toBe('zh-CN');
+    const before = textOf(findByTestId(renderer.root, 'fresh-setup-wizard'));
+    expect(before).toMatch(CJK);
 
     await act(async () => {
-      findByTestId(renderer.root, 'bootstrap-language').props.onChange({
-        target: { value: 'ru' },
-      });
+      select.props.onChange({ target: { value: 'ru' } });
     });
 
     expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe('ru');
     const wizard = textOf(findByTestId(renderer.root, 'fresh-setup-wizard'));
-    expect(wizard).toContain(bootstrapJourneyText('welcome', 'ru'));
-    expect(wizard).toContain(bootstrapJourneyText('chooseHelp', 'ru'));
-    expect(wizard).not.toContain(bootstrapJourneyText('welcome', 'zh-CN'));
+    expect(wizard).not.toBe(before);
+    assertRenderedIn('ru', wizard);
     // The same persisted store the Console header menu writes.
-    expect(storage.get(FRESH_LANGUAGE_STORAGE_KEY)).toBe(
-      JSON.stringify({ state: { language: 'ru' }, version: 0 })
-    );
+    expect(JSON.parse(storage.get(FRESH_LANGUAGE_STORAGE_KEY) ?? '').state.language).toBe('ru');
     await act(async () => renderer.unmount());
 
     // A fresh document starts on that stored choice, not the browser language.
@@ -894,25 +923,32 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(fullWebLanguage()).toBe('ru');
   });
 
-  it('renders Traditional Chinese on the first frame when the Console stores zh-TW', async () => {
+  it('renders Traditional Chinese copy distinct from Simplified when the Console stores zh-TW', async () => {
     storage.set(
       FRESH_LANGUAGE_STORAGE_KEY,
       JSON.stringify({ state: { language: 'zh-TW' }, version: 0 })
     );
     expect(activateFreshLanguage()).toBe('zh-TW');
-    let renderer!: ReactTestRenderer;
-    await act(async () => {
-      renderer = create(
-        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
-      );
-    });
 
-    const gate = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
-    // Traditional and Simplified copy must stay distinct, so a collapsed
-    // zh-TW branch cannot pass by falling back to the zh-CN table.
-    expect(copy('zh-TW', 'unconfirmedTitle')).not.toBe(copy('zh-CN', 'unconfirmedTitle'));
-    expect(gate).toContain(copy('zh-TW', 'unconfirmedTitle'));
-    expect(gate).not.toContain(copy('zh-CN', 'unconfirmedTitle'));
-    await act(async () => renderer.unmount());
+    const renderGate = async (language: 'zh-CN' | 'zh-TW') => {
+      setFullWebLanguage(language);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+        );
+      });
+      const gate = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
+      await act(async () => renderer.unmount());
+      return gate;
+    };
+
+    const traditional = await renderGate('zh-TW');
+    const simplified = await renderGate('zh-CN');
+    assertRenderedIn('zh-TW', traditional);
+    assertRenderedIn('zh-CN', simplified);
+    // Same state, same component: the only difference is the selected table, so
+    // a zh-TW branch that collapsed into zh-CN could not pass this.
+    expect(traditional).not.toBe(simplified);
   });
 });

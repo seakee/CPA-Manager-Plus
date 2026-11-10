@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LANGUAGE_ORDER, STORAGE_KEY_LANGUAGE } from '../utils/constants';
 import { getInitialLanguage } from '../utils/language';
 import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
 import {
-  FRESH_LANGUAGES,
   FRESH_LANGUAGE_STORAGE_KEY,
   activateFreshLanguage,
   isFreshLanguage,
@@ -28,16 +26,22 @@ describe('Bootstrap entry language preference', () => {
     vi.unstubAllGlobals();
   });
 
-  it('shares the Console language key and menu order', () => {
-    expect(FRESH_LANGUAGE_STORAGE_KEY).toBe(STORAGE_KEY_LANGUAGE);
-    expect([...FRESH_LANGUAGES]).toEqual([...LANGUAGE_ORDER]);
+  it('leaves the Console store on the language chosen during setup', async () => {
+    persistFreshLanguage('ru');
+
+    // The Console language menu owns this store; loading it must find the same
+    // preference the Bootstrap entry wrote, without either side naming a key.
+    // This is a module-loading boundary: zustand persist captures `localStorage`
+    // once, at store creation, so the store has to be evaluated after the
+    // browser stub exists — a static import would capture it at file load.
+    vi.resetModules();
+    const { useLanguageStore } = await import('../stores/useLanguageStore');
+
+    expect(useLanguageStore.getState().language).toBe('ru');
   });
 
-  it('reads and writes the zustand payload the Console store persists', () => {
+  it('reads payloads the Console store and older builds leave behind', () => {
     persistFreshLanguage('ru');
-    expect(storage.get(FRESH_LANGUAGE_STORAGE_KEY)).toBe(
-      JSON.stringify({ state: { language: 'ru' }, version: 0 })
-    );
     expect(persistedFreshLanguage()).toBe('ru');
 
     // An older plain value still resolves; an unsupported one never does.
