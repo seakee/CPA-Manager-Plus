@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,17 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
+
+// failingFreshStore answers every read with one store-level failure, which is
+// what a damaged database or an unreadable checkpoint surfaces as.
+type failingFreshStore struct {
+	freshstore.Store
+	err error
+}
+
+func (s failingFreshStore) Load(context.Context) (freshstore.Record, error) {
+	return freshstore.Record{}, s.err
+}
 
 // completedRuntimeTestApplication promotes the shared Fresh fixture to a
 // completed installation so the canonical Runtime resource is served through
@@ -144,11 +157,12 @@ func TestUnreadableDesiredLifecycleLocksOnlyTheRuntimeDomain(t *testing.T) {
 	}
 }
 
-// The reconcile Start fences the artifact the Manager committed, and that value
-// comes from the Fresh checkpoint, never from the Runtime observation. Deriving it
-// from the observation would make the fence unable to detect the selection change
-// it exists to catch.
-func TestCommittedArtifactComesFromTheFreshCheckpointNotTheObservation(t *testing.T) {
+// Only an incomplete installation pins the reconcile Start to the artifact its
+// wizard committed. A completed installation has no pin: `activate_update`
+// replaces the active engine in place and keeps the install-time artifact in the
+// checkpoint as audit evidence, so a pin here would refuse every restart after an
+// update.
+func TestCommittedArtifactPinsOnlyAnIncompleteInstallation(t *testing.T) {
 	harness := newManagedInstallHarness(t)
 	app := harness.app
 	committed := managedInstallRuntimeStatus().ActiveGatewayArtifact.ArtifactID
@@ -157,19 +171,30 @@ func TestCommittedArtifactComesFromTheFreshCheckpointNotTheObservation(t *testin
 	if !ok {
 		t.Fatal("the Manager-owned desired state store does not publish the committed artifact")
 	}
-	// The observation changes, the committed target does not: the Supervisor's
-	// current selection is not the Manager's authority.
+
+	// The harness installation is complete: no pin, whatever the observation says.
 	for _, status := range []model.RuntimeObservedStatus{
 		freshRuntimeReadyStatus(),
 		freshRuntimeReadyStatus(model.RuntimeCapabilityStart),
 		managedInstallRuntimeStatus(),
 	} {
 		app.runtime = &freshRuntimeTestClient{status: status}
-		artifactID, found, err := authority.LoadEmbeddedRuntimeCommittedArtifact(t.Context())
-		if err != nil || !found || artifactID != committed {
-			t.Fatalf("committed artifact for observation %+v = (%q, %v, %v), want %q",
-				status.State, artifactID, found, err, committed)
+		if artifactID, found, err := authority.LoadEmbeddedRuntimeCommittedArtifact(t.Context()); err != nil || found || artifactID != "" {
+			t.Fatalf("completed installation artifact = (%q, %v, %v), want none", artifactID, found, err)
 		}
+	}
+
+	// Until the installation completes it is pinned to its committed target.
+	incomplete := newManagedInstallHarnessWith(t, func(r *freshstore.Record, env managedInstallEnv) {
+		completedManagedInstall(r, env)
+		r.Operation.ProductComplete = false
+	}, true)
+	incompleteAuthority, ok := incomplete.app.desiredStateStore().(runtimeservice.CommittedArtifactStore)
+	if !ok {
+		t.Fatal("the incomplete desired state store does not publish the committed artifact")
+	}
+	if artifactID, found, err := incompleteAuthority.LoadEmbeddedRuntimeCommittedArtifact(t.Context()); err != nil || !found || artifactID != committed {
+		t.Fatalf("incomplete installation artifact = (%q, %v, %v), want %q", artifactID, found, err, committed)
 	}
 
 	// An unmigrated or operator-managed checkpoint was never staged by this
@@ -180,7 +205,119 @@ func TestCommittedArtifactComesFromTheFreshCheckpointNotTheObservation(t *testin
 		t.Fatal("the completed desired state store does not publish the committed artifact")
 	}
 	if artifactID, found, err := unmanagedAuthority.LoadEmbeddedRuntimeCommittedArtifact(t.Context()); err != nil || found || artifactID != "" {
-		t.Fatalf("unmigrated managed checkpoint committed artifact = (%q, %v, %v), want none", artifactID, found, err)
+		t.Fatalf("unmigrated managed checkpoint artifact = (%q, %v, %v), want none", artifactID, found, err)
+	}
+}
+
+// The embedded reconcile worker belongs to a Manager-owned installation. The
+// presence of an External client cannot answer which mode this process serves,
+// because the single official image configures one for every installation, so the
+// committed checkpoint decides. A Connect External installation points at the
+// operator's CPA and must never drive the local Supervisor.
+func TestEmbeddedReconcilerServesOnlyManagerOwnedInstallations(t *testing.T) {
+	app, _ := completedRuntimeTestApplication(t)
+	for name, test := range map[string]struct {
+		strategy bootstrap.FreshStrategyCheckpoint
+		err      error
+		want     bool
+	}{
+		"committed managed": {
+			strategy: bootstrap.FreshStrategyCheckpoint{
+				Strategy: bootstrap.NewManaged, Stage: "committed",
+				TargetIdentity: "runtime-test", TargetGeneration: 7,
+				TargetArtifactID:              "sha256:" + strings.Repeat("a", 64),
+				DestinationConnectionIdentity: "managed:sha256:" + strings.Repeat("b", 64),
+			},
+			want: true,
+		},
+		"adopted": {
+			strategy: bootstrap.FreshStrategyCheckpoint{
+				Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
+				TargetIdentity: "external:sha256:" + strings.Repeat("c", 64), TargetGeneration: 1,
+				TargetArtifactID:              "sha256:" + strings.Repeat("a", 64),
+				DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("c", 64),
+			},
+			want: true,
+		},
+		"connect external": {
+			strategy: bootstrap.FreshStrategyCheckpoint{
+				Strategy: bootstrap.ConnectExternal, Stage: "committed",
+				TargetIdentity: "external:sha256:" + strings.Repeat("c", 64), TargetGeneration: 1,
+			},
+			want: false,
+		},
+		"nothing committed yet": {want: true},
+		// An unreadable checkpoint is not evidence of an External installation: the
+		// worker performs no mutation until it can read the desired state again.
+		"unreadable": {err: errors.New("Fresh store unavailable"), want: true},
+	} {
+		store := staticFreshStore{record: freshstore.Record{Operation: bootstrap.FreshOperation{Strategy: test.strategy}}, err: test.err}
+		subject := freshApplication{store: store}
+		if subject.servesEmbeddedRuntime(t.Context()) != test.want {
+			t.Fatalf("%s: servesEmbeddedRuntime() != %v", name, test.want)
+		}
+	}
+	// A real completed managed installation still serves the embedded Runtime.
+	if !app.servesEmbeddedRuntime(t.Context()) {
+		t.Fatal("completed managed installation does not serve the embedded Runtime")
+	}
+}
+
+// staticFreshStore serves one chosen record, so a decision that only reads the
+// committed checkpoint can be exercised without materialising that checkpoint
+// through the store's own validation.
+type staticFreshStore struct {
+	freshstore.Store
+	record freshstore.Record
+	err    error
+}
+
+func (s staticFreshStore) Load(context.Context) (freshstore.Record, error) {
+	return s.record, s.err
+}
+
+// An unreadable checkpoint is a refusal, not an unfenced automatic start: the
+// Manager must never launch an engine it cannot name.
+func TestCommittedArtifactReadFailureRefusesToNameAnEngine(t *testing.T) {
+	store := failingFreshStore{err: errors.New("Fresh store unavailable")}
+	authority := freshDesiredStateStore{app: &freshApplication{store: store}}
+	if artifactID, found, err := authority.LoadEmbeddedRuntimeCommittedArtifact(t.Context()); err == nil || found || artifactID != "" {
+		t.Fatalf("unreadable checkpoint artifact = (%q, %v, %v), want an error", artifactID, found, err)
+	}
+}
+
+// An in-place engine update swaps the Supervisor's active artifact and rotates
+// the generation; the Fresh checkpoint still names the install-time engine. The
+// restart must start the updated engine, so the reconcile Start fences the
+// same-cycle observation.
+func TestRestartAfterInPlaceUpdateStartsTheUpdatedEngine(t *testing.T) {
+	app, op := completedRuntimeTestApplication(t)
+	updated := model.RuntimeArtifactID("sha256:" + strings.Repeat("e", 64))
+	checkpoint := op.Strategy.TargetArtifactID
+	if updated == model.RuntimeArtifactID(checkpoint) {
+		t.Fatalf("fixture artifact %q is not distinguishable from the update", checkpoint)
+	}
+	if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+	restarted.Generation = 4242 // new Supervisor generation after the container restart
+	restarted.State = model.RuntimeStateOffline
+	restarted.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: updated}
+	client := &freshRuntimeTestClient{status: restarted}
+	app.runtime = client
+	app.runtimeExternal = nil
+
+	reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce() after an in-place update = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Supervisor starts after the update = %d, want 1", client.starts)
+	}
+	if got := client.startRequests[0].ExpectedActiveArtifactID; got != updated {
+		t.Fatalf("automatic Start artifact = %q, want the updated engine %q", got, updated)
 	}
 }
 

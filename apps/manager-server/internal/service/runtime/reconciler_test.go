@@ -12,19 +12,25 @@ import (
 )
 
 func TestStableReconcileOperationID(t *testing.T) {
-	base := StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, 1)
-	if base != StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, 1) {
+	artifactA := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+	artifactB := model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	base := StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1)
+	if base != StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1) {
 		t.Fatal("same reconcile tuple produced different operation IDs")
 	}
 	if len([]byte(base)) > 128 || !strings.HasPrefix(base, "runtime-reconcile/v2:") {
 		t.Fatalf("operation ID = %q length=%d", base, len([]byte(base)))
 	}
 	for name, candidate := range map[string]string{
-		"revision":   StableReconcileOperationID(4, "runtime-01", 7, model.RuntimeOperationStart, 1),
-		"identity":   StableReconcileOperationID(3, "runtime-02", 7, model.RuntimeOperationStart, 1),
-		"generation": StableReconcileOperationID(3, "runtime-01", 8, model.RuntimeOperationStart, 1),
-		"action":     StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStop, 1),
-		"attempt":    StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, 2),
+		"revision":   StableReconcileOperationID(4, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1),
+		"identity":   StableReconcileOperationID(3, "runtime-02", 7, model.RuntimeOperationStart, artifactA, 1),
+		"generation": StableReconcileOperationID(3, "runtime-01", 8, model.RuntimeOperationStart, artifactA, 1),
+		"action":     StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStop, artifactA, 1),
+		// The Supervisor folds the artifact into its Start request fingerprint, so
+		// one operation ID must never describe two of them.
+		"artifact":       StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactB, 1),
+		"empty artifact": StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, "", 1),
+		"attempt":        StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 2),
 	} {
 		if candidate == base {
 			t.Fatalf("%s change did not change operation ID", name)
@@ -204,16 +210,38 @@ func TestCanceledReconcileWorkerNeverSubmitsStop(t *testing.T) {
 	}
 }
 
-func TestReconcileStartFencesTheCommittedArtifact(t *testing.T) {
+func TestReconcileStartFencesTheActiveArtifact(t *testing.T) {
+	observed := model.RuntimeArtifactID("sha256:" + strings.Repeat("d", 64))
 	committed := model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
-	offline := func() *recordingRuntimeClient {
-		return &recordingRuntimeClient{
-			status: embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive)),
-		}
+	offlineStatus := func() model.RuntimeObservedStatus {
+		status := embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive))
+		status.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: observed}
+		return status
 	}
 
-	t.Run("committed artifact fences Start", func(t *testing.T) {
-		client := offline()
+	t.Run("completed installation fences the observed active artifact", func(t *testing.T) {
+		// An in-place engine update replaces the Supervisor's selection while the
+		// Fresh checkpoint keeps the install-time artifact, so a store that reports
+		// no pin (a completed installation) must fall back to the observation.
+		for name, store := range map[string]DesiredStateStore{
+			"does not publish an installation authority": desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			"completed installation": &committedDesiredStore{
+				staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			},
+		} {
+			client := &recordingRuntimeClient{status: offlineStatus()}
+			if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err != nil {
+				t.Fatalf("%s: ReconcileOnce() error = %v", name, err)
+			}
+			requests := client.startRequests()
+			if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != observed {
+				t.Fatalf("%s: Start requests = %#v", name, requests)
+			}
+		}
+	})
+
+	t.Run("incomplete installation overrides the observation with the pin", func(t *testing.T) {
+		client := &recordingRuntimeClient{status: offlineStatus()}
 		store := &committedDesiredStore{
 			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
 			artifact:           committed,
@@ -228,26 +256,23 @@ func TestReconcileStartFencesTheCommittedArtifact(t *testing.T) {
 		}
 	})
 
-	t.Run("store without a committed installation leaves Start unfenced", func(t *testing.T) {
-		for name, store := range map[string]DesiredStateStore{
-			"does not implement the authority": desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
-			"committed nothing": &committedDesiredStore{
-				staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
-			},
-		} {
-			client := offline()
-			if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err != nil {
-				t.Fatalf("%s: ReconcileOnce() error = %v", name, err)
-			}
-			requests := client.startRequests()
-			if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != "" {
-				t.Fatalf("%s: Start requests = %#v", name, requests)
-			}
+	t.Run("no observed artifact leaves Start unfenced", func(t *testing.T) {
+		client := &recordingRuntimeClient{
+			status: embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive)),
+		}
+		if err := NewReconciler(client, desiredStore(model.EmbeddedRuntimeDesiredRunning, 5), time.Second, nil).
+			ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		requests := client.startRequests()
+		if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != "" {
+			t.Fatalf("Start requests = %#v", requests)
 		}
 	})
 
-	// A Manager that cannot name the committed engine must not restart one: an
-	// unreadable or non-canonical authority is a refusal, not an unfenced Start.
+	// A Manager that cannot name the engine its installation pinned must not
+	// restart one: an unreadable or non-canonical authority is a refusal, not a
+	// silent fallback to the observation.
 	for name, store := range map[string]*committedDesiredStore{
 		"unreadable": {
 			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
@@ -260,7 +285,7 @@ func TestReconcileStartFencesTheCommittedArtifact(t *testing.T) {
 			artifactFound:      true,
 		},
 	} {
-		client := offline()
+		client := &recordingRuntimeClient{status: offlineStatus()}
 		if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err == nil {
 			t.Fatalf("%s: ReconcileOnce() error = nil", name)
 		}
@@ -269,12 +294,12 @@ func TestReconcileStartFencesTheCommittedArtifact(t *testing.T) {
 		}
 	}
 
-	// Stop is unchanged: the Supervisor's StopRequest carries no artifact, so the
-	// committed authority must not leak into it.
+	// Stop is unchanged: the Supervisor's StopRequest carries no artifact, so no
+	// artifact authority may leak into it - not the pin, and not the observation.
 	t.Run("Stop stays artifact-free", func(t *testing.T) {
-		client := &recordingRuntimeClient{
-			status: embeddedReconcileStatus(model.RuntimeStateReady, recovery(model.RuntimeRecoveryStateArmed)),
-		}
+		status := embeddedReconcileStatus(model.RuntimeStateReady, recovery(model.RuntimeRecoveryStateArmed))
+		status.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: observed}
+		client := &recordingRuntimeClient{status: status}
 		store := &committedDesiredStore{
 			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredStopped, 5),
 			artifact:           committed,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -196,6 +197,29 @@ func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore 
 	return freshDesiredStateStore{app: a}
 }
 
+// servesEmbeddedRuntime reports whether this process serves a Manager-owned
+// embedded Runtime, which is the only case that owns the reconcile worker. The
+// committed Fresh checkpoint answers it: a Connect External installation points
+// at the operator's CPA and must never drive the local Supervisor.
+//
+// The presence of an External client cannot answer this. The single official
+// image configures one for every installation, so treating it as "External mode"
+// would silently disable auto-start for Manager-owned installs. An unreadable
+// checkpoint is not evidence of an External installation either: the reconciler
+// performs no mutation until it can read the desired state again, and disabling
+// it here would trade that read for a permanent stop until the next container
+// start.
+func (a *freshApplication) servesEmbeddedRuntime(ctx context.Context) bool {
+	if a == nil || a.store == nil {
+		return false
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil {
+		return true
+	}
+	return record.Operation.Strategy.Strategy != bootstrap.ConnectExternal
+}
+
 // LoadEmbeddedRuntimeDesiredState returns the persisted desired state once
 // seeded at completion, or derives an in-memory Running obligation for an
 // incomplete Manager-owned installation whose destination is already committed
@@ -212,17 +236,22 @@ func (s freshDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Cont
 	return s.app.incompleteManagedDesiredRunning(ctx)
 }
 
-// LoadEmbeddedRuntimeCommittedArtifact reports the engine artifact the committed
-// Manager-owned installation pinned. It reads the Fresh checkpoint — the
-// Manager's own committed target — and never a Runtime observation, because the
-// observation is exactly what the reconcile Start has to fence against: an
-// automatic restart that took its expectation from the Supervisor's current
-// selection could not detect a selection change at all.
+// LoadEmbeddedRuntimeCommittedArtifact reports the engine artifact a *running*
+// Manager-owned installation is pinned to, and nothing else. It reads the Fresh
+// checkpoint — the Manager's own committed target — and never a Runtime
+// observation.
 //
-// A checkpoint that is not a verified Manager-owned destination, or that carries
-// no canonical artifact, has nothing to commit, so the answer is "not found" and
-// the Supervisor Start stays unfenced. An unreadable checkpoint is an error: the
-// reconcile refuses to start rather than starting an engine it cannot name.
+// Only an incomplete installation is pinned. `prepare_update`/`activate_update`
+// replace the active engine in place and persist the new selection in the
+// Supervisor, while the checkpoint deliberately keeps the install-time artifact
+// as audit and qualification evidence; fencing a completed installation to it
+// would refuse every restart after an update. A completed installation therefore
+// answers "not found" and the reconciler fences the Supervisor's same-cycle
+// observation instead, exactly as the Console Start does.
+//
+// An unreadable checkpoint, or a Manager-owned checkpoint whose target is not a
+// canonical artifact identity, is an error: the reconciler refuses to start an
+// engine it cannot name.
 func (s freshDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
 	if s.app == nil || s.app.store == nil {
 		return "", false, nil
@@ -231,20 +260,27 @@ func (s freshDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context
 	if err != nil {
 		return "", false, err
 	}
-	checkpoint := record.Operation.Strategy
-	if !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(checkpoint) {
+	op := record.Operation
+	if !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
 		return "", false, nil
 	}
-	artifactID := model.RuntimeArtifactID(checkpoint.TargetArtifactID)
-	if !artifactID.IsValid() {
+	if op.ProductComplete {
 		return "", false, nil
+	}
+	artifactID := model.RuntimeArtifactID(op.Strategy.TargetArtifactID)
+	if !artifactID.IsValid() {
+		return "", false, fmt.Errorf("Fresh managed checkpoint target artifact %q is not a canonical SHA-256 identity",
+			op.Strategy.TargetArtifactID)
 	}
 	return artifactID, true, nil
 }
 
 func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
 	var zero model.EmbeddedRuntimeDesiredState
-	if a == nil || a.store == nil || a.runtime == nil || a.runtimeExternal != nil || a.managedSource == nil {
+	// The committed checkpoint decides which mode this is, never the presence of
+	// an External client: the single official image always configures one, and a
+	// Connect External installation fails the Manager-owned test below anyway.
+	if a == nil || a.store == nil || a.runtime == nil || a.managedSource == nil {
 		return zero, false, nil
 	}
 	record, err := a.store.Load(ctx)

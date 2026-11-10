@@ -185,25 +185,23 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	// The artifact is part of the intent: it changes the Supervisor's request
+	// fingerprint, so it has to change the operation ID with it.
+	expectedArtifact, err := r.startArtifact(ctx, operationType, status)
+	if err != nil {
+		return err
+	}
 	request := model.RuntimeMutationRequest{
-		OperationID:               StableReconcileOperationID(desired.Revision, status.Identity, status.Generation, operationType, attempt),
+		OperationID: StableReconcileOperationID(
+			desired.Revision, status.Identity, status.Generation, operationType, expectedArtifact, attempt,
+		),
 		ExpectedRuntimeIdentity:   status.Identity,
 		ExpectedRuntimeGeneration: status.Generation,
+		ExpectedActiveArtifactID:  expectedArtifact,
 	}
 	var result model.RuntimeOperationResult
 	switch action {
 	case ReconcileActionStart:
-		// The automatic restart is owned by the Manager, not by whatever the
-		// Supervisor currently reports as selected. Fencing the committed artifact
-		// is what stops a same-generation selection change from turning the
-		// restart into permission to launch an engine the installation never
-		// committed. Stop carries no artifact: the Supervisor's StopRequest has no
-		// such field, and terminating the owned child is already artifact-free.
-		expected, artifactErr := r.committedArtifact(ctx)
-		if artifactErr != nil {
-			return artifactErr
-		}
-		request.ExpectedActiveArtifactID = expected
 		result, err = r.client.Start(ctx, request)
 	case ReconcileActionStop:
 		result, err = r.client.Stop(ctx, request)
@@ -308,26 +306,57 @@ func reconcileStartRetryDelay(failedAttempts int) time.Duration {
 	return reconcileStartRetryDelays[index]
 }
 
-// committedArtifact loads the artifact a Manager-owned installation committed to.
-// A store that cannot answer, or answers with a non-canonical identity, refuses
-// the Start: an automatic restart must not run an engine the Manager cannot name.
-func (r *Reconciler) committedArtifact(ctx context.Context) (model.RuntimeArtifactID, error) {
+// startArtifact returns the artifact the submission must fence against.
+//
+// For Start the default is the Supervisor's own same-cycle observation, exactly
+// what the Console Start fences: `activate_update` replaces the active engine in
+// place and persists the new selection in the Supervisor, so the observed
+// artifact is the one a restart has to launch. A still-incomplete Manager-owned
+// installation overrides it with the artifact its wizard committed, because that
+// installation may only ever launch the engine it staged.
+//
+// Stop carries no artifact: the Supervisor's StopRequest has no such field, and
+// terminating the owned child is already artifact-free.
+func (r *Reconciler) startArtifact(
+	ctx context.Context,
+	operationType model.RuntimeOperationType,
+	status model.RuntimeObservedStatus,
+) (model.RuntimeArtifactID, error) {
+	if operationType != model.RuntimeOperationStart {
+		return "", nil
+	}
+	committed, found, err := r.committedArtifact(ctx)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return committed, nil
+	}
+	if status.ActiveGatewayArtifact == nil {
+		return "", nil
+	}
+	return status.ActiveGatewayArtifact.ArtifactID, nil
+}
+
+// committedArtifact asks the optional installation authority which engine it
+// pinned. Only a Manager-owned installation that has not completed reports one.
+func (r *Reconciler) committedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
 	store, ok := r.desired.(CommittedArtifactStore)
 	if !ok {
-		return "", nil
+		return "", false, nil
 	}
 	artifactID, found, err := store.LoadEmbeddedRuntimeCommittedArtifact(ctx)
 	if err != nil {
-		return "", fmt.Errorf("load embedded Runtime committed artifact: %w", err)
+		return "", false, fmt.Errorf("load embedded Runtime committed artifact: %w", err)
 	}
 	if !found {
-		return "", nil
+		return "", false, nil
 	}
 	if !artifactID.IsValid() {
-		return "", fmt.Errorf("%w: committed artifact %q is not a canonical SHA-256 identity",
+		return "", false, fmt.Errorf("%w: committed artifact %q is not a canonical SHA-256 identity",
 			ErrReconcileObservationInvalid, artifactID)
 	}
-	return artifactID, nil
+	return artifactID, true, nil
 }
 
 func DecideReconcileAction(
@@ -381,14 +410,17 @@ func DecideReconcileAction(
 
 // StableReconcileOperationID derives the Supervisor journal identity of one
 // reconcile submission. Everything that decides the intent is in the hash, so a
-// repeated cycle resolves to the operation it already created; attempt is the
-// one component that deliberately distinguishes retries of an intent the
-// Supervisor recorded as failed.
+// repeated cycle resolves to the operation it already created. The artifact is
+// included because the Supervisor folds it into the request fingerprint of a
+// Start: one operation ID must never map to two fingerprints. attempt is the one
+// component that deliberately distinguishes retries of an intent the Supervisor
+// recorded as failed.
 func StableReconcileOperationID(
 	desiredRevision uint64,
 	runtimeIdentity model.RuntimeIdentity,
 	runtimeGeneration model.RuntimeGeneration,
 	action model.RuntimeOperationType,
+	expectedArtifact model.RuntimeArtifactID,
 	attempt int,
 ) string {
 	hash := sha256.New()
@@ -406,6 +438,10 @@ func StableReconcileOperationID(
 	binary.BigEndian.PutUint64(encoded[:], uint64(len(actionBytes)))
 	hash.Write(encoded[:])
 	hash.Write(actionBytes)
+	artifact := []byte(expectedArtifact)
+	binary.BigEndian.PutUint64(encoded[:], uint64(len(artifact)))
+	hash.Write(encoded[:])
+	hash.Write(artifact)
 	binary.BigEndian.PutUint64(encoded[:], uint64(attempt))
 	hash.Write(encoded[:])
 	return "runtime-reconcile/v2:" + hex.EncodeToString(hash.Sum(nil))

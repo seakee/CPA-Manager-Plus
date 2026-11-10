@@ -102,11 +102,20 @@ restart, `compose down`/`up` or a host reboot. Completion seeds
 only installation that stays down is one an operator stopped on the Runtime page
 before the restart. An incomplete Manager-owned installation has no such row: it
 derives an in-memory Running obligation instead, and only once its pinned engine
-artifact reports ready. Every automatic Start fences the artifact the Fresh
-checkpoint committed — not the artifact the Supervisor reports at that moment —
-so a selection change inside one generation is refused rather than launched. A
-Start the Supervisor records as failed is replayed under its original operation
-ID; a *new* attempt is issued only after that durable failure, after its retry
+artifact reports ready.
+
+Every automatic Start fences one artifact. A completed installation fences the
+active artifact the Supervisor reports in the same cycle, exactly as the Console
+Start does, so an engine replaced in place by `prepare_update`/`activate_update`
+is what the restart launches — the Fresh checkpoint keeps the install-time
+artifact as audit evidence and is deliberately not the runtime authority. An
+incomplete installation is the exception: it may only ever launch the artifact
+its wizard committed, so that pinned target overrides the observation. A store
+that cannot answer, or answers with a non-canonical identity, refuses the Start
+instead of falling back to an unfenced one.
+
+A Start the Supervisor records as failed is replayed under its original operation
+ID. A *new* attempt is issued only after that durable failure, after its retry
 delay, and at most `DefaultReconcileStartAttempts` times per generation, because
 the Supervisor's ownership fence turns a second spawn into a state conflict
 instead of a second child. After the last attempt the Runtime stays stopped until
