@@ -2586,3 +2586,67 @@ func TestProviderSectionReadBackRejectsDivergentMalformedOrExtraFields(t *testin
 		})
 	}
 }
+
+// TestProviderSectionReadBackRejectsGroupAuthIndexWithoutCPAAtPrecondition proves
+// a group-level auth_index is treated as CPA-derived only where CPA actually
+// projects one: a keyless openai-compatibility group whose base-url is non-empty
+// (config_auth_index.go:460-488). With no base-url, an empty one, or a
+// whitespace-only one, the field is not CPA's, so the pre-read must not skip the
+// write and the post-write read-back must not report the section migrated.
+func TestProviderSectionReadBackRejectsGroupAuthIndexWithoutCPAAtPrecondition(t *testing.T) {
+	validIdx := fakeAuthIndex("group-precondition")
+	cases := []struct {
+		name  string
+		group func() map[string]any
+	}{
+		{
+			name: "base-url missing",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":   "compat-keyless",
+					"models": []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+		{
+			name: "base-url empty",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":     "compat-keyless",
+					"base-url": "",
+					"models":   []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+		{
+			name: "base-url whitespace",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":     "compat-keyless",
+					"base-url": "   ",
+					"models":   []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := sourceFixture(t)
+			source.config["api-keys"] = map[string]any{"openai-compatibility": []any{tc.group()}}
+			destination := destinationFixture(t)
+			projected := tc.group()
+			projected["auth_index"] = validIdx
+			destination.readOverrides = map[string]any{"api-keys.openai-compatibility": []any{projected}}
+
+			before := destination.writeCount()
+			summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+			if destination.writeCount() == before {
+				t.Fatalf("pre-read treated a non-derivable group auth_index as equal and skipped the write")
+			}
+			item := itemByName(t, summary, providerSectionItemName("api-keys.openai-compatibility"))
+			if item.Outcome != freshstore.AdoptionFailed || item.Reason != "verify_mismatch" {
+				t.Fatalf("post-write read-back: got outcome=%s reason=%s, want failed/verify_mismatch", item.Outcome, item.Reason)
+			}
+		})
+	}
+}

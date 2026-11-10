@@ -1100,7 +1100,13 @@ func stripAPIKeysAuthIndex(path string, value any) (any, bool) {
 			cleanGroup["keys"] = cleanKeys
 		}
 		if rawIdx, hasGroupIdx := cleanGroup["auth_index"]; hasGroupIdx {
-			if path != "api-keys.openai-compatibility" || !keyless {
+			// CPA injects a group-level auth_index only on a keyless
+			// openai-compatibility group whose base-url is non-empty
+			// (config_auth_index.go:460-488); anywhere else the field is not
+			// CPA-derived and must keep the comparison unequal.
+			baseURL, baseURLOK := cleanGroup["base-url"].(string)
+			if path != "api-keys.openai-compatibility" || !keyless ||
+				!baseURLOK || strings.TrimSpace(baseURL) == "" {
 				return nil, false
 			}
 			idx, ok := rawIdx.(string)
