@@ -29,6 +29,7 @@ import type {
   QuotaCooldownInfo,
   UsageHeaderSnapshot,
 } from '@/services/api/usageService';
+import { getDemoQuotaStoreState } from '@/features/demo/demoFixtures';
 import { copyToClipboard } from '@/utils/clipboard';
 import {
   buildQuotaCredentialIdentity,
@@ -550,6 +551,11 @@ const { mocks } = vi.hoisted(() => {
       },
       t: (key: string, options?: Record<string, unknown>) => {
         if (key === 'auth_files.codex_plan_filter_unknown') return 'Unknown plan';
+        // Quota window labels go through the real catalogs, so a language switch
+        // shows up in the rendered title instead of the raw key.
+        if (key.startsWith('codex_quota.') && key.endsWith('_window')) {
+          return mocks.translate?.(key, options) ?? key;
+        }
         if (!options) return key;
         const parts: string[] = [];
         if (typeof options.name === 'string') parts.push(options.name);
@@ -565,17 +571,46 @@ const { mocks } = vi.hoisted(() => {
       },
       quotaDisplayWindowsOverride: null as AccountQuotaDisplayWindow[] | null,
       language: 'en',
+      translate: null as null | ((key: string, options?: Record<string, unknown>) => string),
     },
   };
 });
 
-vi.mock('react-i18next', () => ({
-  initReactI18next: { type: '3rdParty', init: () => {} },
-  useTranslation: () => ({
-    t: mocks.t,
-    i18n: { language: mocks.language || 'en' },
-  }),
-}));
+vi.mock('react-i18next', async () => {
+  const [{ default: i18next }, { default: en }, { default: zhCN }, { default: zhTW }, { default: ru }] =
+    await Promise.all([
+      import('i18next'),
+      import('@/i18n/locales/en.json'),
+      import('@/i18n/locales/zh-CN.json'),
+      import('@/i18n/locales/zh-TW.json'),
+      import('@/i18n/locales/ru.json'),
+    ]);
+  const instance = i18next.createInstance();
+  instance.init({
+    resources: {
+      en: { translation: en },
+      'zh-CN': { translation: zhCN },
+      'zh-TW': { translation: zhTW },
+      ru: { translation: ru },
+    },
+    lng: 'en',
+    fallbackLng: 'zh-CN',
+    initAsync: false,
+    interpolation: { escapeValue: false },
+  });
+  mocks.translate = (key, options) =>
+    instance.t(key, {
+      lng: mocks.language,
+      defaultValue: typeof options?.defaultValue === 'string' ? options.defaultValue : key,
+    });
+  return {
+    initReactI18next: { type: '3rdParty', init: () => {} },
+    useTranslation: () => ({
+      t: mocks.t,
+      i18n: { language: mocks.language || 'en' },
+    }),
+  };
+});
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
@@ -14909,6 +14944,44 @@ describe('AccountsPage replacement flows', () => {
     expect(resetRecords).toHaveLength(1);
     const resetAction = renderer.root.findByProps({ 'data-quota-reset-action': 'true' });
     expect(resetAction.props.disabled).toBe(false);
+  });
+
+  it('renders the quota window labels in the console language', async () => {
+    const demoEntry = Object.values(getDemoQuotaStoreState().codexQuota)[0];
+    const demoWindows = demoEntry.windows ?? [];
+    expect(demoWindows.length).toBeGreaterThan(0);
+    expect(demoWindows.every((window) => Boolean(window.labelKey))).toBe(true);
+    mocks.quotaState.codexQuota = {
+      'codex.json': { ...demoEntry, authFileKey: 'codex.json::auth-1' },
+    };
+
+    const labelsFor = async (language: 'en' | 'ru') => {
+      mocks.language = language;
+      const renderer = await renderAccountsPage();
+      await openCodexQuotaTab(renderer, 'codex.json');
+      const labels = renderer.root
+        .findAll(
+          (node) =>
+            typeof node.props?.className === 'string' && node.props.className.includes('titleLabel')
+        )
+        .map((node) => readText(node.props.children));
+      mountedAccountsRenderers.delete(renderer);
+      await act(async () => renderer.unmount());
+      return labels;
+    };
+
+    const english = await labelsFor('en');
+    const russian = await labelsFor('ru');
+
+    expect(english.length).toBeGreaterThanOrEqual(demoWindows.length);
+    expect(russian).toHaveLength(english.length);
+    // The page hands the builder the active translator, so the same windows are
+    // titled differently in each language and never fall back to the raw fixture label.
+    expect(russian).not.toEqual(english);
+    for (const [index, label] of russian.entries()) {
+      expect(label).not.toContain('codex_quota.');
+      expect(label).not.toBe(demoWindows[index]?.label);
+    }
   });
 
   it('verifies live reset credits before showing confirmation or consuming', async () => {

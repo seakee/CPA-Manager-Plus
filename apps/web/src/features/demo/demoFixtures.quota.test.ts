@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import i18n from '@/i18n';
-import type { CodexQuotaState } from '@/types';
-import { createTranslateQuotaWindowLabel } from '@/features/accounts/model/accountQuotaDisplayWindows';
-import { getDemoApiCallResult, getDemoQuotaStoreState } from './demoFixtures';
+import { getDemoApiCallResult } from './demoFixtures';
 
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
@@ -105,51 +102,5 @@ describe('Codex spend-control demo fixture', () => {
       },
       rate_limit_reached_type: null,
     });
-  });
-});
-
-describe('Codex quota window labels', () => {
-  type DemoQuotaWindow = NonNullable<CodexQuotaState['windows']>[number];
-
-  const demoWindows = (): DemoQuotaWindow[] =>
-    Object.values(getDemoQuotaStoreState().codexQuota).flatMap((quota) => quota.windows ?? []);
-
-  // The same translator AccountsPage hands to buildAccountQuotaDisplayWindows.
-  const displayedLabel = (language: string, window: DemoQuotaWindow) =>
-    createTranslateQuotaWindowLabel(i18n.getFixedT(language))(
-      window.label,
-      window.labelKey,
-      window.labelParams
-    );
-
-  it('renders a different label for every language the console can switch to', () => {
-    const windows = demoWindows();
-    expect(windows.length).toBeGreaterThan(0);
-
-    for (const window of windows) {
-      const english = displayedLabel('en', window);
-      const chinese = displayedLabel('zh-CN', window);
-      const russian = displayedLabel('ru', window);
-
-      // The translation key wins over the English label the window was built with.
-      expect(russian).not.toBe(window.label);
-      expect(chinese).not.toBe(window.label);
-      expect(russian).not.toBe(english);
-      expect(chinese).not.toBe(english);
-      expect(english).not.toMatch(/[\u3400-\u9fff]/);
-      expect(russian).not.toMatch(/[\u3400-\u9fff]/);
-    }
-  });
-
-  it('keeps the same label when the translator is bound to the same language again', () => {
-    const weekly = demoWindows().find(
-      (window) => window.labelKey === 'codex_quota.secondary_window'
-    );
-    expect(weekly).toBeDefined();
-
-    const russian = displayedLabel('ru', weekly!);
-    expect(displayedLabel('en', weekly!)).not.toBe(russian);
-    expect(displayedLabel('zh-TW', weekly!)).not.toBe(russian);
-    expect(displayedLabel('ru', weekly!)).toBe(russian);
   });
 });

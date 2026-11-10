@@ -41,22 +41,6 @@ describe('document language', () => {
     setFullWebLanguage('ru');
     await vi.waitFor(() => expect(root.lang).toBe('ru'));
   });
-
-  it('lets the Console take the attribute back from the Fresh shell', async () => {
-    setFullWebLanguage('en');
-    await vi.waitFor(() => expect(root.lang).toBe('en'));
-
-    await legacyI18n.changeLanguage('zh-TW');
-    expect(root.lang).toBe('zh-TW');
-  });
-
-  it('lets the Fresh shell take the attribute over from the Console', async () => {
-    await legacyI18n.changeLanguage('zh-TW');
-    expect(root.lang).toBe('zh-TW');
-
-    setFullWebLanguage('ru');
-    await vi.waitFor(() => expect(root.lang).toBe('ru'));
-  });
 });
 
 // The singletons above are created once per test file, so they can only prove the

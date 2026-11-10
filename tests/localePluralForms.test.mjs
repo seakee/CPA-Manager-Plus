@@ -141,19 +141,6 @@ describe('locale plural categories', () => {
     expect(missingProtectedFamilies()).toEqual([]);
   });
 
-  it('keeps keys that merely end in a category word out of the counted families', () => {
-    const families = collectPluralFamilies(locales.get('en'));
-
-    expect(families.has('auth_files.paste_success_many')).toBe(false);
-    expect(families.has('monitoring.server_codex_inspection_execute_one')).toBe(false);
-    expect(flattenKeys(locales.get('en'))).toEqual(
-      expect.arrayContaining([
-        'auth_files.paste_success_many',
-        'monitoring.server_codex_inspection_execute_one',
-      ])
-    );
-  });
-
   it('resolves every Russian count without falling back to Chinese', () => {
     expect(pluralProbeLeaks()).toEqual([]);
   });

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import '../i18n';
-import { fullWebLanguage, fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
+import { fullWebLanguage, fullWebText as t } from '../i18n/fullweb';
 import { FreshManagedKeysPage } from './FreshManagedKeysPage';
 import { FreshGatewayWorkspace } from './FreshGatewayWorkspace';
 import { FreshRebindDialog } from './FreshRebindDialog';
@@ -56,9 +56,9 @@ export function FreshManagedResources({
   const consoleLanguage = i18n.resolvedLanguage || i18n.language;
   const [language, setLanguage] = useState(fullWebLanguage);
   useEffect(() => {
-    // Bridge the original Console's locale into retained Fresh editors without
-    // remounting them or losing a draft, request identity or one-time secret.
-    setFullWebLanguage(consoleLanguage);
+    // Retained editors follow the Console locale without remounting, so a draft,
+    // request identity or one-time secret survives the switch. The Fresh instance
+    // itself is carried across one level up, by the Console shell.
     setLanguage(consoleLanguage);
   }, [consoleLanguage]);
   const { pathname: locationPath } = useLocation();
