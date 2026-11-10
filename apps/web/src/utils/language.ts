@@ -1,7 +1,6 @@
 import type { Language } from '@/types';
+import { browserLanguage } from '@/i18n/browserLanguage';
 import { STORAGE_KEY_LANGUAGE, SUPPORTED_LANGUAGES } from '@/utils/constants';
-
-const TRADITIONAL_CHINESE_PREFIXES = ['zh-tw', 'zh-hk', 'zh-mo', 'zh-hant'] as const;
 
 export const isSupportedLanguage = (value: string): value is Language =>
   SUPPORTED_LANGUAGES.includes(value as Language);
@@ -36,16 +35,4 @@ const getStoredLanguage = (): Language | null => {
   }
 };
 
-const getBrowserLanguage = (): Language => {
-  if (typeof navigator === 'undefined') {
-    return 'zh-CN';
-  }
-  const raw = navigator.languages?.[0] || navigator.language || 'zh-CN';
-  const lower = raw.toLowerCase();
-  if (TRADITIONAL_CHINESE_PREFIXES.some((prefix) => lower.startsWith(prefix))) return 'zh-TW';
-  if (lower.startsWith('zh')) return 'zh-CN';
-  if (lower.startsWith('ru')) return 'ru';
-  return 'en';
-};
-
-export const getInitialLanguage = (): Language => getStoredLanguage() ?? getBrowserLanguage();
+export const getInitialLanguage = (): Language => getStoredLanguage() ?? browserLanguage();

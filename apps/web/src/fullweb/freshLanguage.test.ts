@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LANGUAGE_ORDER, STORAGE_KEY_LANGUAGE } from '../utils/constants';
+import { getInitialLanguage } from '../utils/language';
 import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
-import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import {
   FRESH_LANGUAGES,
   FRESH_LANGUAGE_STORAGE_KEY,
@@ -49,16 +49,47 @@ describe('Bootstrap entry language preference', () => {
     expect(persistedFreshLanguage()).toBeNull();
   });
 
-  it('selects the stored language for the first Bootstrap render', () => {
-    storage.set(FRESH_LANGUAGE_STORAGE_KEY, JSON.stringify({ state: { language: 'zh-TW' } }));
-    expect(activateFreshLanguage()).toBe('zh-TW');
-    expect(fullWebLanguage()).toBe('zh-TW');
-    expect(bootstrapJourneyText('welcome')).toBe(bootstrapJourneyText('welcome', 'zh-TW'));
+  it('keeps the rest of the stored Console state when writing the language', () => {
+    storage.set(
+      FRESH_LANGUAGE_STORAGE_KEY,
+      JSON.stringify({ state: { language: 'zh-CN', sidebarCollapsed: true }, version: 3 })
+    );
+
+    persistFreshLanguage('ru');
+
+    expect(JSON.parse(storage.get(FRESH_LANGUAGE_STORAGE_KEY) ?? '')).toEqual({
+      state: { language: 'ru', sidebarCollapsed: true },
+      version: 3,
+    });
   });
 
-  it('keeps the resolved language when nothing is stored and rejects unknown codes', () => {
-    setFullWebLanguage('en');
-    expect(activateFreshLanguage()).toBe('en');
+  it('selects the stored language for the first Bootstrap render', () => {
+    storage.set(FRESH_LANGUAGE_STORAGE_KEY, JSON.stringify({ state: { language: 'zh-TW' } }));
+
+    expect(activateFreshLanguage()).toBe('zh-TW');
+    expect(fullWebLanguage()).toBe('zh-TW');
+  });
+
+  it('derives a first visit from the browser exactly as the Console does', () => {
+    for (const [tag, expected] of [
+      ['zh-HK', 'zh-TW'],
+      ['zh-MO', 'zh-TW'],
+      ['zh-Hant-TW', 'zh-TW'],
+      ['zh-CN', 'zh-CN'],
+      ['ru-RU', 'ru'],
+      ['en-US', 'en'],
+      ['fr-FR', 'en'],
+    ] as const) {
+      vi.stubGlobal('navigator', { languages: [tag], language: tag });
+
+      expect(activateFreshLanguage()).toBe(expected);
+      expect(fullWebLanguage()).toBe(expected);
+      // The Console store starts from the same value for the same browser.
+      expect(getInitialLanguage()).toBe(expected);
+    }
+  });
+
+  it('accepts only the four Console languages', () => {
     expect(isFreshLanguage('ru')).toBe(true);
     expect(isFreshLanguage('fr')).toBe(false);
   });

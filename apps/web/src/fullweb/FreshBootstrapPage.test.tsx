@@ -2,7 +2,7 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOOTSTRAP_UI, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
-import { setFullWebLanguage } from '../i18n/fullweb';
+import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
 import { activateFreshLanguage, FRESH_LANGUAGE_STORAGE_KEY } from './freshLanguage';
@@ -45,7 +45,7 @@ function textOf(node: ReactTestInstance): string {
 
 // The page keeps copy keys, not rendered sentences, so assertions name the key
 // and resolve it in the language under test.
-const copy = (language: 'zh-CN' | 'en' | 'ru', key: FreshBootstrapTextKey) =>
+const copy = (language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', key: FreshBootstrapTextKey) =>
   bootstrapText(key, undefined, language);
 const CJK = /[\u4e00-\u9fff]/;
 // Stands in for the browser store the Console language menu persists into.
@@ -888,8 +888,31 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => renderer.unmount());
 
     // A fresh document starts on that stored choice, not the browser language.
+    vi.stubGlobal('navigator', { languages: ['en-US'], language: 'en-US' });
     setFullWebLanguage('en');
     expect(activateFreshLanguage()).toBe('ru');
-    expect(bootstrapJourneyText('welcome')).toBe(bootstrapJourneyText('welcome', 'ru'));
+    expect(fullWebLanguage()).toBe('ru');
+  });
+
+  it('renders Traditional Chinese on the first frame when the Console stores zh-TW', async () => {
+    storage.set(
+      FRESH_LANGUAGE_STORAGE_KEY,
+      JSON.stringify({ state: { language: 'zh-TW' }, version: 0 })
+    );
+    expect(activateFreshLanguage()).toBe('zh-TW');
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+
+    const gate = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
+    // Traditional and Simplified copy must stay distinct, so a collapsed
+    // zh-TW branch cannot pass by falling back to the zh-CN table.
+    expect(copy('zh-TW', 'unconfirmedTitle')).not.toBe(copy('zh-CN', 'unconfirmedTitle'));
+    expect(gate).toContain(copy('zh-TW', 'unconfirmedTitle'));
+    expect(gate).not.toContain(copy('zh-CN', 'unconfirmedTitle'));
+    await act(async () => renderer.unmount());
   });
 });

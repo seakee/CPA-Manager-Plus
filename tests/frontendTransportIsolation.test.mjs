@@ -181,7 +181,15 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
       // module stay out of this graph; freshLanguage.test.ts pins the key and
       // the menu order to the Console values.
       if (file === 'fullweb/freshLanguage.ts') {
-        expect(source).not.toMatch(/\/v0\/management/);
+        // The shared language preference is the only storage this entry owns,
+        // and only through localStorage under that one key: no session or auth
+        // storage, no legacy endpoint.
+        expect(source).not.toMatch(/\/v0\/management|sessionStorage/);
+        expect(source.match(/localStorage\.\w+/g)).toEqual([
+          'localStorage.getItem',
+          'localStorage.setItem',
+        ]);
+        expect(source).not.toMatch(/localStorage\.(?:get|set)Item\((?!\s*FRESH_LANGUAGE_STORAGE_KEY)/);
         expect(source).toContain(`'${FRESH_LANGUAGE_STORAGE_KEY}'`);
         continue;
       }
