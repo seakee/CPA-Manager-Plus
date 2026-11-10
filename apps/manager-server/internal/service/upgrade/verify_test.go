@@ -1686,3 +1686,232 @@ func TestVerifyCompletesAfterAReproofedRotatedKey(t *testing.T) {
 		t.Fatalf("result = %+v, want a completed operation", verified)
 	}
 }
+
+// newManagedVerifyFixtureAt records a Managed import pointing at the live URL
+// of an httptest.Server so Verify exercises the real ManagedModelSurface probe
+// (proveModelSurface == nil).
+func newManagedVerifyFixtureAt(t *testing.T, baseURL string) *verifyFixture {
+	t.Helper()
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	ctx := context.Background()
+	if err := enterCPAImportStage(ctx, fixture.databasePath()); err != nil {
+		t.Fatalf("enter the CPA import stage: %v", err)
+	}
+	normalized := cpa.NormalizeBaseURL(baseURL)
+	if err := handDestinationConnection(ctx, fixture.databasePath(), fixture.paths.DataKey, normalized, verifyManagedSecret); err != nil {
+		t.Fatalf("hand the destination connection over: %v", err)
+	}
+	destination := managedDestinationRecord(t)
+	destination.BaseURL = normalized
+	if err := saveCPAImportDestinationRecord(ctx, fixture.databasePath(), fixture.paths.DataKey, destination, verifyManagedSecret); err != nil {
+		t.Fatalf("record the destination attempt: %v", err)
+	}
+	if _, err := recordCPAImportCompletion(ctx, fixture.databasePath(), CPAImportResult{
+		Stage:             model.UpgradeStageCPAImport,
+		SourceVersion:     destination.SourceVersion,
+		SourceLayout:      destination.SourceLayout,
+		DestinationURL:    normalized,
+		ServerFingerprint: verifyManagedFingerprint(),
+		ManualItems:       destination.ManualItems,
+	}); err != nil {
+		t.Fatalf("record the CPA import completion: %v", err)
+	}
+	fixture.runtime = newFakeVerifyRuntime(t)
+	return fixture
+}
+
+// TestVerifyManagedModelSurfaceRealPredicate exercises the un-stubbed Managed
+// model-surface gate (proveModelSurface == nil): an empty OpenAI list succeeds
+// when authenticated with the first client key, while 401, malformed JSON and
+// missing data fail closed with upgrade_verify_connection_unproven and never
+// mention a private key.
+func TestVerifyManagedModelSurfaceRealPredicate(t *testing.T) {
+	t.Run("empty model list completes", func(t *testing.T) {
+		var seenAuth string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/models" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			seenAuth = r.Header.Get("Authorization")
+			if seenAuth != "Bearer client-key-1" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		}))
+		defer server.Close()
+
+		fixture := newManagedVerifyFixtureAt(t, server.URL)
+		options := fixture.verifyOptions()
+		options.proveModelSurface = nil
+		options.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			return cpa.V8ConfigObservation{BaseURL: cpa.NormalizeBaseURL(server.URL), ClientKeyCount: 1}, nil
+		}
+		result, err := Verify(context.Background(), options)
+		if err != nil {
+			t.Fatalf("verify with empty model list failed: %v", err)
+		}
+		if !result.Complete || result.Stage != model.UpgradeStageComplete {
+			t.Fatalf("result = %+v, want completed Managed operation", result)
+		}
+		if seenAuth != "Bearer client-key-1" {
+			t.Fatalf("model surface Authorization = %q, want Bearer client-key-1", seenAuth)
+		}
+	})
+
+	failureCases := []struct {
+		name       string
+		status     int
+		body       string
+		wantSubstr string
+	}{
+		{
+			name:       "401 unauthorized",
+			status:     http.StatusUnauthorized,
+			body:       `{"error":"unauthorized"}`,
+			wantSubstr: "rejected the client key",
+		},
+		{
+			name:       "malformed JSON",
+			status:     http.StatusOK,
+			body:       `{"object":"list","data":[`,
+			wantSubstr: "not provable",
+		},
+		{
+			name:       "missing data",
+			status:     http.StatusOK,
+			body:       `{"object":"list"}`,
+			wantSubstr: "not provable",
+		},
+		{
+			name:       "null data",
+			status:     http.StatusOK,
+			body:       `{"object":"list","data":null}`,
+			wantSubstr: "not provable",
+		},
+	}
+	for _, tc := range failureCases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/models" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			fixture := newManagedVerifyFixtureAt(t, server.URL)
+			before := fixture.operation(t)
+			options := fixture.verifyOptions()
+			options.proveModelSurface = nil
+			options.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+				return cpa.V8ConfigObservation{BaseURL: cpa.NormalizeBaseURL(server.URL), ClientKeyCount: 1}, nil
+			}
+			_, err := Verify(context.Background(), options)
+			if !errors.Is(err, ErrVerifyConnectionUnproven) {
+				t.Fatalf("verify (%s) error = %v, want ErrVerifyConnectionUnproven", tc.name, err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyConnectionUnproven {
+				t.Fatalf("verify (%s) code = %q, want %s", tc.name, code, UpgradeErrorVerifyConnectionUnproven)
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "private key") {
+				t.Fatalf("verify (%s) error %q mentioned private key", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Fatalf("verify (%s) error = %q, want substring %q", tc.name, err, tc.wantSubstr)
+			}
+			assertVerifyRefusalWroteNothing(t, fixture, before)
+		})
+	}
+}
+
+// TestManagementReadTransportFailureNeverMentionsPrivateKey proves version- and
+// keys-read transport failures (HTTP 502 or unreachable) keep their typed
+// UpgradeErrorCode on ExternalConnect and Verify without surfacing
+// cpa.ErrProofUnavailable's "private key application proof unavailable" text.
+func TestManagementReadTransportFailureNeverMentionsPrivateKey(t *testing.T) {
+	t.Run("external connect version 502", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer server.Close()
+
+		target := newExternalTarget(t)
+		options := target.options
+		options.BaseURL = server.URL
+		options.observeExternalVersion = nil
+		_, err := ExternalConnect(context.Background(), options)
+		if !errors.Is(err, ErrExternalAuthorityUnavailable) {
+			t.Fatalf("version 502 err = %v, want ErrExternalAuthorityUnavailable", err)
+		}
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorExternalAuthorityUnavailable {
+			t.Fatalf("version 502 code = %q, want %s", code, UpgradeErrorExternalAuthorityUnavailable)
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "private key") {
+			t.Fatalf("version 502 error %q mentioned private key", err)
+		}
+	})
+
+	t.Run("external connect keys 502 and unreachable", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		badURL := server.URL
+
+		target := newExternalTarget(t)
+		options := target.options
+		options.BaseURL = badURL
+		options.readExternalKeys = nil
+		_, err := ExternalConnect(context.Background(), options)
+		if !errors.Is(err, ErrExternalAuthorityUnavailable) {
+			t.Fatalf("keys 502 err = %v, want ErrExternalAuthorityUnavailable", err)
+		}
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorExternalAuthorityUnavailable {
+			t.Fatalf("keys 502 code = %q, want %s", code, UpgradeErrorExternalAuthorityUnavailable)
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "private key") {
+			t.Fatalf("keys 502 error %q mentioned private key", err)
+		}
+
+		server.Close()
+		closedTarget := newExternalTarget(t)
+		closedOptions := closedTarget.options
+		closedOptions.BaseURL = badURL
+		closedOptions.observeExternalVersion = nil
+		_, err = ExternalConnect(context.Background(), closedOptions)
+		if !errors.Is(err, ErrExternalAuthorityUnavailable) || strings.Contains(strings.ToLower(err.Error()), "private key") {
+			t.Fatalf("unreachable version read err = %v", err)
+		}
+	})
+
+	t.Run("verify version and keys transport failures", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer server.Close()
+
+		fixture := newManagedVerifyFixtureAt(t, server.URL)
+		options := fixture.verifyOptions()
+		options.observeExternalVersion = nil
+		_, err := Verify(context.Background(), options)
+		if !errors.Is(err, ErrVerifyConnectionUnproven) || strings.Contains(strings.ToLower(err.Error()), "private key") {
+			t.Fatalf("verify version 502 err = %v", err)
+		}
+
+		options = fixture.verifyOptions()
+		options.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			return cpa.V8ConfigObservation{BaseURL: cpa.NormalizeBaseURL(server.URL), ClientKeyCount: 1}, nil
+		}
+		options.readExternalKeys = nil
+		_, err = Verify(context.Background(), options)
+		if !errors.Is(err, ErrVerifyConnectionUnproven) || strings.Contains(strings.ToLower(err.Error()), "private key") {
+			t.Fatalf("verify keys 502 err = %v", err)
+		}
+	})
+}

@@ -932,7 +932,7 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 	report, err := externalConnectVersion(ctx, probes, binding.BaseURL, managementKey)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the management secret the Manager stores did not authenticate against the CPA the External connect step recorded, so a restarted Manager could not administer it; nothing was written", err)
+			"the management secret the Manager stores did not authenticate against the CPA the External connect step recorded, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	if report.WriteBlocked {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
@@ -940,12 +940,12 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 	}
 	if err := externalConnectConfig(ctx, probes, binding.BaseURL, managementKey); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the CPA the External connect step recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+			"the CPA the External connect step recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	snapshot, err := externalConnectKeys(ctx, probes, binding.BaseURL, managementKey)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the CPA the External connect step recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+			"the CPA the External connect step recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	clientKey := ""
 	if len(snapshot.Keys) > 0 {
@@ -953,7 +953,7 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 	}
 	if err := externalConnectModelSurface(ctx, probes, binding.BaseURL, clientKey); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the gateway behind the CPA the External connect step recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", err)
+			"the gateway behind the CPA the External connect step recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", modelSurfaceFailureCause(err))
 	}
 	if freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256) != binding.ServerFingerprint {
 		return newUpgradeError(UpgradeErrorVerifyBindingDrifted,
@@ -1139,7 +1139,7 @@ func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sq
 	report, err := externalConnectVersion(ctx, probes, destination.BaseURL, managementKey)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the management secret the Manager stores did not authenticate against the destination the CPA import recorded, so a restarted Manager could not administer it; nothing was written", err)
+			"the management secret the Manager stores did not authenticate against the destination the CPA import recorded, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	if report.WriteBlocked {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
@@ -1147,20 +1147,20 @@ func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sq
 	}
 	if err := externalConnectConfig(ctx, probes, destination.BaseURL, managementKey); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the destination the CPA import recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+			"the destination the CPA import recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	snapshot, err := externalConnectKeys(ctx, probes, destination.BaseURL, managementKey)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the destination the CPA import recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+			"the destination the CPA import recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", managementReadFailureCause(err))
 	}
 	clientKey := ""
 	if len(snapshot.Keys) > 0 {
 		clientKey = snapshot.Keys[0]
 	}
-	if err := externalConnectModelSurface(ctx, probes, destination.BaseURL, clientKey); err != nil {
+	if err := managedConnectModelSurface(ctx, probes, destination.BaseURL, clientKey); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the gateway behind the destination the CPA import recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", err)
+			"the gateway behind the destination the CPA import recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", modelSurfaceFailureCause(err))
 	}
 	if freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256) != destination.ServerFingerprint {
 		return newUpgradeError(UpgradeErrorVerifyBindingDrifted,

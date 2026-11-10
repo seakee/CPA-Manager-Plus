@@ -163,6 +163,35 @@ func (t *Transport) ExternalModelSurface(ctx context.Context, clientKey string) 
 	return ErrProofUnavailable
 }
 
+// ManagedModelSurface proves a Managed CPA destination serves a well-formed
+// /v1/models list to an imported client credential, mirroring the empty-allowed
+// list predicate in VerifyV8Adoption (v8_adoption.go:57-65). An empty model
+// catalogue is legitimate on a freshly imported Managed destination that has no
+// provider models configured yet.
+func (t *Transport) ManagedModelSurface(ctx context.Context, clientKey string) error {
+	if t == nil || t.client == nil || !validExternalKey(clientKey) {
+		return errors.New("destination model surface was not provable")
+	}
+	code, body, err := t.request(ctx, http.MethodGet, "/v1/models", clientKey, nil)
+	if err != nil {
+		return errors.New("destination model surface was unreachable")
+	}
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		return errors.New("destination model surface rejected the client key")
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("destination model surface answered with status %d", code)
+	}
+	var list struct {
+		Object string            `json:"object"`
+		Data   []json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(body, &list) != nil || list.Object != "list" || list.Data == nil {
+		return errors.New("destination model surface was not provable")
+	}
+	return nil
+}
+
 // validExternalKey accepts the client credentials a CPA v8 configuration stores:
 // a printable, non-empty token. CPA itself mints arbitrary shapes, so this guard
 // bounds what may be echoed into a write body; it never rewrites a value.

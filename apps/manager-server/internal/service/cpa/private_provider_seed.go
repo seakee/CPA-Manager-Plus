@@ -143,9 +143,8 @@ func privateProviderConfig(data []byte, seed PrivateProviderSeed, clientKey stri
 	}
 	credential, authIndex := keys[0]["api-key"], keys[0]["auth_index"]
 	digest := sha256.Sum256([]byte(credential))
-	indexBytes, err := hex.DecodeString(authIndex)
 	if len(credential) < 16 || len(credential) > 4096 || !printable(credential) ||
-		hex.EncodeToString(digest[:]) != seed.CredentialSHA256 || err != nil || len(indexBytes) != 8 || hex.EncodeToString(indexBytes) != authIndex {
+		hex.EncodeToString(digest[:]) != seed.CredentialSHA256 || !ValidAuthIndex(authIndex) {
 		return false
 	}
 	// Only remove the separately checked provider; the original exact S1 empty
@@ -174,4 +173,14 @@ func (t *Transport) providerConfigured(ctx context.Context, management, clientKe
 		body, err = t.postInstallProjection(ctx, body)
 	}
 	return err == nil && status == 200 && privateProviderConfig(body, seed, clientKey)
+}
+
+// ValidAuthIndex reports whether s is CPA's 16-character lowercase hexadecimal
+// credential auth_index (sdk/cliproxy/auth/types.go:580-587).
+func ValidAuthIndex(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	indexBytes, err := hex.DecodeString(s)
+	return err == nil && len(indexBytes) == 8 && hex.EncodeToString(indexBytes) == s
 }
