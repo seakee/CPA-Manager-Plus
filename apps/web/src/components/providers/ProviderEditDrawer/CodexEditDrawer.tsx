@@ -59,6 +59,13 @@ type CodexFormBaseline = ReturnType<typeof buildCodexBaseline>;
 type TestStatus = 'idle' | 'loading' | 'success' | 'error';
 
 const CODEX_TEST_TIMEOUT_MS = 20_000;
+
+// The discovery reset runs on every Base URL keystroke (discoveryScope contains
+// the field). Reusing one empty array keeps a reset that changes nothing from
+// becoming a state change: each one keeps React's commit chain alive, and after
+// ~50 the next update is aborted with "Maximum update depth exceeded".
+const EMPTY_DISCOVERED_MODELS: ModelInfo[] = [];
+
 const XAI_API_BASE_URL = 'https://api.x.ai/v1';
 
 const buildEmptyForm = (baseUrl = ''): ProviderFormState => ({
@@ -383,7 +390,7 @@ export function CodexEditDrawer({
   const modelDiscoveryRequestIdRef = useRef(0);
   useLayoutEffect(() => {
     modelDiscoveryRequestIdRef.current += 1;
-    setDiscoveredModels([]);
+    setDiscoveredModels((prev) => (prev.length === 0 ? prev : EMPTY_DISCOVERED_MODELS));
     setModelsLoaded(false);
     setModelDiscoveryError('');
     setModelDiscoveryFetching(false);
@@ -626,6 +633,9 @@ export function CodexEditDrawer({
   }, [modelDiscoveryOpen, fetchModelDiscovery]);
 
   useEffect(() => {
+    // This effect reruns whenever discovery results are replaced, so it must
+    // return the previous selection when nothing changed: writing back
+    // unconditionally would add a state change to every reset.
     const availableNames = new Set(
       discoveredModels.map((model) => String(model.name ?? '').trim())
     );

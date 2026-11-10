@@ -18,6 +18,12 @@ import type { OpenAIEditOutletContext } from './AiProvidersOpenAIEditLayout';
 import styles from './AiProvidersPage.module.scss';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
 
+// The discovery reset runs whenever discoveryScope changes. Reusing one empty
+// array keeps a reset that changes nothing from becoming a state change: each
+// one keeps React's commit chain alive, and after ~50 the next update is
+// aborted with "Maximum update depth exceeded".
+const EMPTY_DISCOVERED_MODELS: ModelInfo[] = [];
+
 const getErrorMessage = (err: unknown) => {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
@@ -90,7 +96,7 @@ export function AiProvidersOpenAIModelsPage() {
   const modelDiscoveryRequestIdRef = useRef(0);
   useLayoutEffect(() => {
     modelDiscoveryRequestIdRef.current += 1;
-    setModels([]);
+    setModels((prev) => (prev.length === 0 ? prev : EMPTY_DISCOVERED_MODELS));
     setModelsLoaded(false);
     setError('');
     setFetching(false);
@@ -146,6 +152,9 @@ export function AiProvidersOpenAIModelsPage() {
   }, [fetchOpenaiModelDiscovery, form.baseUrl, initialLoading]);
 
   useEffect(() => {
+    // This effect reruns whenever discovery results are replaced, so it must
+    // return the previous selection when nothing changed: writing back
+    // unconditionally would add a state change to every reset.
     const availableNames = new Set(models.map((model) => model.name));
     setSelected((prev) => {
       let changed = false;
