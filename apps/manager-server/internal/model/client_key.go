@@ -71,6 +71,21 @@ func MaskedClientKey(secret string) string {
 	return prefix + MaskedClientKeyEllipsis + secret[len(secret)-4:]
 }
 
+// MaskedImportedClientKey is the only rendering of a Client Key this Manager did
+// not mint: a key an adopted destination already carried, whose shape is the
+// source CPA's and therefore not one of this Manager's two canonical shapes.
+//
+// The last four characters are what an operator recognises, so they are kept
+// exactly as for a canonical key; a secret too short for them to be a small
+// fraction of it is rendered as the ellipsis alone rather than disclosed.
+func MaskedImportedClientKey(secret string) string {
+	runes := []rune(secret)
+	if len(runes) < 8 {
+		return MaskedClientKeyEllipsis
+	}
+	return MaskedClientKeyEllipsis + string(runes[len(runes)-4:])
+}
+
 func isASCIIAlnum(character rune) bool {
 	return character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
 }

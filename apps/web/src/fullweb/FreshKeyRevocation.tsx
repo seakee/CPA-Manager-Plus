@@ -299,7 +299,7 @@ export function FreshKeyRevocation({
       {preset && (
         <div className="key-operation-resource">
           <strong>
-            {(() => { const key = available.find((item) => item.id === preset.targetId); return key ? keyDisplayName(key, k('installerOrigin'), t('keysUnnamed')) : t('keysUnnamed'); })()}
+            {(() => { const key = available.find((item) => item.id === preset.targetId); return key ? keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed')) : t('keysUnnamed'); })()}
           </strong>
           <code>{available.find((key) => key.id === preset.targetId)?.maskedPreview}</code>
         </div>
@@ -384,7 +384,7 @@ export function FreshKeyRevocation({
                   <option value="">{t('keysOperationSelect')}</option>
                   {available.map((key) => (
                     <option key={key.id} value={key.id}>
-                      {keyDisplayName(key, k('installerOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
+                      {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
                     </option>
                   ))}
                 </select>
@@ -403,7 +403,7 @@ export function FreshKeyRevocation({
                     .filter((key) => key.id !== target)
                     .map((key) => (
                       <option key={key.id} value={key.id}>
-                        {keyDisplayName(key, k('installerOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
+                        {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
                       </option>
                     ))}
                 </select>

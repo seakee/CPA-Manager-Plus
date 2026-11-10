@@ -498,10 +498,11 @@ func newAdoptMigrationFixtureWithClientKeys(t *testing.T, clientKeys ...string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Completion proves the destination with the install-derived authority, so the
-	// fixture is wired exactly like the default profile: the managed source reads
-	// the committed checkpoint and the protected connection.
-	app.keyApply = freshkeyapply.NewManaged(nil, nil, nil, destination.URL(), managedInstallSource(app.store, opened.Protector, destination.URL()))
+	// Completion proves the destination with the install-derived authority and
+	// registers the keys it carries, so the fixture is wired exactly like the
+	// default profile: the managed source reads the committed checkpoint and the
+	// protected connection, and the Key workspace is the installation's own.
+	app.keyApply = freshkeyapply.NewManaged(app.keyRepo, app.keys, runtime, destination.URL(), managedInstallSource(app.store, opened.Protector, destination.URL()))
 	fixture.app, fixture.record = app, record
 	return fixture
 }

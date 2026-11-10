@@ -306,6 +306,11 @@ type adoptCompleteRequest struct {
 //  7. an accepted set of retryable items names the durable run's current
 //     generation, verified again in the completion's own CAS.
 //
+// Only once all of them hold are the destination's client keys registered in the
+// Key workspace and the install journal claimed for this run: that is the write
+// that makes the adopted installation manageable afterwards, and it must not
+// happen for a migration that is not finished.
+//
 // Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
 // sets `ProductComplete` runs under the same lock, so a run can never start
 // between the last check and the write. The lock is released before the reply is
@@ -403,7 +408,8 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	// One authenticated read of the destination is conditions 3 and 4: the Adopt
 	// posture proves the key this Manager installed, and the snapshot carries the
 	// client keys the destination actually has.
-	if _, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey); err != nil {
+	destinationKeys, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey)
+	if err != nil {
 		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
 	}
 	if !summary.Finished || len(summary.Items) < summary.Planned {
@@ -417,6 +423,16 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	}
 	if retryable > 0 && !request.AcceptRetryable {
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_retryable", retryable: retryable}
+	}
+	// Completion is where the destination's credentials become this Manager's
+	// installation: every key the destination carries is registered in the Key
+	// workspace, and the install journal the gateway configuration page and the
+	// key operation journal require is claimed for this run. Both writes are
+	// idempotent, so a completion that failed before its CAS replays them instead
+	// of registering a second identity. They run only after every read-only
+	// condition above holds, so an incomplete migration writes nothing.
+	if _, err := a.keyApply.RegisterAdoption(ctx, destinationKeys); err != nil {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
 	}
 	next, err := a.store.Update(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record) error {
 		if freshAuth {

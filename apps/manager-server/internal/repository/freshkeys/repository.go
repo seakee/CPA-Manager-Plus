@@ -27,11 +27,14 @@ type Record struct {
 
 // Client Key origins. A workspace key is created by the Key workspace; the
 // installation mints exactly one installer key so CPA never starts with client
-// authentication disabled. The origin is storage vocabulary, not an
+// authentication disabled; an adopted key is one an adopted destination already
+// carried, registered at adoption completion so the destination's own
+// credentials are managed here as well. The origin is storage vocabulary, not an
 // authorization: every canonical Key is read through the same projections.
 const (
 	OriginWorkspace = "workspace"
 	OriginInstaller = "installer"
+	OriginAdopted   = "adopted"
 )
 
 var ErrConflict = errors.New("staged key name revision conflict")
@@ -196,8 +199,77 @@ func (r *Repository) CreateInstaller(ctx context.Context, v Record) (bool, error
 	return true, nil
 }
 
+// CreateAdopted persists one Client Key an adopted destination already carried.
+//
+// It is the same canonical record as any other staged key — protected secret,
+// digest, masked preview — and it is fenced by the same unique secret hash, so a
+// replayed completion finds the record instead of registering the credential
+// twice. The origin is the only difference: this Manager never minted the
+// secret, it read it from the destination it had just staged and verified.
+func (r *Repository) CreateAdopted(ctx context.Context, v Record, runtimeIdentity string) (bool, error) {
+	v.Origin = OriginAdopted
+	if v.Identity.Validate() != nil || !security.IsValidProtectedEnvelope(v.Ciphertext) || !identity.IsValidSHA256Hex(v.Hash) || v.Preview == "" || v.Identity.CreatedAtMS <= 0 {
+		return false, errors.New("invalid adopted client key")
+	}
+	if runtimeIdentity != "" && strings.TrimSpace(runtimeIdentity) != runtimeIdentity {
+		return false, errors.New("invalid adopted client key source")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err = tx.QueryRowContext(ctx, "select count(*) from fresh_client_api_keys where secret_hash=? or request_id=?", v.Hash, v.RequestID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists != 0 {
+		return false, nil
+	}
+	i := v.Identity
+	if _, err = tx.ExecContext(ctx, "insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) values(?,?,?,?,?)", i.ID, i.Revision, i.Lifecycle, i.CreatedAtMS, i.UpdatedAtMS); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, "insert into fresh_client_api_keys(request_id,api_key_id,secret_ciphertext,secret_hash,masked_preview,origin) values(?,?,?,?,?,?)", v.RequestID, i.ID, v.Ciphertext, v.Hash, v.Preview, v.Origin); err != nil {
+		return false, err
+	}
+	if runtimeIdentity != "" {
+		if err = bindSource(ctx, tx, i.ID, runtimeIdentity, v.Hash, i.CreatedAtMS); err != nil {
+			return false, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ByHash returns the canonical record of one secret digest, or nil while no
+// record owns it. The digest is unique, so this is the idempotent lookup a
+// replayed registration replays.
+func (r *Repository) ByHash(ctx context.Context, hash string) (*Record, error) {
+	if !identity.IsValidSHA256Hex(hash) {
+		return nil, errors.New("invalid staged client secret digest")
+	}
+	var v Record
+	err := r.db.QueryRowContext(ctx, `select k.request_id, i.id, i.revision, i.lifecycle, i.created_at_ms, i.updated_at_ms,
+		k.secret_ciphertext, k.secret_hash, k.masked_preview, k.name, k.name_revision, k.origin from fresh_client_api_keys k
+		join gateway_api_key_identities i on i.id=k.api_key_id where k.secret_hash=?`, hash).
+		Scan(&v.RequestID, &v.Identity.ID, &v.Identity.Revision, &v.Identity.Lifecycle, &v.Identity.CreatedAtMS, &v.Identity.UpdatedAtMS, &v.Ciphertext, &v.Hash, &v.Preview, &v.Name, &v.NameRevision, &v.Origin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if v.Identity.Validate() != nil || v.NameRevision < 1 || !security.IsValidProtectedEnvelope(v.Ciphertext) || !validOrigin(v.Origin) {
+		return nil, errors.New("invalid staged client key")
+	}
+	return &v, nil
+}
+
 func validOrigin(origin string) bool {
-	return origin == OriginWorkspace || origin == OriginInstaller
+	return origin == OriginWorkspace || origin == OriginInstaller || origin == OriginAdopted
 }
 
 // bindSource records one attribution window. An active binding of the same

@@ -1,8 +1,10 @@
-// Canonical Client Keys have two origins. The workspace creates its own; the
+// Canonical Client Keys have three origins. The workspace creates its own; the
 // default installation mints exactly one so CPA never starts with client
-// authentication disabled. Both are the same canonical record with the same
-// masked-only projection.
-export type KeyOrigin = 'workspace' | 'installer';
+// authentication disabled; and an adopted installation registers the keys the
+// CPA it took over already carried. All three are the same canonical record with
+// the same masked-only projection — only the secret's shape, and therefore the
+// mask it allows, differs.
+export type KeyOrigin = 'workspace' | 'installer' | 'adopted';
 
 export interface Key {
   id: string;
@@ -19,6 +21,9 @@ export interface Key {
 
 const workspaceSecret = /^cpamp_sk_[a-f0-9]{64}$/;
 const installSecret = /^sk-[A-Za-z0-9]{64}$/;
+// An adopted key carries the source CPA's own shape, so its mask is the
+// ellipsis and, for a secret long enough to keep them, the last four characters.
+const adoptedMask = /^…[\s\S]{0,4}$/u;
 
 /** maskedPreviewOf is the only rendering a saved secret may produce. */
 export function maskedPreviewOf(secret: string): string {
@@ -32,12 +37,21 @@ export function validSecretShape(secret: string): boolean {
   return workspaceSecret.test(secret) || installSecret.test(secret);
 }
 
+/** validMask accepts the mask the origin's secret shape can produce. */
+function validMask(origin: KeyOrigin, maskedPreview: string): boolean {
+  if (typeof maskedPreview !== 'string') return false;
+  if (origin === 'workspace') return /^cpamp_sk_…[a-f0-9]{4}$/.test(maskedPreview);
+  if (origin === 'installer') return /^sk-…[A-Za-z0-9]{4}$/.test(maskedPreview);
+  return adoptedMask.test(maskedPreview);
+}
+
 export function validKey(value: Key): boolean {
   return (
     !!value &&
     /^[a-f0-9]{32}$/.test(value.id) &&
     /^[a-f0-9]{32}$/.test(value.requestId) &&
-    /^(?:cpamp_sk_…[a-f0-9]{4}|sk-…[A-Za-z0-9]{4})$/.test(value.maskedPreview) &&
+    (value.origin === 'workspace' || value.origin === 'installer' || value.origin === 'adopted') &&
+    validMask(value.origin, value.maskedPreview) &&
     Number.isSafeInteger(value.createdAtMs) &&
     value.createdAtMs > 0 &&
     value.managerState === 'persisted' &&
@@ -46,21 +60,22 @@ export function validKey(value: Key): boolean {
     [...value.name].length <= 120 &&
     Number.isSafeInteger(value.nameRevision) &&
     value.nameRevision > 0 &&
-    (value.lifecycle === undefined || ['active', 'superseded'].includes(value.lifecycle)) &&
-    (value.origin === 'workspace' || value.origin === 'installer') &&
-    (value.origin === 'installer') === value.maskedPreview.startsWith('sk-…')
+    (value.lifecycle === undefined || ['active', 'superseded'].includes(value.lifecycle))
   );
 }
 
 /**
- * keyDisplayName keeps a renamed key authoritative. The installation's Key has
- * a stored default name that every locale translates instead of displaying.
+ * keyDisplayName keeps a renamed key authoritative. The installation's Key and
+ * the keys an adopted CPA already carried have stored default names that every
+ * locale translates instead of displaying.
  */
 export function keyDisplayName(
   key: Key,
   installerLabel: string,
+  adoptedLabel: string,
   unnamedLabel: string
 ): string {
   if (key.origin === 'installer' && key.nameRevision <= 1) return installerLabel;
+  if (key.origin === 'adopted' && key.nameRevision <= 1) return adoptedLabel;
   return key.name || unnamedLabel;
 }

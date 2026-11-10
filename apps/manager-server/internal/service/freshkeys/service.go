@@ -125,6 +125,99 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 	}
 	return value
 }
+// RegisterAdopted persists one canonical record per Client Key an adopted
+// destination already carried, in the order the destination presents them.
+//
+// Adoption is the one path where the secret was not minted here: it was read from
+// the CPA this Manager had already staged and verified, so the destination's own
+// credentials become Manager-managed keys the Key workspace can list, rename,
+// revoke and replace like any other. Nothing here writes CPA, and the secret
+// leaves only into the protected record — the page still reads the masked
+// preview.
+//
+// It is idempotent by secret digest: a retried or resumed completion replays the
+// existing records instead of registering the same credential twice, and a secret
+// that is already a canonical record of this workspace keeps that single identity.
+func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key, error) {
+	if s == nil || s.repo == nil || s.protector == nil || len(secrets) == 0 || len(secrets) > maxAdoptedSecrets {
+		return nil, ErrRequest
+	}
+	// The whole list is validated before the first write: a refusal must leave
+	// the workspace exactly as it found it.
+	seen := make(map[string]bool, len(secrets))
+	for _, secret := range secrets {
+		if secret == "" || len(secret) > maxAdoptedSecretLength || !utf8.ValidString(secret) || seen[secret] {
+			return nil, ErrRequest
+		}
+		seen[secret] = true
+	}
+	runtimeIdentity := s.runtimeIdentity(ctx)
+	keys := make([]Key, 0, len(secrets))
+	for _, secret := range secrets {
+		hash := digest(secret)
+		record, err := s.repo.ByHash(ctx, hash)
+		if err != nil {
+			return nil, err
+		}
+		if record == nil {
+			ciphertext, err := s.protector.ProtectString(secret)
+			if err != nil {
+				return nil, err
+			}
+			id, err := identity.NewAPIKeyID()
+			if err != nil {
+				return nil, err
+			}
+			requestID, err := identity.NewAPIKeyID()
+			if err != nil {
+				return nil, err
+			}
+			now := s.now()
+			v := repo.Record{
+				RequestID: string(requestID),
+				Identity:  identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},
+				Ciphertext: ciphertext, Hash: hash, Preview: model.MaskedImportedClientKey(secret), NameRevision: 1, Origin: repo.OriginAdopted,
+			}
+			created, err := s.repo.CreateAdopted(ctx, v, runtimeIdentity)
+			if err != nil {
+				return nil, err
+			}
+			if created {
+				record = &v
+			} else if record, err = s.repo.ByHash(ctx, hash); err != nil {
+				return nil, err
+			}
+			if record == nil {
+				return nil, errors.New("adopted client key registration lost its record")
+			}
+		}
+		keys = append(keys, public(*record))
+	}
+	return keys, nil
+}
+
+// Bounds of one adoption's client key list. The destination proof already
+// refuses a list outside them; they are repeated here so this write path never
+// depends on the caller having proved anything.
+const (
+	maxAdoptedSecrets      = 128
+	maxAdoptedSecretLength = 4096
+)
+
+// stagedSecretMatches validates one stored record against its decrypted secret.
+// Two origins have a canonical shape and the preview that shape owns; an adopted
+// key carries the source CPA's arbitrary shape and therefore the imported
+// preview. The digest is the same for both, and it is what binds the row.
+func stagedSecretMatches(record repo.Record, secret string) bool {
+	if digest(secret) != record.Hash {
+		return false
+	}
+	if record.Origin == repo.OriginAdopted {
+		return record.Preview == model.MaskedImportedClientKey(secret)
+	}
+	return model.ValidCanonicalClientKey(secret) && record.Preview == model.MaskedClientKey(secret)
+}
+
 func public(v repo.Record) Key {
 	return Key{ID: v.Identity.ID, RequestID: v.RequestID, MaskedPreview: v.Preview, CreatedAtMS: v.Identity.CreatedAtMS,
 		ManagerState: "persisted", RuntimeState: "not_applied", Name: v.Name, NameRevision: v.NameRevision,
@@ -201,7 +294,7 @@ func (s *Service) List(ctx context.Context) ([]Key, error) {
 	}
 	for _, v := range records {
 		secret, err := s.protector.UnprotectString(v.Ciphertext)
-		if err != nil || digest(secret) != v.Hash || !model.ValidCanonicalClientKey(secret) || v.Preview != model.MaskedClientKey(secret) {
+		if err != nil || !stagedSecretMatches(v, secret) {
 			return nil, errors.New("staged client secret unavailable")
 		}
 		key := public(v)
@@ -327,7 +420,7 @@ func (s *Service) EnsureInitialKey(ctx context.Context) (InitialKey, error) {
 // installerKey decrypts and re-verifies the installation's stored Client Key.
 func (s *Service) installerKey(record *repo.Record) (InitialKey, error) {
 	secret, err := s.protector.UnprotectString(record.Ciphertext)
-	if err != nil || !model.ValidCanonicalClientKey(secret) || digest(secret) != record.Hash || record.Preview != model.MaskedClientKey(secret) {
+	if err != nil || !stagedSecretMatches(*record, secret) {
 		return InitialKey{}, errors.New("install client key unavailable")
 	}
 	return InitialKey{ID: record.Identity.ID, RequestID: record.RequestID, Secret: secret}, nil
@@ -395,8 +488,7 @@ func (s *Service) MatchStagedSecret(ctx context.Context, candidate string) (bool
 	matched := 0
 	for _, record := range records {
 		secret, err := s.protector.UnprotectString(record.Ciphertext)
-		if err != nil || !model.ValidCanonicalClientKey(secret) || digest(secret) != record.Hash ||
-			record.Preview != model.MaskedClientKey(secret) {
+		if err != nil || !stagedSecretMatches(record, secret) {
 			return false, errors.New("staged client key authority corrupt")
 		}
 		stored, err := hex.DecodeString(record.Hash)

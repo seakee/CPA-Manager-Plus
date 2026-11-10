@@ -1044,7 +1044,7 @@ func Migrate(db *sql.DB) error {
 			secret_ciphertext text not null,
 			secret_hash text not null unique,
 			masked_preview text not null,
-			origin text not null default 'workspace' check(origin in ('workspace','installer'))
+			origin text not null default 'workspace' check(origin in ('workspace','installer','adopted'))
 		)`,
 		`create table if not exists gateway_quota_policies (
 			id text not null primary key check(length(id) = 32 and id not glob '*[^0-9a-f]*'),
@@ -1379,6 +1379,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureFreshKeyColumns(db); err != nil {
 		return err
 	}
+	if err := ensureFreshKeyOrigins(db); err != nil {
+		return err
+	}
 	if err := ensureUpgradeOperationColumns(db); err != nil {
 		return err
 	}
@@ -1435,7 +1438,7 @@ func ensureFreshKeyColumns(db *sql.DB) error {
 	for _, column := range []struct{ name, ddl string }{
 		{"name", "name text not null default ''"},
 		{"name_revision", "name_revision integer not null default 1 check(typeof(name_revision) = 'integer' and name_revision >= 1)"},
-		{"origin", "origin text not null default 'workspace' check(origin in ('workspace','installer'))"},
+		{"origin", "origin text not null default 'workspace' check(origin in ('workspace','installer','adopted'))"},
 	} {
 		found, err := tableHasColumn(tx, "fresh_client_api_keys", column.name)
 		if err != nil {
@@ -1452,6 +1455,59 @@ func ensureFreshKeyColumns(db *sql.DB) error {
 	if _, err := tx.Exec(`create unique index if not exists idx_fresh_client_api_keys_installer
 		on fresh_client_api_keys(origin) where origin = 'installer'`); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+// ensureFreshKeyOrigins widens the stored Client Key origin vocabulary to the
+// keys an adopted destination already carried.
+//
+// SQLite cannot alter a CHECK constraint, so the table is rebuilt in place: every
+// row is copied verbatim, the widened definition replaces the old one, and the
+// installation-origin fence index a concurrent install depends on is recreated
+// in the same transaction. A table that already accepts the wider vocabulary —
+// including one created by this build — is left untouched, so the rebuild runs at
+// most once per database.
+func ensureFreshKeyOrigins(db *sql.DB) error {
+	var definition string
+	err := db.QueryRow(`select sql from sqlite_master where type='table' and name='fresh_client_api_keys'`).Scan(&definition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.Contains(definition, "'adopted'") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range []string{
+		`drop table if exists fresh_client_api_keys_adopted`,
+		`create table fresh_client_api_keys_adopted (
+			request_id text primary key,
+			api_key_id text not null unique references gateway_api_key_identities(id),
+			secret_ciphertext text not null,
+			secret_hash text not null unique,
+			masked_preview text not null,
+			name text not null default '',
+			name_revision integer not null default 1 check(typeof(name_revision) = 'integer' and name_revision >= 1),
+			origin text not null default 'workspace' check(origin in ('workspace','installer','adopted'))
+		)`,
+		`insert into fresh_client_api_keys_adopted(request_id,api_key_id,secret_ciphertext,secret_hash,masked_preview,name,name_revision,origin)
+			select request_id,api_key_id,secret_ciphertext,secret_hash,masked_preview,name,name_revision,origin
+			from fresh_client_api_keys`,
+		`drop table fresh_client_api_keys`,
+		`alter table fresh_client_api_keys_adopted rename to fresh_client_api_keys`,
+		`create unique index if not exists idx_fresh_client_api_keys_installer
+			on fresh_client_api_keys(origin) where origin = 'installer'`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("widen fresh client key origins: %w", err)
+		}
 	}
 	return tx.Commit()
 }

@@ -294,7 +294,7 @@ export function FreshKeyDetails({
                   <FullWebIcon name="key" size={24} />
                 </span>
                 <div>
-                  <h3>{keyDisplayName(record, k('installerOrigin'), t('keysUnnamed'))}</h3>
+                  <h3>{keyDisplayName(record, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}</h3>
                   <p>
                     <code>{record.maskedPreview}</code>
                   </p>
@@ -362,7 +362,7 @@ export function FreshKeyDetails({
                     )}
                     <div className="key-readonly-field">
                       <span>{t('keysName')}</span>
-                      <strong>{keyDisplayName(record, k('installerOrigin'), t('keysUnnamed'))}</strong>
+                      <strong>{keyDisplayName(record, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}</strong>
                       <button
                         className="btn btn-secondary btn-sm"
                         disabled={busy || unknown || installationPending}

@@ -2,6 +2,8 @@ package freshkeyapply
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -264,6 +266,61 @@ func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey stri
 		return nil, ErrUnavailable
 	}
 	return snap.Keys, nil
+}
+
+// RegisterAdoption persists the Manager-side installation an adopted destination
+// needs, and it is the only place one is created for an adoption.
+//
+// Two facts become durable together, in this order:
+//
+//  1. one canonical record per Client Key the destination carries, so the Key
+//     workspace lists the credentials the adopted CPA actually has and the normal
+//     revoke and replace journal can act on them; and
+//  2. the install journal every install-derived surface reads — the gateway
+//     configuration page, the key operation journal and the completion of a later
+//     install all require the run, generation and provider seed the destination
+//     was staged under, and an adoption staged its destination itself.
+//
+// Both writes are idempotent, so a completion interrupted between them and
+// retried replays instead of registering a second identity or a second journal.
+// The journal is the same one-shot record a New Managed install claims, so an
+// adoption is refused when another installation already owns it rather than
+// overwriting what that installation's key operations are bound to.
+func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]freshkeys.Key, error) {
+	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
+		return nil, ErrUnavailable
+	}
+	p, err := s.permit()
+	if err != nil {
+		return nil, err
+	}
+	keys, err := s.keys.RegisterAdopted(ctx, secrets)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		ids = append(ids, string(key.ID))
+	}
+	journal := repo.InitialInstall{KeyID: ids[0], RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli(), ProviderSeedSHA256: p.S2B.Binding()}
+	if err := s.repo.ClaimInitialInstall(ctx, journal); err != nil {
+		if !errors.Is(err, repo.ErrConflict) {
+			return nil, err
+		}
+		// The journal is written once. A replay must present this adoption's own
+		// binding — the same run, generation and provider seed the destination was
+		// staged under — and one of the keys just registered; anything else is a
+		// different installation and is refused rather than rebound.
+		existing, readErr := s.repo.InitialInstall(ctx)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if existing == nil || existing.RunID != p.RunID || existing.Generation != p.Generation ||
+			existing.ProviderSeedSHA256 != p.S2B.Binding() || !slices.Contains(ids, existing.KeyID) {
+			return nil, ErrGeneration
+		}
+	}
+	return keys, nil
 }
 
 // targetProof is the caller-observed target handed to the single write. A
