@@ -44,6 +44,10 @@ describe('RuntimeStatusPage artifact origin display', () => {
       await act(async () => renderer!.unmount());
       renderer = undefined;
     }
+    // Unmounting cancels the poll, but a refresh that is already awaiting its
+    // reads still settles its state later; flush it before the stubbed globals
+    // (window, document) go away, so it cannot run against a bare test context.
+    await act(async () => {});
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -69,7 +73,7 @@ describe('RuntimeStatusPage artifact origin display', () => {
         operation: null,
         cdnPresets: [],
       },
-      '固定版本（镜像自带）',
+      'runtime_status.engine_source_bundled',
     ],
     [
       'acquired',
@@ -81,7 +85,7 @@ describe('RuntimeStatusPage artifact origin display', () => {
         operation: null,
         cdnPresets: [],
       },
-      '固定版本（运行时获取）',
+      'runtime_status.engine_source_acquired',
     ],
     [
       'required',
@@ -93,9 +97,9 @@ describe('RuntimeStatusPage artifact origin display', () => {
         operation: null,
         cdnPresets: [],
       },
-      '尚未准备',
+      'runtime_status.engine_source_required',
     ],
-  ])('renders engine version source for %s artifact state', async (_label, artifactPayload, expectedText) => {
+  ])('renders engine version source for %s artifact state', async (_label, artifactPayload, key) => {
     const client: PublicApiClient = {
       get: vi.fn(async (resource: string) => {
         if (resource === 'runtime/status') return embeddedStatus();
@@ -119,7 +123,9 @@ describe('RuntimeStatusPage artifact origin display', () => {
     const valueNode = renderer!.root.findByProps({
       'data-testid': 'runtime-status-engine-source-value',
     });
-    expect(valueNode.props.children).toBe(expectedText);
+    // The value is named by the console catalog, so the test asserts the state is
+    // translated rather than pinning one wording of one language.
+    expect(valueNode.props.children).toBe(i18n.t(key, { lng: 'zh-CN' }));
   });
 
   it('shows nothing extra on unsupported_platform and does not break the page when runtime/artifact fails', async () => {
@@ -187,6 +193,10 @@ describe('RuntimeStatusPage state wording', () => {
       await act(async () => renderer!.unmount());
       renderer = undefined;
     }
+    // Unmounting cancels the poll, but a refresh that is already awaiting its
+    // reads still settles its state later; flush it before the stubbed globals
+    // (window, document) go away, so it cannot run against a bare test context.
+    await act(async () => {});
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -299,9 +309,30 @@ describe('RuntimeStatusPage state wording', () => {
     expect(stateNode('runtime-status-gateway-state')).toBe(
       i18n.t('runtime_status.state_ready', { lng: 'zh-CN' })
     );
+    // The demo fixture is rendered like any other observation: the engine
+    // origin names itself through the console catalog, not as a literal.
     expect(
       renderer!.root.findByProps({ 'data-testid': 'runtime-status-engine-source-value' }).props
         .children
-    ).toBe('固定版本（镜像自带）');
+    ).toBe(i18n.t('runtime_status.engine_source_bundled', { lng: 'zh-CN' }));
   });
+
+  it.each(['zh-CN', 'zh-TW', 'en', 'ru'])(
+    'names every Manager, gateway and operation state in %s',
+    async (language) => {
+      // A missing entry would print the wire value in that language, so the
+      // catalog itself is asserted for the states the Manager actually reports.
+      for (const state of ['ready', 'offline', 'starting', 'unknown']) {
+        const key = `runtime_status.state_${state}`;
+        expect(i18n.exists(key, { lng: language }), key).toBe(true);
+      }
+      for (const state of ['accepted', 'running', 'succeeded', 'failed']) {
+        const key = `runtime_status.operation_${state}`;
+        expect(i18n.exists(key, { lng: language }), key).toBe(true);
+        // The named state is a sentence in that language, never the wire word.
+        expect(i18n.t(key, { lng: language }), key).not.toBe(state);
+      }
+      expect(i18n.t('runtime_status.operation_unknown', { lng: language })).not.toBe('unknown');
+    }
+  );
 });

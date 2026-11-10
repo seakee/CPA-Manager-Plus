@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { artifactText } from '../i18n/freshArtifact';
+import { artifactText, type FreshArtifactTextKey } from '../i18n/freshArtifact';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
 import {
   ARTIFACT_MAX_UPLOAD_BYTES,
@@ -80,6 +81,9 @@ export function FreshArtifactStep({
   credential,
   initialStatus,
 }: FreshArtifactStepProps) {
+  // Every sentence on this step is produced from a key at render time, so the
+  // step itself follows a language switch even when its host keeps its state.
+  useFullWebLanguage();
   const validatedInitial = (() => {
     if (!initialStatus) return null;
     try {
@@ -135,7 +139,9 @@ export function FreshArtifactStep({
     }
     return null;
   });
-  const [validationMessage, setValidationMessage] = useState<string>('');
+  // The failing input keeps its key, so the sentence is produced at render and
+  // follows a language switch like every other message on this step.
+  const [validationMessage, setValidationMessage] = useState<FreshArtifactTextKey | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const aliveRef = useRef(true);
@@ -333,10 +339,10 @@ export function FreshArtifactStep({
 
   const handleAcquire = async () => {
     if (busy || !status || preparationBlocked) return;
-    setValidationMessage('');
+    setValidationMessage(null);
     setError(null);
     if (source === 'cdn' && !validCDNPrefix(effectiveCDNPrefix)) {
-      setValidationMessage(artifactText('cdnInvalidPrefix'));
+      setValidationMessage('cdnInvalidPrefix');
       return;
     }
     readyCalledRef.current = false;
@@ -380,7 +386,7 @@ export function FreshArtifactStep({
       event.target.value = '';
     }
     if (!file || busy || !status || preparationBlocked) return;
-    setValidationMessage('');
+    setValidationMessage(null);
     setError(null);
     if (file.size > ARTIFACT_MAX_UPLOAD_BYTES) {
       setError(mapArtifactErrorCode('archive_too_large', version));
@@ -513,7 +519,7 @@ export function FreshArtifactStep({
 
           {validationMessage && (
             <p className="alert alert-warn" role="alert" data-testid="artifact-validation-error">
-              {validationMessage}
+              {artifactText(validationMessage)}
             </p>
           )}
 
@@ -579,7 +585,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('github');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />
@@ -597,7 +603,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('cdn');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />
@@ -649,7 +655,7 @@ export function FreshArtifactStep({
                           spellCheck={false}
                           onChange={(e) => {
                             setCustomPrefix(e.target.value);
-                            setValidationMessage('');
+                            setValidationMessage(null);
                           }}
                         />
                       </div>
@@ -672,7 +678,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('upload');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />

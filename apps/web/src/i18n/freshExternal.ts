@@ -193,11 +193,15 @@ const messages = {
     'CPA 拒絕了這個管理金鑰。請在 CPA 管理設定中核對金鑰後重試。',
     'CPA отклонил этот ключ управления. Проверьте ключ в настройках управления CPA и повторите попытку.',
   ],
+  // The Manager only knows that no safe read of the management configuration was
+  // obtained: an unanswered connection, a proxy in between, a non-naming HTTP
+  // status or an unreadable body all arrive as this one code. The sentence names
+  // what the operator can check instead of asserting why the read failed.
   setupBlockerUnreachable: [
-    'Nothing answered at that address, so the CPA management interface could not be read. Check that the CPA is running and reachable from this Manager.',
-    '该地址没有响应，无法读取 CPA 管理接口。请确认 CPA 正在运行，且本管理程序可以访问该地址。',
-    '該位址沒有回應，無法讀取 CPA 管理介面。請確認 CPA 正在執行，且本管理程式可以存取該位址。',
-    'На этот адрес никто не ответил, поэтому интерфейс управления CPA прочитать не удалось. Убедитесь, что CPA запущен и доступен из этого Manager.',
+    'The CPA management configuration could not be read safely, so this build records nothing about that CPA. Check the address, connectivity from this Manager, that the target is CPA v8, and its logs.',
+    '无法安全读取 CPA 管理配置，因此本程序没有记录该 CPA 的任何状态。请检查地址、本管理程序到该地址的连通性、目标是否为 CPA v8，以及 CPA 日志。',
+    '無法安全讀取 CPA 管理設定，因此本程式沒有記錄該 CPA 的任何狀態。請檢查位址、本管理程式到該位址的連通性、目標是否為 CPA v8，以及 CPA 日誌。',
+    'Конфигурацию управления CPA не удалось безопасно прочитать, поэтому Manager ничего не записывает об этом CPA. Проверьте адрес, доступность из этого Manager, что цель — CPA v8, и журналы CPA.',
   ],
   setupBlockerManagementUnavailable: [
     'That address answered, but it does not expose the CPA v8 management interface. Connect a CPA v8, or adopt the existing installation instead.',
@@ -271,10 +275,10 @@ export function versionSupportText(support: string | undefined): string {
 }
 
 // The strategy refusals an External setup can receive, each with the cause it
-// names. `management_safe_read_unavailable` is the Manager's only "nothing
-// usable came back" code; an address that answered without the v8 management
-// interface is `owner_upgrade_required`, so "unreachable" and "answered, but not
-// a CPA v8" stay separate sentences instead of one guess covering both.
+// names. `management_safe_read_unavailable` is the Manager's only "no safe read
+// came back" code, so its sentence lists what to check instead of claiming the
+// address did not answer; an address that answered without the v8 management
+// interface is `owner_upgrade_required` and keeps its own sentence.
 const setupBlockers: Record<string, keyof typeof messages> = {
   management_connection_invalid: 'setupBlockerConnectionInvalid',
   management_authentication_rejected: 'setupBlockerKeyRejected',

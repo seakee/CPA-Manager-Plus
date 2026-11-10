@@ -53,6 +53,11 @@ async function click(id: string) {
 async function input(id: string, value: string | boolean) {
   await act(async () => byID(id).props.onChange({ target: { value, checked: value } }));
 }
+async function switchLanguage(language: string) {
+  await act(async () => {
+    setFullWebLanguage(language);
+  });
+}
 async function setup(
   options: {
     external?: boolean;
@@ -318,14 +323,6 @@ async function setup(
     recover: () => {
       recovered = true;
     },
-    // A language switch re-renders the surface that owns the journey; this is
-    // that re-render, with the same props.
-    rerender: () =>
-      act(async () => {
-        renderer.update(
-          <FreshSetupWizard initialOperation={initialOperation} transport={client} />
-        );
-      }),
   };
 }
 
@@ -340,7 +337,7 @@ it.each([false, true])(
     await input('confirm-key-saved-checkbox', true);
     await click('setup-execute');
     expect(byID('enter-console').props.href).toBe('/private');
-    expect(JSON.stringify(renderer.toJSON())).toContain('安装已完成');
+    expect(JSON.stringify(renderer.toJSON())).toContain(s('ready'));
     expect(localStorage.setItem).not.toHaveBeenCalled();
     expect(sessionStorage.setItem).not.toHaveBeenCalled();
     const writes = transport.mock.calls
@@ -408,7 +405,7 @@ it('does not commit the route or finish while managed CPA is not ready', async (
       ([url]) => String(url).endsWith('/routing/activate') || String(url).endsWith('/complete')
     )
   ).toBe(false);
-  expect(JSON.stringify(renderer.toJSON())).toContain('CPA 正在启动');
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('waitingRuntime'));
 });
 
 it('keeps an unverified CPA readiness refusal resumable instead of freezing the installation', async () => {
@@ -418,7 +415,7 @@ it('keeps an unverified CPA readiness refusal resumable instead of freezing the 
   await click('setup-execute');
   // The refusal recorded no checkpoint, so the same operation stays continuable.
   expect(byID('setup-resume').props.disabled).toBe(false);
-  expect(JSON.stringify(renderer.toJSON())).toContain('已保存的进度不会丢失');
+  expect(JSON.stringify(renderer.toJSON())).toContain(s('runtimeVerifyRequired'));
   expect(renderer.root.findAllByProps({ 'data-testid': 'enter-console' })).toHaveLength(0);
   const strategyBodies = () =>
     transport.mock.calls
@@ -453,19 +450,14 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'])(
   'explains the unverified readiness state in every locale (%s)',
   async (language) => {
     await setup({ verifyPending: true });
-    setFullWebLanguage(language);
+    await switchLanguage(language);
     await click('setup-review');
     await input('confirm-key-saved-checkbox', true);
     await click('setup-execute');
     expect(byID('setup-resume').props.disabled).toBe(false);
-    expect(JSON.stringify(renderer.toJSON())).toContain(
-      {
-        'zh-CN': '已保存的进度不会丢失',
-        'zh-TW': '已儲存的進度不會遺失',
-        en: 'could not be verified yet',
-        ru: 'пока нельзя проверить',
-      }[language]
-    );
+    // The sentence is read from the catalog for the selected language, so a
+    // rewording does not fail the test and a lost translation does.
+    expect(JSON.stringify(renderer.toJSON())).toContain(s('runtimeVerifyRequired'));
   }
 );
 
@@ -553,8 +545,13 @@ it('keeps a named routing verification refusal resumable and does not call it a 
   // operation stays continuable instead of reading as an unconfirmed write.
   expect(byID('setup-resume').props.disabled).toBe(false);
   const rendered = JSON.stringify(renderer.toJSON());
-  expect(rendered).toContain('控制台地址没有按预期响应');
-  expect(rendered).not.toContain('连接中断或响应丢失');
+  // The named refusal is reported as itself: the lost-reply sentence would tell
+  // the operator to treat a recorded answer as an unknown outcome.
+  const refusal = s('routingVerificationFailed');
+  const lostReply = s('unknownHelp');
+  expect(rendered).toContain(refusal);
+  expect(refusal).not.toBe(lostReply);
+  expect(rendered).not.toContain(lostReply);
   expect(renderer.root.findAllByProps({ 'data-testid': 'enter-console' })).toHaveLength(0);
   await click('setup-resume');
   expect(byID('enter-console').props.href).toBe('/private');
@@ -590,7 +587,7 @@ it('generates a key only on request and requires fresh confirmation after editin
   await act(async () =>
     renderer.root
       .findAllByType('button')
-      .find((node) => node.children.includes('上一步'))!
+      .find((node) => node.children.includes(s('back')))!
       .props.onClick()
   );
   await input('admin-key-input', admin + 'changed');
@@ -602,27 +599,15 @@ it('generates a key only on request and requires fresh confirmation after editin
   expect(transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))).toBe(false);
 });
 
-it.each(['zh-CN', 'zh-TW', 'en'])('keeps the unified journey localized (%s)', async (language) => {
+it.each(['zh-CN', 'zh-TW', 'en', 'ru'])('keeps the unified journey localized (%s)', async (language) => {
   await setup({ external: true });
-  setFullWebLanguage(language);
+  await switchLanguage(language);
   await click('setup-review');
-  expect(JSON.stringify(renderer.toJSON())).toContain(
-    language === 'en'
-      ? 'Review installation'
-      : language === 'zh-TW'
-        ? '確認安裝資訊'
-        : '确认安装信息'
-  );
+  expect(JSON.stringify(renderer.toJSON())).toContain(s('reviewTitle'));
   await input('confirm-key-saved-checkbox', true);
   await click('setup-execute');
   expect(byID('enter-console').props.href).toBe('/private');
-  expect(JSON.stringify(renderer.toJSON())).toContain(
-    language === 'en'
-      ? 'Sign in and enter CPAMP'
-      : language === 'zh-TW'
-        ? '登入並進入 CPAMP'
-        : '登录并进入 CPAMP'
-  );
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('finishLogin'));
 });
 
 it('uses the maintained shell and shared CSS classes across configuration, review and completion', async () => {
@@ -796,7 +781,7 @@ it('never reads runtime/artifact for External and shows mapped error on unsuppor
     managedTransport.mock.calls.some(([url]) => String(url).endsWith('/runtime/artifact'))
   ).toBe(true);
   const alertNode = renderer.root.findByProps({ role: 'alert' });
-  expect(JSON.stringify(alertNode.children)).not.toContain('初始化尚未完成');
+  expect(JSON.stringify(alertNode.children)).not.toContain(j('setupError'));
   expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
 });
 
@@ -891,20 +876,42 @@ it('keeps gate active and blocks execute when active.artifactId does not match p
 it('retranslates a message that is already on screen when the language changes', async () => {
   setFullWebLanguage('en');
   const englishText = j('invalidSetup');
-  const { rerender } = await setup();
+  await setup();
   await input('admin-key-input', 'short');
   await click('setup-review');
   expect(JSON.stringify(renderer.toJSON())).toContain(englishText);
 
-  // The journey keeps the key, not the sentence, so the same failure reads in
-  // the newly selected language.
-  setFullWebLanguage('zh-CN');
-  const chineseText = j('invalidSetup');
-  expect(chineseText).not.toBe(englishText);
-  await rerender();
-  const rendered = JSON.stringify(renderer.toJSON());
-  expect(rendered).toContain(chineseText);
-  expect(rendered).not.toContain(englishText);
+  // The journey keeps the key, not the sentence, and the wizard subscribes to
+  // the language it renders with: the switch alone re-renders the message that
+  // is already on screen. No prop or state change is staged in between.
+  let previous = englishText;
+  for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+    await switchLanguage(language);
+    const text = j('invalidSetup');
+    expect(text).not.toBe(previous);
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain(text);
+    expect(rendered).not.toContain(previous);
+    previous = text;
+  }
+  // The Russian wizard does not fall back to English for the journey messages.
+  await switchLanguage('ru');
+  expect(j('invalidSetup')).toBe(previous);
+  expect(previous).not.toBe(englishText);
+});
+
+it('names the journey setup, waiting and copy messages in all four languages', () => {
+  // The five messages the wizard renders from the journey dictionary. A missing
+  // translation would show English to an operator who selected another language,
+  // so each one is asserted against the English entry rather than a sentence.
+  const keys = ['setupError', 'invalidSetup', 'waitingRuntime', 'copied', 'copyFailed'] as const;
+  for (const key of keys) {
+    const english = j(key, 'en');
+    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      expect(j(key, language), `${key}/${language}`).not.toBe(english);
+      expect(j(key, language), `${key}/${language}`).not.toBe('');
+    }
+  }
 });
 
 it('localizes the review plugin row and marks the recommended installation option', async () => {
@@ -920,13 +927,13 @@ it('localizes the review plugin row and marks the recommended installation optio
   await act(async () => {
     renderer.root
       .findAllByType('button')
-      .find((node) => node.children.includes('上一步'))!
+      .find((node) => node.children.includes(s('back')))!
       .props.onClick();
   });
   await act(async () => {
     renderer.root
       .findAllByType('button')
-      .find((node) => node.children.includes('上一步'))!
+      .find((node) => node.children.includes(s('back')))!
       .props.onClick();
   });
   // Only the first option is recommended, and it says so with the existing word.

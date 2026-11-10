@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setFullWebLanguage } from '../i18n/fullweb';
+import { artifactText } from '../i18n/freshArtifact';
 import { FreshArtifactStep } from './FreshArtifactStep';
 import {
   ARTIFACT_MAX_UPLOAD_BYTES,
@@ -26,6 +27,14 @@ function makeStatus(overrides: Partial<ArtifactStatus> = {}): ArtifactStatus {
 
 describe('FreshArtifactStep', () => {
   let renderer: ReactTestRenderer | undefined;
+
+  // The switch is the action the entry performs, so the tests drive it rather
+  // than re-rendering the step by hand.
+  async function switchLanguage(language: string) {
+    await act(async () => {
+      setFullWebLanguage(language);
+    });
+  }
 
   beforeEach(() => {
     setFullWebLanguage('zh-CN');
@@ -290,6 +299,39 @@ describe('FreshArtifactStep', () => {
     expect(onReady).toHaveBeenCalledTimes(1);
   });
 
+  it('retranslates a rejected CDN prefix when the display language changes', async () => {
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => makeStatus()),
+      probe: vi.fn(async () => ({ reachable: false, code: 'source_unreachable' })),
+      acquire: vi.fn(),
+      upload: vi.fn(),
+    };
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={vi.fn()} />);
+    });
+    await click('artifact-source-cdn');
+    await act(async () => {
+      byID('artifact-cdn-prefix-input').props.onChange({
+        target: { value: 'http://not-https.example.com/' },
+      });
+    });
+    await click('artifact-acquire-btn');
+    expect(byID('artifact-validation-error').props.children).toBe(
+      artifactText('cdnInvalidPrefix')
+    );
+
+    // The rejected input keeps its key, so the alert that is already on screen
+    // follows the switch; nothing else on the step is re-typed.
+    await switchLanguage('ru');
+    expect(byID('artifact-validation-error').props.children).toBe(
+      artifactText('cdnInvalidPrefix', undefined, 'ru')
+    );
+    expect(artifactText('cdnInvalidPrefix', undefined, 'ru')).not.toBe(
+      artifactText('cdnInvalidPrefix', undefined, 'en')
+    );
+  });
+
   it('names the source that failed when a polled CDN download reports the failure', async () => {
     // A CDN acquire answers 202 and only fails later, in the poll. The remedy
     // must still be the one a CDN prefix can act on, not "switch to CDN".
@@ -340,10 +382,17 @@ describe('FreshArtifactStep', () => {
     expect(byID('artifact-error').props['data-error-code']).toBe('download_failed');
     const remedy = byID('artifact-error-remedy').props.children as string;
     // The CDN remedy points at a different prefix and the upload option; the
-    // GitHub remedy ("retry the download…") would send the operator back to the
-    // source that just failed.
-    expect(remedy).toBe('换一个 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。');
-    expect(remedy).not.toContain('请重试下载');
+    // source-agnostic network remedy would send the operator back to the source
+    // that just failed. Compared against the message catalog rather than a
+    // copied sentence, so rewording the copy cannot fail this test.
+    expect(remedy).toBe(artifactText('remedy_cdn'));
+    expect(remedy).not.toBe(artifactText('remedy_network'));
+    // The remedy follows the display language like the rest of the step.
+    await switchLanguage('ru');
+    expect(byID('artifact-error-remedy').props.children).toBe(
+      artifactText('remedy_cdn', undefined, 'ru')
+    );
+    await switchLanguage('zh-CN');
   });
 
   it('keeps the source that failed when the failure is already in the initial status', async () => {
@@ -376,8 +425,11 @@ describe('FreshArtifactStep', () => {
     });
 
     expect(byID('artifact-error').props['data-error-code']).toBe('download_failed');
-    expect(byID('artifact-error-remedy').props.children).toBe(
-      '换一个 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。'
+    // The restored failure keeps the source the status recorded, so the remedy
+    // is the CDN one rather than the network retry.
+    expect(byID('artifact-error-remedy').props.children).toBe(artifactText('remedy_cdn'));
+    expect(byID('artifact-error-remedy').props.children).not.toBe(
+      artifactText('remedy_network')
     );
   });
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { shellText as s } from '../i18n/consoleShell';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
@@ -140,6 +141,10 @@ export function FreshSetupWizard({
   transport: BootstrapTransportClient;
   onOperation?: (operation: FreshOperation) => void;
 }) {
+  // Messages on this surface are keys rendered through the Full Web text
+  // helpers, so the language switch itself must re-render the wizard: otherwise
+  // an error or note that is already on screen keeps the old language.
+  useFullWebLanguage();
   const [operation, setOperation] = useState(initialOperation);
   // A resumed installation keeps the strategy it recorded, including an
   // adoption whose flow owns the rest of the journey.
