@@ -545,20 +545,30 @@ describe('Fresh installation and Console authority boundary', () => {
     await mount();
     expect(hasLogin()).toBe(true);
     await login();
-    const adapterError = () =>
-      (renderer.root.findByType(LoginPage).props.consoleAuth as { error: string }).error;
-    expect(adapterError()).toBe(i18n.t('fullweb.authError', { lng: 'zh-CN' }));
+    // The user reads the alert region, not the adapter object behind it.
+    const alertText = () => {
+      const children: unknown = renderer.root.findByProps({ id: 'console-login-error' }).props
+        .children;
+      if (typeof children !== 'string') throw new Error('sign-in alert must render one string');
+      return children;
+    };
+    const chineseAlert = alertText();
+    expect(chineseAlert).toBe(i18n.t('fullweb.authError', { lng: 'zh-CN' }));
 
     await act(async () => {
       await i18n.changeLanguage('en');
       await vi.dynamicImportSettled();
     });
-    expect(adapterError()).toBe(i18n.t('fullweb.authError', { lng: 'en' }));
+    const englishAlert = alertText();
+    expect(englishAlert).toBe(i18n.t('fullweb.authError', { lng: 'en' }));
+    expect(englishAlert).not.toBe(chineseAlert);
+    expect(englishAlert).not.toContain('fullweb.');
 
     await act(async () => {
       await i18n.changeLanguage('zh-CN');
       await vi.dynamicImportSettled();
     });
+    expect(alertText()).toBe(chineseAlert);
   });
 
   it.each([

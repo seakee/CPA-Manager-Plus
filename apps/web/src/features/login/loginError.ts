@@ -68,3 +68,11 @@ export const formatLoginError = (error: LoginError, t: TFunction): string => {
     ? `${withStatus} (${t('login.error_backend_detail')}: ${error.backendDetail})`
     : withStatus;
 };
+
+/**
+ * The failure toast repeats the error box above it, so it is built from the same
+ * `LoginError`: a toast that is still on screen retranslates with the box instead
+ * of keeping the language it was created in.
+ */
+export const formatLoginFailure = (error: LoginError, t: TFunction): string =>
+  `${t('notification.login_failed')}: ${formatLoginError(error, t)}`;

@@ -455,6 +455,10 @@ const sanitizeLogMessageParams = (
   if (!isRecord(value)) return undefined;
   const params: Record<string, CodexInspectionLogMessageParam> = {};
   for (const [key, item] of Object.entries(value)) {
+    // Params outlive the sentence they render, so they pass the same sensitive-key
+    // gate as `detail`: a credential-shaped name is dropped instead of being kept
+    // for a later language switch to print.
+    if (isSensitiveLogDetailKey(key)) continue;
     const param = sanitizeLogMessageParam(item);
     if (param !== undefined) params[key] = param;
   }

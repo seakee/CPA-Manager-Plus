@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import i18n from '@/i18n';
+import type { CodexQuotaState } from '@/types';
+import { createTranslateQuotaWindowLabel } from '@/features/accounts/model/accountQuotaDisplayWindows';
 import { getDemoApiCallResult, getDemoQuotaStoreState } from './demoFixtures';
 
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
@@ -107,21 +109,43 @@ describe('Codex spend-control demo fixture', () => {
 });
 
 describe('Codex quota window labels', () => {
-  it('names every demo window through the same i18n keys the live data uses', () => {
-    const windows = Object.values(getDemoQuotaStoreState().codexQuota).flatMap(
-      (quota) => quota.windows ?? []
+  type DemoQuotaWindow = NonNullable<CodexQuotaState['windows']>[number];
+
+  const demoWindows = (): DemoQuotaWindow[] =>
+    Object.values(getDemoQuotaStoreState().codexQuota).flatMap((quota) => quota.windows ?? []);
+
+  // The same translator AccountsPage hands to buildAccountQuotaDisplayWindows.
+  const displayedLabel = (language: string, window: DemoQuotaWindow) =>
+    createTranslateQuotaWindowLabel(i18n.getFixedT(language))(
+      window.label,
+      window.labelKey,
+      window.labelParams
     );
+
+  it('shows the localized label the accounts page renders for every demo window', () => {
+    const windows = demoWindows();
     expect(windows.length).toBeGreaterThan(0);
+
     for (const window of windows) {
-      expect(window.labelKey).toMatch(/^codex_quota\./);
-      expect(i18n.t(window.labelKey ?? '', { lng: 'en' })).not.toMatch(/[\u3400-\u9fff]/);
-      expect(i18n.t(window.labelKey ?? '', { lng: 'ru' })).not.toMatch(/[\u3400-\u9fff]/);
+      const english = displayedLabel('en', window);
+      const russian = displayedLabel('ru', window);
+      // The translation key wins over the English label the window was built with.
+      expect(russian).not.toBe(window.label);
+      expect(russian).not.toBe(english);
+      expect(english).not.toMatch(/[\u3400-\u9fff]/);
+      expect(russian).not.toMatch(/[\u3400-\u9fff]/);
     }
-    expect(
-      i18n.t(
-        windows.find((window) => window.id === 'monthly')?.labelKey ?? '',
-        { lng: 'ru' }
-      )
-    ).toBe('Месячный лимит');
+  });
+
+  it('retranslates a visible window label when the language changes', () => {
+    const weekly = demoWindows().find(
+      (window) => window.labelKey === 'codex_quota.secondary_window'
+    );
+    expect(weekly).toBeDefined();
+
+    expect(displayedLabel('en', weekly!)).toBe('Weekly limit');
+    expect(displayedLabel('zh-CN', weekly!)).toBe('周限额');
+    expect(displayedLabel('zh-TW', weekly!)).toBe('週限額');
+    expect(displayedLabel('ru', weekly!)).toBe('Недельный лимит');
   });
 });

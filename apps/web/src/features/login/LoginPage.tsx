@@ -46,7 +46,7 @@ import {
   CPAMP_VERTICAL_LOGO_URL,
 } from '@/assets/brand';
 import { resolveUsageServiceLoginMode } from './loginMode';
-import { formatLoginError, toLoginError, type LoginError } from './loginError';
+import { formatLoginError, formatLoginFailure, toLoginError, type LoginError } from './loginError';
 import styles from './LoginPage.module.scss';
 
 type RedirectState = { from?: { pathname?: string; search?: string; hash?: string } };
@@ -444,7 +444,9 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
     } catch (err: unknown) {
       const loginError = toLoginError(err);
       setError(loginError);
-      showNotification(`${t('notification.login_failed')}: ${formatLoginError(loginError, t)}`, 'error');
+      showNotification(formatLoginFailure(loginError, t), 'error', undefined, (translate) =>
+        formatLoginFailure(loginError, translate)
+      );
     } finally {
       setLoading(false);
     }

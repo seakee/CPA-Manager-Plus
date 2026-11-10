@@ -6822,6 +6822,48 @@ describe('Codex inspection last-run cache', () => {
     expect(loaded?.result.summary.deleteCount).toBe(1);
   });
 
+  it('drops credential-shaped message params instead of persisting them', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    saveCodexInspectionLastRun({
+      result: createRunResult(),
+      logs: [
+        {
+          id: 'log-secret',
+          level: 'info',
+          message: 'Codex inspection action delete',
+          messageKey: 'monitoring.codex_inspection_log_result',
+          messageParams: {
+            account: 'demo@example.com',
+            action: { key: 'monitoring.codex_inspection_action_delete' },
+            status: 200,
+            percent: '1.0%',
+            accessToken: 'secret-access-token',
+            authorization: 'Bearer secret-authorization',
+            clientSecret: 'secret-client-secret',
+          },
+          timestamp: 2000,
+        },
+      ],
+    });
+
+    const persisted = storage.getItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY) ?? '';
+    for (const secret of ['secret-access-token', 'secret-authorization', 'secret-client-secret']) {
+      expect(persisted).not.toContain(secret);
+    }
+
+    const restored = loadCodexInspectionLastRun();
+    expect(restored?.logs[0].messageParams).toEqual({
+      account: 'demo@example.com',
+      action: { key: 'monitoring.codex_inspection_action_delete' },
+      status: 200,
+      percent: '1.0%',
+    });
+
+    const viewEntry = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('ru'));
+    expect(viewEntry.message).toBe('demo@example.com -> Удалить (HTTP 200 · использовано 1.0%)');
+  });
+
   it('restores legacy 401 filters as reauth filters', () => {
     const storage = createStorage();
     vi.stubGlobal('localStorage', storage);

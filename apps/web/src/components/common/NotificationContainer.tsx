@@ -70,7 +70,9 @@ export function NotificationContainer() {
           key={notification.id}
           className={`notification ${notification.type} ${notification.isExiting ? 'exiting' : 'entering'}`}
         >
-          <div className="message">{notification.message}</div>
+          <div className="message">
+            {notification.renderMessage ? notification.renderMessage(t) : notification.message}
+          </div>
           <button
             type="button"
             className="close-btn"

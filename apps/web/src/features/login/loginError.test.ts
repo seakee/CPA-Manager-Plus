@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import en from '@/i18n/locales/en.json';
 import ru from '@/i18n/locales/ru.json';
 import zhCN from '@/i18n/locales/zh-CN.json';
-import { formatLoginError, toLoginError } from './loginError';
+import { formatLoginError, formatLoginFailure, toLoginError } from './loginError';
 
 const translator = (lng: string) => {
   const instance = i18next.createInstance();
@@ -40,6 +40,15 @@ describe('login error text', () => {
       'HTTP 500: Internal server error, please try again later (service response: database is locked)'
     );
     expect(formatLoginError(failure, translator('ru'))).toContain('детали сервера: database is locked');
+  });
+
+  it('builds a failure toast that retranslates with the error box', () => {
+    const failure = toLoginError({ status: 401 });
+
+    expect(formatLoginFailure(failure, translator('zh-CN'))).toBe('登录失败: 管理员密钥无效。');
+    expect(formatLoginFailure(failure, translator('ru'))).toBe(
+      'Вход не выполнен: Неверный ключ администратора.'
+    );
   });
 
   it('maps transport failures and usage service codes to translation keys', () => {
