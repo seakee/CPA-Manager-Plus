@@ -661,6 +661,25 @@ func validateReadOnlySnapshotSource(databasePath string, files []InspectionFile)
 // Every read-only source read opens this copy instead of the source: an open in
 // place writes SQLite coordination files beside the database even under
 // mode=ro, and this inspection promises to preserve the tree byte for byte.
+// CopySourceForRead copies the database and the named sidecars into a private
+// scratch directory and returns the copy's database path plus the cleanup that
+// removes the directory. It exists for readers that must prove something about a
+// source this process may not own: the copy obeys the inspection staging rules —
+// it never lands in the source, the archive or the data-key directory — and it is
+// only returned when the source inventory is unchanged across the copy, so the
+// caller reads one state without ever opening the source itself.
+func CopySourceForRead(ctx context.Context, paths InspectionPaths, sidecars ...string) (string, func(), error) {
+	files, err := inspectFiles(paths)
+	if err != nil {
+		return "", func() {}, errors.New("source inventory failed")
+	}
+	staging, err := copyInspectionSnapshot(ctx, paths, files, "cpamp-startup-read-", sidecars...)
+	if err != nil {
+		return "", func() {}, err
+	}
+	return filepath.Join(staging, "source.sqlite"), func() { _ = os.RemoveAll(staging) }, nil
+}
+
 func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []InspectionFile, prefix string, sidecars ...string) (string, error) {
 	tempDir, err := inspectionTempDirectory(paths)
 	if err != nil {

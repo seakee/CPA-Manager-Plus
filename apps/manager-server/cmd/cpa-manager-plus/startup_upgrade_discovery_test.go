@@ -729,3 +729,26 @@ func TestConcurrentLegacyDiscoveryObservationsDoNotSelfContend(t *testing.T) {
 		t.Fatalf("concurrent discovery mutated the source tree")
 	}
 }
+
+// TestAdmitStartupReadsAPendingWALSourceWithoutTouchingIt is the startup half of
+// the same invariant: the pre-classification operation read runs before anything
+// knows whose store this is, so it must answer for a 1.x volume with a pending
+// journal without creating usage.sqlite-shm or rewriting a byte.
+func TestAdmitStartupReadsAPendingWALSourceWithoutTouchingIt(t *testing.T) {
+	dir, paths := legacyWALVolumeWithPendingWAL(t, "pending-wal-admission-key-123456")
+	if err := os.Remove(paths.Database + "-shm"); err != nil {
+		t.Fatalf("drop the stale -shm: %v", err)
+	}
+	before := readSourceTree(t, dir)
+
+	if _, err := legacypreflight.AdmitStartup(t.Context(), paths, legacypreflight.Options{}); err == nil {
+		t.Fatalf("a stopped 1.x volume with a pending journal must not be admitted")
+	}
+
+	if _, err := os.Lstat(paths.Database + "-shm"); !os.IsNotExist(err) {
+		t.Fatalf("startup admission created usage.sqlite-shm (err=%v)", err)
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("startup admission mutated the source tree:\nbefore=%v\nafter=%v", before, after)
+	}
+}

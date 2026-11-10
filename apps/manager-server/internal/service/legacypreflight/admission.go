@@ -25,6 +25,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
@@ -227,21 +228,46 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	db, err := sql.Open("sqlite", admissionDataSourceName(path))
+	walPending := false
+	if wal, statErr := os.Lstat(path + "-wal"); statErr == nil && wal.Size() > 0 {
+		walPending = true
+	}
+	// The operation table is looked up in the database file alone first. An
+	// immutable handle opens no journal and creates no -shm, so a source that
+	// records no operations — every 1.x volume — is answered without writing
+	// anything beside the tree v2 must leave untouched, whether or not a journal
+	// is pending. Only a database that records operations at all is read with its
+	// journal applied, and then from a private copy: this read runs before any
+	// classification, so it may be looking at a volume this process will never
+	// own. The copy is therefore only paid by a store that records operations and
+	// still carries a journal, which is a v2 store after a crash — never a 1.x
+	// volume, which has no such table to find.
+	present, err := recordedUpgradeTablePresent(ctx, admissionDataSourceName(path, true))
+	if err != nil {
+		return upgradeRecord{}, false, err
+	}
+	if !present {
+		return upgradeRecord{}, false, nil
+	}
+	readPath := path
+	if walPending {
+		copied, cleanup, copyErr := sqlite.CopySourceForRead(ctx, sqlite.InspectionPaths{
+			Database: path,
+			DataKey:  a.DataKeyPath,
+		}, "-wal")
+		if copyErr != nil {
+			return upgradeRecord{}, false, copyErr
+		}
+		defer cleanup()
+		readPath = copied
+	}
+	db, err := sql.Open("sqlite", admissionDataSourceName(readPath, !walPending))
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
-	var present int
-	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
-		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
-		return upgradeRecord{}, false, err
-	}
-	if present == 0 {
-		return upgradeRecord{}, false, nil
-	}
 	// The columns a reader may select depend on the build that wrote the table:
 	// a store that predates the completion gate has neither the verification
 	// block nor the External connect table, and reading it must say "no evidence"
@@ -914,11 +940,31 @@ func containsRecordedDomain(domains []string, want string) bool {
 
 // admissionDataSourceName mirrors the bounded inspection DSN: read-only, no
 // persistence, and immutable only when there is no live WAL to join.
-func admissionDataSourceName(path string) string {
-	immutable := true
-	if info, err := os.Lstat(path + "-wal"); err == nil && info.Size() > 0 {
-		immutable = false
+// recordedUpgradeTablePresent reports whether the database file names the
+// operation table. The handle is immutable, so the answer describes the file as
+// written and never the journal beside it.
+func recordedUpgradeTablePresent(ctx context.Context, dsn string) (bool, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return false, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+	var present int
+	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
+		return false, err
+	}
+	return present != 0, nil
+}
+
+// admissionDataSourceName is the read-only handle for the operation record.
+// `immutable` must be false only for a copy that carries its journal, because an
+// immutable handle ignores the journal; it must be true for any path inside the
+// source, because a plain read-only open of a WAL database still creates or
+// joins `-shm` beside it.
+func admissionDataSourceName(path string, immutable bool) string {
 	uriPath := filepath.ToSlash(path)
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
