@@ -164,6 +164,103 @@ func TestDirectRevokeLastKeyAndStagedKeeper(t *testing.T) {
 	}
 }
 
+// threeKeyFixture is an installation whose destination carries three staged keys:
+// the install key, one key this workspace minted, and one key an adopted CPA
+// already carried. That is the shape a takeover commonly has, and the shape the
+// whole-list rule must not refuse.
+func threeKeyFixture(t *testing.T) (s *Service, w *operationWire, ids, secrets []string) {
+	t.Helper()
+	var oldID, nextID, old, next string
+	s, w, oldID, nextID, old, next = operationFixture(t)
+	adopted, err := s.keys.RegisterAdopted(t.Context(), []string{"source-client-three"})
+	if err != nil || len(adopted) != 1 {
+		t.Fatalf("adopted key: %#v %v", adopted, err)
+	}
+	var adoptedSecret string
+	if err = s.keys.WithStagedSecret(t.Context(), string(adopted[0].ID), func(v string) error {
+		adoptedSecret = v
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ids = []string{oldID, nextID, string(adopted[0].ID)}
+	secrets = []string{old, next, adoptedSecret}
+	w.keys = slices.Clone(secrets)
+	w.live = slices.Clone(secrets)
+	return s, w, ids, secrets
+}
+
+// A destination with more than two keys is rewritten one key at a time: the
+// operation removes exactly its target (or adds its replacement once) and every
+// other key the Manager staged survives, in place.
+func TestRevokeAndReplaceKeepEveryOtherDestinationKey(t *testing.T) {
+	s, w, ids, secrets := threeKeyFixture(t)
+
+	// Revoke the workspace key and keep the installation's own key.
+	revokeID := strings.Repeat("5", 32)
+	if _, err := s.Prepare(t.Context(), revokeID, ids[1], ids[0], "revoke", 7); err != nil {
+		t.Fatalf("three-key revoke prepare: %v", err)
+	}
+	grantStep(s, revokeID, "revoke")
+	r, err := s.ContinueOperation(t.Context(), revokeID, 7)
+	if err != nil || r.Operation.Outcome != "committed" || r.RuntimeState != "effective_observed" {
+		t.Fatalf("three-key revoke: %#v %v", r, err)
+	}
+	if !slices.Equal(w.keys, []string{secrets[0], secrets[2]}) || !slices.Equal(w.live, w.keys) {
+		t.Fatalf("revoke left %v (live %v)", w.keys, w.live)
+	}
+	// The revoked key no longer authenticates and the two survivors still do: the
+	// fake CPA answers exactly like /v1/models does.
+	if ok, err := w.SampleKeySet(t.Context(), w.live, []string{secrets[1]}); err != nil || !ok {
+		t.Fatalf("post-revoke sampling: %v %v", ok, err)
+	}
+
+	// The installation's key is now the committed keeper, so it can be replaced:
+	// the add step introduces the replacement and the revoke step removes only the
+	// target, leaving the adopted key untouched.
+	replacement, _, err := s.keys.Create(t.Context(), strings.Repeat("d", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceID := strings.Repeat("6", 32)
+	if _, err = s.Prepare(t.Context(), replaceID, ids[0], string(replacement.Key.ID), "replace", 7); err != nil {
+		t.Fatalf("three-key replace prepare: %v", err)
+	}
+	grantStep(s, replaceID, "add")
+	if r, err = s.ContinueOperation(t.Context(), replaceID, 7); err != nil || r.NextStep != "revoke" ||
+		!slices.Equal(w.keys, []string{secrets[0], secrets[2], replacement.CreatedSecret}) {
+		t.Fatalf("three-key replace add step: %#v %v keys=%v", r, err, w.keys)
+	}
+	grantStep(s, replaceID, "revoke")
+	if r, err = s.ContinueOperation(t.Context(), replaceID, 7); err != nil || r.Operation.Outcome != "committed" ||
+		!slices.Equal(w.keys, []string{secrets[2], replacement.CreatedSecret}) {
+		t.Fatalf("three-key replace revoke step: %#v %v keys=%v", r, err, w.keys)
+	}
+}
+
+// The whole-list write is authority over every key in the destination, so a key
+// this Manager never staged keeps the operation refused: writing the list the
+// Manager knows would delete a credential it cannot restore.
+func TestDestinationKeyTheManagerNeverStagedStillConflicts(t *testing.T) {
+	s, w, ids, secrets := threeKeyFixture(t)
+	w.keys = append(slices.Clone(secrets), "unknown-client-key")
+	w.live = slices.Clone(w.keys)
+	id := strings.Repeat("7", 32)
+	if _, err := s.Prepare(t.Context(), id, ids[1], ids[0], "revoke", 7); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("unknown destination key = %v", err)
+	}
+	if w.writes != 0 {
+		t.Fatalf("a refused prepare wrote the destination: %d", w.writes)
+	}
+	// The same holds for a replace whose replacement the destination already
+	// carries: it is not a new credential and the step would not be a comparison.
+	w.keys = slices.Clone(secrets)
+	w.live = slices.Clone(secrets)
+	if _, err := s.Prepare(t.Context(), id, ids[0], ids[2], "replace", 7); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("already-carried replacement = %v", err)
+	}
+}
+
 func TestLostReplyAndRestartResumeOnlyUnattemptedStep(t *testing.T) {
 	s, w, oldID, nextID, _, _ := operationFixture(t)
 	id := strings.Repeat("3", 32)

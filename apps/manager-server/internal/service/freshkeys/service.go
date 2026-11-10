@@ -296,6 +296,35 @@ func digest(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
 }
+
+// SecretDigest is the stored form of one Client Key secret: the sha256 hex that
+// a record is fenced by. It is what a caller may compare a destination's key
+// list against without carrying the secret anywhere it is not already read.
+func SecretDigest(secret string) string { return digest(secret) }
+
+// AllStaged reports whether every secret is one of this installation's active
+// staged Client Keys. It answers membership without returning any secret, which
+// is what a whole-list write needs: a destination key this Manager cannot name is
+// one it must not overwrite.
+func (s *Service) AllStaged(ctx context.Context, secrets []string) (bool, error) {
+	if s == nil || s.repo == nil || len(secrets) == 0 {
+		return false, ErrRequest
+	}
+	for _, secret := range secrets {
+		if secret == "" {
+			return false, nil
+		}
+		record, err := s.repo.ByHash(ctx, digest(secret))
+		if err != nil {
+			return false, err
+		}
+		if record == nil || record.Identity.Lifecycle != identity.LifecycleActive {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (s *Service) List(ctx context.Context) ([]Key, error) {
 	if s.protector == nil {
 		return nil, errors.New("secret protection unavailable")

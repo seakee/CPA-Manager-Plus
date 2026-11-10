@@ -89,6 +89,14 @@ export function FreshKeyRevocation({
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState(false);
+  // The last preflight verdict, tagged with the selection it answered for, so a
+  // stale reply can never unlock or block a different choice.
+  const [preflight, setPreflight] = useState<{
+    selection: string;
+    ready: boolean;
+    reason: string;
+  } | null>(null);
+  const preflightSeq = useRef(0);
   const [message, setMessage] = useState('');
   const [showGuide, setShowGuide] = useState(false);
   const active = useRef(true);
@@ -120,6 +128,50 @@ export function FreshKeyRevocation({
       );
     }
   }, [preset, keys]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const currentSelection =
+    target && keeper && target !== keeper && !(result?.operation && result.operation.outcome !== 'committed')
+      ? target + '|' + keeper + '|' + mode
+      : '';
+
+  // Every remaining limit is a fact about the destination or about the
+  // installation, so it is asked of the server for the exact selection on screen.
+  // The answer is what makes the submit meaningful: a limit is named here instead
+  // of surfacing as a conflict after the click.
+  useEffect(() => {
+    if (!currentSelection || disabled || !checked) return;
+    const seq = ++preflightSeq.current;
+    const [targetId, keeperId, selectionMode] = currentSelection.split('|');
+    void (async () => {
+      try {
+        const value = await client.get<{ ready: boolean; reason: string }>(
+          'api-keys/' + targetId + '/revocation/' + keeperId + '/' + selectionMode,
+          auth
+        );
+        if (!active.current || seq !== preflightSeq.current) return;
+        if (typeof value?.ready !== 'boolean') throw new Error();
+        setPreflight({
+          selection: currentSelection,
+          ready: value.ready,
+          reason: typeof value.reason === 'string' ? value.reason : '',
+        });
+      } catch (err) {
+        if (!active.current || seq !== preflightSeq.current) return;
+        if (err instanceof PublicApiError && err.kind === 'authentication') {
+          onUnauthorized();
+          return;
+        }
+        setPreflight({ selection: currentSelection, ready: false, reason: 'key_operation_unknown' });
+      }
+    })();
+  }, [currentSelection, disabled, checked]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function preflightText(reason: string): string {
+    if (reason === 'key_operation_source_conflict') return k('operationBlockedSourceConflict');
+    if (reason === 'key_operation_conflict') return k('operationBlockedInstalledKey');
+    if (reason === 'last_effective_key') return k('lastKeyProtectionHelp');
+    return k('operationBlockedUnavailable');
+  }
 
   function accept(value: Result, expected?: string, selection = request, observed = true) {
     if (!validResult(value) || (expected && (!value.operation || value.operation.id !== expected)))
@@ -219,7 +271,11 @@ export function FreshKeyRevocation({
       !target ||
       !keeper ||
       available.length <= 1 ||
-      target === keeper
+      target === keeper ||
+      !currentSelection ||
+      !preflight ||
+      preflight.selection !== currentSelection ||
+      !preflight.ready
     )
       return;
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
@@ -422,10 +478,31 @@ export function FreshKeyRevocation({
                 </select>
               </span>
             </label>
+            {!!currentSelection && !!preflight && preflight.selection === currentSelection && !preflight.ready && (
+              <div
+                role="alert"
+                className="key-notice key-notice-warning"
+                data-testid="key-operation-preflight"
+              >
+                <FullWebIcon name="alert" />
+                <div>
+                  <p>{preflightText(preflight.reason)}</p>
+                </div>
+              </div>
+            )}
             <p className="key-field-help">{t('keysOperationConfirm')}</p>
             <button
               className="btn btn-primary"
-              disabled={!target || !keeper || target === keeper || available.length <= 1}
+              disabled={
+                !target ||
+                !keeper ||
+                target === keeper ||
+                available.length <= 1 ||
+                !currentSelection ||
+                !preflight ||
+                preflight.selection !== currentSelection ||
+                !preflight.ready
+              }
               onClick={() => void prepare()}
             >
               {preset ? k('confirmOperation') : t('keysOperationPrepare')}

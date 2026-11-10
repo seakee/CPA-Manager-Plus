@@ -452,8 +452,26 @@ confirms it, exactly as on Managed. A write is only sent while the start
 state still holds: the credential it removes is carried, the CPA keeps another
 one, and — for a revoke — that keeper is a credential this Manager staged and has
 installed. Revoking the only credential is refused with `ErrLastKey`, because
-that would leave the user's CPA accepting unauthenticated clients. The External
-Apply refuses while a journal entry has not settled, and re-reads the document
+that would leave the user's CPA accepting unauthenticated clients.
+
+A write is a whole-list PUT, so the only set it may rewrite is the set it
+verified. `Prepare` journals the sorted digests of the destination's key list as
+`snapshotSha256`, and every later step compares the live list with that snapshot
+before it writes: `Continue` refuses with `cpa.ErrSourceConflict` when the
+destination drifted, and the step's post-check compares it with the set the step
+should leave. A key list is not limited to the two credentials a rotation names —
+an adopted destination keeps whatever the source CPA had, so a three-key
+installation revokes one key and leaves the other two, and every key that is not
+the one the step removes must be a credential this Manager staged and still
+keeps. A credential it never registered, or one it already retired, is the
+operator's own change and is never dropped by a whole-list write. The same rule
+is asked as a read — `GET api-keys/<target>/revocation/<keeper>/<mode>` returns
+`{ready, reason}` with the code the matching `POST` would refuse with — so the
+drawer names the limit where the operator is choosing instead of offering a
+submit that can only end in a conflict. That read writes nothing and journals
+nothing.
+
+The External Apply refuses while a journal entry has not settled, and re-reads the document
 digest and the membership immediately before its own PUT, so a credential the
 user revoked on their CPA is not knowingly added back. That read is not a
 compare-and-swap: a whole-list PUT replaces whatever the CPA holds when it

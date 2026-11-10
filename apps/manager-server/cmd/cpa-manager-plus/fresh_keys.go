@@ -49,6 +49,15 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		a.keyUsageSummary(w, r, op)
 	case strings.HasSuffix(resource, "/usage") && strings.Count(resource, "/") == 2 && r.Method == http.MethodGet:
 		a.keyUsage(w, r, op, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/usage"))
+	case r.Method == http.MethodGet && strings.Count(resource, "/") == 4:
+		// GET api-keys/<target>/revocation/<keeper>/<mode> answers the same verdict
+		// the matching POST would, before the page offers the submit. The selection
+		// travels in the path because a client resource may not select a query.
+		if parts := strings.Split(resource, "/"); parts[0] == "api-keys" && parts[2] == "revocation" {
+			a.preflightClientKeyOperation(w, r, op, parts[1], parts[3], parts[4])
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
 	case strings.HasSuffix(resource, "/revocation") && strings.Count(resource, "/") == 2:
 		a.prepareClientKeyOperation(w, r, op, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/revocation"))
 	case strings.HasSuffix(resource, "/secret") && strings.Count(resource, "/") == 2 && r.Method == http.MethodPost:

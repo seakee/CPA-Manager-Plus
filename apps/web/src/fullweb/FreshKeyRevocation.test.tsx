@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshKeyRevocation } from './FreshKeyRevocation';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
+import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 
 const id = 'b'.repeat(32);
 const target = 'a'.repeat(32);
@@ -21,6 +22,22 @@ const operation = {
 };
 const result = (o: unknown = operation, nextStep = 'add') =>
   Response.json({ operation: o, nextStep, runtimeState: 'effect_unknown', expiresAtMs: 0 });
+// The drawer asks the server whether the exact selection on screen would be
+// accepted before it offers the submit, so every mount sees that read. It is
+// answered outside the queue: the queue holds the calls a test is asserting on.
+const ready = () => Response.json({ ready: true, reason: '' });
+const routed = (
+  responses: Array<() => Response | Promise<Response>>,
+  preflight: () => Response = ready
+) =>
+  vi.fn<typeof fetch>((input, init) => {
+    if (init?.method !== 'POST' && /\/revocation\/[0-9a-f]{32}\/(revoke|replace)$/.test(String(input))) {
+      return Promise.resolve(preflight());
+    }
+    const next = responses.shift();
+    if (!next) return Promise.reject(new Error('unexpected request: ' + String(input)));
+    return Promise.resolve(next());
+  });
 const keys = [target, keeper].map((id) => ({
   id,
   requestId: id,
@@ -86,28 +103,30 @@ describe('Canonical revocation recovery UI', () => {
     );
   }
   it('rejects a prepare reply with another canonical selection and recovers only the original request', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(result(null, ''))
-      .mockResolvedValueOnce(result({ ...operation, targetId: 'd'.repeat(32) }))
-      .mockResolvedValueOnce(result());
+    const fetchMock = routed([
+      () => result(null, ''),
+      () => result({ ...operation, targetId: 'd'.repeat(32) }),
+      () => result(),
+    ]);
     await mount(fetchMock);
     await select();
     await click('keysOperationPrepare');
     expect(JSON.stringify(view.toJSON())).toContain(t('keysOperationUnknown'));
     expect(pending).toHaveBeenLastCalledWith(true);
     await click('keysOperationCheck');
-    expect(String(fetchMock.mock.calls[2][0])).toContain('/operations/' + id);
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/operations/' + id))
+    ).toBe(true);
     expect(button('keysOperationContinue').props.disabled).toBe(false);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
 
   it('keeps the first request identity when prepare is activated twice in one turn', async () => {
     let resolvePrepare!: (response: Response) => void;
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(result(null, ''))
-      .mockReturnValueOnce(new Promise<Response>((resolve) => { resolvePrepare = resolve; }));
+    const fetchMock = routed([
+      () => result(null, ''),
+      () => new Promise<Response>((resolve) => { resolvePrepare = resolve; }),
+    ]);
     await mount(fetchMock);
     await select();
     const random = vi.fn()
@@ -222,19 +241,48 @@ describe('Canonical revocation recovery UI', () => {
       outcome: 'committed',
       steps: operation.steps.map((s) => ({ ...s, state: 'observed', returned: true })),
     };
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(result(committed, ''))
-      .mockResolvedValueOnce(new Response('', { status: 409 }))
-      .mockResolvedValueOnce(result(null, ''));
+    const fetchMock = routed([
+      () => result(committed, ''),
+      () => new Response('', { status: 409 }),
+      () => result(null, ''),
+    ]);
     await mount(fetchMock);
     await select();
     await click('keysOperationPrepare');
     expect(pending).toHaveBeenLastCalledWith(true);
     await click('keysOperationCheck');
-    expect(String(fetchMock.mock.calls[2][0])).toContain('/operations/' + id);
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/operations/' + id))
+    ).toBe(true);
     expect(pending).toHaveBeenLastCalledWith(true);
     expect(view.root.findByType('fieldset').props.disabled).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('names the server verdict in the drawer instead of submitting into a conflict', async () => {
+    const fetchMock = routed(
+      [() => result(null, '')],
+      () => Response.json({ ready: false, reason: 'key_operation_conflict' })
+    );
+    await mount(fetchMock);
+    await select();
+    expect(
+      view.root.findAllByProps({ 'data-testid': 'key-operation-preflight' }).length
+    ).toBeGreaterThan(0);
+    expect(JSON.stringify(view.toJSON())).toContain(k('operationBlockedInstalledKey'));
+    expect(button('keysOperationPrepare').props.disabled).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  });
+
+  it('offers the submit once the server accepts the exact selection', async () => {
+    const fetchMock = routed([() => result(null, ''), () => result()]);
+    await mount(fetchMock);
+    await select();
+    expect(
+      view.root.findAllByProps({ 'data-testid': 'key-operation-preflight' }).length
+    ).toBe(0);
+    expect(button('keysOperationPrepare').props.disabled).toBe(false);
+    await click('keysOperationPrepare');
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
 

@@ -21,26 +21,32 @@ var errExternalSettled = errors.New("external key step already settled")
 // proving, by read-back, that the CPA is in exactly the state the intent starts
 // from. No step is written here: the journal is the durable record a lost reply is
 // reconciled against.
-func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
-	result := OperationResult{RuntimeState: "effect_unknown"}
-	if target == keeper || (mode != "revoke" && mode != "replace") {
-		return result, freshkeys.ErrRequest
-	}
+// externalPreflight answers whether one revoke or replace would pass the External
+// checks, writing nothing. Every limit it can report is a fact about the user's
+// CPA, so the drawer names it before the operator submits.
+func (s *Service) externalPreflight(ctx context.Context, target, keeper, mode string, generation uint64) error {
 	install, err := s.externalTarget(ctx, generation)
 	if err != nil {
-		return result, err
+		return err
 	}
+	return s.externalPrerequisites(ctx, install, target, keeper, mode)
+}
+
+// externalPrerequisites is the read-only part of an External Prepare: the target
+// and keeper are members of the user's CPA, the keeper is not the only credential
+// left, and the CPA serves the version a step would write to.
+func (s *Service) externalPrerequisites(ctx context.Context, install ExternalInstall, target, keeper, mode string) error {
 	w := s.externalKeyWire(install)
 	if w == nil {
-		return result, ErrExternalUnavailable
+		return ErrExternalUnavailable
 	}
-	// No step is written here, but the journal is: an intent this Manager could
-	// never send would stay pending and block every later operation of the
-	// connection, so the version is asked before the intent exists.
-	if err = s.externalWriteGate(ctx, install); err != nil {
-		return result, err
+	// No step is written before this gate: an intent this Manager could never
+	// send would stay pending and block every later operation of the connection,
+	// so the version is asked before the intent exists.
+	if err := s.externalWriteGate(ctx, install); err != nil {
+		return err
 	}
-	err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
+	return s.keyPair(ctx, target, keeper, false, func(old, next string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
@@ -66,7 +72,18 @@ func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode 
 		}
 		return nil
 	})
+}
+
+func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
+	if target == keeper || (mode != "revoke" && mode != "replace") {
+		return result, freshkeys.ErrRequest
+	}
+	install, err := s.externalTarget(ctx, generation)
 	if err != nil {
+		return result, err
+	}
+	if err = s.externalPrerequisites(ctx, install, target, keeper, mode); err != nil {
 		return result, err
 	}
 	steps := []repo.KeyStep{{Name: "revoke", State: "unattempted"}}

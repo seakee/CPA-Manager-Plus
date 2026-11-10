@@ -140,6 +140,12 @@ const en = {
   replaceStep2: '2. Update your clients: Switch them to the new key and verify access yourself.',
   replaceStep3:
     '3. Revoke the old key: Keep another effective key and check the gateway result. No client is switched automatically.',
+  operationBlockedSourceConflict:
+    'The source CPA’s key list does not match this Manager’s records: it carries a key the Manager never registered, or one it already revoked. Nothing was written.',
+  operationBlockedInstalledKey:
+    'Keep this installation’s own key as the target or the keeper: only that key can carry the operation.',
+  operationBlockedUnavailable:
+    'This operation cannot be prepared right now. Check the installation state and retry.',
   lastKeyProtectionTitle: 'Last active key protection',
   lastKeyProtectionHelp:
     'Manager blocks revoking the only remaining saved key to prevent accidental lockout. Create a replacement key first, then use Replace or Revoke.',
@@ -276,6 +282,12 @@ const zh: typeof en = {
   replaceStep1: '1. 新建替代密钥：保存一次性完整密钥，新旧密钥保持独立。',
   replaceStep2: '2. 更新客户端：将相关客户端切换到新密钥，并自行验证接入。',
   replaceStep3: '3. 撤销旧密钥：保留另一把有效密钥并核对网关结果；不会自动切换客户端。',
+  operationBlockedSourceConflict:
+    '源 CPA 的密钥列表与 Manager 的记录不一致：它带有 Manager 未登记或已撤销的密钥，未写入任何内容。',
+  operationBlockedInstalledKey:
+    '目标或 keeper 必须是本安装当前使用的那把密钥，否则无法执行。',
+  operationBlockedUnavailable:
+    '当前无法准备这次操作。请检查安装状态后重试。',
   lastKeyProtectionTitle: '最后一把有效密钥保护',
   lastKeyProtectionHelp:
     '为防止客户端流量意外中断，当仅剩 1 把已保存密钥时禁止直接撤销。请先创建一把新密钥并完成客户端配置，再执行替换或撤销。',
@@ -411,6 +423,12 @@ const tw: typeof en = {
   replaceStep1: '1. 新增替代金鑰：儲存一次性完整金鑰，新舊金鑰保持獨立。',
   replaceStep2: '2. 更新用戶端：將相關用戶端切換至新金鑰，並自行驗證接入。',
   replaceStep3: '3. 撤銷舊金鑰：保留另一把有效金鑰並核對閘道結果；不會自動切換用戶端。',
+  operationBlockedSourceConflict:
+    '來源 CPA 的金鑰清單與 Manager 的記錄不一致：它帶有 Manager 未登記或已撤銷的金鑰，未寫入任何內容。',
+  operationBlockedInstalledKey:
+    '目標或 keeper 必須是本安裝目前使用的那把金鑰，否則無法執行。',
+  operationBlockedUnavailable:
+    '目前無法準備這次操作。請檢查安裝狀態後重試。',
   lastKeyProtectionTitle: '最後一把有效金鑰保護',
   lastKeyProtectionHelp:
     '為防止用戶端流量意外中斷，當僅剩 1 把已儲存金鑰時禁止直接撤銷。請先建立一把新金鑰並完成用戶端設定，再執行替換或撤銷。',
@@ -554,6 +572,12 @@ const ru: typeof en = {
   replaceStep2: '2. Переключите клиентов на новый ключ и проверьте доступ самостоятельно.',
   replaceStep3:
     '3. Отзовите старый ключ, сохранив другой действующий ключ. Проверьте шлюз; клиенты автоматически не переключаются.',
+  operationBlockedSourceConflict:
+    'Список ключей исходного CPA не совпадает с записями Manager: в нём есть ключ, который Manager не регистрировал или уже отозвал. Ничего не записано.',
+  operationBlockedInstalledKey:
+    'Целью или keeper должен быть ключ этой установки: только он может нести операцию.',
+  operationBlockedUnavailable:
+    'Сейчас эту операцию нельзя подготовить. Проверьте состояние установки и повторите попытку.',
   lastKeyProtectionTitle: 'Защита последнего активного ключа',
   lastKeyProtectionHelp:
     'Нельзя отозвать единственный сохранённый ключ. Сначала создайте новый ключ для замены.',

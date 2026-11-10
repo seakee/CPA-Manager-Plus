@@ -16,23 +16,29 @@ const operationPrefix = "fresh_key_operation_v1:"
 // Operation records attempts, not a reusable live-auth grant. Secrets remain in
 // the original encrypted canonical records; the S1 journal is never overwritten.
 type Operation struct {
-	ParentID           string    `json:"parentId,omitempty"`
-	SourceID           string    `json:"sourceId,omitempty"`
-	ClaimSHA256        string    `json:"claimSHA256,omitempty"`
-	ClaimRevision      uint64    `json:"claimRevision,omitempty"`
-	IntentDigest       string    `json:"intentDigest,omitempty"`
-	ID                 string    `json:"id"`
-	TargetID           string    `json:"targetId"`
-	KeeperID           string    `json:"keeperId"`
-	Mode               string    `json:"mode"`
-	RunID              string    `json:"runId"`
-	Generation         string    `json:"generation"`
-	ProviderSeedSHA256 string    `json:"providerSeedSHA256"`
-	Revision           int64     `json:"revision"`
-	Outcome            string    `json:"outcome"`
-	Steps              []KeyStep `json:"steps"`
-	CreatedAtMS        int64     `json:"createdAtMs"`
-	CompletedAtMS      int64     `json:"completedAtMs"`
+	ParentID           string `json:"parentId,omitempty"`
+	SourceID           string `json:"sourceId,omitempty"`
+	ClaimSHA256        string `json:"claimSHA256,omitempty"`
+	ClaimRevision      uint64 `json:"claimRevision,omitempty"`
+	IntentDigest       string `json:"intentDigest,omitempty"`
+	ID                 string `json:"id"`
+	TargetID           string `json:"targetId"`
+	KeeperID           string `json:"keeperId"`
+	Mode               string `json:"mode"`
+	RunID              string `json:"runId"`
+	Generation         string `json:"generation"`
+	ProviderSeedSHA256 string `json:"providerSeedSHA256"`
+	// SnapshotSHA256 is the sorted digest set of the destination's Client Keys as
+	// Prepare validated them. Every step is a transformation of that one set, so a
+	// resume compares the live list against what was proved — never against a list
+	// re-read after the fact. It is a set of digests: the journal still holds no
+	// secret.
+	SnapshotSHA256 []string  `json:"snapshotSha256,omitempty"`
+	Revision       int64     `json:"revision"`
+	Outcome        string    `json:"outcome"`
+	Steps          []KeyStep `json:"steps"`
+	CreatedAtMS    int64     `json:"createdAtMs"`
+	CompletedAtMS  int64     `json:"completedAtMs"`
 }
 type KeyStep struct {
 	RuntimeID     string `json:"runtimeId,omitempty"`
@@ -69,6 +75,13 @@ func validOperation(o Operation) bool {
 	}
 	if o.TargetID == o.KeeperID || o.RunID == "" || o.Generation == "" || (o.Outcome != "pending" && o.Outcome != "unknown" && o.Outcome != "committed") {
 		return false
+	}
+	if len(o.SnapshotSHA256) > 0 {
+		for i, digest := range o.SnapshotSHA256 {
+			if !identity.IsValidSHA256Hex(digest) || (i > 0 && o.SnapshotSHA256[i-1] >= digest) {
+				return false
+			}
+		}
 	}
 	if o.ParentID != "" && (o.ParentID != "k:"+o.ID || len(o.SourceID) < 16 || o.ClaimRevision == 0 || !identity.IsValidSHA256Hex(o.ClaimSHA256) || !identity.IsValidSHA256Hex(o.IntentDigest)) {
 		return false

@@ -142,42 +142,7 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	if s.profile == ProfileExternal {
 		return s.externalPrepare(ctx, id, target, keeper, mode, generation)
 	}
-	p, err := s.operationTarget(ctx, generation)
-	if err != nil {
-		return result, err
-	}
-	installed, err := s.installedKey(ctx)
-	if err != nil || installed != target && (mode != "revoke" || installed != keeper) {
-		return result, repo.ErrConflict
-	}
-	w, ok := s.wire.(keyWire)
-	if !ok {
-		return result, ErrUnavailable
-	}
-	err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
-		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
-		if e != nil {
-			return e
-		}
-		if mode == "revoke" && len(snap.Keys) == 1 {
-			return ErrLastKey
-		}
-		want := []string{old}
-		if mode == "revoke" {
-			want = append(want, next)
-		}
-		if !sameKeys(snap.Keys, want) {
-			return cpa.ErrSourceConflict
-		}
-		ok, e := w.SampleKeySet(ctx, want, nil)
-		if e != nil {
-			return e
-		}
-		if !ok {
-			return cpa.ErrSourceConflict
-		}
-		return nil
-	})
+	p, snapshot, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
 	if err != nil {
 		return result, err
 	}
@@ -185,7 +150,7 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	if mode == "replace" {
 		steps = append([]repo.KeyStep{{Name: "add", State: "unattempted"}}, steps...)
 	}
-	o := repo.Operation{ID: id, TargetID: target, KeeperID: keeper, Mode: mode, RunID: p.RunID, Generation: p.Generation, ProviderSeedSHA256: p.S2B.Binding(), Revision: 1, Outcome: "pending", Steps: steps, CreatedAtMS: time.Now().UnixMilli()}
+	o := repo.Operation{ID: id, TargetID: target, KeeperID: keeper, Mode: mode, RunID: p.RunID, Generation: p.Generation, ProviderSeedSHA256: p.S2B.Binding(), SnapshotSHA256: snapshot, Revision: 1, Outcome: "pending", Steps: steps, CreatedAtMS: time.Now().UnixMilli()}
 	if s.h1 != nil {
 		err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
 			t, ok := s.wire.(*cpa.Transport)
@@ -215,6 +180,94 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 		return result, err
 	}
 	return s.checkOperation(ctx, &o, generation)
+}
+
+// keyOperationPrerequisites is Prepare's authority and destination proof, and the
+// snapshot digests it validated. It journals and writes nothing, so the page can
+// ask the same question — and get the same answer — before it offers the
+// operation instead of discovering a limit as a conflict after a submit.
+func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper, mode string, generation uint64) (Permit, []string, error) {
+	p, err := s.operationTarget(ctx, generation)
+	if err != nil {
+		return p, nil, err
+	}
+	installed, err := s.installedKey(ctx)
+	if err != nil || installed != target && (mode != "revoke" || installed != keeper) {
+		return p, nil, repo.ErrConflict
+	}
+	w, ok := s.wire.(keyWire)
+	if !ok {
+		return p, nil, ErrUnavailable
+	}
+	var snapshot []string
+	err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
+		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
+		if e != nil {
+			return e
+		}
+		if mode == "revoke" && len(snap.Keys) == 1 {
+			return ErrLastKey
+		}
+		// Both keys the operation names must be carried by the destination, and the
+		// replacement of a replace must not be. The write replaces the whole list,
+		// so the rest of that list is authority this step is about to consume: every
+		// other key must be one this Manager stages and still keeps. A credential it
+		// never registered, or one it already retired, is the operator's change at
+		// the destination and is never silently dropped by a whole-list write.
+		if !slices.Contains(snap.Keys, old) || (mode == "revoke" && !slices.Contains(snap.Keys, next)) {
+			return cpa.ErrSourceConflict
+		}
+		if mode == "replace" && slices.Contains(snap.Keys, next) {
+			return cpa.ErrSourceConflict
+		}
+		known, e := s.keys.AllStaged(ctx, snap.Keys)
+		if e != nil {
+			return e
+		}
+		if !known {
+			return cpa.ErrSourceConflict
+		}
+		// The destination is the set this step is allowed to rewrite, so it is the
+		// set that must authenticate before anything is journaled.
+		ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return cpa.ErrSourceConflict
+		}
+		snapshot = keyDigests(snap.Keys)
+		return nil
+	})
+	return p, snapshot, err
+}
+
+// Preflight answers whether one revoke or replace would pass Prepare right now,
+// with the same authority, the same destination proof and nothing written. Every
+// remaining limit is a fact about the destination or the installation, so the
+// page can name it where the operator is choosing instead of after a submit.
+func (s *Service) Preflight(ctx context.Context, target, keeper, mode string, generation uint64) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.KeyOperationsEnabled() {
+		return ErrUnavailable
+	}
+	for _, v := range []string{target, keeper} {
+		if !freshkeys.ValidRequestID(v) {
+			return freshkeys.ErrRequest
+		}
+	}
+	if target == keeper || (mode != "revoke" && mode != "replace") {
+		return freshkeys.ErrRequest
+	}
+	if s.profile == ProfileExternal {
+		return s.externalPreflight(ctx, target, keeper, mode, generation)
+	}
+	_, _, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	return err
 }
 
 func (s *Service) operationTarget(ctx context.Context, generation uint64) (Permit, error) {
@@ -261,6 +314,63 @@ func sameKeys(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// keyDigests is the canonical comparison form of a destination's Client Key list:
+// the sorted digests of its secrets. A whole-list write may only replace a set this
+// Manager can name, so the set — not the secrets — is what the journal carries and
+// what every later read is compared against.
+func keyDigests(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, freshkeys.SecretDigest(key))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// keyOperationSets derives the digest set a step reads and the one it leaves
+// behind, from the single snapshot the journal proved at Prepare. An add step
+// keeps every destination key and introduces the replacement; a revoke step removes
+// exactly the target and keeps every other key, including keys this Manager did not
+// mint but does stage — an adopted destination carries its own list.
+//
+// A journal written before the snapshot was recorded described each step as exactly
+// the keys it named, so a pending one still reconciles by that same rule.
+func keyOperationSets(o *repo.Operation, step, old, next string) (before, after []string) {
+	before = slices.Clone(o.SnapshotSHA256)
+	if len(before) == 0 {
+		before = []string{freshkeys.SecretDigest(old)}
+		if o.Mode == "revoke" {
+			before = insertDigest(before, freshkeys.SecretDigest(next))
+		}
+	}
+	if step == "add" {
+		return before, insertDigest(before, freshkeys.SecretDigest(next))
+	}
+	if o.Mode == "replace" {
+		before = insertDigest(before, freshkeys.SecretDigest(next))
+	}
+	target := freshkeys.SecretDigest(old)
+	after = slices.DeleteFunc(slices.Clone(before), func(digest string) bool { return digest == target })
+	return before, after
+}
+
+// insertDigest adds one digest to a sorted set.
+func insertDigest(set []string, digest string) []string {
+	out := append(slices.Clone(set), digest)
+	slices.Sort(out)
+	return out
+}
+
+// keySetAfter is the destination list one step leaves behind: the live list it
+// proved, with the replacement appended for an add step, or the target removed for
+// a revoke step. Every other key survives untouched, in its original order.
+func keySetAfter(keys []string, step, old, next string) []string {
+	if step == "add" {
+		return append(slices.Clone(keys), next)
+	}
+	return slices.DeleteFunc(slices.Clone(keys), func(key string) bool { return key == old })
 }
 
 func (s *Service) CheckOperation(ctx context.Context, id string, generation uint64) (OperationResult, error) {
@@ -377,20 +487,23 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 			}
 		}
 		err = s.keyPair(ctx, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
-			want, reject := []string{next}, []string{old}
-			if step.Name == "add" {
-				want, reject = []string{old, next}, nil
+			_, after := keyOperationSets(o, step.Name, old, next)
+			var reject []string
+			if step.Name != "add" {
+				reject = []string{old}
 			}
-			// Require multiple spaced live sweeps; a config save is never an ack.
+			// Require multiple spaced live sweeps; a config save is never an ack. The
+			// expected set is the transformation the journal proved, so a key that
+			// appeared or went missing is reported as unknown effect, never as success.
 			for n := 0; n < 3; n++ {
 				snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 				if e != nil {
 					return e
 				}
-				if !sameKeys(snap.Keys, want) {
+				if !slices.Equal(keyDigests(snap.Keys), after) {
 					return cpa.ErrApplyUnknown
 				}
-				ok, e := w.SampleKeySet(ctx, want, reject)
+				ok, e := w.SampleKeySet(ctx, snap.Keys, reject)
 				if e != nil {
 					return e
 				}
@@ -410,7 +523,7 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 				return e
 			}
 			snap, e := w.KeySnapshot(ctx, p.ManagementKey)
-			if e != nil || !sameKeys(snap.Keys, want) {
+			if e != nil || !slices.Equal(keyDigests(snap.Keys), after) {
 				return cpa.ErrApplyUnknown
 			}
 			return nil
@@ -508,18 +621,19 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 		return r, ErrUnavailable
 	}
 	err = s.keyPair(ctx, o.TargetID, o.KeeperID, false, func(old, next string) error {
-		before, after := []string{old, next}, []string{next}
-		if grant.Step == "add" {
-			before, after = []string{old}, []string{old, next}
-		}
+		// The set this step reads is the one the journal proved at Prepare,
+		// transformed by the steps that settled since. A destination that no longer
+		// holds exactly that set — a key added, removed or retired out of band — is a
+		// source conflict with nothing written, whatever its size.
+		before, _ := keyOperationSets(o, grant.Step, old, next)
 		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 		if e != nil {
 			return e
 		}
-		if snap.SourceSHA256 != grant.SourceSHA256 || !sameKeys(snap.Keys, before) {
+		if snap.SourceSHA256 != grant.SourceSHA256 || !slices.Equal(keyDigests(snap.Keys), before) {
 			return cpa.ErrSourceConflict
 		}
-		ok, e := w.SampleKeySet(ctx, before, nil)
+		ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
 		if e != nil {
 			return e
 		}
@@ -533,7 +647,7 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 			return e
 		}
 		snap, e = w.KeySnapshot(ctx, p.ManagementKey)
-		if e != nil || snap.SourceSHA256 != grant.SourceSHA256 || !sameKeys(snap.Keys, before) {
+		if e != nil || snap.SourceSHA256 != grant.SourceSHA256 || !slices.Equal(keyDigests(snap.Keys), before) {
 			return cpa.ErrSourceConflict
 		}
 		if time.Now().UnixMilli() >= grant.ExpiresAtMS {
@@ -552,7 +666,7 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 		if _, e = s.target(ctx, p); e != nil {
 			return e
 		}
-		writeErr := w.WriteKeySet(ctx, p.ManagementKey, after)
+		writeErr := w.WriteKeySet(ctx, p.ManagementKey, keySetAfter(snap.Keys, grant.Step, old, next))
 		o.Steps[index].Returned = true
 		// Use a bounded independent context to retain the attempt on client loss.
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)

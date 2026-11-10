@@ -168,6 +168,63 @@ func TestAdoptedKeysRevokeAndReplaceThroughTheInstallationJournal(t *testing.T) 
 	}
 }
 
+// An adopted destination commonly carries more than two client keys. Revoking one
+// removes exactly that credential from the destination — it stops authenticating
+// while every other key the adoption registered keeps working — and the key left
+// installed can then be replaced.
+func TestAdoptedInstallationRevokesAndReplacesWithThreeKeys(t *testing.T) {
+	destinationKeys := []string{"source-client-one", "source-client-two", "source-client-three"}
+	s, cpa, _ := adoptedFixture(t, destinationKeys...)
+	ctx := t.Context()
+	keys, err := s.RegisterAdoption(ctx, destinationKeys)
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("register adoption: %#v %v", keys, err)
+	}
+	w, ok := s.wire.(keyWire)
+	if !ok {
+		t.Fatal("adopt fixture has no key wire")
+	}
+
+	// Revoke the second adopted key and keep the installation's own key.
+	id := strings.Repeat("8", 32)
+	if _, err = s.Prepare(ctx, id, string(keys[1].ID), string(keys[0].ID), "revoke", 9); err != nil {
+		t.Fatalf("three-key adopted revoke prepare: %v", err)
+	}
+	result, err := s.ContinueOperation(ctx, id, 9)
+	if err != nil || result.Operation == nil || result.Operation.Outcome != "committed" ||
+		result.RuntimeState != "effective_observed" {
+		t.Fatalf("three-key adopted revoke: %#v %v", result, err)
+	}
+	if got := cpa.snapshot(); !slices.Equal(got, []string{destinationKeys[0], destinationKeys[2]}) {
+		t.Fatalf("revoke left %v", got)
+	}
+	// The destination's own authentication is the proof the page's tests use: the
+	// revoked credential is 401 and both survivors are 200.
+	if ok, err = w.SampleKeySet(ctx, []string{destinationKeys[0], destinationKeys[2]}, []string{destinationKeys[1]}); err != nil || !ok {
+		t.Fatalf("post-revoke sampling: %v %v", ok, err)
+	}
+
+	// The surviving adopted keys are still the destination's set, so one of them
+	// can be replaced by a key this Manager mints without touching the other.
+	replacement, _, err := s.keys.Create(ctx, strings.Repeat("e", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceID := strings.Repeat("9", 32)
+	if _, err = s.Prepare(ctx, replaceID, string(keys[0].ID), string(replacement.Key.ID), "replace", 9); err != nil {
+		t.Fatalf("three-key adopted replace prepare: %v", err)
+	}
+	if result, err = s.ContinueOperation(ctx, replaceID, 9); err != nil || result.NextStep != "revoke" ||
+		!slices.Equal(cpa.snapshot(), []string{destinationKeys[0], destinationKeys[2], replacement.CreatedSecret}) {
+		t.Fatalf("three-key adopted replace add step: %#v %v keys=%v", result, err, cpa.snapshot())
+	}
+	if result, err = s.ContinueOperation(ctx, replaceID, 9); err != nil || result.Operation == nil ||
+		result.Operation.Outcome != "committed" ||
+		!slices.Equal(cpa.snapshot(), []string{destinationKeys[2], replacement.CreatedSecret}) {
+		t.Fatalf("three-key adopted replace revoke step: %#v %v keys=%v", result, err, cpa.snapshot())
+	}
+}
+
 // The journal is written once. An adoption that finds another installation's
 // journal is refused instead of inheriting the key operations bound to it.
 func TestAdoptionRegistrationRefusesAnotherInstallationsJournal(t *testing.T) {
