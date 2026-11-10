@@ -141,9 +141,11 @@ const en = {
   replaceStep3:
     '3. Revoke the old key: Keep another effective key and check the gateway result. No client is switched automatically.',
   operationBlockedSourceConflict:
-    'The destination CPA’s key list does not match this operation: it may carry a key the Manager never registered or already revoked, or the key this operation would write. Nothing was written.',
+    'The destination CPA’s key list does not match this operation: it may carry a key the Manager never registered or already revoked, the key this operation would write, or already the most keys this Manager will rewrite there. Nothing was written.',
   operationBlockedInstalledKey:
     'Keep this installation’s own key as the target or the keeper: only that key can carry the operation.',
+  operationBlockedCredentialRejected:
+    'The destination CPA refused the stored Management Key. Rebinding the connection with the current Management Key is the only way forward; retrying this operation changes nothing.',
   operationBlockedUnavailable:
     'This operation cannot be prepared right now. Check the installation state and retry.',
   lastKeyProtectionTitle: 'Last active key protection',
@@ -283,9 +285,11 @@ const zh: typeof en = {
   replaceStep2: '2. 更新客户端：将相关客户端切换到新密钥，并自行验证接入。',
   replaceStep3: '3. 撤销旧密钥：保留另一把有效密钥并核对网关结果；不会自动切换客户端。',
   operationBlockedSourceConflict:
-    '目标 CPA 的密钥列表与本次操作不符：其中可能有 Manager 未登记或已撤销的密钥，也可能已包含本次要写入的密钥。未写入任何内容。',
+    '目标 CPA 的密钥列表与本次操作不符：其中可能有 Manager 未登记或已撤销的密钥，可能已包含本次要写入的密钥，也可能已经持有本 Manager 会在此重写的上限数量密钥。未写入任何内容。',
   operationBlockedInstalledKey:
     '目标或 keeper 必须是本安装当前使用的那把密钥，否则无法执行。',
+  operationBlockedCredentialRejected:
+    '目标 CPA 拒绝了这个已保存的管理密钥。唯一出路是用当前管理密钥重新绑定连接；重复这次操作不会有任何改变。',
   operationBlockedUnavailable:
     '当前无法准备这次操作。请检查安装状态后重试。',
   lastKeyProtectionTitle: '最后一把有效密钥保护',
@@ -424,9 +428,11 @@ const tw: typeof en = {
   replaceStep2: '2. 更新用戶端：將相關用戶端切換至新金鑰，並自行驗證接入。',
   replaceStep3: '3. 撤銷舊金鑰：保留另一把有效金鑰並核對閘道結果；不會自動切換用戶端。',
   operationBlockedSourceConflict:
-    '目標 CPA 的金鑰清單與本次操作不符：其中可能有 Manager 未登記或已撤銷的金鑰，也可能已包含本次要寫入的金鑰。未寫入任何內容。',
+    '目標 CPA 的金鑰清單與本次操作不符：其中可能有 Manager 未登記或已撤銷的金鑰，可能已包含本次要寫入的金鑰，也可能已經持有本 Manager 會在此重寫的上限數量金鑰。未寫入任何內容。',
   operationBlockedInstalledKey:
     '目標或 keeper 必須是本安裝目前使用的那把金鑰，否則無法執行。',
+  operationBlockedCredentialRejected:
+    '目標 CPA 拒絕了這個已儲存的管理金鑰。唯一出路是用目前的管理金鑰重新綁定連線；重複這次操作不會有任何改變。',
   operationBlockedUnavailable:
     '目前無法準備這次操作。請檢查安裝狀態後重試。',
   lastKeyProtectionTitle: '最後一把有效金鑰保護',
@@ -573,9 +579,11 @@ const ru: typeof en = {
   replaceStep3:
     '3. Отзовите старый ключ, сохранив другой действующий ключ. Проверьте шлюз; клиенты автоматически не переключаются.',
   operationBlockedSourceConflict:
-    'Список ключей на целевом CPA не соответствует этой операции: в нём может быть ключ, который Manager не регистрировал или уже отозвал, либо ключ, который эта операция должна записать. Ничего не записано.',
+    'Список ключей на целевом CPA не соответствует этой операции: в нём может быть ключ, который Manager не регистрировал или уже отозвал, ключ, который эта операция должна записать, либо уже достигнут предел ключей, который этот Manager готов там переписать. Ничего не записано.',
   operationBlockedInstalledKey:
     'Целью или keeper должен быть ключ этой установки: только он может нести операцию.',
+  operationBlockedCredentialRejected:
+    'Целевой CPA отклонил сохранённый управляющий ключ. Единственный путь вперёд — заново привязать подключение с текущим управляющим ключом; повтор этой операции ничего не изменит.',
   operationBlockedUnavailable:
     'Сейчас эту операцию нельзя подготовить. Проверьте состояние установки и повторите попытку.',
   lastKeyProtectionTitle: 'Защита последнего активного ключа',

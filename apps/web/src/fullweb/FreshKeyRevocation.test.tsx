@@ -274,6 +274,23 @@ describe('Canonical revocation recovery UI', () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
   });
 
+  it('names the refused credential as a rebind instead of a retry', async () => {
+    const fetchMock = routed(
+      [() => result(null, '')],
+      () => Response.json({ ready: false, reason: 'external_management_key_rejected' })
+    );
+    await mount(fetchMock);
+    await select();
+    expect(
+      view.root.findAllByProps({ 'data-testid': 'key-operation-preflight' }).length
+    ).toBeGreaterThan(0);
+    const rendered = JSON.stringify(view.toJSON());
+    expect(rendered).toContain(k('operationBlockedCredentialRejected'));
+    expect(rendered).not.toContain(k('operationBlockedUnavailable'));
+    expect(button('keysOperationPrepare').props.disabled).toBe(true);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  });
+
   it('offers the submit once the server accepts the exact selection', async () => {
     const fetchMock = routed([() => result(null, ''), () => result()]);
     await mount(fetchMock);

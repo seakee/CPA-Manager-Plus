@@ -169,6 +169,11 @@ export function FreshKeyRevocation({
   function preflightText(reason: string): string {
     if (reason === 'key_operation_source_conflict') return k('operationBlockedSourceConflict');
     if (reason === 'key_operation_conflict') return k('operationBlockedInstalledKey');
+    // The destination refused the stored Management Key. Only a rebind resolves
+    // it, so the two refusals that name that path are read as one instruction
+    // rather than as something to retry.
+    if (reason === 'external_management_key_rejected' || reason === 'external_target_moved')
+      return k('operationBlockedCredentialRejected');
     if (reason === 'last_effective_key') return k('lastKeyProtectionHelp');
     return k('operationBlockedUnavailable');
   }
