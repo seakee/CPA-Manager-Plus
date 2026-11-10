@@ -141,7 +141,7 @@ const en = {
   replaceStep3:
     '3. Revoke the old key: Keep another effective key and check the gateway result. No client is switched automatically.',
   operationBlockedSourceConflict:
-    'The source CPA’s key list does not match this Manager’s records: it carries a key the Manager never registered, or one it already revoked. Nothing was written.',
+    'The destination CPA’s key list does not match this operation: it may carry a key the Manager never registered or already revoked, or the key this operation would write. Nothing was written.',
   operationBlockedInstalledKey:
     'Keep this installation’s own key as the target or the keeper: only that key can carry the operation.',
   operationBlockedUnavailable:
@@ -283,7 +283,7 @@ const zh: typeof en = {
   replaceStep2: '2. 更新客户端：将相关客户端切换到新密钥，并自行验证接入。',
   replaceStep3: '3. 撤销旧密钥：保留另一把有效密钥并核对网关结果；不会自动切换客户端。',
   operationBlockedSourceConflict:
-    '源 CPA 的密钥列表与 Manager 的记录不一致：它带有 Manager 未登记或已撤销的密钥，未写入任何内容。',
+    '目标 CPA 的密钥列表与本次操作不符：其中可能有 Manager 未登记或已撤销的密钥，也可能已包含本次要写入的密钥。未写入任何内容。',
   operationBlockedInstalledKey:
     '目标或 keeper 必须是本安装当前使用的那把密钥，否则无法执行。',
   operationBlockedUnavailable:
@@ -424,7 +424,7 @@ const tw: typeof en = {
   replaceStep2: '2. 更新用戶端：將相關用戶端切換至新金鑰，並自行驗證接入。',
   replaceStep3: '3. 撤銷舊金鑰：保留另一把有效金鑰並核對閘道結果；不會自動切換用戶端。',
   operationBlockedSourceConflict:
-    '來源 CPA 的金鑰清單與 Manager 的記錄不一致：它帶有 Manager 未登記或已撤銷的金鑰，未寫入任何內容。',
+    '目標 CPA 的金鑰清單與本次操作不符：其中可能有 Manager 未登記或已撤銷的金鑰，也可能已包含本次要寫入的金鑰。未寫入任何內容。',
   operationBlockedInstalledKey:
     '目標或 keeper 必須是本安裝目前使用的那把金鑰，否則無法執行。',
   operationBlockedUnavailable:
@@ -573,7 +573,7 @@ const ru: typeof en = {
   replaceStep3:
     '3. Отзовите старый ключ, сохранив другой действующий ключ. Проверьте шлюз; клиенты автоматически не переключаются.',
   operationBlockedSourceConflict:
-    'Список ключей исходного CPA не совпадает с записями Manager: в нём есть ключ, который Manager не регистрировал или уже отозвал. Ничего не записано.',
+    'Список ключей на целевом CPA не соответствует этой операции: в нём может быть ключ, который Manager не регистрировал или уже отозвал, либо ключ, который эта операция должна записать. Ничего не записано.',
   operationBlockedInstalledKey:
     'Целью или keeper должен быть ключ этой установки: только он может нести операцию.',
   operationBlockedUnavailable:
