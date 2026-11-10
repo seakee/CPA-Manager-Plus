@@ -318,11 +318,9 @@ type freshRuntimeClientAdapter struct {
 	app *freshApplication
 }
 
-func (c freshRuntimeClientAdapter) client() (runtimeservice.RuntimeClient, error) {
-	if c.app != nil {
-		if client := c.app.runtimeStatusClient(); client != nil {
-			return client, nil
-		}
+func (c freshRuntimeClientAdapter) embeddedClient(ctx context.Context) (runtimeservice.RuntimeClient, error) {
+	if c.app != nil && c.app.effectiveRuntimeMode(ctx) == model.RuntimeModeEmbedded && c.app.runtime != nil {
+		return c.app.runtime, nil
 	}
 	return nil, errors.New("CPA runtime client is not configured")
 }
@@ -363,7 +361,7 @@ func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObs
 }
 
 func (c freshRuntimeClientAdapter) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -371,7 +369,7 @@ func (c freshRuntimeClientAdapter) Start(ctx context.Context, request model.Runt
 }
 
 func (c freshRuntimeClientAdapter) Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -379,7 +377,7 @@ func (c freshRuntimeClientAdapter) Stop(ctx context.Context, request model.Runti
 }
 
 func (c freshRuntimeClientAdapter) Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -387,7 +385,7 @@ func (c freshRuntimeClientAdapter) Restart(ctx context.Context, request model.Ru
 }
 
 func (c freshRuntimeClientAdapter) PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -395,7 +393,7 @@ func (c freshRuntimeClientAdapter) PrepareUpdate(ctx context.Context, request mo
 }
 
 func (c freshRuntimeClientAdapter) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -403,7 +401,7 @@ func (c freshRuntimeClientAdapter) ActivateUpdate(ctx context.Context, request m
 }
 
 func (c freshRuntimeClientAdapter) ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
-	client, err := c.client()
+	client, err := c.embeddedClient(ctx)
 	if err != nil {
 		return model.RuntimeUpdateOperationObservation{}, err
 	}
@@ -936,6 +934,13 @@ type freshEmbeddedDesiredStateStore struct {
 	inner runtimeservice.DesiredStateStore
 }
 
+func (a *freshApplication) embeddedDesiredStateInner() runtimeservice.DesiredStateStore {
+	if a == nil || a.runtimeSettings == nil {
+		return nil
+	}
+	return a.runtimeSettings
+}
+
 func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
 	if s.app == nil || s.inner == nil || s.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
 		return model.EmbeddedRuntimeDesiredState{}, false, nil
@@ -943,11 +948,25 @@ func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx cont
 	return s.inner.LoadEmbeddedRuntimeDesiredState(ctx)
 }
 
+func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
+	if s.app == nil || s.inner == nil || s.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return "", false, nil
+	}
+	committed, ok := s.inner.(interface {
+		LoadEmbeddedRuntimeCommittedArtifact(context.Context) (model.RuntimeArtifactID, bool, error)
+	})
+	if !ok {
+		return "", false, nil
+	}
+	return committed.LoadEmbeddedRuntimeCommittedArtifact(ctx)
+}
+
 // runFreshEmbeddedReconciler keeps the Embedded desired-lifecycle reconciler
 // active before strategy selection and throughout New Managed / Adopt Existing,
 // and retires it permanently once Connect External is committed in-process.
 func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, interval time.Duration) {
-	if a == nil || a.runtime == nil || a.runtimeSettings == nil {
+	desired := a.embeddedDesiredStateInner()
+	if a == nil || a.runtime == nil || desired == nil {
 		return
 	}
 	if op, err := a.current(ctx); err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
@@ -957,7 +976,7 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	defer cancel()
 	reconciler := runtimeservice.NewReconciler(
 		a.runtime,
-		freshEmbeddedDesiredStateStore{app: a, inner: a.runtimeSettings},
+		freshEmbeddedDesiredStateStore{app: a, inner: desired},
 		interval,
 		log.Printf,
 	)

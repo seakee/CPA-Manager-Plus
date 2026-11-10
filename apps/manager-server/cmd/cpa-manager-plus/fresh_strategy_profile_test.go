@@ -686,3 +686,83 @@ func TestEmbeddedReconcilerRetiresWhenConnectExternalCommitsInProcess(t *testing
 		t.Fatalf("Supervisor hits increased after reconciler exit: before=%d after=%d", hitsAfterExit, got)
 	}
 }
+
+// TestFreshRuntimeClientAdapterStartRejectsExternalModeWithoutExternalCalls
+// verifies that lifecycle mutations on freshRuntimeClientAdapter resolve only
+// the Embedded runtime client with the caller's context, returning the
+// not-configured error in Connect External mode without contacting External or
+// Supervisor endpoints.
+func TestFreshRuntimeClientAdapterStartRejectsExternalModeWithoutExternalCalls(t *testing.T) {
+	var supervisorHits atomic.Int32
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		supervisorHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(supervisor.Close)
+
+	var externalHits atomic.Int32
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		externalHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(externalServer.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+	if err := os.WriteFile(tokenPath, []byte("adapter-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:8317",
+	}, nil)
+
+	record, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected, err := opened.Protector.ProtectString(externalAuthorityManagement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed",
+			TargetIdentity: freshkeyapply.ExternalIdentity(externalServer.URL), TargetGeneration: 1,
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: externalServer.URL, ManagementKey: protected}
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := freshRuntimeClientAdapter{app: app}
+	_, err = adapter.Start(t.Context(), model.RuntimeMutationRequest{
+		OperationID:               "op-external-start",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "CPA runtime client is not configured") {
+		t.Fatalf("adapter.Start in ConnectExternal mode = %v, want not-configured error", err)
+	}
+	if got := externalHits.Load(); got != 0 {
+		t.Fatalf("adapter.Start in ConnectExternal mode contacted external server %d times", got)
+	}
+	if got := supervisorHits.Load(); got != 0 {
+		t.Fatalf("adapter.Start in ConnectExternal mode contacted Supervisor %d times", got)
+	}
+}
