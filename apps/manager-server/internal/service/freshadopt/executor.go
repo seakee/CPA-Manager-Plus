@@ -983,7 +983,7 @@ func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemK
 	digest := digestSHA256(payload)
 	// Same rule as writeLeaf: an equal value is this run's own copy, so it is
 	// recorded without a write.
-	if observed, presence, err := e.destination.ReadConfigValue(ctx, path); err == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed) {
+	if observed, presence, err := e.destination.ReadConfigValue(ctx, path); err == nil && presence == cpa.ConfigPresent && equalWholeConfigValue(kind, path, value, observed) {
 		return freshstore.AdoptionItem{
 			Item: item, Kind: kind, Outcome: freshstore.AdoptionMigrated,
 			SourceSHA256: digest, DestinationSHA256: digestOfValue(observed),
@@ -991,7 +991,7 @@ func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemK
 	}
 	writeErr := e.destination.PutConfigValue(ctx, path, payload)
 	observed, presence, readErr := e.destination.ReadConfigValue(ctx, path)
-	applied := readErr == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed)
+	applied := readErr == nil && presence == cpa.ConfigPresent && equalWholeConfigValue(kind, path, value, observed)
 	switch {
 	case applied:
 		return freshstore.AdoptionItem{
@@ -1032,6 +1032,92 @@ func equalConfigValue(source, destination any) bool {
 	left, errLeft := encodeJSONValue(normalizeValue(source))
 	right, errRight := encodeJSONValue(normalizeValue(destination))
 	return errLeft == nil && errRight == nil && string(left) == string(right)
+}
+
+// equalWholeConfigValue compares one whole section or rule family against its
+// destination read-back. For `api-keys.*` provider sections, CPA v8.0.55
+// strips `auth_index`/`auth-index` on PUT and injects a 16-hex `auth_index` on
+// JSON GET (`internal/api/handlers/management/config_v8.go:67,114`,
+// `config_auth_index.go:145-160,349-635`, `sdk/cliproxy/auth/types.go:580-587`):
+// on each entry of `group.keys` across all eight `api-keys.*` families, and on
+// the group object itself when an `api-keys.openai-compatibility` group has no
+// keys. `oauth.*` sections and rule families receive no derived fields and stay
+// byte-exact.
+func equalWholeConfigValue(kind freshstore.AdoptionItemKind, path string, source, destination any) bool {
+	if kind == freshstore.AdoptionKindProviderSection && strings.HasPrefix(path, "api-keys.") {
+		cleanSource, okSource := stripAPIKeysAuthIndex(path, source)
+		cleanDestination, okDestination := stripAPIKeysAuthIndex(path, destination)
+		if !okSource || !okDestination {
+			return false
+		}
+		return equalConfigValue(cleanSource, cleanDestination)
+	}
+	return equalConfigValue(source, destination)
+}
+
+func stripAPIKeysAuthIndex(path string, value any) (any, bool) {
+	groups, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	cleanedGroups := make([]any, 0, len(groups))
+	for _, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cleanGroup := make(map[string]any, len(group))
+		for k, v := range group {
+			cleanGroup[k] = v
+		}
+		rawKeys, hasKeys := group["keys"]
+		keyless := !hasKeys
+		if hasKeys {
+			keys, ok := rawKeys.([]any)
+			if !ok {
+				return nil, false
+			}
+			keyless = len(keys) == 0
+			cleanKeys := make([]any, 0, len(keys))
+			for _, rawEntry := range keys {
+				entry, ok := rawEntry.(map[string]any)
+				if !ok {
+					return nil, false
+				}
+				cleanEntry := make(map[string]any, len(entry))
+				for k, v := range entry {
+					if k == "auth_index" {
+						idx, ok := v.(string)
+						if !ok || !cpa.ValidAuthIndex(idx) {
+							return nil, false
+						}
+						continue
+					}
+					cleanEntry[k] = v
+				}
+				cleanKeys = append(cleanKeys, cleanEntry)
+			}
+			cleanGroup["keys"] = cleanKeys
+		}
+		if rawIdx, hasGroupIdx := cleanGroup["auth_index"]; hasGroupIdx {
+			// CPA injects a group-level auth_index only on a keyless
+			// openai-compatibility group whose base-url is non-empty
+			// (config_auth_index.go:460-488); anywhere else the field is not
+			// CPA-derived and must keep the comparison unequal.
+			baseURL, baseURLOK := cleanGroup["base-url"].(string)
+			if path != "api-keys.openai-compatibility" || !keyless ||
+				!baseURLOK || strings.TrimSpace(baseURL) == "" {
+				return nil, false
+			}
+			idx, ok := rawIdx.(string)
+			if !ok || !cpa.ValidAuthIndex(idx) {
+				return nil, false
+			}
+			delete(cleanGroup, "auth_index")
+		}
+		cleanedGroups = append(cleanedGroups, cleanGroup)
+	}
+	return cleanedGroups, true
 }
 
 // normalizeValue converts a decoded JSON value into the exact Go scalars the

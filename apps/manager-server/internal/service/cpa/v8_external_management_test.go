@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,11 +17,12 @@ func TestExternalModelSurface(t *testing.T) {
 		body   string
 		wantOK bool
 	}{
-		"a model list":       {status: http.StatusOK, body: `{"data":[{"id":"gpt-test"}]}`, wantOK: true},
-		"an empty list":      {status: http.StatusOK, body: `{"data":[]}`},
-		"an id-less entry":   {status: http.StatusOK, body: `{"data":[{"id":"   "}]}`},
-		"an unparsable body": {status: http.StatusOK, body: `{"data":[`},
-		"an error status":    {status: http.StatusBadGateway, body: `{"data":[{"id":"gpt-test"}]}`},
+		"a model list":         {status: http.StatusOK, body: `{"data":[{"id":"gpt-test"}]}`, wantOK: true},
+		"an empty list":        {status: http.StatusOK, body: `{"data":[]}`},
+		"an empty OpenAI list": {status: http.StatusOK, body: `{"object":"list","data":[]}`},
+		"an id-less entry":     {status: http.StatusOK, body: `{"data":[{"id":"   "}]}`},
+		"an unparsable body":   {status: http.StatusOK, body: `{"data":[`},
+		"an error status":      {status: http.StatusBadGateway, body: `{"data":[{"id":"gpt-test"}]}`},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -53,5 +55,131 @@ func TestExternalModelSurface(t *testing.T) {
 	var absent *Transport
 	if err := absent.ExternalModelSurface(context.Background(), ""); err == nil {
 		t.Fatal("a nil transport reported a served model surface")
+	}
+}
+
+// TestManagedModelSurface proves the Managed destination model-list probe
+// accepts an authenticated empty OpenAI model list like VerifyV8Adoption while
+// refusing 401/403, non-200, malformed JSON and missing data without mentioning
+// private keys.
+func TestManagedModelSurface(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		clientKey  string
+		wantOK     bool
+		wantSubstr string
+	}{
+		{
+			name:      "empty model list",
+			status:    http.StatusOK,
+			body:      `{"object":"list","data":[]}`,
+			clientKey: "client-key-1",
+			wantOK:    true,
+		},
+		{
+			name:      "populated model list",
+			status:    http.StatusOK,
+			body:      `{"object":"list","data":[{"id":"gpt-test","object":"model"}]}`,
+			clientKey: "client-key-1",
+			wantOK:    true,
+		},
+		{
+			name:       "unauthorized client key",
+			status:     http.StatusUnauthorized,
+			body:       `{"error":"unauthorized"}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "rejected the client key",
+		},
+		{
+			name:       "forbidden client key",
+			status:     http.StatusForbidden,
+			body:       `{"error":"forbidden"}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "rejected the client key",
+		},
+		{
+			name:       "upstream error status",
+			status:     http.StatusBadGateway,
+			body:       `{"object":"list","data":[]}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "status 502",
+		},
+		{
+			name:       "malformed JSON",
+			status:     http.StatusOK,
+			body:       `{"object":"list","data":[`,
+			clientKey:  "client-key-1",
+			wantSubstr: "not provable",
+		},
+		{
+			name:       "missing data array",
+			status:     http.StatusOK,
+			body:       `{"object":"list"}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "not provable",
+		},
+		{
+			name:       "null data array",
+			status:     http.StatusOK,
+			body:       `{"object":"list","data":null}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "not provable",
+		},
+		{
+			name:       "wrong object type",
+			status:     http.StatusOK,
+			body:       `{"object":"model","data":[]}`,
+			clientKey:  "client-key-1",
+			wantSubstr: "not provable",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var authorization string
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/v1/models" {
+					writer.WriteHeader(http.StatusNotFound)
+					return
+				}
+				authorization = request.Header.Get("Authorization")
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(testCase.status)
+				_, _ = writer.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			err := NewTransportForEndpoint(server.URL).ManagedModelSurface(context.Background(), testCase.clientKey)
+			if testCase.wantOK {
+				if err != nil {
+					t.Fatalf("expected valid Managed model surface, got %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected invalid Managed model surface to fail")
+				}
+				if strings.Contains(strings.ToLower(err.Error()), "private key") {
+					t.Fatalf("error %q mentioned private key", err)
+				}
+				if testCase.wantSubstr != "" && !strings.Contains(err.Error(), testCase.wantSubstr) {
+					t.Fatalf("error = %q, want substring %q", err, testCase.wantSubstr)
+				}
+			}
+			if authorization != "Bearer "+testCase.clientKey {
+				t.Fatalf("authorization = %q, want Bearer %s", authorization, testCase.clientKey)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer server.Close()
+	if err := NewTransportForEndpoint(server.URL).ManagedModelSurface(context.Background(), ""); err == nil || strings.Contains(strings.ToLower(err.Error()), "private key") {
+		t.Fatalf("empty client key must be refused without private-key wording, got %v", err)
+	}
+	var absent *Transport
+	if err := absent.ManagedModelSurface(context.Background(), "client-key-1"); err == nil || strings.Contains(strings.ToLower(err.Error()), "private key") {
+		t.Fatalf("nil transport must be refused without private-key wording, got %v", err)
 	}
 }

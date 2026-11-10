@@ -103,8 +103,9 @@ type fakeDestinationCPA struct {
 	// failConfigWrite makes the config endpoints answer as a destination that
 	// cannot take a configuration write, so a test with a zero-credential source
 	// can stop a run after the attempt was recorded and before cpa_config is.
-	failConfigWrite      bool
-	server               *httptest.Server
+	failConfigWrite bool
+	emptyModels     bool
+	server          *httptest.Server
 }
 
 func newFakeDestinationCPA(t *testing.T, management string) *fakeDestinationCPA {
@@ -219,6 +220,13 @@ func (c *fakeDestinationCPA) serveModels(w http.ResponseWriter, r *http.Request)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 		return
 	}
+	c.mu.Lock()
+	empty := c.emptyModels
+	c.mu.Unlock()
+	if empty {
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		return
+	}
 	_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-5","object":"model"}]}`))
 }
 
@@ -319,6 +327,9 @@ func (c *fakeDestinationCPA) writeConfig(w http.ResponseWriter, r *http.Request,
 		_, _ = w.Write([]byte(`{"error":"temporarily unavailable"}`))
 		return
 	}
+	if strings.HasPrefix(dotted, "api-keys.") {
+		value = stripDestinationAuthIndexes(value)
+	}
 	c.mu.Lock()
 	if r.Method == http.MethodPatch {
 		// CPA merges a PATCH mapping key by key, so a leaf below a page group
@@ -335,6 +346,9 @@ func (c *fakeDestinationCPA) readConfig(w http.ResponseWriter, slashPath string)
 	dotted := strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", ".")
 	c.mu.Lock()
 	value, found := configValueAt(c.config, strings.Split(dotted, "."))
+	if found && strings.HasPrefix(dotted, "api-keys.") {
+		value = injectDestinationAuthIndexes(dotted, value)
+	}
 	c.mu.Unlock()
 	if !found {
 		w.WriteHeader(http.StatusNotFound)
@@ -343,6 +357,98 @@ func (c *fakeDestinationCPA) readConfig(w http.ResponseWriter, slashPath string)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func stripDestinationAuthIndexes(value any) any {
+	groups, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(groups))
+	for _, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			out = append(out, rawGroup)
+			continue
+		}
+		cleanGroup := make(map[string]any, len(group))
+		for k, v := range group {
+			if k == "auth_index" || k == "auth-index" {
+				continue
+			}
+			cleanGroup[k] = v
+		}
+		if rawKeys, ok := cleanGroup["keys"].([]any); ok {
+			cleanKeys := make([]any, 0, len(rawKeys))
+			for _, rawEntry := range rawKeys {
+				entry, ok := rawEntry.(map[string]any)
+				if !ok {
+					cleanKeys = append(cleanKeys, rawEntry)
+					continue
+				}
+				cleanEntry := make(map[string]any, len(entry))
+				for k, v := range entry {
+					if k == "auth_index" || k == "auth-index" {
+						continue
+					}
+					cleanEntry[k] = v
+				}
+				cleanKeys = append(cleanKeys, cleanEntry)
+			}
+			cleanGroup["keys"] = cleanKeys
+		}
+		out = append(out, cleanGroup)
+	}
+	return out
+}
+
+func injectDestinationAuthIndexes(dotted string, value any) any {
+	groups, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(groups))
+	for gi, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			out = append(out, rawGroup)
+			continue
+		}
+		projectedGroup := make(map[string]any, len(group)+1)
+		for k, v := range group {
+			projectedGroup[k] = v
+		}
+		keys, keysOK := group["keys"].([]any)
+		if dotted == "api-keys.openai-compatibility" && (!keysOK || len(keys) == 0) {
+			if base, _ := group["base-url"].(string); strings.TrimSpace(base) != "" {
+				sum := sha256.Sum256([]byte(fmt.Sprintf("%s#%d#%s", dotted, gi, base)))
+				projectedGroup["auth_index"] = hex.EncodeToString(sum[:8])
+			}
+			out = append(out, projectedGroup)
+			continue
+		}
+		if keysOK {
+			projectedKeys := make([]any, 0, len(keys))
+			for ki, rawKey := range keys {
+				entry, ok := rawKey.(map[string]any)
+				if !ok {
+					projectedKeys = append(projectedKeys, rawKey)
+					continue
+				}
+				projectedEntry := make(map[string]any, len(entry)+1)
+				for k, v := range entry {
+					projectedEntry[k] = v
+				}
+				apiKey, _ := entry["api-key"].(string)
+				sum := sha256.Sum256([]byte(fmt.Sprintf("%s#%d#%d#%s", dotted, gi, ki, apiKey)))
+				projectedEntry["auth_index"] = hex.EncodeToString(sum[:8])
+				projectedKeys = append(projectedKeys, projectedEntry)
+			}
+			projectedGroup["keys"] = projectedKeys
+		}
+		out = append(out, projectedGroup)
+	}
+	return out
 }
 
 // patchConfig deep-merges one PATCH body into the document below one path.
@@ -2200,5 +2306,75 @@ func TestImportCPAReplayRefusesAnUnreachableDestination(t *testing.T) {
 	_, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetUnreachable {
 		t.Fatalf("replay against an unreachable destination = %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetUnreachable)
+	}
+}
+
+// TestImportCPAThenVerifyWithOpenAICompatAndEmptyModelList proves both Managed
+// upgrade fixes end to end: openai-compatibility and sibling api-keys.*
+// families migrate cleanly when CPA injects 16-hex auth_index on read-back, and
+// Verify completes when the Managed destination serves an empty /v1/models list.
+func TestImportCPAThenVerifyWithOpenAICompatAndEmptyModelList(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	sourceConfig := `host: "127.0.0.1"
+port: 8317
+api-keys:
+  - "legacy-client-key-1"
+request-retry: 3
+gemini-api-key:
+  - api-key: "legacy-gemini-provider-key"
+openai-compatibility:
+  - name: "legacy-compat"
+    base-url: "https://example.invalid/v1"
+    api-key-entries:
+      - api-key: "legacy-compat-provider-key"
+    models:
+      - name: "compat-model-1"
+        alias: "compat-model-1"
+`
+	writeCPABeside(t, fixture.volume.root, sourceConfig, nil)
+	destination := newFakeDestinationCPA(t, "")
+	destination.emptyModels = true
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+
+	sourceLock, err := processlock.AcquireExisting(fixture.volume.databasePath())
+	if err != nil {
+		t.Fatalf("acquire 1.x ownership fence: %v", err)
+	}
+	imported, err := ImportCPA(context.Background(), CPAImportOptions{
+		LegacyRoot:     fixture.volume.root,
+		SourceLock:     sourceLock,
+		TargetRoot:     fixture.target,
+		CPAVersion:     "7.3.4",
+		PluginsEnabled: boolPointer(false),
+		DestinationURL: destination.url(),
+		Runtime:        runtime,
+	})
+	if closeErr := sourceLock.Close(); closeErr != nil {
+		t.Fatalf("release source lock after import: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("import with openai-compatibility and gemini-api-key failed: %v", err)
+	}
+	if !containsValue(imported.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("domains = %v, want cpa_config", imported.DomainsDone)
+	}
+	destination.mu.Lock()
+	stored := string(destination.renderConfigDocument())
+	destination.mu.Unlock()
+	if strings.Contains(stored, "auth_index") || strings.Contains(stored, "auth-index") {
+		t.Fatalf("persisted destination config must strip auth_index/auth-index: %s", stored)
+	}
+	verified, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot: fixture.volume.root,
+		TargetRoot: fixture.target,
+		Runtime:    runtime,
+	})
+	if err != nil {
+		t.Fatalf("verify with empty /v1/models list failed: %v", err)
+	}
+	if !verified.Complete || verified.Stage != model.UpgradeStageComplete || verified.TargetMode != model.UpgradeTargetManaged {
+		t.Fatalf("verified = %+v, want completed Managed operation", verified)
 	}
 }

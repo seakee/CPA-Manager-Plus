@@ -44,6 +44,9 @@ type fakeCPA struct {
 	config map[string]any
 	// writeFailures makes one dotted path fail with the given status.
 	writeFailures map[string]int
+	// readOverrides replaces the value readConfig returns for one dotted path,
+	// letting a test simulate a divergent or malformed read-back after PUT.
+	readOverrides map[string]any
 	// uploadStatus > 0 makes the upload answer that status but still store the
 	// bytes, which is how an unknown result is reproduced.
 	uploadStatus int
@@ -275,6 +278,9 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(dotted, "api-keys.") {
+		value = stripFakeAPIKeyAuthIndexes(value)
+	}
 	c.mu.Lock()
 	if r.Method == http.MethodPatch {
 		mergeInto(c.config, strings.Split(dotted, "."), value)
@@ -287,15 +293,131 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 
 func (c *fakeCPA) readConfig(w http.ResponseWriter, slashPath string) {
 	dotted := strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", ".")
-	c.mu.Lock()
-	value := lookup(c.config, strings.Split(dotted, "."))
-	c.mu.Unlock()
+	value := c.projectedValue(dotted)
 	if value == nil {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "not_found"})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (c *fakeCPA) projectedValue(dotted string) any {
+	c.mu.Lock()
+	if c.readOverrides != nil {
+		if override, exists := c.readOverrides[dotted]; exists {
+			c.mu.Unlock()
+			return override
+		}
+	}
+	value := lookup(c.config, strings.Split(dotted, "."))
+	if strings.HasPrefix(dotted, "api-keys.") && value != nil {
+		value = injectFakeAPIKeyAuthIndexes(dotted, value)
+	}
+	c.mu.Unlock()
+	return value
+}
+
+func fakeAuthIndex(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:8])
+}
+
+// stripFakeAPIKeyAuthIndexes mirrors CPA's stripAPIKeysAuthIndexesFromUpdate:
+// PUT /v8/management/config/api-keys/* never persists auth_index/auth-index.
+func stripFakeAPIKeyAuthIndexes(value any) any {
+	groups, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(groups))
+	for _, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			out = append(out, rawGroup)
+			continue
+		}
+		cleanGroup := make(map[string]any, len(group))
+		for k, v := range group {
+			if k == "auth_index" || k == "auth-index" {
+				continue
+			}
+			cleanGroup[k] = v
+		}
+		if rawKeys, ok := cleanGroup["keys"].([]any); ok {
+			cleanKeys := make([]any, 0, len(rawKeys))
+			for _, rawEntry := range rawKeys {
+				entry, ok := rawEntry.(map[string]any)
+				if !ok {
+					cleanKeys = append(cleanKeys, rawEntry)
+					continue
+				}
+				cleanEntry := make(map[string]any, len(entry))
+				for k, v := range entry {
+					if k == "auth_index" || k == "auth-index" {
+						continue
+					}
+					cleanEntry[k] = v
+				}
+				cleanKeys = append(cleanKeys, cleanEntry)
+			}
+			cleanGroup["keys"] = cleanKeys
+		}
+		out = append(out, cleanGroup)
+	}
+	return out
+}
+
+// injectFakeAPIKeyAuthIndexes mirrors CPA v8.0.55's
+// injectV8APIKeyAuthIndexesLocked: GET /v8/management/config/api-keys/* adds a
+// 16-hex auth_index to each key entry, or to the group itself for a keyless
+// openai-compatibility group with a base-url.
+func injectFakeAPIKeyAuthIndexes(dotted string, value any) any {
+	groups, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(groups))
+	for groupIdx, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			out = append(out, rawGroup)
+			continue
+		}
+		projectedGroup := make(map[string]any, len(group)+1)
+		for k, v := range group {
+			projectedGroup[k] = v
+		}
+		rawKeys, hasKeys := group["keys"]
+		keys, keysSlice := rawKeys.([]any)
+		if dotted == "api-keys.openai-compatibility" && (!hasKeys || (keysSlice && len(keys) == 0)) {
+			if baseURL, _ := group["base-url"].(string); strings.TrimSpace(baseURL) != "" {
+				projectedGroup["auth_index"] = fakeAuthIndex(fmt.Sprintf("%s#%d#%s", dotted, groupIdx, baseURL))
+			}
+			out = append(out, projectedGroup)
+			continue
+		}
+		if keysSlice {
+			projectedKeys := make([]any, 0, len(keys))
+			for keyIdx, rawEntry := range keys {
+				entry, ok := rawEntry.(map[string]any)
+				if !ok {
+					projectedKeys = append(projectedKeys, rawEntry)
+					continue
+				}
+				projectedEntry := make(map[string]any, len(entry)+1)
+				for k, v := range entry {
+					projectedEntry[k] = v
+				}
+				apiKey, _ := entry["api-key"].(string)
+				projectedEntry["auth_index"] = fakeAuthIndex(fmt.Sprintf("%s#%d#%d#%s", dotted, groupIdx, keyIdx, apiKey))
+				projectedKeys = append(projectedKeys, projectedEntry)
+			}
+			projectedGroup["keys"] = projectedKeys
+		}
+		out = append(out, projectedGroup)
+	}
+	return out
 }
 
 // leafPaths lists the dotted paths a PATCH body below one prefix would set.
@@ -1812,9 +1934,12 @@ func TestDestinationDigestIsObservedFromTheReadBack(t *testing.T) {
 	// A whole section records the digest of the value read back, not of the body
 	// it sent.
 	section := itemByName(t, summary, providerSectionItemName("api-keys.claude"))
-	observed := lookup(destination.config, []string{"api-keys", "claude"})
+	observed := destination.projectedValue("api-keys.claude")
 	if section.DestinationSHA256 != digestOfValue(observed) {
 		t.Fatalf("the recorded section digest is not the observed value: %s vs %s", section.DestinationSHA256, digestOfValue(observed))
+	}
+	if section.DestinationSHA256 == section.SourceSHA256 {
+		t.Fatalf("section destination digest %s equalled source digest despite injected auth_index", section.DestinationSHA256)
 	}
 }
 
@@ -2292,4 +2417,236 @@ func TestLegacyOverlongIdentityIsNotRecordedAgainOnResume(t *testing.T) {
 		t.Fatal("a credential whose earlier record is manual was uploaded anyway")
 	}
 	source.usesOnlyReads(t)
+}
+
+// TestProviderSectionReadBackAcceptsCPADerivedAuthIndexAcrossFamilies proves
+// every api-keys.* family migrates and skips redundant writes on replay when
+// the destination injects CPA's 16-hex auth_index (both on key entries and on a
+// keyless openai-compatibility group), and when an Adopted v8 source also
+// projects auth_index from GET /v8/management/config.
+func TestProviderSectionReadBackAcceptsCPADerivedAuthIndexAcrossFamilies(t *testing.T) {
+	source := newFakeCPA(t, "source-management-key")
+	source.config = map[string]any{
+		"api-keys": map[string]any{
+			"gemini":       []any{map[string]any{"name": "gemini-1", "keys": []any{map[string]any{"api-key": "gem-key"}}}},
+			"interactions": []any{map[string]any{"name": "interactions-1", "keys": []any{map[string]any{"api-key": "int-key"}}}},
+			"vertex":       []any{map[string]any{"name": "vertex-1", "base-url": "https://vertex.example", "keys": []any{map[string]any{"api-key": "vtx-key"}}}},
+			"codex":        []any{map[string]any{"name": "codex-1", "base-url": "https://codex.example/v1", "keys": []any{map[string]any{"api-key": "cdx-key"}}}},
+			"claude": []any{map[string]any{
+				"name": "claude-1", "base-url": "https://claude.example",
+				"keys": []any{map[string]any{"api-key": "cld-key", "auth_index": fakeAuthIndex("adopted-source-v8-index")}},
+			}},
+			"xai":  []any{map[string]any{"name": "xai-1", "base-url": "https://xai.example/v1", "keys": []any{map[string]any{"api-key": "xai-key"}}}},
+			"meta": []any{map[string]any{"name": "meta-1", "keys": []any{map[string]any{"api-key": "meta-key"}}}},
+			"openai-compatibility": []any{
+				map[string]any{
+					"name": "compat-keyed", "base-url": "https://compat.example/v1",
+					"keys":   []any{map[string]any{"api-key": "compat-key"}},
+					"models": []any{map[string]any{"name": "compat-m", "alias": "compat-m"}},
+				},
+				map[string]any{
+					"name": "compat-keyless", "base-url": "http://127.0.0.1:11434/v1",
+					"keys":   []any{},
+					"models": []any{map[string]any{"name": "local-m"}},
+				},
+			},
+		},
+	}
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	families := []string{
+		"api-keys.gemini", "api-keys.interactions", "api-keys.vertex", "api-keys.codex",
+		"api-keys.claude", "api-keys.xai", "api-keys.meta", "api-keys.openai-compatibility",
+	}
+	for _, section := range families {
+		item := itemByName(t, summary, providerSectionItemName(section))
+		if item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("section %s: outcome=%s reason=%s", section, item.Outcome, item.Reason)
+		}
+	}
+	// A fresh run against the already-populated destination must skip every PUT via pre-read equality.
+	before := destination.writeCount()
+	second := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if after := destination.writeCount(); after != before {
+		t.Fatalf("pre-read equality failed to skip already-migrated provider sections: %d extra writes", after-before)
+	}
+	for _, section := range families {
+		if item := itemByName(t, second, providerSectionItemName(section)); item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("pre-read section %s: %+v", section, item)
+		}
+	}
+}
+
+// TestProviderSectionReadBackRejectsDivergentMalformedOrExtraFields ensures
+// provider-section comparison stays fail-closed on altered values, malformed
+// auth_index formats, misplaced group-level auth_index, and unexpected extra
+// fields.
+func TestProviderSectionReadBackRejectsDivergentMalformedOrExtraFields(t *testing.T) {
+	validIdx := fakeAuthIndex("valid")
+	cases := []struct {
+		name     string
+		section  string
+		override any
+	}{
+		{
+			name:    "changed api-key",
+			section: "api-keys.openai-compatibility",
+			override: []any{map[string]any{
+				"name": "compat-group", "base-url": "http://compat.internal/v1",
+				"keys":   []any{map[string]any{"api-key": "different-key", "auth_index": validIdx}},
+				"models": []any{map[string]any{"name": "compat-model"}},
+			}},
+		},
+		{
+			name:    "changed base-url",
+			section: "api-keys.openai-compatibility",
+			override: []any{map[string]any{
+				"name": "compat-group", "base-url": "http://wrong.internal/v1",
+				"keys":   []any{map[string]any{"api-key": "src-provider-compat-key", "auth_index": validIdx}},
+				"models": []any{map[string]any{"name": "compat-model"}},
+			}},
+		},
+		{
+			name:    "uppercase auth_index",
+			section: "api-keys.openai-compatibility",
+			override: []any{map[string]any{
+				"name": "compat-group", "base-url": "http://compat.internal/v1",
+				"keys":   []any{map[string]any{"api-key": "src-provider-compat-key", "auth_index": strings.ToUpper(validIdx)}},
+				"models": []any{map[string]any{"name": "compat-model"}},
+			}},
+		},
+		{
+			name:    "short auth_index",
+			section: "api-keys.claude",
+			override: []any{map[string]any{
+				"name": "claude-group",
+				"keys": []any{map[string]any{"api-key": "src-provider-claude-key", "auth_index": "557ea525"}},
+			}},
+		},
+		{
+			name:    "non-hex auth_index",
+			section: "api-keys.claude",
+			override: []any{map[string]any{
+				"name": "claude-group",
+				"keys": []any{map[string]any{"api-key": "src-provider-claude-key", "auth_index": "zzzzzzzzzzzzzzzz"}},
+			}},
+		},
+		{
+			name:    "non-string auth_index",
+			section: "api-keys.claude",
+			override: []any{map[string]any{
+				"name": "claude-group",
+				"keys": []any{map[string]any{"api-key": "src-provider-claude-key", "auth_index": json.Number("1234567890123456")}},
+			}},
+		},
+		{
+			name:    "group-level auth_index on keyed group",
+			section: "api-keys.openai-compatibility",
+			override: []any{map[string]any{
+				"name": "compat-group", "base-url": "http://compat.internal/v1", "auth_index": validIdx,
+				"keys":   []any{map[string]any{"api-key": "src-provider-compat-key", "auth_index": validIdx}},
+				"models": []any{map[string]any{"name": "compat-model"}},
+			}},
+		},
+		{
+			name:    "unexpected extra field on key entry",
+			section: "api-keys.openai-compatibility",
+			override: []any{map[string]any{
+				"name": "compat-group", "base-url": "http://compat.internal/v1",
+				"keys":   []any{map[string]any{"api-key": "src-provider-compat-key", "auth_index": validIdx, "unexpected": "extra"}},
+				"models": []any{map[string]any{"name": "compat-model"}},
+			}},
+		},
+		{
+			name:    "hyphenated auth-index extra field",
+			section: "api-keys.claude",
+			override: []any{map[string]any{
+				"name": "claude-group",
+				"keys": []any{map[string]any{"api-key": "src-provider-claude-key", "auth-index": validIdx}},
+			}},
+		},
+		{
+			name:    "unexpected auth_index on oauth section",
+			section: "oauth.model-alias",
+			override: map[string]any{
+				"claude":     []any{map[string]any{"name": "claude-3", "alias": "claude-alias"}},
+				"auth_index": validIdx,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source, destination := sourceFixture(t), destinationFixture(t)
+			destination.readOverrides = map[string]any{tc.section: tc.override}
+			summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+			item := itemByName(t, summary, providerSectionItemName(tc.section))
+			if item.Outcome != freshstore.AdoptionFailed || item.Reason != "verify_mismatch" {
+				t.Fatalf("case %s (%s): got outcome=%s reason=%s, want failed/verify_mismatch", tc.name, tc.section, item.Outcome, item.Reason)
+			}
+		})
+	}
+}
+
+// TestProviderSectionReadBackRejectsGroupAuthIndexWithoutCPAAtPrecondition proves
+// a group-level auth_index is treated as CPA-derived only where CPA actually
+// projects one: a keyless openai-compatibility group whose base-url is non-empty
+// (config_auth_index.go:460-488). With no base-url, an empty one, or a
+// whitespace-only one, the field is not CPA's, so the pre-read must not skip the
+// write and the post-write read-back must not report the section migrated.
+func TestProviderSectionReadBackRejectsGroupAuthIndexWithoutCPAAtPrecondition(t *testing.T) {
+	validIdx := fakeAuthIndex("group-precondition")
+	cases := []struct {
+		name  string
+		group func() map[string]any
+	}{
+		{
+			name: "base-url missing",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":   "compat-keyless",
+					"models": []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+		{
+			name: "base-url empty",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":     "compat-keyless",
+					"base-url": "",
+					"models":   []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+		{
+			name: "base-url whitespace",
+			group: func() map[string]any {
+				return map[string]any{
+					"name":     "compat-keyless",
+					"base-url": "   ",
+					"models":   []any{map[string]any{"name": "local-model"}},
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := sourceFixture(t)
+			source.config["api-keys"] = map[string]any{"openai-compatibility": []any{tc.group()}}
+			destination := destinationFixture(t)
+			projected := tc.group()
+			projected["auth_index"] = validIdx
+			destination.readOverrides = map[string]any{"api-keys.openai-compatibility": []any{projected}}
+
+			before := destination.writeCount()
+			summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+			if destination.writeCount() == before {
+				t.Fatalf("pre-read treated a non-derivable group auth_index as equal and skipped the write")
+			}
+			item := itemByName(t, summary, providerSectionItemName("api-keys.openai-compatibility"))
+			if item.Outcome != freshstore.AdoptionFailed || item.Reason != "verify_mismatch" {
+				t.Fatalf("post-write read-back: got outcome=%s reason=%s, want failed/verify_mismatch", item.Outcome, item.Reason)
+			}
+		})
+	}
 }

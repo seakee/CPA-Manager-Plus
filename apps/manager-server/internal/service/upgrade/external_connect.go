@@ -340,7 +340,7 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	// can reach.
 	if err := externalConnectModelSurface(ctx, options, baseURL, clientKey); err != nil {
 		return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
-			fmt.Sprintf("the CPA at %s authenticated but its model surface did not answer; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), err))
+			fmt.Sprintf("the CPA at %s authenticated but its model surface did not answer; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), modelSurfaceFailureCause(err)))
 	}
 
 	serverFingerprint := freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256)
@@ -682,6 +682,30 @@ func externalConnectModelSurface(ctx context.Context, options ExternalConnectOpt
 	return cpa.NewTransportForEndpoint(endpoint).ExternalModelSurface(ctx, clientKey)
 }
 
+// managedConnectModelSurface proves the Managed destination's /v1/models
+// endpoint with the imported client credential, allowing an empty model list
+// on the same terms as cpa.VerifyV8Adoption (cpa/v8_adoption.go:57-65).
+func managedConnectModelSurface(ctx context.Context, options ExternalConnectOptions, baseURL, clientKey string) error {
+	if options.proveModelSurface != nil {
+		return options.proveModelSurface(ctx, baseURL, clientKey)
+	}
+	endpoint, err := cpa.NormalizeV8BaseURL(baseURL)
+	if err != nil {
+		return errors.New("destination model surface was not provable")
+	}
+	return cpa.NewTransportForEndpoint(endpoint).ManagedModelSurface(ctx, clientKey)
+}
+
+// modelSurfaceFailureCause replaces cpa.ErrProofUnavailable ("private key
+// application proof unavailable", minted for the private S1 initial-key flow)
+// with operator text describing the destination model surface.
+func modelSurfaceFailureCause(err error) error {
+	if errors.Is(err, cpa.ErrProofUnavailable) {
+		return errors.New("destination model surface was not provable")
+	}
+	return err
+}
+
 // externalConnectProbeError maps a probe failure onto the External vocabulary.
 // The order matters: a 403 is the banned-client form of a rejected credential,
 // so it is asked first; a refusal or a moved target is never reported as a
@@ -702,8 +726,17 @@ func externalConnectProbeError(err error) error {
 		return newUpgradeError(UpgradeErrorExternalVersionUnsupported, externalConnectAction, err)
 	default:
 		return newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
-			"the CPA did not answer the management read; nothing was connected and the operation did not advance", err)
+			"the CPA did not answer the management read; nothing was connected and the operation did not advance", managementReadFailureCause(err))
 	}
+}
+
+// managementReadFailureCause replaces cpa.ErrProofUnavailable ("private key
+// application proof unavailable") with neutral management-surface operator text.
+func managementReadFailureCause(err error) error {
+	if errors.Is(err, cpa.ErrProofUnavailable) {
+		return errors.New("the CPA management surface did not give a provable answer")
+	}
+	return err
 }
 
 // externalConnectRefused records the typed refusal on the row without moving the

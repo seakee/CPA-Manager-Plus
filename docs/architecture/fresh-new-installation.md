@@ -1177,7 +1177,7 @@ item. The executor is `internal/service/freshadopt`, reached only from
 | credential file | `GET /v8/management/credentials`, `GET /credentials/download?name=` | `POST /v8/management/credentials?name=`, then `PATCH /credentials/status` to restore the enabled state | the destination's listing entry (name, type, disabled) and the downloaded byte digest |
 | gateway leaf | one `GET /v8/management/config` | `PATCH /config/<group prefix>`, nested down to the leaf, using the same `cpa.ConfigLeafPaths()` table (39 leaves) the gateway page owns | `GET` that one path |
 | rule family | the same single document | `PUT /config/<family path>`, for the 5 `cpa.ConfigRuleFamilyIDs()` families | `GET` that path |
-| provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path |
+| provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path (`api-keys.*` compared modulo CPA's 16-hex `auth_index` projection) |
 
 The approved scope names 13 provider ownership groups, but the pinned v8 document
 projection has no root `models` section: v8.0.55 accepts the root key
