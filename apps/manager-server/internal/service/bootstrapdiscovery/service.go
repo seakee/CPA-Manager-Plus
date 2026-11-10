@@ -41,6 +41,36 @@ func Unavailable() bootstrap.PublicDiscovery {
 	}
 }
 
+func SourceOwnershipUnavailable() bootstrap.PublicDiscovery {
+	return publicDiscovery(
+		bootstrap.PublicRecoveryRequired,
+		bootstrap.Recovery,
+		false,
+		bootstrap.AuthEntryHostIntervention,
+		bootstrap.ReasonSourceOwnershipUnavailable,
+	)
+}
+
+func UnsupportedUpgrade() bootstrap.PublicDiscovery {
+	return publicDiscovery(
+		bootstrap.PublicUnsupportedUpgrade,
+		bootstrap.UnsupportedUpgrade,
+		true,
+		bootstrap.AuthEntryAdminSession,
+		bootstrap.ReasonQualificationUnavailable,
+	)
+}
+
+func RecoveryRequired() bootstrap.PublicDiscovery {
+	return publicDiscovery(
+		bootstrap.PublicRecoveryRequired,
+		bootstrap.Recovery,
+		false,
+		bootstrap.AuthEntryHostIntervention,
+		bootstrap.ReasonRecoveryHostIntervention,
+	)
+}
+
 func Project(input Input) bootstrap.PublicDiscovery {
 	if input.InspectionError != nil {
 		return Unavailable()

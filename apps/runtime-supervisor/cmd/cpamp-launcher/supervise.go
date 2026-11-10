@@ -1025,31 +1025,46 @@ func managerBootstrapURL(healthURL string) string {
 }
 
 func httpEndpointStatusOK(ctx context.Context, client *http.Client, healthURL, bootstrapURL string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-	if err != nil {
+	status, ok := httpGetStatus(ctx, client, healthURL)
+	if !ok {
 		return false
+	}
+	if status == http.StatusOK {
+		return true
+	}
+	if status != http.StatusServiceUnavailable || bootstrapURL == "" {
+		return false
+	}
+	bootStatus, ok := httpGetStatus(ctx, client, bootstrapURL)
+	if !ok {
+		return false
+	}
+	if bootStatus == http.StatusOK {
+		return true
+	}
+	// When Manager has settled into read-only discovery on an unclassifiable or
+	// unavailable source, /.well-known/cpamp-bootstrap answers 503 while the
+	// read-only shell at /.well-known/cpamp-bootstrap/ui answers 200. Before
+	// startup admission finishes (and after BeginWritableStartup on store-open
+	// failure), /ui answers 404, so Ingress still waits during initialization.
+	if bootStatus == http.StatusServiceUnavailable {
+		uiStatus, uiOK := httpGetStatus(ctx, client, strings.TrimRight(bootstrapURL, "/")+"/ui")
+		return uiOK && uiStatus == http.StatusOK
+	}
+	return false
+}
+
+func httpGetStatus(ctx context.Context, client *http.Client, targetURL string) (int, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, false
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		return true
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable && bootstrapURL != "" {
-		bootReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, bootstrapURL, nil)
-		if reqErr != nil {
-			return false
-		}
-		bootResp, doErr := client.Do(bootReq)
-		if doErr != nil {
-			return false
-		}
-		_ = bootResp.Body.Close()
-		return bootResp.StatusCode == http.StatusOK
-	}
-	return false
+	return resp.StatusCode, true
 }
 
 func buildSysProcAttr(spec ChildSpec, setCreds bool) *syscall.SysProcAttr {

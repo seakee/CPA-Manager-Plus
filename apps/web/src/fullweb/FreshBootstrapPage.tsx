@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { bootstrapDiscoveryText as discoveryText } from '../i18n/bootstrapDiscovery';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { shellText } from '../i18n/consoleShell';
 import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
@@ -55,9 +56,32 @@ const LANGUAGE_NAME_KEYS: Record<Language, FreshBootstrapTextKey> = {
   ru: 'languageRussian',
 };
 
+type OwnershipCopyKey = 'ownershipGuidanceTitle' | 'ownershipGuidanceDetail';
+
 // Public discovery never confers write authority. Non-Fresh statuses only
 // enter either the existing-Admin gate or host intervention, never Fresh claim.
-type DiscoveryGuidance = ActionFeedback & { flow: 'fresh' | 'host' | 'upgrade'; retryable?: true };
+type DiscoveryGuidance =
+  | (ActionFeedback & { flow: 'fresh' | 'host' | 'upgrade'; retryable?: true })
+  | {
+      tone: ActionFeedback['tone'];
+      flow: 'ownership';
+      retryable: true;
+      copyKey: { title: OwnershipCopyKey; detail: OwnershipCopyKey };
+    };
+
+function guidanceCopy(note: DiscoveryGuidance): { title: string; detail: string } {
+  if (note.flow === 'ownership') {
+    return {
+      title: discoveryText(note.copyKey.title),
+      detail: discoveryText(note.copyKey.detail),
+    };
+  }
+  return {
+    title: feedbackText(note, 'title'),
+    detail: feedbackText(note, 'detail'),
+  };
+}
+
 function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
   if (!payload || typeof payload !== 'object') return null;
   const value = payload as Record<string, unknown>;
@@ -88,6 +112,20 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
       flow: 'upgrade',
       title: 'guidanceUpgradeTitle',
       detail: 'guidanceUpgradeDetail',
+    };
+  }
+  if (
+    value.status === 'recovery_required' &&
+    value.mode === 'recovery' &&
+    value.auth_entry === 'host_intervention' &&
+    value.reason === 'source_ownership_unavailable' &&
+    value.authentication_required === false
+  ) {
+    return {
+      tone: 'warn',
+      flow: 'ownership',
+      retryable: true,
+      copyKey: { title: 'ownershipGuidanceTitle', detail: 'ownershipGuidanceDetail' },
     };
   }
   if (
@@ -335,26 +373,32 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
               <div className="wizard-card-header">
                 <div className="wizard-step-tag">
                   <span>
-                    {bootstrapText(
-                      discoveryNote?.flow === 'fresh' ? 'gateTagBootstrap' : 'gateTagPreflight'
-                    )}
+                    {discoveryNote?.flow === 'ownership'
+                      ? discoveryText('ownershipStepTag')
+                      : bootstrapText(
+                          discoveryNote?.flow === 'fresh' ? 'gateTagBootstrap' : 'gateTagPreflight'
+                        )}
                   </span>
                 </div>
                 <h1 className="wizard-title">
-                  {discoveryNote?.flow === 'host'
-                    ? bootstrapText('gateHostTitle')
-                    : discoveryNote?.flow === 'fresh'
-                      ? journey('claimRequired')
-                      : bootstrapText(
-                          discoveryChecked ? 'gateUnconfirmedTitle' : 'gateCheckingTitle'
-                        )}
+                  {discoveryNote?.flow === 'ownership'
+                    ? discoveryText('ownershipPageTitle')
+                    : discoveryNote?.flow === 'host'
+                      ? bootstrapText('gateHostTitle')
+                      : discoveryNote?.flow === 'fresh'
+                        ? journey('claimRequired')
+                        : bootstrapText(
+                            discoveryChecked ? 'gateUnconfirmedTitle' : 'gateCheckingTitle'
+                          )}
                 </h1>
                 <p className="wizard-desc">
-                  {discoveryNote?.flow === 'host'
-                    ? bootstrapText('gateHostDesc')
-                    : discoveryNote?.flow === 'fresh'
-                      ? journey('claimRequiredHelp')
-                      : bootstrapText('gateUnconfirmedDesc')}
+                  {discoveryNote?.flow === 'ownership'
+                    ? discoveryText('ownershipPageDesc')
+                    : discoveryNote?.flow === 'host'
+                      ? bootstrapText('gateHostDesc')
+                      : discoveryNote?.flow === 'fresh'
+                        ? journey('claimRequiredHelp')
+                        : bootstrapText('gateUnconfirmedDesc')}
                 </p>
               </div>
               <div className="wizard-card-body">
@@ -365,13 +409,36 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                     role="status"
                   >
                     <div className="alert-content">
-                      <div className="alert-title">{feedbackText(discoveryNote, 'title')}</div>
-                      <div className="alert-desc">{feedbackText(discoveryNote, 'detail')}</div>
+                      <div className="alert-title">{guidanceCopy(discoveryNote).title}</div>
+                      <div className="alert-desc">{guidanceCopy(discoveryNote).detail}</div>
                     </div>
                   </div>
                 )}
 
-                {discoveryNote?.flow === 'host' ? (
+                {discoveryNote?.flow === 'ownership' ? (
+                  <div className="legacy-ownership-steps" data-testid="legacy-ownership-instructions">
+                    <div className="alert alert-info">
+                      <div className="alert-content">
+                        <div className="alert-title">{discoveryText('ownershipUpgradeTitle')}</div>
+                        <div className="alert-desc">{discoveryText('ownershipUpgradeDesc')}</div>
+                        <div className="code-block" data-testid="legacy-upgrade-preflight-command">
+                          docker run --rm --entrypoint cpa-manager-plus -v &lt;1x_volume&gt;:/legacy:ro
+                          -v &lt;v2_volume&gt;:/data seakee/cpa-manager-plus:2.0.0-beta.1 upgrade
+                          preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json
+                        </div>
+                      </div>
+                    </div>
+                    <div className="alert alert-warn">
+                      <div className="alert-content">
+                        <div className="alert-title">{discoveryText('ownershipChownTitle')}</div>
+                        <div className="alert-desc">{discoveryText('ownershipChownDesc')}</div>
+                        <div className="code-block" data-testid="legacy-ownership-command">
+                          chown 10002:10002 /data/usage.sqlite* /data/data.key
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : discoveryNote?.flow === 'host' ? (
                   <div className="alert alert-warn" data-testid="host-preflight-instructions">
                     <div className="alert-content">
                       <div className="alert-title">{bootstrapText('preflightTitle')}</div>
@@ -425,7 +492,9 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                       setDiscoveryAttempt((attempt) => attempt + 1);
                     }}
                   >
-                    {bootstrapText('recheck')}
+                    {discoveryNote?.flow === 'ownership'
+                      ? discoveryText('recheckButton')
+                      : bootstrapText('recheck')}
                   </button>
                 )}
               </div>

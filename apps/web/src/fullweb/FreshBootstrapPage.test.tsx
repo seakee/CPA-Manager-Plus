@@ -1114,4 +1114,104 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(traditional.title).not.toBe(simplified.title);
     expect(traditional.desc).not.toBe(simplified.desc);
   });
+
+  it.each([
+    ['zh-CN', '检测到现有 1.x 数据卷（属主权限需在宿主机处理）', '重新检查来源状态'],
+    ['zh-TW', '偵測到現有 1.x 資料卷（擁有者權限需在主機處理）', '重新檢查來源狀態'],
+    ['en', 'Existing 1.x data volume detected (host ownership action required)', 'Recheck source status'],
+    ['ru', 'Обнаружен существующий том данных 1.x', 'Проверить состояние источника снова'],
+  ] as const)(
+    'renders root-owned 1.x volume guidance in %s and transitions to Upgrade entry after recheck',
+    async (locale, expectedTitle, expectedButton) => {
+      setFullWebLanguage(locale);
+      const discovery = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          Response.json({
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'recovery_required',
+            mode: 'recovery',
+            auth_entry: 'host_intervention',
+            reason: 'source_ownership_unavailable',
+            authentication_required: false,
+          })
+        )
+        .mockResolvedValueOnce(
+          Response.json({
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'unsupported_upgrade',
+            mode: 'unsupported_upgrade',
+            auth_entry: 'admin_session',
+            reason: 'qualification_unavailable',
+            authentication_required: true,
+          })
+        );
+      vi.stubGlobal('fetch', discovery);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+        );
+      });
+
+      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
+        expectedTitle
+      );
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        '--entrypoint cpa-manager-plus'
+      );
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        'upgrade preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json'
+      );
+      expect(textOf(findByTestId(renderer.root, 'legacy-ownership-command'))).toBe(
+        'chown 10002:10002 /data/usage.sqlite* /data/data.key'
+      );
+      expect(textOf(findByTestId(renderer.root, 'legacy-ownership-instructions'))).toContain(
+        '/data/runtime'
+      );
+      expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
+        0
+      );
+      expect(textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery'))).toBe(
+        expectedButton
+      );
+
+      await act(async () =>
+        findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick()
+      );
+      expect(discovery).toHaveBeenCalledTimes(2);
+      expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
+      await act(async () => renderer.unmount());
+    }
+  );
+
+  it('rejects inconsistent source_ownership_unavailable payloads fail-closed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'recovery_required',
+            mode: 'recovery',
+            auth_entry: 'host_intervention',
+            reason: 'source_ownership_unavailable',
+            authentication_required: true,
+          },
+          { status: 200 }
+        )
+      )
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'legacy-ownership-instructions' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
+    await act(async () => renderer.unmount());
+  });
 });

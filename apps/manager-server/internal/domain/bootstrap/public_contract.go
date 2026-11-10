@@ -21,11 +21,12 @@ const (
 type PublicReason string
 
 const (
-	ReasonFreshClaimRequired       PublicReason = "fresh_claim_required"
-	ReasonAdminAuthentication      PublicReason = "admin_authentication_required"
-	ReasonQualificationUnavailable PublicReason = "qualification_unavailable"
-	ReasonRecoveryHostIntervention PublicReason = "recovery_host_intervention"
-	ReasonObservationUnavailable   PublicReason = "observation_unavailable"
+	ReasonFreshClaimRequired         PublicReason = "fresh_claim_required"
+	ReasonAdminAuthentication        PublicReason = "admin_authentication_required"
+	ReasonQualificationUnavailable   PublicReason = "qualification_unavailable"
+	ReasonRecoveryHostIntervention   PublicReason = "recovery_host_intervention"
+	ReasonSourceOwnershipUnavailable PublicReason = "source_ownership_unavailable"
+	ReasonObservationUnavailable     PublicReason = "observation_unavailable"
 )
 
 type AuthEntry string
@@ -51,7 +52,7 @@ func validPublicReason(value PublicReason) bool {
 	switch value {
 	case ReasonFreshClaimRequired, ReasonAdminAuthentication,
 		ReasonQualificationUnavailable, ReasonRecoveryHostIntervention,
-		ReasonObservationUnavailable:
+		ReasonSourceOwnershipUnavailable, ReasonObservationUnavailable:
 		return true
 	default:
 		return false
@@ -126,7 +127,8 @@ func (d PublicDiscovery) Validate() error {
 		}
 	case PublicRecoveryRequired:
 		if d.Mode == nil || *d.Mode != Recovery || d.AuthEntry != AuthEntryHostIntervention ||
-			d.Reason != ReasonRecoveryHostIntervention {
+			d.AuthenticationRequired ||
+			(d.Reason != ReasonRecoveryHostIntervention && d.Reason != ReasonSourceOwnershipUnavailable) {
 			return errors.New("recovery discovery is inconsistent")
 		}
 	case PublicUnavailable:

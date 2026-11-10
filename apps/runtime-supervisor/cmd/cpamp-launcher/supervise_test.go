@@ -115,19 +115,41 @@ func runTestHelperProcess(role string) {
 		if err == nil {
 			defer ln.Close()
 			bootstrapOnly := os.Getenv("CPAMP_TEST_HTTP_BOOTSTRAP_ONLY") == "1"
+			readOnlyUnavailable := os.Getenv("CPAMP_TEST_HTTP_READONLY_UNAVAILABLE") == "1"
+			unsettledGateFile := os.Getenv("CPAMP_TEST_HTTP_SETTLED_FILE")
+			isSettled := func() bool {
+				if unsettledGateFile == "" {
+					return true
+				}
+				_, statErr := os.Stat(unsettledGateFile)
+				return statErr == nil
+			}
 			mux := http.NewServeMux()
 			mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-				if bootstrapOnly {
+				if !isSettled() || bootstrapOnly || readOnlyUnavailable {
 					w.WriteHeader(http.StatusServiceUnavailable)
-					_, _ = w.Write([]byte(`{"status":"fresh_claim_required"}`))
+					_, _ = w.Write([]byte(`{"ok":false}`))
 					return
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("ok"))
 			})
 			mux.HandleFunc("/.well-known/cpamp-bootstrap", func(w http.ResponseWriter, _ *http.Request) {
+				if !isSettled() || readOnlyUnavailable {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"status":"unavailable"}`))
+					return
+				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"mode":"fresh"}`))
+			})
+			mux.HandleFunc("/.well-known/cpamp-bootstrap/ui", func(w http.ResponseWriter, _ *http.Request) {
+				if !isSettled() {
+					http.NotFound(w, nil)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("<!doctype html>"))
 			})
 			srv := &http.Server{Handler: mux}
 			go func() { _ = srv.Serve(ln) }()
@@ -794,6 +816,109 @@ func TestManagerBootstrapDiscoveryModeReadinessGating(t *testing.T) {
 	if strings.Contains(errBuf.String(), "manager readiness wait timed out") {
 		t.Fatalf("expected bootstrap discovery mode to satisfy readiness immediately, got stderr:\n%s", errBuf.String())
 	}
+}
+
+func TestManagerReadOnlyDiscoveryUnavailableStartsIngressOnlyAfterShellMounted(t *testing.T) {
+	t.Run("httpEndpointStatusOK matrix", func(t *testing.T) {
+		cases := []struct {
+			name            string
+			healthStatus    int
+			bootstrapStatus int
+			uiStatus        int
+			want            bool
+		}{
+			{name: "ready health 200", healthStatus: http.StatusOK, bootstrapStatus: http.StatusNotFound, uiStatus: http.StatusNotFound, want: true},
+			{name: "classified discovery 200", healthStatus: http.StatusServiceUnavailable, bootstrapStatus: http.StatusOK, uiStatus: http.StatusNotFound, want: true},
+			{name: "settled readonly discovery 503 with ui 200", healthStatus: http.StatusServiceUnavailable, bootstrapStatus: http.StatusServiceUnavailable, uiStatus: http.StatusOK, want: true},
+			{name: "unsettled startup 503 with ui 404", healthStatus: http.StatusServiceUnavailable, bootstrapStatus: http.StatusServiceUnavailable, uiStatus: http.StatusNotFound, want: false},
+			{name: "unexpected health 500", healthStatus: http.StatusInternalServerError, bootstrapStatus: http.StatusOK, uiStatus: http.StatusOK, want: false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tc.healthStatus)
+				})
+				mux.HandleFunc("/.well-known/cpamp-bootstrap", func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tc.bootstrapStatus)
+				})
+				mux.HandleFunc("/.well-known/cpamp-bootstrap/ui", func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tc.uiStatus)
+				})
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				defer ln.Close()
+				srv := &http.Server{Handler: mux}
+				defer srv.Close()
+				go func() { _ = srv.Serve(ln) }()
+
+				healthURL := "http://" + ln.Addr().String() + "/health"
+				bootstrapURL := managerBootstrapURL(healthURL)
+				got := httpEndpointStatusOK(context.Background(), readinessHTTPClient(50*time.Millisecond), healthURL, bootstrapURL)
+				if got != tc.want {
+					t.Fatalf("httpEndpointStatusOK() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("supervisor waits while ui is 404 then starts ingress once readonly ui is 200", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		settledFile := filepath.Join(t.TempDir(), "manager.settled")
+		mgrAddr := reserveLoopbackAddr(t)
+
+		var errBuf bytes.Buffer
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			ManagerSpec: helperChildSpec(t, "manager",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_HTTP_LISTEN_ADDR="+mgrAddr,
+				"CPAMP_TEST_HTTP_READONLY_UNAVAILABLE=1",
+				"CPAMP_TEST_HTTP_SETTLED_FILE="+settledFile,
+			),
+			IngressSpec:      helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			ManagerHealthURL: "http://" + mgrAddr + "/health",
+			Timings:          fastTimings(),
+			Stdout:           &bytes.Buffer{},
+			Stderr:           &errBuf,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- RunSupervisor(ctx, cfg)
+		}()
+
+		waitForEvents(t, eventFile, 2, func(events []recordedEvent) bool {
+			for _, e := range events {
+				if e.Kind == "start" && e.Role == "manager" {
+					return true
+				}
+			}
+			return false
+		})
+		time.Sleep(250 * time.Millisecond)
+		assertNoRoleStarted(t, eventFile, "ingress")
+
+		if err := os.WriteFile(settledFile, nil, 0o600); err != nil {
+			cancel()
+			t.Fatalf("write settled marker: %v", err)
+		}
+		waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
+			for _, e := range events {
+				if e.Kind == "start" && e.Role == "ingress" {
+					return true
+				}
+			}
+			return false
+		})
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("RunSupervisor failed: %v", err)
+		}
+	})
 }
 
 func assertNoRoleStarted(t *testing.T, eventFile, role string) {

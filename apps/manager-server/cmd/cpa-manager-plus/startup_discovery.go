@@ -17,6 +17,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
 // startupHTTPHandler owns the fixed discovery path while the normal Manager
@@ -216,8 +217,27 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+		handled := false
 		legacypreflight.WithFencedInspection(ctx, paths, options, func(report legacypreflight.Report, err error) {
 			result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: report, InspectionError: err})
+			if result.Status != bootstrap.PublicUnavailable || err == nil {
+				handled = true
+				bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
+			}
+		})
+		if handled {
+			return
+		}
+		upgradeservice.WithReadOnlyLegacyObservation(ctx, paths.Database, legacyRoot, func(obs upgradeservice.LegacyDiscoveryObservation) {
+			result := bootstrapdiscovery.Unavailable()
+			switch obs {
+			case upgradeservice.LegacyDiscoveryOwnershipUnavailable:
+				result = bootstrapdiscovery.SourceOwnershipUnavailable()
+			case upgradeservice.LegacyDiscoveryUnsupportedUpgrade:
+				result = bootstrapdiscovery.UnsupportedUpgrade()
+			case upgradeservice.LegacyDiscoveryRecoveryRequired:
+				result = bootstrapdiscovery.RecoveryRequired()
+			}
 			bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
 		})
 	})

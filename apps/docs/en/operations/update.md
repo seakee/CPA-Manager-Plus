@@ -120,6 +120,14 @@ linux/amd64 Native uses the matching package's `bin/cpa-manager-plus upgrade ...
 | `upgrade_source_busy` / `upgrade_store_locked` | Stop the actual source/target Manager; do not remove lock files to proceed |
 | `upgrade_source_changed` | Source is changing: stop all writers and reassess source/backup |
 | `upgrade_rollback_image_unpinned` / `upgrade_rollback_volume_unbound` | Provide the exact old image and original volume mapping, not a new empty volume |
+| `source_ownership_unavailable` (`/.well-known/cpamp-bootstrap`) | A 1.x data volume was mounted at `/data` (lock/key files are `0:0` while v2 Manager runs as `10002:10002`): stop the container and remount with a fresh `/data` plus read-only `/legacy:ro`; for read-only Upgrade entry inspection only, `chown 10002:10002` on `usage.sqlite*` and `data.key` only — never `chown -R /data` (`/data/runtime` must remain `0:0`) |
+
+### If A 1.x Volume Was Mounted At `/data`
+
+1.x containers write `/data/usage.sqlite.manager.lock` and `/data/data.key` (`0600`) as `root` (`0:0`), whereas the v2 single-image Manager runs as unprivileged `10002:10002` and Runtime Supervisor requires `/data/runtime` to stay owned by `0:0`. If a 1.x volume is mounted at `/data`, v2 stays in read-only guidance mode (`/.well-known/cpamp-bootstrap/ui`) with `source_ownership_unavailable` and modifies none of the 1.x files:
+
+1. **Recommended (standard upgrade)**: stop the container, mount the original 1.x volume read-only at `/legacy:ro`, attach a new empty volume to `/data`, and run `upgrade preflight` and `upgrade run` above.
+2. **Read-only Upgrade entry inspection only**: with the container stopped, change ownership only on the database and key files (`chown 10002:10002 /data/usage.sqlite* /data/data.key`); never run `chown -R 10002:10002 /data`, which invalidates the `0:0` owner requirement on `/data/runtime`.
 
 ## 1.x Stable: Update Within The Original Deployment
 
