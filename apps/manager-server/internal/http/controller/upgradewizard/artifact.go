@@ -300,8 +300,11 @@ func (c *artifactProofCache) verify(
 	meta, err := artifactIdentifySourceTree(metaCtx, mountedRoot)
 	metaTimedOut := metaCtx.Err() != nil
 	metaCancel()
+	if metaTimedOut {
+		return errArtifactProofTimeout
+	}
 	if err != nil {
-		if metaTimedOut || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return errArtifactProofTimeout
 		}
 		return err

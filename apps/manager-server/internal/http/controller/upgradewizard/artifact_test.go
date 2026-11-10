@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1195,6 +1196,69 @@ func TestArtifactUncacheableSourceFailsClosed(t *testing.T) {
 				t.Fatalf("supervisorCalls on unstamped source = %d, want 0", got)
 			}
 		})
+	}
+}
+
+func TestArtifactIdentifyTimeoutPrecedesUncacheableResult(t *testing.T) {
+	origFingerprint := artifactSourceFingerprint
+	origIdentify := artifactIdentifySourceTree
+	origCache := defaultArtifactProofCache
+	t.Cleanup(func() {
+		artifactSourceFingerprint = origFingerprint
+		artifactIdentifySourceTree = origIdentify
+		defaultArtifactProofCache = origCache
+	})
+
+	cache := newArtifactProofCache()
+	defaultArtifactProofCache = cache
+	root := legacySourceDir(t)
+	database := recordedArtifactStore(t, v2StoreAdminKey, root)
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+	handler := newHandler(root, database)
+	handler.Artifact = client
+
+	var fingerprintCalls atomic.Int32
+	artifactSourceFingerprint = func(ctx context.Context, r string) (string, error) {
+		fingerprintCalls.Add(1)
+		return origFingerprint(ctx, r)
+	}
+
+	// 1. Direct verify deadline expiry (`metaCtx` timeout) returning Uncacheable: true + nil error.
+	artifactIdentifySourceTree = func(ctx context.Context, _ string) (upgradeservice.SourceTreeMetadata, error) {
+		<-ctx.Done()
+		return upgradeservice.SourceTreeMetadata{Uncacheable: true}, nil
+	}
+	digest := strings.Repeat("a", 64)
+	if err := cache.verify(context.Background(), time.Millisecond, root, root, digest, digest); !errors.Is(err, errArtifactProofTimeout) {
+		t.Fatalf("cache.verify err = %v, want %v", err, errArtifactProofTimeout)
+	}
+	if got := fingerprintCalls.Load(); got != 0 {
+		t.Fatalf("fingerprintCalls after cache.verify = %d, want 0", got)
+	}
+
+	// 2. End-to-end HTTP request with default handler Timeout and deterministic context cancellation inside IdentifySourceTree.
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	defer reqCancel()
+	artifactIdentifySourceTree = func(ctx context.Context, _ string) (upgradeservice.SourceTreeMetadata, error) {
+		reqCancel()
+		<-ctx.Done()
+		return upgradeservice.SourceTreeMetadata{Uncacheable: true}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, testPrefix+ArtifactStatusSuffix, nil).WithContext(reqCtx)
+	req.Host = "manager.test"
+	req.Header.Set("Authorization", bearer(testAdminKey))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"`+CodeCredentialTimeout+`"`) {
+		t.Fatalf("GET %s = %d: %s, want 503 %s", ArtifactStatusSuffix, rec.Code, rec.Body.String(), CodeCredentialTimeout)
+	}
+	if got := fingerprintCalls.Load(); got != 0 {
+		t.Fatalf("fingerprintCalls = %d, want 0", got)
+	}
+	if got := supervisorCalls.Load(); got != 0 {
+		t.Fatalf("supervisorCalls = %d, want 0", got)
 	}
 }
 
