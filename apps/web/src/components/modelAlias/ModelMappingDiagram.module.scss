@@ -242,7 +242,7 @@
   position: fixed;
   background: var(--bg-primary);
   border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
-  border-radius: 6px;
+  border-radius: var(--app-radius-md);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
   z-index: 9999;
