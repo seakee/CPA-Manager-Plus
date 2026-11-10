@@ -226,6 +226,7 @@
     "state_starting": "Starting",
     "state_unknown": "Unknown",
     "operation_accepted": "Accepted",
+    "operation_running": "Running",
     "operation_succeeded": "Succeeded",
     "operation_failed": "Failed",
     "operation_unknown": "Unknown",

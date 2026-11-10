@@ -182,12 +182,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reject(w)
 			case errors.Is(err, freshrouting.ErrConflict), errors.Is(err, freshstore.ErrConflict):
 				w.WriteHeader(http.StatusConflict)
-			case resource == "routing/activate" &&
-				(errors.Is(err, freshrouting.ErrBlocked) || errors.Is(err, freshrouting.ErrUnverified)):
-				// The published address did not answer as required, or did not prove the
-				// identity this operation wrote. The journey can only name that cause
-				// when the refusal carries a stable code, so this pair is not the bare
-				// 503 the remaining routing faults still are.
+			case resource == "routing/activate" && errors.Is(err, freshrouting.ErrUnverified):
+				// The published address answered, but not as the engine this operation
+				// wrote. Only this cause carries a stable code: a blocked transport or a
+				// target that never matched stay the bare 503 they already were.
 				writeCode(w, http.StatusServiceUnavailable, "routing_verification_failed")
 			default:
 				w.WriteHeader(http.StatusServiceUnavailable)

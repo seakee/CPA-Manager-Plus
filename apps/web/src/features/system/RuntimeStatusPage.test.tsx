@@ -212,9 +212,9 @@ describe('RuntimeStatusPage state wording', () => {
         if (resource === 'runtime/artifact') throw new PublicApiError('network');
         throw new Error(`unexpected resource ${resource}`);
       }) as PublicApiClient['get'],
-      post: vi.fn(),
+      post: vi.fn(async () => ({ action: 'start', state: 'running' })),
       put: vi.fn(),
-    };
+    } as unknown as PublicApiClient;
   }
 
   it('names the Manager and gateway states in the console language, never the wire value', async () => {
@@ -255,6 +255,34 @@ describe('RuntimeStatusPage state wording', () => {
     expect(stateNode('runtime-status-gateway-state')).toBe(
       i18n.t('runtime_status.state_offline', { lng: 'ru' })
     );
+  });
+
+  it('names a running operation in the console language', async () => {
+    // The Manager reports `running` while an operation is in flight; an unnamed
+    // state would print the wire word in every language.
+    const mounted = statusClient({
+      mode: 'embedded',
+      status: 'ready',
+      manager: { state: 'ready' },
+      gateway: { state: 'offline', ready: false, capabilities: ['start', 'stop'] },
+    });
+    await mount(mounted);
+    await act(async () => {
+      await renderer!.root
+        .findByProps({ 'data-testid': 'runtime-status-start' })
+        .props.onClick();
+    });
+
+    const text = () => {
+      const children = renderer!.root.findByProps({
+        'data-testid': 'runtime-status-operation',
+      }).props.children as unknown;
+      return (Array.isArray(children) ? children : [children])
+        .filter((child): child is string => typeof child === 'string')
+        .join('');
+    };
+    expect(text()).toContain(i18n.t('runtime_status.operation_running', { lng: 'zh-CN' }));
+    expect(text()).not.toContain('running');
   });
 
   it('serves the demo fixture instead of the unavailable observation on the demo site', async () => {

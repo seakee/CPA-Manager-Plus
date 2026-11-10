@@ -281,16 +281,17 @@ const setupBlockers: Record<string, keyof typeof messages> = {
   management_safe_read_unavailable: 'setupBlockerUnreachable',
   owner_upgrade_required: 'setupBlockerManagementUnavailable',
   management_v8_config_invalid: 'setupBlockerConfigUnreadable',
-  management_v8_config_document_invalid: 'setupBlockerConfigUnreadable',
   required_v8_profile_qualification_required: 'setupBlockerQualification',
   fresh_strategy_owner_conflict: 'setupBlockerOwnerConflict',
   management_secret_storage_unavailable: 'setupBlockerStorage',
 };
 
-// externalSetupBlockerText returns the sentence for a code this module knows.
-// Any other refusal stays `undefined` so the caller can show its own generic
-// message rather than a guess about the cause.
-export function externalSetupBlockerText(code: string | undefined): string | undefined {
-  const key = code ? setupBlockers[code] : undefined;
-  return key ? externalWorkspaceText(key) : undefined;
+// externalSetupBlockerKey names the sentence for a code this module knows, and
+// leaves every other refusal `undefined` so the caller can show its own generic
+// message rather than a guess about the cause. The caller renders the key, so a
+// language switch still retranslates the message that is on screen.
+export function externalSetupBlockerKey(
+  code: string | undefined
+): keyof typeof messages | undefined {
+  return code ? setupBlockers[code] : undefined;
 }

@@ -220,6 +220,7 @@
     "state_starting": "Запускается",
     "state_unknown": "Неизвестно",
     "operation_accepted": "Принято",
+    "operation_running": "Выполняется",
     "operation_succeeded": "Успешно",
     "operation_failed": "Сбой",
     "operation_unknown": "Неизвестно",

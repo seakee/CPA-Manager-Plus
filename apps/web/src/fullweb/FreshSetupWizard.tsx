@@ -20,7 +20,7 @@ import {
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
-import { externalSetupBlockerText, externalWorkspaceText as x } from '../i18n/freshExternal';
+import { externalSetupBlockerKey, externalWorkspaceText as x } from '../i18n/freshExternal';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 import { FreshArtifactStep } from './FreshArtifactStep';
@@ -33,7 +33,9 @@ import {
   mapArtifactErrorCode,
   readArtifactStatus,
   type ArtifactStatus,
+  type MappedArtifactError,
 } from './freshArtifact';
+import { artifactText } from '../i18n/freshArtifact';
 
 type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
 type Target = {
@@ -63,8 +65,8 @@ type Pending = {
   previous?: string;
 };
 class WizardArtifactError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(readonly mapped: MappedArtifactError) {
+    super(mapped.code);
     this.name = 'WizardArtifactError';
   }
 }
@@ -72,20 +74,44 @@ function attemptID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
-// One error message for every failed step. A typed refusal from the Manager
-// names the cause it recorded; only when nothing names it does the journey fall
-// back to the sentence that covers any unfinished setup.
-function setupErrorMessage(err: unknown) {
-  if (err instanceof WizardArtifactError) return err.message;
+// A message keeps the key (and its interpolation values) rather than the
+// rendered sentence, so switching language re-renders what is already on screen
+// in the newly selected language.
+type WizardMessage =
+  | { from: 'journey'; key: Parameters<typeof j>[0] }
+  | { from: 'shell'; key: Parameters<typeof s>[0] }
+  | { from: 'external'; key: Parameters<typeof x>[0] }
+  | { from: 'artifact'; mapped: MappedArtifactError };
+function wizardMessageText(message: WizardMessage): string {
+  switch (message.from) {
+    case 'journey':
+      return j(message.key);
+    case 'shell':
+      return s(message.key);
+    case 'external':
+      return x(message.key);
+    case 'artifact': {
+      const { messageKey, remedyKey, vars } = message.mapped;
+      return `${artifactText(messageKey, vars)} ${artifactText(remedyKey, vars)}`;
+    }
+  }
+}
+// One message for every failed step. A typed refusal from the Manager names the
+// cause it recorded; only when nothing names it does the journey fall back to
+// the sentence that covers any unfinished setup.
+function setupErrorMessage(err: unknown): WizardMessage {
+  if (err instanceof WizardArtifactError) return { from: 'artifact', mapped: err.mapped };
   if (err instanceof BootstrapTransportError) {
-    if (err.code === 'managed_destination_verification_required') return s('runtimeVerifyRequired');
+    if (err.code === 'managed_destination_verification_required')
+      return { from: 'shell', key: 'runtimeVerifyRequired' };
     // The routing layer refuses with this code when the published address did not
     // answer as required; that cause is actionable, unlike a bare 503.
-    if (err.code === 'routing_verification_failed') return s('routingVerificationFailed');
-    const blocker = externalSetupBlockerText(err.code);
-    if (blocker) return blocker;
+    if (err.code === 'routing_verification_failed')
+      return { from: 'shell', key: 'routingVerificationFailed' };
+    const blocker = externalSetupBlockerKey(err.code);
+    if (blocker) return { from: 'external', key: blocker };
   }
-  return j('setupError');
+  return { from: 'journey', key: 'setupError' };
 }
 function confirmed(op: FreshOperation, pending: Pending) {
   if (op.revision <= pending.revision) return false;
@@ -143,8 +169,8 @@ export function FreshSetupWizard({
   // browser storage, and never in the summary or the URL.
   const [installKey, setInstallKey] = useState('');
   const [installKeyFeedback, setInstallKeyFeedback] = useState<'copied' | 'failed' | ''>('');
-  const [error, setError] = useState('');
-  const [note, setNote] = useState('');
+  const [error, setError] = useState<WizardMessage | null>(null);
+  const [note, setNote] = useState<WizardMessage | null>(null);
   const [unknown, setUnknown] = useState(false);
   // The adoption's own step inside this wizard's four-step chrome: the confirm
   // step is the inventory and the execute step is the migration.
@@ -247,8 +273,8 @@ export function FreshSetupWizard({
     if (inflight.current) return;
     inflight.current = true;
     setBusy(true);
-    setError('');
-    setNote('');
+    setError(null);
+    setNote(null);
     try {
       await action();
     } catch (err) {
@@ -266,7 +292,7 @@ export function FreshSetupWizard({
       (!operation.adminInitialized && !validateFreshAdminKey(key).valid) ||
       !validControlBasePath(path)
     ) {
-      setError(j('invalidSetup'));
+      setError({ from: 'journey', key: 'invalidSetup' });
       return;
     }
     // The External form is refused here, in the operator's words: nothing has
@@ -277,11 +303,11 @@ export function FreshSetupWizard({
       try {
         address = externalURL(baseURL);
       } catch {
-        setError(x('setupAddressInvalid'));
+        setError({ from: 'external', key: 'setupAddressInvalid' });
         return;
       }
       if (!validManagementKey(cpaKey)) {
-        setError(x('setupKeyInvalid'));
+        setError({ from: 'external', key: 'setupKeyInvalid' });
         return;
       }
     }
@@ -291,18 +317,22 @@ export function FreshSetupWizard({
         try {
           artifactStatus = await readArtifactStatus(transport);
         } catch (err) {
-          throw new WizardArtifactError(formatArtifactError(err).text);
+          throw new WizardArtifactError(formatArtifactError(err));
         }
         if (!isArtifactReady(artifactStatus)) {
           setArtifactGate(artifactStatus);
           setSavedKey(false);
           setStep(2);
           if (isArtifactRecoveryRequired(artifactStatus)) {
-            setError(
-              mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version).text
-            );
+            setError({
+              from: 'artifact',
+              mapped: mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version),
+            });
           } else if (isArtifactPinnedMismatch(artifactStatus)) {
-            setError(formatArtifactPinnedMismatch(artifactStatus.pinned.version).text);
+            setError({
+              from: 'artifact',
+              mapped: formatArtifactPinnedMismatch(artifactStatus.pinned.version),
+            });
           }
           return;
         }
@@ -377,7 +407,7 @@ export function FreshSetupWizard({
         if (delivered) setInstallKey(delivered);
         setCPAKey('');
         if (current.strategy?.stage === 'starting') {
-          setNote(j('waitingRuntime'));
+          setNote({ from: 'journey', key: 'waitingRuntime' });
           return;
         }
       }
@@ -391,7 +421,7 @@ export function FreshSetupWizard({
         )
           throw new Error('CPA identity changed');
         if (status.state !== 'ready') {
-          setNote(j('waitingRuntime'));
+          setNote({ from: 'journey', key: 'waitingRuntime' });
           return;
         }
       }
@@ -578,12 +608,12 @@ export function FreshSetupWizard({
           </div>
           {error && (
             <p role="alert" className="alert alert-warn">
-              {error}
+              {wizardMessageText(error)}
             </p>
           )}
           {note && (
             <p role="status" className="alert alert-info">
-              {note}
+              {wizardMessageText(note)}
             </p>
           )}
           {unknown && (
@@ -703,10 +733,10 @@ export function FreshSetupWizard({
                         void task(async () => {
                           try {
                             await navigator.clipboard.writeText(key);
-                            setNote(j('copied'));
+                            setNote({ from: 'journey', key: 'copied' });
                           } catch {
                             setVisible(true);
-                            setError(j('copyFailed'));
+                            setError({ from: 'journey', key: 'copyFailed' });
                           }
                         })
                       }
@@ -950,7 +980,7 @@ export function FreshSetupWizard({
                     setStep(step - 1);
                     setSavedKey(false);
                     setArtifactGate(null);
-                    setError('');
+                    setError(null);
                   }}
                 >
                   {s('back')}

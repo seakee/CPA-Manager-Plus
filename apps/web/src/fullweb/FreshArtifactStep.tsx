@@ -124,9 +124,13 @@ export function FreshArtifactStep({
       return formatArtifactPinnedMismatch(validatedInitial?.pinned.version);
     }
     if (validatedInitial?.operation?.phase === 'failed') {
+      // A failure that survived a reload keeps the source that produced it, so
+      // the remedy still names something that source can act on.
       return mapArtifactErrorCode(
         validatedInitial.operation.code,
-        validatedInitial.pinned.version
+        validatedInitial.pinned.version,
+        undefined,
+        validatedInitial.operation.source
       );
     }
     return null;
@@ -436,8 +440,10 @@ export function FreshArtifactStep({
           role="alert"
           data-testid="artifact-status-unavailable"
         >
-          <p>{error ? error.message : artifactText('statusUnavailable')}</p>
-          {error && <p className="artifact-error-remedy">{error.remedy}</p>}
+          <p>{error ? artifactText(error.messageKey, error.vars) : artifactText('statusUnavailable')}</p>
+          {error && (
+            <p className="artifact-error-remedy">{artifactText(error.remedyKey, error.vars)}</p>
+          )}
           <div className="artifact-actions">
             <button
               type="button"
@@ -498,9 +504,9 @@ export function FreshArtifactStep({
               data-testid="artifact-error"
               data-error-code={error.code}
             >
-              <p data-testid="artifact-error-message">{error.message}</p>
+              <p data-testid="artifact-error-message">{artifactText(error.messageKey, error.vars)}</p>
               <p className="artifact-error-remedy" data-testid="artifact-error-remedy">
-                {error.remedy}
+                {artifactText(error.remedyKey, error.vars)}
               </p>
             </div>
           )}

@@ -318,6 +318,14 @@ async function setup(
     recover: () => {
       recovered = true;
     },
+    // A language switch re-renders the surface that owns the journey; this is
+    // that re-render, with the same props.
+    rerender: () =>
+      act(async () => {
+        renderer.update(
+          <FreshSetupWizard initialOperation={initialOperation} transport={client} />
+        );
+      }),
   };
 }
 
@@ -878,6 +886,25 @@ it('keeps gate active and blocks execute when active.artifactId does not match p
   expect(
     transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
   ).toBe(false);
+});
+
+it('retranslates a message that is already on screen when the language changes', async () => {
+  setFullWebLanguage('en');
+  const englishText = j('invalidSetup');
+  const { rerender } = await setup();
+  await input('admin-key-input', 'short');
+  await click('setup-review');
+  expect(JSON.stringify(renderer.toJSON())).toContain(englishText);
+
+  // The journey keeps the key, not the sentence, so the same failure reads in
+  // the newly selected language.
+  setFullWebLanguage('zh-CN');
+  const chineseText = j('invalidSetup');
+  expect(chineseText).not.toBe(englishText);
+  await rerender();
+  const rendered = JSON.stringify(renderer.toJSON());
+  expect(rendered).toContain(chineseText);
+  expect(rendered).not.toContain(englishText);
 });
 
 it('localizes the review plugin row and marks the recommended installation option', async () => {

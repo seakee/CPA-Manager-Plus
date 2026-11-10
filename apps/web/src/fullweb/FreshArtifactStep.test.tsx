@@ -346,6 +346,41 @@ describe('FreshArtifactStep', () => {
     expect(remedy).not.toContain('请重试下载');
   });
 
+  it('keeps the source that failed when the failure is already in the initial status', async () => {
+    // A reload lands directly on the failed operation, so the source comes from
+    // the status rather than from a request this session made.
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => makeStatus()),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn(),
+      upload: vi.fn(),
+    };
+
+    await act(async () => {
+      renderer = create(
+        <FreshArtifactStep
+          transport={transport}
+          initialStatus={makeStatus({
+            operation: {
+              id: 'op-restored',
+              source: 'cdn',
+              phase: 'failed',
+              receivedBytes: 0,
+              totalBytes: 0,
+              code: 'download_failed',
+            },
+          })}
+          onReady={vi.fn()}
+        />
+      );
+    });
+
+    expect(byID('artifact-error').props['data-error-code']).toBe('download_failed');
+    expect(byID('artifact-error-remedy').props.children).toBe(
+      '换一个 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。'
+    );
+  });
+
   it('renders unreadable status as unavailable and never calls onReady', async () => {
     const transport: ArtifactTransport = {
       readStatus: vi.fn(async () => {

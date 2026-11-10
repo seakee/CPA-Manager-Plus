@@ -251,6 +251,8 @@ export interface MappedArtifactError {
   code: ArtifactErrorCode | 'pinned_mismatch' | 'unknown';
   messageKey: FreshArtifactTextKey;
   remedyKey: FreshArtifactTextKey;
+  /** Interpolation values the two keys expect, so a re-render can translate again. */
+  vars: Record<string, string | number>;
   message: string;
   remedy: string;
   text: string;
@@ -267,6 +269,7 @@ export function formatArtifactPinnedMismatch(
     code: 'pinned_mismatch',
     messageKey: 'error_pinned_mismatch',
     remedyKey: 'remedy_pinned_mismatch',
+    vars,
     message,
     remedy,
     text: `${message} ${remedy}`,
@@ -292,6 +295,7 @@ export function mapArtifactErrorCode(
       code,
       messageKey: entry.messageKey,
       remedyKey,
+      vars,
       message,
       remedy,
       text: `${message} ${remedy}`,
@@ -303,6 +307,7 @@ export function mapArtifactErrorCode(
     code: 'unknown',
     messageKey: 'error_unknown',
     remedyKey: 'remedy_runtime_unavailable',
+    vars,
     message,
     remedy,
     text: `${message} ${remedy}`,

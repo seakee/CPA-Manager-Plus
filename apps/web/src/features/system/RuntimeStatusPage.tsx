@@ -116,10 +116,10 @@ export function RuntimeStatusPage({
   const { showConfirmation, showNotification } = useNotificationStore();
   const managerCredential = credential || auth.managementKey;
   // Manager, gateway and operation states are wire values (`ready`, `offline`,
-  // `starting`, `unknown`, `accepted`, `succeeded`, `failed`). Each one renders
-  // through its `runtime_status.*` entry in the console's current language; a
-  // value this build does not name keeps its underscore-free wire form instead of
-  // disappearing.
+  // `starting`, `unknown`; `accepted`, `running`, `succeeded`, `failed`). Each one
+  // renders through its `runtime_status.*` entry in the console's current
+  // language; a value this build does not name keeps its underscore-free wire
+  // form instead of disappearing.
   const stateLabel = (value: string | undefined, fallback: string) => {
     if (!value) return fallback;
     const key = `runtime_status.state_${value}`;
@@ -320,7 +320,11 @@ export function RuntimeStatusPage({
           {status?.mode === 'embedded' && gateway && (
             <div className="runtime-status-actions">
               {gateway.state === 'offline' ? (
-                <Button onClick={() => requestAction('start')} disabled={busy || !gateway.capabilities?.includes('start')}>
+                <Button
+                  onClick={() => requestAction('start')}
+                  disabled={busy || !gateway.capabilities?.includes('start')}
+                  data-testid="runtime-status-start"
+                >
                   {t('runtime_status.start', { defaultValue: 'Start' })}
                 </Button>
               ) : (
@@ -404,7 +408,7 @@ export function RuntimeStatusPage({
       )}
 
       {operation && (
-        <p className="runtime-status-operation" role="status">
+        <p className="runtime-status-operation" role="status" data-testid="runtime-status-operation">
           {t('runtime_status.operation_status', { defaultValue: 'Operation {{action}}: {{state}}', action: operation.action === 'start' ? t('runtime_status.start', { defaultValue: 'Start' }) : operation.action === 'stop' ? t('runtime_status.stop', { defaultValue: 'Stop' }) : t('runtime_status.restart', { defaultValue: 'Restart' }), state: operationLabel(operation.state) })}
           {operation.state === 'unknown' && ` · ${t('runtime_status.query_original', { defaultValue: 'Result pending confirmation; the original operation was not resent.' })}`}
         </p>

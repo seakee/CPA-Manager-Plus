@@ -226,6 +226,7 @@
     "state_starting": "启动中",
     "state_unknown": "未知",
     "operation_accepted": "已受理",
+    "operation_running": "执行中",
     "operation_succeeded": "已完成",
     "operation_failed": "失败",
     "operation_unknown": "未知",
