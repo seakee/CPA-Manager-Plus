@@ -126,7 +126,7 @@
   flex-shrink: 0;
   width: 36px;
   height: 36px;
-  color: var(--primary-color);
+  color: var(--primary-text);
   background: var(--app-accent-soft);
   border-radius: var(--app-radius-md);
 }
@@ -206,7 +206,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--primary-color);
+  color: var(--primary-text);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -413,7 +413,7 @@
   padding: 12px 16px;
   background: var(--app-surface-muted);
   border-bottom: 1px solid var(--app-border);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 .key-detail-section h4 {
   margin: 0;

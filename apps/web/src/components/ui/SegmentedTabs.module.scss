@@ -58,7 +58,7 @@
     transform 0.15s ease;
 
   &:hover:not(.disabled) {
-    color: var(--primary-active);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
   }
 }
@@ -70,7 +70,7 @@
 
 .active,
 .active:hover:not(.disabled) {
-  color: var(--primary-active);
+  color: var(--primary-text);
   background: color-mix(in srgb, var(--bg-primary) 88%, var(--primary-color));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 16%, transparent);
   font-weight: 700;

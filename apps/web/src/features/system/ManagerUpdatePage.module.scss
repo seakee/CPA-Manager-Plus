@@ -144,7 +144,7 @@
   padding: 3px 7px;
   border-radius: var(--app-radius-xs);
   background: var(--app-accent-soft);
-  color: var(--color-primary);
+  color: var(--primary-text);
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
@@ -166,7 +166,7 @@
   flex: 0 0 46px;
   border-radius: var(--app-radius-md);
   background: var(--app-accent-soft);
-  color: var(--color-primary);
+  color: var(--primary-text);
 }
 
 .summary {
@@ -216,7 +216,7 @@
   }
 
   &:hover {
-    color: var(--color-primary);
+    color: var(--primary-text);
     text-decoration: underline;
     text-underline-offset: 3px;
   }
@@ -317,7 +317,7 @@
   display: flex;
   width: fit-content;
   margin-top: 16px;
-  color: var(--color-primary);
+  color: var(--primary-text);
 }
 
 .runningVersions {
@@ -350,7 +350,7 @@
     text-decoration: none;
 
     &:hover {
-      color: var(--color-primary);
+      color: var(--primary-text);
     }
     svg {
       flex-shrink: 0;

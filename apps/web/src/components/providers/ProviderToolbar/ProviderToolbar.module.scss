@@ -473,7 +473,7 @@ $toolbar-control-height: var(--control-height-sm);
 
   &:hover:not(:disabled) {
     background: color-mix(in srgb, var(--primary-color) 8%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus-visible {

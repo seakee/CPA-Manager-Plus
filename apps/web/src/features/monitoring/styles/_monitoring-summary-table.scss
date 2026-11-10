@@ -180,8 +180,8 @@
     padding: 8px 10px;
     border: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
     border-radius: var(--app-radius-md);
-    background: color-mix(in srgb, var(--data-blue-base) 92%, var(--data-blue-dark-2));
-    color: var(--primary-contrast);
+    background: var(--app-surface-strong);
+    color: var(--text-primary);
     /* floating layer: elevation allowed */
     box-shadow: var(--floating-shadow-md);
     opacity: 0;
@@ -212,7 +212,7 @@
   }
 
   .summaryValueTooltipLabel {
-    color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     line-height: 1.2;
@@ -220,7 +220,7 @@
   }
 
   .summaryValueTooltipValue {
-    color: var(--primary-contrast);
+    color: var(--text-primary);
     font-size: 13px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -309,15 +309,15 @@
   }
 
   .tonegood {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .tonewarn {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .tonebad {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   .statusBadge.tonegood {
@@ -336,15 +336,15 @@
   }
 
   .goodText {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .warnText {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .badText {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   .patternBars {
@@ -829,13 +829,13 @@
   }
 
   .sortableHeaderButton:focus-visible {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     text-decoration: underline;
     text-underline-offset: 3px;
   }
 
   .sortableHeaderButtonActive {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .sortIndicator {
@@ -845,7 +845,7 @@
     width: 14px;
     min-width: 14px;
     height: 14px;
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .sortIndicator svg {
@@ -1078,7 +1078,7 @@
 
   .realtimeReasoningBadge {
     display: inline;
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     font-size: 12px;
     font-weight: 700;
     line-height: 1.2;
@@ -1110,11 +1110,11 @@
   }
 
   .realtimeRequestStatusGood {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .realtimeRequestStatusBad {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   .realtimeFailureTooltip {
@@ -1208,7 +1208,7 @@
   .realtimeFailureCopyButton:focus-visible {
     border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
     background: var(--monitor-surface-hover);
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 
   .realtimeFailureTooltipStatus {

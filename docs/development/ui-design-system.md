@@ -9,6 +9,7 @@ This specification defines the token contracts, layout conventions, and automate
 - **Solid primary fills**: Filled primary buttons, primary action pills, and checked switch tracks use `--primary-solid`, `--primary-solid-hover`, and `--primary-solid-active` paired with `--primary-contrast` text. This ramp is shared across light and dark themes so button text maintains `>= 4.5:1` contrast in every state.
 - **Solid danger fills**: Filled destructive buttons use `--danger-solid`, `--danger-solid-hover`, and `--danger-solid-active` with `--primary-contrast` text, shared across themes for the same reason. `--color-danger` / `--error-color` stay for status text, badges, and charts.
 - **Links, focus, and accents**: Text links, active indicators, focus rings, and non-filled accent highlights use `--primary-color` (with `--primary-hover`, `--primary-active`, `--primary-soft`, `--primary-subtle`, `--primary-ring`, and `--focus-*`), which adapts per theme.
+- **Primary as text**: Whenever the primary colour carries text — links, active tab labels, active segment labels, counts, and value text, including text on `--primary-soft` and darker primary tints — use `--primary-text` (light `#1d4ed8`, dark `#93c5fd`). `--focus-text` resolves to it. `--primary-color` alone is only 3.68:1 on white and 3.20:1 on a primary tint, so it stays reserved for borders, rings, icon strokes, and decorative fills.
 - Do not pair `--primary-contrast` text with `--primary-color` fills on dark surfaces; use `--primary-solid*` for filled controls.
 
 ## 2. Surfaces, Text, Borders, and Elevation
@@ -22,7 +23,7 @@ This specification defines the token contracts, layout conventions, and automate
 - **Text hierarchy**:
   - Primary copy and headings: `--app-text-primary` / `--text-primary`.
   - Secondary body and labels: `--app-text-regular` / `--text-secondary`.
-  - Muted metadata and captions: `--app-text-muted` / `--text-tertiary` / `--text-muted`.
+  - Muted metadata and captions: `--app-text-muted` / `--text-tertiary` / `--text-muted`. Both themes keep this step at `>= 4.5:1` on card surfaces (`#64748b` on white in light, `#949494` on the dark card), so do not use it on saturated primary, success, warning, or danger tints — use the matching badge text token there instead.
   - Disabled/placeholder copy: `--text-quaternary`.
 - **Borders**:
   - Default container/row divider: `--app-border` / `--border-color` / `--border-subtle`.

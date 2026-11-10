@@ -70,7 +70,7 @@
 
 .kicker {
   margin: 0 0 6px;
-  color: var(--data-red-base);
+  color: var(--error-color);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
@@ -333,7 +333,7 @@
 }
 
 .errorState {
-  color: var(--data-red-base);
+  color: var(--error-color);
 }
 
 .evidenceBox {

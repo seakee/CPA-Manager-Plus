@@ -39,7 +39,7 @@
     border-left-color: transparent;
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
     box-shadow: none;
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 
   :global([role='tab'][aria-selected='true'] + [role='tab']) {
@@ -53,7 +53,7 @@
 
   :global([role='tab'][aria-selected='true']:hover) {
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 
   @include mobile {
@@ -114,7 +114,7 @@
 
 .tabs :global([role='tab'][aria-selected='true']) .tabCount {
   background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 @include mobile {

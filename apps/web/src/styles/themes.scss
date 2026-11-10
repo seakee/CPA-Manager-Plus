@@ -28,7 +28,8 @@
   --app-shadow-soft: none;
   --app-text-primary: #2c3e50;
   --app-text-regular: #5f6c7b;
-  --app-text-muted: #8b95a6;
+  /* Muted text is body-size copy, so it must still clear 4.5:1 on white. */
+  --app-text-muted: #64748b;
   --app-accent: var(--data-blue-base);
   --app-accent-soft: rgba(59, 130, 246, 0.12);
   --surface-subtle: #f6faff;
@@ -169,7 +170,7 @@
   --data-emerald-light-9: #ecfdf5;
 
   --data-green-base: #22c55e;
-  --data-green-dark-2: #16a34a;
+  --data-green-dark-2: #15803d;
   --data-green-light-3: #4ade80;
   --data-green-light-5: #86efac;
   --data-green-light-7: #bbf7d0;
@@ -177,7 +178,7 @@
   --data-green-light-9: #f0fdf4;
 
   --data-amber-base: #f59e0b;
-  --data-amber-dark-2: #d97706;
+  --data-amber-dark-2: #b45309;
   --data-amber-light-3: #fbbf24;
   --data-amber-light-5: #fcd34d;
   --data-amber-light-7: #fde68a;
@@ -185,7 +186,7 @@
   --data-amber-light-9: #fffbeb;
 
   --data-red-base: #ef4444;
-  --data-red-dark-2: #dc2626;
+  --data-red-dark-2: #b91c1c;
   --data-red-light-3: #f87171;
   --data-red-light-5: #fca5a5;
   --data-red-light-7: #fecaca;
@@ -246,6 +247,9 @@
   --primary-color: var(--color-primary);
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary-dark-2);
+  /* Text-safe primary for links, labels and active indicators, including when
+     they sit on tinted primary fills (`--primary-soft` and darker). */
+  --primary-text: #1d4ed8;
   --primary-contrast: #ffffff;
   --primary-solid: #2563eb;
   --primary-solid-hover: #1d4ed8;
@@ -259,12 +263,12 @@
   --focus-bg: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
   --focus-border: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
   --focus-inset: color-mix(in srgb, var(--primary-color) 22%, transparent);
-  --focus-text: var(--primary-active);
+  --focus-text: var(--primary-text);
 
-  --success-color: var(--color-success);
+  --success-color: var(--color-success-dark-2);
   --quota-medium-color: var(--color-warning);
-  --warning-color: var(--color-warning);
-  --error-color: var(--color-danger);
+  --warning-color: var(--color-warning-dark-2);
+  --error-color: var(--color-danger-dark-2);
   --danger-color: var(--error-color);
   --info-color: var(--color-info);
 
@@ -322,7 +326,7 @@
   --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --app-text-primary: #e5e5e5;
   --app-text-regular: #a3a3a3;
-  --app-text-muted: #7a7a7a;
+  --app-text-muted: #949494;
   --app-accent-soft: rgba(96, 165, 250, 0.18);
   --surface-subtle: rgba(255, 255, 255, 0.06);
   --surface-subtle-hover: rgba(96, 165, 250, 0.12);
@@ -513,6 +517,7 @@
   --primary-color: var(--color-primary);
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary);
+  --primary-text: var(--data-blue-dark-2);
   --primary-ring: rgba(96, 165, 250, 0.28);
   --count-badge-text: var(--data-badge-info-text);
   --shadow: none;

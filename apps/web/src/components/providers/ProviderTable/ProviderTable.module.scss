@@ -259,7 +259,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
 
   &:hover:not(:disabled) {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus {

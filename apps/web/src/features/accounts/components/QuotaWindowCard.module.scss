@@ -48,7 +48,7 @@
   height: 30px;
   border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 
   &[data-quota-window-icon='payg'],
   &[data-quota-window-icon='billing'] {
@@ -142,7 +142,7 @@
   display: flex;
   align-items: baseline;
   gap: 5px;
-  color: var(--primary-color);
+  color: var(--primary-text);
   white-space: nowrap;
 
   span {
@@ -222,7 +222,7 @@
 
   svg {
     flex: 0 0 auto;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -266,13 +266,13 @@
 .rowIconBlue {
   border-color: color-mix(in srgb, var(--data-blue-base) 34%, transparent);
   background: var(--data-blue-light-9);
-  color: var(--data-blue-base);
+  color: var(--primary-text);
 }
 
 .rowIconGreen {
   border-color: color-mix(in srgb, var(--data-green-base) 34%, transparent);
   background: var(--data-green-light-9);
-  color: var(--data-green-base);
+  color: var(--success-color);
 }
 
 .rowIconTeal {
@@ -284,7 +284,7 @@
 .rowIconAmber {
   border-color: color-mix(in srgb, var(--data-amber-base) 34%, transparent);
   background: var(--data-amber-light-9);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .metricLabel,
@@ -416,7 +416,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--color-warning);
+  color: var(--warning-color);
 }
 
 .compactCard {

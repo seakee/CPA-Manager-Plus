@@ -11,13 +11,13 @@
 }
 
 .fillHigh {
-  background-color: var(--data-green-base);
+  background-color: var(--success-color);
 }
 
 .fillMedium {
-  background-color: var(--data-amber-base);
+  background-color: var(--warning-color);
 }
 
 .fillLow {
-  background-color: var(--data-red-base);
+  background-color: var(--error-color);
 }

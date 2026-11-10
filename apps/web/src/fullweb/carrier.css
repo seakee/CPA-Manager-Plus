@@ -9,7 +9,7 @@
   --journey-background: var(--app-bg-gradient);
   --border-strong: var(--app-border-strong);
   --border-focus: var(--app-input-border-focus);
-  --accent: var(--primary-color);
+  --accent: var(--primary-text);
   --accent-hover: var(--primary-solid-hover);
   --accent-soft: var(--app-accent-soft);
   --emerald: var(--data-badge-success-text);
@@ -937,7 +937,7 @@ input {
   content: '';
   position: absolute;
   inset: 4px;
-  background: var(--accent);
+  background: var(--primary-color);
   border-radius: 50%;
 }
 

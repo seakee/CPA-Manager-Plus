@@ -36,7 +36,7 @@
 
   .accountButton:hover {
     transform: none;
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountButton:focus,
@@ -46,7 +46,7 @@
   }
 
   .accountButton:focus-visible {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountButtonLabel {
@@ -235,7 +235,7 @@
     justify-content: center;
     border-radius: var(--app-radius-sm);
     background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     flex: 0 0 auto;
   }
 
@@ -271,7 +271,7 @@
   .apiKeyCopyButton:hover {
     border-color: color-mix(in srgb, var(--data-blue-base) 30%, var(--border-color));
     background: color-mix(in srgb, var(--data-blue-base) 8%, var(--bg-primary));
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     transform: none;
   }
 
@@ -282,14 +282,14 @@
     padding: 0 8px;
     border-radius: var(--app-radius-xs);
     background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     font-size: 12px;
     font-weight: 700;
     white-space: nowrap;
   }
 
   .accountStatusDotEnabled {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .accountStatusDotDisabled,
@@ -298,7 +298,7 @@
   }
 
   .accountStatusDotMixed {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .accountOverviewCardGrid {
@@ -490,21 +490,21 @@
     background: color-mix(in srgb, var(--data-green-base) 14%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowInput .tokenStructureRowIcon {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .tokenStructureRowOutput {
     background: color-mix(in srgb, var(--data-amber-base) 16%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowOutput .tokenStructureRowIcon {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .tokenStructureRowCached {
     background: color-mix(in srgb, var(--data-cyan-base) 14%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowCached .tokenStructureRowIcon {
-    color: var(--data-cyan-base);
+    color: var(--data-cyan-dark-2);
   }
 
   .accountSectionHeader {
@@ -577,23 +577,23 @@
   }
 
   .primaryText {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .healthMetricItem .goodText {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .healthMetricItem .warnText {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .healthMetricItem .badText {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   .healthMetricItem .primaryText {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountScopeText {
@@ -827,27 +827,27 @@
     flex: 0 0 auto;
     border-radius: var(--app-radius-xs);
     background: color-mix(in srgb, var(--data-blue-base) 11%, var(--bg-primary));
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountMetricIconTotal {
     background: color-mix(in srgb, var(--data-blue-base) 13%, var(--bg-primary));
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountMetricIconInput {
     background: color-mix(in srgb, var(--data-green-base) 13%, var(--bg-primary));
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .accountMetricIconOutput {
     background: color-mix(in srgb, var(--data-amber-base) 17%, var(--bg-primary));
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .accountMetricIconCached {
     background: color-mix(in srgb, var(--data-cyan-base) 14%, var(--bg-primary));
-    color: var(--data-cyan-base);
+    color: var(--data-cyan-dark-2);
   }
 
   .accountOverviewMetricValue {
@@ -1162,7 +1162,7 @@
   }
 
   .quotaRetryButton:hover:not(:disabled) {
-    border-color: var(--data-blue-base);
+    border-color: var(--primary-text);
     background: color-mix(in srgb, var(--data-blue-base) 18%, var(--bg-primary));
   }
 
@@ -1196,7 +1196,7 @@
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
     font: inherit;
     font-size: 12px;
     font-weight: 700;
@@ -1205,7 +1205,7 @@
 
   .accountModelViewAllButton:hover {
     transform: none;
-    color: var(--data-blue-base);
+    color: var(--primary-text);
   }
 
   .accountModelViewAllButton:disabled {
@@ -1247,7 +1247,7 @@
 
   .accountModelRow:hover {
     transform: none;
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountModelRow:focus,
@@ -1257,7 +1257,7 @@
   }
 
   .accountModelRow:focus-visible {
-    color: var(--data-blue-dark-2);
+    color: var(--primary-text);
   }
 
   .accountModelStat {
@@ -1427,15 +1427,15 @@
   }
 
   .accountModelTable .goodText {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 
   .accountModelTable .warnText {
-    color: var(--data-amber-base);
+    color: var(--warning-color);
   }
 
   .accountModelTable .badText {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   .table .accountModelTable {

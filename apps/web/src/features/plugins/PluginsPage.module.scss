@@ -119,7 +119,7 @@
   }
 
   &[data-tone='active'] strong {
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 }
 
@@ -386,7 +386,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .inlineBadge {
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .capabilityTitle,
