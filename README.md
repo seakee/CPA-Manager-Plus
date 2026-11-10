@@ -125,6 +125,9 @@ CPAMP manages and observes traffic through CPA / CLIProxyAPI. It is not a replac
 
 ## Quick Start
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/cpa-manager-plus)
+
+
 ### Installer
 
 For a guided full-stack or CPAMP-only deployment:
