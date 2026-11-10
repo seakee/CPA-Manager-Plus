@@ -75,7 +75,9 @@ const en = {
   error_unknown: 'The CPA engine could not be prepared.',
   remedy_archive:
     'Wrong or damaged file; download CLIProxyAPI_{version}_linux_<arch>.tar.gz from the official release and try again.',
-  remedy_network: 'Try a CDN prefix or upload the official .tar.gz archive from your browser.',
+  remedy_network:
+    'Retry the download; if it keeps failing, use a CDN prefix or upload the official .tar.gz archive from your browser.',
+  remedy_cdn: 'Try another CDN prefix, or upload the official .tar.gz archive from your browser.',
   remedy_recovery: 'Restart the container, then reopen the wizard.',
   remedy_unsupported_platform:
     'This deployment cannot prepare the engine; use the full image or connect an external CPA.',
@@ -179,7 +181,8 @@ const zh: typeof en = {
   error_unknown: '未能完成 CPA 引擎准备。',
   remedy_archive:
     '文件错误或已损坏；请从官方发布页下载 CLIProxyAPI_{version}_linux_<arch>.tar.gz 后重试。',
-  remedy_network: '请尝试使用 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。',
+  remedy_network: '请重试下载；若持续失败，可改用 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。',
+  remedy_cdn: '换一个 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。',
   remedy_recovery: '请重启容器后重新打开安装向导。',
   remedy_unsupported_platform: '当前部署无法准备内置引擎；请改用完整镜像或连接外部 CPA。',
   remedy_install_failed: '请检查容器磁盘空间与运行时目录权限后重试。',
@@ -277,7 +280,8 @@ const tw: typeof en = {
   error_unknown: '未能完成 CPA 引擎準備。',
   remedy_archive:
     '檔案錯誤或已損毀；請從官方發佈頁下載 CLIProxyAPI_{version}_linux_<arch>.tar.gz 後重試。',
-  remedy_network: '請嘗試使用 CDN 前綴，或在瀏覽器中直接上傳官方 .tar.gz 發佈套件。',
+  remedy_network: '請重試下載；若持續失敗，可改用 CDN 前綴，或在瀏覽器中直接上傳官方 .tar.gz 發佈套件。',
+  remedy_cdn: '換一個 CDN 前綴，或在瀏覽器中直接上傳官方 .tar.gz 發佈套件。',
   remedy_recovery: '請重新啟動容器後重新開啟安裝精靈。',
   remedy_unsupported_platform: '目前部署無法準備內建引擎；請改用完整映像或連線外部 CPA。',
   remedy_install_failed: '請檢查容器磁碟空間與執行階段目錄權限後重試。',
@@ -383,7 +387,10 @@ const ru: typeof en = {
   error_unknown: 'Не удалось подготовить движок CPA.',
   remedy_archive:
     'Неверный или повреждённый файл; скачайте CLIProxyAPI_{version}_linux_<arch>.tar.gz из официального релиза и повторите попытку.',
-  remedy_network: 'Попробуйте префикс CDN или загрузите официальный архив .tar.gz через браузер.',
+  remedy_network:
+    'Повторите загрузку; если она продолжает сбоить, используйте префикс CDN или загрузите официальный архив .tar.gz через браузер.',
+  remedy_cdn:
+    'Попробуйте другой префикс CDN или загрузите официальный архив .tar.gz через браузер.',
   remedy_recovery: 'Перезапустите контейнер, затем снова откройте мастер.',
   remedy_unsupported_platform:
     'Это развёртывание не может подготовить движок; используйте полный образ или подключите внешний CPA.',

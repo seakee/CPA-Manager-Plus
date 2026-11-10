@@ -329,3 +329,17 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
     expect(upload).toHaveBeenCalledTimes(1);
   });
 });
+
+it('tailors the network remedy to the source that actually failed', () => {
+  expect(mapArtifactErrorCode('download_failed', '8.0.55', 'en').remedyKey).toBe('remedy_network');
+  expect(mapArtifactErrorCode('download_failed', '8.0.55', 'en', 'github').remedyKey).toBe(
+    'remedy_network'
+  );
+  // A CDN prefix that fails cannot be fixed by naming the CDN prefix again.
+  expect(mapArtifactErrorCode('download_failed', '8.0.55', 'en', 'cdn').remedyKey).toBe(
+    'remedy_cdn'
+  );
+  expect(mapArtifactErrorCode('archive_invalid', '8.0.55', 'en', 'cdn').remedyKey).toBe(
+    'remedy_archive'
+  );
+});

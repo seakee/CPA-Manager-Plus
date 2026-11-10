@@ -159,6 +159,76 @@ const messages = {
   ],
   usageReadFailed: ['Usage state could not be read', '无法读取用量状态', '無法讀取用量狀態', 'Не удалось прочитать состояние сбора'],
   reload: ['Reload page', '重新加载页面', '重新載入頁面', 'Перезагрузить страницу'],
+
+  // The External setup form. The wizard sends one strategy write, so a refusal
+  // arrives as a bounded code: each of them names the cause the operator can
+  // act on instead of the shared "setup did not finish" sentence.
+  setupExternalNoMigration: [
+    'This connects an existing CPA. Nothing is copied from it: its history, requests and logs stay on that CPA.',
+    '这里连接的是已有 CPA，不会从它复制任何内容：它的历史用量、请求记录与日志都保留在原 CPA 上。',
+    '這裡連接的是既有 CPA，不會從它複製任何內容：它的歷史用量、請求記錄與日誌都保留在原 CPA 上。',
+    'Здесь подключается существующий CPA. Из него ничего не копируется: история, запросы и журналы остаются на этом CPA.',
+  ],
+  setupAddressInvalid: [
+    'Enter the CPA base address as a complete http:// or https:// URL, without credentials, query or fragment.',
+    '请填写 CPA 基础地址：完整的 http:// 或 https:// 地址，不能带凭据、查询参数或片段。',
+    '請填寫 CPA 基礎位址：完整的 http:// 或 https:// 位址，不能包含憑證、查詢參數或片段。',
+    'Укажите базовый адрес CPA как полный URL http:// или https://, без учётных данных, параметров запроса и фрагмента.',
+  ],
+  setupKeyInvalid: [
+    'Enter the CPA management key. It cannot contain spaces or control characters.',
+    '请填写 CPA 管理密钥；密钥不能包含空白或控制字符。',
+    '請填寫 CPA 管理金鑰；金鑰不能包含空白或控制字元。',
+    'Укажите ключ управления CPA. Он не может содержать пробелы и управляющие символы.',
+  ],
+  setupBlockerConnectionInvalid: [
+    'That address or management key is not in a usable form. Enter the CPA base URL, for example http://10.0.0.5:8317, and its management key.',
+    '地址或管理密钥格式不可用。请填写 CPA 基础地址（例如 http://10.0.0.5:8317）及其管理密钥。',
+    '位址或管理金鑰格式不可用。請填寫 CPA 基礎位址（例如 http://10.0.0.5:8317）及其管理金鑰。',
+    'Адрес или ключ управления указаны в недопустимом виде. Укажите базовый адрес CPA (например, http://10.0.0.5:8317) и его ключ управления.',
+  ],
+  setupBlockerKeyRejected: [
+    'The CPA rejected this management key. Check the key in the CPA management settings, then try again.',
+    'CPA 拒绝了这个管理密钥。请在 CPA 管理设置中核对密钥后重试。',
+    'CPA 拒絕了這個管理金鑰。請在 CPA 管理設定中核對金鑰後重試。',
+    'CPA отклонил этот ключ управления. Проверьте ключ в настройках управления CPA и повторите попытку.',
+  ],
+  setupBlockerUnreachable: [
+    'Nothing answered at that address, so the CPA management interface could not be read. Check that the CPA is running and reachable from this Manager.',
+    '该地址没有响应，无法读取 CPA 管理接口。请确认 CPA 正在运行，且本管理程序可以访问该地址。',
+    '該位址沒有回應，無法讀取 CPA 管理介面。請確認 CPA 正在執行，且本管理程式可以存取該位址。',
+    'На этот адрес никто не ответил, поэтому интерфейс управления CPA прочитать не удалось. Убедитесь, что CPA запущен и доступен из этого Manager.',
+  ],
+  setupBlockerManagementUnavailable: [
+    'That address answered, but it does not expose the CPA v8 management interface. Connect a CPA v8, or adopt the existing installation instead.',
+    '该地址有响应，但没有提供 CPA v8 管理接口。请连接 CPA v8，或改为接管已有安装。',
+    '該位址有回應，但沒有提供 CPA v8 管理介面。請連接 CPA v8，或改為接管既有安裝。',
+    'Адрес ответил, но интерфейс управления CPA v8 там недоступен. Подключите CPA v8 или перенесите существующую установку.',
+  ],
+  setupBlockerConfigUnreadable: [
+    'The CPA answered with a configuration this Manager cannot read safely. Check that the address is CPA v8, then try again.',
+    'CPA 返回了本管理程序无法安全读取的配置。请确认该地址是 CPA v8 后重试。',
+    'CPA 回傳了本管理程式無法安全讀取的設定。請確認該位址是 CPA v8 後重試。',
+    'CPA вернул конфигурацию, которую Manager не может безопасно прочитать. Убедитесь, что адрес указывает на CPA v8, и повторите попытку.',
+  ],
+  setupBlockerQualification: [
+    'This build has not qualified external CPA connections, so it cannot connect one. Use an embedded installation instead.',
+    '当前构建尚未开放外部 CPA 连接，无法连接外部 CPA。请改用内置安装。',
+    '目前建置尚未開放外部 CPA 連線，無法連接外部 CPA。請改用內建安裝。',
+    'Эта сборка не поддерживает внешние подключения CPA, поэтому подключить внешний CPA нельзя. Используйте встроенную установку.',
+  ],
+  setupBlockerOwnerConflict: [
+    'This installation already owns a different method or source. Start a new installation.',
+    '该安装已归属其他方式或来源。请新建一次安装。',
+    '該安裝已歸屬其他方式或來源。請新建一次安裝。',
+    'Эта установка уже закреплена за другим способом или источником. Начните новую установку.',
+  ],
+  setupBlockerStorage: [
+    'The management key could not be stored securely. Check the Manager encryption key and storage, then try again.',
+    '无法安全保存管理密钥。请检查管理程序的加密密钥与存储后重试。',
+    '無法安全保存管理金鑰。請檢查管理程式的加密金鑰與儲存後重試。',
+    'Не удалось безопасно сохранить ключ управления. Проверьте ключ шифрования и хранилище Manager и повторите попытку.',
+  ],
 } satisfies Record<string, readonly [string, string, string, string]>;
 
 export function externalWorkspaceText(key: keyof typeof messages): string {
@@ -198,4 +268,29 @@ export function versionSupportText(support: string | undefined): string {
     default:
       return externalWorkspaceText('supportUnknown');
   }
+}
+
+// The strategy refusals an External setup can receive, each with the cause it
+// names. `management_safe_read_unavailable` is the Manager's only "nothing
+// usable came back" code; an address that answered without the v8 management
+// interface is `owner_upgrade_required`, so "unreachable" and "answered, but not
+// a CPA v8" stay separate sentences instead of one guess covering both.
+const setupBlockers: Record<string, keyof typeof messages> = {
+  management_connection_invalid: 'setupBlockerConnectionInvalid',
+  management_authentication_rejected: 'setupBlockerKeyRejected',
+  management_safe_read_unavailable: 'setupBlockerUnreachable',
+  owner_upgrade_required: 'setupBlockerManagementUnavailable',
+  management_v8_config_invalid: 'setupBlockerConfigUnreadable',
+  management_v8_config_document_invalid: 'setupBlockerConfigUnreadable',
+  required_v8_profile_qualification_required: 'setupBlockerQualification',
+  fresh_strategy_owner_conflict: 'setupBlockerOwnerConflict',
+  management_secret_storage_unavailable: 'setupBlockerStorage',
+};
+
+// externalSetupBlockerText returns the sentence for a code this module knows.
+// Any other refusal stays `undefined` so the caller can show its own generic
+// message rather than a guess about the cause.
+export function externalSetupBlockerText(code: string | undefined): string | undefined {
+  const key = code ? setupBlockers[code] : undefined;
+  return key ? externalWorkspaceText(key) : undefined;
 }

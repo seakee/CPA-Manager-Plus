@@ -724,8 +724,11 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       } catch (err) {
         // Commit retires the fixed carrier. A lost reply can therefore be
         // followed by 404, even though retrying the original operation worked.
+        // A refusal that carries a code is not a lost reply: the routing layer
+        // named why the address was not verified, and the journey has to say it.
         if (
           !(err instanceof BootstrapTransportError) ||
+          err.code === 'routing_verification_failed' ||
           !['transport', 'not_found', 'unavailable', 'response'].includes(err.kind)
         )
           throw err;

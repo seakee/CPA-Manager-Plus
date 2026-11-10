@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useAuthStore, useNotificationStore } from '@/stores';
+import { isDemoMode } from '@/features/demo/demoMode';
 import { createPublicApiClient, PublicApiError } from '@/fullweb/publicApi';
 import type { FullWebCredential, PublicApiClient } from '@/fullweb/publicApi';
 import type { ArtifactStatus } from '@/fullweb/freshArtifact';
@@ -48,9 +49,30 @@ type RuntimeOperation = {
 const defaultClient = createPublicApiClient();
 const POLL_MS = 30_000;
 
-function statusLabel(value: string | undefined, fallback: string) {
-  return value ? value.replace(/_/g, ' ') : fallback;
-}
+// The demo site runs without a Manager behind it, so the Full Web API this page
+// reads cannot answer there and the page would forever show the unavailable
+// observation. It renders this fixture instead — the same approach the panel
+// feature availability hook takes with `demoAvailability`. The gateway reports
+// no lifecycle capability, so the demo offers no start, stop or restart it
+// could not perform.
+const DEMO_ARTIFACT_ID = 'sha256:' + 'a'.repeat(64);
+const DEMO_RUNTIME_STATUS: RuntimeStatusResponse = {
+  mode: 'embedded',
+  status: 'ready',
+  manager: { state: 'ready' },
+  gateway: {
+    identity: 'demo-runtime',
+    generation: 1,
+    protocolVersion: 'v1',
+    state: 'ready',
+    ready: true,
+    artifactId: DEMO_ARTIFACT_ID,
+  },
+};
+const DEMO_RUNTIME_ARTIFACT: Pick<ArtifactStatus, 'active' | 'required'> = {
+  active: { artifactId: DEMO_ARTIFACT_ID, origin: 'bundled' },
+  required: false,
+};
 
 function newRequestId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -89,10 +111,26 @@ export function RuntimeStatusPage({
   credential?: string;
   onUnauthorized?: () => void;
 } = {}) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const auth = useAuthStore();
   const { showConfirmation, showNotification } = useNotificationStore();
   const managerCredential = credential || auth.managementKey;
+  // Manager, gateway and operation states are wire values (`ready`, `offline`,
+  // `starting`, `unknown`, `accepted`, `succeeded`, `failed`). Each one renders
+  // through its `runtime_status.*` entry in the console's current language; a
+  // value this build does not name keeps its underscore-free wire form instead of
+  // disappearing.
+  const stateLabel = (value: string | undefined, fallback: string) => {
+    if (!value) return fallback;
+    const key = `runtime_status.state_${value}`;
+    return i18n.exists(key) ? t(key) : value.replace(/_/g, ' ');
+  };
+  const operationLabel = (value: string | undefined) => {
+    const key = `runtime_status.operation_${value ?? 'unknown'}`;
+    if (i18n.exists(key)) return t(key);
+    return value ? value.replace(/_/g, ' ') : t('runtime_status.operation_unknown');
+  };
+  const demo = __DEMO_SITE__ && isDemoMode();
   const [status, setStatus] = useState<RuntimeStatusResponse | null>(null);
   const [operation, setOperation] = useState<RuntimeOperation | null>(null);
   const [artifact, setArtifact] = useState<Pick<ArtifactStatus, 'active' | 'required'> | null>(null);
@@ -103,6 +141,12 @@ export function RuntimeStatusPage({
   const busyRef = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (demo) {
+      setStatus({ ...DEMO_RUNTIME_STATUS, observedAt: new Date().toISOString() });
+      setArtifact(DEMO_RUNTIME_ARTIFACT);
+      setLoading(false);
+      return;
+    }
     if (!managerCredential) {
       setLoading(false);
       return;
@@ -140,15 +184,16 @@ export function RuntimeStatusPage({
     } finally {
       if (requestId === requestRef.current) setLoading(false);
     }
-  }, [client, managerCredential, onUnauthorized]);
+  }, [client, demo, managerCredential, onUnauthorized]);
 
   useEffect(() => {
     void refresh();
+    if (demo) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
     }, POLL_MS);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [demo, refresh]);
 
   const queryOperation = useCallback(
     async (requestId: string) => {
@@ -258,19 +303,19 @@ export function RuntimeStatusPage({
       </header>
 
       <section className="runtime-status-summary" aria-live="polite">
-        <strong>{statusLabel(status?.status, t('runtime_status.loading', { defaultValue: 'Loading' }))}</strong>
+        <strong data-testid="runtime-status-state">{stateLabel(status?.status, t('runtime_status.loading', { defaultValue: 'Loading' }))}</strong>
         <span>{status?.observedAt ? new Date(status.observedAt).toLocaleString() : t('runtime_status.no_observation', { defaultValue: 'No observation yet' })}</span>
       </section>
 
       <section className="runtime-status-cards">
         <Card>
           <h2>{t('runtime_status.manager', { defaultValue: 'CPAMP Manager' })}</h2>
-          <p>{statusLabel(status?.manager.state, t('runtime_status.unknown', { defaultValue: 'Unknown' }))}</p>
+          <p data-testid="runtime-status-manager-state">{stateLabel(status?.manager.state, t('runtime_status.unknown', { defaultValue: 'Unknown' }))}</p>
           <small>{t('runtime_status.manager_fact', { defaultValue: 'Manager authentication and API routing are independent from gateway readiness.' })}</small>
         </Card>
         <Card>
           <h2>{t('runtime_status.gateway', { defaultValue: 'CPA gateway' })}</h2>
-          <p>{statusLabel(gateway?.state, t('runtime_status.unknown', { defaultValue: 'Unknown' }))}</p>
+          <p data-testid="runtime-status-gateway-state">{stateLabel(gateway?.state, t('runtime_status.unknown', { defaultValue: 'Unknown' }))}</p>
           <small>{gateway?.ready ? t('runtime_status.ready', { defaultValue: 'Ready for gateway requests' }) : t('runtime_status.not_ready', { defaultValue: 'Not ready for gateway requests' })}</small>
           {status?.mode === 'embedded' && gateway && (
             <div className="runtime-status-actions">
@@ -360,7 +405,7 @@ export function RuntimeStatusPage({
 
       {operation && (
         <p className="runtime-status-operation" role="status">
-          {t('runtime_status.operation_status', { defaultValue: 'Operation {{action}}: {{state}}', action: operation.action, state: operation.state })}
+          {t('runtime_status.operation_status', { defaultValue: 'Operation {{action}}: {{state}}', action: operation.action === 'start' ? t('runtime_status.start', { defaultValue: 'Start' }) : operation.action === 'stop' ? t('runtime_status.stop', { defaultValue: 'Stop' }) : t('runtime_status.restart', { defaultValue: 'Restart' }), state: operationLabel(operation.state) })}
           {operation.state === 'unknown' && ` · ${t('runtime_status.query_original', { defaultValue: 'Result pending confirmation; the original operation was not resent.' })}`}
         </p>
       )}

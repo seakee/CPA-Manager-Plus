@@ -190,7 +190,14 @@ export function FreshArtifactStep({
         return;
       }
       if (next.operation?.phase === 'failed') {
-        setError(mapArtifactErrorCode(next.operation.code, next.pinned.version));
+        setError(
+          mapArtifactErrorCode(
+            next.operation.code,
+            next.pinned.version,
+            undefined,
+            next.operation.source
+          )
+        );
       } else if (isRunningPhase(next.operation?.phase)) {
         setPolling(true);
         setPollRun((c) => c + 1);
@@ -263,7 +270,14 @@ export function FreshArtifactStep({
         }
         if (next.operation?.phase === 'failed') {
           setPolling(false);
-          setError(mapArtifactErrorCode(next.operation.code, next.pinned.version));
+          setError(
+            mapArtifactErrorCode(
+              next.operation.code,
+              next.pinned.version,
+              undefined,
+              next.operation.source
+            )
+          );
           return;
         }
         if (!isRunningPhase(next.operation?.phase)) {
@@ -338,14 +352,14 @@ export function FreshArtifactStep({
         return;
       }
       if (nextOp.phase === 'failed') {
-        setError(mapArtifactErrorCode(nextOp.code, version));
+        setError(mapArtifactErrorCode(nextOp.code, version, undefined, nextOp.source));
         return;
       }
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
       if (!aliveRef.current || isAbortedArtifactError(err)) return;
-      const mapped = formatArtifactError(err, version);
+      const mapped = formatArtifactError(err, version, undefined, source);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();
         return;
@@ -379,14 +393,14 @@ export function FreshArtifactStep({
         return;
       }
       if (nextOp.phase === 'failed') {
-        setError(mapArtifactErrorCode(nextOp.code, version));
+        setError(mapArtifactErrorCode(nextOp.code, version, undefined, nextOp.source));
         return;
       }
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
       if (!aliveRef.current || isAbortedArtifactError(err)) return;
-      const mapped = formatArtifactError(err, version);
+      const mapped = formatArtifactError(err, version, undefined, source);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();
         return;
@@ -418,7 +432,7 @@ export function FreshArtifactStep({
 
       {statusPhase === 'unavailable' && (
         <div
-          className="alert alert-warn"
+          className="alert alert-warn artifact-alert"
           role="alert"
           data-testid="artifact-status-unavailable"
         >
@@ -479,7 +493,7 @@ export function FreshArtifactStep({
           )}
           {error && (
             <div
-              className="alert alert-warn"
+              className="alert alert-warn artifact-alert"
               role="alert"
               data-testid="artifact-error"
               data-error-code={error.code}

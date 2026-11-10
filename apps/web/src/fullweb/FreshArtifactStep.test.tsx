@@ -290,6 +290,62 @@ describe('FreshArtifactStep', () => {
     expect(onReady).toHaveBeenCalledTimes(1);
   });
 
+  it('names the source that failed when a polled CDN download reports the failure', async () => {
+    // A CDN acquire answers 202 and only fails later, in the poll. The remedy
+    // must still be the one a CDN prefix can act on, not "switch to CDN".
+    const statuses: ArtifactStatus[] = [
+      makeStatus(),
+      makeStatus({
+        operation: {
+          id: 'op-cdn',
+          source: 'cdn',
+          phase: 'failed',
+          receivedBytes: 0,
+          totalBytes: 0,
+          code: 'download_failed',
+        },
+      }),
+    ];
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(
+        async () => statuses.shift() ?? statuses[statuses.length - 1] ?? makeStatus()
+      ),
+      probe: vi.fn(async () => ({ reachable: false, code: 'source_unreachable' })),
+      acquire: vi.fn<ArtifactTransport['acquire']>(async () => ({
+        id: 'op-cdn',
+        source: 'cdn',
+        phase: 'downloading',
+        receivedBytes: 0,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+    const onReady = vi.fn();
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+    });
+    await click('artifact-source-cdn');
+    await act(async () => {
+      byID('artifact-cdn-prefix-input').props.onChange({
+        target: { value: 'https://mirror.example.com/' },
+      });
+    });
+    await click('artifact-acquire-btn');
+    expect(byID('artifact-operation-progress').props['data-phase']).toBe('downloading');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(byID('artifact-error').props['data-error-code']).toBe('download_failed');
+    const remedy = byID('artifact-error-remedy').props.children as string;
+    // The CDN remedy points at a different prefix and the upload option; the
+    // GitHub remedy ("retry the download…") would send the operator back to the
+    // source that just failed.
+    expect(remedy).toBe('换一个 CDN 前缀，或在浏览器中直接上传官方 .tar.gz 发布包。');
+    expect(remedy).not.toContain('请重试下载');
+  });
+
   it('renders unreadable status as unavailable and never calls onReady', async () => {
     const transport: ArtifactTransport = {
       readStatus: vi.fn(async () => {

@@ -289,6 +289,20 @@ describe('Fresh routing prepare, cutover and lost-response recovery', () => {
     }
   );
 
+  it('surfaces a named routing verification refusal instead of a lost reply', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = await preparedClient(fetchMock);
+    // A refusal that carries a code names a cause the journey can explain, so it
+    // must not be folded into the "reply was lost" recovery path below.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ Code: 'routing_verification_failed' }), { status: 503 })
+    );
+    await expect(client.activateRouting()).rejects.toMatchObject({
+      code: 'routing_verification_failed',
+      status: 503,
+    });
+  });
+
   it.each([401, 409])(
     'does not bypass a rejected or conflicting activation (%s)',
     async (status) => {

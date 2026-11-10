@@ -163,6 +163,13 @@ func TestFixedTransportClaimSessionMethodsAliasesAndOversizedBodies(t *testing.T
 	if w = request("POST", bootstrap.FixedBootstrapAPIPath+"routing/activate", "Fresh "+session.Token, string(activateBody)); w.Code != 503 {
 		t.Fatal("failed public verification misclassified", w.Code)
 	}
+	var verificationRefusal struct {
+		Code string `json:"Code"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &verificationRefusal) != nil ||
+		verificationRefusal.Code != "routing_verification_failed" {
+		t.Fatal("failed public verification was not named by a stable code", w.Body.String())
+	}
 	record, _ := st.Load(t.Context())
 	if record.Operation.Routing.Committed {
 		t.Fatal("unverified route committed")

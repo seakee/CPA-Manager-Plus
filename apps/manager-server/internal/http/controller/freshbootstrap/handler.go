@@ -182,6 +182,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reject(w)
 			case errors.Is(err, freshrouting.ErrConflict), errors.Is(err, freshstore.ErrConflict):
 				w.WriteHeader(http.StatusConflict)
+			case resource == "routing/activate" &&
+				(errors.Is(err, freshrouting.ErrBlocked) || errors.Is(err, freshrouting.ErrUnverified)):
+				// The published address did not answer as required, or did not prove the
+				// identity this operation wrote. The journey can only name that cause
+				// when the refusal carries a stable code, so this pair is not the bare
+				// 503 the remaining routing faults still are.
+				writeCode(w, http.StatusServiceUnavailable, "routing_verification_failed")
 			default:
 				w.WriteHeader(http.StatusServiceUnavailable)
 			}
@@ -249,6 +256,13 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+func writeCode(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Code string `json:"Code"`
+	}{code})
 }
 func reject(w http.ResponseWriter)     { w.WriteHeader(http.StatusUnauthorized) }
 func badRequest(w http.ResponseWriter) { w.WriteHeader(http.StatusBadRequest) }

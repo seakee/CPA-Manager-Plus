@@ -16,9 +16,11 @@ import {
   adoptionCompletionState,
   needsCredentialFileNote,
   normalizeCPAAddress,
+  validManagementKey,
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
+import { externalSetupBlockerText, externalWorkspaceText as x } from '../i18n/freshExternal';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 import { FreshArtifactStep } from './FreshArtifactStep';
@@ -69,6 +71,21 @@ class WizardArtifactError extends Error {
 function attemptID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+// One error message for every failed step. A typed refusal from the Manager
+// names the cause it recorded; only when nothing names it does the journey fall
+// back to the sentence that covers any unfinished setup.
+function setupErrorMessage(err: unknown) {
+  if (err instanceof WizardArtifactError) return err.message;
+  if (err instanceof BootstrapTransportError) {
+    if (err.code === 'managed_destination_verification_required') return s('runtimeVerifyRequired');
+    // The routing layer refuses with this code when the published address did not
+    // answer as required; that cause is actionable, unlike a bare 503.
+    if (err.code === 'routing_verification_failed') return s('routingVerificationFailed');
+    const blocker = externalSetupBlockerText(err.code);
+    if (blocker) return blocker;
+  }
+  return j('setupError');
 }
 function confirmed(op: FreshOperation, pending: Pending) {
   if (op.revision <= pending.revision) return false;
@@ -236,14 +253,7 @@ export function FreshSetupWizard({
       await action();
     } catch (err) {
       if (alive.current) {
-        setError(
-          err instanceof WizardArtifactError
-            ? err.message
-            : err instanceof BootstrapTransportError &&
-                err.code === 'managed_destination_verification_required'
-              ? s('runtimeVerifyRequired')
-              : j('setupError')
-        );
+        setError(setupErrorMessage(err));
         setUnknown(pending.current !== null);
       }
     } finally {
@@ -258,6 +268,22 @@ export function FreshSetupWizard({
     ) {
       setError(j('invalidSetup'));
       return;
+    }
+    // The External form is refused here, in the operator's words: nothing has
+    // been sent yet, so an unusable address or key never becomes the generic
+    // "setup did not finish" sentence.
+    let address = '';
+    if (strategy === 'connect_external') {
+      try {
+        address = externalURL(baseURL);
+      } catch {
+        setError(x('setupAddressInvalid'));
+        return;
+      }
+      if (!validManagementKey(cpaKey)) {
+        setError(x('setupKeyInvalid'));
+        return;
+      }
     }
     await task(async () => {
       if (strategy === 'new_managed' || strategy === 'adopt_existing') {
@@ -299,11 +325,7 @@ export function FreshSetupWizard({
       }
       if (strategy === 'new_managed')
         setTarget(managedTarget(await transport.request('installation/runtime')));
-      else {
-        setBaseURL(externalURL(baseURL));
-        if (!cpaKey || cpaKey.length > 4096 || /[\s\p{Cc}]/u.test(cpaKey))
-          throw new Error('Invalid CPA key');
-      }
+      else setBaseURL(address);
       setSavedKey(false);
       setStep(2);
     });
@@ -376,7 +398,21 @@ export function FreshSetupWizard({
       if (!current.routing.target) current = accept(await transport.prepareRouting(path));
       if (!current.routing.committed) {
         pending.current = { revision: current.revision, stage: 'route' };
-        await transport.activateRouting();
+        try {
+          await transport.activateRouting();
+        } catch (err) {
+          // A named routing refusal is a recorded answer, not a lost reply. The
+          // checkpoint is untouched, so the same operation stays continuable and
+          // the journey must not claim the write is unconfirmed.
+          if (
+            err instanceof BootstrapTransportError &&
+            err.code === 'routing_verification_failed'
+          ) {
+            pending.current = null;
+            setUnknown(false);
+          }
+          throw err;
+        }
         current = await read();
       } else {
         // Also install the canonical carrier when resuming a lost activation reply.
@@ -471,9 +507,13 @@ export function FreshSetupWizard({
     [s('consoleAddress'), path],
     ...(strategy === 'connect_external' && baseURL ? [[t('externalBaseURL'), baseURL]] : []),
     ...(strategy === 'new_managed'
-      ? [['plugins', plugins ? j('enabled') : j('disabled'), 'review-plugins']]
+      ? [[j('plugins'), plugins ? j('enabled') : j('disabled'), 'review-plugins']]
       : []),
   ];
+  // The engine step is the confirmation step's content whenever the image ships
+  // without the CPA: there is no summary to confirm yet, and the only action that
+  // moves forward lives inside that step.
+  const engineGate = step === 2 && !complete && !!artifactGate;
   return (
     <section className="cpamp-installation" data-testid="fresh-setup-wizard" aria-busy={busy}>
       <div className="wizard-card">
@@ -509,7 +549,9 @@ export function FreshSetupWizard({
                     : step === 1
                       ? j('configureHeading')
                       : step === 2
-                        ? s('reviewTitle')
+                        ? engineGate
+                          ? s('engineGateTitle')
+                          : s('reviewTitle')
                         : note
                           ? j('waitingRuntime')
                           : s(busy ? 'installing' : unknown ? 'unknown' : 'failure')}
@@ -527,7 +569,9 @@ export function FreshSetupWizard({
                     : step === 1
                       ? j('draftHelp')
                       : step === 2
-                        ? s('reviewHelp')
+                        ? engineGate
+                          ? s('engineGateHelp')
+                          : s('reviewHelp')
                         : j('progressHelp')}
               </p>
             </div>
@@ -584,6 +628,9 @@ export function FreshSetupWizard({
                           : value === 'adopt_existing'
                             ? 'adopt'
                             : 'external'
+                      )}
+                      {value === 'new_managed' && (
+                        <span className="badge badge-indigo">{j('recommended')}</span>
                       )}
                     </h2>
                     <p>
@@ -785,7 +832,11 @@ export function FreshSetupWizard({
               )}
               {!complete && (
                 <>
-                  <p className="alert alert-info">{j('noMigration')}</p>
+                  <p className="alert alert-info">
+                    {strategy === 'connect_external'
+                      ? x('setupExternalNoMigration')
+                      : j('noMigration')}
+                  </p>
                   <label className="journey-checkline">
                     <input
                       type="checkbox"
@@ -926,16 +977,21 @@ export function FreshSetupWizard({
                   {s('next')}
                 </button>
               )}
-              {step === 2 && (
+              {step === 2 && !engineGate && (
                 <button
                   type="button"
                   className="btn btn-primary"
                   data-testid="setup-execute"
-                  disabled={busy || !savedKey || !!artifactGate}
+                  disabled={busy || !savedKey}
                   onClick={() => void execute()}
                 >
                   {s('submit')}
                 </button>
+              )}
+              {engineGate && (
+                <p className="journey-quiet" role="status" data-testid="engine-gate-next">
+                  {s('engineGateNext')}
+                </p>
               )}
               {step === 3 && (
                 <>
