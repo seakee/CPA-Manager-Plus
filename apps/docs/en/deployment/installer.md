@@ -3,7 +3,7 @@
 ::: warning 1.x Stable installer, not the v2 Beta installation entry
 `bin/install-cpamp.sh` continues to install **1.x Stable** by default. The installation, upgrade, repair, reset, and native options on this page describe 1.x. Changing an image or version parameter does not turn this single-container flow into a v2 migration.
 
-For **v2 Beta Embedded**, use `docker-compose.v2-embedded.yml` and `embedded-release-pairing.json` from the same Prerelease, with all three images pinned to `<tag>@sha256:<digest>`; see [v2 Docker Installation](./docker.md). Existing 1.x installations must first reach the exact `v1.14.10` baseline, then use offline copy-in as described in [Upgrade And Rollback](../operations/update.md); target CPA requires at least `v8.0.55`. Without Docker, v2 Beta provides only the [linux/amd64 native package](./native.md).
+For **v2 Beta Embedded**, use `docker-compose.v2-embedded.yml` and `embedded-release-pairing.json` from the same Prerelease, with all three images pinned to `<tag>@sha256:<digest>`; see [v2 Docker Installation](./docker.md). The v2 Beta browser entry is `/console` on the public origin (for example `http://<host>:18317/console`); this page's `:18317/management.html` belongs to 1.x Stable only. Existing 1.x installations must first reach the exact `v1.14.10` baseline, then use offline copy-in as described in [Upgrade And Rollback](../operations/update.md); target CPA requires at least `v8.0.55`. Without Docker, v2 Beta provides only the [linux/amd64 native package](./native.md).
 :::
 
 
@@ -112,7 +112,7 @@ The import encrypts the CPA URL and CPA Management Key into `/data/usage.sqlite`
 
 If the first offline import or a later validation step fails, the installer retains `secrets/cpa-connection-import.pending` with mode `0600` together with the temporary key. The pending file records only its version, the CPA URL, and the installer-owned key filename; it does not contain key plaintext. Rerun the installer in the same directory and choose upgrade to retry the import automatically. The pending file and temporary key are removed only after every validation succeeds. A corrupt, conflicting, or externally owned pending input fails safely without guessing a connection or deleting files.
 
-After deployment, open:
+After deployment, open (1.x Stable):
 
 ```text
 http://<host>:18317/management.html

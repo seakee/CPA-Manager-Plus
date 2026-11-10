@@ -23,7 +23,7 @@ description: 对比 CPAMP 轻量面板和完整模式支持的管理、监控、
 | 登录凭证                                  | CPA Management Key    | CPAMP Admin Key |
 | 备份、迁移状态、pprof                     | ❌                    | ✅              |
 
-CPAMP 轻量面板是 CPA 直接托管的增强 WebUI，与官方面板一样不需要额外服务。它不会连接或读取 Manager Server；需要表中的服务端能力时，必须改用 Manager Server 的 `:18317/management.html` 入口。
+CPAMP 轻量面板是 CPA 直接托管的增强 WebUI，与官方面板一样不需要额外服务。它不会连接或读取 Manager Server；需要表中的服务端能力时，必须改用 Manager Server 的入口：v2 Beta 是公开 origin 的 `/console`，1.x Stable 是 `:18317/management.html`。
 
 > **在线演示不是运行模式。** 它只使用虚构数据预览界面，不能连接、管理或监控真实 CPA，也不代表矩阵中的功能已经实际运行。
 
@@ -31,10 +31,12 @@ CPAMP 轻量面板是 CPA 直接托管的增强 WebUI，与官方面板一样不
 
 Docker 和原生包提供相同的完整模式能力，只是安装方式不同。
 
-| 安装方式            | 适合谁                   | 面板入口                                    |
-| ------------------- | ------------------------ | ------------------------------------------- |
-| Docker 部署（推荐） | 大多数新用户和服务器部署 | `http://<cpamp-host>:18317/management.html` |
-| 原生包部署          | 不使用 Docker 的主机     | `http://<cpamp-host>:18317/management.html` |
+| 安装方式            | 适合谁                   | 入口                                                                                                                        |
+| ------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Docker 部署（推荐） | 大多数新用户和服务器部署 | v2 Beta：`http://<cpamp-host>:18317/console`<br>1.x Stable：`http://<cpamp-host>:18317/management.html` |
+| 原生包部署          | 不使用 Docker 的主机     | 同上                                                                                                                        |
+
+v2 Beta 不提供 `/management.html`，访问返回 404；不要把它当作 v2 入口。
 
 - Docker 用户查看 [Docker 部署](../deployment/docker.md)。
 - Linux、macOS 或 Windows 用户查看 [原生包部署](../deployment/native.md)。

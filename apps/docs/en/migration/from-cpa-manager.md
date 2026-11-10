@@ -81,7 +81,7 @@ docker run -d \
   seakee/cpa-manager-plus:latest
 ```
 
-After startup, open `http://<host>:18317/management.html` and log in with the admin key.
+After startup, open (1.x Stable) `http://<host>:18317/management.html` and log in with the admin key.
 
 ## Native Package Migration
 

@@ -47,7 +47,7 @@ sudo systemctl restart cpa-manager-plus.service
 sudo systemctl status cpa-manager-plus.service
 ```
 
-在浏览器将公开 origin 与完整 Handoff 路径拼接，设置 Admin Key、选择 New Managed / Adopt / External 并完成资格检查；New Managed 保存首次 Client Key 并验证公开入口。重新签发 `initialize`、重置管理员密钥、备份或迁移前先停止整个服务；不要并行运行 systemd 和 `cpa-manager-plusctl start`。升级已有 1.x 必须使用 [v1.14.10 离线迁移和回滚手册](../operations/update.md)，不得指向原 1.x 目录直接启动 v2。
+在浏览器将公开 origin 与完整 Handoff 路径拼接，设置 Admin Key、选择 New Managed / Adopt / External 并完成资格检查；New Managed 保存首次 Client Key 并验证公开入口。安装完成后，后续登录打开公开 origin 的 `/console`（例如 `https://cpamp.example.com/console`）；v2 不提供 `/management.html`，访问返回 404。重新签发 `initialize`、重置管理员密钥、备份或迁移前先停止整个服务；不要并行运行 systemd 和 `cpa-manager-plusctl start`。升级已有 1.x 必须使用 [v1.14.10 离线迁移和回滚手册](../operations/update.md)，不得指向原 1.x 目录直接启动 v2。
 
 当前 Native 包的许可证查验以实际包内 `LICENSE` 与 `share/licenses/cli-proxy-api/LICENSE` 为准；镜像的第三方清单与 Provenance 路径不适用于 Native，见 [发布与许可证](../reference/releases.md)。
 
@@ -56,7 +56,7 @@ sudo systemctl status cpa-manager-plus.service
 
 不想使用 Docker 时，可以直接运行 CPAMP 原生包。它适合已有进程管理、systemd、launchd 或 Windows 服务托管习惯的环境。
 
-原生包模式仍然是 Manager Server 模式：二进制会托管 `/management.html`，本地保存 SQLite 数据，并使用 CPAMP 管理员密钥登录。它不是旧 CPA-Manager 的“给 CPA 端口面板外接 Usage Service”工作流。
+原生包模式仍然是 Manager Server 模式：二进制会托管 `/management.html`，本地保存 SQLite 数据，并使用 CPAMP 管理员密钥登录。本节的 `:18317/management.html` 入口属于 1.x Stable；v2 Beta 使用公开 origin 的 `/console`。它不是旧 CPA-Manager 的“给 CPA 端口面板外接 Usage Service”工作流。
 
 如果只想安装 CPAMP 原生包，可以使用 [一键安装脚本](./installer.md)。脚本不会原生安装 CPA；完整新部署仍建议用 Docker。
 
@@ -65,7 +65,7 @@ sudo systemctl status cpa-manager-plus.service
 1. 确认 CPA 已经运行，并准备 CPA 地址和 CPA Management Key。
 2. 从 GitHub Release 下载与你系统和架构匹配的原生包。
 3. 解压后运行 `cpa-manager-plus`，或使用包内的后台控制脚本。
-4. 打开 `http://<host>:18317/management.html`。
+4. 打开 1.x Stable 入口 `http://<host>:18317/management.html`。
 5. 使用日志中生成的 CPAMP 管理员密钥登录并连接 CPA。
 
 需要长期运行时，再选择 systemd、launchd、Windows 服务或其他进程管理方式。

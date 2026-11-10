@@ -3,8 +3,11 @@
 先确认你打开的是 CPAMP 完整模式：
 
 ```text
-http://<cpamp-host>:18317/management.html
+v2 Beta:      http://<cpamp-host>:18317/console
+1.x Stable:   http://<cpamp-host>:18317/management.html
 ```
+
+v2 Beta 不提供 `/management.html`，访问返回 404，它不是 v2 入口。
 
 CPA `:8317/management.html` 上的轻量面板不保存请求历史，因此看不到请求监控属于正常现象。
 

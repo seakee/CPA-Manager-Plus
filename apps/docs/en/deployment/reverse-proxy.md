@@ -2,13 +2,18 @@
 
 Use a reverse proxy when one domain needs to serve both the CPAMP panel and CPA APIs. HTTP panels and HTTP APIs can be proxied; RESP Pub/Sub and RESP pop cannot go through a normal HTTP reverse proxy.
 
-This guide uses a same-domain setup:
+::: warning The v2 Beta entry differs from 1.x
+The v2 Beta single image publishes only port `18317`, routed by Ingress: the console is at `/console` (for example `https://your-domain.com/console`), the frontend calls `/console/api/v2/*`, and `/management.html` returns 404. v2 therefore does not need the 1.x path split on this page; forward the whole domain to `18317`. The table, Nginx example, and troubleshooting entries below describe the 1.x Stable `/management.html` panel.
+:::
 
-- CPA Manager Plus panel: `https://your-domain.com/management.html`
+This guide uses a 1.x Stable same-domain setup:
+
+- CPAMP 1.x panel: `https://your-domain.com/management.html`
+- CPAMP v2 Beta console: `https://your-domain.com/console`
 - CPA / CLI Proxy API: `https://your-domain.com/v1/...`
 - CPA OAuth callbacks, Codex API, Amp routes, and other CPA-side endpoints
 
-This applies to Full Docker / Manager Server mode. CPA itself serves `/management.html` for the CPAMP Lightweight Panel, so this mixed routing is usually unnecessary.
+This applies to 1.x Stable Full Docker / Manager Server mode. CPA itself serves `/management.html` for the CPAMP Lightweight Panel, so this mixed routing is usually unnecessary.
 
 ## Choose Your Scenario
 
@@ -22,9 +27,11 @@ For most deployments, use separate domains or subdomains for CPAMP and CPA. Read
 
 ## Route Boundaries
 
+The table below is the 1.x Stable split (v2 Beta forwards the whole origin to `18317` and needs no per-path routing):
+
 | Traffic                                      | Recommended backend | Notes                                                                                                                                                  |
 | -------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/management.html`                           | CPAMP `:18317`      | Manager Server-hosted management panel.                                                                                                                |
+| `/management.html` (1.x)                     | CPAMP `:18317`      | Manager Server-hosted management panel.                                                                                                                |
 | `/usage-service/*`                           | CPAMP `:18317`      | Manager Server mode detection and config APIs.                                                                                                         |
 | `/v0/management/*`                           | CPAMP `:18317`      | CPAMP handles usage, model-prices, aliases, dashboard, monitoring, and codex-inspection first; other management APIs are then proxied by CPAMP to CPA. |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`      | Plugin page resources used by the CPAMP panel. CPAMP proxies them to CPA when needed.                                                                  |
@@ -36,9 +43,9 @@ For most deployments, use separate domains or subdomains for CPAMP and CPA. Read
 | New paths without explicit ownership         | CPA `:8317`         | Avoid blocking future CPA endpoints, except `/v8/management/*` (see above).                                                                             |
 | RESP Pub/Sub / RESP pop                      | Direct CPA `:8317`  | Cannot go through an HTTP reverse proxy.                                                                                                               |
 
-In v2 this `/v8/management/config/api-keys[/*]` route is served only on the Manager Server legacy management surface (the `/management.html` panel and its reverse-proxy topology): a sandboxed plugin iframe is a cross-site fetch client and the public Ingress denies the whole `/v8/management/*` namespace, so neither can reach it.
+This `/v8/management/config/api-keys[/*]` read-only route belongs to the 1.x Stable `/management.html` management surface. v2 Beta does not serve `/management.html`, and the public Ingress refuses the whole `/v8/management/*` namespace; a sandboxed plugin iframe is a cross-site fetch client, so neither can reach it.
 
-Recommended architecture:
+1.x Stable recommended architecture:
 
 ```text
 Browser
@@ -139,6 +146,8 @@ services:
 If CPA already runs on the host machine, omit the CPA service and point the Nginx upstream to a host-accessible address instead.
 
 ## Nginx HTTP Example
+
+The example below targets the 1.x Stable `/management.html` panel. For v2 Beta, forward the whole origin to `18317` instead of reusing this path split.
 
 Add this to the `http {}` block in `nginx.conf`:
 
@@ -304,7 +313,7 @@ ports:
   - '18317:18317'
 ```
 
-## CPAMP First Setup
+## CPAMP First Setup (1.x Stable)
 
 Open:
 
@@ -343,7 +352,7 @@ For Linux Docker environments, it is usually better to put CPA and CPAMP in the 
 
 ## Verification
 
-After configuring Nginx, test in this order:
+After configuring Nginx, test in this order. The commands below target the 1.x Stable `/management.html` panel; for v2 Beta first confirm the console with `curl -I https://your-domain.com/console`, then use the console's reported state for the remaining public paths.
 
 ```bash
 # 1. CPAMP panel should be reachable
@@ -378,7 +387,7 @@ curl -i https://your-domain.com/v8/management/config/api-keys \
 
 ## Troubleshooting
 
-### `/management.html` opens, but setup cannot save the CPA URL
+### `/management.html` opens, but setup cannot save the CPA URL (1.x Stable)
 
 Check whether the CPAMP container can reach CPA:
 

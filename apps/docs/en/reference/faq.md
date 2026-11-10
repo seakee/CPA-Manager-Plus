@@ -1,11 +1,15 @@
 # FAQ
 
-CPA Manager Plus provides full monitoring and analytics through the Manager Server-hosted panel. The old CPA-Manager workflow that attached an External Usage Service is not supported in Plus.
+CPA Manager Plus provides full monitoring and analytics through Manager Server. The old CPA-Manager workflow that attached an External Usage Service is not supported in Plus.
 
-Use the Manager Server-hosted panel for CPAMP analytics:
+The CPAMP analytics browser entry depends on the version:
+
+- **v2 Beta**: `/console` on the public origin, for example `http://<host>:18317/console`. v2 does not serve `/management.html`, which returns 404.
+- **1.x Stable**: the Manager Server-hosted panel, for example `http://<host>:18317/management.html`.
 
 ```text
-http://<host>:18317/management.html
+v2 Beta:      http://<host>:18317/console
+1.x Stable:   http://<host>:18317/management.html
 ```
 
 ## Which Usage Option Should I Choose?
@@ -17,11 +21,21 @@ http://<host>:18317/management.html
 | Replace the official UI with a clearer interface and no additional service      | [CPAMP Lightweight Panel](../deployment/cpa-panel.md) |
 | No Docker, but all features are required                                        | CPAMP Full Mode (native package)                      |
 
-The CPAMP Lightweight Panel is an enhanced alternative to the official Management Center and is hosted directly by CPA. It does not configure Manager Server or read Manager Server SQLite data. Use Docker or native packages and open `:18317/management.html` for the full CPAMP feature set.
+The CPAMP Lightweight Panel is an enhanced alternative to the official Management Center and is hosted directly by CPA. It does not configure Manager Server or read Manager Server SQLite data. Use Docker or native packages to run Manager Server and open its browser entry: `/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable.
 
 ## Which Address Should I Open?
 
-CPAMP Full Mode through Docker or a native package:
+The CPAMP Full Mode entry depends on the version.
+
+v2 Beta (the console under the public origin):
+
+```text
+http://<host>:18317/console
+```
+
+v2 does not serve `/management.html`; that path returns 404.
+
+1.x Stable (the Manager Server-hosted panel):
 
 ```text
 http://<host>:18317/management.html
@@ -83,7 +97,7 @@ The repair canonicalizes both rows to the connection you provide, keeps it encry
 
 Changing the CPA panel repository only changes the frontend served by CPA.
 
-Request monitoring and historical analytics require Manager Server:
+Request monitoring and historical analytics require Manager Server. The Docker example below is 1.x Stable, with its entry at `:18317/management.html`; for v2 Beta see [v2 Docker Installation](../deployment/docker.md), where the entry is `/console` on the public origin:
 
 ```bash
 docker run -d \
@@ -215,7 +229,7 @@ Do not use a public HTTPS reverse proxy domain.
 
 No. RESP Pub/Sub and RESP pop must connect directly to the CPA API port. HTTP queue can go through an HTTP proxy.
 
-For same-domain deployment, read [Reverse Proxy](../deployment/reverse-proxy.md). Rule of thumb:
+For same-domain deployment, read [Reverse Proxy](../deployment/reverse-proxy.md). The 1.x Stable path split below does not apply to v2 Beta, whose single image exposes one public entry with the console at `/console` (forward the whole origin to `18317`):
 
 ```text
 /management.html        -> CPAMP
@@ -322,15 +336,15 @@ The CPA Management Key is not accepted for CPAMP Manager Server-only APIs.
 
 ## `/models` Returns 412
 
-Manager Server setup is not complete.
-
-Open:
+1.x Stable: Manager Server setup is not complete. Open:
 
 ```text
 http://<cpamp-host>:18317/management.html
 ```
 
 Finish setup first.
+
+v2 Beta: `/models` also fails while installation is unfinished or the Gateway is not admitted. After completing the wizard, check Gateway status and the Client Key at `/console` on the public origin; `:18317/management.html` returns 404 in v2.
 
 ## Usage From A Downtime Window Is Missing
 
@@ -354,13 +368,11 @@ If Manager Server is down longer than the retention window, that period usually 
 
 This is expected.
 
-The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. Open:
+The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. For monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection, open the Full Mode entry: `/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable:
 
 ```text
 http://<cpamp-host>:18317/management.html
 ```
-
-for monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection.
 
 ## CPAMP Lightweight Panel Still Shows The Official Or An Older UI
 
@@ -389,4 +401,4 @@ No. The live demo uses frontend mock data and does not need CPA, Manager Server,
 
 ## What Is management.html In A Release?
 
-`management.html` is the single-file management panel shipped in release packages. Manager Server can host it, or CPA can load it as the CPAMP Lightweight Panel. The online documentation remains on GitHub Pages and is not distributed with install packages.
+`management.html` is the single-file management panel shipped in release packages and loaded by CPA as the CPAMP Lightweight Panel; each v2 Beta prerelease ships it too. The 1.x Stable Manager Server hosts it at `:18317/management.html`; v2 Beta Full Mode instead serves the `/console` console and does not serve `/management.html` (404). The online documentation remains on GitHub Pages and is not distributed with install packages.

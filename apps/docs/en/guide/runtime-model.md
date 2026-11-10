@@ -16,10 +16,13 @@ Full Mode in v2 Beta is not the single-Manager 1.x deployment below. Embedded of
 
 After external Management Key rotation, rebind and prove the current connection in the panel; do not repeatedly retry credentials CPA already rejected. Retain Manager `data.key` with its encrypted database. A refused or incomplete Adopt migration does not authorize automatic External fallback: follow the wizard report, not environment changes or manually edited records.
 
+The v2 Beta browser entry is the console at **`/console`** on the public origin (for example `http://<host>:18317/console`). v2 does not serve CPAMP's `/management.html`; that path returns 404. Embedded `8317` and `9081` are container-internal only and must not be published separately.
+
 Install: [v2 Docker](../deployment/docker.md) / [linux/amd64 Native](../deployment/native.md). Operate: [Backup](../operations/backup.md) / [Licensing And Release Assets](../reference/releases.md).
 
 ## 1.x Stable And Lightweight Panel Reference
 
+This section describes 1.x Stable, where Full Mode is the Manager Server panel at `:18317/management.html`. For v2 Beta use the `/console` entry above; do not treat this section's `:18317/management.html` as the v2 entry.
 
 CPA receives and forwards real model requests. CPAMP manages CPA and, in Full Mode, stores request history, analyzes cost, and helps maintain account state.
 

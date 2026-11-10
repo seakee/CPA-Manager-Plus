@@ -16,10 +16,13 @@ v2 Beta 的完整模式不等同于下方 1.x 的单 Manager 部署。内置官�
 
 外部 Management Key 轮换后，用面板重新绑定并证明当前连接；已被 CPA 拒绝的凭证不应反复重试。Manager 的 `data.key` 与加密数据库必须成套保留。Adopt 的资格拒绝或未完成迁移不是 External 自动降级许可；按向导报告处理，不以更换环境变量或手改记录代替证明。
 
+v2 Beta 的浏览器入口是公开 origin 下的控制台 **`/console`**（例如 `http://<host>:18317/console`）。v2 不提供 CPAMP 的 `/management.html`，访问该路径会返回 404；Embedded 的 `8317` 与 `9081` 只在容器内，不要另外公开。
+
 安装：[v2 Docker](../deployment/docker.md) / [linux/amd64 Native](../deployment/native.md)；维护：[备份](../operations/backup.md) / [许可证与发布资产](../reference/releases.md)。
 
 ## 1.x Stable 与轻量面板参考
 
+本节描述 1.x Stable：完整模式由 Manager Server 在 `:18317/management.html` 托管面板。v2 Beta 请使用上文的 `/console` 入口，不要把本节的 `:18317/management.html` 当成 v2 入口。
 
 CPA 负责接收和转发真实模型请求，CPAMP 负责管理 CPA，并在完整模式下保存请求历史、分析成本和处理账号状态。
 

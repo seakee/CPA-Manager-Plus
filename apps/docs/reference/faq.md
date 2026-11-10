@@ -1,11 +1,15 @@
 # 常见问题
 
-CPA Manager Plus 的完整监控和分析能力来自 Manager Server 托管面板。旧 CPA-Manager 通过 External Usage Service 接入用量服务的工作流不适用于 Plus。
+CPA Manager Plus 的完整监控和分析能力来自 Manager Server。旧 CPA-Manager 通过 External Usage Service 接入用量服务的工作流不适用于 Plus。
 
-CPAMP 统计和监控能力应从 Manager Server 托管面板进入：
+CPAMP 的统计和监控能力来自 Manager Server，浏览器入口按版本区分：
+
+- **v2 Beta**：公开 origin 的 `/console`，例如 `http://<host>:18317/console`。v2 不提供 `/management.html`，访问返回 404。
+- **1.x Stable**：Manager Server 托管的面板，例如 `http://<host>:18317/management.html`。
 
 ```text
-http://<host>:18317/management.html
+v2 Beta:      http://<host>:18317/console
+1.x Stable:   http://<host>:18317/management.html
 ```
 
 ## 应该选择哪种使用方式？
@@ -17,11 +21,21 @@ http://<host>:18317/management.html
 | 不增加额外服务，用更清晰的界面替代官方 UI    | [CPAMP 轻量面板](../deployment/cpa-panel.md) |
 | 不使用 Docker，但需要全部功能                | CPAMP 完整模式（原生包）                     |
 
-CPAMP 轻量面板由 CPA 直接托管，是官方 Management Center 的增强替代 UI。它不配置 Manager Server，也不读取 Manager Server SQLite 数据。需要完整 CPAMP 能力时，使用 Docker 或原生包启动 Manager Server，并打开 `:18317/management.html`。
+CPAMP 轻量面板由 CPA 直接托管，是官方 Management Center 的增强替代 UI。它不配置 Manager Server，也不读取 Manager Server SQLite 数据。需要完整 CPAMP 能力时，使用 Docker 或原生包启动 Manager Server，并打开它的浏览器入口：v2 Beta 是公开 origin 的 `/console`，1.x Stable 是 `:18317/management.html`。
 
 ## 打开面板后应该访问哪个地址？
 
-CPAMP 完整模式（Docker 或原生包）：
+CPAMP 完整模式的入口取决于版本。
+
+v2 Beta（公开 origin 下的控制台）：
+
+```text
+http://<host>:18317/console
+```
+
+v2 不提供 `/management.html`，访问该路径返回 404。
+
+1.x Stable（Manager Server 托管的面板）：
 
 ```text
 http://<host>:18317/management.html
@@ -83,7 +97,7 @@ cpa-manager-plus store-cpa-connection \
 
 修改 CPA panel repository 只会改变 CPA 托管的前端页面。
 
-请求监控和历史统计需要 Manager Server：
+请求监控和历史统计需要 Manager Server。下面是 1.x Stable 的 Docker 示例，入口是 `:18317/management.html`；v2 Beta 见 [v2 Docker 安装](../deployment/docker.md)，入口是公开 origin 的 `/console`：
 
 ```bash
 docker run -d \
@@ -215,7 +229,7 @@ http://cli-proxy-api:8317
 
 不能。RESP Pub/Sub 和 RESP pop 需要直接连接 CPA API 端口。HTTP queue 可以经过 HTTP proxy。
 
-同域名部署时，阅读 [反向代理](../deployment/reverse-proxy.md)。核心规则：
+同域名部署时，阅读 [反向代理](../deployment/reverse-proxy.md)。以下 1.x Stable 路径分流（v2 Beta 单镜像只有一个公开入口，控制台在 `/console`，把整个 origin 转发到 `18317`）：
 
 ```text
 /management.html        -> CPAMP
@@ -322,15 +336,15 @@ CPA Management Key 不能用于 CPAMP Manager Server-only API。
 
 ## `/models` 返回 412
 
-说明 Manager Server 尚未完成 setup。
-
-打开：
+1.x Stable：说明 Manager Server 尚未完成 setup。打开：
 
 ```text
 http://<cpamp-host>:18317/management.html
 ```
 
 先完成 setup。
+
+v2 Beta：安装未完成或网关尚未放行时 `/models` 也会失败；完成向导后到公开 origin 的 `/console` 核对网关状态与 Client Key，`:18317/management.html` 在 v2 返回 404。
 
 ## 停机期间的用量为什么无法恢复？
 
@@ -354,7 +368,7 @@ CPA 用量队列是内存队列，保留时间有限。
 
 这是预期行为。
 
-CPAMP 轻量面板不使用 Manager Server 分析能力，也不能挂接独立 Manager Server。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开：
+CPAMP 轻量面板不使用 Manager Server 分析能力，也不能挂接独立 Manager Server。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开完整模式入口：v2 Beta 是公开 origin 的 `/console`，1.x Stable 是：
 
 ```text
 http://<cpamp-host>:18317/management.html
@@ -387,4 +401,4 @@ rm static/management.html
 
 ## release 里的 management.html 是什么？
 
-`management.html` 是 release 包中的单文件管理面板，可由 Manager Server 托管，也可作为 CPAMP 轻量面板由 CPA 加载。在线文档仍通过 GitHub Pages 访问，不随安装包分发。
+`management.html` 是 release 包中的单文件管理面板，作为 CPAMP 轻量面板由 CPA 加载；每个 v2 Beta 预发布同样附带该文件。1.x Stable 的 Manager Server 会托管它，入口是 `:18317/management.html`；v2 Beta 的完整模式改用 `/console` 控制台，不提供 `/management.html`（返回 404）。在线文档仍通过 GitHub Pages 访问，不随安装包分发。

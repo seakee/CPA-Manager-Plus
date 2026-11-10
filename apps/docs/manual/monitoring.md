@@ -13,7 +13,7 @@ description: 使用 CPA Manager Plus 按账号、调用方 API Key、Provider、
 
 ## 可用条件
 
-请求监控只在 Manager Server 托管的面板中可用，并且需要开启 CPA 用量发布。CPAMP 轻量面板不连接 Manager Server，也不读取它的 SQLite；需要监控时请打开 `http://<cpamp-host>:18317/management.html`。
+请求监控只在 Manager Server 托管的面板或控制台中可用，并且需要开启 CPA 用量发布。CPAMP 轻量面板不连接 Manager Server，也不读取它的 SQLite；需要监控时请打开完整模式入口：v2 Beta 是 `http://<cpamp-host>:18317/console`，1.x Stable 是 `http://<cpamp-host>:18317/management.html`。
 
 如果页面提示请求监控未启用，请先到 [配置中心](./configuration.md) 的 Manager Server 配置里启用请求监控。
 

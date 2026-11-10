@@ -47,7 +47,7 @@ sudo systemctl restart cpa-manager-plus.service
 sudo systemctl status cpa-manager-plus.service
 ```
 
-Append the entire Handoff path to the public origin in a browser, set an Admin Key, select New Managed / Adopt / External, and complete qualification. For New Managed, save the first Client Key and verify the public entry. Stop the entire service before reissuing `initialize`, resetting Admin, backing up, or migrating; do not run systemd and `cpa-manager-plusctl start` concurrently. Existing 1.x users must follow the [v1.14.10 offline migration and rollback procedure](../operations/update.md), never start v2 directly against the old data directory.
+Append the entire Handoff path to the public origin in a browser, set an Admin Key, select New Managed / Adopt / External, and complete qualification. For New Managed, save the first Client Key and verify the public entry. After installation, later logins open `/console` on the public origin (for example `https://cpamp.example.com/console`); v2 does not serve `/management.html`, which returns 404. Stop the entire service before reissuing `initialize`, resetting Admin, backing up, or migrating; do not run systemd and `cpa-manager-plusctl start` concurrently. Existing 1.x users must follow the [v1.14.10 offline migration and rollback procedure](../operations/update.md), never start v2 directly against the old data directory.
 
 Check Native licensing using the actual package's `LICENSE` and `share/licenses/cli-proxy-api/LICENSE`. Container third-party inventory and Provenance paths do not apply to Native; see [Releases And Licensing](../reference/releases.md).
 
@@ -56,7 +56,7 @@ Check Native licensing using the actual package's `LICENSE` and `share/licenses/
 
 Use native packages when Docker is not part of your environment. They fit deployments already managed by systemd, launchd, Windows services, or another process supervisor.
 
-Native mode is still Manager Server mode: the binary serves `/management.html`, stores SQLite data locally, and uses the CPAMP Admin Key for login. It is not the old "external Usage Service for the CPA-port panel" workflow.
+Native mode is still Manager Server mode: the binary serves `/management.html`, stores SQLite data locally, and uses the CPAMP Admin Key for login. The `:18317/management.html` entry in this section belongs to 1.x Stable; v2 Beta uses `/console` on the public origin. It is not the old "external Usage Service for the CPA-port panel" workflow.
 
 If you only want to install the CPAMP native package, you can use [One-Click Installer](./installer.md). The script does not install CPA natively; use Docker for a full new deployment.
 
@@ -65,7 +65,7 @@ If you only want to install the CPAMP native package, you can use [One-Click Ins
 1. Confirm that CPA already runs and prepare its URL and CPA Management Key.
 2. Download the native package for your operating system and architecture from GitHub Releases.
 3. Extract and run `cpa-manager-plus`, or use the included background control script.
-4. Open `http://<host>:18317/management.html`.
+4. Open the 1.x Stable entry `http://<host>:18317/management.html`.
 5. Log in with the generated CPAMP Admin Key from the logs and connect CPA.
 
 For long-running production use, choose systemd, launchd, Windows Service Manager, or another process manager afterward.

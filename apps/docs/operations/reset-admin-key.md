@@ -12,7 +12,7 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   cpamp-manager reset-admin-key --db-path /data/usage.sqlite
 ```
 
-保存终端仅显示一次的新 Admin Key；命令成功后才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`，通过原公开入口登录。不要删除数据卷、锁文件或安装记录；失败时保持停止，核对真实数据路径。不要让输出进入公开日志。
+保存终端仅显示一次的新 Admin Key；命令成功后才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`，通过原公开入口的 `/console`（例如 `http://<host>:18317/console`）登录。v2 不提供 `/management.html`。不要删除数据卷、锁文件或安装记录；失败时保持停止，核对真实数据路径。不要让输出进入公开日志。
 
 linux/amd64 Native 在停止完整 launcher/systemd 服务、完成备份后，从包根目录执行：
 

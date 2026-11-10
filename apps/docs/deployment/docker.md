@@ -62,14 +62,16 @@ docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initiali
 在浏览器中先设置并保存 CPAMP Admin Key，再选择安装模式：**New Managed**（新建托管 CPA；`slim` 镜像会在安装完成前先由向导准备固定版本 CPA 引擎）、**Adopt**（收纳迁移既有 CPA；`slim` 镜像同样会先由向导准备固定版本 CPA 引擎）或 **External**（连接独立维护的外部 CPA，`full` 与 `slim` 均支持）。Adopt / External 不是无条件成功路径：遇到向导提示的源配置、版本、凭据或证据拒绝时必须按提示修正或中止，不得手改安装记录绕过。External 要求外部 CPA 至少为 `v8.0.55`，详见[运行时模型说明](../guide/runtime-model.md)。
 
 New Managed 完成后请立即保存一次性首把 Client Key，并通过统一入口完成首次模型请求验证后再接入业务流量。Admin Key、CPA Management Key 与 Client Key 职责不同，不可混用。进程 `/health` 返回 200 不代表安装完成或网关已放行，必须以向导完成、路由校验与客户端实测为准。
-## 1.x Stable：手动部署参考
 
+安装向导完成后，后续登录直接打开同一公开 origin 的 `/console`（例如 `http://<host>:18317/console`）。v2 不提供 `/management.html`，访问返回 404，它不是 v2 入口。
+
+## 1.x Stable：手动部署参考
 
 Docker 是新部署最省心的方式。CPAMP 镜像包含 Manager Server 和内置 `management.html` 面板；CPA / CLI Proxy API 仍是单独服务，可以和 CPAMP 放在同一个 Compose 文件里。
 
 想让脚本检查环境并生成 Compose 文件，可以先看 [一键安装脚本](./installer.md)。下面的内容适合手动维护 Compose 或把 CPAMP 合入已有部署。
 
-新部署建议使用 Manager Server 托管面板：
+1.x Stable 新部署建议使用 Manager Server 托管面板（v2 Beta 使用上文公开 origin 的 `/console`）：
 
 ```text
 http://<host>:18317/management.html
@@ -178,7 +180,7 @@ volumes:
 docker compose up -d
 ```
 
-打开：
+打开（1.x Stable）：
 
 ```text
 http://<host>:18317/management.html

@@ -12,7 +12,7 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   cpamp-manager reset-admin-key --db-path /data/usage.sqlite
 ```
 
-Save the new Admin Key shown once in the terminal. Only after success run `docker compose -f docker-compose.v2-embedded.yml up -d` and sign in through the original public entry. Do not delete volumes, lock files, or installation records. On failure, leave services stopped and check the actual data path. Keep output out of public logs.
+Save the new Admin Key shown once in the terminal. Only after success run `docker compose -f docker-compose.v2-embedded.yml up -d` and sign in at `/console` on the original public entry (for example `http://<host>:18317/console`); v2 does not serve `/management.html`. Do not delete volumes, lock files, or installation records. On failure, leave services stopped and check the actual data path. Keep output out of public logs.
 
 For linux/amd64 Native, stop the complete launcher/systemd service and back up first, then run from the package root:
 

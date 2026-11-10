@@ -51,13 +51,14 @@ Full Mode adds Manager Server and local SQLite for server-backed capabilities th
 
 ## Entry Points And Capability Boundary
 
-| Usage option               | Panel entry                                 | Best for                                     |
-| -------------------------- | ------------------------------------------- | -------------------------------------------- |
-| Official Management Center | `http://<cpa-host>:8317/management.html`    | Keeping the upstream default UI              |
-| CPAMP Lightweight Panel    | `http://<cpa-host>:8317/management.html`    | Replacing only the UI with no extra service  |
-| CPAMP Full Mode            | `http://<cpamp-host>:18317/management.html` | Monitoring, cost, inspection, and automation |
+| Usage option                     | Panel entry                                 | Best for                                     |
+| -------------------------------- | ------------------------------------------- | -------------------------------------------- |
+| Official Management Center       | `http://<cpa-host>:8317/management.html`    | Keeping the upstream default UI              |
+| CPAMP Lightweight Panel          | `http://<cpa-host>:8317/management.html`    | Replacing only the UI with no extra service  |
+| CPAMP Full Mode (v2 Beta)        | `http://<cpamp-host>:18317/console`         | Monitoring, cost, inspection, and automation |
+| CPAMP Full Mode (1.x Stable)     | `http://<cpamp-host>:18317/management.html` | Monitoring, cost, inspection, and automation |
 
-The CPA-hosted `:8317` panel does not connect to or read Manager Server. Even when Manager Server runs separately, open its own `:18317/management.html` entry to use request history, cost analytics, model prices, and server-side inspection.
+The Full Mode entry depends on the version: v2 Beta uses `/console` on the public origin (for example `http://<cpamp-host>:18317/console`) and does not serve `/management.html`, which returns 404; 1.x Stable still uses `:18317/management.html`. The CPA-hosted `:8317` panel does not connect to or read Manager Server. Even when Manager Server runs separately, open its own Full Mode entry to use request history, cost analytics, model prices, and server-side inspection.
 
 ## Full Mode Installation Options
 
@@ -66,7 +67,7 @@ Full Mode has one product capability set with two installation choices:
 - **Docker deployment (recommended)**: for most new users and server deployments.
 - **Native package deployment**: for Linux, macOS, or Windows hosts without Docker.
 
-Both use the `:18317/management.html` entry and the CPAMP Admin Key.
+Both use the CPAMP Admin Key. The entry depends on the version: v2 Beta uses `/console` on the public origin, while 1.x Stable uses `:18317/management.html`.
 
 ## Preview Before Choosing
 
@@ -76,7 +77,7 @@ The [Live Demo](https://seakee.github.io/CPA-Manager-Plus/) lets you preview the
 
 1. Already run CPA and only want a different UI: install the CPAMP Lightweight Panel.
 2. Need historical monitoring or cost analytics: deploy Manager Server.
-3. Switch to `:18317/management.html` and configure the CPA connection and collector.
+3. Switch to the Full Mode entry (`/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable) and configure the CPA connection and collector.
 4. The lightweight panel may remain on the CPA port, but the two entry points have independent capabilities.
 
 ## Next Steps

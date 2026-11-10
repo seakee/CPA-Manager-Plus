@@ -62,14 +62,16 @@ docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initiali
 In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (new managed CPA; on `slim`, the wizard prepares the pinned CPA engine before Managed setup completes), **Adopt** (qualify and migrate an existing CPA; on `slim`, the wizard also prepares the pinned CPA engine first), or **External** (connect to an independently operated CPA, supported on both `full` and `slim`). Adopt/External are not unconditional success paths: resolve the wizard's source, version, credential, or evidence refusals and stop if admission fails; do not edit installation records manually. External requires at least CPA `v8.0.55`; see [Runtime Model](../guide/runtime-model.md).
 
 For New Managed, save the one-time first Client Key and verify model requests through the public entry before sending production traffic. Admin Key, CPA Management Key, and Client Key are different credentials. A successful process `/health` is not installation completion or Gateway readiness: require the wizard's completion, routing verification, and client connectivity.
-## 1.x Stable: Manual Deployment Reference
 
+After the wizard completes, later logins open `/console` on the same public origin (for example `http://<host>:18317/console`). v2 does not serve `/management.html`; it returns 404 and is not the v2 entry.
+
+## 1.x Stable: Manual Deployment Reference
 
 Docker is the simplest path for a new deployment. The CPAMP image contains Manager Server and the embedded `management.html` panel. CPA / CLI Proxy API is still a separate service, and can run in the same Compose stack.
 
 If you want the script to check the environment and generate Compose files for you, start with [One-Click Installer](./installer.md). The rest of this page is for manual Compose maintenance or merging CPAMP into an existing deployment.
 
-For new deployments, use the Manager Server-hosted panel:
+For new 1.x Stable deployments, use the Manager Server-hosted panel (v2 Beta uses `/console` on the public origin described above):
 
 ```text
 http://<host>:18317/management.html
@@ -178,7 +180,7 @@ volumes:
 docker compose up -d
 ```
 
-Open:
+Open (1.x Stable):
 
 ```text
 http://<host>:18317/management.html
