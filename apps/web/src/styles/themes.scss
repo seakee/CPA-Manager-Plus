@@ -27,9 +27,12 @@
   --app-shadow: none;
   --app-shadow-soft: none;
   --app-text-primary: #2c3e50;
-  --app-text-regular: #5f6c7b;
-  /* Muted text is body-size copy, so it must still clear 4.5:1 on white. */
-  --app-text-muted: #64748b;
+  /* Body-size copy must clear 4.5:1 not only on white but on the canvas
+     (#eff2f7), on the white-alpha card surfaces and on 8-12% primary tints
+     that sit under hovered rows and chips. Measured worst case for the whole
+     light surface set: regular 5.91:1, muted 5.02:1. */
+  --app-text-regular: #475569;
+  --app-text-muted: #52606f;
   --app-accent: var(--data-blue-base);
   --app-accent-soft: rgba(59, 130, 246, 0.12);
   --surface-subtle: #f6faff;
@@ -101,7 +104,9 @@
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
   --text-tertiary: var(--app-text-muted);
-  --text-quaternary: #b5bdca;
+  /* Recessive tier for decorative glyphs and placeholder copy: >= 3:1 on every
+     light surface, 4.45:1 on white. Never use it for copy that carries meaning. */
+  --text-quaternary: #6f7889;
   --text-muted: var(--app-text-muted);
 
   --border-color: var(--app-border);
@@ -154,7 +159,7 @@
   --color-info-dark-2: var(--data-slate-dark-2);
 
   --data-blue-base: #3b82f6;
-  --data-blue-dark-2: #2563eb;
+  --data-blue-dark-2: #1d4ed8;
   --data-blue-light-3: #60a5fa;
   --data-blue-light-5: #93c5fd;
   --data-blue-light-7: #bfdbfe;
@@ -170,7 +175,12 @@
   --data-emerald-light-9: #ecfdf5;
 
   --data-green-base: #22c55e;
-  --data-green-dark-2: #15803d;
+  /* The `-dark-2` steps of the three status ramps are the text tier: they must
+     clear 4.5:1 both on the canvas and on the 8-12% self-tint that their own
+     badges and inline feedback paint (`--success-color` / `--warning-color`
+     consumers). Measured worst case incl. self tints: green 5.32:1,
+     amber 5.29:1, red 4.72:1. */
+  --data-green-dark-2: #166534;
   --data-green-light-3: #4ade80;
   --data-green-light-5: #86efac;
   --data-green-light-7: #bbf7d0;
@@ -178,7 +188,7 @@
   --data-green-light-9: #f0fdf4;
 
   --data-amber-base: #f59e0b;
-  --data-amber-dark-2: #b45309;
+  --data-amber-dark-2: #92400e;
   --data-amber-light-3: #fbbf24;
   --data-amber-light-5: #fcd34d;
   --data-amber-light-7: #fde68a;
@@ -325,8 +335,10 @@
   --app-shadow-soft: none;
   --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --app-text-primary: #e5e5e5;
-  --app-text-regular: #a3a3a3;
-  --app-text-muted: #949494;
+  /* Worst case over the dark surface set (canvas, glass, sidebar scrim, 5-8%
+     white lifts and 12-18% blue/semantic tints): regular 6.33:1, muted 5.06:1. */
+  --app-text-regular: #bcbcbc;
+  --app-text-muted: #a8a8a8;
   --app-accent-soft: rgba(96, 165, 250, 0.18);
   --surface-subtle: rgba(255, 255, 255, 0.06);
   --surface-subtle-hover: rgba(96, 165, 250, 0.12);
@@ -337,7 +349,7 @@
   --sidebar-bg-color: rgba(24, 28, 40, 0.42);
   --sidebar-logo-bg-color: rgba(24, 28, 40, 0.28);
   --sidebar-hover-bg-color: rgba(255, 255, 255, 0.05);
-  --sidebar-text-color: #a3a3a3;
+  --sidebar-text-color: var(--app-text-regular);
   --sidebar-active-text-color: #ffffff;
   --sidebar-shadow: 2px 0 12px rgba(0, 0, 0, 0.5);
 
@@ -378,7 +390,8 @@
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
   --text-tertiary: var(--app-text-muted);
-  --text-quaternary: #5f6572;
+  /* Recessive tier: >= 3:1 on every dark surface (measured 3.72:1 worst case). */
+  --text-quaternary: #8f8f8f;
   --text-muted: var(--app-text-muted);
 
   --border-color: var(--app-border);

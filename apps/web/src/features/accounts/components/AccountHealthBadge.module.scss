@@ -80,7 +80,8 @@
 }
 
 :global(.healthBadgeDisabled .healthBadgeDot) {
-  background: var(--data-badge-neutral-text);
+  /* Dots take palette tones, never a text-role token. */
+  background: var(--data-slate-base);
 }
 
 :global(.healthBadgeUnknown) {
@@ -90,5 +91,5 @@
 }
 
 :global(.healthBadgeUnknown .healthBadgeDot) {
-  background: var(--data-badge-neutral-text);
+  background: var(--data-slate-base);
 }

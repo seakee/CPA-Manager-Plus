@@ -9,7 +9,11 @@
   --journey-background: var(--app-bg-gradient);
   --border-strong: var(--app-border-strong);
   --border-focus: var(--app-input-border-focus);
-  --accent: var(--primary-text);
+  /* Two roles, matching themes.scss: `--accent` is the non-text emphasis colour
+     (borders, checked checkboxes/radios via accent-color, spinner edges);
+     `--accent-text` is the text/icon role that must clear 4.5:1 / 3:1. */
+  --accent: var(--primary-color);
+  --accent-text: var(--primary-text);
   --accent-hover: var(--primary-solid-hover);
   --accent-soft: var(--app-accent-soft);
   --emerald: var(--data-badge-success-text);
@@ -67,7 +71,7 @@
 }
 
 .console-navigation a {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
   text-decoration: none;
 }
@@ -243,7 +247,7 @@ input {
 }
 
 .badge-indigo {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--info-border);
 }
@@ -324,7 +328,7 @@ input {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--accent);
+  color: var(--accent-text);
   margin-bottom: 10px;
 }
 
@@ -709,7 +713,7 @@ input {
 
 .journey-version {
   padding: 6px 12px;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-radius: var(--app-radius-sm);
   font-size: 14px;
@@ -829,14 +833,14 @@ input {
 }
 
 .journey-steps li.active {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
 .journey-steps li.active .journey-step-dot {
   background: var(--accent-soft);
   border: 1px solid var(--focus-border);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .journey-steps li.done .journey-step-dot {
@@ -866,7 +870,7 @@ input {
 }
 
 .journey-body .alert > .fullweb-icon {
-  color: var(--accent);
+  color: var(--accent-text);
   margin-top: 3px;
 }
 
@@ -958,7 +962,7 @@ input {
 }
 
 .selected .journey-tile-icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .journey-choice.is-unavailable {
@@ -1074,7 +1078,7 @@ input {
 
 .journey-preview span {
   display: block;
-  color: var(--accent);
+  color: var(--accent-text);
   overflow-wrap: anywhere;
   font-size: 14px;
 }

@@ -1901,7 +1901,8 @@
 }
 
 .heatmapDetailBodyRefreshing {
-  opacity: 0.78;
+  /* 0.78 alpha of the text ramp fell to 4.1:1 while stale results are shown. */
+  opacity: 0.9;
 }
 
 .heatmapDetailRefreshBadge {

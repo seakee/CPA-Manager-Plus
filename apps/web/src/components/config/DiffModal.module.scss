@@ -151,7 +151,6 @@ $diff-del-text-color: color-mix(in srgb, var(--data-badge-danger-text) 92%, var(
 
 .hunkExpandIcon {
   color: color-mix(in srgb, $diff-hunk-color 70%, var(--text-tertiary));
-  opacity: 0.7;
 }
 
 .hunkText {

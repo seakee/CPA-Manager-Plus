@@ -80,7 +80,9 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   .cellPriority,
   .cellModels,
   .cellRecent {
-    opacity: 0.55;
+    /* 0.55 alpha of body text was 2.34:1; 0.85 keeps the row visibly inactive
+       while holding 5.16:1 on white and 4.88:1 on the hover tint. */
+    opacity: 0.85;
   }
 }
 

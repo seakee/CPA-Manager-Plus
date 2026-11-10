@@ -114,13 +114,12 @@
   font-size: 10px;
   line-height: 1;
   padding: 2px;
-  color: var(--text-secondary);
-  opacity: 0.5;
-  transition: opacity 0.15s;
+  color: var(--text-quaternary);
+  transition: color 0.15s;
   z-index: 1;
 
   &:hover {
-    opacity: 1;
+    color: var(--text-primary);
   }
 
   &:disabled {

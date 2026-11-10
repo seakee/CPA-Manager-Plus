@@ -193,8 +193,9 @@
         box-shadow: none;
 
         .bentoArrow {
-          transform: none;
-          opacity: 0.5;
+          /* Hierarchy comes from size/weight, never from alpha on text: a
+             50% primary on white is 2.38:1. Motion marks the affordance. */
+          transform: translateX(2px);
         }
       }
 
@@ -230,8 +231,7 @@
         font-size: 14px;
         color: var(--primary-text);
         font-weight: 600;
-        opacity: 0.5;
-        transition: all 0.2s;
+        transition: transform 0.2s;
       }
     }
   }

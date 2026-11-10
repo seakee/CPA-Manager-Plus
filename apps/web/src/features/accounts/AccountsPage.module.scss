@@ -471,7 +471,9 @@
   }
 
   &.accountGridCardDisabled {
-    opacity: 0.76;
+    /* The card is still read for its state, so 0.85 replaces 0.76: body copy
+       holds 5.16:1 and metadata 4.5:1 instead of 3.59:1 / 3.3:1. */
+    opacity: 0.85;
     background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
   }
 }
@@ -558,7 +560,7 @@
   .accountCard:focus-within,
   .accountGridCard:focus-within {
     .accountPinButton:not(.accountPinButtonActive) {
-      opacity: 0.55;
+      opacity: 0.75;
 
       &:hover {
         opacity: 1;
@@ -773,15 +775,13 @@
 
     .accountGridCardNotePlaceholder {
       color: var(--primary-text);
-      opacity: 0.85;
+      opacity: 1;
     }
   }
   &.accountGridCardNoteRowEmpty {
-    opacity: 0.6;
-
-    &:hover {
-      opacity: 1;
-    }
+    /* The empty row is an interactive affordance, so its copy stays a measured
+       text tier (muted 6.44:1 on white); alpha dimming put it at 2.88:1. */
+    color: var(--text-tertiary);
   }
 
   &.accountGridCardNoteReadOnly {
@@ -793,7 +793,7 @@
 
       .accountGridCardNoteIcon {
         color: var(--text-secondary);
-        opacity: 0.65;
+        opacity: 0.75;
       }
 
       .accountGridCardNotePlaceholder {
@@ -803,17 +803,13 @@
     }
 
     &.accountGridCardNoteRowEmpty {
-      opacity: 0.6;
-
-      &:hover {
-        opacity: 0.6;
-      }
+      color: var(--text-tertiary);
     }
   }
 
   .accountGridCardNoteIcon {
     flex-shrink: 0;
-    opacity: 0.65;
+    opacity: 0.75;
     color: var(--text-secondary);
     transition: opacity 0.14s ease, color 0.14s ease;
   }
@@ -828,9 +824,8 @@
 
   .accountGridCardNotePlaceholder {
     font-style: normal;
-    opacity: 0.7;
     user-select: none;
-    transition: color 0.14s ease, opacity 0.14s ease;
+    transition: color 0.14s ease;
   }
 }
 
@@ -2147,15 +2142,6 @@
   min-width: 0;
   white-space: nowrap;
   flex-shrink: 0;
-}
-
-.quotaForecastGroup {
-  opacity: 0.82;
-  transition: opacity 0.14s ease;
-
-  &:hover {
-    opacity: 1;
-  }
 }
 
 .quotaUsageIcon {

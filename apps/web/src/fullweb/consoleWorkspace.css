@@ -15,7 +15,7 @@
 }
 .fresh-managed-config .page-eyebrow {
   margin: 0 0 6px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 1.8px;
@@ -56,7 +56,7 @@
   height: 38px;
   flex: 0 0 auto;
   border-radius: var(--app-radius-md);
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .fresh-managed-resource .key-workspace-heading {
@@ -226,7 +226,7 @@
 .gateway-tabs [aria-selected='true'] {
   border-color: var(--accent, var(--primary-color));
   background: var(--accent-soft, var(--app-accent-soft));
-  color: var(--accent, var(--primary-color));
+  color: var(--accent-text, var(--primary-text));
   font-weight: 600;
 }
 
@@ -234,7 +234,7 @@
   padding: 1px 6px;
   border-radius: var(--app-radius-xs);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -721,7 +721,7 @@
 .fresh-system-workspace .badge-emerald {
   border-color: var(--data-badge-info-border, var(--border-subtle));
   background: var(--data-badge-info-bg, var(--accent-soft));
-  color: var(--data-badge-info-text, var(--accent));
+  color: var(--data-badge-info-text, var(--accent-text));
 }
 
 .config-workspace .badge.warn {
@@ -896,7 +896,8 @@
 }
 
 .field-locked {
-  opacity: 0.72;
+  /* Locked groups stay readable: 0.72 alpha put their labels below 4.5:1. */
+  opacity: 0.9;
 }
 
 .field-reason {
@@ -1034,7 +1035,7 @@
 .state-group .btn.active {
   border-color: var(--accent);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
