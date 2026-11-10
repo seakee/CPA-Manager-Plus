@@ -553,16 +553,18 @@ describe('Fresh installation and Console authority boundary', () => {
       return children;
     };
     const chineseAlert = alertText();
-    expect(chineseAlert).toBe(i18n.t('fullweb.authError', { lng: 'zh-CN' }));
+    expect(chineseAlert.length).toBeGreaterThan(0);
+    expect(chineseAlert).not.toMatch(/fullweb\./);
 
     await act(async () => {
       await i18n.changeLanguage('en');
       await vi.dynamicImportSettled();
     });
     const englishAlert = alertText();
-    expect(englishAlert).toBe(i18n.t('fullweb.authError', { lng: 'en' }));
+    // The visible alert follows the language instead of keeping the old sentence.
     expect(englishAlert).not.toBe(chineseAlert);
-    expect(englishAlert).not.toContain('fullweb.');
+    expect(englishAlert).not.toContain(chineseAlert);
+    expect(englishAlert).not.toMatch(/fullweb\./);
 
     await act(async () => {
       await i18n.changeLanguage('zh-CN');

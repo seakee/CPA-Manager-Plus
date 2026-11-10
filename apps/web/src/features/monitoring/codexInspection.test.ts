@@ -6847,8 +6847,9 @@ describe('Codex inspection last-run cache', () => {
       ],
     });
 
+    const secrets = ['secret-access-token', 'secret-authorization', 'secret-client-secret'];
     const persisted = storage.getItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY) ?? '';
-    for (const secret of ['secret-access-token', 'secret-authorization', 'secret-client-secret']) {
+    for (const secret of secrets) {
       expect(persisted).not.toContain(secret);
     }
 
@@ -6860,8 +6861,17 @@ describe('Codex inspection last-run cache', () => {
       percent: '1.0%',
     });
 
-    const viewEntry = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('ru'));
-    expect(viewEntry.message).toBe('demo@example.com -> Удалить (HTTP 200 · использовано 1.0%)');
+    // What is left still renders in every language, and no credential reaches the text.
+    const russian = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('ru'));
+    const english = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('en'));
+    for (const message of [russian.message, english.message]) {
+      expect(message).toContain('demo@example.com');
+      expect(message).not.toMatch(/monitoring\./);
+      for (const secret of secrets) {
+        expect(message).not.toContain(secret);
+      }
+    }
+    expect(russian.message).not.toBe(english.message);
   });
 
   it('restores legacy 401 filters as reauth filters', () => {

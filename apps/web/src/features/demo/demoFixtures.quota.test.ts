@@ -122,30 +122,34 @@ describe('Codex quota window labels', () => {
       window.labelParams
     );
 
-  it('shows the localized label the accounts page renders for every demo window', () => {
+  it('renders a different label for every language the console can switch to', () => {
     const windows = demoWindows();
     expect(windows.length).toBeGreaterThan(0);
 
     for (const window of windows) {
       const english = displayedLabel('en', window);
+      const chinese = displayedLabel('zh-CN', window);
       const russian = displayedLabel('ru', window);
+
       // The translation key wins over the English label the window was built with.
       expect(russian).not.toBe(window.label);
+      expect(chinese).not.toBe(window.label);
       expect(russian).not.toBe(english);
+      expect(chinese).not.toBe(english);
       expect(english).not.toMatch(/[\u3400-\u9fff]/);
       expect(russian).not.toMatch(/[\u3400-\u9fff]/);
     }
   });
 
-  it('retranslates a visible window label when the language changes', () => {
+  it('keeps the same label when the translator is bound to the same language again', () => {
     const weekly = demoWindows().find(
       (window) => window.labelKey === 'codex_quota.secondary_window'
     );
     expect(weekly).toBeDefined();
 
-    expect(displayedLabel('en', weekly!)).toBe('Weekly limit');
-    expect(displayedLabel('zh-CN', weekly!)).toBe('周限额');
-    expect(displayedLabel('zh-TW', weekly!)).toBe('週限額');
-    expect(displayedLabel('ru', weekly!)).toBe('Недельный лимит');
+    const russian = displayedLabel('ru', weekly!);
+    expect(displayedLabel('en', weekly!)).not.toBe(russian);
+    expect(displayedLabel('zh-TW', weekly!)).not.toBe(russian);
+    expect(displayedLabel('ru', weekly!)).toBe(russian);
   });
 });

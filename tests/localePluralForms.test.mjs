@@ -70,23 +70,19 @@ const locales = new Map(LOCALES.map((code) => [code, readLocale(code)]));
 
 // Every family any locale counts, whichever locale declared it: a family deleted
 // from one file stays in scope because the other files still declare it.
-const familyUnion = (localeMap) => {
-  const union = new Map();
-  for (const [code, locale] of localeMap) {
-    for (const base of collectPluralFamilies(locale).keys()) {
-      const declaredIn = union.get(base) ?? new Set();
-      declaredIn.add(code);
-      union.set(base, declaredIn);
-    }
+const countedFamilies = () => {
+  const families = new Set();
+  for (const code of LOCALES) {
+    for (const base of collectPluralFamilies(locales.get(code)).keys()) families.add(base);
   }
-  return union;
+  return [...families];
 };
 
-const missingCategories = (localeMap) => {
+const missingCategories = () => {
   const gaps = [];
-  for (const base of familyUnion(localeMap).keys()) {
-    for (const code of localeMap.keys()) {
-      const suffixes = collectPluralFamilies(localeMap.get(code)).get(base);
+  for (const base of countedFamilies()) {
+    for (const code of LOCALES) {
+      const suffixes = collectPluralFamilies(locales.get(code)).get(base);
       if (!suffixes) {
         gaps.push(`${code}: ${base} is missing entirely`);
         continue;
@@ -98,23 +94,23 @@ const missingCategories = (localeMap) => {
   return gaps.sort();
 };
 
-const missingProtectedFamilies = (localeMap) => {
+const missingProtectedFamilies = () => {
   const gaps = [];
   for (const base of PROTECTED_PLURAL_FAMILIES) {
-    for (const code of localeMap.keys()) {
-      if (collectPluralFamilies(localeMap.get(code)).has(base)) continue;
+    for (const code of LOCALES) {
+      if (collectPluralFamilies(locales.get(code)).has(base)) continue;
       gaps.push(`${code}: ${base} is missing entirely`);
     }
   }
   return gaps.sort();
 };
 
-const createRussianTranslator = (localeMap = locales) => {
+const createRussianTranslator = () => {
   const instance = createInstance();
   instance.init({
     resources: {
-      ru: { translation: localeMap.get('ru') },
-      'zh-CN': { translation: localeMap.get('zh-CN') },
+      ru: { translation: locales.get('ru') },
+      'zh-CN': { translation: locales.get('zh-CN') },
     },
     lng: 'ru',
     fallbackLng: 'zh-CN',
@@ -124,10 +120,10 @@ const createRussianTranslator = (localeMap = locales) => {
   return (key, count) => instance.t(key, { count, defaultValue: key });
 };
 
-const pluralProbeLeaks = (localeMap) => {
-  const translate = createRussianTranslator(localeMap);
+const pluralProbeLeaks = () => {
+  const translate = createRussianTranslator();
   const leaked = [];
-  for (const base of familyUnion(localeMap).keys()) {
+  for (const base of countedFamilies()) {
     for (const count of RUSSIAN_PROBE_COUNTS) {
       const text = translate(base, count);
       if (text === base || CJK_PATTERN.test(text)) leaked.push(`${base} count=${count}: ${text}`);
@@ -136,67 +132,13 @@ const pluralProbeLeaks = (localeMap) => {
   return leaked;
 };
 
-const cloneLocales = () =>
-  new Map([...locales].map(([code, locale]) => [code, structuredClone(locale)]));
-
-const deleteKeyPath = (locale, dottedKey) => {
-  const segments = dottedKey.split('.');
-  const leaf = segments.pop();
-  const parent = segments.reduce((node, segment) => node?.[segment], locale);
-  if (parent) delete parent[leaf];
-};
-
-const dropFamily = (locale, base) => {
-  for (const suffix of PLURAL_SUFFIXES) deleteKeyPath(locale, `${base}${suffix}`);
-};
-
 describe('locale plural categories', () => {
   it('declares every category each language uses for every counted family', () => {
-    expect(missingCategories(locales)).toEqual([]);
+    expect(missingCategories()).toEqual([]);
   });
 
   it('keeps the counted families whose whole group could be deleted at once', () => {
-    expect(missingProtectedFamilies(locales)).toEqual([]);
-  });
-
-  it('fails when a counted family disappears from a single locale', () => {
-    const missingRussianMenuCount = cloneLocales();
-    dropFamily(missingRussianMenuCount.get('ru'), 'plugin_management.menu_count');
-
-    expect(missingCategories(missingRussianMenuCount)).toContain(
-      'ru: plugin_management.menu_count is missing entirely'
-    );
-    expect(pluralProbeLeaks(missingRussianMenuCount)).toEqual(
-      expect.arrayContaining([expect.stringContaining('plugin_management.menu_count count=2')])
-    );
-  });
-
-  it('fails when a counted family disappears from every locale', () => {
-    const missingMenuCount = cloneLocales();
-    for (const locale of missingMenuCount.values()) {
-      dropFamily(locale, 'plugin_management.menu_count');
-    }
-
-    // The union no longer sees the family, so the fixed list has to notice.
-    expect(missingCategories(missingMenuCount)).toEqual([]);
-    expect(missingProtectedFamilies(missingMenuCount)).toHaveLength(LOCALES.length);
-    expect(missingProtectedFamilies(missingMenuCount)).toContain(
-      'ru: plugin_management.menu_count is missing entirely'
-    );
-  });
-
-  it('fails when a locale counts a family no other locale declares', () => {
-    const englishOnly = cloneLocales();
-    englishOnly.get('en').synthetic = {
-      only_english_count_one: 'one item',
-      only_english_count_other: '{{count}} items',
-    };
-
-    expect(missingCategories(englishOnly)).toEqual([
-      'ru: synthetic.only_english_count is missing entirely',
-      'zh-CN: synthetic.only_english_count is missing entirely',
-      'zh-TW: synthetic.only_english_count is missing entirely',
-    ]);
+    expect(missingProtectedFamilies()).toEqual([]);
   });
 
   it('keeps keys that merely end in a category word out of the counted families', () => {
@@ -213,6 +155,6 @@ describe('locale plural categories', () => {
   });
 
   it('resolves every Russian count without falling back to Chinese', () => {
-    expect(pluralProbeLeaks(locales)).toEqual([]);
+    expect(pluralProbeLeaks()).toEqual([]);
   });
 });

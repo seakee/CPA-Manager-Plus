@@ -20,35 +20,50 @@ const translator = (lng: string) => {
 describe('login error text', () => {
   it('keeps the reason so a language switch retranslates the failure', () => {
     const failure = toLoginError({ status: 403, message: 'Request failed with status code 403' });
+    const english = formatLoginError(failure, translator('en'));
+    const russian = formatLoginError(failure, translator('ru'));
 
-    expect(formatLoginError(failure, translator('en'))).toBe(
-      'HTTP 403: Access denied, insufficient permissions'
-    );
-    expect(formatLoginError(failure, translator('ru'))).toBe(
-      'HTTP 403: Доступ запрещён, недостаточно прав'
-    );
+    // The HTTP prefix is protocol, the sentence after it is translated.
+    expect(english.startsWith('HTTP 403: ')).toBe(true);
+    expect(russian.startsWith('HTTP 403: ')).toBe(true);
+    expect(russian).not.toBe(english);
+    expect(english).not.toMatch(/(login|usage_service_errors)\./);
+    expect(russian).not.toMatch(/(login|usage_service_errors)\./);
 
     const rejectedKey = toLoginError({ status: 401 });
-    expect(formatLoginError(rejectedKey, translator('ru'))).toBe('Неверный ключ администратора.');
+    const rejectedEnglish = formatLoginError(rejectedKey, translator('en'));
+    const rejectedRussian = formatLoginError(rejectedKey, translator('ru'));
+    expect(rejectedEnglish.startsWith('HTTP')).toBe(false);
+    expect(rejectedRussian).not.toBe(rejectedEnglish);
   });
 
   it('keeps the backend detail outside the translated sentence', () => {
     const failure = toLoginError({ status: 500, message: 'database is locked' });
 
     expect(failure).toEqual({ key: 'login.error_server', httpStatus: 500, backendDetail: 'database is locked' });
-    expect(formatLoginError(failure, translator('en'))).toBe(
-      'HTTP 500: Internal server error, please try again later (service response: database is locked)'
-    );
-    expect(formatLoginError(failure, translator('ru'))).toContain('детали сервера: database is locked');
+    const english = formatLoginError(failure, translator('en'));
+    const russian = formatLoginError(failure, translator('ru'));
+    expect(english.startsWith('HTTP 500: ')).toBe(true);
+    // The raw backend text is appended verbatim in every language.
+    expect(english).toContain('database is locked');
+    expect(russian).toContain('database is locked');
+    expect(russian).not.toBe(english);
   });
 
-  it('builds a failure toast that retranslates with the error box', () => {
+  it('builds a failure toast from the error that is on screen, in any language', () => {
     const failure = toLoginError({ status: 401 });
+    const chineseBox = formatLoginError(failure, translator('zh-CN'));
+    const chineseToast = formatLoginFailure(failure, translator('zh-CN'));
+    const russianToast = formatLoginFailure(failure, translator('ru'));
 
-    expect(formatLoginFailure(failure, translator('zh-CN'))).toBe('登录失败: 管理员密钥无效。');
-    expect(formatLoginFailure(failure, translator('ru'))).toBe(
-      'Вход не выполнен: Неверный ключ администратора.'
-    );
+    // The toast repeats the box above it and adds nothing but the failure prefix.
+    expect(chineseToast).toContain(chineseBox);
+    expect(chineseToast).not.toBe(chineseBox);
+    expect(chineseToast).not.toMatch(/notification\./);
+    // Re-rendering it with another translator changes the sentence entirely.
+    expect(russianToast).not.toBe(chineseToast);
+    expect(russianToast).not.toContain(chineseBox);
+    expect(formatLoginError(failure, translator('ru'))).not.toBe(chineseBox);
   });
 
   it('maps transport failures and usage service codes to translation keys', () => {

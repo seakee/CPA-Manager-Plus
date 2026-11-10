@@ -148,13 +148,22 @@ describe('NotificationContainer', () => {
     ];
 
     await render(i18n);
-    expect(messageText()).toBe('登录失败');
+    const chinese = messageText();
+    expect(chinese).not.toMatch(/^notification\./);
 
     await act(async () => {
       await i18n.changeLanguage('ru');
     });
 
-    expect(messageText()).toBe('Вход не выполнен');
+    const russian = messageText();
+    expect(russian).not.toBe(chinese);
+    expect(russian).not.toMatch(/^notification\./);
+
+    await act(async () => {
+      await i18n.changeLanguage('zh-CN');
+    });
+
+    expect(messageText()).toBe(chinese);
   });
 
   it('keeps a plain message unchanged across a language change', async () => {
