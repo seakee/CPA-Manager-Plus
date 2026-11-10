@@ -334,9 +334,9 @@ curl -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 
 The CPA Management Key is not accepted for CPAMP Manager Server-only APIs.
 
-## `/models` Returns 412
+## `/models` Returns 412 Or 503
 
-1.x Stable: Manager Server setup is not complete. Open:
+1.x Stable: a `412` means Manager Server setup is not complete. Open:
 
 ```text
 http://<cpamp-host>:18317/management.html
@@ -344,7 +344,7 @@ http://<cpamp-host>:18317/management.html
 
 Finish setup first.
 
-v2 Beta: `/models` also fails while installation is unfinished or the Gateway is not admitted. After completing the wizard, check Gateway status and the Client Key at `/console` on the public origin; `:18317/management.html` returns 404 in v2.
+v2 Beta: it does not return `412`. While installation is unfinished or the Gateway is not admitted, `/models` is answered by the public ingress with `503 gateway pending configuration`. After completing the wizard, check Gateway status and the Client Key at `/console` on the public origin; `:18317/management.html` returns 404 in v2.
 
 ## Usage From A Downtime Window Is Missing
 
@@ -368,10 +368,11 @@ If Manager Server is down longer than the retention window, that period usually 
 
 This is expected.
 
-The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. For monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection, open the Full Mode entry: `/console` on the public origin for v2 Beta, `:18317/management.html` for 1.x Stable:
+The CPAMP Lightweight Panel does not use Manager Server analytics and cannot attach to a separate Manager Server. For monitoring, dashboard analytics, model prices, API key aliases, usage import/export, and server inspection, open the Full Mode entry:
 
 ```text
-http://<cpamp-host>:18317/management.html
+v2 Beta:      http://<cpamp-host>:18317/console
+1.x Stable:   http://<cpamp-host>:18317/management.html
 ```
 
 ## CPAMP Lightweight Panel Still Shows The Official Or An Older UI

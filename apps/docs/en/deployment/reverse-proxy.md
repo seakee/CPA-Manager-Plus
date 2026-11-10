@@ -3,7 +3,7 @@
 Use a reverse proxy when one domain needs to serve both the CPAMP panel and CPA APIs. HTTP panels and HTTP APIs can be proxied; RESP Pub/Sub and RESP pop cannot go through a normal HTTP reverse proxy.
 
 ::: warning The v2 Beta entry differs from 1.x
-The v2 Beta single image publishes only port `18317`, routed by Ingress: the console is at `/console` (for example `https://your-domain.com/console`), the frontend calls `/console/api/v2/*`, and `/management.html` returns 404. v2 therefore does not need the 1.x path split on this page; forward the whole domain to `18317`. The table, Nginx example, and troubleshooting entries below describe the 1.x Stable `/management.html` panel.
+The v2 Beta single image publishes only port `18317`, routed by Ingress: the console is at `/console` (for example `https://your-domain.com/console`; the entry has no trailing slash and `/console/` returns 404), the frontend calls `/console/api/v2/*`, and `/management.html` returns 404. v2 therefore does not need the 1.x path split on this page; forward the whole domain to `18317`. The table, Nginx example, and troubleshooting entries below describe the 1.x Stable `/management.html` panel.
 :::
 
 This guide uses a 1.x Stable same-domain setup:
@@ -352,7 +352,16 @@ For Linux Docker environments, it is usually better to put CPA and CPAMP in the 
 
 ## Verification
 
-After configuring Nginx, test in this order. The commands below target the 1.x Stable `/management.html` panel; for v2 Beta first confirm the console with `curl -I https://your-domain.com/console`, then use the console's reported state for the remaining public paths.
+After configuring Nginx, test in this order. The commands below target the 1.x Stable `/management.html` panel.
+
+The v2 Beta console entry is `/console` and has no trailing slash (`/console/` returns 404). It only returns the page on browser-style navigation, so the check must declare `Accept: text/html`:
+
+```bash
+# The v2 Beta console should return 200; the entry has no trailing slash
+curl -sI -H 'Accept: text/html' https://your-domain.com/console
+```
+
+A plain `curl -I https://your-domain.com/console` (curl sends `Accept: */*` by default) returns 404 by design; that does not mean the console is unavailable. Use the console's reported state for the remaining public paths.
 
 ```bash
 # 1. CPAMP panel should be reachable

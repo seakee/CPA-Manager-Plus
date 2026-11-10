@@ -67,7 +67,8 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 | -------------------------------------------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------- |
 | 官方 [CLI Proxy API Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) | 希望继续使用 CPA 项目维护的上游原生 UI   | CPA `:8317/management.html`             |
 | CPAMP 轻量面板                                                                                           | 只替换界面，不增加额外服务或数据库       | CPA `:8317/management.html`             |
-| CPAMP 完整模式                                                                                           | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server `:18317/management.html` |
+| CPAMP 完整模式（v2 Beta）                                                                                | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server `/console`               |
+| CPAMP 完整模式（1.x Stable）                                                                             | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server `:18317/management.html` |
 
 详细区别见 [如何选择 CPA 面板](https://seakee.github.io/CPA-Manager-Plus/docs/guide/choosing-a-panel.html)，也可以直接查看 [CPAMP 轻量面板安装指南](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/cpa-panel.html)。
 
@@ -159,7 +160,7 @@ volumes:
 docker compose up -d
 ```
 
-打开 `http://<host>:18317/management.html`，从 Manager Server 日志取得 CPAMP 管理员密钥，然后在 setup 填写 CPA 地址和 CPA Management Key。
+打开 1.x Stable 面板 `http://<host>:18317/management.html`，从 Manager Server 日志取得 CPAMP 管理员密钥，然后在 setup 填写 CPA 地址和 CPA Management Key。`:latest` 标签是 1.x Stable；使用 v2 Beta 镜像时入口是 `http://<host>:18317/console`，`/management.html` 返回 404。
 
 ### 仅部署 CPAMP
 

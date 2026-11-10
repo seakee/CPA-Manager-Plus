@@ -31,10 +31,10 @@ The CPAMP Lightweight Panel is an enhanced WebUI hosted directly by CPA and requ
 
 Docker and native packages provide the same Full Mode capabilities; only the installation method differs.
 
-| Installation                    | Best for                              | Entry                                                                                                    |
-| ------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Installation                    | Best for                              | Entry                                                                                                   |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Docker deployment (recommended) | Most new users and server deployments | v2 Beta: `http://<cpamp-host>:18317/console`<br>1.x Stable: `http://<cpamp-host>:18317/management.html` |
-| Native package deployment       | Hosts where Docker is not used        | Same as above                                                                                            |
+| Native package deployment       | Hosts where Docker is not used        | Same as above                                                                                           |
 
 v2 Beta does not serve `/management.html`; it returns 404 and is not the v2 entry.
 

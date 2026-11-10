@@ -334,9 +334,9 @@ curl -H "Authorization: Bearer <CPAMP_ADMIN_KEY>" \
 
 CPA Management Key 不能用于 CPAMP Manager Server-only API。
 
-## `/models` 返回 412
+## `/models` 返回 412 或 503
 
-1.x Stable：说明 Manager Server 尚未完成 setup。打开：
+1.x Stable：返回 `412` 说明 Manager Server 尚未完成 setup。打开：
 
 ```text
 http://<cpamp-host>:18317/management.html
@@ -344,7 +344,7 @@ http://<cpamp-host>:18317/management.html
 
 先完成 setup。
 
-v2 Beta：安装未完成或网关尚未放行时 `/models` 也会失败；完成向导后到公开 origin 的 `/console` 核对网关状态与 Client Key，`:18317/management.html` 在 v2 返回 404。
+v2 Beta：不返回 `412`。安装未完成或网关尚未放行时，`/models` 由公开 ingress 返回 `503 gateway pending configuration`。完成向导后到公开 origin 的 `/console` 核对网关状态与 Client Key；`:18317/management.html` 在 v2 返回 404。
 
 ## 停机期间的用量为什么无法恢复？
 
@@ -368,10 +368,11 @@ CPA 用量队列是内存队列，保留时间有限。
 
 这是预期行为。
 
-CPAMP 轻量面板不使用 Manager Server 分析能力，也不能挂接独立 Manager Server。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开完整模式入口：v2 Beta 是公开 origin 的 `/console`，1.x Stable 是：
+CPAMP 轻量面板不使用 Manager Server 分析能力，也不能挂接独立 Manager Server。需要监控、仪表盘、模型价格、API 密钥别名、用量导入导出和服务端巡检时，请打开完整模式入口：
 
 ```text
-http://<cpamp-host>:18317/management.html
+v2 Beta:      http://<cpamp-host>:18317/console
+1.x Stable:   http://<cpamp-host>:18317/management.html
 ```
 
 ## CPA 面板仍显示旧面板

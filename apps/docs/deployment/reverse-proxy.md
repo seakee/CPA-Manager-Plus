@@ -3,7 +3,7 @@
 如果你想用同一个域名访问 CPAMP 面板和 CPA API，就需要明确分流规则。HTTP 面板和 HTTP API 可以走反向代理；RESP Pub/Sub / RESP pop 不能走普通 HTTP 反向代理。
 
 ::: warning v2 Beta 的入口与 1.x 不同
-v2 Beta 单镜像只公开 `18317` 一个端口，由 Ingress 统一路由：控制台在 `/console`（例如 `https://your-domain.com/console`），前端调用 `/console/api/v2/*`，`/management.html` 返回 404。因此 v2 不需要本页的 1.x 路径分流，把整个域名转发到 `18317` 即可。下表、Nginx 示例和排障项描述的是 1.x Stable 的 `/management.html` 面板。
+v2 Beta 单镜像只公开 `18317` 一个端口，由 Ingress 统一路由：控制台在 `/console`（例如 `https://your-domain.com/console`，入口不带尾斜杠，`/console/` 返回 404），前端调用 `/console/api/v2/*`，`/management.html` 返回 404。因此 v2 不需要本页的 1.x 路径分流，把整个域名转发到 `18317` 即可。下表、Nginx 示例和排障项描述的是 1.x Stable 的 `/management.html` 面板。
 :::
 
 本文按 1.x Stable 的同域名部署来说明：
@@ -349,7 +349,16 @@ Linux Docker 环境则建议把 CPA 和 CPAMP 放到同一个 Docker network，�
 
 ## 验证
 
-配置完成后按顺序验证。下面的命令面向 1.x Stable 的 `/management.html` 面板；v2 Beta 先用 `curl -I https://your-domain.com/console` 确认控制台可打开，其余公开路径以实际安装后的控制台状态为准。
+配置完成后按顺序验证。下面的命令面向 1.x Stable 的 `/management.html` 面板。
+
+v2 Beta 的控制台入口是 `/console`，不带尾斜杠（`/console/` 返回 404），并且只在浏览器式导航下返回页面，所以验证时必须声明 `Accept: text/html`：
+
+```bash
+# v2 Beta 控制台应返回 200；入口不带尾斜杠
+curl -sI -H 'Accept: text/html' https://your-domain.com/console
+```
+
+不带 `Accept: text/html` 的 `curl -I https://your-domain.com/console`（curl 默认发送 `Accept: */*`）返回 404 属于预期行为，不代表控制台不可用。其余公开路径以实际安装后的控制台状态为准。
 
 ```bash
 # 1. CPAMP 面板能打开
