@@ -7,22 +7,36 @@ import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
 import i18n from '../i18n';
 import { configurationText as c } from '../i18n/configurationWorkspace';
+import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { gatewayViewFixture } from './gatewayViewFixture';
+
+/** The text a node renders to, the way the operator reads it. */
+function textOf(node: { children?: readonly unknown[] } | string): string {
+  if (typeof node === 'string') return node;
+  return (node.children ?? [])
+    .map((child) =>
+      typeof child === 'string' ? child : textOf(child as { children?: readonly unknown[] })
+    )
+    .join('');
+}
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
 // portal, focus, animation and close controls.
 vi.mock('../components/ui/Modal', () => ({
   Modal: ({
     open,
+    title,
     children,
     footer,
   }: {
     open: boolean;
+    title?: ReactNode;
     children?: ReactNode;
     footer?: ReactNode;
   }) =>
     open ? (
       <div>
+        {title ? <h2>{title}</h2> : null}
         {children}
         {footer}
       </div>
@@ -140,8 +154,13 @@ describe('Fresh resources within the original Console', () => {
       nameRevision: 1,
       origin: 'workspace' as const,
     };
+    let failCreate!: (reason: Error) => void;
     const transport = vi.fn<typeof fetch>().mockImplementation((url, init) => {
-      if (init?.method === 'POST') return Promise.reject(new TypeError('reply lost'));
+      if (init?.method === 'POST') {
+        return new Promise<Response>((_resolve, reject) => {
+          failCreate = reject;
+        });
+      }
       return Promise.resolve(
         Response.json(
           String(url).includes('/requests/')
@@ -161,9 +180,22 @@ describe('Fresh resources within the original Console', () => {
         .findAllByType('button')
         .find((node) => node.props.children === label || node.props['aria-label'] === label)!;
     await act(async () => button(t('keysCreate')).props.onClick());
-    await act(async () =>
-      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() })
-    );
+    await act(async () => {
+      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // While creation is in flight, the exit lock is held and the unknown-result
+    // recovery panel does not flash prematurely.
+    expect(pending).toHaveBeenLastCalledWith(true);
+    const inFlightText = JSON.stringify(renderer.toJSON());
+    expect(inFlightText).not.toContain(t('keysUnknown'));
+    expect(inFlightText).not.toContain(k('pending'));
+
+    await act(async () => {
+      failCreate(new TypeError('reply lost'));
+    });
+    const settledText = JSON.stringify(renderer.toJSON());
+    expect(settledText).toContain(t('keysUnknown'));
+    expect(settledText).toContain(k('pending'));
     expect(pending).toHaveBeenLastCalledWith(true);
     expect(window.addEventListener).toHaveBeenCalledWith('beforeunload', expect.any(Function));
     await navigate('/console/system/updates');
@@ -226,9 +258,20 @@ describe('Fresh resources within the original Console', () => {
       });
       expect(panel('keys').props.lang).toBe(language);
       const view = JSON.stringify(renderer.toJSON());
-      // The dialog header carries the title; the panel repeats only what the
-      // operator has to act on, so the heading exists once per dialog.
-      expect(view).toContain(t('keysCreated'));
+      // The one-time key modal renders its secret heading once (`Modal.title`),
+      // and its created summary line once.
+      const secretHeadings = renderer.root.findAll(
+        (node) =>
+          ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.type)) &&
+          textOf(node) === k('secretTitle')
+      );
+      expect(secretHeadings).toHaveLength(1);
+      const createdNotices = renderer.root.findAll(
+        (node) =>
+          ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.type)) &&
+          textOf(node) === t('keysCreated')
+      );
+      expect(createdNotices).toHaveLength(1);
       expect(view).toContain(secret);
       expect(pending).toHaveBeenLastCalledWith(true);
     }

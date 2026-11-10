@@ -1,5 +1,7 @@
 {
   "fullweb": {
+    "pluginsProbeFailed": "外掛服務沒有回應，Console 無法確認目前 CPA 是否支援外掛。",
+    "pluginsProbeRetry": "重試",
     "keysRevokeTitle": "撤銷或替換金鑰",
     "keysOperationHelp": "僅用於私有環境。需要替換時先建立並儲存新金鑰。每一步均需主機授權，替換期間閘道可能暫時無法使用。",
     "keysOperationId": "操作編號",

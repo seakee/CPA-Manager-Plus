@@ -264,6 +264,10 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
+	// Fresh owns Collector lifecycle on a.runCtx and governs External usage
+	// writes behind explicit confirmation; ManagerConfigService only updates DB
+	// settings rows here.
+	legacyContext.ManagerConfigService.UseExternalCollectorLifecycle()
 	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
 		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
 	}
@@ -696,7 +700,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "operation" && r.Method == http.MethodGet:
 		writeFreshJSON(w, op)
 	case strings.HasPrefix(resource, "cpamp/"):
-		a.legacyResource(w, r, resource)
+		a.legacyResource(w, r, op, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
 	case resource == "installation/adoption" && r.Method == http.MethodGet:

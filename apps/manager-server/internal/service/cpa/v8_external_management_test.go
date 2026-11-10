@@ -2,6 +2,7 @@ package cpa
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,5 +182,49 @@ func TestManagedModelSurface(t *testing.T) {
 	var absent *Transport
 	if err := absent.ManagedModelSurface(context.Background(), "client-key-1"); err == nil || strings.Contains(strings.ToLower(err.Error()), "private key") {
 		t.Fatalf("nil transport must be refused without private-key wording, got %v", err)
+	}
+}
+
+func TestExternalReadConfigDocument(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		status        int
+		body          string
+		wantRejected  bool
+		wantForbidden bool
+		wantOK        bool
+	}{
+		{name: "200 document", status: http.StatusOK, body: `{"config-version":8,"access":{"api-keys":["k1"]}}`, wantOK: true},
+		{name: "401 unauthorized", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantRejected: true},
+		{name: "403 forbidden", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantRejected: true, wantForbidden: true},
+		{name: "502 bad gateway", status: http.StatusBadGateway, body: `bad gateway`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v8/management/config" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			doc, err := NewTransportForEndpoint(server.URL).ExternalReadConfigDocument(t.Context(), "management-key-1")
+			if tc.wantOK {
+				if err != nil || doc == nil {
+					t.Fatalf("ExternalReadConfigDocument = %v, %v; want document", doc, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got := errors.Is(err, ErrManagementRejected); got != tc.wantRejected {
+				t.Fatalf("errors.Is(ErrManagementRejected) = %v, want %v (%v)", got, tc.wantRejected, err)
+			}
+			if got := errors.Is(err, ErrManagementClientForbidden); got != tc.wantForbidden {
+				t.Fatalf("errors.Is(ErrManagementClientForbidden) = %v, want %v (%v)", got, tc.wantForbidden, err)
+			}
+		})
 	}
 }

@@ -6,8 +6,8 @@ import { useRequestMonitoringSwitch, type RequestMonitoringSwitch } from './useR
 
 const mocks = vi.hoisted(() => ({
   getManagerConfig: vi.fn<(base: string, key?: string) => Promise<ManagerConfigResponse>>(),
-  saveManagerConfig: vi.fn<
-    (base: string, config: ManagerConfig, key?: string) => Promise<ManagerConfigResponse>
+  setRequestMonitoring: vi.fn<
+    (base: string, enabled: boolean, key?: string) => Promise<ManagerConfigResponse>
   >(),
   refreshPanelFeatureAvailability: vi.fn(),
   managerServiceBase: '/console/api/v2/cpamp',
@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/services/api/usageService', () => ({
   usageServiceApi: {
     getManagerConfig: mocks.getManagerConfig,
-    saveManagerConfig: mocks.saveManagerConfig,
+    setRequestMonitoring: mocks.setRequestMonitoring,
   },
 }));
 
@@ -75,11 +75,12 @@ async function mount() {
 beforeEach(() => {
   current = undefined;
   mocks.getManagerConfig.mockReset();
-  mocks.saveManagerConfig.mockReset();
+  mocks.setRequestMonitoring.mockReset();
   mocks.refreshPanelFeatureAvailability.mockReset();
   mocks.getManagerConfig.mockResolvedValue(response(stored));
-  mocks.saveManagerConfig.mockImplementation(
-    async (_base: string, config: ManagerConfig) => response(config)
+  mocks.setRequestMonitoring.mockImplementation(
+    async (_base: string, enabled: boolean) =>
+      response({ ...stored, collector: { ...stored.collector, enabled } })
   );
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -102,31 +103,28 @@ describe('useRequestMonitoringSwitch', () => {
     expect(current?.writable).toBe(true);
   });
 
-  it('writes the config it just read with only collector.enabled changed', async () => {
+  it('writes the switch as one narrow field instead of the whole document', async () => {
     await mount();
 
     await act(async () => {
       await current!.setEnabled(false);
     });
 
-    expect(mocks.saveManagerConfig).toHaveBeenCalledTimes(1);
-    const [base, payload, key] = mocks.saveManagerConfig.mock.calls[0];
-    expect(base).toBe('/console/api/v2/cpamp');
-    expect(key).toBe('admin-key');
-    expect(payload).toEqual({
-      ...stored,
-      collector: { ...stored.collector, enabled: false },
-    });
-    expect(payload.cpaConnection).toEqual(stored.cpaConnection);
-    expect(payload.codexInspection).toEqual(stored.codexInspection);
-    expect(payload.externalUsageService).toEqual(stored.externalUsageService);
+    // One write, carrying the switch and nothing else: a whole-document PUT is
+    // how a switch that owns one field used to drop the fields it does not own.
+    expect(mocks.setRequestMonitoring).toHaveBeenCalledTimes(1);
+    expect(mocks.setRequestMonitoring).toHaveBeenCalledWith(
+      '/console/api/v2/cpamp',
+      false,
+      'admin-key'
+    );
     expect(current?.enabled).toBe(false);
     // Sidebar entry and route gate read the same availability probe.
     expect(mocks.refreshPanelFeatureAvailability).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the stored state and reports the failure when the write is rejected', async () => {
-    mocks.saveManagerConfig.mockRejectedValueOnce(new Error('cpa unreachable'));
+    mocks.setRequestMonitoring.mockRejectedValueOnce(new Error('cpa unreachable'));
     await mount();
 
     await act(async () => {
@@ -147,8 +145,36 @@ describe('useRequestMonitoringSwitch', () => {
     });
 
     expect(mocks.getManagerConfig).not.toHaveBeenCalled();
-    expect(mocks.saveManagerConfig).not.toHaveBeenCalled();
+    expect(mocks.setRequestMonitoring).not.toHaveBeenCalled();
     expect(current?.writable).toBe(false);
     mocks.managerServiceBase = '/console/api/v2/cpamp';
+  });
+
+  it('ignores a slow initial GET that resolves after a PATCH has already completed', async () => {
+    let resolveInitialRead!: (value: ManagerConfigResponse) => void;
+    mocks.getManagerConfig.mockImplementationOnce(
+      () =>
+        new Promise<ManagerConfigResponse>((resolve) => {
+          resolveInitialRead = resolve;
+        })
+    );
+
+    await mount();
+    expect(current?.loaded).toBe(false);
+
+    await act(async () => {
+      await current!.setEnabled(true);
+    });
+    expect(current?.loaded).toBe(true);
+    expect(current?.enabled).toBe(true);
+
+    await act(async () => {
+      resolveInitialRead(
+        response({ ...stored, collector: { ...stored.collector, enabled: false } })
+      );
+      await Promise.resolve();
+    });
+
+    expect(current?.enabled).toBe(true);
   });
 });

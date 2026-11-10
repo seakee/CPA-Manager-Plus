@@ -24,6 +24,10 @@ const (
 	usageStartReasonCollectorFailed     = "usage_collector_unavailable"
 	usageStartReasonStatisticsDisabled  = "usage_statistics_disabled"
 	usageStartReasonExternalUnavailable = "external_cpa_authority_unavailable"
+	// usageStartReasonMonitoringDisabled is the administrator's own request
+	// monitoring switch being off: nothing is collected because nothing was
+	// asked for, which is a different statement from an unreadable authority.
+	usageStartReasonMonitoringDisabled = "usage_monitoring_disabled"
 )
 
 // usageStartOutcome is what one Collector startup attempt proved. Started is
@@ -68,11 +72,18 @@ func (a *freshApplication) sampleUsageAuthority(ctx context.Context, baseURL, ma
 // started: the collection instant itself is idempotent and keeps its earliest
 // value.
 func (a *freshApplication) stopUsageCollection(ctx context.Context) {
-	if a.legacyCollector != nil {
-		_ = a.legacyCollector.Stop(ctx)
+	if a == nil {
+		return
 	}
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
+	a.stopUsageCollectionLocked(ctx)
+}
+
+func (a *freshApplication) stopUsageCollectionLocked(ctx context.Context) {
+	if a.legacyCollector != nil {
+		_ = a.legacyCollector.Stop(ctx)
+	}
 	a.usageStarted = false
 	a.usageCollectorStarted = false
 	a.setUsageStartReason("")
@@ -303,8 +314,11 @@ func (a *freshApplication) confirmExternalUsageCollection(w http.ResponseWriter,
 	a.externalUsageConfirmed.Store(true)
 	// The refusal latched by an earlier attempt is not evidence about this one:
 	// the administrator just changed the premise, so the start may run again.
+	// Clear any unconsumed confirmation afterwards so a refusal (for example when
+	// Manager's own monitoring switch is off) cannot linger for a later replay.
 	a.resetUsageStart()
 	a.startUsageCollection(op)
+	a.externalUsageConfirmed.Store(false)
 	state, err := a.externalUsageState(r.Context())
 	if err != nil {
 		a.writeExternalUsageError(w, err)

@@ -93,6 +93,30 @@ func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) 
 	return snapshot, nil
 }
 
+// ExternalReadConfigDocument reads the External CPA configuration document and
+// distinguishes an authentication refusal (401/403) from an unreachable or
+// invalid document, so callers can record the typed credential blocker instead
+// of burning the CPA's five-strike lockout window.
+func (t *Transport) ExternalReadConfigDocument(ctx context.Context, management string) (map[string]any, error) {
+	if t == nil || !validManagementKey(management) {
+		return nil, ErrProofUnavailable
+	}
+	code, body, err := t.request(ctx, http.MethodGet, "/v8/management/config", management, nil)
+	if err != nil {
+		return nil, ErrProofUnavailable
+	}
+	switch code {
+	case http.StatusUnauthorized:
+		return nil, ErrManagementRejected
+	case http.StatusForbidden:
+		return nil, ErrManagementClientForbidden
+	case http.StatusOK:
+	default:
+		return nil, ErrProofUnavailable
+	}
+	return DecodeConfigDocument(body)
+}
+
 // ExternalWriteKeySet writes the whole client-key list of an External CPA. It
 // sends exactly one request and never retries: an acknowledged 401 is the typed
 // blocker, and anything else leaves the effect unknown for the caller's

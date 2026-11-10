@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -49,6 +52,21 @@ func consoleModelListResource(resource, method string) bool {
 // CPA's own list, and a CPA that holds no client key gets the empty list this
 // console already renders instead of an authentication failure it cannot fix.
 func (a *freshApplication) consoleModelList(w http.ResponseWriter, r *http.Request) {
+	if a == nil {
+		writeConsoleModelListUnavailable(w)
+		return
+	}
+	if a.store != nil {
+		record, err := a.store.Load(r.Context())
+		if err != nil {
+			writeConsoleModelListUnavailable(w)
+			return
+		}
+		if record.Operation.Strategy.Strategy == bootstrap.ConnectExternal {
+			a.externalConsoleModelList(w, r, record)
+			return
+		}
+	}
 	baseURL, managementKey, err := a.consoleCPADestination(r.Context())
 	if err != nil {
 		writeConsoleModelListUnavailable(w)
@@ -69,14 +87,112 @@ func (a *freshApplication) consoleModelList(w http.ResponseWriter, r *http.Reque
 	proxysvc.ProxyModelListWithClientKey(w, r, baseURL, clientKey, response.Error, response.MethodNotAllowed)
 }
 
+// externalConsoleModelList serializes the External management-key read through
+// legacyCredentialGate and records a 401/403 against externalReadGrant so page
+// loads never trip CPA's five-strike authentication lockout.
+func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *http.Request, initial freshstore.Record) {
+	if initial.Operation.Strategy.Stage != "committed" || a.externalSource == nil {
+		writeConsoleModelListUnavailable(w)
+		return
+	}
+	ctx := r.Context()
+	gate := &a.legacyCredentialGate
+	if !gate.acquire(ctx) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || record.Operation.Strategy.Stage != "committed" {
+		gate.release()
+		writeConsoleModelListUnavailable(w)
+		return
+	}
+	grant := a.externalReadGrantFor(ctx, record)
+	if grant.Refused {
+		gate.release()
+		writeExternalManagementRejected(w)
+		return
+	}
+	install, err := a.externalSource(ctx)
+	if err != nil || install.BaseURL == "" || install.ManagementKey == "" {
+		gate.release()
+		writeConsoleModelListUnavailable(w)
+		return
+	}
+	hold, requestCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	document, err := cpa.NewTransportForEndpoint(install.BaseURL).ExternalReadConfigDocument(requestCtx, install.ManagementKey)
+	hold.finish()
+	if err != nil {
+		switch {
+		case errors.Is(err, cpa.ErrManagementClientForbidden):
+			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			writeExternalManagementForbidden(w)
+		case errors.Is(err, cpa.ErrManagementRejected):
+			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			writeExternalManagementRejected(w)
+		default:
+			writeConsoleModelListUnavailable(w)
+		}
+		return
+	}
+	clientKey := firstCPAClientKey(document)
+	if clientKey == "" {
+		writeConsoleModelListEmpty(w)
+		return
+	}
+	proxysvc.ProxyModelListWithClientKey(w, r, install.BaseURL, clientKey, response.Error, response.MethodNotAllowed)
+}
+
 // consoleCPADestination resolves the CPA this installation is connected to
 // together with the management credential that reads it. Only the committed
 // installation authority may name that CPA: a Manager-owned install answers with
 // the destination it staged, an External install with the connection the user
-// supplied, and an environment-managed connection is the only remaining source.
+// supplied, and an environment-managed connection is the last remaining
+// authority.
+//
+// The committed strategy names that CPA, so the strategy decides the source and
+// never the mere presence of one: an installation whose committed strategy is
+// External reads the connection the user supplied even while a managed source
+// exists in the same process, and a Manager-owned install reads the destination
+// it staged. Only an installation with no committed strategy at all falls back
+// to whatever source this process holds. A checkpoint that cannot be read fails
+// closed: the answer is "this console cannot name the CPA", never a guess.
 func (a *freshApplication) consoleCPADestination(ctx context.Context) (string, string, error) {
 	if a == nil {
 		return "", "", errConsoleModelListUnavailable
+	}
+	if a.store != nil {
+		op, err := a.current(ctx)
+		if err != nil {
+			return "", "", errConsoleModelListUnavailable
+		}
+		if op.Strategy.Strategy != "" {
+			if op.Strategy.Stage != "committed" {
+				return "", "", errConsoleModelListUnavailable
+			}
+			switch {
+			case op.Strategy.Strategy == bootstrap.ConnectExternal:
+				if a.externalSource == nil {
+					return "", "", errConsoleModelListUnavailable
+				}
+				install, err := a.externalSource(ctx)
+				if err != nil || install.BaseURL == "" || install.ManagementKey == "" {
+					return "", "", errConsoleModelListUnavailable
+				}
+				return install.BaseURL, install.ManagementKey, nil
+			case freshkeyapply.ManagerOwnedStrategy(op.Strategy):
+				if a.managedSource == nil {
+					return "", "", errConsoleModelListUnavailable
+				}
+				install, err := a.managedSource(ctx)
+				if err != nil || install.BaseURL == "" || install.ManagementKey == "" {
+					return "", "", errConsoleModelListUnavailable
+				}
+				return install.BaseURL, install.ManagementKey, nil
+			default:
+				return "", "", errConsoleModelListUnavailable
+			}
+		}
 	}
 	if a.managedSource != nil {
 		install, err := a.managedSource(ctx)

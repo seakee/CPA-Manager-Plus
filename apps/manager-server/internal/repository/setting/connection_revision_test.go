@@ -390,3 +390,31 @@ func TestPersistedCPAConnectionRevisionLegacyNormalizeDoesNotMint(t *testing.T) 
 		t.Fatalf("legacy replacement retained qualification: found=%v err=%v", found, err)
 	}
 }
+
+func TestPatchManagerCollectorEnabledHandlesNullJSONShapes(t *testing.T) {
+	db, r, _, _ := revisionFixture(t)
+	defer db.Close()
+	ctx := t.Context()
+
+	if _, err := db.Exec(`insert into settings(key, value, updated_at_ms) values('manager_config_v1', 'null', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if patched, err := r.PatchManagerCollectorEnabled(ctx, false); err == nil || patched {
+		t.Fatalf("null document patched=%v err=%v, want error", patched, err)
+	}
+
+	if _, err := db.Exec(`update settings set value = '{"collector":null,"futureKnob":{"mode":"latent"}}' where key = 'manager_config_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	patched, err := r.PatchManagerCollectorEnabled(ctx, false)
+	if err != nil || !patched {
+		t.Fatalf("null collector patched=%v err=%v, want patched", patched, err)
+	}
+	var raw string
+	if err := db.QueryRow(`select value from settings where key = 'manager_config_v1'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, `"enabled":false`) || !strings.Contains(raw, `"futureKnob":{"mode":"latent"}`) {
+		t.Fatalf("patched raw = %s", raw)
+	}
+}

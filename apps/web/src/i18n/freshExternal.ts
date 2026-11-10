@@ -152,6 +152,12 @@ const messages = {
     'CPA 的用量統計已關閉',
     'статистика использования на CPA отключена',
   ],
+  usageBlockedMonitoring: [
+    'request monitoring is turned off in Manager',
+    'Manager 的请求监控已关闭',
+    'Manager 的請求監控已關閉',
+    'мониторинг запросов в Manager отключён',
+  ],
   usageBlockedExternalAuthority: [
     'the saved CPA credential could not be verified',
     '无法验证已保存的 CPA 凭据',
@@ -313,6 +319,8 @@ export function blockedReasonText(reason: string | undefined): string {
       return externalWorkspaceText('usageBlockedCollector');
     case 'usage_statistics_disabled':
       return externalWorkspaceText('usageBlockedStatistics');
+    case 'usage_monitoring_disabled':
+      return externalWorkspaceText('usageBlockedMonitoring');
     case 'external_cpa_authority_unavailable':
       return externalWorkspaceText('usageBlockedExternalAuthority');
     default:

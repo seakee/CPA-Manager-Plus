@@ -42,6 +42,19 @@ func TestExternalLegacyReplacedWritesAreRefusedLocally(t *testing.T) {
 			}
 		})
 	}
+	// The narrow monitoring switch PATCH is Manager-local on External: it stays
+	// open while whole-document PUT stays refused, and it sends zero traffic to
+	// the user's CPA when statistics are disabled there.
+	for _, resource := range []string{"cpamp/config", "cpamp/usage-service/config"} {
+		before := fake.requests.Load()
+		off := gatewayRequest(t, app, http.MethodPatch, resource, `{"enabled":false}`, "application/json")
+		if off.Code != http.StatusOK {
+			t.Fatalf("PATCH %s false = %d %s", resource, off.Code, off.Body.String())
+		}
+		if sent := fake.requests.Load() - before; sent != 0 {
+			t.Fatalf("PATCH %s false forwarded %d requests to the user's CPA", resource, sent)
+		}
+	}
 }
 
 // TestExternalLegacyReadsStayOpenBeforeARejection proves the cutover is scoped to

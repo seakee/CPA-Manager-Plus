@@ -107,7 +107,9 @@ export function FreshExternalUsage({
       setState(parsed);
       setConfirming(false);
       setConfirmFailed(false);
-      setNotice(x('usageConfirmed'));
+      if (parsed.statisticsEnabled && !parsed.blockedReason) {
+        setNotice(x('usageConfirmed'));
+      }
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -200,7 +202,7 @@ export function FreshExternalUsage({
           </button>
         </p>
       )}
-      {!state.statisticsEnabled && (
+      {!state.statisticsEnabled && state.blockedReason !== 'usage_monitoring_disabled' && (
         <button
           className="btn btn-primary btn-sm"
           data-testid="external-usage-enable"

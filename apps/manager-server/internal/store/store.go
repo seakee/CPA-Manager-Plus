@@ -271,6 +271,10 @@ func (s *Store) LoadManagerConfig(ctx context.Context) (ManagerConfig, bool, err
 	return s.Settings.LoadManagerConfig(ctx)
 }
 
+func (s *Store) PatchManagerCollectorEnabled(ctx context.Context, enabled bool) (bool, error) {
+	return s.Settings.PatchManagerCollectorEnabled(ctx, enabled)
+}
+
 func (s *Store) SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired EmbeddedRuntimeDesiredLifecycle) (EmbeddedRuntimeDesiredState, error) {
 	return s.Settings.SetEmbeddedRuntimeDesiredLifecycle(ctx, desired)
 }

@@ -1,9 +1,13 @@
 package managerconfig
 
 import (
+	"strings"
 	"testing"
 
+	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
+	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
 func TestResolveLegacyConnectionAuthorityMatrix(t *testing.T) {
@@ -169,4 +173,69 @@ func TestLegacyConnectionResolutionValidatesRequestedInput(t *testing.T) {
 	}); err == nil {
 		t.Fatal("conflicting partial key was accepted")
 	}
+}
+
+func TestSetCollectorEnabledHonoursEnvironmentSourceAndExternalLifecycle(t *testing.T) {
+	t.Run("environment source refuses toggle and keeps env source without persisting secrets", func(t *testing.T) {
+		cfg := testutil.NewConfig(t)
+		st := testutil.NewStore(t, cfg)
+		cpaMock := testutil.NewCPAMock(t)
+		cfg.CPAUpstreamURL = cpaMock.URL()
+		cfg.ManagementKey = cpaMock.ManagementKey
+		collector := collectorservice.New(collectorpkg.NewManager(cfg, st))
+		svc := New(cfg, st, collector)
+
+		if _, err := svc.SetCollectorEnabled(t.Context(), false); err == nil || !strings.Contains(err.Error(), "environment variables") {
+			t.Fatalf("env toggle error = %v, want environment-managed refusal", err)
+		}
+		if _, ok, err := st.LoadManagerConfig(t.Context()); err != nil || ok {
+			t.Fatalf("env refusal persisted manager_config_v1: ok=%v err=%v", ok, err)
+		}
+
+		res, err := svc.SetCollectorEnabled(t.Context(), true)
+		if err != nil {
+			t.Fatalf("idempotent env SetCollectorEnabled error = %v", err)
+		}
+		if res.Source != string(SourceEnv) {
+			t.Fatalf("source = %q, want %q", res.Source, SourceEnv)
+		}
+		if _, ok, err := st.LoadManagerConfig(t.Context()); err != nil || ok {
+			t.Fatalf("idempotent env call persisted manager_config_v1: ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("external collector lifecycle updates DB only without starting background collector or touching CPA", func(t *testing.T) {
+		cfg := testutil.NewConfig(t)
+		st := testutil.NewStore(t, cfg)
+		cpaMock := testutil.NewCPAMock(t)
+		cpaMock.UsageStatisticsEnabled = false
+		collector := collectorservice.New(collectorpkg.NewManager(cfg, st))
+		svc := New(cfg, st, collector)
+		svc.UseExternalCollectorLifecycle()
+
+		seed := store.ManagerConfig{
+			CPAConnection: store.ManagerCPAConnectionConfig{
+				CPABaseURL:    cpaMock.URL(),
+				ManagementKey: cpaMock.ManagementKey,
+			},
+			Collector: store.ManagerCollectorConfig{Enabled: BoolPtr(false)},
+		}
+		if err := st.SaveManagerConfigAndSetup(t.Context(), seed, SetupFromManagerConfig(seed)); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := svc.SetCollectorEnabled(t.Context(), true)
+		if err != nil {
+			t.Fatalf("SetCollectorEnabled(true) error = %v", err)
+		}
+		if res.Source != string(SourceDB) || res.Config.Collector.Enabled == nil || !*res.Config.Collector.Enabled {
+			t.Fatalf("unexpected response = %#v", res)
+		}
+		if collector.StartCount() != 0 {
+			t.Fatalf("collector StartCount = %d, want 0", collector.StartCount())
+		}
+		if cpaMock.UsageStatisticsEnabled {
+			t.Fatal("external lifecycle SetCollectorEnabled mutated CPA usage-statistics-enabled")
+		}
+	})
 }

@@ -3,7 +3,6 @@ import {
   refreshPanelFeatureAvailability,
   usePanelFeatureAvailability,
 } from '@/hooks/usePanelFeatureAvailability';
-import { buildRequestMonitoringConfig } from '@/features/monitoring/requestMonitoringConfig';
 import { usageServiceApi } from '@/services/api/usageService';
 import { useAuthStore } from '@/stores';
 
@@ -33,13 +32,15 @@ export function useRequestMonitoringSwitch(): RequestMonitoringSwitch {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   const writeInFlight = useRef(false);
+  const mutationGeneration = useRef(0);
 
   useEffect(() => {
     if (!managerServiceBase) return;
     let cancelled = false;
+    const readGeneration = mutationGeneration.current;
     usageServiceApi.getManagerConfig(managerServiceBase, managementKey).then(
       (response) => {
-        if (cancelled) return;
+        if (cancelled || mutationGeneration.current !== readGeneration) return;
         setStored({
           serviceBase: managerServiceBase,
           enabled: response.config.collector?.enabled !== false,
@@ -59,17 +60,16 @@ export function useRequestMonitoringSwitch(): RequestMonitoringSwitch {
       setSaving(true);
       setFailed(false);
       try {
-        const current = await usageServiceApi.getManagerConfig(managerServiceBase, managementKey);
-        const response = await usageServiceApi.saveManagerConfig(
+        const response = await usageServiceApi.setRequestMonitoring(
           managerServiceBase,
-          buildRequestMonitoringConfig(current.config, next),
+          next,
           managementKey
         );
+        mutationGeneration.current += 1;
         setStored({
           serviceBase: managerServiceBase,
           enabled: response.config.collector?.enabled !== false,
         });
-        // The sidebar entry and the route gate read the same availability.
         refreshPanelFeatureAvailability();
       } catch {
         setFailed(true);

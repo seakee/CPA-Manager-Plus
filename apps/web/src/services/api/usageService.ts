@@ -2688,6 +2688,41 @@ export const usageServiceApi = {
     });
   },
 
+  /**
+   * `PATCH /usage-service/config` writes the request-monitoring switch and
+   * nothing else. The switch owns one field, so it never reads the whole
+   * document back just to submit it again: a body that carries more than the
+   * switch is refused by the Manager instead of being interpreted.
+   */
+  setRequestMonitoring: async (
+    base: string,
+    enabled: boolean,
+    managementKey?: string
+  ): Promise<ManagerConfigResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      const current = getDemoManagerConfig();
+      return {
+        ...current,
+        config: {
+          ...current.config,
+          collector: { ...current.config.collector, enabled },
+        },
+      };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.patch<ManagerConfigResponse>(
+        buildUrl(base, '/usage-service/config'),
+        { enabled },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
   listCodexInspectionRuns: async (
     base: string,
     managementKey?: string,

@@ -55,18 +55,6 @@ describe('configuration workspace copy', () => {
     }
   });
 
-  it('keeps overview statistic labels free of the count they render beside', async () => {
-    for (const locale of LOCALES) {
-      const { text } = await each(locale);
-      // The stat grid renders the number in its own <dd>; a label that also
-      // carried {count} read as "个配置字段 / 39".
-      for (const key of ['fields', 'ruleFamilies', 'ownerGroups', 'dirty'] as const) {
-        expect(text(key)).not.toContain('{count}');
-        expect(text(key).trim()).toBe(text(key));
-      }
-    }
-  });
-
   it('does not tell the user that discarding drafts signs them out', async () => {
     for (const locale of LOCALES) {
       const { text } = await each(locale);

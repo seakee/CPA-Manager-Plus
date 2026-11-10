@@ -1,5 +1,7 @@
 {
   "fullweb": {
+    "pluginsProbeFailed": "The plugin service did not answer, so the Console could not confirm this CPA's plugin support.",
+    "pluginsProbeRetry": "Retry",
     "keysRevokeTitle": "Revoke or replace a key",
     "keysOperationHelp": "Private profile only. Create and save a replacement key first if needed. The host must authorize each step; the gateway may be unavailable during replacement.",
     "keysOperationId": "Operation",

@@ -28,6 +28,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 type freshUsageHarness struct {
@@ -781,5 +782,316 @@ func TestFreshUsageStartRetriesOnlyTheMarkerAfterAMarkerFailure(t *testing.T) {
 	app.startUsageCollection(record.Operation)
 	if sourceCalls != 1 {
 		t.Fatalf("completed startup started the source again: %d", sourceCalls)
+	}
+}
+
+// TestStartupCollectionHonoursStoredMonitoringSwitch is the restart contract:
+// the switch the administrator stored governs whether this process starts a
+// Collector, so an installation switched off does not come back collecting, an
+// enabled one does, and a document that never carried the switch keeps the
+// enabled default a completion writes. WAL maintenance is not collection and
+// must run either way.
+func TestStartupCollectionHonoursStoredMonitoringSwitch(t *testing.T) {
+	disabled, enabled := false, true
+	for _, scenario := range []struct {
+		name    string
+		stored  *bool
+		collect bool
+	}{
+		{name: "absent keeps the enabled default", stored: nil, collect: true},
+		{name: "enabled", stored: &enabled, collect: true},
+		{name: "disabled", stored: &disabled, collect: false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			hostCtx, stopHost := context.WithCancel(t.Context())
+			defer stopHost()
+			opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
+			markFreshProductComplete(t, app)
+			app.cfg.DBPath = opened.Record.Operation.Identity.DatabasePath
+			stub := usageManagementStub(t)
+			app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+				return freshkeyapply.ManagedInstall{
+					BaseURL:       stub.URL,
+					ManagementKey: strings.Repeat("a", 64),
+					Strategy:      string(bootstrap.NewManaged),
+				}, nil
+			}
+			if scenario.stored != nil {
+				if err := app.runtimeSettings.SaveManagerConfig(hostCtx, store.ManagerConfig{
+					Collector: store.ManagerCollectorConfig{Enabled: scenario.stored},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			op, err := app.current(hostCtx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !op.ProductComplete {
+				t.Fatal("the harness did not complete the installation")
+			}
+
+			before := app.legacyCollector.StartCount()
+			app.startUsageCollection(op)
+
+			if started := app.legacyCollector.StartCount() > before; started != scenario.collect {
+				t.Fatalf("collector started = %v, want %v", started, scenario.collect)
+			}
+			if claimed := app.usageCollectionStarted(); claimed != scenario.collect {
+				t.Fatalf("collection claimed = %v, want %v", claimed, scenario.collect)
+			}
+			var windows int
+			if err := opened.DB.QueryRow(`select count(*) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&windows); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if scenario.collect {
+				want = 1
+			}
+			if windows != want {
+				t.Fatalf("collection windows = %d, want %d", windows, want)
+			}
+			if maintenance := freshDatabaseMaintenanceFor(app.cfg.DBPath); maintenance == nil {
+				t.Fatal("database maintenance did not start independently of the switch")
+			}
+			if !scenario.collect {
+				reason, _ := app.usageStartReason.Load().(string)
+				if reason != usageStartReasonMonitoringDisabled {
+					t.Fatalf("blocked reason = %q, want %q", reason, usageStartReasonMonitoringDisabled)
+				}
+			}
+		})
+	}
+}
+
+// TestUsageMonitoringSwitchWriteStopsAndRestartsCollection is the same contract
+// on the running process: the Console writes the switch, and the Collector
+// follows it now instead of at the next restart.
+func TestUsageMonitoringSwitchWriteStopsAndRestartsCollection(t *testing.T) {
+	t.Run("new_managed HTTP PATCH reconciles on host runCtx without double-start or On->On restart", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+		_, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
+		markFreshProductComplete(t, app)
+		stub := usageManagementStub(t)
+		app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+			return freshkeyapply.ManagedInstall{
+				BaseURL:       stub.URL,
+				ManagementKey: strings.Repeat("a", 64),
+				Strategy:      string(bootstrap.NewManaged),
+			}, nil
+		}
+		on := true
+		if err := app.runtimeSettings.SaveManagerConfig(hostCtx, store.ManagerConfig{
+			Collector: store.ManagerCollectorConfig{Enabled: &on},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		op, err := app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app.startUsageCollection(op)
+		if !app.usageCollectionStarted() {
+			t.Fatal("collection did not start on an enabled installation")
+		}
+		initialStarts := app.legacyCollector.StartCount()
+
+		// On -> On idempotent PATCH must not restart the running Collector or
+		// detach it onto context.Background().
+		same := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json")
+		if same.Code != http.StatusOK {
+			t.Fatalf("PATCH On->On = %d %s", same.Code, same.Body.String())
+		}
+		if got := app.legacyCollector.StartCount() - initialStarts; got != 0 {
+			t.Fatalf("On->On StartCount delta = %d, want 0", got)
+		}
+
+		// On -> Off stops immediately.
+		off := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+		if off.Code != http.StatusOK {
+			t.Fatalf("PATCH On->Off = %d %s", off.Code, off.Body.String())
+		}
+		if app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("collector phase = %s after the switch went off", app.collectionPhase())
+		}
+		if app.usageCollectionStarted() {
+			t.Fatal("collection is still claimed after the switch went off")
+		}
+		if app.usageStartBlock() != usageStartReasonMonitoringDisabled {
+			t.Fatalf("blocked reason = %q, want %q", app.usageStartBlock(), usageStartReasonMonitoringDisabled)
+		}
+
+		// Off -> On starts exactly once on hostCtx.
+		beforeOn := app.legacyCollector.StartCount()
+		backOn := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json")
+		if backOn.Code != http.StatusOK {
+			t.Fatalf("PATCH Off->On = %d %s", backOn.Code, backOn.Body.String())
+		}
+		if got := app.legacyCollector.StartCount() - beforeOn; got != 1 {
+			t.Fatalf("Off->On StartCount delta = %d, want 1", got)
+		}
+		if app.collectionPhase() == usageapp.PhaseStopped || !app.usageCollectionStarted() {
+			t.Fatalf("collector did not resume on Off->On: phase=%s claimed=%v", app.collectionPhase(), app.usageCollectionStarted())
+		}
+	})
+
+	t.Run("connect_external HTTP PATCH toggles local collector without bypassing confirmation or mutating external CPA", func(t *testing.T) {
+		h := newExternalUsageHarness(t)
+
+		// 1. External CPA has statistics disabled: PATCH {"enabled": false} -> {"enabled": true}
+		// must never write usage-statistics-enabled on the user's CPA.
+		off := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`)
+		if off.Code != http.StatusOK {
+			t.Fatalf("External PATCH false = %d %s", off.Code, off.Body.String())
+		}
+		if h.app.usageStartBlock() != usageStartReasonMonitoringDisabled {
+			t.Fatalf("External blocked reason = %q, want %q", h.app.usageStartBlock(), usageStartReasonMonitoringDisabled)
+		}
+		// Confirming External usage while Manager monitoring is Off must neither
+		// write to CPA nor leave a lingering approval for a later PATCH {"enabled":true}.
+		confirmWhileOff := h.call(t, http.MethodPost, "external/usage", `{"requestId":"confirm-while-off","confirmEnableStatistics":true}`)
+		if confirmWhileOff.Code != http.StatusOK {
+			t.Fatalf("confirm while off = %d %s", confirmWhileOff.Code, confirmWhileOff.Body.String())
+		}
+		if h.cpa.statWrites.Load() != 0 {
+			t.Fatalf("confirm while monitoring off wrote CPA statistics %d times", h.cpa.statWrites.Load())
+		}
+
+		onUnconfirmed := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`)
+		if onUnconfirmed.Code != http.StatusOK {
+			t.Fatalf("External PATCH true (unconfirmed) = %d %s", onUnconfirmed.Code, onUnconfirmed.Body.String())
+		}
+		if h.cpa.statWrites.Load() != 0 {
+			t.Fatalf("External PATCH true mutated CPA usage-statistics-enabled (%d writes)", h.cpa.statWrites.Load())
+		}
+		if h.app.usageCollectionStarted() {
+			t.Fatal("External PATCH true started collection while CPA statistics were disabled")
+		}
+		if h.app.usageStartBlock() != usageStartReasonStatisticsDisabled {
+			t.Fatalf("External blocked reason = %q, want %q", h.app.usageStartBlock(), usageStartReasonStatisticsDisabled)
+		}
+
+		// 2. Once statistics are enabled via explicit POST external/usage, PATCH Off -> On
+		// stops and resumes collection cleanly with zero additional CPA stat writes.
+		confirmed := h.call(t, http.MethodPost, "external/usage", `{"requestId":"confirm-1","confirmEnableStatistics":true}`)
+		if confirmed.Code != http.StatusOK || !h.app.usageCollectionStarted() {
+			t.Fatalf("explicit confirm = %d %s, started=%v", confirmed.Code, confirmed.Body.String(), h.app.usageCollectionStarted())
+		}
+		writesAfterConfirm := h.cpa.statWrites.Load()
+		startsAfterConfirm := h.app.legacyCollector.StartCount()
+
+		if same := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`); same.Code != http.StatusOK {
+			t.Fatalf("External On->On PATCH = %d %s", same.Code, same.Body.String())
+		}
+		if got := h.app.legacyCollector.StartCount() - startsAfterConfirm; got != 0 {
+			t.Fatalf("External On->On StartCount delta = %d, want 0", got)
+		}
+
+		if off2 := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`); off2.Code != http.StatusOK {
+			t.Fatalf("External On->Off PATCH = %d %s", off2.Code, off2.Body.String())
+		}
+		if h.app.collectionPhase() != usageapp.PhaseStopped || h.app.usageCollectionStarted() {
+			t.Fatalf("External collector still active after Off: phase=%s started=%v", h.app.collectionPhase(), h.app.usageCollectionStarted())
+		}
+
+		beforeResume := h.app.legacyCollector.StartCount()
+		if resume := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`); resume.Code != http.StatusOK {
+			t.Fatalf("External Off->On PATCH = %d %s", resume.Code, resume.Body.String())
+		}
+		if got := h.app.legacyCollector.StartCount() - beforeResume; got != 1 {
+			t.Fatalf("External Off->On StartCount delta = %d, want 1", got)
+		}
+		if !h.app.usageCollectionStarted() || h.app.collectionPhase() == usageapp.PhaseStopped {
+			t.Fatalf("External collector did not resume: phase=%s started=%v", h.app.collectionPhase(), h.app.usageCollectionStarted())
+		}
+		if h.cpa.statWrites.Load() != writesAfterConfirm {
+			t.Fatalf("External Off->On wrote CPA statistics (%d -> %d)", writesAfterConfirm, h.cpa.statWrites.Load())
+		}
+	})
+}
+
+func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing.T) {
+	for range 12 {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		var inSample sync.Once
+		sampleEntered := make(chan struct{})
+		releaseSample := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v0/management/config":
+				inSample.Do(func() { close(sampleEntered) })
+				<-releaseSample
+				w.Header().Set("X-CPA-Version", "v8.0.13")
+				_, _ = w.Write([]byte(`{}`))
+			case "/v0/management/usage-queue":
+				_, _ = w.Write([]byte("[]"))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+
+		_, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
+		markFreshProductComplete(t, app)
+		app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+			return freshkeyapply.ManagedInstall{
+				BaseURL:       server.URL,
+				ManagementKey: strings.Repeat("a", 64),
+				Strategy:      string(bootstrap.NewManaged),
+			}, nil
+		}
+		on := true
+		if err := app.runtimeSettings.SaveManagerConfig(hostCtx, store.ManagerConfig{
+			Collector: store.ManagerCollectorConfig{Enabled: &on},
+		}); err != nil {
+			stopHost()
+			server.Close()
+			t.Fatal(err)
+		}
+		op, err := app.current(hostCtx)
+		if err != nil {
+			stopHost()
+			server.Close()
+			t.Fatal(err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			app.startUsageCollection(op)
+		}()
+		go func() {
+			defer wg.Done()
+			<-sampleEntered
+			resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+			if resp.Code != http.StatusOK {
+				t.Errorf("concurrent PATCH false = %d %s", resp.Code, resp.Body.String())
+			}
+		}()
+		<-sampleEntered
+		// Let PATCH commit false and enter applyUsageMonitoringSwitch while
+		// startUsageCollection holds usageStartMu inside sampleUsageAuthority.
+		time.Sleep(5 * time.Millisecond)
+		close(releaseSample)
+		wg.Wait()
+
+		if app.collectionPhase() != usageapp.PhaseStopped {
+			stopHost()
+			server.Close()
+			t.Fatalf("concurrent disable left collector phase = %s, want stopped", app.collectionPhase())
+		}
+		if app.usageCollectionStarted() {
+			stopHost()
+			server.Close()
+			t.Fatal("concurrent disable left collection claimed")
+		}
+		if app.usageStartBlock() != usageStartReasonMonitoringDisabled {
+			stopHost()
+			server.Close()
+			t.Fatalf("blocked reason = %q, want %q", app.usageStartBlock(), usageStartReasonMonitoringDisabled)
+		}
+		stopHost()
+		server.Close()
 	}
 }

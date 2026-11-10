@@ -150,10 +150,10 @@ const messages = {
     'Отменить несохранённые правки',
   ],
   discardHelp: [
-    'Discard {count} unsaved fields and restore the last read values? Submitted operations are not affected.',
+    'Discard unsaved fields ({count}) and restore the last read values? Submitted operations are not affected.',
     '放弃 {count} 项未保存修改并恢复为上次读取的值？已提交操作不受影响。',
     '捨棄 {count} 項未儲存修改並還原為上次讀取的值？已提交操作不受影響。',
-    'Отменить {count} несохранённых полей и вернуть последние прочитанные значения? Отправленные операции не изменятся.',
+    'Отменить несохранённые поля ({count}) и вернуть последние прочитанные значения? Отправленные операции не изменятся.',
   ],
   keep: ['Keep editing', '继续编辑', '繼續編輯', 'Продолжить редактирование'],
   confirmDiscard: [

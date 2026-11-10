@@ -58,13 +58,15 @@ func externalLegacyReplacedWrite(path, method string) bool {
 		return false
 	}
 	switch strings.TrimRight(path, "/") {
-	case "/v0/management/api-keys", "/v0/management/config.yaml", "/usage-service/config":
-		// API keys are owned by `api-keys`, the gateway document by
-		// `gateway/config`, and the usage-service settings document by the
-		// connection, the rebind and `external/usage`. On External the setup row
-		// is a mirror of the committed connection, so editing it here would
-		// desync the two.
+	case "/v0/management/api-keys", "/v0/management/config.yaml":
 		return true
+	case "/usage-service/config":
+		// Whole-document PUT rewrites the CPA connection and collector settings
+		// owned by the committed connection, the rebind and `external/usage`,
+		// so editing it here would desync the two. The narrow `PATCH`
+		// (`{"enabled": bool}`) owns only Manager's local request-monitoring
+		// switch and never touches the External CPA.
+		return method != http.MethodPatch
 	}
 	return false
 }
@@ -537,7 +539,7 @@ func writeExternalAuthorityUnavailable(w http.ResponseWriter) {
 // the legacy paths; this adapter keeps the Public API authority and admin
 // verification at the Fresh boundary while reusing the original business
 // services and response shapes.
-func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request, resource string) {
+func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
 	if a.legacy == nil {
 		http.Error(w, "resource unavailable", http.StatusServiceUnavailable)
 		return
@@ -567,7 +569,7 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 		clone := r.Clone(r.Context())
 		clone.URL = parsed
 		clone.RequestURI = parsed.RequestURI()
-		a.legacy.ServeHTTP(w, clone)
+		a.serveLegacyResource(w, r, clone, op, bridged)
 		return
 	}
 	var target string
@@ -578,7 +580,7 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 		today := time.Now()
 		start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).UnixMilli()
 		target = "/v0/management/dashboard/summary?today_start_ms=" + strconv.FormatInt(start, 10)
-	case resource == "cpamp/config" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+	case resource == "cpamp/config" && (r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		target = "/usage-service/config"
 	case resource == "cpamp/status" && r.Method == http.MethodGet:
 		target = "/status"
@@ -600,7 +602,69 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	clone := r.Clone(r.Context())
 	clone.URL = parsed
 	clone.RequestURI = parsed.RequestURI()
-	a.legacy.ServeHTTP(w, clone)
+	a.serveLegacyResource(w, r, clone, op, strings.TrimPrefix(parsed.Path, "/"))
+}
+
+// serveLegacyResource forwards one bridged request and, when that request wrote
+// the request-monitoring switch, reconciles this process with what the write
+// stored. The switch is the administrator's own statement about collection, so a
+// successful write must reach the Collector now instead of at the next restart.
+func (a *freshApplication) serveLegacyResource(
+	w http.ResponseWriter,
+	r *http.Request,
+	clone *http.Request,
+	op bootstrap.FreshOperation,
+	target string,
+) {
+	if !legacyMonitoringSwitchWrite(target, r.Method) {
+		a.legacy.ServeHTTP(w, clone)
+		return
+	}
+	recorder := &legacyStatusRecorder{ResponseWriter: w}
+	a.legacy.ServeHTTP(recorder, clone)
+	if recorder.status >= http.StatusOK && recorder.status < http.StatusMultipleChoices {
+		a.applyUsageMonitoringSwitch(r.Context(), op)
+	}
+}
+
+// legacyMonitoringSwitchWrite reports whether a bridged request writes the
+// request-monitoring switch. Both spellings the Console uses end at the same
+// legacy endpoint.
+func legacyMonitoringSwitchWrite(target, method string) bool {
+	if method != http.MethodPut && method != http.MethodPatch {
+		return false
+	}
+	return strings.TrimRight(target, "/") == "usage-service/config"
+}
+
+// legacyStatusRecorder keeps the status of one bridged write without changing
+// the response it forwards. Only switch writes are recorded, so the rest of the
+// bridge still hands the real writer to the legacy router untouched.
+type legacyStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *legacyStatusRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *legacyStatusRecorder) Write(body []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(body)
+}
+
+func (r *legacyStatusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+func (r *legacyStatusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // legacyBridgePathAllowed is an endpoint-and-method allowlist. The
@@ -619,7 +683,7 @@ func legacyBridgePathAllowed(resource, method string) bool {
 	case "usage-service/info":
 		return allowed(http.MethodGet)
 	case "usage-service/config":
-		return allowed(http.MethodGet, http.MethodPut)
+		return allowed(http.MethodGet, http.MethodPut, http.MethodPatch)
 	case "usage-service/account-processing-policy":
 		return allowed(http.MethodGet, http.MethodPatch)
 	case "usage-service/quota-cooldowns":

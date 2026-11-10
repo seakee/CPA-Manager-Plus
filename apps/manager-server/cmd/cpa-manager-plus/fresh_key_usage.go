@@ -57,6 +57,67 @@ func (a *freshApplication) collectionPhase() usageapp.CollectionPhase {
 	}
 }
 
+// usageMonitoringEnabled reports the administrator's stored request-monitoring
+// switch. It is the authority the Collector start consults, so an installation
+// whose switch is Off does not resume collecting after a restart. A missing
+// document or a missing value is the On default a new installation completes
+// with, which is why absence is not read as Off.
+func (a *freshApplication) usageMonitoringEnabled(ctx context.Context) (bool, error) {
+	if a == nil || a.runtimeSettings == nil {
+		return true, nil
+	}
+	cfg, found, err := a.runtimeSettings.LoadManagerConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !found || cfg.Collector.Enabled == nil {
+		return true, nil
+	}
+	return *cfg.Collector.Enabled, nil
+}
+
+// applyUsageMonitoringSwitch reconciles this process with the switch the
+// administrator just wrote. Off stops the Collector and drops the latched start,
+// so the workspace stops claiming a stream the switch forbids; On re-arms
+// through the one startup entry point, which records the collection window only
+// after it proved the authority.
+func (a *freshApplication) applyUsageMonitoringSwitch(ctx context.Context, op bootstrap.FreshOperation) {
+	if a == nil || a.usage == nil {
+		return
+	}
+	reconcileCtx := a.runCtx
+	if reconcileCtx == nil {
+		reconcileCtx = context.WithoutCancel(ctx)
+	}
+	if a.runCtx != nil && a.usageProjection != nil {
+		startFreshDatabaseMaintenance(a.runCtx, a.cfg.DBPath)
+	}
+	a.usageStartMu.Lock()
+	defer a.usageStartMu.Unlock()
+	enabled, err := a.usageMonitoringEnabled(reconcileCtx)
+	if err != nil {
+		log.Printf("Fresh request monitoring switch unavailable: %v", err)
+		a.stopUsageCollectionLocked(reconcileCtx)
+		return
+	}
+	if !enabled {
+		a.stopUsageCollectionLocked(reconcileCtx)
+		a.setUsageStartReason(usageStartReasonMonitoringDisabled)
+		return
+	}
+	if a.usageCollectorStarted && a.collectionPhase() != usageapp.PhaseStopped {
+		return
+	}
+	a.stopUsageCollectionLocked(reconcileCtx)
+	if a.runCtx == nil || a.usageProjection == nil {
+		log.Printf("Fresh usage workers not started: no host lifetime")
+		return
+	}
+	if a.attemptUsageStart(a.runCtx, op) {
+		a.usageStarted = true
+	}
+}
+
 // startUsageCollection arms the real usage chain of a completed installation:
 // staged-key bindings (including keys created before completion), the canonical
 // identity projection, the Collector reading the install-derived CPA authority,
@@ -121,6 +182,23 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// running Collector, so repeating it would open a restart window that loses
 	// whatever arrived in between.
 	if !a.usageCollectorStarted {
+		// The administrator's stored switch governs collection, and a restart is
+		// exactly where it used to be ignored: this process starts a Collector for
+		// every completed installation, so an installation switched off came back
+		// collecting on the next start. An explicit Off therefore starts nothing
+		// and records no collection window; WAL maintenance already ran above,
+		// because database upkeep is not collection.
+		enabled, err := a.usageMonitoringEnabled(ctx)
+		if err != nil {
+			// An unreadable switch proves neither state, so the Collector stays
+			// closed and a later trigger retries the attempt.
+			log.Printf("Fresh request monitoring switch unavailable: %v", err)
+			return false
+		}
+		if !enabled {
+			a.setUsageStartReason(usageStartReasonMonitoringDisabled)
+			return false
+		}
 		started := false
 		switch {
 		case a.privateCollector != nil:
@@ -162,6 +240,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 			// it has authenticated anything. The first authenticated management
 			// read is, so it gates the durable collection instant.
 			if err := a.sampleUsageAuthority(ctx, install.BaseURL, install.ManagementKey); err != nil {
+				_ = a.legacyCollector.Stop(ctx)
 				log.Printf("Fresh usage collection sample unavailable: %v", err)
 				return false
 			}
