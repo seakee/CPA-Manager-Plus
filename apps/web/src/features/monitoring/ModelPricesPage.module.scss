@@ -200,7 +200,6 @@
 
 .filterButtonActive,
 .filterButtonActive:hover {
-  border-left-color: transparent;
   background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
   color: var(--data-blue-dark-2);
 }

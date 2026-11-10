@@ -579,6 +579,11 @@ input {
   box-shadow: none;
 }
 
+/* The wrapper paints the focus ring via :focus-within; the field must not add a second one. */
+.input-wrap .form-input:focus-visible {
+  outline: none;
+}
+
 .form-input::placeholder {
   color: var(--text-tertiary);
   font-family: inherit;
