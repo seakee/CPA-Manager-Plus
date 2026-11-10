@@ -81,7 +81,7 @@ docker run -d \
   seakee/cpa-manager-plus:latest
 ```
 
-启动后打开 `http://<host>:18317/management.html`，使用管理员密钥登录。
+启动后打开（1.x Stable）`http://<host>:18317/management.html`，使用管理员密钥登录。
 
 ## 原生包迁移
 

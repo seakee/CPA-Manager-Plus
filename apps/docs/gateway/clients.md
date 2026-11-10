@@ -1,6 +1,13 @@
 # 客户端接入
 
-客户端只需要知道 CPA 的地址和普通 API 密钥。不要把 Codex、Claude Code、OpenCode 或 OpenAI SDK 指向 CPAMP；CPAMP 负责观测和管理，不承接普通模型请求。
+客户端只需要知道 CPA 的地址和普通 API 密钥。在 1.x 和 v2 连接外部 CPA 时，不要把 Codex、Claude Code、OpenCode 或 OpenAI SDK 指向 CPAMP；CPAMP 负责观测和管理，不承接普通模型请求。
+
+::: tip 按版本区分 Base URL
+
+- **v2 Beta 内置 CPA**（新装或接管现有 CPA）：客户端 Base URL 是 CPAMP 的公开地址，例如 `https://cpamp.example.com/v1`。Ingress 把 `/v1/*` 等模型请求转给容器内的 CPA；容器内的 `8317` 不对外开放，不要直接连它，也不要把它暴露出去。
+- **v2 Beta 连接外部 CPA**：继续使用外部 CPA 原有的对外地址。
+- **1.x**：按本页下面的说明配置。
+  :::
 
 ## 通用规则
 
@@ -11,7 +18,7 @@
 | 模型     | 使用 CPA 提供商暴露的模型名或别名。                                           |
 | 监控     | 请求通过 CPA 后，CPAMP 才能采集用量队列并展示在请求监控 / 用量分析中。        |
 
-同域名反向代理时，`/v1/*`、`/v1beta/*`、`/backend-api/codex/*` 这些客户端请求应转发到 CPA。普通模型请求转给 CPAMP 只会增加 401、404 或 412 的排障成本。
+同域名反向代理时，`/v1/*`、`/v1beta/*`、`/backend-api/codex/*` 这些客户端请求应转发到 CPA。普通模型请求转给 CPAMP 只会增加 401、404 或 428 的排障成本。
 
 ## Codex
 

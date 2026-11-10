@@ -2,13 +2,18 @@
 
 如果你想用同一个域名访问 CPAMP 面板和 CPA API，就需要明确分流规则。HTTP 面板和 HTTP API 可以走反向代理；RESP Pub/Sub / RESP pop 不能走普通 HTTP 反向代理。
 
-本文按同域名部署来说明：
+::: warning v2 Beta 的入口与 1.x 不同
+v2 Beta 单镜像只公开 `18317` 一个端口，由 Ingress 统一路由：控制台位于安装时设置的**控制台地址（Control Base Path）**下，向导默认 `/console`（例如 `https://your-domain.com/console`），前端调用同一路径下的 `/api/v2/*`；如果安装时换成别的合法路径，控制台和前端 API 一起移动。控制台路径本身不带尾斜杠（默认值下 `/console/` 返回 404），且只在浏览器式导航（`Accept: text/html`）下返回页面；`/management.html` 在 v2 返回 404。因此 v2 不需要本页的 1.x 路径分流，把整个域名转发到 `18317` 即可，反向代理不需要改写控制台路径。下表、Nginx 示例和排障项描述的是 1.x Stable 的 `/management.html` 面板。
+:::
 
-- CPA Manager Plus 面板：`https://your-domain.com/management.html`
+本文按 1.x Stable 的同域名部署来说明：
+
+- CPAMP 1.x 面板：`https://your-domain.com/management.html`
+- CPAMP v2 Beta 控制台：`https://your-domain.com/console`（默认控制台地址，以向导完成页为准）
 - CPA / CLI Proxy API：`https://your-domain.com/v1/...`
 - CPA OAuth 回调、Codex API、Amp 路由等 CPA 侧接口
 
-本文适用于 Full Docker / Manager Server 模式。CPAMP 轻量面板由 CPA 自己托管 `/management.html`，通常不需要这套混合分流。
+本文适用于 1.x Stable 的 Full Docker / Manager Server 模式。CPAMP 轻量面板由 CPA 自己托管 `/management.html`，通常不需要这套混合分流。
 
 ## 先选场景
 
@@ -22,9 +27,11 @@
 
 ## 路径边界
 
+下表是 1.x Stable 的分流规则（v2 Beta 把整个 origin 转发到 `18317`，无需逐路径分流）：
+
 | 流量                                         | 推荐后端         | 说明                                                                                                    |
 | -------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------- |
-| `/management.html`                           | CPAMP `:18317`   | Manager Server 托管的管理面板。                                                                         |
+| `/management.html`（1.x）                    | CPAMP `:18317`   | Manager Server 托管的管理面板。                                                                         |
 | `/usage-service/*`                           | CPAMP `:18317`   | Manager Server 模式探测和配置接口。                                                                     |
 | `/v0/management/*`                           | CPAMP `:18317`   | CPAMP 先处理用量、模型价格、别名、仪表盘、请求监控、Codex 账号巡检；其他管理接口再由 CPAMP 代理到 CPA。 |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`   | CPAMP 面板中的插件页面资源；CPAMP 会按需代理到 CPA。                                                    |
@@ -36,9 +43,9 @@
 | 未明确归属的新路径                           | CPA `:8317`      | 避免阻断 CPA 未来新增接口（`/v8/management/*` 除外，见上）。                                            |
 | RESP Pub/Sub / RESP pop                      | 直连 CPA `:8317` | 不能经过 HTTP 反向代理。                                                                                |
 
-在 v2 中，上述 `/v8/management/config/api-keys[/*]` 路由只在 Manager Server 旧版管理面（`/management.html` 面板及其反向代理拓扑）提供：沙箱化插件 iframe 是跨站取用者，公开 Ingress 也拒绝整个 `/v8/management/*`，两者都不可达。
+上述 `/v8/management/config/api-keys[/*]` 只读路由属于 1.x Stable 的 `/management.html` 管理面。v2 Beta 不提供 `/management.html`，公开 Ingress 也拒绝整个 `/v8/management/*`；沙箱化插件 iframe 是跨站取用者，两者都不可达。
 
-推荐架构：
+1.x Stable 推荐架构：
 
 ```text
 Browser
@@ -140,6 +147,8 @@ services:
 
 ## Nginx HTTP 示例
 
+以下示例面向 1.x Stable 的 `/management.html` 面板。v2 Beta 只需把整个 origin 转发到 `18317`，不要复用这里的路径分流。
+
 在 `nginx.conf` 的 `http {}` 块中加入：
 
 ```nginx
@@ -224,7 +233,7 @@ server {
     location ^~ /v8/management/ { return 404; }
 
     # /models 由 CPAMP 提供兼容代理
-    # 如果 CPAMP 尚未完成 setup，访问此路径可能返回 412
+    # 如果 CPAMP 尚未完成 setup，访问此路径返回 428（usage service is not configured）
     location = /models          { proxy_pass http://cpamp; }
 
     # ===== CPA / CLI Proxy API =====
@@ -301,7 +310,7 @@ ports:
   - '18317:18317'
 ```
 
-## CPAMP 首次 setup
+## CPAMP 首次 setup（1.x Stable）
 
 访问：
 
@@ -340,7 +349,16 @@ Linux Docker 环境则建议把 CPA 和 CPAMP 放到同一个 Docker network，�
 
 ## 验证
 
-配置完成后按顺序验证：
+配置完成后按顺序验证。下面的命令面向 1.x Stable 的 `/management.html` 面板。
+
+v2 Beta 的控制台入口是安装时设置的控制台地址（默认 `/console`，以下命令按默认值举例），不带尾斜杠（`/console/` 返回 404），并且只在浏览器式导航下返回页面，所以验证时必须声明 `Accept: text/html`：
+
+```bash
+# v2 Beta 控制台应返回 200；入口不带尾斜杠
+curl -sI -H 'Accept: text/html' https://your-domain.com/console
+```
+
+不带 `Accept: text/html` 的 `curl -I https://your-domain.com/console`（curl 默认发送 `Accept: */*`）返回 404 属于预期行为，不代表控制台不可用。其余公开路径以实际安装后的控制台状态为准。
 
 ```bash
 # 1. CPAMP 面板能打开
@@ -373,7 +391,7 @@ curl -i https://your-domain.com/v8/management/config/api-keys \
 
 ## 排障
 
-### `/management.html` 能打开，但 setup 保存 CPA 地址失败
+### `/management.html` 能打开，但 setup 保存 CPA 地址失败（1.x Stable）
 
 优先检查 CPAMP 容器是否能访问 CPA：
 
@@ -402,9 +420,9 @@ CPAMP Full Docker / Manager Server 模式下：
 
 不要混用这三个密钥。
 
-### `/models` 返回 412
+### `/models` 返回 428
 
-通常说明 CPAMP 尚未完成首次 setup。先访问：
+通常说明 CPAMP 尚未完成首次 setup（没有可用的用量服务配置）。先访问：
 
 ```text
 https://your-domain.com/management.html
