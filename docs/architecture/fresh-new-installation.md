@@ -289,35 +289,42 @@ immediate SQLite transaction (`freshstore.TransactionalUpdater` +
 - Every install-derived write or admission consumer on an `adopt_existing`
   installation (`Targets`, `ConfigTarget`, `DefaultInstallCPAAuthorityProven`,
   and the key-operation journal) requires **both** durable `ProductComplete`
-  and the matching one-shot install journal (`KeyID` bound to the first
-  registered adopted key and to the staged run, Runtime generation and provider
-  seed). If completion is rejected by CAS, continuation expiry, a retired
-  destination key, a source binding conflict, a foreign journal (`409
-  adopt_installation_conflict`), or a decryption/storage failure — including an
-  outermost Fresh store read outage on the canonical route (`503
-  adopt_installation_unavailable`) — the transaction rolls back completely:
-  neither adopted workspace records, nor source bindings, nor the journal, nor
-  write authority remain behind.
+  and atomic `CommitAdoptionTx` registration evidence (`AdoptedSetSHA256` on the
+  one-shot journal paired with `fresh_s1_adoption_registration_v1`, canonical
+  key rows, and `gateway_api_key_source_bindings` for the committed Runtime
+  identity). Both `POST api-keys/<id>/initial-install` and
+  `freshkeyapply.Service.Apply` reject `adopt_existing` (`409 Conflict`, no
+  journal or CPA write), while `GET api-keys/<id>/initial-install` retains
+  read-only membership observation (`cpa.Transport.Configured`). If completion
+  is rejected by CAS, continuation expiry, a retired destination key, a source
+  binding conflict, a foreign journal (`409 adopt_installation_conflict`), or a
+  decryption/storage failure — including an outermost Fresh store read outage on
+  the canonical route (`503 adopt_installation_unavailable`) — the transaction
+  rolls back completely: neither adopted workspace records, nor source bindings,
+  nor the journal, nor write authority remain behind.
 - An `adopt_existing` installation that reached `ProductComplete = true` on a
-  build prior to journaled adoption holds no matching install journal and is
-  therefore denied by `DefaultInstallCPAAuthorityProven` as well as by config
-  and key-operation consumers until backfilled. On Manager startup
-  (`prepareCompletedStartup`, with background retry while the embedded CPA
-  starts) and on an explicit `POST complete` replay, `reconcileCompletedAdoption`
-  re-proves the live Runtime target and destination CPA read-only and commits
-  the adopted keys, source bindings and one-shot journal inside one immediate
-  `freshstore.WithRecordTx` transaction without bumping `Operation.Revision`
-  (or returns `409`/`503` on `POST complete` if a conflict or outage prevents
-  backfill). Completion also actively re-proves `X-CPA-SUPPORT-PLUGIN`
-  (`pluginCapability.reprove`, superseding any stale in-flight epoch) and
-  evaluates the header at response commit time so the first post-completion
-  Console navigation observes plugin support immediately.
-- The `initial-install` observation reads an adopted destination by **membership**:
-  `cpa.Transport.Configured` answers whether the staged secret is one of the keys
-  the CPA serves, because an adopted `access.api-keys` is the source CPA's list
-  and the single-key reading could never be true there. Membership is the only
-  configured fact an adoption can state — `AuthSweep` remains the live proof — and
-  the relaxation is confined to the adopted posture: a New Managed destination
+  build prior to journaled adoption — or one carrying only an unverified
+  non-adoption `InitialInstall` row without `CommitAdoptionTx` evidence — fails
+  closed in `DefaultInstallCPAAuthorityProven`, `ConfigTarget`, the
+  key-operation journal, and `AdoptionRegistrationReady` until backfilled. On
+  Manager startup (`prepareCompletedStartup`, with background retry while the
+  embedded CPA starts) and on an explicit `POST complete` replay,
+  `reconcileCompletedAdoption` re-proves the live Runtime target and destination
+  CPA read-only and commits the adopted keys, source bindings, and atomic
+  registration journal inside one immediate `freshstore.WithRecordTx`
+  transaction without bumping `Operation.Revision` (or returns `409`/`503` on
+  `POST complete` if a conflict or outage prevents backfill). Completion also
+  actively re-proves `X-CPA-SUPPORT-PLUGIN` (`pluginCapability.reprove`,
+  superseding any stale in-flight epoch) and evaluates the header on the final
+  `2xx`/`3xx` response commit (preserving `Unwrap`, `http.Flusher`, and
+  `http.Hijacker`) so the first post-completion Console navigation observes
+  plugin support immediately.
+- The `initial-install` read-only observation (`GET`) reads an adopted destination
+  by **membership**: `cpa.Transport.Configured` answers whether the staged secret is
+  one of the keys the CPA serves, because an adopted `access.api-keys` is the source
+  CPA's list and the single-key reading could never be true there. Membership is the
+  only configured fact an adoption can state — `AuthSweep` remains the live proof —
+  and the relaxation is confined to the adopted posture: a New Managed destination
   still requires the list to be exactly the staged key.
 - Chat admission does **not** widen with it. `freshkeyapply.Service.Admit` is the
   private S1/S2 install proof, and its first gate is the canonical Key workspace
