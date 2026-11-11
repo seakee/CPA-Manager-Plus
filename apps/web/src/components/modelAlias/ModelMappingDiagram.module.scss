@@ -96,12 +96,10 @@
   max-width: 280px;
   position: relative;
   transition: all 0.2s ease;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 
   &:hover {
     border-color: var(--primary-color);
     transform: translateY(-1px);
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
     z-index: 10;
   }
 
@@ -243,8 +241,8 @@
 .contextMenu {
   position: fixed;
   background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
+  border-radius: var(--app-radius-md);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
   z-index: 9999;
@@ -283,6 +281,10 @@
     cursor: default;
     pointer-events: none;
   }
+}
+
+:global([data-theme='dark']) .contextMenu {
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
 }
 
 .settingsEmpty {

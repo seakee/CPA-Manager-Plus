@@ -353,8 +353,12 @@
   --bg-error-light: #2b1719;
   --floating-surface: var(--app-surface);
   --floating-border: var(--app-border);
-  --floating-shadow-sm: 0 8px 24px rgba(0, 0, 0, 0.14);
-  --floating-shadow-md: 0 12px 28px rgba(15, 23, 42, 0.16);
+  --floating-shadow-sm:
+    0 8px 24px rgba(0, 0, 0, 0.32),
+    0 0 0 1px rgb(255 255 255 / 0.06);
+  --floating-shadow-md:
+    0 12px 28px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgb(255 255 255 / 0.08);
   --floating-shadow-lg:
     0 16px 32px rgba(0, 0, 0, 0.42),
     0 0 0 1px color-mix(in srgb, var(--primary-color) 14%, transparent);

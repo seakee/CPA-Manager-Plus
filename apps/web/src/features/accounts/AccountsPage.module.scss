@@ -5906,7 +5906,8 @@
   border: 1px solid var(--border-primary);
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
 }
 
 .accountSortDropdownItem.accountSortDropdownItem {
@@ -6056,7 +6057,11 @@
   border-bottom: 0;
   border-radius: var(--app-radius-lg) var(--app-radius-lg) 0 0;
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed. This sheet is anchored to the viewport
+     bottom, so the downward offsets of both floating tiers fall off-screen; the
+     `lg` tier is used because its 1px accent ring is what defines the sheet edge
+     above the scrim. `-dialog` stays reserved for centered dialogs. */
+  box-shadow: var(--floating-shadow-lg);
 }
 
 .mobileFilterHeader {
@@ -6850,7 +6855,8 @@
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--app-surface-strong);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
 }
 
 .floatingBatchActionLeft,
