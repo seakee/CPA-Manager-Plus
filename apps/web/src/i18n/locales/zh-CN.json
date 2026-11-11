@@ -1985,6 +1985,8 @@
     "detail_quota_other_items": "其他额度项",
     "detail_quota_other_items_desc": "金额、产品及其他不属于已识别标准或模型窗口的额度。",
     "detail_quota_reset_records": "重置记录",
+    "detail_plugin_quota_summary": "插件额度摘要",
+    "detail_plugin_quota_summary_desc": "所属插件上报的标签/数值事实（总体用量、额外余额等）。按声明原样显示；缺失数据保持未知，不会变成窗口百分比。",
     "detail_no_quota_windows": "该账号暂未解析出额度窗口。",
     "detail_window_requests": "窗口请求",
     "detail_window_tokens": "窗口 Token",
@@ -5372,5 +5374,16 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "plugin_quota": {
+    "plan_label": "方案",
+    "missing_auth_index": "认证文件缺少 auth_index",
+    "probe_unsupported": "当前 CPA 版本不支持声明式插件额度探测（quota_probe）",
+    "plugin_not_found": "未找到为 {{provider}} 提供额度查询的已启用插件",
+    "empty_data": "暂无可用额度数据",
+    "window_five_hour": "5 小时限额",
+    "window_daily": "日限额",
+    "window_weekly": "周限额",
+    "window_monthly": "月限额"
   }
 }

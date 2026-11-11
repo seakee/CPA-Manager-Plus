@@ -971,6 +971,12 @@
   }
 }
 
+.accountGridCardPluginQuotaSummary {
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--accounts-border) 52%, transparent);
+}
+
 .accountGridCardRecentStatusHeader {
   display: flex;
   align-items: center;

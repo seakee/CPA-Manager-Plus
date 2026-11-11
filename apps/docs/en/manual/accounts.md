@@ -66,7 +66,16 @@ After a successful xAI OAuth quota refresh, CPAMP queries `/user?include=subscri
 | Claude          | Base quota, weekly quota, and model-scoped limits                              | Scoped limits can be duplicated, missing, or inactive; CPAMP groups them by identity and freshness. |
 | xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                     |
 | Muse / Meta     | `meta:window`, `meta:weekly`, and reset/period metadata                         | Missing usage percentages remain unknown rather than becoming `0%`; DCA is limited to account/quota flows. |
+| Plugin providers | Credential entry with `supports_quota` plus the owning plugin's quota probe  | Requires a CPA plugin that declares the `quota_provider` capability (for example ClinePassBridge).   |
 | Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                              |
+
+### Plugin credentials
+
+CPA plugins can declare a `quota_provider` capability. When a credential entry advertises `supports_quota`, Accounts shows the regular quota refresh actions for it. Refreshing resolves the owning plugin from the credential entry (`quota_plugin_id`) or the plugin registry (`quota_provider`), then queries CPA's generic plugin quota endpoint, which asks the plugin for live data. Plugin quota windows follow the same refresh, caching, and evidence rules as built-in providers.
+
+Besides quota windows, a plugin can report label/value quota summary facts (for example an overall usage percentage or an extra balance with an explicit currency). CPAMP shows these facts as declared in the card list, table list, and the quota detail tab: declared units, currencies, and precision caveats are preserved, a reported `0` stays visible, and missing or invalid data stays unknown — it is never converted into a window percentage or turned into an invented total or reset time. A summary-only response is still valid partial evidence; subscription metadata is kept while quota stays unknown; genuinely empty responses remain failures, and a failed refresh retains the previous scoped snapshot.
+
+For known plugin-reported window fractions such as the 5-hour, weekly, and monthly windows, the card and table credential lists themselves render real progress bars in the existing style even when an exact reset timestamp is absent — including a genuine 0% zero-width bar. The plugin's own relative-reset description is preserved and unknown period boundaries are marked as not confirmed; CPAMP does not infer absolute reset times and does not enable interval usage or forecasts that lack their existing evidence.
 
 ## Quota Cooldown And Account Actions
 

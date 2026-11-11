@@ -12,12 +12,16 @@ import type {
   KimiQuotaState,
   MetaQuotaData,
   MetaQuotaState,
+  PluginListEntry,
+  PluginQuotaData,
+  PluginQuotaState,
   XaiBillingSummary,
   XaiQuotaState,
 } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import type { AuthFilesApiRequestScope } from '@/services/api/authFiles';
 import { createScopedApiRequestConfig } from '@/services/api/client';
+import { pluginsApi } from '@/services/api/plugins';
 import { fetchXaiSubscription } from '@/utils/quota/xaiSubscription';
 import type {
   AntigravityQuotaData,
@@ -26,6 +30,13 @@ import type {
   KimiQuotaData,
   QuotaFetchContext,
 } from '@/utils/quota';
+import {
+  hasMeaningfulPluginQuotaSummaryValue,
+  readAuthFileQuotaAuthIndex,
+  readAuthFileQuotaPluginId,
+  readAuthFileQuotaProvider,
+  resolveQuotaPluginFromList,
+} from '@/utils/quota/pluginQuota';
 import {
   buildCodexQuotaWindows,
   fetchAntigravityQuota,
@@ -62,7 +73,7 @@ import {
   scopeQuotaStateToCredential,
 } from '@/utils/quota/credentialScope';
 
-type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin' | 'meta';
+type QuotaType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai' | 'devin' | 'meta' | 'plugin';
 
 export type { QuotaFetchContext };
 
@@ -928,6 +939,121 @@ export const META_CONFIG: QuotaConfig<MetaQuotaState, MetaQuotaData> = {
     plan: null,
     isSubscriptionActive: null,
     quotaInventoryObserved: false,
+    error: message,
+    errorStatus: status,
+    ...buildQuotaCredentialIdentity(file),
+    failedAtMs: Date.now(),
+  }),
+  scopeState: scopeCredentialQuotaState,
+};
+
+const PLUGIN_LIST_CACHE_TTL_MS = 60_000;
+
+let pluginQuotaListCache: { atMs: number; plugins: PluginListEntry[] } | null = null;
+
+const resetPluginQuotaListCache = () => {
+  pluginQuotaListCache = null;
+};
+
+const listQuotaPlugins = async (
+  requestScope?: AuthFilesApiRequestScope
+): Promise<PluginListEntry[]> => {
+  const now = Date.now();
+  if (pluginQuotaListCache && now - pluginQuotaListCache.atMs < PLUGIN_LIST_CACHE_TTL_MS) {
+    return pluginQuotaListCache.plugins;
+  }
+  try {
+    const response = await pluginsApi.list(requestScope);
+    pluginQuotaListCache = { atMs: now, plugins: response.plugins };
+    return response.plugins;
+  } catch (error: unknown) {
+    resetPluginQuotaListCache();
+    throw error;
+  }
+};
+
+export const resetPluginQuotaCacheForTest = () => {
+  resetPluginQuotaListCache();
+};
+
+/**
+ * Quota config for credentials owned by CPA plugins that declare the
+ * `quota_provider` capability. The plugin id is resolved from the credential
+ * entry (`quota_plugin_id`) or from the plugin registry by `quota_provider`,
+ * then fetched through `POST /plugins/{pluginId}/quota`.
+ */
+export const PLUGIN_CONFIG: QuotaConfig<PluginQuotaState, PluginQuotaData> = {
+  type: 'plugin',
+  i18nPrefix: 'plugin_quota',
+  fetchQuota: async (file, t, requestScope) => {
+    const authIndex = readAuthFileQuotaAuthIndex(file);
+    if (!authIndex) throw new Error(t('plugin_quota.missing_auth_index'));
+
+    const quotaProvider = readAuthFileQuotaProvider(file);
+    const explicitPluginId = readAuthFileQuotaPluginId(file);
+    let pluginId = explicitPluginId;
+    let resolvedProvider = quotaProvider || null;
+    if (!pluginId) {
+      if (!quotaProvider) throw new Error(t('plugin_quota.probe_unsupported'));
+      const plugins = await listQuotaPlugins(requestScope);
+      const plugin = resolveQuotaPluginFromList(quotaProvider, plugins);
+      if (!plugin) throw new Error(t('plugin_quota.plugin_not_found', { provider: quotaProvider }));
+      pluginId = plugin.id;
+      resolvedProvider = plugin.quotaProvider ?? resolvedProvider;
+    }
+
+    const data = await pluginsApi.fetchQuota(pluginId, authIndex);
+    // Only meaningful normalized evidence counts: valid windows, a summary
+    // item with a real value (numeric zero and text count), or known
+    // subscription metadata. An all-null/invalid summary is not evidence: the
+    // refresh stays an observable failure so a previous scoped good snapshot
+    // is retained with feedback instead of being replaced by placeholders.
+    if (
+      data.groups.length === 0 &&
+      !hasMeaningfulPluginQuotaSummaryValue(data.summary) &&
+      !data.subscription
+    ) {
+      throw new Error(t('plugin_quota.empty_data'));
+    }
+    return {
+      groups: data.groups,
+      summary: data.summary,
+      subscription: data.subscription,
+      serverTimeOffsetMs: data.serverTimeOffsetMs,
+      pluginId,
+      quotaProvider: resolvedProvider,
+    };
+  },
+  getStoreKey: getQuotaCredentialStoreKey,
+  buildLoadingState: (file) => ({
+    status: 'loading',
+    groups: [],
+    summary: [],
+    subscription: null,
+    serverTimeOffsetMs: null,
+    pluginId: null,
+    quotaProvider: null,
+    ...buildQuotaCredentialIdentity(file),
+  }),
+  buildSuccessState: (data, file) => ({
+    status: 'success',
+    groups: data.groups,
+    summary: data.summary,
+    subscription: data.subscription,
+    serverTimeOffsetMs: data.serverTimeOffsetMs,
+    pluginId: data.pluginId,
+    quotaProvider: data.quotaProvider,
+    ...buildQuotaCredentialIdentity(file),
+    fetchedAtMs: Date.now(),
+  }),
+  buildErrorState: (message, status, file) => ({
+    status: 'error',
+    groups: [],
+    summary: [],
+    subscription: null,
+    serverTimeOffsetMs: null,
+    pluginId: null,
+    quotaProvider: (file ? readAuthFileQuotaProvider(file) : '') || null,
     error: message,
     errorStatus: status,
     ...buildQuotaCredentialIdentity(file),

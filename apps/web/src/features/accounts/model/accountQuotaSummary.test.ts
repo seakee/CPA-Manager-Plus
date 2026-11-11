@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { AuthFileItem, CodexQuotaState, XaiBillingSummary } from '@/types';
+import type { AuthFileItem, CodexQuotaState, PluginQuotaState, XaiBillingSummary } from '@/types';
 import { getAuthFileSelectionKey } from '@/features/authFiles/model/credentialStatus';
 import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import { buildQuotaCredentialIdentity } from '@/utils/quota/credentialScope';
 import {
   hasConfirmedXaiBillingEntitlement,
+  resolveAccountPluginQuotaSummaryItems,
   resolveAccountQuota,
   type AccountQuotaStores,
 } from './accountQuotaSummary';
@@ -656,3 +657,164 @@ describe('hasConfirmedXaiBillingEntitlement', () => {
   });
 });
 
+
+describe('resolveAccountQuota — plugin credentials', () => {
+  const resetIso = '2026-11-09T06:36:53Z';
+  const resetMs = Date.parse(resetIso);
+
+  const file = { name: 'cline.json', type: 'cline-pass', authIndex: 'p-1' } as AuthFileItem;
+  const storeKey = 'cline.json::p-1';
+
+  const storesWithPlugin = (): AccountQuotaStores => {
+    const stores = emptyStores();
+    const state: PluginQuotaState = {
+      status: 'success',
+      authFileKey: storeKey,
+      authFileName: file.name,
+      authIndex: 'p-1',
+      authFileIdentityVerified: true,
+      fetchedAtMs: 1726398000000,
+      pluginId: 'clinepassbridge',
+      quotaProvider: 'cline-pass',
+      subscription: { plan: 'Cline Pass (Monthly)', tierName: null, tierId: null },
+      summary: [],
+      serverTimeOffsetMs: null,
+      groups: [
+        {
+          id: 'cline-pass',
+          label: 'Cline Pass',
+          buckets: [
+            { id: '5h', label: '5h', window: '5h', remainingFraction: 1 },
+            {
+              id: '7d',
+              label: '7d',
+              window: '7d',
+              remainingFraction: 0.13,
+              resetTime: resetIso,
+            },
+            {
+              id: 'monthly',
+              label: 'monthly',
+              window: 'monthly',
+              remainingFraction: 0.14,
+              resetTime: resetIso,
+            },
+          ],
+        },
+      ],
+    };
+    stores.pluginQuota = { [storeKey]: state };
+    return stores;
+  };
+
+  it('summarizes plugin buckets into a limiting-window status instead of unknown', () => {
+    const summary = resolveAccountQuota(file, storesWithPlugin());
+    // 13% is below the low threshold: the row is 'low', never 'unknown',
+    // so the quota bar keeps its warning color instead of going neutral.
+    expect(summary).toMatchObject({
+      status: 'low',
+      remainingPercent: 13,
+      usedPercent: 87,
+      resetAtMs: resetMs,
+      planType: 'Cline Pass (Monthly)',
+    });
+    expect(summary.source).not.toBe('none');
+  });
+
+  it('stays unknown while no plugin quota snapshot exists', () => {
+    const summary = resolveAccountQuota(file, emptyStores());
+    expect(summary.status).toBe('unknown');
+    expect(summary.remainingPercent).toBeNull();
+  });
+
+  it('reports plugin quota errors without inventing windows', () => {
+    const stores = storesWithPlugin();
+    const state = stores.pluginQuota![storeKey];
+    stores.pluginQuota![storeKey] = {
+      ...state,
+      status: 'error',
+      error: 'plugin unavailable',
+      errorStatus: 502,
+      failedAtMs: 1726399000000,
+    };
+    const summary = resolveAccountQuota(file, stores);
+    expect(summary.status).toBe('error');
+    expect(summary.error).toBe('plugin unavailable');
+    expect(summary.errorStatus).toBe(502);
+  });
+});
+
+describe('resolveAccountPluginQuotaSummaryItems', () => {
+  const makePluginState = (
+    overrides: Partial<PluginQuotaState> = {}
+  ): PluginQuotaState => ({
+    status: 'success',
+    authFileKey: 'cc.json::cc-1',
+    authFileName: 'cc.json',
+    authIndex: 'cc-1',
+    authFileIdentityVerified: true,
+    fetchedAtMs: 1726398000000,
+    pluginId: 'commandcode',
+    quotaProvider: 'commandcode',
+    subscription: null,
+    summary: [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+      {
+        key: 'extra_credits',
+        label: 'Extra balance',
+        value: 12.5,
+        unit: null,
+        format: 'currency',
+        currency: 'USD',
+      },
+    ],
+    serverTimeOffsetMs: null,
+    groups: [],
+    ...overrides,
+  });
+
+  const makePluginFile = (): AuthFileItem =>
+    ({ name: 'cc.json', type: 'commandcode', provider: 'commandcode', authIndex: 'cc-1' }) as AuthFileItem;
+
+  const storesWithPluginState = (state: PluginQuotaState): AccountQuotaStores => {
+    const stores = emptyStores();
+    stores.pluginQuota = { 'cc.json::cc-1': state };
+    return stores;
+  };
+
+  it('returns the identity-scoped plugin summary items', () => {
+    const stores = storesWithPluginState(makePluginState());
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)).toHaveLength(2);
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)[0]?.key).toBe(
+      'usage_percent'
+    );
+  });
+
+  it('keeps the retained summary readable while a transient refresh failed', () => {
+    const stores = storesWithPluginState(
+      makePluginState({ status: 'error', error: 'bridge unavailable', errorStatus: 503 })
+    );
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)).toHaveLength(2);
+  });
+
+  it('returns no items when the credential has no scoped plugin snapshot', () => {
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), emptyStores())).toEqual([]);
+  });
+
+  it('does not leak another credential identity summary', () => {
+    const stores = storesWithPluginState(makePluginState());
+    const otherFile = {
+      name: 'cc.json',
+      type: 'commandcode',
+      provider: 'commandcode',
+      authIndex: 'cc-2',
+    } as AuthFileItem;
+    expect(resolveAccountPluginQuotaSummaryItems(otherFile, stores)).toEqual([]);
+  });
+
+  it('keeps built-in providers on their own adapters without plugin summary leakage', () => {
+    const stores = storesWithPluginState(makePluginState());
+    const claudeFile = { name: 'cc.json', type: 'claude', authIndex: 'cc-1' } as AuthFileItem;
+    expect(resolveAccountPluginQuotaSummaryItems(claudeFile, stores)).toEqual([]);
+  });
+});

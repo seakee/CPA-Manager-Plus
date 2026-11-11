@@ -19,6 +19,7 @@ const createPlugin = (patch: Partial<PluginListEntry> = {}): PluginListEntry => 
   enabled: true,
   effectiveEnabled: true,
   supportsOAuth: false,
+  supportsQuota: false,
   logo: '',
   configFields: [],
   menus: [

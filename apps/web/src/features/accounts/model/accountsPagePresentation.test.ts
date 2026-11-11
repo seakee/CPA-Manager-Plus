@@ -956,6 +956,232 @@ describe('accountsPagePresentation', () => {
       expect(selectMetaQuotaListWindows([current])).toEqual([current]);
       expect(selectMetaQuotaListWindows([extra])).toEqual([]);
     });
+
+    it('selects plugin 5h/weekly fractions with unknown boundaries in duration order', () => {
+      const fiveHour = makeQuotaWindow({
+        key: 'windows:5h',
+        label: '5-hour limit',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+        resetAtMs: null,
+        resetLabel: '-',
+      });
+      const weekly = makeQuotaWindow({
+        key: 'windows:weekly',
+        label: 'Weekly limit',
+        kind: 'weekly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 604800,
+        remainingPercent: 59,
+        resetAtMs: null,
+        resetLabel: '-',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('commandcode'), [weekly, fiveHour]);
+      expect(selected).toEqual([fiveHour, weekly]);
+    });
+
+    it('includes a true-zero plugin fraction as list evidence', () => {
+      const exhausted = makeQuotaWindow({
+        key: 'windows:5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 0,
+        usedPercent: 100,
+        resetAtMs: null,
+        resetLabel: '-',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('commandcode'), [exhausted]);
+      expect(selected).toEqual([exhausted]);
+    });
+
+    it('applies the main-list limit and duration order to unknown-boundary plugin windows', () => {
+      const fiveHour = makeQuotaWindow({
+        key: 'windows:5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+      });
+      const weekly = makeQuotaWindow({
+        key: 'windows:weekly',
+        kind: 'weekly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 604800,
+        remainingPercent: 59,
+      });
+      const monthly = makeQuotaWindow({
+        key: 'windows:monthly',
+        kind: 'monthly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 2592000,
+        remainingPercent: 90,
+      });
+
+      expect(selectAccountQuotaMainListWindows(makeRow('commandcode'), [monthly, weekly, fiveHour])).toEqual([
+        fiveHour,
+        weekly,
+      ]);
+      expect(
+        selectAccountQuotaMainListWindows(makeRow('commandcode'), [monthly, weekly, fiveHour], 4)
+      ).toEqual([fiveHour, weekly, monthly]);
+    });
+
+    it('excludes plugin windows without a known kind, valid fraction, or account-wide scope', () => {
+      const unknownKind = makeQuotaWindow({
+        key: 'windows:milestone',
+        kind: undefined,
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: null,
+        remainingPercent: 50,
+      });
+      const summaryKind = makeQuotaWindow({
+        key: 'windows:overall',
+        kind: 'summary',
+        source: 'plugin',
+        windowMode: 'non_window',
+        remainingPercent: 40,
+        amountLabel: '40% overall',
+      });
+      const missingFraction = makeQuotaWindow({
+        key: 'windows:5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: null,
+      });
+      const outOfRange = makeQuotaWindow({
+        key: 'windows:weekly',
+        kind: 'weekly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 604800,
+        remainingPercent: 101,
+      });
+      const modelScoped = makeQuotaWindow({
+        key: 'windows:scoped-5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+        modelScope: { kind: 'models', models: ['sonnet'], complete: true },
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('commandcode'), [
+        unknownKind,
+        summaryKind,
+        missingFraction,
+        outOfRange,
+        modelScoped,
+      ]);
+      expect(selected).toEqual([]);
+    });
+
+    it('excludes unknown-boundary daily even when it could displace approved windows at max 4', () => {
+      const fiveHour = makeQuotaWindow({
+        key: 'windows:5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+      });
+      const daily = makeQuotaWindow({
+        key: 'windows:daily',
+        kind: 'daily',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 86400,
+        remainingPercent: 80,
+      });
+      const weekly = makeQuotaWindow({
+        key: 'windows:weekly',
+        kind: 'weekly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 604800,
+        remainingPercent: 59,
+      });
+      const monthly = makeQuotaWindow({
+        key: 'windows:monthly',
+        kind: 'monthly',
+        source: 'plugin',
+        windowMode: 'unknown',
+        limitWindowSeconds: 2592000,
+        remainingPercent: 52,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(
+        makeRow('commandcode'),
+        [fiveHour, daily, weekly, monthly],
+        4
+      );
+      expect(selected).toEqual([fiveHour, weekly, monthly]);
+    });
+
+    it('keeps non-plugin sources out of the plugin supplement', () => {
+      const claudeUnknown = makeQuotaWindow({
+        key: 'claude-5h',
+        kind: 'five_hour',
+        source: 'claude',
+        windowMode: 'unknown',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+      });
+      const codexUnknown = makeQuotaWindow({
+        key: 'codex-weekly',
+        kind: 'weekly',
+        source: 'codex',
+        windowMode: 'unknown',
+        limitWindowSeconds: 604800,
+        remainingPercent: 59,
+      });
+      const summaryWindow = makeQuotaWindow({
+        key: 'summary',
+        kind: 'summary',
+        source: 'summary',
+        windowMode: 'non_window',
+        remainingPercent: 44,
+      });
+
+      expect(selectAccountQuotaMainListWindows(makeRow('claude'), [claudeUnknown])).toEqual([]);
+      expect(selectAccountQuotaMainListWindows(makeRow('commandcode'), [summaryWindow])).toEqual([]);
+      // Codex selection follows its own pre-existing candidate rule, untouched
+      // by the plugin supplement.
+      expect(selectAccountQuotaMainListWindows(makeRow('codex'), [codexUnknown])).toEqual([
+        codexUnknown,
+      ]);
+    });
+
+    it('does not duplicate a plugin window that already qualifies as a standard interval', () => {
+      const fixedPlugin = makeQuotaWindow({
+        key: 'windows:5h',
+        kind: 'five_hour',
+        source: 'plugin',
+        windowMode: 'fixed',
+        limitWindowSeconds: 18000,
+        remainingPercent: 68,
+        resetAtMs: 1_000,
+        fromMs: 1_000,
+        toMs: 2_000,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('commandcode'), [fixedPlugin]);
+      expect(selected).toEqual([fixedPlugin]);
+    });
   });
 
   describe('getQuotaWindowReadableLabel', () => {

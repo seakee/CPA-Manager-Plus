@@ -6,6 +6,7 @@ export {
   DEVIN_CONFIG,
   KIMI_CONFIG,
   META_CONFIG,
+  PLUGIN_CONFIG,
   XAI_CONFIG,
   buildObservedCodexQuotaState,
   buildQuotaFailureState,

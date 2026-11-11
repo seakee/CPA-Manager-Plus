@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AuthFileItem, DevinQuotaData, MetaQuotaData } from '@/types';
+import type { AuthFileItem, DevinQuotaData, MetaQuotaData, PluginQuotaData } from '@/types';
 import {
   fetchClaudeQuota,
   fetchCodexQuota,
@@ -15,6 +15,7 @@ import {
   CODEX_CONFIG,
   DEVIN_CONFIG,
   META_CONFIG,
+  PLUGIN_CONFIG,
   type QuotaConfig,
 } from './quotaConfigs';
 import { refreshQuotaWithConfig, type QuotaSetter } from './quotaRefresh';
@@ -27,6 +28,22 @@ vi.mock('@/utils/quota', async (importOriginal) => {
     fetchCodexQuota: vi.fn(),
     fetchDevinQuota: vi.fn(),
     fetchMetaQuota: vi.fn(),
+  };
+});
+
+const pluginQuotaFetchMock = vi.fn();
+
+vi.mock('@/services/api/plugins', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/api/plugins')>();
+  return {
+    ...actual,
+    pluginsApi: {
+      ...actual.pluginsApi,
+      // Apply the real response normalization so fixtures stay raw, exactly
+      // like the payloads the plugin quota config receives in production.
+      fetchQuota: async (...args: Parameters<typeof actual.pluginsApi.fetchQuota>) =>
+        actual.normalizePluginQuotaResponse(await pluginQuotaFetchMock(...args)),
+    },
   };
 });
 
@@ -490,5 +507,179 @@ describe('refreshQuotaWithConfig', () => {
     expect(result).toBeNull();
     const metaStoreKey = getQuotaCredentialStoreKey(metaFile);
     expect(useQuotaStore.getState().metaQuota[metaStoreKey]).toBeUndefined();
+  });
+
+  describe('plugin quota retention', () => {
+    const pluginFile = {
+      name: 'commandcode-auth.json',
+      type: 'commandcode',
+      provider: 'commandcode',
+      authIndex: 'cc-1',
+      quota_plugin_id: 'commandcode',
+    } as AuthFileItem;
+
+    const pluginData = (
+      summaryValue: number,
+      extra?: Partial<PluginQuotaData>
+    ): PluginQuotaData => ({
+      groups: [],
+      summary: [
+        {
+          key: 'usage_percent',
+          label: 'Usage (rounded)',
+          value: summaryValue,
+          unit: '%',
+          format: 'number',
+          currency: null,
+        },
+        {
+          key: 'extra_credits',
+          label: 'Extra balance',
+          value: 12.5,
+          unit: null,
+          format: 'currency',
+          currency: 'USD',
+        },
+      ],
+      subscription: null,
+      serverTimeOffsetMs: null,
+      pluginId: 'commandcode',
+      quotaProvider: 'commandcode',
+      ...extra,
+    });
+
+    beforeEach(() => {
+      pluginQuotaFetchMock.mockReset();
+    });
+
+    it('keeps the previous summary and groups visible while a refresh is pending', async () => {
+      const storeKey = getQuotaCredentialStoreKey(pluginFile);
+      const previousState = PLUGIN_CONFIG.buildSuccessState(pluginData(10), pluginFile);
+      useQuotaStore.getState().setPluginQuota({ [storeKey]: previousState });
+
+      const pending = deferred<PluginQuotaData>();
+      pluginQuotaFetchMock.mockReturnValueOnce(pending.promise);
+
+      const refreshPromise = runRefresh(
+        PLUGIN_CONFIG,
+        pluginFile,
+        useQuotaStore.getState().setPluginQuota,
+        previousState
+      );
+
+      // Pending refresh must not wipe the previous scoped snapshot.
+      expect(useQuotaStore.getState().pluginQuota[storeKey]).toMatchObject({
+        status: 'success',
+        summary: previousState.summary,
+      });
+
+      pending.resolve(pluginData(32));
+      const result = await refreshPromise;
+      expect(result).toMatchObject({ status: 'success' });
+      expect(useQuotaStore.getState().pluginQuota[storeKey]).toMatchObject({
+        status: 'success',
+        summary: pluginData(32).summary,
+      });
+    });
+
+    it('keeps prior plugin facts and records feedback on a transient refresh failure', async () => {
+      const storeKey = getQuotaCredentialStoreKey(pluginFile);
+      const previousState = PLUGIN_CONFIG.buildSuccessState(
+        pluginData(10, {
+          groups: [
+            {
+              id: 'windows',
+              label: 'Windows',
+              buckets: [{ id: '5h', label: '5h', window: '5h', remainingFraction: 0.4 }],
+            },
+          ],
+        }),
+        pluginFile
+      );
+      useQuotaStore.getState().setPluginQuota({ [storeKey]: previousState });
+      pluginQuotaFetchMock.mockRejectedValueOnce(
+        Object.assign(new Error('bridge unavailable'), { status: 503 })
+      );
+
+      const result = await runRefresh(
+        PLUGIN_CONFIG,
+        pluginFile,
+        useQuotaStore.getState().setPluginQuota,
+        previousState
+      );
+      const state = useQuotaStore.getState().pluginQuota[storeKey];
+
+      expect(result).toMatchObject({ status: 'error', error: 'bridge unavailable', errorStatus: 503 });
+      expect(state).toMatchObject({
+        status: 'error',
+        error: 'bridge unavailable',
+        errorStatus: 503,
+        summary: previousState.summary,
+        groups: previousState.groups,
+        pluginId: 'commandcode',
+      });
+    });
+
+    it('rejects an evidence-free refresh and retains the previous scoped snapshot with feedback', async () => {
+      const storeKey = getQuotaCredentialStoreKey(pluginFile);
+      const previousState = PLUGIN_CONFIG.buildSuccessState(pluginData(32), pluginFile);
+      useQuotaStore.getState().setPluginQuota({ [storeKey]: previousState });
+
+      // A follow-up response whose only summary value normalizes to null is not
+      // meaningful evidence: the refresh must fail instead of replacing facts.
+      pluginQuotaFetchMock.mockResolvedValueOnce({
+        subscription: null,
+        summary: [{ key: 'broken', label: 'Malformed synthetic summary', value: { remaining: 1 } }],
+        groups: [],
+        serverTimeOffsetMs: null,
+      });
+
+      const result = await runRefresh(
+        PLUGIN_CONFIG,
+        pluginFile,
+        useQuotaStore.getState().setPluginQuota,
+        previousState
+      );
+      const state = useQuotaStore.getState().pluginQuota[storeKey];
+
+      expect(result).toMatchObject({ status: 'error', error: 'plugin_quota.empty_data' });
+      expect(state).toMatchObject({
+        status: 'error',
+        error: 'plugin_quota.empty_data',
+        summary: previousState.summary,
+        pluginId: 'commandcode',
+      });
+    });
+
+    it('does not publish a late plugin response after a newer refresh replaced the snapshot', async () => {
+      const storeKey = getQuotaCredentialStoreKey(pluginFile);
+      const first = deferred<PluginQuotaData>();
+      const second = deferred<PluginQuotaData>();
+      pluginQuotaFetchMock
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise);
+
+      const firstPromise = runRefresh(
+        PLUGIN_CONFIG,
+        pluginFile,
+        useQuotaStore.getState().setPluginQuota
+      );
+      const secondPromise = runRefresh(
+        PLUGIN_CONFIG,
+        pluginFile,
+        useQuotaStore.getState().setPluginQuota
+      );
+
+      second.resolve(pluginData(50));
+      await secondPromise;
+      first.resolve(pluginData(10));
+      const firstResult = await firstPromise;
+
+      expect(firstResult).toBeNull();
+      expect(useQuotaStore.getState().pluginQuota[storeKey]).toMatchObject({
+        status: 'success',
+        summary: pluginData(50).summary,
+      });
+    });
   });
 });

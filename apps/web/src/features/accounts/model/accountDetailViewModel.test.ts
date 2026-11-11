@@ -244,6 +244,28 @@ const makeMonitoringValue = (
 });
 
 describe('accountDetailViewModel', () => {
+  it('carries plugin quota summary items into the quota view model', () => {
+    const summaryItems = [
+      {
+        key: 'usage_percent',
+        label: 'Usage (rounded)',
+        value: 32,
+        unit: '%',
+        format: 'number',
+        currency: null,
+      },
+    ];
+    const viewModel = buildAccountDetailViewModel(makeRow({ provider: 'commandcode' }), {
+      pluginQuotaSummaryItems: summaryItems,
+    });
+    expect(viewModel.quota.pluginSummaryItems).toEqual(summaryItems);
+  });
+
+  it('defaults the plugin quota summary to empty when the option is omitted', () => {
+    const viewModel = buildAccountDetailViewModel(makeRow({ provider: 'commandcode' }), {});
+    expect(viewModel.quota.pluginSummaryItems).toEqual([]);
+  });
+
   it('preserves unavailable historical cost without dropping core history', () => {
     const viewModel = buildAccountDetailViewModel(makeRow(), {
       history: makeHistory({ total_cost: null }),

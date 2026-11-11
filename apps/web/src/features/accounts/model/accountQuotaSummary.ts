@@ -7,6 +7,8 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  PluginQuotaState,
+  PluginQuotaSummaryItem,
   QuotaResetAccuracy,
   XaiBillingSummary,
   XaiQuotaState,
@@ -29,6 +31,11 @@ import {
 import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
 import { isCodexMainQuotaModelScope, isCodexMainQuotaWindow } from '@/utils/quota/codexQuota';
 import { resolveAuthFilePlanType, resolveAntigravityPlanType } from '@/utils/plans';
+import {
+  QUOTA_PROVIDER_TYPES,
+  normalizeProviderKey,
+  type QuotaProviderType,
+} from '@/features/authFiles/constants';
 
 export type AccountQuotaStatus =
   | 'unknown'
@@ -80,6 +87,7 @@ export interface AccountQuotaStores {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
+  pluginQuota?: Record<string, PluginQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
 }
 
@@ -1163,7 +1171,61 @@ export const resolveAccountQuota = (
     );
   }
 
+  // Plugin-served credentials fall back to the generic plugin quota store.
+  const pluginQuotaState = stores.pluginQuota
+    ? getCredentialScopedQuotaState(stores.pluginQuota, file)
+    : undefined;
+  if (pluginQuotaState) {
+    const planType = pluginQuotaState.subscription?.plan ?? filePlanType;
+    if (pluginQuotaState.status === 'loading') return loadingQuota(planType);
+    if (pluginQuotaState.status === 'error')
+      return quotaFromError(
+        pluginQuotaState.error,
+        planType,
+        pluginQuotaState.errorStatus,
+        pluginQuotaState.failedAtMs
+      );
+    return quotaFromRemainingWindows(
+      pluginQuotaState.groups.flatMap((group) =>
+        group.buckets.map((bucket) => {
+          const reset = resolveAbsoluteQuotaReset(bucket.resetTime);
+          return {
+            // Normalize to 0.1% precision to keep fraction scaling stable.
+            remainingPercent:
+              typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)
+                ? Math.round(bucket.remainingFraction * 1000) / 10
+                : null,
+            resetLabel: bucket.resetTime ?? '-',
+            resetAtMs: reset.resetAtMs,
+            resetAccuracy: reset.resetAccuracy,
+          };
+        })
+      ),
+      planType,
+      { fetchedAtMs: pluginQuotaState.fetchedAtMs }
+    );
+  }
+
   return emptyQuota(filePlanType);
+};
+
+/**
+ * Select the identity-scoped generic plugin quota summary facts for a
+ * credential. Built-in providers keep their own adapters in priority, so
+ * plugin store data must not leak into their rows. A transient refresh failure
+ * retains the previous scoped snapshot, so its summary stays readable.
+ */
+export const resolveAccountPluginQuotaSummaryItems = (
+  file: AuthFileItem,
+  stores: AccountQuotaStores
+): PluginQuotaSummaryItem[] => {
+  if (QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(normalizeAccountProvider(file)) as QuotaProviderType)) {
+    return [];
+  }
+  const pluginQuotaState = stores.pluginQuota
+    ? getCredentialScopedQuotaState(stores.pluginQuota, file)
+    : undefined;
+  return pluginQuotaState?.summary ?? [];
 };
 
 export const compareQuotaResetLabels = (

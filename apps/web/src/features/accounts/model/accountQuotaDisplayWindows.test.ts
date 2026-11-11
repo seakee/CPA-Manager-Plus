@@ -32,6 +32,11 @@ const emptyStores = (): AccountQuotaStores => ({
   xaiQuota: {},
 });
 
+const emptyStoresWithPlugin = (): AccountQuotaStores => ({
+  ...emptyStores(),
+  pluginQuota: {},
+});
+
 const t = ((key: string, options?: Record<string, string | number>) => {
   const translations: Record<string, string> = {
     'antigravity_quota.group_gemini_models': 'Gemini models',
@@ -46,6 +51,9 @@ const t = ((key: string, options?: Record<string, string | number>) => {
     'xai_quota.pay_as_you_go_label': 'Pay-as-you-go',
     'xai_quota.usage_amount': `${options?.remaining ?? '--'} / ${options?.limit ?? '--'} remaining`,
     'accounts.col_quota': 'Quota',
+    'plugin_quota.window_five_hour': '5-hour limit',
+    'plugin_quota.window_weekly': 'Weekly limit',
+    'plugin_quota.window_monthly': 'Monthly limit',
   };
   return translations[key] ?? key;
 }) as TFunction;
@@ -61,9 +69,11 @@ const buildRow = (file: AuthFileItem, stores: AccountQuotaStores = emptyStores()
     stores.devinQuota,
     stores.kimiQuota,
     stores.metaQuota,
+    stores.pluginQuota,
     stores.xaiQuota,
-  ] as Array<Record<string, CredentialScopedQuotaState>>;
+  ] as Array<Record<string, CredentialScopedQuotaState> | undefined>;
   records.forEach((record) => {
+    if (!record) return;
     const legacy = record[file.name];
     if (!legacy) return;
     const identity = buildQuotaCredentialIdentity(file);
@@ -1890,5 +1900,182 @@ describe('accountQuotaDisplayWindows', () => {
         quotaProgressObservedAtMs: null,
       });
     });
+  });
+});
+
+describe('Plugin quota display windows', () => {
+  const resetIso = '2026-11-09T06:36:53Z';
+  const resetMs = Date.parse(resetIso);
+
+  const pluginFile: AuthFileItem = {
+    name: 'clinepassbridge-abc.json',
+    type: 'cline-pass',
+    authIndex: 'p-1',
+  };
+
+  const pluginStoreKey = 'clinepassbridge-abc.json::p-1';
+
+  const storesWithPluginQuota = () => {
+    const stores = emptyStoresWithPlugin();
+    stores.pluginQuota![pluginStoreKey] = {
+      status: 'success',
+      authFileKey: pluginStoreKey,
+      authFileName: pluginFile.name,
+      authIndex: 'p-1',
+      authFileIdentityVerified: true,
+      fetchedAtMs: 1726398000000,
+      pluginId: 'clinepassbridge',
+      quotaProvider: 'cline-pass',
+      subscription: { plan: 'Cline Pass (Monthly)', tierName: null, tierId: null },
+      summary: [],
+      serverTimeOffsetMs: null,
+      groups: [
+        {
+          id: 'cline-pass',
+          label: 'Cline Pass',
+          buckets: [
+            { id: '5h', label: '5h', window: '5h', remainingFraction: 1 },
+            {
+              id: '7d',
+              label: '7d',
+              window: '7d',
+              remainingFraction: 0.13,
+              resetTime: resetIso,
+            },
+            {
+              id: 'monthly',
+              label: 'monthly',
+              window: 'monthly',
+              remainingFraction: 0.14,
+              resetTime: resetIso,
+            },
+          ],
+        },
+      ],
+    };
+    return stores;
+  };
+
+  it('builds localized plugin windows with inferred kinds and reset times', () => {
+    const stores = storesWithPluginQuota();
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+
+    expect(windows).toHaveLength(3);
+    expect(windows[0]).toMatchObject({
+      key: 'cline-pass:5h',
+      label: '5-hour limit',
+      kind: 'five_hour',
+      source: 'plugin',
+      remainingPercent: 100,
+      usedPercent: 0,
+    });
+    expect(windows[1]).toMatchObject({
+      key: 'cline-pass:7d',
+      label: 'Weekly limit',
+      kind: 'weekly',
+      source: 'plugin',
+      remainingPercent: 13,
+      usedPercent: 87,
+      resetAtMs: resetMs,
+    });
+    expect(windows[2]).toMatchObject({
+      key: 'cline-pass:monthly',
+      label: 'Monthly limit',
+      kind: 'monthly',
+      source: 'plugin',
+      remainingPercent: 14,
+    });
+  });
+
+  it('falls back to the raw plugin label for unknown window hints', () => {
+    const stores = storesWithPluginQuota();
+    const record = stores.pluginQuota![pluginStoreKey];
+    record.groups = [
+      {
+        id: 'g',
+        label: 'G',
+        buckets: [
+          { id: 'milestone', label: 'milestone', window: 'milestone', remainingFraction: 0.5 },
+        ],
+      },
+    ];
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({ label: 'milestone', kind: undefined });
+  });
+
+  it('keeps built-in providers on their own adapters even when plugin data exists', () => {
+    const stores = storesWithPluginQuota();
+    const claudeFile: AuthFileItem = { name: 'claude.json', type: 'claude', authIndex: 'c-1' };
+    const row = buildRow(claudeFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    // No claude quota state: no windows at all — plugin data must not leak in.
+    expect(windows).toHaveLength(0);
+  });
+
+  it('returns no plugin windows when the store has no entry for the credential', () => {
+    const stores = emptyStoresWithPlugin();
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(windows).toHaveLength(0);
+  });
+
+  it('does not fabricate a quota window from summary-only plugin data', () => {
+    const stores = storesWithPluginQuota();
+    const record = stores.pluginQuota![pluginStoreKey];
+    record.groups = [];
+    record.summary = [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+      {
+        key: 'extra_credits',
+        label: 'Extra balance',
+        value: 12.5,
+        unit: null,
+        format: 'currency',
+        currency: 'USD',
+      },
+    ];
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    // Summary metrics are label/value facts, not timed windows with a progress bar.
+    expect(windows).toHaveLength(0);
+  });
+
+  it('still renders window buckets alongside retained summary evidence', () => {
+    const stores = storesWithPluginQuota();
+    const record = stores.pluginQuota![pluginStoreKey];
+    record.summary = [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+    ];
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(windows).toHaveLength(3);
+    expect(windows.every((window) => window.source === 'plugin')).toBe(true);
   });
 });

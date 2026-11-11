@@ -14,6 +14,12 @@ import type {
   PluginStoreSource,
   PluginStoreSourceError,
 } from '@/types';
+import type {
+  PluginQuotaBucket,
+  PluginQuotaGroup,
+  PluginQuotaResponse,
+  PluginQuotaSummaryItem,
+} from '@/types';
 import { isRecord } from '@/utils/helpers';
 
 const asString = (value: unknown): string => {
@@ -22,6 +28,11 @@ const asString = (value: unknown): string => {
 };
 
 const asBoolean = (value: unknown): boolean => value === true;
+
+const normalizeQuotaProvider = (value: unknown): string | undefined => {
+  const provider = asString(value).trim();
+  return provider || undefined;
+};
 
 const hasOwn = (source: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(source, key);
@@ -120,6 +131,8 @@ const normalizePluginEntry = (value: unknown): PluginListEntry | null => {
     enabled: value.enabled !== false,
     effectiveEnabled: asBoolean(value.effective_enabled ?? value.effectiveEnabled),
     supportsOAuth,
+    supportsQuota: asBoolean(value.supports_quota ?? value.supportsQuota),
+    quotaProvider: normalizeQuotaProvider(value.quota_provider ?? value.quotaProvider),
     logo: asString(value.logo || metadata?.logo).trim(),
     configFields: configFields.length > 0 ? configFields : (metadata?.configFields ?? []),
     menus: normalizeMenus(value.menus),
@@ -284,6 +297,122 @@ export interface PluginStoreInstallOptions {
   version?: string;
 }
 
+const readFiniteNumber = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+// Subscription fields follow the established string contract. Objects,
+// booleans, arrays, and nonfinite numbers must not be stringified into a
+// believable plan/tier label.
+const normalizeQuotaSubscriptionField = (value: unknown): string | null => {
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
+  return null;
+};
+
+const normalizeQuotaSubscription = (
+  value: unknown
+): PluginQuotaResponse['subscription'] => {
+  if (!isRecord(value)) return null;
+  const plan = normalizeQuotaSubscriptionField(value.plan);
+  const tierName = normalizeQuotaSubscriptionField(value.tierName ?? value.tier_name);
+  const tierId = normalizeQuotaSubscriptionField(value.tierId ?? value.tier_id);
+  if (!plan && !tierName && !tierId) return null;
+  return {
+    plan: plan || null,
+    tierName: tierName || null,
+    tierId: tierId || null,
+  };
+};
+
+// Only established primitive quota values are meaningful: finite numbers and
+// non-empty text. Booleans, objects, and arrays must not be stringified into
+// believable quota values, and missing data must stay null (never zero).
+const normalizeQuotaSummaryValue = (value: unknown): string | number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') return value.trim() || null;
+  return null;
+};
+
+const normalizeQuotaSummaryMeta = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+};
+
+const normalizeQuotaSummaryItems = (value: unknown): PluginQuotaSummaryItem[] =>
+  Array.isArray(value)
+    ? value
+        .map((item, index): PluginQuotaSummaryItem | null => {
+          if (!isRecord(item)) return null;
+          const label = asString(item.label).trim();
+          if (!label) return null;
+          return {
+            key: asString(item.key).trim() || `summary-${index}`,
+            label,
+            value: normalizeQuotaSummaryValue(item.value),
+            unit: normalizeQuotaSummaryMeta(item.unit),
+            format: normalizeQuotaSummaryMeta(item.format),
+            currency: normalizeQuotaSummaryMeta(item.currency),
+          };
+        })
+        .filter((item): item is PluginQuotaSummaryItem => Boolean(item))
+    : [];
+
+const normalizeQuotaBuckets = (
+  value: unknown,
+  groupKey: string
+): PluginQuotaBucket[] =>
+  Array.isArray(value)
+    ? value
+        .map((item, index): PluginQuotaBucket | null => {
+          if (!isRecord(item)) return null;
+          const remainingFraction = readFiniteNumber(item.remainingFraction ?? item.remaining_fraction);
+          if (remainingFraction === null) return null;
+          const window = asString(item.window).trim();
+          return {
+            id: window || `${groupKey}-${index}`,
+            label: asString(item.label).trim() || window || `${groupKey}-${index}`,
+            window: window || undefined,
+            remainingFraction: Math.max(0, Math.min(1, remainingFraction)),
+            resetTime: asString(item.resetTime ?? item.reset_time).trim() || undefined,
+            description: asString(item.description).trim() || undefined,
+          };
+        })
+        .filter((bucket): bucket is PluginQuotaBucket => Boolean(bucket))
+    : [];
+
+export const normalizePluginQuotaResponse = (value: unknown): PluginQuotaResponse => {
+  const source = isRecord(value) ? value : {};
+  const groups = Array.isArray(source.groups)
+    ? source.groups
+        .map((item, index): PluginQuotaGroup | null => {
+          if (!isRecord(item)) return null;
+          const label = asString(item.displayName ?? item.display_name ?? item.label).trim();
+          if (!label) return null;
+          const groupKey = label
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || `group-${index}`;
+          const buckets = normalizeQuotaBuckets(item.buckets, groupKey);
+          if (buckets.length === 0) return null;
+          return {
+            id: groupKey,
+            label,
+            description: asString(item.description).trim() || undefined,
+            buckets,
+          };
+        })
+        .filter((group): group is PluginQuotaGroup => Boolean(group))
+    : [];
+
+  return {
+    subscription: normalizeQuotaSubscription(source.subscription),
+    summary: normalizeQuotaSummaryItems(source.summary),
+    groups,
+    serverTimeOffsetMs: readFiniteNumber(source.serverTimeOffsetMs ?? source.server_time_offset_ms),
+  };
+};
+
 export const pluginsApi = {
   async list(requestScope?: ApiClientRequestScope): Promise<PluginListResponse> {
     const data = await apiClient.get(
@@ -291,6 +420,13 @@ export const pluginsApi = {
       requestScope ? createScopedApiRequestConfig(requestScope) : undefined
     );
     return normalizePluginList(data);
+  },
+
+  async fetchQuota(id: string, authIndex: string): Promise<PluginQuotaResponse> {
+    const data = await apiClient.post(`/plugins/${encodeURIComponent(id)}/quota`, {
+      auth_index: authIndex,
+    });
+    return normalizePluginQuotaResponse(data);
   },
 
   updateEnabled: (id: string, enabled: boolean) =>

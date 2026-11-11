@@ -130,3 +130,89 @@ describe('AccountQuotaTab timer crossing expiry', () => {
     act(() => renderer.unmount());
   });
 });
+
+describe('AccountQuotaTab plugin quota summary', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const summaryItems = [
+    { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+    {
+      key: 'extra_credits',
+      label: 'Extra balance',
+      value: 12.5,
+      unit: null,
+      format: 'currency',
+      currency: 'USD',
+    },
+  ];
+
+  const makeDetailView = (
+    options: { pluginSummaryItems?: typeof summaryItems; windows?: unknown[] } = {}
+  ): AccountDetailViewModel =>
+    ({
+      identity: {
+        rowKey: 'cc.json\u0000cc-1',
+        name: 'cc.json',
+        provider: 'commandcode',
+        type: 'commandcode',
+        authIndex: 'cc-1',
+        account: 'cc@example.com',
+      },
+      quota: {
+        windows: options.windows ?? [],
+        resetCreditsAvailableCount: null,
+        resetCreditExpiries: [],
+        cooldown: null,
+        pluginSummaryItems: options.pluginSummaryItems ?? [],
+      },
+      history: null,
+    }) as unknown as AccountDetailViewModel;
+
+  const renderTab = async (detailView: AccountDetailViewModel) => {
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <AccountQuotaTab
+          detailView={detailView}
+          windowUsageError=""
+          historyAvailable={false}
+          historyRefreshing={false}
+          onRefreshHistory={vi.fn()}
+          onResetQuota={vi.fn()}
+          resetQuotaDisabled={false}
+        />
+      );
+    });
+    return renderer;
+  };
+
+  it('renders the plugin summary facts in a dedicated section', async () => {
+    const renderer = await renderTab(makeDetailView({ pluginSummaryItems: summaryItems }));
+    const section = renderer.root.findAllByProps({ 'data-account-plugin-quota-summary': 'true' });
+    expect(section).toHaveLength(1);
+    const output = JSON.stringify(renderer.toJSON());
+    expect(output).toContain('Usage (rounded)');
+    expect(output).toContain('32%');
+    expect(output).toContain('Extra balance');
+    expect(output).toContain('$12.50');
+    await act(async () => renderer.unmount());
+  });
+
+  it('suppresses the misleading no-window empty state for summary-only evidence', async () => {
+    const renderer = await renderTab(makeDetailView({ pluginSummaryItems: summaryItems }));
+    const output = JSON.stringify(renderer.toJSON());
+    expect(output).not.toContain('accounts.detail_no_quota_windows');
+    expect(renderer.root.findAllByProps({ 'data-account-plugin-quota-summary': 'true' })).toHaveLength(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it('keeps the existing no-window empty state when no plugin summary evidence exists', async () => {
+    const renderer = await renderTab(makeDetailView());
+    const output = JSON.stringify(renderer.toJSON());
+    expect(output).toContain('accounts.detail_no_quota_windows');
+    expect(renderer.root.findAllByProps({ 'data-account-plugin-quota-summary': 'true' })).toHaveLength(0);
+    await act(async () => renderer.unmount());
+  });
+});

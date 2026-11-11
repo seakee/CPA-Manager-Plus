@@ -579,6 +579,29 @@ const selectCodexQuotaListWindows = (
   return quotaWindows.filter(isCodexQuotaListCandidate);
 };
 
+// User-approved supplement (2026-11-11, amended): a plugin-reported account-wide
+// 5-hour/weekly/monthly fraction is list evidence even when its absolute reset
+// boundary is unknown. Known approved kinds with a finite 0–100 remaining
+// percent (true zero included) qualify; daily and other kinds, unknown kinds,
+// amounts, summary items, model-scoped or out-of-range data, and every
+// non-plugin source stay excluded. Showing the reported fraction does not
+// classify the window as a fixed interval.
+const PLUGIN_QUOTA_MAIN_LIST_KINDS = new Set<AccountQuotaWindowKind>([
+  'five_hour',
+  'weekly',
+  'monthly',
+]);
+
+const isPluginQuotaMainListCandidate = (window: AccountQuotaDisplayWindow): boolean =>
+  window.source === 'plugin' &&
+  window.kind !== undefined &&
+  PLUGIN_QUOTA_MAIN_LIST_KINDS.has(window.kind) &&
+  !isModelScopedAccountQuotaWindow(window) &&
+  typeof window.remainingPercent === 'number' &&
+  Number.isFinite(window.remainingPercent) &&
+  window.remainingPercent >= 0 &&
+  window.remainingPercent <= 100;
+
 const selectKimiQuotaListWindows = (
   quotaWindows: AccountQuotaDisplayWindow[]
 ): AccountQuotaDisplayWindow[] => {
@@ -782,6 +805,9 @@ export const selectAccountQuotaMainListWindows = (
   maxWindows = 2
 ): AccountQuotaDisplayWindow[] => {
   const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
+  const pluginBoundaryUnknownWindows = quotaWindows.filter(
+    (window) => isPluginQuotaMainListCandidate(window) && !standardQuotaWindows.includes(window)
+  );
   let candidates: AccountQuotaDisplayWindow[];
 
   switch (row.provider) {
@@ -816,7 +842,12 @@ export const selectAccountQuotaMainListWindows = (
       break;
     case 'claude':
     default:
-      candidates = standardQuotaWindows;
+      // Built-in providers keep their own selection; plugin-served rows gain
+      // their explicitly reported unknown-boundary fractions as list evidence.
+      candidates =
+        pluginBoundaryUnknownWindows.length > 0
+          ? [...standardQuotaWindows, ...pluginBoundaryUnknownWindows]
+          : standardQuotaWindows;
       break;
   }
 

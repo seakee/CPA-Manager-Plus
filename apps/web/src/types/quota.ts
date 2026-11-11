@@ -2,6 +2,12 @@
  * Quota management types.
  */
 
+import type {
+  PluginQuotaGroup,
+  PluginQuotaSubscription,
+  PluginQuotaSummaryItem,
+} from './plugin';
+
 // Theme types
 export type ThemeColors = { bg: string; text: string; border?: string };
 export type TypeColorSet = { light: ThemeColors; dark?: ThemeColors };
@@ -702,6 +708,31 @@ export interface MetaQuotaState
   extends CredentialScopedQuotaState,
     MetaQuotaData {
   status: 'idle' | 'loading' | 'success' | 'error';
+  error?: string;
+  errorStatus?: number;
+}
+
+// Plugin quota types — the generic quota shape served by CPA plugin quota
+// providers (POST /v0/management/plugins/{pluginId}/quota). The response is
+// normalized to the same subscription/groups/buckets contract used by the
+// built-in Antigravity provider.
+export interface PluginQuotaData {
+  groups: PluginQuotaGroup[];
+  summary: PluginQuotaSummaryItem[];
+  subscription: PluginQuotaSubscription | null;
+  serverTimeOffsetMs: number | null;
+  pluginId: string;
+  quotaProvider: string | null;
+}
+
+export interface PluginQuotaState extends CredentialScopedQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  groups: PluginQuotaGroup[];
+  summary: PluginQuotaSummaryItem[];
+  subscription: PluginQuotaSubscription | null;
+  serverTimeOffsetMs: number | null;
+  pluginId: string | null;
+  quotaProvider: string | null;
   error?: string;
   errorStatus?: number;
 }

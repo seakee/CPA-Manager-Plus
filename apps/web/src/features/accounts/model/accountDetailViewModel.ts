@@ -1,5 +1,10 @@
 import type { TFunction } from 'i18next';
-import type { CodexQuotaState, QuotaResetAccuracy, XaiQuotaState } from '@/types';
+import type {
+  CodexQuotaState,
+  PluginQuotaSummaryItem,
+  QuotaResetAccuracy,
+  XaiQuotaState,
+} from '@/types';
 import { getSortedCodexResetCreditExpiries } from '@/components/quota/quotaConfigs';
 import type {
   AccountActionCandidate,
@@ -320,6 +325,7 @@ export interface AccountDetailViewModel {
     fields: AccountDetailField[];
     diagnostics: AccountDetailField[];
     windows: AccountDetailQuotaWindow[];
+    pluginSummaryItems: PluginQuotaSummaryItem[];
     cooldown: QuotaCooldownInfo | null;
     resetCreditsAvailableCount: number | null;
     resetCreditExpiries: AccountDetailResetCreditExpiry[];
@@ -347,6 +353,7 @@ export interface BuildAccountDetailViewModelOptions {
   quotaCooldown?: QuotaCooldownInfo | null;
   codexStatus?: AuthFileCodexStatusSummary | null;
   quotaWindows?: AccountDetailQuotaWindowInput[];
+  pluginQuotaSummaryItems?: PluginQuotaSummaryItem[];
   windowUsageByKey?: Map<string, MonitoringAccountWindowUsageItem>;
   actionCandidates?: AccountActionCandidate[];
   matchedActionCandidates?: AccountActionCandidate[];
@@ -1530,6 +1537,7 @@ export const buildAccountDetailViewModel = (
       fields: buildQuotaFields(row, listItem),
       diagnostics: buildQuotaDiagnostics(row, options.xaiQuota),
       windows: buildQuotaWindows(row, quotaWindows, options.windowUsageByKey ?? new Map()),
+      pluginSummaryItems: options.pluginQuotaSummaryItems ?? [],
       cooldown: quotaCooldown,
       resetCreditsAvailableCount: options.codexQuota?.rateLimitResetCreditsAvailableCount ?? null,
       resetCreditExpiries: getSortedCodexResetCreditExpiries(

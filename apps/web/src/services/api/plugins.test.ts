@@ -23,8 +23,10 @@ vi.mock('./client', () => ({
 import {
   normalizePluginDeleteResult,
   normalizePluginList,
+  normalizePluginQuotaResponse,
   normalizePluginStoreList,
   normalizePluginStoreInstallResult,
+  pluginsApi,
   pluginStoreApi,
 } from './plugins';
 
@@ -300,4 +302,152 @@ describe('plugin API normalizers', () => {
     expect(result.plugins[1]?.metadata?.configFields[0]?.defaultValue).toBe('Asia/Shanghai');
   });
 
+});
+
+describe('plugin quota API', () => {
+  it('normalizes plugin list quota capability fields', () => {
+    const result = normalizePluginList({
+      plugins: [
+        {
+          id: 'clinepassbridge',
+          supports_quota: true,
+          quota_provider: 'cline-pass',
+        },
+        {
+          id: 'legacy',
+          supportsQuota: false,
+        },
+      ],
+    });
+    expect(result.plugins[0]?.supportsQuota).toBe(true);
+    expect(result.plugins[0]?.quotaProvider).toBe('cline-pass');
+    expect(result.plugins[1]?.supportsQuota).toBe(false);
+    expect(result.plugins[1]?.quotaProvider).toBeUndefined();
+  });
+
+  it('normalizes plugin quota responses into subscription and grouped buckets', () => {
+    const result = normalizePluginQuotaResponse({
+      subscription: { plan: 'Cline Pass (Monthly)' },
+      groups: [
+        {
+          displayName: 'Cline Pass',
+          buckets: [
+            { window: '5h', remainingFraction: 1 },
+            { window: '7d', remainingFraction: 0.13, resetTime: '2026-11-09T06:36:53Z' },
+            { remainingFraction: 2 },
+            { remainingFraction: 'not-a-number' },
+          ],
+        },
+        { label: 'empty', buckets: [] },
+      ],
+    });
+    expect(result.subscription?.plan).toBe('Cline Pass (Monthly)');
+    expect(result.groups).toHaveLength(1);
+    const group = result.groups[0];
+    expect(group?.label).toBe('Cline Pass');
+    // Out-of-range fractions are clamped into [0, 1]; non-numeric ones drop out
+    expect(group?.buckets).toHaveLength(3);
+    expect(group?.buckets[0]).toMatchObject({ id: '5h', label: '5h', remainingFraction: 1 });
+    expect(group?.buckets[1]?.remainingFraction).toBe(0.13);
+    expect(group?.buckets[2]).toMatchObject({ id: 'cline-pass-2', remainingFraction: 1 });
+    expect(result.summary).toEqual([]);
+    expect(result.serverTimeOffsetMs).toBeNull();
+  });
+
+  it('posts auth_index to the plugin quota endpoint', async () => {
+    mocks.post.mockResolvedValueOnce({
+      subscription: { plan: 'Pro' },
+      groups: [
+        {
+          displayName: 'Cline Pass',
+          buckets: [{ window: 'monthly', remainingFraction: 0.5 }],
+        },
+      ],
+    });
+    const result = await pluginsApi.fetchQuota('clinepassbridge', 'auth-1');
+    expect(mocks.post).toHaveBeenCalledWith('/plugins/clinepassbridge/quota', {
+      auth_index: 'auth-1',
+    });
+    expect(result.groups[0]?.buckets[0]?.remainingFraction).toBe(0.5);
+  });
+
+  it('normalizes summary items with declared primitive values and metadata', () => {
+    const result = normalizePluginQuotaResponse({
+      summary: [
+        { key: 'usage_percent', label: 'Usage (rounded)', value: 32, format: 'number', unit: '%' },
+        {
+          key: 'extra_credits',
+          label: 'Extra balance',
+          value: 12.5,
+          format: 'currency',
+          currency: 'USD',
+        },
+        { label: 'Valid zero', value: 0 },
+        { label: 'Text status', value: ' limited ' },
+      ],
+    });
+    expect(result.summary).toHaveLength(4);
+    expect(result.summary[0]).toMatchObject({
+      key: 'usage_percent',
+      label: 'Usage (rounded)',
+      value: 32,
+      format: 'number',
+      unit: '%',
+      currency: null,
+    });
+    expect(result.summary[1]).toMatchObject({
+      value: 12.5,
+      format: 'currency',
+      currency: 'USD',
+    });
+    // A valid zero must survive normalization and stay distinguishable from missing data.
+    expect(result.summary[2]).toMatchObject({ value: 0, unit: null });
+    expect(result.summary[3]).toMatchObject({ value: 'limited', format: null });
+  });
+
+  it('drops non-primitive or invalid summary values instead of stringifying them', () => {
+    const result = normalizePluginQuotaResponse({
+      summary: [
+        { label: 'Boolean value', value: true },
+        { label: 'Object value', value: { remaining: 1 } },
+        { label: 'Array value', value: [1, 2] },
+        { label: 'NaN value', value: Number.NaN },
+        { label: 'Infinite value', value: Number.POSITIVE_INFINITY },
+        { label: 'Empty text', value: '   ' },
+        { label: 'Missing value' },
+        { label: 'Numeric metadata', value: 5, unit: 7, format: 8, currency: 9 },
+      ],
+    });
+    expect(result.summary).toHaveLength(8);
+    for (const item of result.summary.slice(0, 7)) {
+      expect(item.value).toBeNull();
+    }
+    // Non-string metadata is dropped rather than stringified into believable quota metadata.
+    expect(result.summary[7]).toMatchObject({ value: 5, unit: null, format: null, currency: null });
+  });
+
+  it('drops malformed subscription fields instead of stringifying them', () => {
+    const result = normalizePluginQuotaResponse({
+      subscription: {
+        plan: { name: 'Malformed synthetic plan' },
+        tierName: ['Pro'],
+        tierId: true,
+      },
+    });
+    expect(result.subscription).toBeNull();
+  });
+
+  it('keeps legitimate subscription metadata while rejecting nonfinite values', () => {
+    const result = normalizePluginQuotaResponse({
+      subscription: {
+        plan: 'Go',
+        tierName: ' Pro ',
+        tier_id: Number.NaN,
+      },
+    });
+    expect(result.subscription).toMatchObject({ plan: 'Go', tierName: 'Pro', tierId: null });
+
+    const numericPlan = normalizePluginQuotaResponse({ subscription: { plan: 42 } });
+    expect(numericPlan.subscription?.plan).toBe('42');
+  });
 });
