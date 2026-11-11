@@ -14,8 +14,12 @@
     "vitepress": {
       "@docsearch/css": "3.9.0",
       "@docsearch/js": "3.9.0",
-      "vite": "6.4.4"
-    }
+      "vite": "6.4.5"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    },
+    "follow-redirects": "1.16.2"
   },
   "scripts": {
     "dev": "npm --workspace apps/web run dev",
