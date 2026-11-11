@@ -111,11 +111,16 @@ type supportPluginResponseWriter struct {
 }
 
 func (w *supportPluginResponseWriter) WriteHeader(status int) {
-	if !w.committed {
-		w.committed = true
-		if status < http.StatusBadRequest && w.capable != nil && w.capable(w.request) {
-			w.Header().Set(supportPluginHeader, supportPluginHeaderValue)
-		}
+	if w.committed {
+		return
+	}
+	if status >= 100 && status < http.StatusOK && status != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.committed = true
+	if status >= http.StatusOK && status < http.StatusBadRequest && w.capable != nil && w.capable(w.request) {
+		w.Header().Set(supportPluginHeader, supportPluginHeaderValue)
 	}
 	w.ResponseWriter.WriteHeader(status)
 }

@@ -207,10 +207,17 @@ func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key,
 // RegisterAdoptedWithJournal commits every adopted Client Key and claims the
 // one-shot initial install journal in one atomic SQLite transaction.
 func (s *Service) RegisterAdoptedWithJournal(ctx context.Context, candidates []repo.Record, journal repo.InitialInstall) ([]Key, error) {
+	return s.RegisterAdoptedWithJournalForRuntime(ctx, candidates, s.runtimeIdentity(ctx), journal)
+}
+
+// RegisterAdoptedWithJournalForRuntime commits every adopted Client Key and
+// claims the one-shot initial install journal for an explicit runtime identity
+// in one atomic SQLite transaction.
+func (s *Service) RegisterAdoptedWithJournalForRuntime(ctx context.Context, candidates []repo.Record, runtimeIdentity string, journal repo.InitialInstall) ([]Key, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrRequest
 	}
-	records, err := s.repo.RegisterAdoption(ctx, candidates, s.runtimeIdentity(ctx), journal)
+	records, err := s.repo.RegisterAdoption(ctx, candidates, runtimeIdentity, journal)
 	if err != nil {
 		if errors.Is(err, repo.ErrRetired) {
 			return nil, ErrAdoptedSecretRetired

@@ -326,3 +326,73 @@ func TestChatAdmissionStaysFailClosedForAnAdoptedDestinationsKeys(t *testing.T) 
 		t.Fatalf("a refused candidate reached the destination's config")
 	}
 }
+
+// Apply must refuse `adopt_existing` before touching the one-shot journal or
+// destination CPA, while Observe keeps read-only membership observation; and a
+// non-adoption ClaimInitialInstall row matching the run/generation/seed must
+// fail closed in DefaultInstallCPAAuthorityProven, ConfigTarget, and
+// AdoptionRegistrationReady until atomic RegisterAdoption commits.
+func TestAdoptServiceApplyRefusesAdoptExistingAndSuspiciousJournalFailsClosed(t *testing.T) {
+	s, cpa, source := adoptedFixture(t, adoptedSourceKeys...)
+	ctx := t.Context()
+
+	staged, _, err := s.keys.Create(ctx, strings.Repeat("d", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, complete := range []bool{false, true} {
+		source.set(func(install *ManagedInstall) { install.ProductComplete = complete })
+		if _, err := s.Apply(ctx, string(staged.Key.ID), 9); !errors.Is(err, repo.ErrConflict) {
+			t.Fatalf("Apply on adopt_existing (complete=%v) = %v, want ErrConflict", complete, err)
+		}
+		if journal, jErr := s.repo.InitialInstall(ctx); jErr != nil || journal != nil {
+			t.Fatalf("Apply on adopt_existing left journal = %#v (%v)", journal, jErr)
+		}
+		if cpa.keyWrites != 0 {
+			t.Fatalf("Apply on adopt_existing wrote to destination CPA: %d", cpa.keyWrites)
+		}
+	}
+
+	// Read-only Observe continues to work for an adopted destination.
+	if obs, obsErr := s.Observe(ctx, string(staged.Key.ID), 9); obsErr != nil || obs.CPAConfigured {
+		t.Fatalf("Observe on unstaged key = %+v (%v)", obs, obsErr)
+	}
+
+	// Seed a field-matching non-adoption ClaimInitialInstall journal directly:
+	// every consumer must fail closed and AdoptionRegistrationReady must return
+	// (false, nil) so backfill still performs its read-only re-proof.
+	if err := s.repo.ClaimInitialInstall(ctx, repo.InitialInstall{
+		KeyID:              string(staged.Key.ID),
+		RunID:              "managed:operation-adoption",
+		Generation:         "9",
+		AttemptedAtMS:      1,
+		ProviderSeedSHA256: Permit{}.S2B.Binding(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if s.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatal("non-adoption ClaimInitialInstall journal proved DefaultInstallCPAAuthorityProven")
+	}
+	if _, err := s.ConfigTarget(ctx, 9); !errors.Is(err, ErrGeneration) {
+		t.Fatalf("ConfigTarget with non-adoption journal = %v, want ErrGeneration", err)
+	}
+	ready, err := s.AdoptionRegistrationReady(ctx)
+	if err != nil || ready {
+		t.Fatalf("AdoptionRegistrationReady with non-adoption journal = (%v, %v), want (false, nil)", ready, err)
+	}
+
+	// Atomic adoption registration upgrades the journal with CommitAdoptionTx
+	// commitment evidence and restores full authority.
+	if _, err := s.RegisterAdoption(ctx, adoptedSourceKeys); err != nil {
+		t.Fatalf("RegisterAdoption recovery: %v", err)
+	}
+	if ready, err = s.AdoptionRegistrationReady(ctx); err != nil || !ready {
+		t.Fatalf("AdoptionRegistrationReady after RegisterAdoption = (%v, %v), want (true, nil)", ready, err)
+	}
+	if !s.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatal("DefaultInstallCPAAuthorityProven false after RegisterAdoption")
+	}
+	if mgmt, err := s.ConfigTarget(ctx, 9); err != nil || mgmt != cpa.management {
+		t.Fatalf("ConfigTarget after RegisterAdoption = %q (%v)", mgmt, err)
+	}
+}

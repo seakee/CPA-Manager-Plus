@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -800,11 +802,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		if upgraded.gatewayAdmissionProven(ctx) {
 			t.Fatal("historical completed adoption without journal proved Gateway admission before backfill")
 		}
-		authResp := httptest.NewRecorder()
-		upgraded.ServeHTTP(authResp, httptest.NewRequest(http.MethodGet, "/internal/routing/fresh-authority", nil))
-		if authResp.Code != http.StatusOK || strings.Contains(authResp.Body.String(), `"admitted":true`) {
-			t.Fatalf("fresh-authority before backfill = %d %s", authResp.Code, authResp.Body.String())
-		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
 		cfgBefore := readGatewayConfigView(t, upgraded)
 		if cfgBefore.Capability.Writable {
 			t.Fatalf("historical adoption writable before backfill: %+v", cfgBefore.Capability)
@@ -820,6 +818,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		if !upgraded.gatewayAdmissionProven(ctx) {
 			t.Fatal("backfilled historical adoption did not prove Gateway admission")
 		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, true)
 		listed, err := upgraded.keys.List(ctx)
 		if err != nil || len(listed) != len(adoptedClientKeys) {
 			t.Fatalf("backfilled keys = %#v %v", listed, err)
@@ -868,8 +867,263 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		if fixture.app.gatewayAdmissionProven(ctx) {
 			t.Fatal("conflicted historical adoption proved Gateway admission")
 		}
+		assertFreshAuthorityAdmission(t, fixture.app, loaded.Operation, false)
 		if listed, err := fixture.app.keys.List(ctx); err != nil || len(listed) != 0 {
 			t.Fatalf("conflicted historical backfill left keys: %#v %v", listed, err)
 		}
 	})
+
+	t.Run("POST initial-install on historical completed adoption returns 409 without journal or CPA write and backfill still re-proves", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		upgraded := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(upgraded, fixture.runtime, fixture.destination.URL())
+		fixture.destination.mu.Lock()
+		writesBefore := len(fixture.destination.writes)
+		fixture.destination.mu.Unlock()
+
+		createResp := gatewayRequest(t, upgraded, http.MethodPost, "api-keys", `{"requestId":"`+strings.Repeat("a", 32)+`"}`, "application/json")
+		if createResp.Code != http.StatusCreated {
+			t.Fatalf("POST api-keys = %d %s", createResp.Code, createResp.Body.String())
+		}
+		var created struct {
+			Key struct {
+				ID string `json:"id"`
+			} `json:"key"`
+		}
+		if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil || created.Key.ID == "" {
+			t.Fatalf("decode created workspace key: %v %s", err, createResp.Body.String())
+		}
+
+		installResp := gatewayRequest(t, upgraded, http.MethodPost, "api-keys/"+created.Key.ID+"/initial-install", `{}`, "application/json")
+		if installResp.Code != http.StatusConflict {
+			t.Fatalf("POST initial-install on historical adopt = %d %s, want 409", installResp.Code, installResp.Body.String())
+		}
+		if _, applyErr := upgraded.keyApply.Apply(ctx, created.Key.ID, preUpgrade.Operation.Strategy.TargetGeneration); !errors.Is(applyErr, freshkeyssvc.ErrConflict) {
+			t.Fatalf("service Apply on historical adopt = %v, want ErrConflict", applyErr)
+		}
+		if journal, jErr := upgraded.keyRepo.InitialInstall(ctx); jErr != nil || journal != nil {
+			t.Fatalf("refused initial-install wrote journal = %#v (%v)", journal, jErr)
+		}
+		fixture.destination.mu.Lock()
+		writesAfter := len(fixture.destination.writes)
+		fixture.destination.mu.Unlock()
+		if writesAfter != writesBefore {
+			t.Fatalf("refused initial-install wrote to destination CPA: %d -> %d", writesBefore, writesAfter)
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
+
+		// Backfill must still run the read-only destination proof: while the
+		// destination management read fails, neither startup nor POST complete
+		// admits or treats the installation as ready.
+		fixture.destination.mu.Lock()
+		origAuthFn := fixture.destination.authFn
+		fixture.destination.authFn = func() string { return "temporary-outage-key" }
+		fixture.destination.mu.Unlock()
+		upgraded.prepareCompletedStartup(ctx, preUpgrade.Operation)
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
+		unprovenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if unprovenReplay.Code != http.StatusServiceUnavailable || errorCode(t, unprovenReplay) != "adopt_destination_unproven" {
+			t.Fatalf("POST complete while destination unproven = %d %s, want 503 adopt_destination_unproven", unprovenReplay.Code, unprovenReplay.Body.String())
+		}
+
+		fixture.destination.mu.Lock()
+		fixture.destination.authFn = origAuthFn
+		fixture.destination.mu.Unlock()
+		provenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if provenReplay.Code != http.StatusOK {
+			t.Fatalf("POST complete after destination recovery = %d %s", provenReplay.Code, provenReplay.Body.String())
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, true)
+		listed, err := upgraded.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys)+1 {
+			t.Fatalf("keys after backfill = %#v (%v), want %d", listed, err, len(adoptedClientKeys)+1)
+		}
+	})
+
+	t.Run("CPA write failure or pre-existing non-adoption journal never admits Gateway and backfill still re-proves", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		upgraded := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(upgraded, fixture.runtime, fixture.destination.URL())
+		fixture.destination.mu.Lock()
+		fixture.destination.writeFailures["access/api-keys"] = http.StatusConflict
+		fixture.destination.mu.Unlock()
+
+		staged, _, err := upgraded.keys.Create(ctx, strings.Repeat("b", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		installResp := gatewayRequest(t, upgraded, http.MethodPost, "api-keys/"+string(staged.Key.ID)+"/initial-install", `{}`, "application/json")
+		if installResp.Code != http.StatusConflict {
+			t.Fatalf("POST initial-install with failing CPA write = %d %s, want 409", installResp.Code, installResp.Body.String())
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
+
+		// Even if a pre-upgrade installation already persisted a field-matching
+		// ClaimInitialInstall row when a CPA write failed, every consumer must
+		// stay fail-closed and backfill must still perform its read-only re-proof.
+		if err := upgraded.keyRepo.ClaimInitialInstall(ctx, freshkeys.InitialInstall{
+			KeyID:              string(staged.Key.ID),
+			RunID:              freshkeyapply.ManagedRunID(string(preUpgrade.Operation.Identity.OperationID)),
+			Generation:         "3",
+			AttemptedAtMS:      1,
+			ProviderSeedSHA256: freshkeyapply.Permit{}.S2B.Binding(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
+		if cfgSuspicious := readGatewayConfigView(t, upgraded); cfgSuspicious.Capability.Writable {
+			t.Fatalf("suspicious ClaimInitialInstall journal unlocked gateway writes: %+v", cfgSuspicious.Capability)
+		}
+		if ready, readyErr := upgraded.keyApply.AdoptionRegistrationReady(ctx); readyErr != nil || ready {
+			t.Fatalf("AdoptionRegistrationReady on suspicious journal = (%v, %v), want (false, nil)", ready, readyErr)
+		}
+
+		// Destination read failure proves backfill did NOT short-circuit on the
+		// suspicious journal.
+		fixture.destination.mu.Lock()
+		origAuthFn := fixture.destination.authFn
+		fixture.destination.authFn = func() string { return "destination-down" }
+		fixture.destination.mu.Unlock()
+		if downResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); downResp.Code != http.StatusServiceUnavailable || errorCode(t, downResp) != "adopt_destination_unproven" {
+			t.Fatalf("POST complete with suspicious journal while destination down = %d %s, want 503 adopt_destination_unproven", downResp.Code, downResp.Body.String())
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
+
+		// Once destination read-only proof succeeds, backfill upgrades the journal
+		// with CommitAdoptionTx evidence and registers all adopted keys.
+		fixture.destination.mu.Lock()
+		fixture.destination.authFn = origAuthFn
+		fixture.destination.mu.Unlock()
+		if okResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); okResp.Code != http.StatusOK {
+			t.Fatalf("POST complete recovery = %d %s", okResp.Code, okResp.Body.String())
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, true)
+		listed, err := upgraded.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys)+1 {
+			t.Fatalf("recovered keys = %#v (%v), want %d", listed, err, len(adoptedClientKeys)+1)
+		}
+	})
+
+	t.Run("concurrent POST complete across two instances and repeated prepareCompletedStartup register adopted keys once", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		appA := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(appA, fixture.runtime, fixture.destination.URL())
+		appB := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(appB, fixture.runtime, fixture.destination.URL())
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		bodies := make([]string, 2)
+		for idx, candidateApp := range []*freshApplication{appA, appB} {
+			wg.Add(1)
+			go func(slot int, target *freshApplication) {
+				defer wg.Done()
+				<-start
+				rec := serveHTTPRequest(t, target, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+				codes[slot] = rec.Code
+				bodies[slot] = rec.Body.String()
+			}(idx, candidateApp)
+		}
+		close(start)
+		wg.Wait()
+		for idx, code := range codes {
+			if code != http.StatusOK {
+				t.Fatalf("concurrent POST complete[%d] = %d %s, want 200", idx, code, bodies[idx])
+			}
+		}
+		for range 3 {
+			appA.prepareCompletedStartup(ctx, preUpgrade.Operation)
+			appB.prepareCompletedStartup(ctx, preUpgrade.Operation)
+		}
+		if gotRev := fixture.reload(t).Operation.Revision; gotRev != preUpgrade.Operation.Revision {
+			t.Fatalf("concurrent/repeated backfill mutated revision %d -> %d", preUpgrade.Operation.Revision, gotRev)
+		}
+		listed, err := appA.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys) {
+			t.Fatalf("keys after concurrent complete + repeated startup = %#v (%v), want %d", listed, err, len(adoptedClientKeys))
+		}
+		var activeBindings int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='runtime'`).Scan(&activeBindings); err != nil || activeBindings != len(adoptedClientKeys) {
+			t.Fatalf("active source bindings = %d (%v), want %d", activeBindings, err, len(adoptedClientKeys))
+		}
+		assertFreshAuthorityAdmission(t, appA, preUpgrade.Operation, true)
+		assertFreshAuthorityAdmission(t, appB, preUpgrade.Operation, true)
+	})
+}
+
+func assertFreshAuthorityAdmission(t *testing.T, app *freshApplication, op bootstrap.FreshOperation, wantAdmitted bool) {
+	t.Helper()
+	authResp := httptest.NewRecorder()
+	app.ServeHTTP(authResp, httptest.NewRequest(http.MethodGet, "/internal/routing/fresh-authority", nil))
+	if authResp.Code != http.StatusOK {
+		t.Fatalf("GET /internal/routing/fresh-authority = %d %s, want 200", authResp.Code, authResp.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(authResp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode fresh-authority raw JSON: %v (%s)", err, authResp.Body.String())
+	}
+	rawAdmission, present := raw["gatewayAdmission"]
+	if !present || len(bytes.TrimSpace(rawAdmission)) == 0 || string(bytes.TrimSpace(rawAdmission)) == "null" {
+		t.Fatalf("fresh-authority missing gatewayAdmission object: %s", authResp.Body.String())
+	}
+	var admissionFields map[string]json.RawMessage
+	if err := json.Unmarshal(rawAdmission, &admissionFields); err != nil {
+		t.Fatalf("decode gatewayAdmission map: %v (%s)", err, string(rawAdmission))
+	}
+	for _, requiredField := range []string{"installationId", "generation", "admitted"} {
+		if _, ok := admissionFields[requiredField]; !ok {
+			t.Fatalf("gatewayAdmission missing %q field: %s", requiredField, string(rawAdmission))
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(authResp.Body.Bytes()))
+	dec.DisallowUnknownFields()
+	var reply freshAuthorityReply
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatalf("decode freshAuthorityReply: %v (%s)", err, authResp.Body.String())
+	}
+	wantInstallID := string(op.Identity.InstallationID)
+	wantGen := string(op.Identity.Generation)
+	if wantInstallID == "" || wantGen == "" {
+		t.Fatalf("expected operation identity to carry non-empty installationId/generation: %+v", op.Identity)
+	}
+	if reply.InstallationID != wantInstallID || reply.Generation != wantGen {
+		t.Fatalf("freshAuthorityReply routing identity = (%q, %q), want (%q, %q)", reply.InstallationID, reply.Generation, wantInstallID, wantGen)
+	}
+	if reply.GatewayAdmission.InstallationID != wantInstallID || reply.GatewayAdmission.Generation != wantGen {
+		t.Fatalf("gatewayAdmission identity = (%q, %q), want (%q, %q)", reply.GatewayAdmission.InstallationID, reply.GatewayAdmission.Generation, wantInstallID, wantGen)
+	}
+	if reply.GatewayAdmission.Admitted != wantAdmitted {
+		t.Fatalf("gatewayAdmission.Admitted = %v, want %v (body=%s)", reply.GatewayAdmission.Admitted, wantAdmitted, authResp.Body.String())
+	}
 }

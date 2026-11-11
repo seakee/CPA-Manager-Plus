@@ -286,8 +286,9 @@ func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey stri
 // metadata prepared ahead of the completion transaction, so the SQLite write
 // transaction performs no key generation, encryption or nested store reads.
 type PreparedAdoption struct {
-	records []repo.Record
-	journal repo.InitialInstall
+	records         []repo.Record
+	runtimeIdentity string
+	journal         repo.InitialInstall
 }
 
 // RunID reports the managed installation run identity the adoption was prepared for.
@@ -317,7 +318,7 @@ func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (Prepar
 		RunID: p.RunID, Generation: p.Generation,
 		AttemptedAtMS: time.Now().UnixMilli(), ProviderSeedSHA256: p.S2B.Binding(),
 	}
-	return PreparedAdoption{records: records, journal: journal}, nil
+	return PreparedAdoption{records: records, runtimeIdentity: p.Identity, journal: journal}, nil
 }
 
 // CommitAdoptionTx commits every prepared adopted Client Key and claims the
@@ -325,6 +326,11 @@ func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (Prepar
 func (s *Service) CommitAdoptionTx(ctx context.Context, tx *sql.Tx, prepared PreparedAdoption, runtimeIdentity string) ([]freshkeys.Key, error) {
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil || tx == nil || len(prepared.records) == 0 {
 		return nil, ErrUnavailable
+	}
+	if runtimeIdentity == "" {
+		runtimeIdentity = prepared.runtimeIdentity
+	} else if prepared.runtimeIdentity != "" && runtimeIdentity != prepared.runtimeIdentity {
+		return nil, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
 	}
 	keys, err := s.keys.RegisterAdoptedWithJournalTx(ctx, tx, prepared.records, runtimeIdentity, prepared.journal)
 	if err != nil {
@@ -353,7 +359,7 @@ func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]fre
 	if err != nil {
 		return nil, err
 	}
-	keys, err := s.keys.RegisterAdoptedWithJournal(ctx, prepared.records, prepared.journal)
+	keys, err := s.keys.RegisterAdoptedWithJournalForRuntime(ctx, prepared.records, prepared.runtimeIdentity, prepared.journal)
 	if err != nil {
 		return nil, mapAdoptionRegistrationError(err)
 	}
@@ -363,6 +369,19 @@ func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]fre
 func (s *Service) requireInstallJournal(ctx context.Context, p Permit) error {
 	if s == nil || s.repo == nil {
 		return ErrUnavailable
+	}
+	if p.Strategy == string(bootstrap.AdoptExisting) {
+		ready, err := s.repo.VerifyAdoptionRegistration(ctx, p.RunID, p.Generation, p.S2B.Binding(), p.Identity)
+		if err != nil {
+			if errors.Is(err, repo.ErrJournalConflict) {
+				return ErrGeneration
+			}
+			return err
+		}
+		if !ready {
+			return ErrGeneration
+		}
+		return nil
 	}
 	a, err := s.repo.InitialInstall(ctx)
 	if err != nil {
@@ -375,11 +394,13 @@ func (s *Service) requireInstallJournal(ctx context.Context, p Permit) error {
 }
 
 // AdoptionRegistrationReady reports whether a completed Managed Adopt
-// installation already holds its matching one-shot install journal and primary
-// key record. It returns (false, nil) when no journal exists yet so an upgraded
-// installation completed before journaled adoption existed can backfill once,
-// and returns ErrAdoptionConflict when the journal belongs to a different run,
-// generation or provider seed.
+// installation holds atomic CommitAdoptionTx registration evidence (adopted set
+// commitment, registration record, canonical key rows and runtime source
+// bindings). It returns (false, nil) when no adoption registration exists yet
+// — including when a non-adoption ClaimInitialInstall row exists for the same
+// run/generation/seed — so backfill still performs the read-only Runtime and
+// destination CPA re-proof, and returns ErrAdoptionConflict when a foreign or
+// inconsistent journal is present.
 func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
 		return false, ErrUnavailable
@@ -388,23 +409,14 @@ func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	inst, err := s.repo.InitialInstall(ctx)
+	ready, err := s.repo.VerifyAdoptionRegistration(ctx, p.RunID, p.Generation, p.S2B.Binding(), p.Identity)
 	if err != nil {
-		return false, err
-	}
-	if inst == nil {
-		return false, nil
-	}
-	if inst.RunID != p.RunID || inst.Generation != p.Generation || inst.ProviderSeedSHA256 != p.S2B.Binding() {
-		return false, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
-	}
-	if _, err := s.keys.Detail(ctx, inst.KeyID); err != nil {
-		if errors.Is(err, freshkeys.ErrNotFound) {
-			return false, fmt.Errorf("%w: %w", ErrAdoptionConflict, err)
+		if errors.Is(err, repo.ErrJournalConflict) {
+			return false, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
 		}
 		return false, err
 	}
-	return true, nil
+	return ready, nil
 }
 
 // VerifyRuntimeTarget proves the live Runtime identity, Ready state and active

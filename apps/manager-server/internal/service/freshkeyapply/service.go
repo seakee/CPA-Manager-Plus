@@ -46,17 +46,17 @@ type wire interface {
 	AuthSweep(context.Context, string) (bool, error)
 }
 type Service struct {
-	h1             *cpa.H1Coordinator
-	mu             sync.Mutex
-	repo           *repo.Repository
-	keys           *freshkeys.Service
-	runtime        runtimeservice.RuntimeClient
-	wire           wire
-	permit         func() (Permit, error)
+	h1                 *cpa.H1Coordinator
+	mu                 sync.Mutex
+	repo               *repo.Repository
+	keys               *freshkeys.Service
+	runtime            runtimeservice.RuntimeClient
+	wire               wire
+	permit             func() (Permit, error)
 	registrationPermit func() (Permit, error)
-	keyPermit      func(context.Context, string, string) (KeyPermit, error)
-	source         ManagedSource
-	externalSource ExternalSource
+	keyPermit          func(context.Context, string, string) (KeyPermit, error)
+	source             ManagedSource
+	externalSource     ExternalSource
 	// externalWire builds the CPA transport of one resolved External target. It
 	// is a field so tests can stand in a fake CPA; production dials the committed
 	// address and never the private loopback.
@@ -205,6 +205,11 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 		return s.externalApply(ctx, id, generation)
 	}
 	result := State{KeyID: id, RuntimeState: "effect_unknown"}
+	if s.registrationPermit != nil {
+		if rp, rpErr := s.registrationPermit(); rpErr == nil && rp.Strategy == string(bootstrap.AdoptExisting) {
+			return result, repo.ErrConflict
+		}
+	}
 	if op, err := s.repo.LatestOperation(ctx); err != nil || op != nil {
 		return result, repo.ErrConflict
 	}
@@ -229,6 +234,9 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 	p, err := s.permit()
 	if err != nil {
 		return result, err
+	}
+	if p.Strategy == string(bootstrap.AdoptExisting) {
+		return result, repo.ErrConflict
 	}
 	if p.Generation != strconv.FormatUint(generation, 10) {
 		return result, ErrGeneration
