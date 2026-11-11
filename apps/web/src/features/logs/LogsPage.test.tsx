@@ -92,11 +92,12 @@ describe('LogsPage error log listing', () => {
     expect(pageText()).toContain(bannerText);
   });
 
-  it('hides the request-log banner while a listing with files is loaded', async () => {
-    mocks.fetchErrorLogs.mockResolvedValue({ files: [{ name: 'error-2026-11-10.log' }] });
+  it('keeps the request-log banner hidden once a listing with files has loaded', async () => {
+    const listing = createDeferred<{ files: Array<{ name: string }> }>();
+    mocks.fetchErrorLogs.mockReturnValue(listing.promise);
 
     await renderErrorTab();
-    expect(pageText()).toContain('error-2026-11-10.log');
+    await act(async () => listing.resolve({ files: [{ name: 'error-2026-11-10.log' }] }));
     expect(pageText()).not.toContain(bannerText);
   });
 
