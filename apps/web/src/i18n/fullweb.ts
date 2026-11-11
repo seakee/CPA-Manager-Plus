@@ -1,10 +1,13 @@
 import { createInstance } from 'i18next';
+import { browserLanguage } from './browserLanguage';
 import { fullweb as zhCN } from './locales/zh-CN.json';
 import { fullweb as zhTW } from './locales/zh-TW.json';
 import { fullweb as en } from './locales/en.json';
 import { fullweb as ru } from './locales/ru.json';
 
 // Full Web does not enter the legacy connection or stored-preference graph.
+// The Bootstrap entry re-selects the Console's saved language itself; see
+// fullweb/freshLanguage.
 const i18n = createInstance();
 void i18n.init({
   resources: {
@@ -13,7 +16,7 @@ void i18n.init({
     en: { translation: en },
     ru: { translation: ru },
   },
-  lng: typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'zh-CN',
+  lng: browserLanguage(),
   supportedLngs: ['zh-CN', 'zh-TW', 'en', 'ru'],
   fallbackLng: 'zh-CN',
   initAsync: false,

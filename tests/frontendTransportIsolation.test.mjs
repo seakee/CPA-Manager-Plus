@@ -6,6 +6,11 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { createPublicApiClient } from '../apps/web/src/fullweb/publicApi.ts';
 import { resolveRoutingContext } from '../apps/web/src/fullweb/routingContext.ts';
+import {
+  FRESH_LANGUAGE_STORAGE_KEY,
+  activateFreshLanguage,
+  persistFreshLanguage,
+} from '../apps/web/src/fullweb/freshLanguage.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'apps/web');
@@ -174,7 +179,66 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
     ).toEqual([]);
     for (const file of files) {
       const source = readFileSync(path.join(src, file), 'utf8');
+      // The interface language is the one non-secret preference the Bootstrap
+      // entry shares with the Console, so this one file legitimately persists
+      // it. Which keys it may touch is enforced by behavior, not by counting
+      // source text: see the storage recorder test below. The Console store,
+      // the legacy endpoint table and every session/auth module stay out of
+      // this graph.
+      if (file === 'fullweb/freshLanguage.ts') continue;
       expect(source, file).not.toMatch(/localStorage|sessionStorage|\/v0\/management/);
+    }
+  });
+
+  it('keeps the Bootstrap storage exception on the language key alone', () => {
+    // Every attempt is recorded before the stub answers, so production catch
+    // blocks cannot hide a foreign access: the record, not the response, is the
+    // evidence.
+    const record = [];
+    const stored = new Map();
+    const instrumented = {
+      getItem: (key) => {
+        record.push(['getItem', key]);
+        return stored.get(key) ?? null;
+      },
+      setItem: (key, value) => {
+        record.push(['setItem', key]);
+        stored.set(key, String(value));
+      },
+      removeItem: (key) => {
+        record.push(['removeItem', key]);
+        stored.delete(key);
+      },
+      clear: () => {
+        record.push(['clear']);
+        stored.clear();
+      },
+      key: (index) => {
+        record.push(['key', index]);
+        return [...stored.keys()][index] ?? null;
+      },
+      get length() {
+        record.push(['length']);
+        return stored.size;
+      },
+    };
+    vi.stubGlobal('navigator', { languages: ['zh-HK'], language: 'zh-HK' });
+    vi.stubGlobal('localStorage', instrumented);
+    try {
+      // Activation and the header switch are the entry's whole storage surface.
+      expect(activateFreshLanguage()).toBe('zh-TW');
+      persistFreshLanguage('ru');
+
+      expect(record.length).toBeGreaterThan(0);
+      expect(record.map(([operation]) => operation).filter((op) => op !== 'getItem')).toEqual([
+        'setItem',
+      ]);
+      for (const [, key] of record) {
+        expect(key).toBe(FRESH_LANGUAGE_STORAGE_KEY);
+      }
+      expect(JSON.parse(stored.get(FRESH_LANGUAGE_STORAGE_KEY)).state.language).toBe('ru');
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

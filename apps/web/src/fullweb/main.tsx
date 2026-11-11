@@ -2,11 +2,15 @@ import { createRoot } from 'react-dom/client';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { AppBackground } from '../components/common/AppBackground';
 import { readRoutingContext } from './routingContext';
+import { activateFreshLanguage } from './freshLanguage';
 import { BOOTSTRAP_UI, consumeHandoff, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
 import '../styles/global.scss';
 import './carrier.css';
 
+// Apply the language the Console already persists before anything renders, so
+// the Bootstrap entry never flashes the browser default first.
+activateFreshLanguage();
 const context = readRoutingContext(document);
 const root = createRoot(document.getElementById('root')!);
 const FreshConsolePage = lazy(() =>

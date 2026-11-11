@@ -1,6 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { shellText } from '../i18n/consoleShell';
+import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
+import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
+import {
+  FRESH_LANGUAGES,
+  isFreshLanguage,
+  persistFreshLanguage,
+} from './freshLanguage';
+import type { Language } from '../types';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
 import { FullWebIcon } from './FullWebIcon';
@@ -22,11 +30,30 @@ export interface FreshBootstrapPageProps {
 
 type BootPhase = 'no_handoff' | 'connecting' | 'ready' | 'init_error';
 
+// A state keeps the copy keys rather than the rendered sentence, so a language
+// switch re-renders the same failure in the newly selected language.
 interface ActionFeedback {
   tone: 'danger' | 'warn' | 'info' | 'success';
-  title: string;
-  detail: string;
+  title: FreshBootstrapTextKey;
+  detail: FreshBootstrapTextKey;
+  /** HTTP status interpolated into a `{status}` title, when the server reported one. */
+  status?: number;
 }
+
+function feedbackText(feedback: ActionFeedback, part: 'title' | 'detail'): string {
+  return bootstrapText(
+    feedback[part],
+    feedback.status === undefined ? undefined : { status: feedback.status }
+  );
+}
+
+// Every language names itself, exactly as the Console header menu does.
+const LANGUAGE_NAME_KEYS: Record<Language, FreshBootstrapTextKey> = {
+  'zh-CN': 'languageZhCN',
+  'zh-TW': 'languageZhTW',
+  en: 'languageEnglish',
+  ru: 'languageRussian',
+};
 
 // Public discovery never confers write authority. Non-Fresh statuses only
 // enter either the existing-Admin gate or host intervention, never Fresh claim.
@@ -45,9 +72,8 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
     return {
       tone: 'info',
       flow: 'fresh',
-      title: '检测到需要宿主机认领的 Fresh 初始化状态',
-      detail:
-        '此状态仅为只读识别结果。请从受信宿主机获取一次性 Handoff 链接；本页面不会自行创建或认领安装。',
+      title: 'guidanceFreshTitle',
+      detail: 'guidanceFreshDetail',
     };
   }
   if (
@@ -60,9 +86,8 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
     return {
       tone: 'warn',
       flow: 'upgrade',
-      title: '检测到尚未获得升级资格的现有来源',
-      detail:
-        '只能在受信宿主机检查原始来源。当前无法进入 Fresh 初始化或 Upgrade 切换；预检成功也不代表获得导入或覆盖授权。',
+      title: 'guidanceUpgradeTitle',
+      detail: 'guidanceUpgradeDetail',
     };
   }
   if (
@@ -75,9 +100,8 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
     return {
       tone: 'warn',
       flow: 'host',
-      title: '检测到需要宿主机介入的恢复状态',
-      detail:
-        '来源不具备直接初始化资格。请先在受信宿主机进行只读预检，保护数据库、data.key 和已有备份；不得从此页面尝试 Fresh/Adopt/Upgrade 写入。',
+      title: 'guidanceRecoveryTitle',
+      detail: 'guidanceRecoveryDetail',
     };
   }
   if (
@@ -90,10 +114,9 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
     return {
       tone: 'warn',
       flow: 'host',
-      title: '来源状态暂无法确认',
+      title: 'guidanceUnavailableTitle',
       retryable: true,
-      detail:
-        '来源只读检查未获得可信分类。请在受信宿主机排查；不能根据此状态认定为 Fresh，也不能据此执行初始化或迁移。',
+      detail: 'guidanceUnavailableDetail',
     };
   }
   return null;
@@ -107,59 +130,54 @@ function describeBootstrapError(
     if (err.kind === 'transport') {
       return {
         tone: 'warn',
-        title: '网络连接异常（Bootstrap Transport Unavailable）',
+        title: 'errorTransportTitle',
         detail:
           stage === 'commit'
-            ? '提交结果尚未确认，当前密钥与幂等提交标识（commitId）已保留在内存中。请检查网络或服务状态后点击“同步服务端状态”；确认服务端仍未初始化后才可重试。请勿刷新页面或更换密钥。'
+            ? 'errorTransportCommitDetail'
             : stage === 'start'
-              ? '无法连接至 Manager Bootstrap 服务端。您可尝试重新连接一次；若服务端已消费本次一次性 Claim Token 并返回 HTTP 401，请在宿主机重新执行 cpa-manager-plus initialize 获取新的 Handoff 链接。'
-              : '无法连接至 Manager Bootstrap 服务端，请确认本地受控容器或服务进程正在运行后重试。',
+              ? 'errorTransportStartDetail'
+              : 'errorTransportOtherDetail',
       };
     }
     if (err.kind === 'rejected' || err.kind === 'authority') {
       return {
         tone: 'danger',
-        title: 'Bootstrap 授权已失效或被拒绝（HTTP 401）',
-        detail:
-          stage === 'start'
-            ? '一次性认领令牌（Claim Token）已被消费、过期，或被更新的初始化代际（Claim Generation）取代。请在宿主机重新执行 cpa-manager-plus initialize 获取最新 Handoff 链接。'
-            : '当前 Bootstrap 会话授权已失效，或该操作在当前阶段已关闭。请点击“同步服务端状态”检查最新进度，或在宿主机重新执行初始化命令。',
+        title: 'errorRejectedTitle',
+        detail: stage === 'start' ? 'errorRejectedStartDetail' : 'errorRejectedOtherDetail',
       };
     }
     if (err.kind === 'mismatch') {
       return {
         tone: 'danger',
-        title: '安装实例身份不匹配（Bootstrap Authority Mismatch）',
-        detail:
-          '服务端返回的 FreshOperation 身份（admissionId / installationId / generation / operationId）与 Handoff 凭证不一致，已按 Fail-Closed 策略中止操作。',
+        title: 'errorMismatchTitle',
+        detail: 'errorMismatchDetail',
       };
     }
     if (err.kind === 'bad_request') {
       return {
         tone: 'danger',
-        title: '请求参数未通过服务端校验（HTTP 400）',
-        detail:
-          '管理员密钥格式、字节长度或字符复杂度不符合服务端安全要求，请检查密钥规则或使用“一键生成”重新生成。',
+        title: 'errorBadRequestTitle',
+        detail: 'errorBadRequestDetail',
       };
     }
     if (err.kind === 'conflict') {
       return {
         tone: 'warn',
-        title: '操作状态冲突（HTTP 409）',
-        detail:
-          '服务端 FreshOperation 状态已发生变更（例如管理员已完成初始化或正在使用不同幂等标识提交）。请点击“同步服务端状态”获取最新状态。',
+        title: 'errorConflictTitle',
+        detail: 'errorConflictDetail',
       };
     }
     return {
       tone: 'danger',
-      title: `服务端暂时不可用${err.status ? `（HTTP ${err.status}）` : ''}`,
-      detail: 'Bootstrap 服务端未能完成当前请求，请稍后重试或同步服务端状态。',
+      title: err.status ? 'errorServerTitleStatus' : 'errorServerTitle',
+      detail: 'errorServerDetail',
+      status: err.status,
     };
   }
   return {
     tone: 'danger',
-    title: '操作未能完成',
-    detail: '发生未预期的客户端异常，请刷新服务端状态或重新获取 Handoff 链接。',
+    title: 'errorUnexpectedTitle',
+    detail: 'errorUnexpectedDetail',
   };
 }
 
@@ -172,7 +190,21 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
   const [discoveryNote, setDiscoveryNote] = useState<DiscoveryGuidance | null>(null);
   const [discoveryChecked, setDiscoveryChecked] = useState(false);
   const [discoveryAttempt, setDiscoveryAttempt] = useState(0);
+  // Full Web starts on the Console's saved language (see fullweb/freshLanguage),
+  // so this is the same choice the Console header menu shows. Selecting here
+  // re-renders every Bootstrap and wizard string and writes that same store.
+  const [language, setLanguage] = useState<Language>(() => {
+    const current = fullWebLanguage();
+    return isFreshLanguage(current) ? current : 'zh-CN';
+  });
   const startedRef = useRef(false);
+  const changeLanguage = useCallback((next: string) => {
+    if (!isFreshLanguage(next)) return;
+    // Set the table before the state update so the re-render already reads it.
+    setFullWebLanguage(next);
+    setLanguage(next);
+    persistFreshLanguage(next);
+  }, []);
   useEffect(() => {
     document.documentElement.classList.toggle('light', lightTheme);
     document.documentElement.setAttribute('data-theme', lightTheme ? 'white' : 'dark');
@@ -266,6 +298,23 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
           )}
         </div>
         <div className="header-actions">
+          <label className="bootstrap-language">
+            <FullWebIcon name="globe" size={22} />
+            <select
+              className="bootstrap-language-select"
+              data-testid="bootstrap-language"
+              aria-label={bootstrapText('languageSwitch')}
+              title={bootstrapText('languageSwitch')}
+              value={language}
+              onChange={(event) => changeLanguage(event.target.value)}
+            >
+              {FRESH_LANGUAGES.map((value) => (
+                <option key={value} value={value}>
+                  {bootstrapText(LANGUAGE_NAME_KEYS[value])}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             className="btn btn-ghost btn-icon-only"
@@ -286,26 +335,26 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
               <div className="wizard-card-header">
                 <div className="wizard-step-tag">
                   <span>
-                    {discoveryNote?.flow === 'fresh'
-                      ? 'Bootstrap Gate · 需要安装主机授权'
-                      : 'Source Preflight · 只读来源检查'}
+                    {bootstrapText(
+                      discoveryNote?.flow === 'fresh' ? 'gateTagBootstrap' : 'gateTagPreflight'
+                    )}
                   </span>
                 </div>
                 <h1 className="wizard-title">
                   {discoveryNote?.flow === 'host'
-                    ? '当前来源需要宿主机预检，不能直接 Fresh 初始化'
+                    ? bootstrapText('gateHostTitle')
                     : discoveryNote?.flow === 'fresh'
                       ? journey('claimRequired')
-                      : discoveryChecked
-                        ? '来源状态无法确认，禁止直接初始化'
-                        : '正在确认来源状态，禁止直接初始化'}
+                      : bootstrapText(
+                          discoveryChecked ? 'gateUnconfirmedTitle' : 'gateCheckingTitle'
+                        )}
                 </h1>
                 <p className="wizard-desc">
                   {discoveryNote?.flow === 'host'
-                    ? '公共 Discovery 仅提供来源类型提示，不读取或修改现有数据；后续操作必须在受信宿主机执行。'
+                    ? bootstrapText('gateHostDesc')
                     : discoveryNote?.flow === 'fresh'
                       ? journey('claimRequiredHelp')
-                      : '尚未取得可信的 Fresh 来源分类；请检查宿主机上的来源与服务状态，不能依据当前页面执行初始化或迁移。'}
+                      : bootstrapText('gateUnconfirmedDesc')}
                 </p>
               </div>
               <div className="wizard-card-body">
@@ -316,8 +365,8 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                     role="status"
                   >
                     <div className="alert-content">
-                      <div className="alert-title">{discoveryNote.title}</div>
-                      <div className="alert-desc">{discoveryNote.detail}</div>
+                      <div className="alert-title">{feedbackText(discoveryNote, 'title')}</div>
+                      <div className="alert-desc">{feedbackText(discoveryNote, 'detail')}</div>
                     </div>
                   </div>
                 )}
@@ -325,10 +374,8 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                 {discoveryNote?.flow === 'host' ? (
                   <div className="alert alert-warn" data-testid="host-preflight-instructions">
                     <div className="alert-content">
-                      <div className="alert-title">下一步：在宿主机执行只读来源预检</div>
-                      <div className="alert-desc">
-                        把路径替换为真实来源数据库路径。此命令不会授权迁移，且不要在来源写入仍运行时声称已停止。
-                      </div>
+                      <div className="alert-title">{bootstrapText('preflightTitle')}</div>
+                      <div className="alert-desc">{bootstrapText('preflightDesc')}</div>
                       <div className="code-block" data-testid="host-preflight-command">
                         cpa-manager-plus legacy-preflight --db /path/to/usage.sqlite --summary
                       </div>
@@ -339,10 +386,11 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                     <div className="alert alert-warn">
                       <FullWebIcon name="alert" size={22} />
                       <div className="alert-content">
-                        <div className="alert-title">如何获取或恢复 Bootstrap 授权链接？</div>
+                        <div className="alert-title">{bootstrapText('handoffHelpTitle')}</div>
                         <div className="alert-desc">
-                          请在受信宿主机运行初始化命令，并使用输出的带 <code>#handoff=...</code>{' '}
-                          片段的完整 URL 重新打开本页面：
+                          {bootstrapText('handoffHelpLead')}
+                          <code>#handoff=...</code>
+                          {bootstrapText('handoffHelpTail')}
                         </div>
                       </div>
                     </div>
@@ -358,12 +406,9 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                   >
                     <div className="alert-content">
                       <div className="alert-title">
-                        {discoveryChecked ? '来源状态无法确认' : '正在读取来源状态'}
+                        {bootstrapText(discoveryChecked ? 'unconfirmedTitle' : 'checkingTitle')}
                       </div>
-                      <div className="alert-desc">
-                        不提供 Fresh
-                        初始化命令；请在受信宿主机确认来源、日志与服务状态。未知结果不会授予任何写入权限。
-                      </div>
+                      <div className="alert-desc">{bootstrapText('unconfirmedDesc')}</div>
                     </div>
                   </div>
                 )}
@@ -380,7 +425,7 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                       setDiscoveryAttempt((attempt) => attempt + 1);
                     }}
                   >
-                    重新检查来源状态
+                    {bootstrapText('recheck')}
                   </button>
                 )}
               </div>
@@ -403,21 +448,21 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                   <summary>{journey('diagnostics')}</summary>
                   <div className="info-card">
                     <div className="info-row">
-                      <span className="info-key">授权模式</span>
+                      <span className="info-key">{bootstrapText('diagnosticsMode')}</span>
                       <span className="info-val">
-                        {handoff?.resume
-                          ? 'Resume Session (GET operation)'
-                          : 'Claim Exchange (POST claim/exchange)'}
+                        {bootstrapText(
+                          handoff?.resume ? 'diagnosticsModeResume' : 'diagnosticsModeClaim'
+                        )}
                       </span>
                     </div>
                     {handoff && (
                       <>
                         <div className="info-row">
-                          <span className="info-key">Operation ID</span>
+                          <span className="info-key">{bootstrapText('diagnosticsOperationId')}</span>
                           <span className="info-val">{handoff.identity.operationId}</span>
                         </div>
                         <div className="info-row">
-                          <span className="info-key">Installation / Gen</span>
+                          <span className="info-key">{bootstrapText('diagnosticsInstallation')}</span>
                           <span className="info-val">
                             {handoff.identity.installationId} · {handoff.identity.generation}
                           </span>
@@ -434,13 +479,10 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
             <section className="wizard-card" data-testid="bootstrap-authority-error">
               <div className="wizard-card-header">
                 <div className="wizard-step-tag">
-                  <span>Bootstrap Authority Failed</span>
+                  <span>{bootstrapText('authorityFailedTag')}</span>
                 </div>
-                <h1 className="wizard-title">无法建立 Fresh Bootstrap 受控会话</h1>
-                <p className="wizard-desc">
-                  客户端已完成地址栏敏感片段清理，但与 Manager Bootstrap
-                  后端交换或恢复授权时未通过验证。
-                </p>
+                <h1 className="wizard-title">{bootstrapText('authorityFailedTitle')}</h1>
+                <p className="wizard-desc">{bootstrapText('authorityFailedDesc')}</p>
               </div>
               <div className="wizard-card-body">
                 <div
@@ -450,10 +492,10 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                   <FullWebIcon name="alert" size={22} />
                   <div className="alert-content">
                     <div className="alert-title" data-testid="init-error-title">
-                      {initError.title}
+                      {feedbackText(initError, 'title')}
                     </div>
                     <div className="alert-desc" data-testid="init-error-detail">
-                      {initError.detail}
+                      {feedbackText(initError, 'detail')}
                     </div>
                   </div>
                 </div>
@@ -461,16 +503,18 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                 {handoff && (
                   <div className="info-card">
                     <div className="info-row">
-                      <span className="info-key">Operation ID</span>
+                      <span className="info-key">{bootstrapText('diagnosticsOperationId')}</span>
                       <span className="info-val">{handoff.identity.operationId}</span>
                     </div>
                     <div className="info-row">
-                      <span className="info-key">Claim Generation</span>
+                      <span className="info-key">{bootstrapText('claimGeneration')}</span>
                       <span className="info-val">#{handoff.claimGeneration}</span>
                     </div>
                     <div className="info-row">
-                      <span className="info-key">Handoff 模式</span>
-                      <span className="info-val">{handoff.resume ? 'Resume' : 'Fresh Claim'}</span>
+                      <span className="info-key">{bootstrapText('handoffMode')}</span>
+                      <span className="info-val">
+                        {bootstrapText(handoff.resume ? 'handoffModeResume' : 'handoffModeFresh')}
+                      </span>
                     </div>
                   </div>
                 )}
@@ -479,17 +523,14 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
               </div>
               {handoff && (initErrorKind === 'transport' || initErrorKind === 'unavailable') && (
                 <div className="wizard-card-footer">
-                  <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                    可尝试重新连接一次；若返回 HTTP 401（令牌已被消费），请在宿主机重新运行
-                    cpa-manager-plus initialize 获取新 Handoff
-                  </span>
+                  <span className="bootstrap-retry-note">{bootstrapText('reconnectNote')}</span>
                   <button
                     type="button"
                     className="btn btn-primary"
                     data-testid="retry-start-btn"
                     onClick={() => void executeStart(handoff)}
                   >
-                    重试连接 Bootstrap 服务
+                    {bootstrapText('retryBootstrap')}
                   </button>
                 </div>
               )}
