@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -245,12 +246,16 @@ func (c Config) EmbeddedRuntimeConfigured() bool {
 	return strings.TrimSpace(c.RuntimeURL) != "" && strings.TrimSpace(c.RuntimeTokenFile) != ""
 }
 
-// TrustedSupervisorRoots returns the canonical Supervisor root directory (or
-// directories, for container deployments rooted at /data) owned by this
+// TrustedSupervisorRoots returns the canonical POSIX Supervisor root directory
+// (or directories, for container deployments rooted at /data) owned by this
 // Manager instance. Priority matches Runtime Supervisor and the native
 // launcher: explicit CPAMP_RUNTIME_JOURNAL_PATH, then CPAMP_RUNTIME_DATA_DIR,
-// then DataDir.
+// then DataDir. Windows hosts never run a POSIX Embedded Runtime Supervisor and
+// always fail closed with an empty slice.
 func (c Config) TrustedSupervisorRoots() []string {
+	if runtime.GOOS == "windows" {
+		return []string{}
+	}
 	if strings.TrimSpace(c.RuntimeJournalPath) != "" {
 		journal := cleanCanonicalPath(c.RuntimeJournalPath)
 		if journal == "" {
@@ -299,7 +304,7 @@ func resolveRuntimeEnvPath(raw string) string {
 
 func cleanCanonicalPath(raw string) string {
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	if trimmed == "" || filepath.VolumeName(trimmed) != "" {
 		return ""
 	}
 	if !filepath.IsAbs(trimmed) {

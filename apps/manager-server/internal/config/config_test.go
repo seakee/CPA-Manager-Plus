@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -474,6 +475,30 @@ func TestNormalizeCollectorMode(t *testing.T) {
 
 func TestTrustedSupervisorRootsMatchesDeploymentLayouts(t *testing.T) {
 	clearConfigEnv(t)
+	if runtime.GOOS == "windows" {
+		for name, cfg := range map[string]Config{
+			"empty":        {},
+			"posix-data":   {DataDir: "/data"},
+			"drive-volume": {DataDir: `C:\ProgramData\cpa-manager-plus\data`},
+			"unc-volume":   {DataDir: `\\server\share\cpa-manager-plus\data`},
+		} {
+			if got := cfg.TrustedSupervisorRoots(); len(got) != 0 {
+				t.Fatalf("windows %s roots = %v, want fail-closed empty slice", name, got)
+			}
+		}
+		customRoot := t.TempDir()
+		t.Setenv("USAGE_DATA_DIR", filepath.Join(customRoot, "data"))
+		t.Setenv("CPAMP_RUNTIME_DATA_DIR", filepath.Join(customRoot, "rt-data"))
+		t.Setenv("CPAMP_RUNTIME_JOURNAL_PATH", filepath.Join(customRoot, "custom-sup", "operations.sqlite"))
+		loaded, err := LoadWithoutCreatingDefault()
+		if err != nil {
+			t.Fatalf("LoadWithoutCreatingDefault() error = %v", err)
+		}
+		if got := loaded.TrustedSupervisorRoots(); len(got) != 0 {
+			t.Fatalf("windows env-configured roots = %v, want fail-closed empty slice", got)
+		}
+		return
+	}
 
 	if got := (Config{}).TrustedSupervisorRoots(); len(got) != 2 || got[0] != "/data/runtime/supervisor" || got[1] != "/runtime/supervisor" {
 		t.Fatalf("empty DataDir roots = %v, want container defaults", got)

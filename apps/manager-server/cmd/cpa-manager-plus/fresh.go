@@ -92,6 +92,7 @@ var errFreshExternalPermitRevoked = errors.New("fresh external host permit revok
 type runtimeLifecycleMutex struct {
 	initOnce sync.Once
 	ch       chan struct{}
+	onWait   func()
 }
 
 func (m *runtimeLifecycleMutex) tokenCh() chan struct{} {
@@ -100,6 +101,15 @@ func (m *runtimeLifecycleMutex) tokenCh() chan struct{} {
 		m.ch <- struct{}{}
 	})
 	return m.ch
+}
+
+func (m *runtimeLifecycleMutex) unlockFunc(ch chan struct{}) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ch <- struct{}{}
+		})
+	}
 }
 
 func (m *runtimeLifecycleMutex) Lock(ctx context.Context) (func(), error) {
@@ -116,12 +126,19 @@ func (m *runtimeLifecycleMutex) Lock(ctx context.Context) (func(), error) {
 			ch <- struct{}{}
 			return nil, err
 		}
-		var once sync.Once
-		return func() {
-			once.Do(func() {
-				ch <- struct{}{}
-			})
-		}, nil
+		return m.unlockFunc(ch), nil
+	default:
+	}
+	if m.onWait != nil {
+		m.onWait()
+	}
+	select {
+	case <-ch:
+		if err := ctx.Err(); err != nil {
+			ch <- struct{}{}
+			return nil, err
+		}
+		return m.unlockFunc(ch), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

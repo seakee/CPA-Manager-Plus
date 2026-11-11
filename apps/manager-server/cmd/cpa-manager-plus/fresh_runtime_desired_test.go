@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -868,17 +869,24 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 		app, op := completedRuntimeTestApplication(t)
 		reconcileEnteredLock := make(chan struct{})
 		releaseReconcile := make(chan struct{})
-		var statusOnce sync.Once
+		operatorWaitingOnLock := make(chan struct{})
+		var waitOnce sync.Once
+		app.runtimeLifecycleMu.onWait = func() {
+			waitOnce.Do(func() {
+				close(operatorWaitingOnLock)
+			})
+		}
+		var firstStatus atomic.Bool
 		client := &freshRuntimeTestClient{
 			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
 			onStatus: func(ctx context.Context) {
-				statusOnce.Do(func() {
+				if firstStatus.CompareAndSwap(false, true) {
 					close(reconcileEnteredLock)
 					select {
 					case <-releaseReconcile:
 					case <-ctx.Done():
 					}
-				})
+				}
 			},
 		}
 		app.runtime = client
@@ -903,7 +911,11 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 			app.runtimeOperations(cancelledRecorder, req, op, "runtime/operations")
 		}()
 
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-operatorWaitingOnLock:
+		case <-time.After(2 * time.Second):
+			t.Fatal("operator Stop did not enter contended lifecycle lock wait")
+		}
 		cancelReq()
 		select {
 		case <-handlerDone:
@@ -938,7 +950,14 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 		app, op := completedRuntimeTestApplication(t)
 		reconcileEnteredLock := make(chan struct{})
 		releaseReconcile := make(chan struct{})
-		var statusOnce sync.Once
+		operatorWaitingOnLock := make(chan struct{})
+		var waitOnce sync.Once
+		app.runtimeLifecycleMu.onWait = func() {
+			waitOnce.Do(func() {
+				close(operatorWaitingOnLock)
+			})
+		}
+		var firstStatus atomic.Bool
 		var observedStopDeadline time.Time
 		var observedStopHasDeadline bool
 		var observedStopGeneration model.RuntimeGeneration
@@ -946,13 +965,13 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 		client := &freshRuntimeTestClient{
 			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
 			onStatus: func(ctx context.Context) {
-				statusOnce.Do(func() {
+				if firstStatus.CompareAndSwap(false, true) {
 					close(reconcileEnteredLock)
 					select {
 					case <-releaseReconcile:
 					case <-ctx.Done():
 					}
-				})
+				}
 			},
 			onStopRequest: func(ctx context.Context, request model.RuntimeMutationRequest) {
 				observedStopDeadline, observedStopHasDeadline = ctx.Deadline()
@@ -979,9 +998,14 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 			app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-after-brief-wait"), op, "runtime/operations")
 		}()
 
-		// Let the operator request wait on the lifecycle lock while reconcile
-		// rotates the observed generation before releasing the lock.
-		time.Sleep(40 * time.Millisecond)
+		// Wait until the operator request is deterministically contended on the
+		// lifecycle lock before reconcile rotates the observed generation and
+		// releases the lock.
+		select {
+		case <-operatorWaitingOnLock:
+		case <-time.After(2 * time.Second):
+			t.Fatal("operator Stop did not enter contended lifecycle lock wait")
+		}
 		client.mu.Lock()
 		rotated := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
 		rotated.Generation = 42
