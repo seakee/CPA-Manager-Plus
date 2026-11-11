@@ -9,10 +9,11 @@ import { FreshManagedRuntime } from './FreshManagedRuntime';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import { createPublicApiClient } from './publicApi';
 import type { FreshOperation } from './bootstrapTransport';
-import { fullWebText as t } from '../i18n/fullweb';
+import { fullWebLanguage, fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
 import { LegacyConsolePage } from './LegacyConsolePage';
 import { LoginPage } from '../features/login/LoginPage';
 import { useAuthStore } from '../stores/useAuthStore';
+import { useLanguageStore } from '../stores/useLanguageStore';
 import { obfuscatedStorage } from '../services/storage/secureStorage';
 import { STORAGE_KEY_AUTH } from '../utils/constants';
 import { usageServiceApi } from '../services/api/usageService';
@@ -124,12 +125,21 @@ describe('Fresh installation and Console authority boundary', () => {
     read = vi
       .fn<typeof fetch>()
       .mockImplementation(() => Promise.resolve(Response.json(operation)));
+    // CI runs with an English browser: make the language chain start from 'en'
+    // instead of whatever locale the developer machine happens to have.
+    vi.stubGlobal('navigator', { language: 'en-US', languages: ['en-US'] });
+    useLanguageStore.setState({ language: 'en' });
+    setFullWebLanguage('en');
+    void i18n.changeLanguage('en');
   });
   afterEach(async () => {
     if (renderer) await act(async () => renderer.unmount());
     useAuthStore.getState().logout();
     useNotificationStore.getState().hideConfirmation();
     vi.restoreAllMocks();
+    useLanguageStore.setState({ language: 'en' });
+    setFullWebLanguage('en');
+    await i18n.changeLanguage('en');
     vi.unstubAllGlobals();
   });
   const find = (id: string) => renderer.root.findByProps({ 'data-testid': id });
@@ -537,6 +547,77 @@ describe('Fresh installation and Console authority boundary', () => {
     await login();
     expect(has('legacy-console')).toBe(false);
   });
+  it('retranslates a console sign-in error after the language changes', async () => {
+    // The console switches language through its own store, which is what keeps
+    // i18n, the Fresh shell and the persisted preference in step.
+    await act(async () => {
+      useLanguageStore.getState().setLanguage('zh-CN');
+    });
+    read.mockImplementation(() => Promise.resolve(new Response('', { status: 401 })));
+    await mount();
+    expect(hasLogin()).toBe(true);
+    await login();
+    // The user reads the alert region, not the adapter object behind it.
+    const alertText = () => {
+      const children: unknown = renderer.root.findByProps({ id: 'console-login-error' }).props
+        .children;
+      if (typeof children !== 'string') throw new Error('sign-in alert must render one string');
+      return children;
+    };
+    const chineseAlert = alertText();
+    expect(chineseAlert.length).toBeGreaterThan(0);
+    expect(chineseAlert).not.toMatch(/fullweb\./);
+
+    await act(async () => {
+      useLanguageStore.getState().setLanguage('en');
+      await vi.dynamicImportSettled();
+    });
+    const englishAlert = alertText();
+    // The visible alert follows the language instead of keeping the old sentence.
+    expect(englishAlert).not.toBe(chineseAlert);
+    expect(englishAlert).not.toContain(chineseAlert);
+    expect(englishAlert).not.toMatch(/fullweb\./);
+
+    await act(async () => {
+      useLanguageStore.getState().setLanguage('zh-CN');
+      await vi.dynamicImportSettled();
+    });
+    expect(alertText()).toBe(chineseAlert);
+  });
+
+  it('keeps the console tab title and <html lang> on the language the console renders', async () => {
+    const page = () =>
+      globalThis.document as unknown as { title: string; documentElement: { lang: string } };
+
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(true);
+    const englishTitle = page().title;
+    expect(englishTitle.length).toBeGreaterThan(0);
+    expect(englishTitle).not.toBe('consoleTitle');
+
+    await act(async () => {
+      useLanguageStore.getState().setLanguage('ru');
+      await vi.dynamicImportSettled();
+    });
+    await vi.waitFor(() => expect(page().title).not.toBe(englishTitle));
+    const russianTitle = page().title;
+    expect(russianTitle.length).toBeGreaterThan(0);
+    expect(russianTitle).not.toBe('consoleTitle');
+    // The Console bridge carried the choice into the Fresh instance, so the tab
+    // title and the document language agree.
+    expect(fullWebLanguage()).toBe('ru');
+    expect(page().documentElement.lang).toBe(fullWebLanguage());
+
+    await act(async () => {
+      useLanguageStore.getState().setLanguage('en');
+      await vi.dynamicImportSettled();
+    });
+    await vi.waitFor(() => expect(page().title).toBe(englishTitle));
+    expect(fullWebLanguage()).toBe('en');
+    expect(page().documentElement.lang).toBe(fullWebLanguage());
+  });
+
   it.each([
     { adminInitialized: false },
     { revision: 0 },

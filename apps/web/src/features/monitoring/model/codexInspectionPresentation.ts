@@ -172,21 +172,24 @@ export const toSettingsDraft = (
   autoRecoverEnabled: settings.autoRecoverEnabled,
 });
 
-export const formatActionLabel = (action: CodexInspectionAction, t: TFunction) => {
+export const codexInspectionActionLabelKey = (action: CodexInspectionAction) => {
   switch (action) {
     case 'delete':
-      return t('monitoring.codex_inspection_action_delete');
+      return 'monitoring.codex_inspection_action_delete';
     case 'disable':
-      return t('monitoring.codex_inspection_action_disable');
+      return 'monitoring.codex_inspection_action_disable';
     case 'enable':
-      return t('monitoring.codex_inspection_action_enable');
+      return 'monitoring.codex_inspection_action_enable';
     case 'reauth':
-      return t('monitoring.codex_inspection_action_reauth');
+      return 'monitoring.codex_inspection_action_reauth';
     case 'keep':
     default:
-      return t('monitoring.codex_inspection_action_keep');
+      return 'monitoring.codex_inspection_action_keep';
   }
 };
+
+export const formatActionLabel = (action: CodexInspectionAction, t: TFunction) =>
+  t(codexInspectionActionLabelKey(action));
 
 const isCodexInspectionActionValue = (value: unknown): value is CodexInspectionAction =>
   value === 'delete' ||
@@ -635,6 +638,34 @@ export const toServerInspectionLogViewEntry = (
   };
 };
 
+// A nested parameter points at a label key. If that key disappears the log must
+// still read like text, so fall back to its last segment instead of the path.
+const readableKeyTail = (key: string) => {
+  const tail = key.slice(key.lastIndexOf('.') + 1).replace(/_/g, ' ');
+  return tail.charAt(0).toUpperCase() + tail.slice(1);
+};
+
+/**
+ * A stored log keeps the template, not the text: format it in the language the
+ * page shows now, including the labels nested in its parameters.
+ */
+export const formatStoredLogMessage = (
+  entry: Pick<CodexInspectionStoredLogEntry, 'message' | 'messageKey' | 'messageParams'>,
+  t: TFunction
+): string => {
+  if (!entry.messageKey) return entry.message;
+  if (!entry.messageParams) return t(entry.messageKey);
+  const params = Object.fromEntries(
+    Object.entries(entry.messageParams).map(([name, value]) => [
+      name,
+      typeof value === 'object'
+        ? t(value.key, { defaultValue: readableKeyTail(value.key) })
+        : value,
+    ])
+  );
+  return t(entry.messageKey, params);
+};
+
 export const toLocalInspectionLogViewEntry = (
   entry: InspectionLogEntry,
   t: TFunction
@@ -643,7 +674,7 @@ export const toLocalInspectionLogViewEntry = (
   return {
     id: entry.id,
     level: entry.level,
-    message: entry.message,
+    message: formatStoredLogMessage(entry, t),
     timestamp: entry.timestamp,
     ...(detail ? { detail } : {}),
   };

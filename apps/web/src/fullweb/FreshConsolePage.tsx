@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { fullWebText as t } from '../i18n/fullweb';
+import { fullWebI18n, fullWebText as t } from '../i18n/fullweb';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
 import { createPublicApiClient, PublicApiError } from './publicApi';
 import type { RoutingContext } from './routingContext';
@@ -11,6 +11,8 @@ import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline
 import './consoleWorkspace.css';
 import { activateFreshSession, clearFreshSession, rememberedFreshCredential } from './freshSession';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
+import { useConsoleDocumentTitle } from './useConsoleDocumentTitle';
+import { useFullWebLanguage } from './useFullWebLanguage';
 
 const defaultClient = createPublicApiClient();
 const LegacyConsolePage = lazy(() =>
@@ -33,13 +35,17 @@ export function FreshConsolePage({
   const [enteredConsole, setEnteredConsole] = useState(false);
   const [externalSelected, setExternalSelected] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  // Kept as a key: the login form and its language menu must retranslate a
+  // failure that is already on screen.
+  const [error, setError] = useState<Parameters<typeof t>[0] | null>(null);
   const [light, setLight] = useState(true);
   const installationPendingRef = useRef(false);
   const requestId = useRef(0);
-  useEffect(() => {
-    document.title = t('consoleTitle');
-  }, []);
+  const language = useFullWebLanguage();
+  useConsoleDocumentTitle();
+  // The stored failure key is translated at render: subscribing to the Fresh
+  // language (not an unrelated re-render) is what retranslates it.
+  const errorText = error ? fullWebI18n.getFixedT(language)(error) : '';
   useEffect(
     () => () => {
       requestId.current++;
@@ -73,14 +79,14 @@ export function FreshConsolePage({
     setEnteredConsole(false);
     setExternalSelected(false);
     setBusy(false);
-    setError('');
+    setError(null);
   }
 
   async function readOperation(candidate = credential, remember = rememberPassword) {
     if (busy || installationPendingRef.current || !candidate) return false;
     const currentRequest = ++requestId.current;
     setBusy(true);
-    setError('');
+    setError(null);
     try {
       const next = await client.get<FreshOperation>('operation', {
         kind: 'admin',
@@ -107,7 +113,7 @@ export function FreshConsolePage({
         (operation && !sameIdentity(next.identity, operation.identity))
       ) {
         clearAuthentication();
-        setError(t('invalidOperation'));
+        setError('invalidOperation');
         return false;
       }
       activateFreshSession(context, candidate, remember);
@@ -120,9 +126,9 @@ export function FreshConsolePage({
       if (currentRequest !== requestId.current) return false;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         clearAuthentication();
-        setError(t('authError'));
+        setError('authError');
       } else {
-        setError(t('unavailable'));
+        setError('unavailable');
       }
       return false;
     } finally {
@@ -132,7 +138,7 @@ export function FreshConsolePage({
 
   const unauthorized = () => {
     clearAuthentication();
-    setError(t('authError'));
+    setError('authError');
   };
   if (!operation) {
     return (
@@ -141,7 +147,7 @@ export function FreshConsolePage({
           adapter={{
             address: new URL(context.basePath, window.location.origin).toString(),
             credentialPlaceholder: bootstrapJourneyText('loginKeyPlaceholder'),
-            error,
+            error: errorText,
             authenticate: readOperation,
             restore: async () => {
               const candidate = rememberedFreshCredential(context);
@@ -167,7 +173,7 @@ export function FreshConsolePage({
           <div className="wizard-container">
             {error && (
               <p className="alert alert-warn" role="alert">
-                {error}
+                {errorText}
               </p>
             )}
             {operation.strategy?.strategy === 'connect_external' ||

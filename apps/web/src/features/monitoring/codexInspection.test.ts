@@ -1171,6 +1171,28 @@ describe('Server Codex inspection log details', () => {
     expect(copied).toContain('"healthEvidence":"消费额度或积分已用尽"');
   });
 
+  it('never shows a raw translation key when a stored log label is missing', () => {
+    const viewEntry = toLocalInspectionLogViewEntry(
+      {
+        id: 'local-missing-label',
+        level: 'info',
+        message: 'fallback',
+        messageKey: 'monitoring.codex_inspection_log_result',
+        messageParams: {
+          account: 'a@example.com',
+          action: { key: 'monitoring.codex_inspection_action_retired' },
+          status: 200,
+          percent: '1.0%',
+        },
+        timestamp: Date.UTC(2026, 6, 23, 12, 0, 0),
+      },
+      summaryT
+    );
+
+    expect(viewEntry.message).not.toContain('monitoring.');
+    expect(viewEntry.message).toContain('Codex inspection action retired');
+  });
+
   it('formats local structured details with the same presentation as server logs', () => {
     const viewEntry = toLocalInspectionLogViewEntry(
       {
@@ -6798,6 +6820,58 @@ describe('Codex inspection last-run cache', () => {
     expect(loaded?.actionFilter).toBe('delete');
     expect(loaded?.logs).toHaveLength(1);
     expect(loaded?.result.summary.deleteCount).toBe(1);
+  });
+
+  it('drops credential-shaped message params instead of persisting them', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    saveCodexInspectionLastRun({
+      result: createRunResult(),
+      logs: [
+        {
+          id: 'log-secret',
+          level: 'info',
+          message: 'Codex inspection action delete',
+          messageKey: 'monitoring.codex_inspection_log_result',
+          messageParams: {
+            account: 'demo@example.com',
+            action: { key: 'monitoring.codex_inspection_action_delete' },
+            status: 200,
+            percent: '1.0%',
+            accessToken: 'secret-access-token',
+            authorization: 'Bearer secret-authorization',
+            clientSecret: 'secret-client-secret',
+          },
+          timestamp: 2000,
+        },
+      ],
+    });
+
+    const secrets = ['secret-access-token', 'secret-authorization', 'secret-client-secret'];
+    const persisted = storage.getItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY) ?? '';
+    for (const secret of secrets) {
+      expect(persisted).not.toContain(secret);
+    }
+
+    const restored = loadCodexInspectionLastRun();
+    expect(restored?.logs[0].messageParams).toEqual({
+      account: 'demo@example.com',
+      action: { key: 'monitoring.codex_inspection_action_delete' },
+      status: 200,
+      percent: '1.0%',
+    });
+
+    // What is left still renders in every language, and no credential reaches the text.
+    const russian = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('ru'));
+    const english = toLocalInspectionLogViewEntry(restored!.logs[0], i18n.getFixedT('en'));
+    for (const message of [russian.message, english.message]) {
+      expect(message).toContain('demo@example.com');
+      expect(message).not.toMatch(/monitoring\./);
+      for (const secret of secrets) {
+        expect(message).not.toContain(secret);
+      }
+    }
+    expect(russian.message).not.toBe(english.message);
   });
 
   it('restores legacy 401 filters as reauth filters', () => {

@@ -2,6 +2,8 @@
  * 通用类型定义
  */
 
+import type { TFunction } from 'i18next';
+
 export type Theme = 'white' | 'dark' | 'auto';
 
 export type VisualEffectsMode = 'full' | 'reduced';
@@ -15,6 +17,12 @@ export interface Notification {
   message: string;
   type: NotificationType;
   duration?: number;
+  /**
+   * Rendered with the live translator while the toast is on screen, so a message
+   * built from translation keys follows a language switch. `message` stays the
+   * fallback for text that is not localized.
+   */
+  renderMessage?: (t: TFunction) => string;
 }
 
 export interface ApiResponse<T = unknown> {

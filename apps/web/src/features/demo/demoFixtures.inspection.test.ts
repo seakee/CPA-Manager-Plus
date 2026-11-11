@@ -10,7 +10,14 @@ import {
 import { apiClient } from '@/services/api/client';
 import { normalizeConfigResponse } from '@/services/api/transformers';
 import { inspectCodexAccounts } from '@/features/monitoring/codexInspection';
-import { toServerInspectionLogViewEntry } from '@/features/monitoring/model/codexInspectionPresentation';
+import {
+  toLocalInspectionLogViewEntry,
+  toServerInspectionLogViewEntry,
+} from '@/features/monitoring/model/codexInspectionPresentation';
+import {
+  hydrateCodexInspectionLastRun,
+  serializeCodexInspectionLastRun,
+} from '@/features/monitoring/model/codexInspectionStorage';
 import {
   getDemoApiCallResult,
   getDemoAuthFiles,
@@ -241,6 +248,31 @@ describe('credential health inspection demo fixtures', () => {
     expect(expiredXai).toMatchObject({ level: 'error' });
     expect(expiredXai?.message).toContain('真实推理检查');
     expect(logs[logs.length - 1]?.message).toContain('巡检完成：');
+  });
+
+  it('retranslates a stored local log after the Console language changes', () => {
+    const baseNow = Date.UTC(2026, 6, 23, 12, 0, 0);
+    const stored = serializeCodexInspectionLastRun({
+      result: getDemoCodexInspectionLocalRun(baseNow),
+      logs: getDemoCodexInspectionLocalLogs(baseNow, i18n.getFixedT('zh-CN')),
+    });
+    const persisted = hydrateCodexInspectionLastRun(stored);
+    expect(persisted).not.toBeNull();
+
+    const english = (persisted?.logs ?? []).map((entry) =>
+      toLocalInspectionLogViewEntry(entry, i18n.getFixedT('en'))
+    );
+    const [
+      loading,
+      setReady,
+      ...results
+    ] = english;
+
+    expect(loading?.message).toBe('Loading authentication files; target: Codex + xAI');
+    expect(setReady?.message).toContain('Inspection set contains');
+    expect(results.some((entry) => entry.message.includes('Keep'))).toBe(true);
+    expect(results.some((entry) => entry.message.includes('real inference healthy'))).toBe(true);
+    expect(english[english.length - 1]?.message).toContain('Inspection complete:');
   });
 
   it('uses the same concise summaries while preserving truthful local and server metadata', () => {

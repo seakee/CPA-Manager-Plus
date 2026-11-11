@@ -1,5 +1,6 @@
 import type {
   CodexInspectionLogDetail,
+  CodexInspectionLogMessageParam,
   CodexInspectionLastRunState,
   CodexInspectionQuotaWindow,
   CodexInspectionResultItem,
@@ -441,14 +442,41 @@ const sanitizeStoredText = (value: unknown): string => sanitizeStringifiedJson(r
 const sanitizeStoredLogDetail = (value: unknown): CodexInspectionLogDetail | undefined =>
   isRecord(value) ? (sanitizeLogDetailValue(value) as CodexInspectionLogDetail) : undefined;
 
+const sanitizeLogMessageParam = (value: unknown): CodexInspectionLogMessageParam | undefined => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return sanitizeStoredText(value);
+  const nestedKey = isRecord(value) ? readString(value.key) : '';
+  return nestedKey ? { key: nestedKey } : undefined;
+};
+
+const sanitizeLogMessageParams = (
+  value: unknown
+): Record<string, CodexInspectionLogMessageParam> | undefined => {
+  if (!isRecord(value)) return undefined;
+  const params: Record<string, CodexInspectionLogMessageParam> = {};
+  for (const [key, item] of Object.entries(value)) {
+    // Params outlive the sentence they render, so they pass the same sensitive-key
+    // gate as `detail`: a credential-shaped name is dropped instead of being kept
+    // for a later language switch to print.
+    if (isSensitiveLogDetailKey(key)) continue;
+    const param = sanitizeLogMessageParam(item);
+    if (param !== undefined) params[key] = param;
+  }
+  return Object.keys(params).length ? params : undefined;
+};
+
 const serializeStoredLogEntry = (
   entry: CodexInspectionStoredLogEntry
 ): CodexInspectionStoredLogEntry => {
   const detail = sanitizeStoredLogDetail(entry.detail);
+  const messageKey = readString(entry.messageKey);
+  const messageParams = sanitizeLogMessageParams(entry.messageParams);
   return {
     id: entry.id,
     level: normalizeLogLevel(entry.level),
     message: readString(entry.message),
+    ...(messageKey ? { messageKey } : {}),
+    ...(messageParams ? { messageParams } : {}),
     timestamp: entry.timestamp,
     ...(detail ? { detail } : {}),
   };
@@ -461,11 +489,15 @@ const hydrateStoredLogEntry = (value: unknown): CodexInspectionStoredLogEntry | 
   const timestamp = readNullableNumber(value.timestamp) ?? Date.now();
   const id = readString(value.id) || `${timestamp}-${message.slice(0, 12)}`;
   const detail = sanitizeStoredLogDetail(value.detail);
+  const messageKey = readString(value.messageKey);
+  const messageParams = sanitizeLogMessageParams(value.messageParams);
 
   return {
     id,
     level: normalizeLogLevel(value.level),
     message,
+    ...(messageKey ? { messageKey } : {}),
+    ...(messageParams ? { messageParams } : {}),
     timestamp,
     ...(detail ? { detail } : {}),
   };

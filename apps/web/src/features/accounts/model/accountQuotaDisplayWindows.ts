@@ -79,6 +79,17 @@ export type TranslateQuotaWindowLabel = (
   labelParams?: Record<string, string | number>
 ) => string;
 
+/**
+ * AccountsPage renders every quota window through this: a window that carries a
+ * translation key shows the localized text instead of the label it was built in.
+ */
+export const createTranslateQuotaWindowLabel =
+  (t: TFunction): TranslateQuotaWindowLabel =>
+  (label, labelKey, labelParams) => {
+    if (!labelKey) return label || t('accounts.col_quota');
+    return t(labelKey, { defaultValue: label || labelKey, ...labelParams });
+  };
+
 export interface BuildAccountQuotaDisplayWindowsOptions {
   stores: AccountQuotaStores;
   getDisplayCodexQuota?: (file: AuthFileItem) => CodexQuotaState | undefined;

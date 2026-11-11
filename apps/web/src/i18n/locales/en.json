@@ -4829,6 +4829,7 @@
     "models_error": "Failed to load model list",
     "models_gateway_pending": "Gateway access is pending configuration",
     "models_count": "{{count}} available models",
+    "models_group_unclassified": "Other",
     "version_check_title": "Update Check",
     "version_check_desc": "Check the server version and show whether an update is available.",
     "version_current_label": "Current version",

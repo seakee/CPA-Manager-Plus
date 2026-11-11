@@ -176,6 +176,7 @@ import {
 } from '@/features/accounts/model/accountWindowUsageRows';
 import {
   buildAccountQuotaDisplayWindows,
+  createTranslateQuotaWindowLabel,
   type AccountQuotaDisplayWindow,
 } from '@/features/accounts/model/accountQuotaDisplayWindows';
 import {
@@ -4725,18 +4726,8 @@ export function AccountsPage() {
     (fileName: string) => getDisplayText(fileName),
     [getDisplayText]
   );
-  const translateQuotaWindowLabel = useCallback(
-    (
-      label: string | undefined,
-      labelKey?: string,
-      labelParams?: Record<string, string | number>
-    ) => {
-      if (!labelKey) return label || t('accounts.col_quota');
-      return t(labelKey, {
-        defaultValue: label || labelKey,
-        ...labelParams,
-      });
-    },
+  const translateQuotaWindowLabel = useMemo(
+    () => createTranslateQuotaWindowLabel(t),
     [t]
   );
   const buildQuotaDisplayWindows = useCallback(

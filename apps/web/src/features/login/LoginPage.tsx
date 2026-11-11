@@ -26,7 +26,6 @@ import {
 import {
   LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEY,
   USAGE_SERVICE_LAST_CPA_BASE_KEY,
-  getUsageServiceErrorCode,
   usageServiceApi,
 } from '@/services/api/usageService';
 import {
@@ -46,8 +45,8 @@ import {
   CPAMP_VERTICAL_LOGO_SRC_SET,
   CPAMP_VERTICAL_LOGO_URL,
 } from '@/assets/brand';
-import type { ApiError } from '@/types';
 import { resolveUsageServiceLoginMode } from './loginMode';
+import { formatLoginError, formatLoginFailure, toLoginError, type LoginError } from './loginError';
 import styles from './LoginPage.module.scss';
 
 type RedirectState = { from?: { pathname?: string; search?: string; hash?: string } };
@@ -62,62 +61,6 @@ function resolveRedirectPath(state: unknown): string {
   const search = typeof from?.search === 'string' ? from.search : '';
   const hash = typeof from?.hash === 'string' ? from.hash : '';
   return `${pathname}${search}${hash}`;
-}
-
-function getLocalizedErrorMessage(
-  error: unknown,
-  t: (key: string, options?: Record<string, unknown>) => string
-): string {
-  const usageServiceCode = getUsageServiceErrorCode(error);
-  if (usageServiceCode) {
-    return t(`usage_service_errors.${usageServiceCode}`, {
-      defaultValue: t('usage_service_errors.request_failed'),
-    });
-  }
-
-  const apiError = error as Partial<ApiError>;
-  const status = typeof apiError.status === 'number' ? apiError.status : undefined;
-  const code = typeof apiError.code === 'string' ? apiError.code : undefined;
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof apiError.message === 'string'
-        ? apiError.message
-        : typeof error === 'string'
-          ? error
-          : '';
-
-  const withHttpStatus = (summary: string) => {
-    if (!status) return summary;
-
-    const genericAxiosMessage = `Request failed with status code ${status}`;
-    const detail = message.trim();
-    const backendDetail =
-      detail && detail !== genericAxiosMessage
-        ? ` (${t('login.error_backend_detail')}: ${detail})`
-        : '';
-
-    return `HTTP ${status}: ${summary}${backendDetail}`;
-  };
-
-  if (status === 401) return withHttpStatus(t('login.error_unauthorized'));
-  if (status === 403) return withHttpStatus(t('login.error_forbidden'));
-  if (status === 404) return withHttpStatus(t('login.error_not_found'));
-  if (status && status >= 500) return withHttpStatus(t('login.error_server'));
-  if (code === 'ECONNABORTED' || message.toLowerCase().includes('timeout')) {
-    return t('login.error_timeout');
-  }
-  if (code === 'ERR_NETWORK' || message.toLowerCase().includes('network error')) {
-    return t('login.error_network');
-  }
-  if (code === 'ERR_CERT_AUTHORITY_INVALID' || message.toLowerCase().includes('certificate')) {
-    return t('login.error_ssl');
-  }
-  if (message.toLowerCase().includes('cors') || message.toLowerCase().includes('cross-origin')) {
-    return t('login.error_cors');
-  }
-
-  return withHttpStatus(t('login.error_invalid'));
 }
 
 export interface ConsoleLoginAdapter {
@@ -162,7 +105,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
   const [loading, setLoading] = useState(false);
   const [autoLoading, setAutoLoading] = useState(true);
   const [autoLoginSuccess, setAutoLoginSuccess] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<LoginError | null>(null);
   const [hostedByUsageService, setHostedByUsageService] = useState(false);
   const [usageServiceNeedsSetup, setUsageServiceNeedsSetup] = useState(false);
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
@@ -353,15 +296,15 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
   const validateUsageSetupStep = useCallback(
     (step: UsageSetupStep) => {
       if (step === 'admin' && !adminKey.trim()) {
-        setError(t('login.admin_key_required'));
+        setError({ key: 'login.admin_key_required' });
         return false;
       }
       if (step === 'connection' && !apiBase.trim()) {
-        setError(t('login.cpa_address_required'));
+        setError({ key: 'login.cpa_address_required' });
         return false;
       }
       if (step === 'cpaKey' && !cpaManagementKey.trim()) {
-        setError(t('login.cpa_management_key_required'));
+        setError({ key: 'login.cpa_management_key_required' });
         return false;
       }
       if (step === 'polling') {
@@ -371,14 +314,14 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
           !Number.isFinite(parsedPollIntervalMs) ||
           parsedPollIntervalMs <= 0
         ) {
-          setError(t('login.poll_interval_invalid'));
+          setError({ key: 'login.poll_interval_invalid' });
           return false;
         }
       }
-      setError('');
+      setError(null);
       return true;
     },
-    [adminKey, apiBase, cpaManagementKey, pollIntervalMs, t]
+    [adminKey, apiBase, cpaManagementKey, pollIntervalMs]
   );
 
   const handleUsageSetupNext = useCallback(() => {
@@ -389,7 +332,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
   }, [usageSetupStep, usageSetupSteps, validateUsageSetupStep]);
 
   const handleUsageSetupBack = useCallback(() => {
-    setError('');
+    setError(null);
     const currentIndex = usageSetupSteps.indexOf(usageSetupStep);
     const previousStep = usageSetupSteps[Math.max(currentIndex - 1, 0)];
     setUsageSetupStep(previousStep);
@@ -399,15 +342,15 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
     if (consoleAuth) {
       if (consoleAuth.status) return;
       if (!adminKey.trim()) {
-        setError(t('login.admin_key_required'));
+        setError({ key: 'login.admin_key_required' });
         return;
       }
       setLoading(true);
-      setError('');
+      setError(null);
       try {
         await consoleAuth.authenticate(adminKey.trim(), rememberCredential);
       } catch (err) {
-        setError(getLocalizedErrorMessage(err, t));
+        setError(toLoginError(err));
       } finally {
         setLoading(false);
       }
@@ -424,24 +367,24 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
 
     if (usageServiceNeedsSetup) {
       if (!trimmedAdminKey) {
-        setError(t('login.admin_key_required'));
+        setError({ key: 'login.admin_key_required' });
         return;
       }
       if (!apiBase.trim()) {
-        setError(t('login.cpa_address_required'));
+        setError({ key: 'login.cpa_address_required' });
         return;
       }
       if (!trimmedCPAKey) {
-        setError(t('login.cpa_management_key_required'));
+        setError({ key: 'login.cpa_management_key_required' });
         return;
       }
     } else if (isManagerServerMode) {
       if (!trimmedAdminKey) {
-        setError(t('login.admin_key_required'));
+        setError({ key: 'login.admin_key_required' });
         return;
       }
     } else if (!trimmedCPAKey) {
-      setError(t('login.cpa_management_key_required'));
+      setError({ key: 'login.cpa_management_key_required' });
       return;
     }
 
@@ -453,12 +396,12 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
         !Number.isFinite(parsedPollIntervalMs) ||
         parsedPollIntervalMs <= 0)
     ) {
-      setError(t('login.poll_interval_invalid'));
+      setError({ key: 'login.poll_interval_invalid' });
       return;
     }
 
     setLoading(true);
-    setError('');
+    setError(null);
     try {
       if (usageServiceNeedsSetup) {
         await usageServiceApi.setup(
@@ -499,9 +442,11 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
         navigate(redirectAfterLogin, { replace: true });
       }
     } catch (err: unknown) {
-      const message = getLocalizedErrorMessage(err, t);
-      setError(message);
-      showNotification(`${t('notification.login_failed')}: ${message}`, 'error');
+      const loginError = toLoginError(err);
+      setError(loginError);
+      showNotification(formatLoginFailure(loginError, t), 'error', undefined, (translate) =>
+        formatLoginFailure(loginError, translate)
+      );
     } finally {
       setLoading(false);
     }
@@ -536,7 +481,8 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
     [handleSubmit, loading]
   );
 
-  const consoleError = consoleAuth && (error || consoleAuth.error);
+  const errorText = error ? formatLoginError(error, t) : '';
+  const consoleError = consoleAuth && (errorText || consoleAuth.error);
   useEffect(() => {
     if (consoleError && !autoLoading && !autoLoginSuccess && !loading) {
       consoleFormRef.current?.querySelector<HTMLInputElement>('#console-admin-key')?.focus();
@@ -851,7 +797,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                     )}
                   </div>
 
-                  {error && <div className={styles.errorBox}>{error}</div>}
+                  {errorText && <div className={styles.errorBox}>{errorText}</div>}
 
                   <div className={styles.stepActions}>
                     <Button
@@ -977,8 +923,8 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
                     {loading ? t('login.submitting') : t('login.submit_button')}
                   </Button>
 
-                  {(error || consoleAuth?.error) && (
-                    <div id={consoleAuth ? 'console-login-error' : undefined} className={styles.errorBox} role="alert">{error || consoleAuth?.error}</div>
+                  {(errorText || consoleAuth?.error) && (
+                    <div id={consoleAuth ? 'console-login-error' : undefined} className={styles.errorBox} role="alert">{errorText || consoleAuth?.error}</div>
                   )}
                 </form>
               )}

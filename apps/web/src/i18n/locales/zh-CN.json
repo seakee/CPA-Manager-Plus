@@ -4827,6 +4827,7 @@
     "models_error": "获取模型列表失败",
     "models_gateway_pending": "网关接入等待配置",
     "models_count": "可用模型 {{count}} 个",
+    "models_group_unclassified": "其他",
     "version_check_title": "版本检查",
     "version_check_desc": "检查服务器版本，并提示是否有可用更新。",
     "version_current_label": "当前版本",
