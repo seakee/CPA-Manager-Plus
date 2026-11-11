@@ -78,7 +78,7 @@ RUN set -eu; \
       "$executable_sha256" > /out/cpa-artifact.json; \
     chmod 0444 /out/cpa-artifact.json /out/CPA-LICENSE
 
-FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS supervisor-build
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS supervisor-build
 
 ARG VERSION
 ARG SOURCE_COMMIT
@@ -136,7 +136,7 @@ WORKDIR /app/apps/web
 RUN VERSION="$VERSION" npm run build
 RUN mkdir -p /out && node /app/bin/release/hash-fullweb.mjs /app/apps/web/dist/fullweb /out/fullweb-manifest.json
 
-FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS service-build
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS service-build
 ARG VERSION
 ARG SOURCE_COMMIT
 # Fail closed on malformed identity before the Go build and license collection.
@@ -175,7 +175,7 @@ FROM service-build AS web-package-test
 RUN CPAMP_FULLWEB_PACKAGED_TEST=1 go test -run '^TestPackagedFullWeb(Dist|Manifest)$' ./internal/httpapi
 RUN go test -run '^TestR1EmbeddedPublicAPITransportFixture$' ./internal/domain/routing
 
-FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS ingress-build
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS ingress-build
 ARG VERSION
 ARG SOURCE_COMMIT
 ARG TARGETOS

@@ -1,6 +1,6 @@
 module github.com/seakee/cpa-manager-plus/apps/manager-server
 
-go 1.26.10
+go 1.26.11
 
 require (
 	golang.org/x/sys v0.44.0
