@@ -1348,3 +1348,139 @@ func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing
 		}
 	})
 }
+
+// TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut proves
+// that USAGE_RESP_TLS_SKIP_VERIFY=true (cfg.TLSSkipVerify=true) stays active on
+// Fresh-seeded skeleton manager_config_v1 rows (both before and across narrow
+// PATCH toggles, as well as on ConnectExternal) until a whole-document PUT
+// explicitly persists Collector transport settings.
+func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	key := strings.Repeat("d", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v0/management/config":
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case "/v0/management/usage-statistics-enabled":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v0/management/usage-queue":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("[]"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	normalizedURL, err := cpa.NormalizeV8BaseURL(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{
+		CPAUpstreamURL: normalizedURL,
+		CollectorMode:  "http",
+		TLSSkipVerify:  true,
+	})
+	protectedKey, err := opened.Protector.ProtectString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeObs := validInstallationRuntime()
+	updated, err := app.store.Update(hostCtx, current.Operation.Identity, current.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                string(runtimeObs.Identity),
+			TargetGeneration:              uint64(runtimeObs.Generation),
+			TargetArtifactID:              string(runtimeObs.ActiveGatewayArtifact.ArtifactID),
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(normalizedURL),
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL:    normalizedURL,
+			ManagementKey: protectedKey,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := app.store.Update(hostCtx, updated.Operation.Identity, updated.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.managedSource = managedInstallSource(app.store, opened.Protector, normalizedURL)
+
+	// 1. Before any whole-document PUT, the freshstore-seeded skeleton row must
+	// not clobber cfg.TLSSkipVerify=true, even across narrow PATCH toggles.
+	app.startUsageCollection(completed.Operation)
+	activeCfg, active := app.legacyCollector.ActiveRuntimeConfig()
+	if !active || !activeCfg.TLSSkipVerify {
+		t.Fatalf("startup ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true from process config", activeCfg, active)
+	}
+	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PATCH false = %d %s", resp.Code, resp.Body.String())
+	}
+	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PATCH true = %d %s", resp.Code, resp.Body.String())
+	}
+	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
+	if !active || !activeCfg.TLSSkipVerify {
+		t.Fatalf("after narrow PATCH toggle ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true", activeCfg, active)
+	}
+
+	// 2. Whole-document PUT preserving tlsSkipVerify=true keeps the Collector
+	// running without a restart.
+	startsBeforePut := app.legacyCollector.StartCount()
+	putTrueBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL)
+	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putTrueBody, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT tlsSkipVerify=true = %d %s", resp.Code, resp.Body.String())
+	}
+	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 0 {
+		t.Fatalf("PUT keeping tlsSkipVerify=true restarted Collector: StartCount delta = %d, want 0", got)
+	}
+	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
+	if !active || !activeCfg.TLSSkipVerify {
+		t.Fatalf("after PUT tlsSkipVerify=true ActiveRuntimeConfig = %+v (active=%v)", activeCfg, active)
+	}
+
+	// 3. Whole-document PUT setting tlsSkipVerify=false overrides the process
+	// default and reloads the running Collector with TLSSkipVerify=false.
+	putFalseBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":25000,"tlsSkipVerify":false}}}`, normalizedURL)
+	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putFalseBody, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT tlsSkipVerify=false = %d %s", resp.Code, resp.Body.String())
+	}
+	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 1 {
+		t.Fatalf("PUT setting tlsSkipVerify=false StartCount delta = %d, want 1", got)
+	}
+	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
+	if !active || activeCfg.TLSSkipVerify {
+		t.Fatalf("after PUT tlsSkipVerify=false ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=false", activeCfg, active)
+	}
+
+	// 4. ConnectExternal (where whole-document PUT is blocked) also honours
+	// cfg.TLSSkipVerify=true on its freshstore-seeded skeleton row.
+	extHarness := newExternalUsageHarness(t)
+	extHarness.app.cfg.TLSSkipVerify = true
+	extHarness.cpa.enabled.Store(true)
+	extHarness.app.startUsageCollection(extHarness.operation(t))
+	extCfg, extActive := extHarness.app.legacyCollector.ActiveRuntimeConfig()
+	if !extActive || !extCfg.TLSSkipVerify {
+		t.Fatalf("ConnectExternal ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true", extCfg, extActive)
+	}
+}

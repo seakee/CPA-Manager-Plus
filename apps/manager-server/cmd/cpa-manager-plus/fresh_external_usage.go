@@ -13,9 +13,12 @@ import (
 	usageapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // Stable codes of a Collector start this Manager refused to claim. They reach
@@ -66,7 +69,9 @@ func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, mana
 			}
 			batchSize = managerconfig.PositiveOrDefault(managerCfg.Collector.BatchSize, batchSize, 100)
 			pollIntervalMS = managerconfig.PositiveOrDefault(managerCfg.Collector.PollIntervalMS, pollIntervalMS, 500)
-			tlsSkipVerify = managerCfg.Collector.TLSSkipVerify
+			if persistedCollectorTransportConfigured(managerCfg.Collector) {
+				tlsSkipVerify = managerCfg.Collector.TLSSkipVerify
+			}
 		}
 	}
 	return collector.RuntimeConfig{
@@ -79,6 +84,18 @@ func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, mana
 		PollInterval:   time.Duration(pollIntervalMS) * time.Millisecond,
 		TLSSkipVerify:  tlsSkipVerify,
 	}, nil
+}
+
+// persistedCollectorTransportConfigured reports whether a stored ManagerConfig
+// row carries explicit Collector transport fields (as written by a whole-config
+// PUT) rather than a Fresh-seeded skeleton row containing only collector.enabled.
+func persistedCollectorTransportConfigured(c store.ManagerCollectorConfig) bool {
+	return strings.TrimSpace(c.CollectorMode) != "" ||
+		strings.TrimSpace(c.Queue) != "" ||
+		strings.TrimSpace(c.PopSide) != "" ||
+		c.BatchSize > 0 ||
+		c.PollIntervalMS > 0 ||
+		c.TLSSkipVerify
 }
 
 // sampleUsageAuthority proves, with one authenticated management read, that the
@@ -111,6 +128,7 @@ func (a *freshApplication) stopUsageCollectionLocked(ctx context.Context) {
 	if a.legacyCollector != nil {
 		_ = a.legacyCollector.Stop(ctx)
 	}
+	a.activeExternalGrant.Store(externalReadGrant{})
 	a.usageStarted = false
 	a.usageCollectorStarted = false
 	a.setUsageStartReason("")
@@ -164,13 +182,51 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	if a.externalSource == nil || a.legacyCollector == nil {
 		return usageStartOutcome{Reason: usageStartReasonNoAuthority}
 	}
-	install, err := a.externalSource(ctx)
+	gate := &a.legacyCredentialGate
+	if !gate.acquire(ctx) {
+		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+	}
+	gateReleased := false
+	releaseGate := func() {
+		if !gateReleased {
+			gateReleased = true
+			gate.release()
+		}
+	}
+	defer releaseGate()
+
+	var (
+		grant   externalReadGrant
+		install freshkeyapply.ExternalInstall
+		err     error
+	)
+	if a.store != nil {
+		var record freshstore.Record
+		record, err = a.store.Load(ctx)
+		if err != nil {
+			log.Printf("Fresh external usage collection unavailable: %v", err)
+			return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+		}
+		grant, install, err = a.externalReadTargetFor(ctx, record)
+	} else {
+		install, err = a.externalSource(ctx)
+	}
 	if err != nil {
 		if errors.Is(err, cpa.ErrManagementRejected) {
+			releaseGate()
 			return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 		}
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+	}
+	if grant.Refused {
+		releaseGate()
+		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+	}
+	rejectExternalCredential := func(rejectErr error) usageStartOutcome {
+		a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
+		releaseGate()
+		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
 	// Collection is only worth arming on a CPA this Manager can prove it manages:
 	// the version contract decides the enable write and every later write, so a
@@ -178,11 +234,12 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	// code the write surfaces answer with, never an unexplained empty window.
 	switch report, err := cpa.ObserveExternalVersion(ctx, install.BaseURL, install.ManagementKey); {
 	case errors.Is(err, cpa.ErrManagementRejected):
-		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+		return rejectExternalCredential(err)
 	case err != nil:
 		log.Printf("Fresh external usage version unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	case report.WriteBlocked:
+		releaseGate()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonVersionUnsupported)
 	}
 	// The first authenticated sample of this attempt is also the read of the
@@ -190,7 +247,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	enabled, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
 	switch {
 	case errors.Is(err, cpa.ErrManagementRejected):
-		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+		return rejectExternalCredential(err)
 	case err != nil:
 		log.Printf("Fresh external usage statistics unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
@@ -207,7 +264,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		}
 		if err = cpa.SetExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey, true); err != nil {
 			if errors.Is(err, cpa.ErrManagementRejected) {
-				return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+				return rejectExternalCredential(err)
 			}
 			log.Printf("Fresh external usage statistics enable unavailable: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
@@ -217,12 +274,13 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		back, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
 		switch {
 		case errors.Is(err, cpa.ErrManagementRejected):
-			return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+			return rejectExternalCredential(err)
 		case err != nil || !back:
 			log.Printf("Fresh external usage statistics enable was not observed: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
 	}
+	releaseGate()
 	// Staged keys are attributed to the connection identity, never to a raw
 	// address and never to the managed destination: another CPA is another
 	// identity, so a rebind can never inherit this history.
@@ -242,6 +300,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	if a.collectionPhase() == usageapp.PhaseStopped {
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
 	}
+	a.activeExternalGrant.Store(grant)
 	return usageStartOutcome{Started: true}
 }
 
@@ -265,6 +324,14 @@ func (a *freshApplication) refuseExternalUsage(ctx context.Context, reason strin
 func (a *freshApplication) reportCollectorAuthRejection() {
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
+	if grant, ok := a.activeExternalGrant.Load().(externalReadGrant); ok && grant.Identity != "" && grant.Credential != "" {
+		recordCtx := a.runCtx
+		if recordCtx == nil {
+			recordCtx = context.Background()
+		}
+		a.noteExternalRejection(recordCtx, grant, cpa.ErrManagementRejected)
+		a.activeExternalGrant.Store(externalReadGrant{})
+	}
 	a.usageCollectorStarted = false
 	a.usageStarted = false
 	a.setUsageStartReason(freshconfig.ReasonManagementRejected)

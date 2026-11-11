@@ -210,7 +210,8 @@ type freshApplication struct {
 	// usageStartReason is the stable code of the last refused Collector start.
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.
-	usageStartReason atomic.Value
+	usageStartReason    atomic.Value
+	activeExternalGrant atomic.Value
 	// externalUsageConfirmed records the administrator's explicit confirmation
 	// to enable usage statistics on the user's own CPA. Without it nothing is
 	// written to that CPA and the collection window never opens. It is
@@ -265,10 +266,22 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
-	// Fresh owns Collector lifecycle on a.runCtx and governs External usage
-	// writes behind explicit confirmation; ManagerConfigService only updates DB
-	// settings rows here.
+	// Fresh owns Collector lifecycle on a.runCtx: narrow monitoring-switch PATCH
+	// updates only Manager's DB settings row, ConnectExternal blocks whole-config
+	// PUT and skips Get's optional CPA usage probe (External posture lives on
+	// GET external/usage), and Managed/Adopt reconcile the host-bound Collector
+	// after PUT.
 	legacyContext.ManagerConfigService.UseExternalCollectorLifecycle()
+	legacyContext.ManagerConfigService.SetCPAUsageProbeAllowed(func(probeCtx context.Context) bool {
+		if a.store == nil {
+			return true
+		}
+		record, loadErr := a.store.Load(probeCtx)
+		if loadErr != nil {
+			return false
+		}
+		return record.Operation.Strategy.Strategy != bootstrap.ConnectExternal
+	})
 	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
 		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
 	}

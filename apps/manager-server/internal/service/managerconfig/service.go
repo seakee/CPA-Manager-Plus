@@ -46,6 +46,7 @@ type Service struct {
 	store                      *store.Store
 	collector                  *collectorservice.Service
 	externalCollectorLifecycle bool
+	cpaUsageProbeAllowed       func(context.Context) bool
 }
 
 func New(cfg config.Config, store *store.Store, collector *collectorservice.Service) *Service {
@@ -56,13 +57,28 @@ func New(cfg config.Config, store *store.Store, collector *collectorservice.Serv
 	}
 }
 
-// UseExternalCollectorLifecycle delegates Collector start/stop and CPA
-// usage-statistics authority to an enclosing host (Fresh). When enabled,
-// ManagerConfigService updates only Manager's persisted configuration rows and
-// never starts a detached background Collector or mutates CPA usage settings.
+// UseExternalCollectorLifecycle delegates Collector start/stop to an enclosing
+// host (Fresh) so neither Update nor SetCollectorEnabled starts or stops a
+// detached background Collector. Under this mode, SetCollectorEnabled (the
+// narrow monitoring-switch PATCH) updates only Manager's persisted
+// configuration row without mutating CPA usage-statistics settings, whereas
+// whole-document Update (PUT, permitted on non-External profiles) still
+// validates the connection and enables CPA usage-statistics when collector
+// monitoring is enabled.
 func (s *Service) UseExternalCollectorLifecycle() {
 	if s != nil {
 		s.externalCollectorLifecycle = true
+	}
+}
+
+// SetCPAUsageProbeAllowed configures whether Get may probe the persisted CPA
+// management endpoint for optional live usage-statistics metadata. When allow
+// returns false (for example on ConnectExternal, where External usage posture
+// is owned by GET external/usage), Get answers purely from Manager's persisted
+// configuration without presenting the saved management credential upstream.
+func (s *Service) SetCPAUsageProbeAllowed(allow func(context.Context) bool) {
+	if s != nil {
+		s.cpaUsageProbeAllowed = allow
 	}
 }
 
@@ -72,7 +88,8 @@ func (s *Service) Get(ctx context.Context) (Response, error) {
 		return Response{}, err
 	}
 	var cpaUsage *cpa.UsageConfig
-	if cfg.CPAConnection.CPABaseURL != "" && cfg.CPAConnection.ManagementKey != "" {
+	if cfg.CPAConnection.CPABaseURL != "" && cfg.CPAConnection.ManagementKey != "" &&
+		(s.cpaUsageProbeAllowed == nil || s.cpaUsageProbeAllowed(ctx)) {
 		if usageCfg, err := cpa.FetchUsageConfig(
 			ctx,
 			cfg.CPAConnection.CPABaseURL,

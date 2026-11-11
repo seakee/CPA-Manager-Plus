@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -769,5 +770,165 @@ func TestExternalUsageConfirmationNeverPresentsARefusedCredential(t *testing.T) 
 	}
 	if h.app.usageCollectionStarted() {
 		t.Fatal("the confirm claimed collection started")
+	}
+}
+
+// TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection proves that on
+// ConnectExternal:
+//  1. GET cpamp/usage-service/config (and cpamp/config) returns 200 OK from
+//     Manager's local settings without probing the External CPA (both before and
+//     after a recorded credential rejection).
+//  2. After a recorded rejection, PATCH cpamp/usage-service/config {"enabled":true}
+//     sends zero further management requests to the External CPA.
+//  3. A first-hit 401 or 403 during PATCH {"enabled":true} (or startup) records
+//     externalReadGrant.Refused under legacyCredentialGate so concurrent reads
+//     never submit the rejected credential a second time.
+func TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection(t *testing.T) {
+	t.Run("GET config and PATCH enable send zero requests after recorded rejection", func(t *testing.T) {
+		h := newExternalUsageHarness(t)
+
+		// Even while the credential is valid, GET usage-service/config on
+		// ConnectExternal answers from local settings without probing External CPA.
+		beforeHealthy := h.cpa.requests.Load()
+		for _, resource := range []string{"cpamp/usage-service/config", "cpamp/config"} {
+			resp := h.call(t, http.MethodGet, resource, "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d %s, want 200", resource, resp.Code, resp.Body.String())
+			}
+			if strings.Contains(resp.Body.String(), `"cpaUsage"`) {
+				t.Fatalf("GET %s included upstream cpaUsage on ConnectExternal: %s", resource, resp.Body.String())
+			}
+		}
+		if got := h.cpa.requests.Load() - beforeHealthy; got != 0 {
+			t.Fatalf("GET usage-service/config sent %d External CPA requests, want 0", got)
+		}
+
+		// Rotate/reject the External credential and record refusal once via models.
+		h.cpa.rejects.Store(true)
+		first := h.call(t, http.MethodGet, "cpamp/v1/models", "")
+		if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("initial cpamp/v1/models = %d %s, want 409 %s", first.Code, first.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if !h.app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("expected externalReadGrant.Refused after initial 401")
+		}
+
+		afterRejection := h.cpa.requests.Load()
+		for range 3 {
+			for _, resource := range []string{"cpamp/usage-service/config", "cpamp/config"} {
+				resp := h.call(t, http.MethodGet, resource, "")
+				if resp.Code != http.StatusOK {
+					t.Fatalf("GET %s after rejection = %d %s, want 200", resource, resp.Code, resp.Body.String())
+				}
+			}
+			patchResp := h.call(t, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`)
+			if patchResp.Code != http.StatusOK {
+				t.Fatalf("PATCH enable after rejection = %d %s, want 200", patchResp.Code, patchResp.Body.String())
+			}
+		}
+		if got := h.cpa.requests.Load() - afterRejection; got != 0 {
+			t.Fatalf("GET config / PATCH enable sent %d External CPA requests after recorded rejection, want 0", got)
+		}
+		if h.app.usageCollectionStarted() || h.app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("PATCH enable claimed collection on a refused credential: started=%v phase=%s", h.app.usageCollectionStarted(), h.app.collectionPhase())
+		}
+		if got := h.app.usageStartBlock(); got != freshconfig.ReasonManagementRejected {
+			t.Fatalf("usageStartBlock = %q, want %q", got, freshconfig.ReasonManagementRejected)
+		}
+	})
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run("first-hit "+http.StatusText(status)+" on PATCH enable records Refused under gate", func(t *testing.T) {
+			var upstreamAuthAttempts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamAuthAttempts.Add(1)
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":"rejected"}`))
+			}))
+			defer upstream.Close()
+
+			hostCtx, stopHost := context.WithCancel(t.Context())
+			defer stopHost()
+			app := newExternalApp(t, upstream.URL, externalAuthorityManagement)
+			app.runCtx = hostCtx
+			app.store = uncancellableStore{app.store}
+
+			// Start with local monitoring switch disabled so PATCH {"enabled":true}
+			// triggers the first External CPA probe.
+			disableReq := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
+			disableReq.Header.Set("Content-Type", "application/json")
+			disableReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			disableResp := httptest.NewRecorder()
+			app.canonicalAPI(disableResp, disableReq)
+			if disableResp.Code != http.StatusOK {
+				t.Fatalf("PATCH disable = %d %s", disableResp.Code, disableResp.Body.String())
+			}
+			if app.externalReadGrant(t.Context()).Refused {
+				t.Fatal("credential unexpectedly marked Refused before first probe")
+			}
+
+			atBeforeRecord := make(chan struct{})
+			allowRecord := make(chan struct{})
+			var recordOnce sync.Once
+			app.rejection.beforeRecord = func() {
+				recordOnce.Do(func() {
+					close(atBeforeRecord)
+					<-allowRecord
+				})
+			}
+
+			patchResp := httptest.NewRecorder()
+			patchDone := make(chan struct{})
+			go func() {
+				defer close(patchDone)
+				req := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				app.canonicalAPI(patchResp, req)
+			}()
+
+			select {
+			case <-atBeforeRecord:
+			case <-time.After(5 * time.Second):
+				t.Fatal("PATCH enable did not record External rejection on first-hit refusal")
+			}
+
+			modelWaiterEntered := make(chan struct{})
+			modelResp := httptest.NewRecorder()
+			modelDone := make(chan struct{})
+			go func() {
+				defer close(modelDone)
+				ctx := &waitNotifyContext{Context: t.Context(), entered: modelWaiterEntered}
+				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				app.canonicalAPI(modelResp, req)
+			}()
+
+			select {
+			case <-modelWaiterEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("concurrent cpamp/v1/models waiter did not queue on legacyCredentialGate")
+			}
+
+			close(allowRecord)
+			<-patchDone
+			<-modelDone
+
+			if patchResp.Code != http.StatusOK {
+				t.Fatalf("PATCH enable = %d %s, want 200", patchResp.Code, patchResp.Body.String())
+			}
+			if !app.externalReadGrant(t.Context()).Refused {
+				t.Fatal("first-hit refusal on PATCH enable did not persist externalReadGrant.Refused")
+			}
+			if got := app.usageStartBlock(); got != freshconfig.ReasonManagementRejected {
+				t.Fatalf("usageStartBlock = %q, want %q", got, freshconfig.ReasonManagementRejected)
+			}
+			if modelResp.Code != http.StatusConflict || errorCode(t, modelResp) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("concurrent cpamp/v1/models = %d %s, want 409 %s", modelResp.Code, modelResp.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+			if got := upstreamAuthAttempts.Load(); got != 1 {
+				t.Fatalf("External CPA received %d management requests across PATCH enable + concurrent models, want 1", got)
+			}
+		})
 	}
 }

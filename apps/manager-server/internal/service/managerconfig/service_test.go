@@ -1,7 +1,11 @@
 package managerconfig
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
@@ -238,4 +242,56 @@ func TestSetCollectorEnabledHonoursEnvironmentSourceAndExternalLifecycle(t *test
 			t.Fatal("external lifecycle SetCollectorEnabled mutated CPA usage-statistics-enabled")
 		}
 	})
+}
+
+func TestGetSkipsCPAUsageProbeWhenDisallowed(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	collector := collectorservice.New(collectorpkg.NewManager(cfg, st))
+	svc := New(cfg, st, collector)
+
+	seed := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{
+			CPABaseURL:    upstream.URL,
+			ManagementKey: "secret-key",
+		},
+		Collector: store.ManagerCollectorConfig{Enabled: BoolPtr(true)},
+	}
+	if err := st.SaveManagerConfigAndSetup(t.Context(), seed, SetupFromManagerConfig(seed)); err != nil {
+		t.Fatal(err)
+	}
+
+	allow := false
+	svc.SetCPAUsageProbeAllowed(func(context.Context) bool { return allow })
+
+	res, err := svc.Get(t.Context())
+	if err != nil {
+		t.Fatalf("Get with disallowed probe failed: %v", err)
+	}
+	if res.CPAUsage != nil {
+		t.Fatalf("expected nil CPAUsage when probe disallowed, got %#v", res.CPAUsage)
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("disallowed probe hit upstream %d times, want 0", got)
+	}
+
+	allow = true
+	res, err = svc.Get(t.Context())
+	if err != nil {
+		t.Fatalf("Get with allowed probe failed: %v", err)
+	}
+	if res.CPAUsage == nil || !res.CPAUsage.UsageStatisticsEnabled {
+		t.Fatalf("expected populated CPAUsage when probe allowed, got %#v", res.CPAUsage)
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("allowed probe hit upstream %d times, want 1", got)
+	}
 }
