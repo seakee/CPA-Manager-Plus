@@ -913,7 +913,12 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 	}
 	var finishExternalCommit func(committed bool)
 	if request.Strategy == bootstrap.ConnectExternal {
-		finishExternalCommit = a.beginExternalCommit()
+		var fenceErr error
+		finishExternalCommit, fenceErr = a.beginExternalCommit(r.Context())
+		if fenceErr != nil {
+			writeFreshStrategyError(w, fenceErr)
+			return
+		}
 	}
 	next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
 		if request.Strategy == bootstrap.ConnectExternal && a.externalPermit != nil && !a.externalPermit(record.Operation, request.ExpectedRevision, externalBaseURL, request.ManagementKey, request.AttemptID) {

@@ -177,28 +177,27 @@ func (s *Service) SetEmbeddedMutationsEnabled(enabled func(context.Context) (boo
 	s.embeddedMutationsEnabled = enabled
 }
 
-func isEmbeddedMutationCandidate(r *http.Request, mutation authFileOwnershipMutation) bool {
-	if isAPIKeyMutationRequest(r) || mutation.deleteMutation != nil {
-		return true
-	}
-	keys, all := authFileMutationLockTargets(mutation)
-	return all || len(keys) > 0
-}
+var errEmbeddedMutationFenceUnavailable = errors.New("embedded mutation fence is unavailable")
 
-func (s *Service) resolveEmbeddedMutations(ctx context.Context) (*credentialdeletemutation.Service, *identitymutation.Service, error) {
+func (s *Service) resolveEmbeddedMutations(
+	ctx context.Context,
+	needsDeletes bool,
+	needsAPIKeyMutations bool,
+) (*credentialdeletemutation.Service, *identitymutation.Service, error) {
 	deletes := s.credentialDeletes.Load()
 	mutations := s.apiKeyMutations.Load()
-	if deletes == nil && mutations == nil {
+	if s.embeddedMutationsEnabled == nil {
+		return deletes, mutations, nil
+	}
+	enabled, err := s.embeddedMutationsEnabled(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !enabled {
 		return nil, nil, nil
 	}
-	if s.embeddedMutationsEnabled != nil {
-		enabled, err := s.embeddedMutationsEnabled(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !enabled {
-			return nil, nil, nil
-		}
+	if (needsDeletes && deletes == nil) || (needsAPIKeyMutations && mutations == nil) {
+		return nil, nil, errEmbeddedMutationFenceUnavailable
 	}
 	return deletes, mutations, nil
 }
@@ -363,9 +362,12 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 		activeDeletes         *credentialdeletemutation.Service
 		activeAPIKeyMutations *identitymutation.Service
 	)
-	if isEmbeddedMutationCandidate(r, ownershipMutation) {
+	needsAPIKeyMutations := isAPIKeyMutationRequest(r)
+	keys, all := authFileMutationLockTargets(ownershipMutation)
+	needsDeletes := ownershipMutation.deleteMutation != nil || all || len(keys) > 0
+	if needsAPIKeyMutations || needsDeletes {
 		var modeErr error
-		activeDeletes, activeAPIKeyMutations, modeErr = s.resolveEmbeddedMutations(r.Context())
+		activeDeletes, activeAPIKeyMutations, modeErr = s.resolveEmbeddedMutations(r.Context(), needsDeletes, needsAPIKeyMutations)
 		if modeErr != nil {
 			writeError(w, http.StatusServiceUnavailable, modeErr)
 			return
@@ -525,10 +527,11 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Service) acquireAuthFileMutation(ctx context.Context, mutation authFileOwnershipMutation) (func(), error) {
+	keys, all := authFileMutationLockTargets(mutation)
 	var deletes *credentialdeletemutation.Service
-	if s != nil {
+	if s != nil && (mutation.deleteMutation != nil || all || len(keys) > 0) {
 		var err error
-		deletes, _, err = s.resolveEmbeddedMutations(ctx)
+		deletes, _, err = s.resolveEmbeddedMutations(ctx, true, false)
 		if err != nil {
 			return nil, err
 		}

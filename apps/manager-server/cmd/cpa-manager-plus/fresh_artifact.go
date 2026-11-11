@@ -37,11 +37,11 @@ type gatedEmbeddedArtifactRuntime struct {
 	app *freshApplication
 }
 
-func (g gatedEmbeddedArtifactRuntime) enter(ctx context.Context) (*runtimeservice.ArtifactClient, context.Context, func(), error) {
+func (g gatedEmbeddedArtifactRuntime) enterRead(ctx context.Context) (*runtimeservice.ArtifactClient, context.Context, func(), error) {
 	if g.app == nil || g.app.artifact == nil {
 		return nil, nil, nil, errEmbeddedRuntimeDisabled
 	}
-	callCtx, release, err := g.app.enterEmbeddedExecution(ctx)
+	callCtx, release, err := g.app.enterEmbeddedRead(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -52,40 +52,57 @@ func (g gatedEmbeddedArtifactRuntime) enter(ctx context.Context) (*runtimeservic
 	return g.app.artifact, callCtx, release, nil
 }
 
+func (g gatedEmbeddedArtifactRuntime) enterMutation(ctx context.Context) (*runtimeservice.ArtifactClient, func(), error) {
+	if g.app == nil || g.app.artifact == nil {
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	release, err := g.app.enterEmbeddedMutation(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if g.app.artifact == nil {
+		release()
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	return g.app.artifact, release, nil
+}
+
 func (g gatedEmbeddedArtifactRuntime) Status(ctx context.Context) (runtimeservice.ArtifactStatus, error) {
-	client, callCtx, release, err := g.enter(ctx)
+	client, callCtx, release, err := g.enterRead(ctx)
 	if err != nil {
 		return runtimeservice.ArtifactStatus{}, err
 	}
-	defer release()
-	return client.Status(callCtx)
+	out, callErr := client.Status(callCtx)
+	release()
+	return out, g.app.wrapEmbeddedReadErr(ctx, callErr)
 }
 
 func (g gatedEmbeddedArtifactRuntime) Probe(ctx context.Context) (runtimeservice.ArtifactProbeResult, error) {
-	client, callCtx, release, err := g.enter(ctx)
+	client, callCtx, release, err := g.enterRead(ctx)
 	if err != nil {
 		return runtimeservice.ArtifactProbeResult{}, err
 	}
-	defer release()
-	return client.Probe(callCtx)
+	out, callErr := client.Probe(callCtx)
+	release()
+	return out, g.app.wrapEmbeddedReadErr(ctx, callErr)
 }
 
 func (g gatedEmbeddedArtifactRuntime) Acquire(ctx context.Context, source string, cdnPrefix string) (runtimeservice.ArtifactOperationEnvelope, error) {
-	client, callCtx, release, err := g.enter(ctx)
+	client, release, err := g.enterMutation(ctx)
 	if err != nil {
 		return runtimeservice.ArtifactOperationEnvelope{}, err
 	}
 	defer release()
-	return client.Acquire(callCtx, source, cdnPrefix)
+	return client.Acquire(ctx, source, cdnPrefix)
 }
 
 func (g gatedEmbeddedArtifactRuntime) Upload(ctx context.Context, body io.Reader, contentLength int64) (runtimeservice.ArtifactOperationEnvelope, error) {
-	client, callCtx, release, err := g.enter(ctx)
+	client, release, err := g.enterMutation(ctx)
 	if err != nil {
 		return runtimeservice.ArtifactOperationEnvelope{}, err
 	}
 	defer release()
-	return client.Upload(callCtx, body, contentLength)
+	return client.Upload(ctx, body, contentLength)
 }
 
 func (a *freshApplication) artifactRuntime(op bootstrap.FreshOperation) artifactproxy.ArtifactRuntime {
