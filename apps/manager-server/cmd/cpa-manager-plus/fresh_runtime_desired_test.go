@@ -27,7 +27,10 @@ type failingFreshStore struct {
 }
 
 func (s failingFreshStore) Load(context.Context) (freshstore.Record, error) {
-	return freshstore.Record{}, s.err
+	if s.err != nil {
+		return freshstore.Record{}, s.err
+	}
+	return freshstore.Record{}, errors.New("simulated checkpoint read failure")
 }
 
 // committedManagedCheckpoint is a completed Manager-owned installation: the
@@ -1029,6 +1032,118 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 		}
 		if observedStopGeneration != 42 {
 			t.Fatalf("ExpectedRuntimeGeneration = %d, want post-lock generation 42", observedStopGeneration)
+		}
+	})
+}
+
+func TestEmbeddedReconcilerWrapperForwardsLifecycleLockAndRecordsStartLedger(t *testing.T) {
+	t.Run("freshEmbeddedDesiredStateStore forwards LifecycleLocker to serialize operator Stop against Reconciler", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		client := &freshRuntimeTestClient{
+			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		hooked := &hookedDesiredStateStore{
+			DesiredStateStore: freshEmbeddedDesiredStateStore{app: app, inner: app.embeddedDesiredStateInner()},
+		}
+		hooked.onLoad = func(call int, desired model.EmbeddedRuntimeDesiredState, found bool, err error) {
+			if call != 1 || err != nil || !found {
+				return
+			}
+			stopRecorder := httptest.NewRecorder()
+			client.onStop = func() {
+				client.mu.Lock()
+				offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+				offline.State = model.RuntimeStateOffline
+				offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
+				client.status = offline
+				client.mu.Unlock()
+			}
+			app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-through-wrapper"), op, "runtime/operations")
+			if stopRecorder.Code != http.StatusOK {
+				t.Errorf("operator Stop status = %d body=%s", stopRecorder.Code, stopRecorder.Body.String())
+			}
+		}
+
+		reconciler := runtimeservice.NewReconciler(app.embeddedRuntimeClient(), hooked, runtimeservice.DefaultReconcileInterval, nil)
+		if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		if client.starts != 0 {
+			t.Fatalf("Supervisor starts after operator Stop through freshEmbeddedDesiredStateStore = %d, want 0", client.starts)
+		}
+	})
+
+	t.Run("auto-start through embeddedRuntimeClient records write-ahead start intent in ledger", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+		offline.Generation = 777
+		offline.State = model.RuntimeStateOffline
+		offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
+		client := &freshRuntimeTestClient{
+			status:   offline,
+			startErr: errors.New("connection reset after Supervisor accepted start"),
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		reconciler := runtimeservice.NewReconciler(
+			app.embeddedRuntimeClient(),
+			freshEmbeddedDesiredStateStore{app: app, inner: app.embeddedDesiredStateInner()},
+			runtimeservice.DefaultReconcileInterval,
+			nil,
+		)
+		if err := reconciler.ReconcileOnce(t.Context()); err == nil {
+			t.Fatal("ReconcileOnce with lost Start response = nil, want error")
+		}
+		if client.starts != 1 {
+			t.Fatalf("Supervisor starts = %d, want 1", client.starts)
+		}
+		app.embeddedExecution.ledgerMu.Lock()
+		ledger, err := app.loadEmbeddedStartLedgerLocked(t.Context())
+		app.embeddedExecution.ledgerMu.Unlock()
+		if err != nil {
+			t.Fatalf("loadEmbeddedStartLedgerLocked = %v", err)
+		}
+		if len(ledger.Unresolved) != 1 {
+			t.Fatalf("unresolved start ledger entries = %d (%+v), want 1", len(ledger.Unresolved), ledger.Unresolved)
+		}
+	})
+
+	t.Run("incompleteManagedDesiredRunning gates artifact Status probe on embedded execution gate", func(t *testing.T) {
+		incompleteManaged := func(r *freshstore.Record, env managedInstallEnv) {
+			completedManagedInstall(r, env)
+			r.Operation.ProductComplete = false
+		}
+		harness := newManagedInstallHarnessWith(t, incompleteManaged, true)
+		app := harness.app
+		var artifactCalls atomic.Int32
+		artifactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			artifactCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer artifactServer.Close()
+		app.artifact = runtimeservice.NewArtifactClient(artifactServer.URL, "artifact-token")
+		app.markEmbeddedExecutionClosed()
+
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired, found, err := app.incompleteManagedDesiredRunning(t.Context(), rec.Operation)
+		if err != nil || found || desired != (model.EmbeddedRuntimeDesiredState{}) {
+			t.Fatalf("incompleteManagedDesiredRunning after gate closed = (%+v, %v, %v), want (zero, false, nil)", desired, found, err)
+		}
+		if got := artifactCalls.Load(); got != 0 {
+			t.Fatalf("artifact server calls after embedded gate closed = %d, want 0", got)
 		}
 	})
 }

@@ -420,14 +420,6 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 // effectiveRuntimeMode returns an invalid mode rather than misreporting
 // External, never contacts runtimeExternal, and causes CPAUpdateService to fail
 // closed with 503 runtime_mode_invalid instead of 409 managed_externally.
-type failingFreshStore struct {
-	freshstore.Store
-}
-
-func (failingFreshStore) Load(context.Context) (freshstore.Record, error) {
-	return freshstore.Record{}, errors.New("simulated checkpoint read failure")
-}
-
 func TestEffectiveRuntimeModeFailsClosedOnStoreError(t *testing.T) {
 	harness := newManagedInstallHarness(t)
 	var externalHits atomic.Int32
@@ -911,7 +903,8 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	t.Cleanup(externalServer.Close)
 
 	reconcilerStatusEntered := make(chan struct{})
-	opStatusEntered := make(chan struct{})
+	statusReadEntered := make(chan struct{})
+	opWaitingOnLock := make(chan struct{})
 	var statusCallCount atomic.Int32
 	var supervisorStartHits atomic.Int32
 	var supervisorStopHits atomic.Int32
@@ -932,7 +925,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 				close(reconcilerStatusEntered)
 				<-r.Context().Done()
 			case 2:
-				close(opStatusEntered)
+				close(statusReadEntered)
 				<-r.Context().Done()
 			default:
 				w.Header().Set("Content-Type", "application/json")
@@ -1014,8 +1007,29 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		t.Fatal("reconciler did not enter Supervisor /v1/runtime/status")
 	}
 
-	// Also start an in-flight POST /control/api/v2/runtime/operations ("start") using the pre-commit snapshot,
-	// and wait until it is actively blocked in its pre-reservation /v1/runtime/status call.
+	// Start an in-flight GET /control/api/v2/runtime/status read so a second
+	// Supervisor /v1/runtime/status RPC is concurrently active alongside the reconciler.
+	statusReadDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		app.runtimeStatus(rec, req, preCommitCompleteOp)
+		statusReadDone <- rec
+	}()
+	select {
+	case <-statusReadEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime/status did not enter Supervisor /v1/runtime/status")
+	}
+
+	// Start an in-flight POST /control/api/v2/runtime/operations ("start") using
+	// the pre-commit snapshot; because freshEmbeddedDesiredStateStore forwards
+	// LockEmbeddedRuntimeLifecycle, it deterministically waits on runtimeLifecycleMu
+	// behind the active reconciler cycle.
+	var opWaitOnce sync.Once
+	app.runtimeLifecycleMu.onWait = func() {
+		opWaitOnce.Do(func() { close(opWaitingOnLock) })
+	}
 	opDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
@@ -1026,9 +1040,9 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		opDone <- rec
 	}()
 	select {
-	case <-opStatusEntered:
+	case <-opWaitingOnLock:
 	case <-time.After(2 * time.Second):
-		t.Fatal("runtime/operations did not enter Supervisor /v1/runtime/status")
+		t.Fatal("runtime/operations did not contend on runtimeLifecycleMu")
 	}
 	// Commit Connect External via the real strategy HTTP handler while Embedded work is in flight.
 	commitPayload, err := json.Marshal(struct {
@@ -1066,6 +1080,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("reconciler did not exit before ConnectExternal commit completed")
 	}
+	<-statusReadDone
 	opRec := <-opDone
 	if opRec.Code != http.StatusConflict || !strings.Contains(opRec.Body.String(), "runtime_mutation_unsupported") {
 		t.Fatalf("in-flight runtime/operations across ConnectExternal commit = %d %s, want 409 runtime_mutation_unsupported", opRec.Code, opRec.Body.String())
@@ -1122,6 +1137,106 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	if got := postCommitSupervisorHits.Load(); got != 0 {
 		t.Fatalf("Supervisor hits after ConnectExternal commit = %d, want 0", got)
 	}
+
+	t.Run("submit_runtime_operation_in_flight_status_cancelled_by_external_commit", func(t *testing.T) {
+		opInFlightEntered := make(chan struct{})
+		var statusSeq atomic.Int32
+		supOp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/runtime/status" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if statusSeq.Add(1) == 1 {
+				close(opInFlightEntered)
+				<-r.Context().Done()
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		}))
+		t.Cleanup(supOp.Close)
+
+		dirOp := t.TempDir()
+		pathsOp := legacypreflight.DefaultPaths(filepath.Join(dirOp, "manager.sqlite"))
+		pathsOp.Config = filepath.Join(dirOp, "config.json")
+		openedOp, err := fresh.Open(t.Context(), pathsOp, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = openedOp.Close() })
+
+		appOp := newFreshApplication(openedOp, config.Config{
+			RuntimeURL:       supOp.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		appOp.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     openedOp.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		recOp, err := appOp.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		recOp, err = appOp.store.Update(t.Context(), recOp.Operation.Identity, recOp.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		staleCompleteOp := recOp.Operation
+		staleCompleteOp.ProductComplete = true
+
+		opResDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+				strings.NewReader(`{"action":"start","requestId":"33333333-3333-4333-8333-333333333333"}`))
+			req.Header.Set("Content-Type", "application/json")
+			appOp.runtimeOperations(rec, req, staleCompleteOp, "runtime/operations")
+			opResDone <- rec
+		}()
+		select {
+		case <-opInFlightEntered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("submitRuntimeOperation did not enter Supervisor /v1/runtime/status")
+		}
+
+		bodyOp, err := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         recOp.Operation.Identity,
+			ExpectedRevision: recOp.Operation.Revision,
+			AttemptID:        strings.Repeat("b", 32),
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalServer.URL,
+				ManagementKey: management,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(bodyOp))
+		cReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		cReq.Header.Set("Content-Type", "application/json")
+		cRec := httptest.NewRecorder()
+		appOp.canonicalAPI(cRec, cReq)
+		if cRec.Code != http.StatusOK {
+			t.Fatalf("POST strategy (ConnectExternal) = %d %s, want 200", cRec.Code, cRec.Body.String())
+		}
+		inFlightRec := <-opResDone
+		if inFlightRec.Code != http.StatusConflict || !strings.Contains(inFlightRec.Body.String(), "runtime_mutation_unsupported") {
+			t.Fatalf("in-flight submitRuntimeOperation = %d %s, want 409 runtime_mutation_unsupported", inFlightRec.Code, inFlightRec.Body.String())
+		}
+	})
 
 	t.Run("reconcile_once_commits_external_between_status_and_start", func(t *testing.T) {
 		var startHits atomic.Int32
@@ -3377,8 +3492,8 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 
 	// First verify that sub-second reconcile intervals (25ms) do not trigger
 	// sub-second fallback watch polling: across 4 full reconcile cycles, store.Load
-	// is called only once on startup plus 2 times per reconcile cycle (desired-state
-	// check + enterEmbeddedRead), with zero extra watch-ticker loads.
+	// is called once on startup plus 3 times per reconcile cycle (pre-lock +
+	// post-lock desired-state check + enterEmbeddedRead), with zero extra watch-ticker loads.
 	fastCtx, cancelFast := context.WithCancel(t.Context())
 	fastExited := make(chan struct{})
 	go func() {
@@ -3392,9 +3507,9 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	}
 	cancelFast()
 	<-fastExited
-	if got := countingStore.calls.Load(); got > 1+2*statusCalls.Load() {
+	if got := countingStore.calls.Load(); got > 1+3*statusCalls.Load() {
 		t.Fatalf("store.Load calls across %d 25ms reconcile cycles = %d, want <= %d (watch ticker must stay >= 1s)",
-			statusCalls.Load(), got, 1+2*statusCalls.Load())
+			statusCalls.Load(), got, 1+3*statusCalls.Load())
 	}
 
 	// Now run with a 10-hour interval so neither ticker can fire, and verify
@@ -3405,7 +3520,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	observingLongStore := &nthLoadFailingStore{
 		Store: app.store,
 		onCall: func(n int32) {
-			if n >= 3 {
+			if n >= 4 {
 				longOnce.Do(func() { close(initialLongStatus) })
 			}
 		},

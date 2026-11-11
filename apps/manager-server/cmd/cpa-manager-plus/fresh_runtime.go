@@ -1863,6 +1863,24 @@ type freshEmbeddedDesiredStateStore struct {
 	inner runtimeservice.DesiredStateStore
 }
 
+var (
+	_ runtimeservice.DesiredStateStore      = freshEmbeddedDesiredStateStore{}
+	_ runtimeservice.CommittedArtifactStore = freshEmbeddedDesiredStateStore{}
+	_ runtimeservice.LifecycleLocker        = freshEmbeddedDesiredStateStore{}
+)
+
+func (s freshEmbeddedDesiredStateStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if s.inner != nil {
+		if locker, ok := s.inner.(runtimeservice.LifecycleLocker); ok {
+			return locker.LockEmbeddedRuntimeLifecycle(ctx)
+		}
+	}
+	if s.app == nil {
+		return func() {}, nil
+	}
+	return s.app.runtimeLifecycleMu.Lock(ctx)
+}
+
 func (a *freshApplication) embeddedDesiredStateInner() runtimeservice.DesiredStateStore {
 	if a == nil {
 		return nil
