@@ -27,7 +27,6 @@ import (
 const freshRuntimeJournalKey = "fresh_runtime_operations_v1"
 const freshEmbeddedStartLedgerKey = "fresh_embedded_start_ledger_v1"
 
-
 const (
 	// freshRuntimeJournalTerminalRetention bounds the durable journal to the most
 	// recent terminal operations. Every non-terminal entry is always retained.
@@ -279,8 +278,7 @@ type freshEmbeddedStartIntent struct {
 }
 
 type freshEmbeddedStartLedgerData struct {
-	EverDispatched bool                                `json:"everDispatched"`
-	Unresolved     map[string]freshEmbeddedStartIntent `json:"unresolved"`
+	Unresolved map[string]freshEmbeddedStartIntent `json:"unresolved"`
 }
 
 type freshStrategyActionBlocker struct {
@@ -315,7 +313,7 @@ func embeddedRuntimeRecoveryUnverifiedBlocker() *freshStrategyActionBlocker {
 func embeddedSupervisorUnavailableBlocker() *freshStrategyActionBlocker {
 	return &freshStrategyActionBlocker{
 		Code:   "embedded_supervisor_status_unavailable",
-		Action: "Embedded runtime activity was recorded on this installation and cpamp-runtime-supervisor is unreachable or reporting an unknown state. Restore or restart cpamp-runtime-supervisor so the embedded runtime can be confirmed stopped, then retry Connect External.",
+		Action: "cpamp-runtime-supervisor is configured (CPAMP_RUNTIME_URL) but unreachable or reporting an unverified state, so the embedded runtime cannot be confirmed stopped. In the official image (where cpamp-launcher supervises cpamp-runtime-supervisor on loopback), check or restart cpamp-runtime-supervisor or the container so it reports offline with recovery disarmed, then retry Connect External; on a standalone deployment without an embedded supervisor, unset CPAMP_RUNTIME_URL and CPAMP_RUNTIME_TOKEN_FILE and restart the manager.",
 	}
 }
 
@@ -541,7 +539,6 @@ func (a *freshApplication) loadEmbeddedStartLedgerLocked(ctx context.Context) (f
 		if gate.memoryLedger == nil {
 			return data, nil
 		}
-		data.EverDispatched = gate.memoryLedger.EverDispatched
 		for k, v := range gate.memoryLedger.Unresolved {
 			data.Unresolved[k] = v
 		}
@@ -574,8 +571,7 @@ func (a *freshApplication) saveEmbeddedStartLedgerLocked(ctx context.Context, da
 	db := a.embeddedStartLedgerDB()
 	if db == nil {
 		copied := freshEmbeddedStartLedgerData{
-			EverDispatched: data.EverDispatched,
-			Unresolved:     make(map[string]freshEmbeddedStartIntent, len(data.Unresolved)),
+			Unresolved: make(map[string]freshEmbeddedStartIntent, len(data.Unresolved)),
 		}
 		for k, v := range data.Unresolved {
 			copied.Unresolved[k] = v
@@ -622,7 +618,6 @@ func (a *freshApplication) beginEmbeddedStartIntent(
 	if err != nil {
 		return "", err
 	}
-	data.EverDispatched = true
 	data.Unresolved[key] = freshEmbeddedStartIntent{
 		Key:               key,
 		OperationID:       operationID,
@@ -854,80 +849,6 @@ func (a *freshApplication) checkPendingJournalEmbeddedOperations(
 	return nil
 }
 
-// provenEmbeddedRuntimeNeverActivated returns true only when durable SQLite and
-// configured desired-state stores prove this installation never desired, staged,
-// or dispatched any Embedded CPA execution across the lifetime of the database.
-func (a *freshApplication) provenEmbeddedRuntimeNeverActivated(ctx context.Context) (bool, error) {
-	if a == nil {
-		return false, nil
-	}
-	if a.store != nil {
-		rec, err := a.store.Load(ctx)
-		if err != nil {
-			return false, err
-		}
-		if rec.Operation.ProductComplete {
-			return false, nil
-		}
-		if rec.Operation.Strategy.Strategy != "" && rec.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
-			return false, nil
-		}
-	}
-
-	gate := &a.embeddedExecution
-	gate.ledgerMu.Lock()
-	ledger, err := a.loadEmbeddedStartLedgerLocked(ctx)
-	gate.ledgerMu.Unlock()
-	if err != nil {
-		return false, err
-	}
-	if ledger.EverDispatched || len(ledger.Unresolved) > 0 {
-		return false, nil
-	}
-
-	if a.runtimeJournal != nil {
-		jData, err := a.runtimeJournal.load(ctx)
-		if err != nil {
-			return false, err
-		}
-		if len(jData.Operations) > 0 {
-			return false, nil
-		}
-		if a.runtimeJournal.db != nil {
-			var count int
-			if err := a.runtimeJournal.db.QueryRowContext(
-				ctx,
-				`select count(*) from settings where key in ('runtime_desired_v1','cpa_update_state_v1')`,
-			).Scan(&count); err != nil {
-				return false, err
-			}
-			if count > 0 {
-				return false, nil
-			}
-		}
-	}
-
-	if a.desiredState != nil {
-		_, found, err := a.desiredState.LoadEmbeddedRuntimeDesiredState(ctx)
-		if err != nil {
-			return false, err
-		}
-		if found {
-			return false, nil
-		}
-	}
-	if a.runtimeSettings != nil {
-		_, found, err := a.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx)
-		if err != nil {
-			return false, err
-		}
-		if found {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
 func checkEmbeddedRuntimeStoppedAndRecoveryDisarmed(observed model.RuntimeObservedStatus) error {
 	if observed.State != model.RuntimeStateOffline {
 		return embeddedRuntimeNotStoppedBlocker()
@@ -951,17 +872,7 @@ func (a *freshApplication) verifyEmbeddedRuntimeStoppedForExternalCommit(ctx con
 	defer cancel()
 
 	observed, err := a.runtime.Status(fenceCtx)
-	if err != nil {
-		neverActivated, proofErr := a.provenEmbeddedRuntimeNeverActivated(fenceCtx)
-		if proofErr != nil {
-			return proofErr
-		}
-		if neverActivated {
-			return nil
-		}
-		return embeddedSupervisorUnavailableBlocker()
-	}
-	if observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.State == model.RuntimeStateUnknown {
+	if err != nil || observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.State == model.RuntimeStateUnknown {
 		return embeddedSupervisorUnavailableBlocker()
 	}
 	reobserve, err := a.checkUnresolvedEmbeddedStarts(fenceCtx, observed.Identity, observed.Generation)

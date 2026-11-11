@@ -2159,15 +2159,15 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 	})
 }
 
-// TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbeddedIntentAcrossRestart
-// verifies P2-1: a fresh official image that durably never desired or dispatched
-// any Embedded CPA start can commit Connect External even when Supervisor is
-// unreachable; once any start intent has ever been recorded, an unreachable
-// Supervisor refuses Connect External across Manager restarts with a typed,
-// operator-actionable 409 blocker.
-func TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbeddedIntentAcrossRestart(t *testing.T) {
+// TestUnreachableOrUnverifiedSupervisorFailsClosedWithActionable409AndAllowsStandaloneExternalCommit
+// verifies that whenever an embedded Supervisor is configured (CPAMP_RUNTIME_URL),
+// Connect External fails closed with 409 embedded_supervisor_status_unavailable and
+// non-empty operator recovery guidance on unreachable, 401, or unverified-protocol
+// Status responses even on a pristine database, while standalone deployments
+// without CPAMP_RUNTIME_URL (a.runtime == nil) continue committing External without
+// a Supervisor.
+func TestUnreachableOrUnverifiedSupervisorFailsClosedWithActionable409AndAllowsStandaloneExternalCommit(t *testing.T) {
 	const management = externalAuthorityManagement
-	const artifactID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 	newExternalUpstream := func(t *testing.T) *httptest.Server {
 		t.Helper()
@@ -2185,6 +2185,42 @@ func TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbedded
 		}))
 		t.Cleanup(srv.Close)
 		return srv
+	}
+
+	newPristineApp := func(t *testing.T, runtimeURL string, tokenPath string) *freshApplication {
+		t.Helper()
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       runtimeURL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return app
 	}
 
 	postConnectExternal := func(t *testing.T, app *freshApplication, externalURL string) *httptest.ResponseRecorder {
@@ -2219,51 +2255,69 @@ func TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbedded
 		return rec
 	}
 
-	t.Run("pristine_fresh_install_commits_external_when_supervisor_unreachable", func(t *testing.T) {
+	assertBlockedUnavailable := func(t *testing.T, app *freshApplication, res *httptest.ResponseRecorder, label string) {
+		t.Helper()
+		var blocker freshStrategyActionBlocker
+		if res.Code != http.StatusConflict || json.Unmarshal(res.Body.Bytes(), &blocker) != nil ||
+			blocker.Code != "embedded_supervisor_status_unavailable" || strings.TrimSpace(blocker.Action) == "" {
+			t.Fatalf("%s = %d %s, want 409 embedded_supervisor_status_unavailable with non-empty Action",
+				label, res.Code, res.Body.String())
+		}
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cur.Operation.Strategy.Strategy != "" {
+			t.Fatalf("%s committed strategy = %+v, want uncommitted", label, cur.Operation.Strategy)
+		}
+	}
+
+	t.Run("pristine_db_with_unreachable_supervisor_fails_closed_with_actionable_409", func(t *testing.T) {
 		externalServer := newExternalUpstream(t)
-		// Closed server gives an immediately unreachable RuntimeURL without network waits.
 		closedSupervisor := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		closedSupervisor.Close()
 
 		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
-		if err := os.WriteFile(tokenPath, []byte("pristine-unreachable-token"), 0o600); err != nil {
+		if err := os.WriteFile(tokenPath, []byte("unreachable-token"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		dir := t.TempDir()
-		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
-		paths.Config = filepath.Join(dir, "config.json")
-		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = opened.Close() })
-
-		app := newFreshApplication(opened, config.Config{
-			RuntimeURL:       closedSupervisor.URL,
-			RuntimeTokenFile: tokenPath,
-			CPAUpstreamURL:   "http://127.0.0.1:8317",
-		}, nil)
-		app.strategy = freshstrategy.New(freshstrategy.Options{
-			Protector:     opened.Protector,
-			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
-		})
-		rec, err := app.store.Load(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
+		app := newPristineApp(t, closedSupervisor.URL, tokenPath)
 
 		res := postConnectExternal(t, app, externalServer.URL)
-		if res.Code != http.StatusOK {
-			t.Fatalf("pristine ConnectExternal with unreachable Supervisor = %d %s, want 200", res.Code, res.Body.String())
+		assertBlockedUnavailable(t, app, res, "pristine ConnectExternal with unreachable Supervisor")
+	})
+
+	t.Run("pristine_db_with_supervisor_401_fails_closed_until_status_recovers", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		var healthy atomic.Bool
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path != "/v1/runtime/status" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if !healthy.Load() {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","errorCode":"unauthorized","message":"invalid runtime token"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","recovery":{"state":"inactive"}}`))
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("supervisor-401-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		app := newPristineApp(t, supervisor.URL, tokenPath)
+
+		blockedRes := postConnectExternal(t, app, externalServer.URL)
+		assertBlockedUnavailable(t, app, blockedRes, "pristine ConnectExternal with 401 Supervisor")
+
+		healthy.Store(true)
+		okRes := postConnectExternal(t, app, externalServer.URL)
+		if okRes.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal after Supervisor recovers = %d %s, want 200", okRes.Code, okRes.Body.String())
 		}
 		committed, err := app.store.Load(t.Context())
 		if err != nil {
@@ -2274,85 +2328,42 @@ func TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbedded
 		}
 	})
 
-	t.Run("prior_start_intent_blocks_unreachable_supervisor_across_manager_restart_with_actionable_409", func(t *testing.T) {
+	t.Run("pristine_db_with_supervisor_protocol_v2_fails_closed_with_actionable_409", func(t *testing.T) {
 		externalServer := newExternalUpstream(t)
 		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case "/v1/runtime/operations/start":
-				// Even a terminal Start (leaving Unresolved empty while EverDispatched=true)
-				// means an Embedded CPA may now be running when Supervisor later goes unreachable.
-				_, _ = w.Write([]byte(`{"operationId":"prior-start-01","operationType":"start","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
-			default:
-				w.WriteHeader(http.StatusNotFound)
+			if r.URL.Path == "/v1/runtime/status" {
+				_, _ = w.Write([]byte(`{"protocolVersion":"v2","state":"ready"}`))
+				return
 			}
+			w.WriteHeader(http.StatusNotFound)
 		}))
+		t.Cleanup(supervisor.Close)
 
 		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
-		if err := os.WriteFile(tokenPath, []byte("prior-intent-token"), 0o600); err != nil {
+		if err := os.WriteFile(tokenPath, []byte("supervisor-v2-token"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		dir := t.TempDir()
-		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
-		paths.Config = filepath.Join(dir, "config.json")
-		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		app := newPristineApp(t, supervisor.URL, tokenPath)
+
+		res := postConnectExternal(t, app, externalServer.URL)
+		assertBlockedUnavailable(t, app, res, "pristine ConnectExternal with protocol v2 Supervisor")
+	})
+
+	t.Run("standalone_without_runtime_url_commits_external_without_supervisor", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		app := newPristineApp(t, "", "")
+
+		res := postConnectExternal(t, app, externalServer.URL)
+		if res.Code != http.StatusOK {
+			t.Fatalf("standalone ConnectExternal without Supervisor = %d %s, want 200", res.Code, res.Body.String())
+		}
+		committed, err := app.store.Load(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
-		app1 := newFreshApplication(opened1, config.Config{
-			RuntimeURL:       supervisor.URL,
-			RuntimeTokenFile: tokenPath,
-			CPAUpstreamURL:   "http://127.0.0.1:8317",
-		}, nil)
-		rec, err := app1.store.Load(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		if _, err := app1.embeddedRuntimeClient().Start(t.Context(), model.RuntimeMutationRequest{
-			OperationID:               "prior-start-01",
-			ExpectedRuntimeIdentity:   "runtime-01",
-			ExpectedRuntimeGeneration: 1,
-			ExpectedActiveArtifactID:  artifactID,
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		// Shut down Supervisor AND restart Manager on the same SQLite database.
-		supervisor.Close()
-		if err := opened1.Close(); err != nil {
-			t.Fatal(err)
-		}
-		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = opened2.Close() })
-		app2 := newFreshApplication(opened2, config.Config{
-			RuntimeURL:       supervisor.URL,
-			RuntimeTokenFile: tokenPath,
-			CPAUpstreamURL:   "http://127.0.0.1:8317",
-		}, nil)
-		app2.strategy = freshstrategy.New(freshstrategy.Options{
-			Protector:     opened2.Protector,
-			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
-		})
-
-		res := postConnectExternal(t, app2, externalServer.URL)
-		var blocker freshStrategyActionBlocker
-		if res.Code != http.StatusConflict || json.Unmarshal(res.Body.Bytes(), &blocker) != nil ||
-			blocker.Code != "embedded_supervisor_status_unavailable" || blocker.Action == "" {
-			t.Fatalf("post-intent ConnectExternal with unreachable Supervisor after restart = %d %s, want 409 embedded_supervisor_status_unavailable with Action",
-				res.Code, res.Body.String())
+		if committed.Operation.Strategy.Strategy != bootstrap.ConnectExternal || committed.Operation.Strategy.Stage != "committed" {
+			t.Fatalf("committed strategy = %+v, want ConnectExternal/committed", committed.Operation.Strategy)
 		}
 	})
 }
