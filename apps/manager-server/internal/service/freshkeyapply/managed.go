@@ -92,6 +92,7 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 			RunID: install.RunID, Generation: install.Generation, ManagementKey: install.ManagementKey,
 			IssuedAtMS: now.Add(-time.Second).UnixMilli(), ExpiresAtMS: now.Add(managedGrantTTL).UnixMilli(),
 			Profile: ProfileManaged, Identity: install.Identity, ArtifactID: install.ArtifactID,
+			Strategy: install.Strategy,
 		}, nil
 	}
 	s.permit = func() (Permit, error) { return managedPermit(true) }
@@ -357,6 +358,67 @@ func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]fre
 		return nil, mapAdoptionRegistrationError(err)
 	}
 	return keys, nil
+}
+
+func (s *Service) requireInstallJournal(ctx context.Context, p Permit) error {
+	if s == nil || s.repo == nil {
+		return ErrUnavailable
+	}
+	a, err := s.repo.InitialInstall(ctx)
+	if err != nil {
+		return err
+	}
+	if a == nil || a.RunID != p.RunID || a.Generation != p.Generation || a.ProviderSeedSHA256 != p.S2B.Binding() {
+		return ErrGeneration
+	}
+	return nil
+}
+
+// AdoptionRegistrationReady reports whether a completed Managed Adopt
+// installation already holds its matching one-shot install journal and primary
+// key record. It returns (false, nil) when no journal exists yet so an upgraded
+// installation completed before journaled adoption existed can backfill once,
+// and returns ErrAdoptionConflict when the journal belongs to a different run,
+// generation or provider seed.
+func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
+	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
+		return false, ErrUnavailable
+	}
+	p, err := s.permit()
+	if err != nil {
+		return false, err
+	}
+	inst, err := s.repo.InitialInstall(ctx)
+	if err != nil {
+		return false, err
+	}
+	if inst == nil {
+		return false, nil
+	}
+	if inst.RunID != p.RunID || inst.Generation != p.Generation || inst.ProviderSeedSHA256 != p.S2B.Binding() {
+		return false, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
+	}
+	if _, err := s.keys.Detail(ctx, inst.KeyID); err != nil {
+		if errors.Is(err, freshkeys.ErrNotFound) {
+			return false, fmt.Errorf("%w: %w", ErrAdoptionConflict, err)
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// VerifyRuntimeTarget proves the live Runtime identity, Ready state and active
+// CPA artifact for the committed Managed installation.
+func (s *Service) VerifyRuntimeTarget(ctx context.Context) error {
+	if s == nil || s.profile != ProfileManaged {
+		return ErrUnavailable
+	}
+	p, err := s.permit()
+	if err != nil {
+		return err
+	}
+	_, err = s.target(ctx, p)
+	return err
 }
 
 func mapAdoptionRegistrationError(err error) error {

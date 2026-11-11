@@ -257,11 +257,34 @@ func stageAdoptedTx(ctx context.Context, tx *sql.Tx, candidates []Record, runtim
 				var conflict bool
 				if err = tx.QueryRowContext(ctx, `select exists(
 					select 1 from gateway_api_key_source_bindings
-					where api_key_hash = ? and retired_at_ms is null and api_key_id <> ?)`, existing.Hash, string(existing.Identity.ID)).Scan(&conflict); err != nil {
+					where retired_at_ms is null
+					  and (api_key_hash = ? or api_key_id = ?)
+					  and (api_key_id <> ? or runtime_identity <> ?))`,
+					existing.Hash, string(existing.Identity.ID), string(existing.Identity.ID), runtimeIdentity).Scan(&conflict); err != nil {
 					return nil, err
 				}
 				if conflict {
 					return nil, ErrSourceOwned
+				}
+				var alreadyBound bool
+				if err = tx.QueryRowContext(ctx, `select exists(
+					select 1 from gateway_api_key_source_bindings
+					where api_key_id = ? and runtime_identity = ? and api_key_hash = ? and retired_at_ms is null)`,
+					string(existing.Identity.ID), runtimeIdentity, existing.Hash).Scan(&alreadyBound); err != nil {
+					return nil, err
+				}
+				if !alreadyBound {
+					lastSeen := v.Identity.CreatedAtMS
+					if lastSeen < existing.Identity.CreatedAtMS {
+						lastSeen = existing.Identity.CreatedAtMS
+					}
+					if _, err = tx.ExecContext(ctx, `insert into gateway_api_key_source_bindings (
+						api_key_id, runtime_identity, api_key_hash, observed_runtime_generation,
+						first_seen_at_ms, last_seen_at_ms, retired_at_ms
+					) values (?, ?, ?, null, ?, ?, null)`,
+						string(existing.Identity.ID), runtimeIdentity, existing.Hash, existing.Identity.CreatedAtMS, lastSeen); err != nil {
+						return nil, err
+					}
 				}
 			}
 			resolved = append(resolved, *existing)

@@ -337,6 +337,48 @@ func TestPluginCapabilityProbeDiscardsAProofThatOutlivedItsConnection(t *testing
 	}
 }
 
+// An old-epoch proof still in flight when completion calls reprove must neither
+// block the new epoch's proof from starting nor overwrite the completed answer
+// when the stale probe eventually returns.
+func TestPluginCapabilityProbeReproveSupersedesInFlightEpoch(t *testing.T) {
+	oldEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	oldDone := make(chan struct{})
+	var calls, launches atomic.Int32
+	probe := newPluginCapabilityProbe(time.Hour, time.Minute, func(context.Context) bool {
+		if calls.Add(1) == 1 {
+			close(oldEntered)
+			<-releaseOld
+			return false
+		}
+		return true
+	})
+	probe.launch = func(refresh func()) {
+		if launches.Add(1) == 1 {
+			go func() {
+				defer close(oldDone)
+				refresh()
+			}()
+			return
+		}
+		go refresh()
+	}
+	if probe.capable(context.Background()) {
+		t.Fatal("probe reported capable before first proof finished")
+	}
+	<-oldEntered
+
+	probe.reprove(context.Background())
+	if !probe.capable(context.Background()) {
+		t.Fatal("reprove did not establish capability while old epoch was in flight")
+	}
+	close(releaseOld)
+	<-oldDone
+	if !probe.capable(context.Background()) {
+		t.Fatal("late old-epoch completion clobbered reproven capability")
+	}
+}
+
 // Concurrent reads, forgets and refreshes must be safe under -race: the epoch
 // and the in-flight flag are the only shared state the answer depends on.
 func TestPluginCapabilityProbeIsRaceFree(t *testing.T) {

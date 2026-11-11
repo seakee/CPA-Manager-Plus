@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
-
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
@@ -20,6 +19,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	freshkeyssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
 // adoptedClientKeys are the source CPA's client keys of this fixture. They carry
@@ -43,6 +44,21 @@ func adoptionFixtureWithKeys(t *testing.T, clientKeys ...string) *adoptMigration
 	return fixture
 }
 
+type activeAdoptRoutingDriver struct {
+	store freshstore.Store
+}
+
+func (d activeAdoptRoutingDriver) Inspect(ctx context.Context) (freshrouting.State, error) {
+	record, err := d.store.Load(ctx)
+	if err != nil {
+		return freshrouting.State{}, err
+	}
+	return freshrouting.StateFor(record.Operation), nil
+}
+
+func (activeAdoptRoutingDriver) Apply(context.Context, freshrouting.State) error  { return nil }
+func (activeAdoptRoutingDriver) Verify(context.Context, freshrouting.State) error { return nil }
+
 func wireAdoptManagedAuthority(app *freshApplication, rt *migrationRuntime, destinationURL string) {
 	source := managedInstallSource(app.store, app.protector, destinationURL)
 	app.managedSource = source
@@ -57,6 +73,20 @@ func wireAdoptManagedAuthority(app *freshApplication, rt *migrationRuntime, dest
 		}
 		return cpa.PostureFor(install.Strategy)
 	})
+	app.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, app.v8PluginCapable)
+	app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+}
+
+func serveHTTPRequest(t *testing.T, app *freshApplication, method, path, body, contentType string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	return rec
 }
 
 // Completion is where an adopted destination's client keys become the Key
@@ -162,6 +192,10 @@ func (s *loadFailingStore) UpdateTx(ctx context.Context, id bootstrap.FreshIdent
 	return s.Store.(freshstore.TransactionalUpdater).UpdateTx(ctx, id, rev, fn)
 }
 
+func (s *loadFailingStore) WithRecordTx(ctx context.Context, fn func(freshstore.Record, *sql.Tx) error) error {
+	return s.Store.(freshstore.TransactionalUpdater).WithRecordTx(ctx, fn)
+}
+
 type updateTxHookStore struct {
 	freshstore.Store
 	beforeTx func(context.Context, freshstore.Store) error
@@ -189,6 +223,10 @@ func (s *updateTxHookStore) UpdateTx(ctx context.Context, id bootstrap.FreshIden
 		}
 		return nil
 	})
+}
+
+func (s *updateTxHookStore) WithRecordTx(ctx context.Context, fn func(freshstore.Record, *sql.Tx) error) error {
+	return s.Store.(freshstore.TransactionalUpdater).WithRecordTx(ctx, fn)
 }
 
 func readGatewayConfigView(t *testing.T, app *freshApplication) freshconfig.View {
@@ -363,26 +401,51 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 		ctx := t.Context()
 		realStore := fixture.app.store
 
+		// Outermost first Load failure (`failFromCall: 1`) through both ServeHTTP
+		// (`canonical`) and `canonicalAPI`, plus inner Load failure (`failFromCall: 2`),
+		// must all return 503 `adopt_installation_unavailable`, while `ErrNotFresh`
+		// still answers 404.
+		for _, failAt := range []int32{1, 2} {
+			failing := &loadFailingStore{
+				Store:        realStore,
+				failFromCall: failAt,
+				err:          errors.New("simulated sqlite read outage"),
+			}
+			fixture.app.store = failing
+			fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
+			serveResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+			if serveResp.Code != http.StatusServiceUnavailable || errorCode(t, serveResp) != "adopt_installation_unavailable" {
+				t.Fatalf("ServeHTTP store.Load outage (failFromCall=%d) = %d %s", failAt, serveResp.Code, serveResp.Body.String())
+			}
+
+			failing.calls.Store(0)
+			apiResp := fixture.complete(t)
+			if apiResp.Code != http.StatusServiceUnavailable || errorCode(t, apiResp) != "adopt_installation_unavailable" {
+				t.Fatalf("canonicalAPI store.Load outage (failFromCall=%d) = %d %s", failAt, apiResp.Code, apiResp.Body.String())
+			}
+		}
+
 		fixture.app.store = &loadFailingStore{
 			Store:        realStore,
-			failFromCall: 2,
-			err:          errors.New("simulated sqlite read outage"),
+			failFromCall: 1,
+			err:          freshstore.ErrNotFresh,
 		}
-		loadResp := fixture.complete(t)
-		if loadResp.Code != http.StatusServiceUnavailable || errorCode(t, loadResp) != "adopt_installation_unavailable" {
-			t.Fatalf("store.Load outage = %d %s", loadResp.Code, loadResp.Body.String())
+		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
+		if notFresh := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); notFresh.Code != http.StatusNotFound {
+			t.Fatalf("ErrNotFresh complete = %d, want 404", notFresh.Code)
 		}
 
 		fixture.app.store = &updateTxHookStore{
 			Store:   realStore,
 			afterFn: func() error { return errors.New("simulated sqlite commit outage") },
 		}
+		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
 		txResp := fixture.complete(t)
 		if txResp.Code != http.StatusServiceUnavailable || errorCode(t, txResp) != "adopt_installation_unavailable" {
 			t.Fatalf("UpdateTx outage = %d %s", txResp.Code, txResp.Body.String())
 		}
 		fixture.app.store = realStore
-
+		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
 		if fixture.reload(t).Operation.ProductComplete {
 			t.Fatal("storage failure completed the installation")
 		}
@@ -472,28 +535,41 @@ func TestAdoptCompletionEnablesRealConfigAndPluginWritesAcrossRestart(t *testing
 		t.Fatalf("pre-completion plugin capability = %+v", beforePlugin.Capability)
 	}
 	assertNoAdoptWriteAuthority(t, fixture, strings.Repeat("a", 32), strings.Repeat("b", 32))
-	// The navigation's plugin answer is wired as production wires it, with the
-	// refresh run inline so each read observes the proof it triggered. A page
-	// load during the wizard caches "no plugins" for a whole TTL.
-	navigation := newPluginCapabilityProbe(time.Hour, time.Minute, fixture.app.v8PluginCapable)
-	navigation.launch = func(refresh func()) { refresh() }
-	fixture.app.pluginCapability = navigation
-	navigation.capable(ctx)
-	if navigation.capable(ctx) {
-		t.Fatal("plugin support advertised before adoption completed")
+	// Exercise the unmodified production async plugin capability probe through
+	// `app.ServeHTTP`, including an old-epoch pre-completion probe held open
+	// across completion: pre-completion responses carry no plugin header, while
+	// the VERY FIRST successful Console response after completion carries
+	// `X-CPA-SUPPORT-PLUGIN: 1`.
+	oldProbeEntered := make(chan struct{})
+	releaseOldProbe := make(chan struct{})
+	var probeCalls atomic.Int32
+	fixture.app.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, func(probeCtx context.Context) bool {
+		if probeCalls.Add(1) == 1 {
+			close(oldProbeEntered)
+			<-releaseOldProbe
+			return false
+		}
+		return fixture.app.v8PluginCapable(probeCtx)
+	})
+	preOpResp := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/operation", "", "")
+	if preOpResp.Code != http.StatusOK || preOpResp.Header().Get(supportPluginHeader) != "" {
+		t.Fatalf("pre-completion ServeHTTP operation = %d header=%q", preOpResp.Code, preOpResp.Header().Get(supportPluginHeader))
 	}
+	<-oldProbeEntered
 
-	if response := fixture.complete(t); response.Code != http.StatusOK {
-		t.Fatalf("complete = %d %s", response.Code, response.Body.String())
+	completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+	if completeResp.Code != http.StatusOK {
+		t.Fatalf("ServeHTTP complete = %d %s", completeResp.Code, completeResp.Body.String())
 	}
-	// Completion changes what the saved connection can serve, so the cached
-	// pre-completion answer must not outlive it: the first read re-proves and the
-	// next one advertises plugins.
-	navigation.capable(ctx)
-	if !navigation.capable(ctx) {
-		t.Fatal("plugin support still hidden after adoption completed")
-	}
+	close(releaseOldProbe)
 
+	firstPostComplete := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/api-keys", "", "")
+	if firstPostComplete.Code != http.StatusOK || firstPostComplete.Header().Get(supportPluginHeader) != supportPluginHeaderValue {
+		t.Fatalf("first post-completion Console response = %d %s=%q", firstPostComplete.Code, supportPluginHeader, firstPostComplete.Header().Get(supportPluginHeader))
+	}
+	if got := completeResp.Header().Get(supportPluginHeader); got != supportPluginHeaderValue {
+		t.Fatalf("ServeHTTP complete %s = %q, want %q", supportPluginHeader, got, supportPluginHeaderValue)
+	}
 	// 1. Gateway configuration: perform a real group save and read back.
 	cfgView := readGatewayConfigView(t, fixture.app)
 	if cfgView.Capability.Mode != freshconfig.ModeManaged || !cfgView.Capability.Writable {
@@ -595,4 +671,167 @@ func TestAdoptCompletionEnablesRealConfigAndPluginWritesAcrossRestart(t *testing
 	if got := fixture.destination.clientKeys(); len(got) != 1 || got[0] != adoptedClientKeys[0] {
 		t.Fatalf("destination client keys after restarted revoke = %#v", got)
 	}
+}
+
+// When the adopted CPA carries a Client Key that was already created in the
+// Manager workspace before strategy commit (without a source binding), adopt
+// completion binds its source runtime inside the same transaction; if an
+// existing key is already bound to a different runtime, completion refuses
+// with 409 and rolls back every sibling key and binding.
+func TestAdoptCompletionReusesPreStagedWorkspaceKeysAndBindsSourceAtomically(t *testing.T) {
+	t.Run("pre-staged workspace key without binding is bound in the completion transaction", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		unwiredKeys := freshkeyssvc.New(fixture.app.keyRepo, fixture.app.protector)
+		staged, _, err := unwiredKeys.Create(ctx, strings.Repeat("7", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bindingsBefore int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&bindingsBefore); err != nil || bindingsBefore != 0 {
+			t.Fatalf("bindings before completion = %d (%v), want 0", bindingsBefore, err)
+		}
+		fixture.destination.mu.Lock()
+		fixture.destination.config["access"] = map[string]any{"api-keys": []any{staged.CreatedSecret, "source-peer-two"}}
+		fixture.destination.mu.Unlock()
+
+		resp := fixture.complete(t)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("complete = %d %s", resp.Code, resp.Body.String())
+		}
+		var activeBindings int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='runtime'`).Scan(&activeBindings); err != nil || activeBindings != 2 {
+			t.Fatalf("active runtime bindings after completion = %d (%v), want 2", activeBindings, err)
+		}
+	})
+
+	t.Run("existing key bound to incompatible runtime refuses 409 and rolls back sibling keys", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, "source-peer-clean", "source-peer-foreign-runtime")
+		ctx := t.Context()
+		staged, err := fixture.app.keys.RegisterAdopted(ctx, []string{"source-peer-foreign-runtime"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.opened.DB.Exec(`update gateway_api_key_source_bindings set runtime_identity='external-other' where api_key_id=?`, string(staged[0].ID)); err != nil {
+			t.Fatal(err)
+		}
+
+		resp := fixture.complete(t)
+		if resp.Code != http.StatusConflict || errorCode(t, resp) != "adopt_installation_conflict" {
+			t.Fatalf("foreign-runtime complete = %d %s", resp.Code, resp.Body.String())
+		}
+		if fixture.reload(t).Operation.ProductComplete {
+			t.Fatal("foreign-runtime conflict completed the installation")
+		}
+		listed, err := fixture.app.keys.List(ctx)
+		if err != nil || len(listed) != 1 || listed[0].ID != staged[0].ID {
+			t.Fatalf("foreign-runtime conflict leaked sibling key: %#v %v", listed, err)
+		}
+		var runtimeBindings int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where runtime_identity='runtime'`).Scan(&runtimeBindings); err != nil || runtimeBindings != 0 {
+			t.Fatalf("foreign-runtime conflict left %d runtime bindings: %v", runtimeBindings, err)
+		}
+	})
+}
+
+// An Adopt installation that reached `ProductComplete=true` on a build prior to
+// journaled adoption has neither adopted workspace keys nor an install journal:
+//   1. before backfill, Gateway admission, config saves, plugin toggles and key
+//      operations all fail closed consistently (no admission without a journal);
+//   2. if backfill meets a foreign journal or an unproven destination, `POST
+//      complete` refuses with 409/503 instead of returning a silent 200; and
+//   3. `prepareCompletedStartup` (on Manager restart) or `POST complete`
+//      atomically backfills the adopted keys, source bindings and journal once
+//      without bumping `Operation.Revision`, restoring full authority.
+func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDeterministically(t *testing.T) {
+	t.Run("fails closed before backfill and recovers on prepareCompletedStartup", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		upgraded := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(upgraded, fixture.runtime, fixture.destination.URL())
+
+		if upgraded.gatewayAdmissionProven(ctx) {
+			t.Fatal("historical completed adoption without journal proved Gateway admission before backfill")
+		}
+		authResp := httptest.NewRecorder()
+		upgraded.ServeHTTP(authResp, httptest.NewRequest(http.MethodGet, "/internal/routing/fresh-authority", nil))
+		if authResp.Code != http.StatusOK || strings.Contains(authResp.Body.String(), `"admitted":true`) {
+			t.Fatalf("fresh-authority before backfill = %d %s", authResp.Code, authResp.Body.String())
+		}
+		cfgBefore := readGatewayConfigView(t, upgraded)
+		if cfgBefore.Capability.Writable {
+			t.Fatalf("historical adoption writable before backfill: %+v", cfgBefore.Capability)
+		}
+		if listed, err := upgraded.keys.List(ctx); err != nil || len(listed) != 0 {
+			t.Fatalf("keys before backfill = %#v %v", listed, err)
+		}
+
+		upgraded.prepareCompletedStartup(ctx, preUpgrade.Operation)
+		if got := fixture.reload(t).Operation.Revision; got != preUpgrade.Operation.Revision {
+			t.Fatalf("startup backfill mutated revision %d -> %d", preUpgrade.Operation.Revision, got)
+		}
+		if !upgraded.gatewayAdmissionProven(ctx) {
+			t.Fatal("backfilled historical adoption did not prove Gateway admission")
+		}
+		listed, err := upgraded.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys) {
+			t.Fatalf("backfilled keys = %#v %v", listed, err)
+		}
+		var activeBindings int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='runtime'`).Scan(&activeBindings); err != nil || activeBindings != len(adoptedClientKeys) {
+			t.Fatalf("backfilled source bindings = %d (%v), want %d", activeBindings, err, len(adoptedClientKeys))
+		}
+
+		cfgAfter := readGatewayConfigView(t, upgraded)
+		if !cfgAfter.Capability.Writable {
+			t.Fatalf("backfilled gateway capability = %+v", cfgAfter.Capability)
+		}
+		save := gatewayRequest(t, upgraded, http.MethodPost, "gateway/config/groups/routing",
+			`{"requestId":"`+strings.Repeat("88", 16)+`","expected":{"generation":"`+cfgAfter.Generation+`","baseline":"`+groupBaseline(t, cfgAfter, "routing")+`"},"edits":[{"path":"routing.strategy","action":"set","value":"fill-first"}]}`,
+			"application/json")
+		if save.Code != http.StatusOK || fixture.destination.value("routing", "strategy") != "fill-first" {
+			t.Fatalf("backfilled config save = %d %s", save.Code, save.Body.String())
+		}
+		replay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if replay.Code != http.StatusOK {
+			t.Fatalf("post-backfill complete replay = %d %s", replay.Code, replay.Body.String())
+		}
+	})
+
+	t.Run("POST complete on historical unjournaled adoption refuses foreign journal with 409 instead of silent 200", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		if _, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.app.keyRepo.ClaimInitialInstall(ctx, freshkeys.InitialInstall{
+			KeyID: strings.Repeat("c", 32), RunID: "managed:foreign-run", Generation: "3", AttemptedAtMS: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		resp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if resp.Code != http.StatusConflict || errorCode(t, resp) != "adopt_installation_conflict" {
+			t.Fatalf("conflicted historical complete = %d %s", resp.Code, resp.Body.String())
+		}
+		if fixture.app.gatewayAdmissionProven(ctx) {
+			t.Fatal("conflicted historical adoption proved Gateway admission")
+		}
+		if listed, err := fixture.app.keys.List(ctx); err != nil || len(listed) != 0 {
+			t.Fatalf("conflicted historical backfill left keys: %#v %v", listed, err)
+		}
+	})
 }

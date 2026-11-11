@@ -137,11 +137,14 @@ func TestAdoptionRegistrationGrantsTheConfigAuthority(t *testing.T) {
 	if _, err := s.Prepare(ctx, strings.Repeat("1", 32), string(keys[0].ID), string(keys[1].ID), "revoke", 9); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("incomplete adoption prepared a key operation: %v", err)
 	}
-	// Conversely, `ProductComplete` without a matching install journal still
-	// refuses configuration writes.
+	// Conversely, `ProductComplete` without a matching install journal refuses
+	// BOTH configuration writes AND Gateway admission consistently.
 	unregistered, _, _ := adoptedFixture(t, adoptedSourceKeys...)
 	if _, err := unregistered.ConfigTarget(ctx, 9); !errors.Is(err, ErrGeneration) {
 		t.Fatalf("completed adoption without journal granted ConfigTarget: %v", err)
+	}
+	if unregistered.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatal("completed adoption without journal proved Gateway admission")
 	}
 	// Once `ProductComplete` commits alongside the claimed journal, authority
 	// and admission become active for the staged generation only.

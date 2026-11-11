@@ -544,7 +544,15 @@ func (a *freshApplication) serve(w http.ResponseWriter, r *http.Request) {
 
 func (a *freshApplication) canonical(w http.ResponseWriter, r *http.Request) {
 	op, err := a.current(r.Context())
-	if err != nil || op.Routing.Target == "" {
+	if err != nil {
+		if errors.Is(err, freshstore.ErrNotFresh) {
+			http.NotFound(w, r)
+			return
+		}
+		writeFreshCanonicalStoreUnavailable(w, r)
+		return
+	}
+	if op.Routing.Target == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -552,6 +560,12 @@ func (a *freshApplication) canonical(w http.ResponseWriter, r *http.Request) {
 	if op.Routing.Committed {
 		snapshot := a.routing.Snapshot(r.Context())
 		if !snapshot.PublicAPIActive() {
+			if snapshot.State == routing.SnapshotUnavailable {
+				if _, loadErr := a.store.Load(r.Context()); loadErr != nil && !errors.Is(loadErr, freshstore.ErrNotFresh) {
+					writeFreshCanonicalStoreUnavailable(w, r)
+					return
+				}
+			}
 			http.NotFound(w, r)
 			return
 		}
@@ -563,13 +577,42 @@ func (a *freshApplication) canonical(w http.ResponseWriter, r *http.Request) {
 	httpapi.InitialFullWebHandler(op.Routing.Target, api).ServeHTTP(w, r)
 }
 
+func writeFreshCanonicalStoreUnavailable(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if isCredentialedCanonicalComplete(r) {
+		writeFreshAdoptCompleteError(w, http.StatusServiceUnavailable, "adopt_installation_unavailable", 0)
+		return
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
+func isCredentialedCanonicalComplete(r *http.Request) bool {
+	if r == nil || r.URL == nil || r.Method != http.MethodPost {
+		return false
+	}
+	const completeSuffix = routing.PublicAPIV2Suffix + "/complete"
+	if !strings.HasSuffix(r.URL.Path, completeSuffix) {
+		return false
+	}
+	prefix := strings.TrimSuffix(r.URL.Path, completeSuffix)
+	if !routing.ValidControlBasePath(prefix) {
+		return false
+	}
+	_, freshAuth := freshbootstrap.SessionToken(r)
+	return freshAuth || security.ExtractBearerToken(r.Header.Get("Authorization")) != ""
+}
+
 func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) {
 	// Full Web's HTML/static wrapper sets no-cache. Restore the API boundary
 	// here before any authentication error or one-time secret response.
 	w.Header().Set("Cache-Control", "no-store")
 	record, err := a.store.Load(r.Context())
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, freshstore.ErrNotFresh) {
+			http.NotFound(w, r)
+			return
+		}
+		writeFreshCanonicalStoreUnavailable(w, r)
 		return
 	}
 	op := record.Operation
@@ -709,6 +752,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), next.Operation); err != nil {
 			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 		}
+		a.pluginCapability.reprove(r.Context())
 		// Completion is the moment the install-derived CPA authority exists, so
 		// the same idempotent startup path as a resumed install runs now: it
 		// backfills keys staged before completion and starts collection,
@@ -1108,6 +1152,9 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	}
 	if op.ProductComplete {
 		app.startUsageCollection(op)
+		if op.Strategy.Strategy == bootstrap.AdoptExisting {
+			go app.awaitCompletedAdoptionBackfill(ctx)
+		}
 	}
 	go restoreFreshRouting(ctx, app.routing)
 	go app.runFreshUpdateChecks(ctx)

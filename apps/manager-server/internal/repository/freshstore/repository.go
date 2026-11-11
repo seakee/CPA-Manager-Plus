@@ -319,6 +319,21 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 		return fn(record)
 	})
 }
+func (r *repository) WithRecordTx(ctx context.Context, fn func(Record, *sql.Tx) error) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	v, err := load(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err = fn(v, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 func (r *repository) UpdateTx(ctx context.Context, id bootstrap.FreshIdentity, revision uint64, fn func(*Record, *sql.Tx) error) (Record, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

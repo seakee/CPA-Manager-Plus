@@ -185,3 +185,65 @@ func TestRegisterAdoptedRollsBackBatchWhenNthKeyFails(t *testing.T) {
 		}
 	})
 }
+
+// Reusing a secret already staged in the Key workspace must bind or validate
+// its source runtime identity inside the same transaction: missing bindings
+// are created, matching bindings replay idempotently, and bindings pointing at
+// a different runtime fail closed as ErrSourceOwned without leaving siblings.
+func TestRegisterAdoptedBindsOrValidatesExistingWorkspaceKeySourceInTx(t *testing.T) {
+	t.Run("existing workspace key without binding acquires current runtime binding", func(t *testing.T) {
+		db, preCommitSvc, protector, _ := installKeyStore(t)
+		ctx := t.Context()
+		staged, _, err := preCommitSvc.Create(ctx, strings.Repeat("1", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		registered, err := service.RegisterAdopted(ctx, []string{staged.CreatedSecret, "adopted-new-peer"})
+		if err != nil || len(registered) != 2 {
+			t.Fatalf("RegisterAdopted = %#v %v", registered, err)
+		}
+		if registered[0].ID != staged.Key.ID || registered[0].Origin != "workspace" || registered[1].Origin != "adopted" {
+			t.Fatalf("registered origins/IDs = %#v", registered)
+		}
+		var boundCount int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='embedded-default'`).Scan(&boundCount); err != nil || boundCount != 2 {
+			t.Fatalf("active bindings for embedded-default = %d (%v), want 2", boundCount, err)
+		}
+		// Replaying with the same runtime identity stays idempotent.
+		if _, err = service.RegisterAdopted(ctx, []string{staged.CreatedSecret, "adopted-new-peer"}); err != nil {
+			t.Fatalf("replay RegisterAdopted: %v", err)
+		}
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='embedded-default'`).Scan(&boundCount); err != nil || boundCount != 2 {
+			t.Fatalf("active bindings after replay = %d (%v), want 2", boundCount, err)
+		}
+	})
+
+	t.Run("existing workspace key bound to another runtime refuses and rolls back batch", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		ctx := t.Context()
+		otherRuntimeSvc := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "external-other", nil
+		}))
+		staged, _, err := otherRuntimeSvc.Create(ctx, strings.Repeat("2", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		adoptSvc := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		if _, err = adoptSvc.RegisterAdopted(ctx, []string{"adopted-first-before-conflict", staged.CreatedSecret}); !errors.Is(err, repo.ErrSourceOwned) {
+			t.Fatalf("foreign-runtime existing key = %v, want ErrSourceOwned", err)
+		}
+		listed, err := adoptSvc.List(ctx)
+		if err != nil || len(listed) != 1 || listed[0].ID != staged.Key.ID {
+			t.Fatalf("foreign-runtime conflict leaked peer key: %#v %v", listed, err)
+		}
+		var embeddedBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where runtime_identity='embedded-default'`).Scan(&embeddedBindings); err != nil || embeddedBindings != 0 {
+			t.Fatalf("foreign-runtime conflict left %d embedded-default bindings: %v", embeddedBindings, err)
+		}
+	})
+}

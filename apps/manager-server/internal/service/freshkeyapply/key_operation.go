@@ -306,12 +306,8 @@ func (s *Service) operationTarget(ctx context.Context, generation uint64) (Permi
 	if _, err = s.target(ctx, p); err != nil {
 		return p, err
 	}
-	a, err := s.repo.InitialInstall(ctx)
-	if err != nil {
+	if err = s.requireInstallJournal(ctx, p); err != nil {
 		return p, err
-	}
-	if a == nil || a.RunID != p.RunID || a.Generation != p.Generation || a.ProviderSeedSHA256 != p.S2B.Binding() {
-		return p, ErrGeneration
 	}
 	return p, nil
 }

@@ -768,8 +768,11 @@ func TestGatewayAdmissionProvenBindsManagedAndAdoptedToConfiguredSupervisorRoot(
 					t.Fatal(installErr)
 				}
 				destination.seed(key.Secret)
+			} else {
+				if _, regErr := app.keyApply.RegisterAdoption(t.Context(), []string{"source-key-one", "source-key-two"}); regErr != nil {
+					t.Fatal(regErr)
+				}
 			}
-
 			// 1. Custom <DataDir>/runtime/supervisor root is admitted.
 			if !app.gatewayAdmissionProven(t.Context()) {
 				t.Fatalf("configured custom Supervisor root (%s) was not admitted for %s", customSupRoot, tc.name)

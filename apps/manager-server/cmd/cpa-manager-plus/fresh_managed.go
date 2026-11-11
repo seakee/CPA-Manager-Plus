@@ -177,6 +177,11 @@ func (a *freshApplication) prepareCompletedStartup(ctx context.Context, op boots
 	if _, err := a.ensureManagedRuntimeDesiredRunning(ctx, op); err != nil {
 		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 	}
+	if op.Strategy.Strategy == bootstrap.AdoptExisting {
+		if decision := a.reconcileCompletedAdoption(ctx); decision.status != 0 {
+			log.Printf("Fresh completed adoption registration backfill unavailable: status=%d code=%s", decision.status, decision.code)
+		}
+	}
 	return op
 }
 

@@ -106,4 +106,5 @@ type Store interface {
 // checkpoint transition commits roll back whenever the CAS refuses or fails.
 type TransactionalUpdater interface {
 	UpdateTx(context.Context, bootstrap.FreshIdentity, uint64, func(*Record, *sql.Tx) error) (Record, error)
+	WithRecordTx(context.Context, func(Record, *sql.Tx) error) error
 }

@@ -28,6 +28,7 @@ type Permit struct {
 	Profile       string                  `json:"-"`
 	Identity      string                  `json:"-"`
 	ArtifactID    string                  `json:"-"`
+	Strategy      string                  `json:"-"`
 }
 
 func loadPermit() (Permit, error) {
