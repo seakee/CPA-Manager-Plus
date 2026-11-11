@@ -3422,6 +3422,24 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 // retires immediately via the in-memory externalCommitted signal when
 // ConnectExternal commits even when configured with a multi-hour reconcile
 // interval, and makes zero post-commit Supervisor requests.
+type externalCommitBoundaryStore struct {
+	freshstore.Store
+	onCommitted func()
+}
+
+func (s externalCommitBoundaryStore) Update(
+	ctx context.Context,
+	id bootstrap.FreshIdentity,
+	rev uint64,
+	fn func(*freshstore.Record) error,
+) (freshstore.Record, error) {
+	next, err := s.Store.Update(ctx, id, rev, fn)
+	if err == nil && isCommittedExternalStrategy(next.Operation.Strategy) && s.onCommitted != nil {
+		s.onCommitted()
+	}
+	return next, err
+}
+
 func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	const management = externalAuthorityManagement
 	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3440,6 +3458,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 
 	initialStatusObserved := make(chan struct{})
 	var initialOnce sync.Once
+	var casBoundaryReached atomic.Bool
 	var externalCommitted atomic.Bool
 	var postCommitSupervisorHits atomic.Int32
 	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3470,6 +3489,9 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		RuntimeTokenFile: tokenPath,
 		CPAUpstreamURL:   "http://127.0.0.1:8317",
 	}, nil)
+	if app.pluginCapability != nil {
+		app.pluginCapability.launch = func(refresh func()) { refresh() }
+	}
 	app.strategy = freshstrategy.New(freshstrategy.Options{
 		Protector:     opened.Protector,
 		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
@@ -3491,6 +3513,16 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	app.store = externalCommitBoundaryStore{
+		Store: app.store,
+		onCommitted: func() {
+			// Flip at the exact durable SQLite CAS boundary, before finishExternalCommit
+			// and before ServeHTTP returns.
+			casBoundaryReached.Store(true)
+			externalCommitted.Store(true)
+		},
+	}
+
 	reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
 	defer cancelReconciler()
 	reconcilerExited := make(chan struct{})
@@ -3504,7 +3536,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		t.Fatal("10h reconciler initial Supervisor observation did not arrive")
 	}
 
-	payload, err := json.Marshal(struct {
+	reqBody, err := json.Marshal(struct {
 		Identity         bootstrap.FreshIdentity `json:"identity"`
 		ExpectedRevision uint64                  `json:"expectedRevision"`
 		AttemptID        string                  `json:"attemptId"`
@@ -3522,7 +3554,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commitReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+	commitReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(reqBody))
 	commitReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	commitReq.Header.Set("Content-Type", "application/json")
 	commitRes := httptest.NewRecorder()
@@ -3530,15 +3562,50 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	if commitRes.Code != http.StatusOK {
 		t.Fatalf("POST strategy (ConnectExternal) = %d %s, want 200", commitRes.Code, commitRes.Body.String())
 	}
-	externalCommitted.Store(true)
+	if !casBoundaryReached.Load() {
+		t.Fatal("durable External CAS boundary hook was not reached")
+	}
 
 	select {
 	case <-reconcilerExited:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("reconciler did not retire immediately via externalCommitted signal")
 	}
+
+	// Drive controlled post-commit HTTP entry points before and after completion:
+	// embedded installation observation and lifecycle mutations must fail closed
+	// at the HTTP boundary without sending any request to the embedded Supervisor.
+	installObsReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil)
+	installObsReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	installObsRes := httptest.NewRecorder()
+	app.ServeHTTP(installObsRes, installObsReq)
+	if installObsRes.Code != http.StatusConflict {
+		t.Errorf("GET installation/runtime after External commit = %d %s, want 409", installObsRes.Code, installObsRes.Body.String())
+	}
+
+	completeReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	completeReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	completeRes := httptest.NewRecorder()
+	app.ServeHTTP(completeRes, completeReq)
+	if completeRes.Code != http.StatusOK {
+		t.Fatalf("POST complete (ConnectExternal) = %d %s, want 200", completeRes.Code, completeRes.Body.String())
+	}
+
+	mutReq := httptest.NewRequest(
+		http.MethodPost,
+		"/control/api/v2/runtime/operations",
+		strings.NewReader(`{"action":"start","requestId":"99999999-9999-4999-8999-999999999999"}`),
+	)
+	mutReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	mutReq.Header.Set("Content-Type", "application/json")
+	mutRes := httptest.NewRecorder()
+	app.ServeHTTP(mutRes, mutReq)
+	if mutRes.Code != http.StatusConflict || !strings.Contains(mutRes.Body.String(), `"runtime_mutation_unsupported"`) {
+		t.Errorf("POST runtime/operations after External commit = %d %s, want 409 runtime_mutation_unsupported", mutRes.Code, mutRes.Body.String())
+	}
+
 	if got := postCommitSupervisorHits.Load(); got != 0 {
-		t.Fatalf("post-commit Supervisor hits = %d, want 0", got)
+		t.Fatalf("post-CAS-commit Supervisor hits = %d, want 0", got)
 	}
 }
 
@@ -4617,5 +4684,247 @@ func TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequest
 	}
 	if got := startHits.Load(); got != 1 {
 		t.Fatalf("Supervisor Start RPCs across both attempts = %d, want 1 (only from retry)", got)
+	}
+}
+
+// TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUntilGenerationChanges
+// verifies R6 P3-1: when the initial write-ahead ledger INSERT succeeds, the
+// subsequent journal promotion UPDATE (reserved -> accepted) fails, and the
+// rollback ledger cleanup write also fails, POST /control/api/v2/runtime/operations
+// fails closed with 503 and zero Supervisor mutating RPCs while the durable
+// unresolved ledger row continues fencing POST /control/api/v2/strategy
+// (connect_external) with 409 embedded_runtime_start_unresolved both before and
+// after SQLite triggers recover, releasing only after Supervisor runtimeGeneration
+// advances with offline + disarmed recovery.
+func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUntilGenerationChanges(t *testing.T) {
+	const (
+		productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		management           = externalAuthorityManagement
+		requestID            = "88888888-8888-4888-8888-888888888888"
+	)
+
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+management {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.55")
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v8/management/config":
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/data/auth"},"access":{"api-keys":["ext-key-1"]}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(externalServer.Close)
+
+	var (
+		supervisorGen atomic.Uint64
+		mutatingHits  atomic.Int32
+	)
+	supervisorGen.Store(1)
+
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		gen := strconv.FormatUint(supervisorGen.Load(), 10)
+		switch r.URL.Path {
+		case "/v1/runtime/status":
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop","restart"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		case "/v1/runtime/operations/start", "/v1/runtime/operations/stop", "/v1/runtime/operations/restart":
+			mutatingHits.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(supervisor.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+	if err := os.WriteFile(tokenPath, []byte("promo-cleanup-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:8317",
+	}, nil)
+	if app.pluginCapability != nil {
+		app.pluginCapability.launch = func(refresh func()) { refresh() }
+	}
+	app.strategy = freshstrategy.New(freshstrategy.Options{
+		Protector:     opened.Protector,
+		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+	})
+
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := app.runtimeJournal.db
+	var uncommittedOpJSON string
+	if err := db.QueryRowContext(t.Context(), `SELECT value FROM settings WHERE key = ?`, freshstore.OperationKey).Scan(&uncommittedOpJSON); err != nil {
+		t.Fatalf("snapshot uncommitted operation row: %v", err)
+	}
+
+	protected, err := opened.Protector.ProtectString(strings.Repeat("e", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                "runtime-01",
+			TargetGeneration:              1,
+			TargetArtifactID:              productionArtifactID,
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Allow the initial journal reservation INSERT and the first write-ahead
+	// ledger INSERT, reject the journal promotion UPDATE (reserved -> accepted),
+	// and reject the subsequent ledger cleanup UPDATE/DELETE.
+	if _, err := db.ExecContext(t.Context(), `
+		CREATE TRIGGER test_fail_journal_promotion_update
+		BEFORE UPDATE ON settings
+		WHEN NEW.key = 'fresh_runtime_operations_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated journal promotion write failure');
+		END;
+		CREATE TRIGGER test_fail_ledger_cleanup_update
+		BEFORE UPDATE ON settings
+		WHEN NEW.key = 'fresh_embedded_start_ledger_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated start ledger cleanup update failure');
+		END;
+		CREATE TRIGGER test_fail_ledger_cleanup_delete
+		BEFORE DELETE ON settings
+		WHEN OLD.key = 'fresh_embedded_start_ledger_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated start ledger cleanup delete failure');
+		END;
+	`); err != nil {
+		t.Fatalf("install promotion+cleanup failure triggers: %v", err)
+	}
+
+	startReq := httptest.NewRequest(
+		http.MethodPost,
+		"/control/api/v2/runtime/operations",
+		strings.NewReader(`{"action":"start","requestId":"`+requestID+`"}`),
+	)
+	startReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRes := httptest.NewRecorder()
+	app.ServeHTTP(startRes, startReq)
+	if startRes.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST runtime/operations under promotion+cleanup failure = %d %s, want 503", startRes.Code, startRes.Body.String())
+	}
+	if got := mutatingHits.Load(); got != 0 {
+		t.Fatalf("Supervisor mutating RPCs under promotion+cleanup failure = %d, want 0", got)
+	}
+	if desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+		t.Fatalf("DesiredRunning persisted despite promotion+cleanup failure: (%+v, %v, %v)", desired, found, err)
+	}
+	lookupReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/operations/"+requestID, nil)
+	lookupReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	lookupRes := httptest.NewRecorder()
+	app.ServeHTTP(lookupRes, lookupReq)
+	if lookupRes.Code != http.StatusNotFound {
+		t.Fatalf("GET runtime/operations/%s = %d %s, want 404", requestID, lookupRes.Code, lookupRes.Body.String())
+	}
+
+	// POST /runtime/operations requires ProductComplete == true, whereas POST /strategy
+	// (ConnectExternal) requires an uncommitted Fresh operation (fresh.go:814). Restore
+	// the uncommitted Fresh operation rows on the same SQLite DB while keeping all
+	// triggers, fresh_embedded_start_ledger_v1, and fresh_runtime_operations_v1 intact.
+	if _, err := db.ExecContext(t.Context(), `UPDATE settings SET value = ? WHERE key = ?`, uncommittedOpJSON, freshstore.OperationKey); err != nil {
+		t.Fatalf("restore uncommitted operation row: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `DELETE FROM settings WHERE key IN ('manager_config_v1', 'setup')`); err != nil {
+		t.Fatalf("clear completed connection rows: %v", err)
+	}
+
+	postExternal := func(attemptID string) *httptest.ResponseRecorder {
+		cur, loadErr := app.store.Load(t.Context())
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		body, marshalErr := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         cur.Operation.Identity,
+			ExpectedRevision: cur.Operation.Revision,
+			AttemptID:        attemptID,
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalServer.URL,
+				ManagementKey: management,
+			},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		req.Header.Set("Content-Type", "application/json")
+		out := httptest.NewRecorder()
+		app.ServeHTTP(out, req)
+		return out
+	}
+
+	// 1. Same Supervisor generation (1) with triggers still active: fenced with 409 embedded_runtime_start_unresolved.
+	res1 := postExternal(strings.Repeat("a", 32))
+	var blocker freshStrategyActionBlocker
+	if res1.Code != http.StatusConflict || json.Unmarshal(res1.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_runtime_start_unresolved" {
+		t.Fatalf("ConnectExternal in generation 1 with triggers active = %d %s, want 409 embedded_runtime_start_unresolved", res1.Code, res1.Body.String())
+	}
+
+	// 2. Drop triggers (SQLite recovers), still generation 1: fence remains active.
+	if _, err := db.ExecContext(t.Context(), `
+		DROP TRIGGER IF EXISTS test_fail_journal_promotion_update;
+		DROP TRIGGER IF EXISTS test_fail_ledger_cleanup_update;
+		DROP TRIGGER IF EXISTS test_fail_ledger_cleanup_delete;
+	`); err != nil {
+		t.Fatalf("drop promotion+cleanup triggers: %v", err)
+	}
+	res2 := postExternal(strings.Repeat("b", 32))
+	blocker = freshStrategyActionBlocker{}
+	if res2.Code != http.StatusConflict || json.Unmarshal(res2.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_runtime_start_unresolved" {
+		t.Fatalf("ConnectExternal in generation 1 after dropping triggers = %d %s, want 409 embedded_runtime_start_unresolved", res2.Code, res2.Body.String())
+	}
+
+	// 3. Supervisor restarts onto generation 2 (offline + disarmed): ConnectExternal commits.
+	supervisorGen.Store(2)
+	res3 := postExternal(strings.Repeat("c", 32))
+	if res3.Code != http.StatusOK || !strings.Contains(res3.Body.String(), `"stage":"committed"`) {
+		t.Fatalf("ConnectExternal after Supervisor generation change = %d %s, want 200 committed", res3.Code, res3.Body.String())
 	}
 }
