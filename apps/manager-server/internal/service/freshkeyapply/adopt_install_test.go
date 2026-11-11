@@ -396,3 +396,42 @@ func TestAdoptServiceApplyRefusesAdoptExistingAndSuspiciousJournalFailsClosed(t 
 		t.Fatalf("ConfigTarget after RegisterAdoption = %q (%v)", mgmt, err)
 	}
 }
+
+// Non-HTTP Service.RegisterAdoption must allow an order-independent replay of
+// the committed secret set while rejecting any replay that adds, drops, or
+// swaps a key with ErrAdoptionConflict and zero workspace/binding side effects.
+func TestServiceRegisterAdoptionEnforcesCommittedKeySetAcrossReorderedAndChangedReplays(t *testing.T) {
+	s, _, _ := adoptedFixture(t, adoptedSourceKeys...)
+	ctx := t.Context()
+
+	initial, err := s.RegisterAdoption(ctx, []string{adoptedSourceKeys[0], adoptedSourceKeys[1]})
+	if err != nil || len(initial) != 2 {
+		t.Fatalf("initial Service.RegisterAdoption = %#v (%v), want 2 keys", initial, err)
+	}
+	firstJournal, err := s.repo.InitialInstall(ctx)
+	if err != nil || firstJournal == nil || firstJournal.AdoptedSetSHA256 == "" {
+		t.Fatalf("first journal = %#v (%v)", firstJournal, err)
+	}
+
+	reordered, err := s.RegisterAdoption(ctx, []string{adoptedSourceKeys[1], adoptedSourceKeys[0]})
+	if err != nil || len(reordered) != 2 {
+		t.Fatalf("reordered Service.RegisterAdoption = %#v (%v), want 2 keys", reordered, err)
+	}
+	if afterReorder, jErr := s.repo.InitialInstall(ctx); jErr != nil || afterReorder == nil || *afterReorder != *firstJournal {
+		t.Fatalf("reordered Service.RegisterAdoption mutated journal: %#v (%v)", afterReorder, jErr)
+	}
+
+	if _, err := s.RegisterAdoption(ctx, []string{adoptedSourceKeys[0], adoptedSourceKeys[1], "adopted-source-extra-key"}); !errors.Is(err, ErrAdoptionConflict) {
+		t.Fatalf("changed-set Service.RegisterAdoption = %v, want ErrAdoptionConflict", err)
+	}
+	if afterConflict, jErr := s.repo.InitialInstall(ctx); jErr != nil || afterConflict == nil || *afterConflict != *firstJournal {
+		t.Fatalf("conflicting Service.RegisterAdoption mutated journal: %#v (%v)", afterConflict, jErr)
+	}
+	listed, err := s.keys.List(ctx)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("keys after conflicting Service.RegisterAdoption = %#v (%v), want 2", listed, err)
+	}
+	if ready, readyErr := s.AdoptionRegistrationReady(ctx); readyErr != nil || !ready || !s.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatalf("authority after conflicting Service.RegisterAdoption: ready=(%v, %v)", ready, readyErr)
+	}
+}

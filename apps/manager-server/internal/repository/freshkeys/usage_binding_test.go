@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -283,5 +284,96 @@ func TestVerifyAdoptionRegistrationUsesConsistentReadSnapshotAcrossConcurrentCom
 				t.Fatalf("VerifyAdoptionRegistration after commit = (%v, %v), want (true, nil)", readyAfter, err)
 			}
 		})
+	}
+}
+
+// Once an adoption commitment is recorded, a replay presenting the same key set
+// in a different order (even with freshly generated candidate IDs) stays
+// idempotent, while any replay presenting a different key set fails with
+// ErrJournalConflict without staging extra keys, identities, or bindings.
+func TestRegisterAdoptionEnforcesCommittedKeySetDigestOnReplay(t *testing.T) {
+	db := openTestDB(t)
+	repo := New(db)
+	ctx := t.Context()
+
+	const (
+		runID = "managed:op-set-commitment"
+		gen   = "4"
+		seed  = "seed-commitment-sha256"
+		secA  = "cpamp_sk_adopt_set_alpha"
+		secB  = "cpamp_sk_adopt_set_beta"
+		secC  = "cpamp_sk_adopt_set_gamma"
+	)
+	recA := stagedRecord(t, strings.Repeat("1", 32), usageKeyID, secA)
+	recB := stagedRecord(t, strings.Repeat("2", 32), usageKeeper, secB)
+	recC := stagedRecord(t, strings.Repeat("3", 32), usageOtherID, secC)
+
+	committed, err := repo.RegisterAdoption(ctx, []Record{recA, recB}, usageRuntime, InitialInstall{
+		RunID:              runID,
+		Generation:         gen,
+		AttemptedAtMS:      10,
+		ProviderSeedSHA256: seed,
+	})
+	if err != nil || len(committed) != 2 {
+		t.Fatalf("initial RegisterAdoption = %#v (%v), want 2 records", committed, err)
+	}
+	firstJournal, err := repo.InitialInstall(ctx)
+	if err != nil || firstJournal == nil || firstJournal.AdoptedSetSHA256 == "" {
+		t.Fatalf("first journal = %#v (%v)", firstJournal, err)
+	}
+
+	// Same secret set in reverse order with freshly minted candidate IDs stays idempotent.
+	reorderedB := stagedRecord(t, strings.Repeat("4", 32), "22223333444455556666777788889999", secB)
+	reorderedA := stagedRecord(t, strings.Repeat("5", 32), "99998888777766665555444433332222", secA)
+	replayed, err := repo.RegisterAdoption(ctx, []Record{reorderedB, reorderedA}, usageRuntime, InitialInstall{
+		RunID:              runID,
+		Generation:         gen,
+		AttemptedAtMS:      20,
+		ProviderSeedSHA256: seed,
+	})
+	if err != nil || len(replayed) != 2 || replayed[0].Identity.ID != usageKeeper || replayed[1].Identity.ID != usageKeyID {
+		t.Fatalf("reordered same-set replay = %#v (%v)", replayed, err)
+	}
+	if afterReorder, jErr := repo.InitialInstall(ctx); jErr != nil || afterReorder == nil || *afterReorder != *firstJournal {
+		t.Fatalf("reordered replay mutated journal: got %#v (%v), want %#v", afterReorder, jErr, firstJournal)
+	}
+
+	// Different sets ({A,B,C}, {A}, {A,C}) must fail with ErrJournalConflict and
+	// leave zero rows for C across keys, identities, and source bindings.
+	for _, tc := range []struct {
+		name       string
+		candidates []Record
+	}{
+		{name: "superset_with_C", candidates: []Record{recA, recB, recC}},
+		{name: "subset_only_A", candidates: []Record{recA}},
+		{name: "replaced_B_with_C", candidates: []Record{recA, recC}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := repo.RegisterAdoption(ctx, tc.candidates, usageRuntime, InitialInstall{
+				RunID:              runID,
+				Generation:         gen,
+				AttemptedAtMS:      30,
+				ProviderSeedSHA256: seed,
+			}); !errors.Is(err, ErrJournalConflict) {
+				t.Fatalf("RegisterAdoption(%s) = %v, want ErrJournalConflict", tc.name, err)
+			}
+			if afterMismatch, jErr := repo.InitialInstall(ctx); jErr != nil || afterMismatch == nil || *afterMismatch != *firstJournal {
+				t.Fatalf("mismatched replay(%s) mutated journal: %#v (%v)", tc.name, afterMismatch, jErr)
+			}
+			for _, query := range []string{
+				`select count(*) from fresh_client_api_keys where api_key_id=? or secret_hash=?`,
+				`select count(*) from gateway_api_key_identities where id=? and ? <> ''`,
+				`select count(*) from gateway_api_key_source_bindings where api_key_id=? or api_key_hash=?`,
+			} {
+				var count int
+				if err := db.QueryRow(query, usageOtherID, recC.Hash).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("mismatched replay(%s) left C row (%s): count=%d err=%v", tc.name, query, count, err)
+				}
+			}
+		})
+	}
+	listed, err := repo.List(ctx)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("final listed keys = %#v (%v), want 2", listed, err)
 	}
 }

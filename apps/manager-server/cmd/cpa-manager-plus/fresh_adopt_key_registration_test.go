@@ -180,11 +180,12 @@ func TestAdoptCompletionRegistersTheDestinationKeys(t *testing.T) {
 
 type loadFailingStore struct {
 	freshstore.Store
-	failFromCall  int32
-	failOnlyCall  int32
-	failUntilCall int32
-	calls         atomic.Int32
-	err           error
+	failFromCall       int32
+	failOnlyCall       int32
+	failUntilCall      int32
+	calls              atomic.Int32
+	err                error
+	beforeWithRecordTx func()
 }
 
 func (s *loadFailingStore) Load(ctx context.Context) (freshstore.Record, error) {
@@ -206,6 +207,9 @@ func (s *loadFailingStore) UpdateTx(ctx context.Context, id bootstrap.FreshIdent
 }
 
 func (s *loadFailingStore) WithRecordTx(ctx context.Context, fn func(freshstore.Record, *sql.Tx) error) error {
+	if s.beforeWithRecordTx != nil {
+		s.beforeWithRecordTx()
+	}
 	return s.Store.(freshstore.TransactionalUpdater).WithRecordTx(ctx, fn)
 }
 
@@ -1151,6 +1155,117 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 				assertFreshAuthorityAdmission(t, appB, preUpgrade.Operation, true)
 			})
 		}
+	})
+	t.Run("interleaved backfill across two instances observing different destination key snapshots rejects second snapshot with 409 and leaves no extra key", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		const extraSecret = "source-client-three"
+		extraHash := sha256Hex(extraSecret)
+
+		appA := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(appA, fixture.runtime, fixture.destination.URL())
+		appB := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(appB, fixture.runtime, fixture.destination.URL())
+		realStoreA := appA.store
+		realStoreB := appB.store
+
+		appAPrepared := make(chan struct{})
+		allowAppACommit := make(chan struct{})
+		appADone := make(chan struct{})
+		closeOnceA := sync.OnceFunc(func() { close(appAPrepared) })
+		closeAllowA := sync.OnceFunc(func() { close(allowAppACommit) })
+		closeDoneA := sync.OnceFunc(func() { close(appADone) })
+		t.Cleanup(func() {
+			closeOnceA()
+			closeAllowA()
+			closeDoneA()
+		})
+
+		appA.store = &loadFailingStore{
+			Store: realStoreA,
+			beforeWithRecordTx: func() {
+				closeOnceA()
+				<-allowAppACommit
+			},
+		}
+		var journalAfterAppA *freshkeys.InitialInstall
+		appB.store = &loadFailingStore{
+			Store: realStoreB,
+			beforeWithRecordTx: func() {
+				closeAllowA()
+				<-appADone
+				var jErr error
+				journalAfterAppA, jErr = appA.keyRepo.InitialInstall(ctx)
+				if jErr != nil || journalAfterAppA == nil || journalAfterAppA.AdoptedSetSHA256 == "" {
+					t.Errorf("journal after appA commit = %#v (%v)", journalAfterAppA, jErr)
+				}
+			},
+		}
+
+		var (
+			recA *httptest.ResponseRecorder
+			recB *httptest.ResponseRecorder
+			wg   sync.WaitGroup
+		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer closeDoneA()
+			recA = serveHTTPRequest(t, appA, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		}()
+
+		// Wait until appA has finished its read-only destination proof of {A, B},
+		// then advance destination CPA's key list to {A, B, C} before appB proves.
+		<-appAPrepared
+		fixture.destination.mu.Lock()
+		fixture.destination.config["access"] = map[string]any{
+			"api-keys": []any{adoptedClientKeys[0], adoptedClientKeys[1], extraSecret},
+		}
+		fixture.destination.mu.Unlock()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recB = serveHTTPRequest(t, appB, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		}()
+		wg.Wait()
+
+		if recA.Code != http.StatusOK {
+			t.Fatalf("first snapshot POST complete = %d %s, want 200", recA.Code, recA.Body.String())
+		}
+		if recB.Code != http.StatusConflict || errorCode(t, recB) != "adopt_installation_conflict" {
+			t.Fatalf("second divergent-snapshot POST complete = %d %s, want 409 adopt_installation_conflict", recB.Code, recB.Body.String())
+		}
+		afterJournal, err := appA.keyRepo.InitialInstall(ctx)
+		if err != nil || afterJournal == nil || journalAfterAppA == nil || *afterJournal != *journalAfterAppA {
+			t.Fatalf("committed journal mutated across divergent conflict: got %#v (%v), want %#v", afterJournal, err, journalAfterAppA)
+		}
+
+		listed, err := appA.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys) {
+			t.Fatalf("workspace keys after divergent-snapshot conflict = %#v (%v), want %d", listed, err, len(adoptedClientKeys))
+		}
+		var keyCount, identityCount, bindingCount int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from fresh_client_api_keys where secret_hash=?`, extraHash).Scan(&keyCount); err != nil || keyCount != 0 {
+			t.Fatalf("extra key staged in fresh_client_api_keys: count=%d err=%v", keyCount, err)
+		}
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_identities`).Scan(&identityCount); err != nil || identityCount != len(adoptedClientKeys) {
+			t.Fatalf("gateway_api_key_identities count = %d (%v), want %d", identityCount, err, len(adoptedClientKeys))
+		}
+		if err := fixture.opened.DB.QueryRow(`select count(*) from gateway_api_key_source_bindings where api_key_hash=?`, extraHash).Scan(&bindingCount); err != nil || bindingCount != 0 {
+			t.Fatalf("extra key bound in gateway_api_key_source_bindings: count=%d err=%v", bindingCount, err)
+		}
+		assertFreshAuthorityAdmission(t, appA, preUpgrade.Operation, true)
+		assertFreshAuthorityAdmission(t, appB, preUpgrade.Operation, true)
 	})
 }
 

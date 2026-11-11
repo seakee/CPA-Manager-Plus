@@ -116,9 +116,55 @@ func (r *Repository) RegisterAdoption(ctx context.Context, candidates []Record, 
 // RegisterAdoptionTx performs the same atomic adopted-key registration and
 // initial-install journal claim inside a caller-owned write transaction.
 func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candidates []Record, runtimeIdentity string, journal InitialInstall) ([]Record, error) {
-	if tx == nil || journal.RunID == "" || journal.Generation == "" || journal.AttemptedAtMS <= 0 {
+	if tx == nil || len(candidates) == 0 || journal.RunID == "" || journal.Generation == "" || journal.AttemptedAtMS <= 0 {
 		return nil, errors.New("invalid adopted installation journal")
 	}
+	existing, err := initialInstall(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		if existing.RunID != journal.RunID || existing.Generation != journal.Generation ||
+			existing.ProviderSeedSHA256 != journal.ProviderSeedSHA256 {
+			return nil, ErrJournalConflict
+		}
+		if existing.AdoptedSetSHA256 != "" {
+			previewKeyIDs, err := previewAdoptionKeyIDsTx(ctx, tx, candidates)
+			if err != nil {
+				return nil, err
+			}
+			previewSetSHA256 := hashAdoptedKeyIDs(runtimeIdentity, previewKeyIDs)
+			if previewSetSHA256 != existing.AdoptedSetSHA256 || !slices.Contains(previewKeyIDs, existing.KeyID) {
+				return nil, ErrJournalConflict
+			}
+			ready, err := verifyAdoptionRegistration(ctx, tx, journal.RunID, journal.Generation, journal.ProviderSeedSHA256, runtimeIdentity, nil)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				return nil, ErrJournalConflict
+			}
+		} else {
+			var existingReg string
+			err = tx.QueryRowContext(ctx, `select value from settings where key=?`, adoptionRegistrationSetting).Scan(&existingReg)
+			if err == nil {
+				return nil, ErrJournalConflict
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+		}
+	} else {
+		var orphanReg string
+		err = tx.QueryRowContext(ctx, `select value from settings where key=?`, adoptionRegistrationSetting).Scan(&orphanReg)
+		if err == nil {
+			return nil, ErrJournalConflict
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+
 	records, err := stageAdoptedTx(ctx, tx, candidates, runtimeIdentity)
 	if err != nil {
 		return nil, err
@@ -131,6 +177,20 @@ func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candida
 		}
 	}
 	setSHA256 := hashAdoptedKeyIDs(runtimeIdentity, keyIDs)
+	if existing != nil && existing.AdoptedSetSHA256 != "" {
+		if setSHA256 != existing.AdoptedSetSHA256 || !slices.Contains(keyIDs, existing.KeyID) {
+			return nil, ErrJournalConflict
+		}
+		ready, err := verifyAdoptionRegistration(ctx, tx, journal.RunID, journal.Generation, journal.ProviderSeedSHA256, runtimeIdentity, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			return nil, ErrJournalConflict
+		}
+		return records, nil
+	}
+
 	journal.KeyID = string(records[0].Identity.ID)
 	journal.AdoptedSetSHA256 = setSHA256
 	data, err := json.Marshal(journal)
@@ -149,15 +209,18 @@ func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candida
 		return nil, err
 	}
 	nowMS := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do nothing`, initialInstallSetting, string(data), nowMS)
-	if err != nil {
-		return nil, err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if n == 1 {
+	if existing == nil {
+		result, err := tx.ExecContext(ctx, `insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do nothing`, initialInstallSetting, string(data), nowMS)
+		if err != nil {
+			return nil, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n != 1 {
+			return nil, ErrJournalConflict
+		}
 		regRes, err := tx.ExecContext(ctx, `insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do nothing`, adoptionRegistrationSetting, string(regData), nowMS)
 		if err != nil {
 			return nil, err
@@ -171,42 +234,37 @@ func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candida
 		}
 		return records, nil
 	}
-	existing, err := initialInstall(ctx, tx)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, `update settings set value=?, updated_at_ms=? where key=?`, string(data), nowMS, initialInstallSetting); err != nil {
 		return nil, err
 	}
-	if existing == nil || existing.RunID != journal.RunID || existing.Generation != journal.Generation ||
-		existing.ProviderSeedSHA256 != journal.ProviderSeedSHA256 {
-		return nil, ErrJournalConflict
-	}
-	if existing.AdoptedSetSHA256 == "" {
-		var existingReg string
-		err = tx.QueryRowContext(ctx, `select value from settings where key=?`, adoptionRegistrationSetting).Scan(&existingReg)
-		if err == nil {
-			return nil, ErrJournalConflict
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
-		if _, err = tx.ExecContext(ctx, `update settings set value=?, updated_at_ms=? where key=?`, string(data), nowMS, initialInstallSetting); err != nil {
-			return nil, err
-		}
-		if _, err = tx.ExecContext(ctx, `insert into settings(key,value,updated_at_ms) values(?,?,?)`, adoptionRegistrationSetting, string(regData), nowMS); err != nil {
-			return nil, err
-		}
-		return records, nil
-	}
-	if !slices.Contains(keyIDs, existing.KeyID) {
-		return nil, ErrJournalConflict
-	}
-	ready, err := verifyAdoptionRegistration(ctx, tx, journal.RunID, journal.Generation, journal.ProviderSeedSHA256, runtimeIdentity, nil)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, `insert into settings(key,value,updated_at_ms) values(?,?,?)`, adoptionRegistrationSetting, string(regData), nowMS); err != nil {
 		return nil, err
-	}
-	if !ready {
-		return nil, ErrJournalConflict
 	}
 	return records, nil
+}
+
+func previewAdoptionKeyIDsTx(ctx context.Context, tx *sql.Tx, candidates []Record) ([]string, error) {
+	resolvedByHash := make(map[string]string, len(candidates))
+	keyIDs := make([]string, 0, len(candidates))
+	for _, v := range candidates {
+		id, seen := resolvedByHash[v.Hash]
+		if !seen {
+			existing, err := byHash(ctx, tx, v.Hash)
+			if err != nil {
+				return nil, err
+			}
+			if existing != nil {
+				id = string(existing.Identity.ID)
+			} else {
+				id = string(v.Identity.ID)
+			}
+			resolvedByHash[v.Hash] = id
+		}
+		if !slices.Contains(keyIDs, id) {
+			keyIDs = append(keyIDs, id)
+		}
+	}
+	return keyIDs, nil
 }
 
 // VerifyAdoptionRegistration checks whether this installation holds atomic
