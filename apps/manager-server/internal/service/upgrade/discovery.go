@@ -177,21 +177,36 @@ func InspectReadOnlyLegacySource(
 	return observation, true
 }
 
-// afterUnfenceableSidecarAudit and beforeUnfenceableImmutableRead are
-// package-private synchronous test seams exercising concurrent sidecar creation
-// across the unfenced immutable read path. Production leaves both nil.
+// afterUnfenceableSidecarAudit, afterUnfenceableSnapshotOpen, and
+// beforeUnfenceableImmutableRead are synchronous test seams exercising
+// concurrent source mutations across unfenced discovery reads. Production
+// leaves all three nil.
 var (
 	afterUnfenceableSidecarAudit   func(databasePath string)
+	afterUnfenceableSnapshotOpen   func(databasePath string)
 	beforeUnfenceableImmutableRead func(databasePath string)
 )
+
+// SetAfterUnfenceableSnapshotOpenForTest registers a synchronous hook invoked
+// right after classifyUnfenceableSource opens and verifies its private WAL
+// snapshot and before SQL classification finishes and returns. Production never
+// calls it.
+func SetAfterUnfenceableSnapshotOpenForTest(hook func(databasePath string)) func() {
+	previous := afterUnfenceableSnapshotOpen
+	afterUnfenceableSnapshotOpen = hook
+	return func() {
+		afterUnfenceableSnapshotOpen = previous
+	}
+}
 
 // classifyUnfenceableSource answers for a database whose ownership marker this
 // process may not open. No fence can be taken, so nothing beside the source is
 // created or modified: baseline file + sidecar identity (requiring a valid
 // kernel ChangeStamp) is captured first; a non-empty WAL validates its header
 // and replays inside a private snapshot outside every preserved root, while a
-// cold database with no WAL is read through an immutable handle and re-verified
-// against that baseline afterward. A corrupt WAL header, an unreadable WAL, a
+// cold database with no WAL is read through an immutable handle, and both
+// paths re-verify source and sidecar identity against that baseline afterward.
+// A corrupt WAL header, an unreadable WAL, a
 // pending rollback journal, a store v2 has already opened (its own tables in
 // either the main file or the WAL), or the Fresh operation marker is never
 // presented as a 1.x source; only an intact 1.x store whose marker alone is
@@ -215,6 +230,7 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 	if err != nil || before.uncacheable {
 		return LegacyDiscoveryNone
 	}
+	var verdict LegacyDiscoveryObservation
 	if before.wal.present && before.wal.size > 0 {
 		if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
 			return LegacyDiscoveryNone
@@ -226,24 +242,27 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		if err != nil {
 			return LegacyDiscoveryNone
 		}
-		verdict := classifyUnfenceableDatabase(ctx, snapshot.DB(), true)
+		if afterUnfenceableSnapshotOpen != nil {
+			afterUnfenceableSnapshotOpen(databasePath)
+		}
+		verdict = classifyUnfenceableDatabase(ctx, snapshot.DB(), true)
 		if closeErr := snapshot.Close(); closeErr != nil || ctx.Err() != nil {
 			return LegacyDiscoveryNone
 		}
-		return verdict
-	}
-	if beforeUnfenceableImmutableRead != nil {
-		beforeUnfenceableImmutableRead(databasePath)
-	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, true))
-	if err != nil {
-		return LegacyDiscoveryNone
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	verdict := classifyUnfenceableDatabase(ctx, db, false)
-	if closeErr := db.Close(); closeErr != nil || ctx.Err() != nil {
-		return LegacyDiscoveryNone
+	} else {
+		if beforeUnfenceableImmutableRead != nil {
+			beforeUnfenceableImmutableRead(databasePath)
+		}
+		db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, true))
+		if err != nil {
+			return LegacyDiscoveryNone
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		verdict = classifyUnfenceableDatabase(ctx, db, false)
+		if closeErr := db.Close(); closeErr != nil || ctx.Err() != nil {
+			return LegacyDiscoveryNone
+		}
 	}
 	if err := AuditSourceSidecars(databasePath); err != nil {
 		return LegacyDiscoveryNone

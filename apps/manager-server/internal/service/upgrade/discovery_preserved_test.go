@@ -390,4 +390,65 @@ func TestUnfenceableDiscoveryEnforcesBaselineIdentityAndChangeStamp(t *testing.T
 			t.Fatalf("verdict with unavailable ChangeStamp = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
 		}
 	})
+
+	t.Run("wal-mutated-after-snapshot-open", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		donorDB := filepath.Join(t.TempDir(), databaseFileName)
+		rawDB, err := os.ReadFile(fixture.dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(donorDB, rawDB, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writer, err := sql.Open("sqlite", donorDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range []string{
+			`pragma journal_mode = wal`,
+			`pragma wal_checkpoint(truncate)`,
+			`pragma wal_autocheckpoint = 0`,
+			`insert into settings (key, value, updated_at_ms) values ('probe_row', '1', 1)`,
+		} {
+			if _, err := writer.Exec(stmt); err != nil {
+				_ = writer.Close()
+				t.Fatal(err)
+			}
+		}
+		walModeDB, err := os.ReadFile(donorDB)
+		if err != nil {
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+		walBytes, err := os.ReadFile(donorDB + "-wal")
+		_ = writer.Close()
+		if err != nil || len(walBytes) < 32 {
+			t.Fatalf("read donor WAL: %v (len=%d)", err, len(walBytes))
+		}
+		if err := os.WriteFile(fixture.dbPath, walModeDB, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fixture.dbPath+"-wal", walBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		marker := fixture.dbPath + ".manager.lock"
+		if err := os.Chmod(marker, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+
+		restore := SetAfterUnfenceableSnapshotOpenForTest(func(dbPath string) {
+			corrupt := append([]byte(nil), walBytes...)
+			corrupt[0] ^= 0xff
+			_ = os.WriteFile(dbPath+"-wal", corrupt, 0o644)
+		})
+		defer restore()
+
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict when WAL changed after snapshot open = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
 }

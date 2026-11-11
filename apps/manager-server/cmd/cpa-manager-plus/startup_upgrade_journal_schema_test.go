@@ -26,6 +26,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -843,6 +844,163 @@ func TestUnreadableLockFailsClosedOnCorruptOrUncheckpointedV2WAL(t *testing.T) {
 			}
 			if afterTree := readSourceTree(t, dir); !reflect.DeepEqual(beforeTree, afterTree) {
 				t.Fatalf("%s mutated source tree", tc.name)
+			}
+		})
+	}
+}
+
+// TestUnreadableLockFailsClosedWhenWALSourceChangesAfterSnapshotOpen enforces
+// that on the unreadable-lock + non-empty WAL discovery path, if an external
+// process modifies the source WAL or sidecars after the private snapshot has
+// been copied and verified (and before classification returns), GET discovery
+// fails closed with 503 unavailable instead of returning a stale 200
+// source_ownership_unavailable verdict, while Manager never writes to the source.
+func TestUnreadableLockFailsClosedWhenWALSourceChangesAfterSnapshotOpen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
+	}
+
+	_, v2DonorPaths := walOnlyMutationOnLegacyStore(t, "v2-table")
+	v2WALBytes, err := os.ReadFile(v2DonorPaths.Database + "-wal")
+	if err != nil || len(v2WALBytes) == 0 {
+		t.Fatalf("read WAL-only v2 donor WAL (len=%d, err=%v)", len(v2WALBytes), err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, dbPath string)
+	}{
+		{
+			name: "wal-switches-to-v2-schema-after-snapshot",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-wal", v2WALBytes, 0o644); err != nil {
+					t.Fatalf("replace WAL with v2-table WAL: %v", err)
+				}
+			},
+		},
+		{
+			name: "wal-rewritten-in-place-with-restored-mtime-after-snapshot",
+			mutate: func(t *testing.T, dbPath string) {
+				walPath := dbPath + "-wal"
+				origStat, err := os.Lstat(walPath)
+				if err != nil {
+					t.Fatalf("stat WAL: %v", err)
+				}
+				f, err := os.OpenFile(walPath, os.O_RDWR, 0)
+				if err != nil {
+					t.Fatalf("open WAL in place: %v", err)
+				}
+				var b [1]byte
+				if _, err := f.ReadAt(b[:], 0); err != nil {
+					_ = f.Close()
+					t.Fatalf("read WAL byte 0: %v", err)
+				}
+				b[0] ^= 0xff
+				if _, err := f.WriteAt(b[:], 0); err != nil {
+					_ = f.Close()
+					t.Fatalf("rewrite WAL byte 0: %v", err)
+				}
+				if err := f.Close(); err != nil {
+					t.Fatalf("close WAL: %v", err)
+				}
+				if err := os.Chtimes(walPath, origStat.ModTime(), origStat.ModTime()); err != nil {
+					t.Fatalf("restore WAL mtime: %v", err)
+				}
+			},
+		},
+		{
+			name: "pending-rollback-journal-created-after-snapshot",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-journal", []byte("pending-rollback-frames"), 0o644); err != nil {
+					t.Fatalf("write rollback journal: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(legacyRootEnvironment, "")
+			dir, paths := walOnlyMutationOnLegacyStore(t, "legacy-event")
+			markerPath := paths.Database + ".manager.lock"
+			markerInfo, err := os.Lstat(markerPath)
+			if err != nil {
+				t.Fatalf("stat marker: %v", err)
+			}
+			origMarkerMode := markerInfo.Mode().Perm()
+			beforeTree := readSourceTree(t, dir)
+			if err := os.Chmod(markerPath, 0o000); err != nil {
+				t.Fatalf("chmod marker: %v", err)
+			}
+			beforeMarker := discoveryMarkerState(t, markerPath)
+
+			snapshotExceptMarker := func() map[string]string {
+				entries, readErr := os.ReadDir(dir)
+				if readErr != nil {
+					t.Errorf("readdir source: %v", readErr)
+					return nil
+				}
+				out := make(map[string]string, len(entries))
+				for _, entry := range entries {
+					full := filepath.Join(dir, entry.Name())
+					if full == markerPath {
+						out[entry.Name()] = discoveryMarkerState(t, markerPath)
+						continue
+					}
+					raw, fileErr := os.ReadFile(full)
+					if fileErr != nil {
+						t.Errorf("read %s: %v", full, fileErr)
+						continue
+					}
+					out[entry.Name()] = discoveryMarkerState(t, full) + ":" + string(raw)
+				}
+				return out
+			}
+			beforeHookEntries := snapshotExceptMarker()
+
+			var (
+				hookFired           bool
+				expectedPostEntries map[string]string
+			)
+			restore := upgradeservice.SetAfterUnfenceableSnapshotOpenForTest(func(dbPath string) {
+				if dbPath != paths.Database {
+					return
+				}
+				hookFired = true
+				if gotEntries := snapshotExceptMarker(); !reflect.DeepEqual(beforeHookEntries, gotEntries) {
+					t.Errorf("OpenSnapshot modified source volume before hook")
+				}
+				tc.mutate(t, dbPath)
+				expectedPostEntries = snapshotExceptMarker()
+			})
+			defer restore()
+
+			h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+			h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+			defer h.BeginWritableStartup()
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+			afterMarker := discoveryMarkerState(t, markerPath)
+			afterEntries := snapshotExceptMarker()
+			if err := os.Chmod(markerPath, origMarkerMode); err != nil {
+				t.Fatalf("restore marker mode: %v", err)
+			}
+			afterTree := readSourceTree(t, dir)
+			if !hookFired {
+				t.Fatalf("%s did not traverse unfenceable WAL snapshot path", tc.name)
+			}
+			if rec.Code != http.StatusServiceUnavailable ||
+				!strings.Contains(rec.Body.String(), `"status":"unavailable"`) ||
+				!strings.Contains(rec.Body.String(), `"reason":"observation_unavailable"`) {
+				t.Fatalf("%s GET discovery = %d (%s), want 503 unavailable/observation_unavailable", tc.name, rec.Code, rec.Body.String())
+			}
+			if afterMarker != beforeMarker {
+				t.Fatalf("%s Manager touched marker: %s -> %s", tc.name, beforeMarker, afterMarker)
+			}
+			if !reflect.DeepEqual(expectedPostEntries, afterEntries) {
+				t.Fatalf("%s Manager modified source volume after snapshot open", tc.name)
+			}
+			if beforeTree[filepath.Base(markerPath)] != afterTree[filepath.Base(markerPath)] {
+				t.Fatalf("%s marker bytes changed", tc.name)
 			}
 		})
 	}
