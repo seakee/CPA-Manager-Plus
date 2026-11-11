@@ -40,7 +40,10 @@ This specification defines the token contracts, layout conventions, and automate
     - `--floating-shadow-xl`: form select popovers (`Select`, including its input-focus accent ring).
     - `--floating-shadow-dialog`: centered modal dialogs (`.modal`).
     - `--floating-shadow-drawer`: side drawer panels (`Drawer` panel edge shadow, Codex inspection config drawer).
-  - The dark theme deepens the scale instead of reusing the light values: every tier keeps its light offsets and adds a heavier drop layer plus a hairline ring (`0 0 0 1px rgb(255 255 255 / 0.06)` for `sm`, `0.08` for `md`, the accent ring for `lg` and above), because against a near-black page the drop layer alone barely reads and the ring carries the separation.
+  - The dark theme deepens part of the scale instead of reusing the light values. The `[data-theme='dark']` block in `themes.scss` gives `sm`, `md`, `lg`, and `xl` dark-specific values; `dialog` and `drawer` repeat the light values unchanged:
+    - `sm` and `md` were deepened along with the floating-layer rollout: they keep their light offsets and gain a heavier neutral-black drop layer (`rgba(0, 0, 0, 0.32)` for `sm`, `0.4` for `md`) plus a 1px white hairline ring (`0 0 0 1px rgb(255 255 255 / 0.06)` for `sm`, `0.08` for `md`), because against a near-black page the drop layer alone barely reads and the ring carries the separation.
+    - `lg` and `xl` keep their pre-existing dark values: the same offsets, a heavier drop layer, and a stronger accent ring (`14%` primary for `lg` vs `8%` in light, `16%` input-border for `xl` vs `10%`), with no white hairline ring.
+    - `dialog` (`0 10px 15px -3px rgb(0 0 0 / 0.1)`) and `drawer` (`-24px 0 48px rgba(15, 23, 42, 0.18)`) are identical in both themes and are therefore outside this rule; deepening them needs its own visual review rather than an inference from this list.
   - Overlay backdrops use the `--overlay-scrim*` tokens from `themes.scss`:
     - `--overlay-scrim`: centered modal dialog backdrop (`.modal-overlay`).
     - `--overlay-scrim-backdrop`: mobile navigation sidebar backdrop (`.sidebar-backdrop`).
