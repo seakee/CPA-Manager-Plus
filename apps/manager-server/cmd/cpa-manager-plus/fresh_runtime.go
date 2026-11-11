@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,11 +21,12 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 const freshRuntimeJournalKey = "fresh_runtime_operations_v1"
+const freshEmbeddedStartLedgerKey = "fresh_embedded_start_ledger_v1"
+
 
 const (
 	// freshRuntimeJournalTerminalRetention bounds the durable journal to the most
@@ -266,13 +268,55 @@ func freshRuntimeResolveOperation(
 
 var errEmbeddedRuntimeDisabled = errors.New("CPA runtime client is not configured")
 
-type freshUnresolvedEmbeddedStart struct {
-	operationID       string
-	operationType     model.RuntimeOperationType
-	runtimeIdentity   model.RuntimeIdentity
-	runtimeGeneration uint64
-	targetVersion     string
-	dispatchedAt      time.Time
+type freshEmbeddedStartIntent struct {
+	Key               string                     `json:"key"`
+	OperationID       string                     `json:"operationId"`
+	OperationType     model.RuntimeOperationType `json:"operationType"`
+	RuntimeIdentity   model.RuntimeIdentity      `json:"runtimeIdentity"`
+	RuntimeGeneration uint64                     `json:"runtimeGeneration"`
+	TargetVersion     string                     `json:"targetVersion,omitempty"`
+	CreatedAt         time.Time                  `json:"createdAt"`
+}
+
+type freshEmbeddedStartLedgerData struct {
+	EverDispatched bool                                `json:"everDispatched"`
+	Unresolved     map[string]freshEmbeddedStartIntent `json:"unresolved"`
+}
+
+type freshStrategyActionBlocker struct {
+	Code        string
+	Action      string `json:",omitempty"`
+	Unsupported []string
+}
+
+func (e *freshStrategyActionBlocker) Error() string { return e.Code }
+
+func embeddedRuntimeStartUnresolvedBlocker() *freshStrategyActionBlocker {
+	return &freshStrategyActionBlocker{
+		Code:   "embedded_runtime_start_unresolved",
+		Action: "An embedded CPA start or update operation is still in progress or unconfirmed. Wait for it to finish, or restart cpamp-runtime-supervisor (or the container) to establish a fresh stopped runtime generation, then retry Connect External.",
+	}
+}
+
+func embeddedRuntimeNotStoppedBlocker() *freshStrategyActionBlocker {
+	return &freshStrategyActionBlocker{
+		Code:   "embedded_runtime_not_stopped",
+		Action: "The embedded CPA runtime is running or has automatic crash recovery armed. Stop the embedded runtime (or restart cpamp-runtime-supervisor) so it stays offline with recovery disarmed, then retry Connect External.",
+	}
+}
+
+func embeddedRuntimeRecoveryUnverifiedBlocker() *freshStrategyActionBlocker {
+	return &freshStrategyActionBlocker{
+		Code:   "embedded_runtime_recovery_unverified",
+		Action: "The embedded runtime supervisor reported offline without recovery state evidence. Check or restart cpamp-runtime-supervisor so it reports disarmed recovery (inactive or manual_intervention), then retry Connect External.",
+	}
+}
+
+func embeddedSupervisorUnavailableBlocker() *freshStrategyActionBlocker {
+	return &freshStrategyActionBlocker{
+		Code:   "embedded_supervisor_status_unavailable",
+		Action: "Embedded runtime activity was recorded on this installation and cpamp-runtime-supervisor is unreachable or reporting an unknown state. Restore or restart cpamp-runtime-supervisor so the embedded runtime can be confirmed stopped, then retry Connect External.",
+	}
 }
 
 type freshEmbeddedExecutionGate struct {
@@ -285,7 +329,8 @@ type freshEmbeddedExecutionGate struct {
 	closed             bool
 	readCancels        map[uint64]context.CancelFunc
 	nextID             uint64
-	unresolvedStarts   []freshUnresolvedEmbeddedStart
+	ledgerMu           sync.Mutex
+	memoryLedger       *freshEmbeddedStartLedgerData
 	externalCommitted  chan struct{}
 	reconcilerCancel   context.CancelFunc
 	reconcilerDone     chan struct{}
@@ -478,36 +523,150 @@ func isGuaranteedSupervisorPreAdmissionRejection(err error) bool {
 	}
 }
 
-func (a *freshApplication) recordEmbeddedStartOutcome(
+func (a *freshApplication) embeddedStartLedgerDB() *sql.DB {
+	if a == nil || a.runtimeJournal == nil {
+		return nil
+	}
+	return a.runtimeJournal.db
+}
+
+func (a *freshApplication) loadEmbeddedStartLedgerLocked(ctx context.Context) (freshEmbeddedStartLedgerData, error) {
+	data := freshEmbeddedStartLedgerData{Unresolved: map[string]freshEmbeddedStartIntent{}}
+	if a == nil {
+		return data, nil
+	}
+	db := a.embeddedStartLedgerDB()
+	if db == nil {
+		gate := &a.embeddedExecution
+		if gate.memoryLedger == nil {
+			return data, nil
+		}
+		data.EverDispatched = gate.memoryLedger.EverDispatched
+		for k, v := range gate.memoryLedger.Unresolved {
+			data.Unresolved[k] = v
+		}
+		return data, nil
+	}
+	var raw string
+	err := db.QueryRowContext(ctx, `select value from settings where key = ?`, freshEmbeddedStartLedgerKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return data, nil
+	}
+	if err != nil {
+		return freshEmbeddedStartLedgerData{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		return freshEmbeddedStartLedgerData{}, errors.New("embedded start ledger is unavailable")
+	}
+	if data.Unresolved == nil {
+		data.Unresolved = map[string]freshEmbeddedStartIntent{}
+	}
+	return data, nil
+}
+
+func (a *freshApplication) saveEmbeddedStartLedgerLocked(ctx context.Context, data freshEmbeddedStartLedgerData) error {
+	if a == nil {
+		return nil
+	}
+	if data.Unresolved == nil {
+		data.Unresolved = map[string]freshEmbeddedStartIntent{}
+	}
+	db := a.embeddedStartLedgerDB()
+	if db == nil {
+		copied := freshEmbeddedStartLedgerData{
+			EverDispatched: data.EverDispatched,
+			Unresolved:     make(map[string]freshEmbeddedStartIntent, len(data.Unresolved)),
+		}
+		for k, v := range data.Unresolved {
+			copied.Unresolved[k] = v
+		}
+		a.embeddedExecution.memoryLedger = &copied
+		return nil
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(
+		ctx,
+		`insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do update set value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
+		freshEmbeddedStartLedgerKey,
+		string(raw),
+		time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (a *freshApplication) beginEmbeddedStartIntent(
+	ctx context.Context,
 	operationType model.RuntimeOperationType,
 	operationID string,
 	runtimeIdentity model.RuntimeIdentity,
 	runtimeGeneration uint64,
 	targetVersion string,
+) (string, error) {
+	if a == nil {
+		return "", errEmbeddedRuntimeDisabled
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	key := fmt.Sprintf("%s:%s:%s:%d", operationType, operationID, runtimeIdentity, runtimeGeneration)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	gate := &a.embeddedExecution
+	gate.ledgerMu.Lock()
+	defer gate.ledgerMu.Unlock()
+	data, err := a.loadEmbeddedStartLedgerLocked(writeCtx)
+	if err != nil {
+		return "", err
+	}
+	data.EverDispatched = true
+	data.Unresolved[key] = freshEmbeddedStartIntent{
+		Key:               key,
+		OperationID:       operationID,
+		OperationType:     operationType,
+		RuntimeIdentity:   runtimeIdentity,
+		RuntimeGeneration: runtimeGeneration,
+		TargetVersion:     targetVersion,
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := a.saveEmbeddedStartLedgerLocked(writeCtx, data); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func (a *freshApplication) finishEmbeddedStartIntent(
+	intentKey string,
 	result model.RuntimeOperationResult,
 	callErr error,
 ) {
-	if a == nil {
+	if a == nil || intentKey == "" {
 		return
 	}
-	if callErr == nil && result.Validate() == nil &&
-		(result.State == model.RuntimeOperationSucceeded || result.State == model.RuntimeOperationFailed) {
+	settled := (callErr == nil && result.Validate() == nil &&
+		(result.State == model.RuntimeOperationSucceeded || result.State == model.RuntimeOperationFailed)) ||
+		(callErr != nil && isGuaranteedSupervisorPreAdmissionRejection(callErr))
+	if !settled {
 		return
 	}
-	if callErr != nil && isGuaranteedSupervisorPreAdmissionRejection(callErr) {
-		return
-	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	gate := &a.embeddedExecution
-	gate.mu.Lock()
-	gate.unresolvedStarts = append(gate.unresolvedStarts, freshUnresolvedEmbeddedStart{
-		operationID:       operationID,
-		operationType:     operationType,
-		runtimeIdentity:   runtimeIdentity,
-		runtimeGeneration: runtimeGeneration,
-		targetVersion:     targetVersion,
-		dispatchedAt:      time.Now().UTC(),
-	})
-	gate.mu.Unlock()
+	gate.ledgerMu.Lock()
+	defer gate.ledgerMu.Unlock()
+	data, err := a.loadEmbeddedStartLedgerLocked(writeCtx)
+	if err != nil {
+		return
+	}
+	if _, exists := data.Unresolved[intentKey]; !exists {
+		return
+	}
+	delete(data.Unresolved, intentKey)
+	_ = a.saveEmbeddedStartLedgerLocked(writeCtx, data)
 }
 
 func (a *freshApplication) externalCommittedSignal() <-chan struct{} {
@@ -573,74 +732,107 @@ func (a *freshApplication) checkUnresolvedEmbeddedStarts(
 	ctx context.Context,
 	identity model.RuntimeIdentity,
 	generation model.RuntimeGeneration,
-	now time.Time,
 ) (bool, error) {
 	gate := &a.embeddedExecution
-	gate.mu.Lock()
-	snapshot := append([]freshUnresolvedEmbeddedStart(nil), gate.unresolvedStarts...)
-	gate.mu.Unlock()
-	if len(snapshot) == 0 {
+	gate.ledgerMu.Lock()
+	data, err := a.loadEmbeddedStartLedgerLocked(ctx)
+	gate.ledgerMu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	if len(data.Unresolved) == 0 {
 		return false, nil
 	}
 
-	var remaining []freshUnresolvedEmbeddedStart
+	keys := make([]string, 0, len(data.Unresolved))
+	for k := range data.Unresolved {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	nextUnresolved := make(map[string]freshEmbeddedStartIntent, len(data.Unresolved))
+	changed := false
 	reobserveStatus := false
-	for i, entry := range snapshot {
-		if entry.runtimeIdentity != "" &&
-			(entry.runtimeIdentity != identity || entry.runtimeGeneration != uint64(generation)) {
+	for i, key := range keys {
+		entry := data.Unresolved[key]
+		if entry.RuntimeIdentity != "" &&
+			(entry.RuntimeIdentity != identity || entry.RuntimeGeneration != uint64(generation)) {
+			changed = true
 			continue
 		}
-		if entry.operationType == model.RuntimeOperationActivateUpdate {
-			obs, err := a.runtime.ObserveUpdateOperation(ctx, model.RuntimeObserveUpdateOperationRequest{
+		if entry.OperationType == model.RuntimeOperationActivateUpdate {
+			obs, obsErr := a.runtime.ObserveUpdateOperation(ctx, model.RuntimeObserveUpdateOperationRequest{
 				RuntimeMutationRequest: model.RuntimeMutationRequest{
-					OperationID:               entry.operationID,
+					OperationID:               entry.OperationID,
 					ExpectedRuntimeIdentity:   identity,
 					ExpectedRuntimeGeneration: generation,
 				},
 				OperationType: model.RuntimeOperationActivateUpdate,
-				TargetVersion: entry.targetVersion,
+				TargetVersion: entry.TargetVersion,
 			})
-			if err != nil {
+			if obsErr != nil {
 				var protocolErr *runtimeservice.ProtocolError
-				if errors.As(err, &protocolErr) && protocolErr != nil &&
+				if errors.As(obsErr, &protocolErr) && protocolErr != nil &&
 					protocolErr.Code == runtimeservice.ProtocolErrorOperationNotFound {
+					changed = true
 					reobserveStatus = true
 					continue
 				}
-				remaining = append(remaining, snapshot[i:]...)
-				gate.mu.Lock()
-				gate.unresolvedStarts = remaining
-				gate.mu.Unlock()
-				return false, err
+				for _, tailKey := range keys[i:] {
+					nextUnresolved[tailKey] = data.Unresolved[tailKey]
+				}
+				if changed {
+					gate.ledgerMu.Lock()
+					data.Unresolved = nextUnresolved
+					_ = a.saveEmbeddedStartLedgerLocked(ctx, data)
+					gate.ledgerMu.Unlock()
+				}
+				return false, embeddedSupervisorUnavailableBlocker()
 			}
 			if obs.Validate() == nil &&
 				(obs.State == model.RuntimeOperationFailed || obs.State == model.RuntimeOperationSucceeded) {
+				changed = true
 				reobserveStatus = true
 				continue
 			}
-			remaining = append(remaining, entry)
+			nextUnresolved[key] = entry
 			continue
 		}
-		if now.Sub(entry.dispatchedAt) >= freshRuntimeOperationUnknownBound {
-			continue
-		}
-		remaining = append(remaining, entry)
+		// Start and Restart have no Supervisor lookup endpoint in Protocol v1 and
+		// never expire by wall-clock time: they remain fenced until a new Supervisor
+		// generation proves the prior incarnation is gone.
+		nextUnresolved[key] = entry
 	}
 
-	gate.mu.Lock()
-	gate.unresolvedStarts = remaining
-	gate.mu.Unlock()
-	if len(remaining) > 0 {
-		return false, &freshstrategy.Blocker{Code: "embedded_runtime_start_unresolved"}
+	if changed {
+		gate.ledgerMu.Lock()
+		data.Unresolved = nextUnresolved
+		saveErr := a.saveEmbeddedStartLedgerLocked(ctx, data)
+		gate.ledgerMu.Unlock()
+		if saveErr != nil {
+			return false, saveErr
+		}
+	}
+	if len(nextUnresolved) > 0 {
+		return false, embeddedRuntimeStartUnresolvedBlocker()
 	}
 	return reobserveStatus, nil
+}
+
+func freshRuntimeProvenSettledForExternalCommit(op freshRuntimeOperation) bool {
+	if op.State == freshRuntimeStateSucceeded {
+		return true
+	}
+	if op.State == freshRuntimeStateFailed && op.FailureCode != "unknown_expired" {
+		return true
+	}
+	return false
 }
 
 func (a *freshApplication) checkPendingJournalEmbeddedOperations(
 	ctx context.Context,
 	identity model.RuntimeIdentity,
 	generation model.RuntimeGeneration,
-	now time.Time,
 ) error {
 	if a == nil || a.runtimeJournal == nil {
 		return nil
@@ -650,19 +842,105 @@ func (a *freshApplication) checkPendingJournalEmbeddedOperations(
 		return err
 	}
 	for _, op := range data.Operations {
-		if freshRuntimeOperationTerminal(op) {
-			continue
-		}
-		if now.Sub(op.UpdatedAt) >= freshRuntimeOperationUnknownBound {
+		if freshRuntimeProvenSettledForExternalCommit(op) {
 			continue
 		}
 		if op.RuntimeIdentity != "" &&
 			(op.RuntimeIdentity != string(identity) || op.RuntimeGeneration != uint64(generation)) {
 			continue
 		}
-		return &freshstrategy.Blocker{Code: "embedded_runtime_start_unresolved"}
+		return embeddedRuntimeStartUnresolvedBlocker()
 	}
 	return nil
+}
+
+// provenEmbeddedRuntimeNeverActivated returns true only when durable SQLite and
+// configured desired-state stores prove this installation never desired, staged,
+// or dispatched any Embedded CPA execution across the lifetime of the database.
+func (a *freshApplication) provenEmbeddedRuntimeNeverActivated(ctx context.Context) (bool, error) {
+	if a == nil {
+		return false, nil
+	}
+	if a.store != nil {
+		rec, err := a.store.Load(ctx)
+		if err != nil {
+			return false, err
+		}
+		if rec.Operation.ProductComplete {
+			return false, nil
+		}
+		if rec.Operation.Strategy.Strategy != "" && rec.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+			return false, nil
+		}
+	}
+
+	gate := &a.embeddedExecution
+	gate.ledgerMu.Lock()
+	ledger, err := a.loadEmbeddedStartLedgerLocked(ctx)
+	gate.ledgerMu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	if ledger.EverDispatched || len(ledger.Unresolved) > 0 {
+		return false, nil
+	}
+
+	if a.runtimeJournal != nil {
+		jData, err := a.runtimeJournal.load(ctx)
+		if err != nil {
+			return false, err
+		}
+		if len(jData.Operations) > 0 {
+			return false, nil
+		}
+		if a.runtimeJournal.db != nil {
+			var count int
+			if err := a.runtimeJournal.db.QueryRowContext(
+				ctx,
+				`select count(*) from settings where key in ('runtime_desired_v1','cpa_update_state_v1')`,
+			).Scan(&count); err != nil {
+				return false, err
+			}
+			if count > 0 {
+				return false, nil
+			}
+		}
+	}
+
+	if a.desiredState != nil {
+		_, found, err := a.desiredState.LoadEmbeddedRuntimeDesiredState(ctx)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return false, nil
+		}
+	}
+	if a.runtimeSettings != nil {
+		_, found, err := a.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func checkEmbeddedRuntimeStoppedAndRecoveryDisarmed(observed model.RuntimeObservedStatus) error {
+	if observed.State != model.RuntimeStateOffline {
+		return embeddedRuntimeNotStoppedBlocker()
+	}
+	if observed.Recovery == nil {
+		return embeddedRuntimeRecoveryUnverifiedBlocker()
+	}
+	switch observed.Recovery.State {
+	case model.RuntimeRecoveryStateInactive, model.RuntimeRecoveryStateManualIntervention:
+		return nil
+	default:
+		return embeddedRuntimeNotStoppedBlocker()
+	}
 }
 
 func (a *freshApplication) verifyEmbeddedRuntimeStoppedForExternalCommit(ctx context.Context) error {
@@ -673,48 +951,33 @@ func (a *freshApplication) verifyEmbeddedRuntimeStoppedForExternalCommit(ctx con
 	defer cancel()
 
 	observed, err := a.runtime.Status(fenceCtx)
-	if err != nil || observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.State == model.RuntimeStateUnknown {
-		if err != nil {
-			return err
+	if err != nil {
+		neverActivated, proofErr := a.provenEmbeddedRuntimeNeverActivated(fenceCtx)
+		if proofErr != nil {
+			return proofErr
 		}
-		return errors.New("embedded Runtime status observation is invalid or unknown")
+		if neverActivated {
+			return nil
+		}
+		return embeddedSupervisorUnavailableBlocker()
 	}
-	now := time.Now().UTC()
-	reobserve, err := a.checkUnresolvedEmbeddedStarts(fenceCtx, observed.Identity, observed.Generation, now)
+	if observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.State == model.RuntimeStateUnknown {
+		return embeddedSupervisorUnavailableBlocker()
+	}
+	reobserve, err := a.checkUnresolvedEmbeddedStarts(fenceCtx, observed.Identity, observed.Generation)
 	if err != nil {
 		return err
 	}
-	if err := a.checkPendingJournalEmbeddedOperations(fenceCtx, observed.Identity, observed.Generation, now); err != nil {
+	if err := a.checkPendingJournalEmbeddedOperations(fenceCtx, observed.Identity, observed.Generation); err != nil {
 		return err
 	}
 	if reobserve {
 		observed, err = a.runtime.Status(fenceCtx)
 		if err != nil || observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.State == model.RuntimeStateUnknown {
-			if err != nil {
-				return err
-			}
-			return errors.New("embedded Runtime status re-observation is invalid or unknown")
+			return embeddedSupervisorUnavailableBlocker()
 		}
 	}
-	if !embeddedRuntimeStoppedForExternalCommit(observed) {
-		return &freshstrategy.Blocker{Code: "embedded_runtime_not_stopped"}
-	}
-	return nil
-}
-
-func embeddedRuntimeStoppedForExternalCommit(observed model.RuntimeObservedStatus) bool {
-	if observed.State != model.RuntimeStateOffline {
-		return false
-	}
-	if observed.Recovery == nil {
-		return true
-	}
-	switch observed.Recovery.State {
-	case model.RuntimeRecoveryStateInactive, model.RuntimeRecoveryStateManualIntervention:
-		return true
-	default:
-		return false
-	}
+	return checkEmbeddedRuntimeStoppedAndRecoveryDisarmed(observed)
 }
 
 func (a *freshApplication) beginExternalCommit(ctx context.Context) (func(committed bool), error) {
@@ -753,7 +1016,7 @@ func (a *freshApplication) beginExternalCommit(ctx context.Context) (func(commit
 	}
 	if inFlightMutations > 0 {
 		abort()
-		return nil, &freshstrategy.Blocker{Code: "embedded_runtime_start_unresolved"}
+		return nil, embeddedRuntimeStartUnresolvedBlocker()
 	}
 	if a.runtime != nil {
 		if err := a.verifyEmbeddedRuntimeStoppedForExternalCommit(ctx); err != nil {
@@ -843,22 +1106,27 @@ func (c gatedEmbeddedRuntimeClient) Status(ctx context.Context) (model.RuntimeOb
 }
 
 func (c gatedEmbeddedRuntimeClient) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	if err := request.Validate(); err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
 	client, release, err := c.enterMutation(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	out, callErr := client.Start(ctx, request)
-	if request.Validate() == nil {
-		c.app.recordEmbeddedStartOutcome(
-			model.RuntimeOperationStart,
-			request.OperationID,
-			request.ExpectedRuntimeIdentity,
-			uint64(request.ExpectedRuntimeGeneration),
-			"",
-			out,
-			callErr,
-		)
+	intentKey, err := c.app.beginEmbeddedStartIntent(
+		ctx,
+		model.RuntimeOperationStart,
+		request.OperationID,
+		request.ExpectedRuntimeIdentity,
+		uint64(request.ExpectedRuntimeGeneration),
+		"",
+	)
+	if err != nil {
+		release()
+		return model.RuntimeOperationResult{}, err
 	}
+	out, callErr := client.Start(ctx, request)
+	c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
 	release()
 	return out, callErr
 }
@@ -873,22 +1141,30 @@ func (c gatedEmbeddedRuntimeClient) Stop(ctx context.Context, request model.Runt
 }
 
 func (c gatedEmbeddedRuntimeClient) Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	if request.ExpectedActiveArtifactID != "" {
+		return model.RuntimeOperationResult{}, errors.New("restart request must not carry expectedActiveArtifactId")
+	}
+	if err := request.Validate(); err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
 	client, release, err := c.enterMutation(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	out, callErr := client.Restart(ctx, request)
-	if request.ExpectedActiveArtifactID == "" && request.Validate() == nil {
-		c.app.recordEmbeddedStartOutcome(
-			model.RuntimeOperationRestart,
-			request.OperationID,
-			request.ExpectedRuntimeIdentity,
-			uint64(request.ExpectedRuntimeGeneration),
-			"",
-			out,
-			callErr,
-		)
+	intentKey, err := c.app.beginEmbeddedStartIntent(
+		ctx,
+		model.RuntimeOperationRestart,
+		request.OperationID,
+		request.ExpectedRuntimeIdentity,
+		uint64(request.ExpectedRuntimeGeneration),
+		"",
+	)
+	if err != nil {
+		release()
+		return model.RuntimeOperationResult{}, err
 	}
+	out, callErr := client.Restart(ctx, request)
+	c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
 	release()
 	return out, callErr
 }
@@ -903,22 +1179,27 @@ func (c gatedEmbeddedRuntimeClient) PrepareUpdate(ctx context.Context, request m
 }
 
 func (c gatedEmbeddedRuntimeClient) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+	if err := request.Validate(); err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
 	client, release, err := c.enterMutation(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	out, callErr := client.ActivateUpdate(ctx, request)
-	if request.Validate() == nil {
-		c.app.recordEmbeddedStartOutcome(
-			model.RuntimeOperationActivateUpdate,
-			request.OperationID,
-			request.ExpectedRuntimeIdentity,
-			uint64(request.ExpectedRuntimeGeneration),
-			request.TargetVersion,
-			out,
-			callErr,
-		)
+	intentKey, err := c.app.beginEmbeddedStartIntent(
+		ctx,
+		model.RuntimeOperationActivateUpdate,
+		request.OperationID,
+		request.ExpectedRuntimeIdentity,
+		uint64(request.ExpectedRuntimeGeneration),
+		request.TargetVersion,
+	)
+	if err != nil {
+		release()
+		return model.RuntimeOperationResult{}, err
 	}
+	out, callErr := client.ActivateUpdate(ctx, request)
+	c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
 	release()
 	return out, callErr
 }

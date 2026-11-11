@@ -475,6 +475,13 @@ func (a *freshApplication) current(ctx context.Context) (bootstrap.FreshOperatio
 }
 
 func writeFreshStrategyError(w http.ResponseWriter, err error) {
+	var actionBlocker *freshStrategyActionBlocker
+	if errors.As(err, &actionBlocker) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		writeFreshJSON(w, actionBlocker)
+		return
+	}
 	var blocker *freshstrategy.Blocker
 	if errors.As(err, &blocker) {
 		w.Header().Set("Content-Type", "application/json")

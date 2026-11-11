@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -489,6 +490,16 @@ type staticDesiredRunningStore struct{}
 func (staticDesiredRunningStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
 	return model.EmbeddedRuntimeDesiredState{
 		DesiredLifecycle: model.EmbeddedRuntimeDesiredRunning,
+		Revision:         1,
+		UpdatedAtMS:      time.Now().UTC().UnixMilli(),
+	}, true, nil
+}
+
+type staticDesiredStoppedStore struct{}
+
+func (staticDesiredStoppedStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	return model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: model.EmbeddedRuntimeDesiredStopped,
 		Revision:         1,
 		UpdatedAtMS:      time.Now().UTC().UnixMilli(),
 	}, true, nil
@@ -1777,8 +1788,8 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		})
 
 		firstRes := postConnectExternal(t, app, externalServer.URL)
-		if firstRes.Code != http.StatusServiceUnavailable {
-			t.Fatalf("first ConnectExternal on transient ObserveUpdateOperation 503 = %d %s, want 503", firstRes.Code, firstRes.Body.String())
+		if firstRes.Code != http.StatusConflict || !strings.Contains(firstRes.Body.String(), `"embedded_supervisor_status_unavailable"`) {
+			t.Fatalf("first ConnectExternal on transient ObserveUpdateOperation 503 = %d %s, want 409 embedded_supervisor_status_unavailable", firstRes.Code, firstRes.Body.String())
 		}
 
 		// On retry, activate-01 resolves as operation_not_found, while trailing start-02 MUST remain fenced.
@@ -1869,6 +1880,478 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		res := postConnectExternal(t, app, externalServer.URL)
 		if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), `"embedded_runtime_not_stopped"`) {
 			t.Fatalf("ConnectExternal after failed ActivateUpdate rollback = %d %s, want 409 embedded_runtime_not_stopped",
+				res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("offline_without_recovery_evidence_refuses_external_commit", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			// Valid Protocol v1 offline observation WITHOUT recovery object.
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"}}`))
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("missing-recovery-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		res := postConnectExternal(t, app, externalServer.URL)
+		var blocker freshStrategyActionBlocker
+		if res.Code != http.StatusConflict || json.Unmarshal(res.Body.Bytes(), &blocker) != nil ||
+			blocker.Code != "embedded_runtime_recovery_unverified" || blocker.Action == "" {
+			t.Fatalf("ConnectExternal with offline and missing recovery = %d %s, want 409 embedded_runtime_recovery_unverified with Action",
+				res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("manager_restart_after_accepted_start_still_fences_external_commit_until_new_supervisor_generation", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		startAccepted := make(chan struct{})
+		releaseSpawn := make(chan struct{})
+		var acceptOnce sync.Once
+		var releaseOnce sync.Once
+		var supervisorGen atomic.Uint64
+		supervisorGen.Store(1)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			gen := strconv.FormatUint(supervisorGen.Load(), 10)
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/start":
+				acceptOnce.Do(func() { close(startAccepted) })
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+				<-releaseSpawn
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseSpawn) }) })
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("restart-ledger-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		app1 := newFreshApplication(opened1, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		rec, err := app1.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Dispatch unjournaled reconciler Start on app1; Supervisor accepts and drops connection.
+		reconciler := runtimeservice.NewReconciler(
+			app1.embeddedRuntimeClient(),
+			staticDesiredRunningStore{},
+			time.Second,
+			nil,
+		)
+		_ = reconciler.ReconcileOnce(t.Context())
+		<-startAccepted
+
+		// Simulate full Manager process restart: close opened1 and open a brand-new
+		// freshApplication (app2) on the same SQLite database (all in-memory state wiped).
+		if err := opened1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened2.Close() })
+		app2 := newFreshApplication(opened2, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app2.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened2.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+
+		blockedRes := postConnectExternal(t, app2, externalServer.URL)
+		var blocker freshStrategyActionBlocker
+		if blockedRes.Code != http.StatusConflict || json.Unmarshal(blockedRes.Body.Bytes(), &blocker) != nil ||
+			blocker.Code != "embedded_runtime_start_unresolved" || blocker.Action == "" {
+			t.Fatalf("ConnectExternal after Manager restart with unresolved gen=1 Start = %d %s, want 409 embedded_runtime_start_unresolved with Action",
+				blockedRes.Code, blockedRes.Body.String())
+		}
+
+		// Once Supervisor restarts into generation 2 (offline + inactive), the prior
+		// incarnation's accepted Start is provably gone and ConnectExternal commits.
+		supervisorGen.Store(2)
+		okRes := postConnectExternal(t, app2, externalServer.URL)
+		if okRes.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal after Supervisor restarted to generation 2 = %d %s, want 200",
+				okRes.Code, okRes.Body.String())
+		}
+	})
+
+	t.Run("accepted_start_older_than_legacy_ttl_never_expires_by_wall_clock_time", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/start":
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("no-ttl-expiry-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.runtimeSettings = openIsolatedDesiredSettings(t, opened)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		preCommitCompleteOp := rec.Operation
+		preCommitCompleteOp.ProductComplete = true
+
+		opOut := httptest.NewRecorder()
+		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+			strings.NewReader(`{"action":"start","requestId":"dddddddd-4444-4444-8444-444444444444"}`))
+		opReq.Header.Set("Content-Type", "application/json")
+		app.runtimeOperations(opOut, opReq, preCommitCompleteOp, "runtime/operations")
+
+		// Backdate BOTH the start ledger and the runtime operation journal by 10 minutes
+		// (> legacy 2-minute freshRuntimeOperationUnknownBound), and let runtimeStatus
+		// transition the display journal entry to unknown_expired.
+		tenMinutesAgo := time.Now().UTC().Add(-10 * time.Minute)
+		app.embeddedExecution.ledgerMu.Lock()
+		ledger, err := app.loadEmbeddedStartLedgerLocked(t.Context())
+		if err != nil {
+			app.embeddedExecution.ledgerMu.Unlock()
+			t.Fatal(err)
+		}
+		for k, v := range ledger.Unresolved {
+			v.CreatedAt = tenMinutesAgo
+			ledger.Unresolved[k] = v
+		}
+		if err := app.saveEmbeddedStartLedgerLocked(t.Context(), ledger); err != nil {
+			app.embeddedExecution.ledgerMu.Unlock()
+			t.Fatal(err)
+		}
+		app.embeddedExecution.ledgerMu.Unlock()
+
+		jData, err := app.runtimeJournal.load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range jData.Operations {
+			v.CreatedAt = tenMinutesAgo
+			v.UpdatedAt = tenMinutesAgo
+			jData.Operations[k] = v
+		}
+		if err := app.runtimeJournal.save(t.Context(), jData); err != nil {
+			t.Fatal(err)
+		}
+		statusOut := httptest.NewRecorder()
+		app.runtimeStatus(statusOut, httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil), preCommitCompleteOp)
+
+		// ConnectExternal must STILL refuse with 409: wall-clock age never proves completion.
+		res := postConnectExternal(t, app, externalServer.URL)
+		if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), `"embedded_runtime_start_unresolved"`) {
+			t.Fatalf("ConnectExternal 10m after unconfirmed Start = %d %s, want 409 embedded_runtime_start_unresolved",
+				res.Code, res.Body.String())
+		}
+	})
+}
+
+// TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbeddedIntentAcrossRestart
+// verifies P2-1: a fresh official image that durably never desired or dispatched
+// any Embedded CPA start can commit Connect External even when Supervisor is
+// unreachable; once any start intent has ever been recorded, an unreachable
+// Supervisor refuses Connect External across Manager restarts with a typed,
+// operator-actionable 409 blocker.
+func TestUnreachableSupervisorAllowsPristineExternalCommitAndBlocksAfterEmbeddedIntentAcrossRestart(t *testing.T) {
+	const management = externalAuthorityManagement
+	const artifactID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	newExternalUpstream := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-CPA-Version", "v8.0.55")
+			switch r.URL.Path {
+			case "/v0/management/config":
+				_, _ = w.Write([]byte(`{}`))
+			case "/v8/management/config":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+			default:
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	postConnectExternal := func(t *testing.T, app *freshApplication, externalURL string) *httptest.ResponseRecorder {
+		t.Helper()
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         cur.Operation.Identity,
+			ExpectedRevision: cur.Operation.Revision,
+			AttemptID:        strings.Repeat("f", 32),
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalURL,
+				ManagementKey: management,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		app.canonicalAPI(rec, req)
+		return rec
+	}
+
+	t.Run("pristine_fresh_install_commits_external_when_supervisor_unreachable", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		// Closed server gives an immediately unreachable RuntimeURL without network waits.
+		closedSupervisor := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		closedSupervisor.Close()
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("pristine-unreachable-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       closedSupervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		res := postConnectExternal(t, app, externalServer.URL)
+		if res.Code != http.StatusOK {
+			t.Fatalf("pristine ConnectExternal with unreachable Supervisor = %d %s, want 200", res.Code, res.Body.String())
+		}
+		committed, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if committed.Operation.Strategy.Strategy != bootstrap.ConnectExternal || committed.Operation.Strategy.Stage != "committed" {
+			t.Fatalf("committed strategy = %+v, want ConnectExternal/committed", committed.Operation.Strategy)
+		}
+	})
+
+	t.Run("prior_start_intent_blocks_unreachable_supervisor_across_manager_restart_with_actionable_409", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/operations/start":
+				// Even a terminal Start (leaving Unresolved empty while EverDispatched=true)
+				// means an Embedded CPA may now be running when Supervisor later goes unreachable.
+				_, _ = w.Write([]byte(`{"operationId":"prior-start-01","operationType":"start","state":"succeeded","runtimeIdentity":"runtime-01","runtimeGeneration":1}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("prior-intent-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app1 := newFreshApplication(opened1, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		rec, err := app1.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := app1.embeddedRuntimeClient().Start(t.Context(), model.RuntimeMutationRequest{
+			OperationID:               "prior-start-01",
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 1,
+			ExpectedActiveArtifactID:  artifactID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Shut down Supervisor AND restart Manager on the same SQLite database.
+		supervisor.Close()
+		if err := opened1.Close(); err != nil {
+			t.Fatal(err)
+		}
+		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened2.Close() })
+		app2 := newFreshApplication(opened2, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app2.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened2.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+
+		res := postConnectExternal(t, app2, externalServer.URL)
+		var blocker freshStrategyActionBlocker
+		if res.Code != http.StatusConflict || json.Unmarshal(res.Body.Bytes(), &blocker) != nil ||
+			blocker.Code != "embedded_supervisor_status_unavailable" || blocker.Action == "" {
+			t.Fatalf("post-intent ConnectExternal with unreachable Supervisor after restart = %d %s, want 409 embedded_supervisor_status_unavailable with Action",
 				res.Code, res.Body.String())
 		}
 	})
@@ -2370,7 +2853,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 				if supervisorRunning.Load() {
 					state = "ready"
 				}
-				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + state + `","capabilities":["start","restart","stage_destination"],"cpaObservedVersion":"v8.0.55","activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"}}`))
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + state + `","capabilities":["start","restart","stage_destination"],"cpaObservedVersion":"v8.0.55","activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
 			case "/v1/runtime/operations/stage-destination":
 				var req struct {
 					OperationID   string `json:"operationId"`
@@ -2425,7 +2908,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			QualifiedArtifactID: model.RuntimeArtifactID(artifactID),
 			InitialClientKey:    installTestClientKey,
 		})
-		app.desiredState = staticDesiredRunningStore{}
+		app.desiredState = staticDesiredStoppedStore{}
 
 		rec, err := app.store.Load(t.Context())
 		if err != nil {
@@ -2832,7 +3315,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	var fourthOnce sync.Once
 	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline"}`))
+		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","recovery":{"state":"inactive","attemptsRemaining":0}}`))
 		if statusCalls.Add(1) >= 4 {
 			fourthOnce.Do(func() { close(fourthStatus) })
 		}
@@ -2861,7 +3344,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		Protector:     opened.Protector,
 		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
 	})
-	app.desiredState = staticDesiredRunningStore{}
+	app.desiredState = staticDesiredStoppedStore{}
 
 	rec, err := app.store.Load(t.Context())
 	if err != nil {
