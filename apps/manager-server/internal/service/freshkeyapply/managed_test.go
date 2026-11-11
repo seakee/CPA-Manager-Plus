@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -37,6 +38,10 @@ type managedCPA struct {
 	keyWrites   int
 	dirtyConfig bool
 	authOpen    bool
+	extraRoots  map[string]any
+	pluginsOn   bool
+	authDir     string
+	pluginDir   string
 }
 
 func (m *managedCPA) config() []byte {
@@ -50,19 +55,33 @@ func (m *managedCPA) config() []byte {
 	if m.dirtyConfig {
 		usage = false
 	}
+	authDir := m.authDir
+	if authDir == "" {
+		authDir = "/runtime/supervisor/destination/auth"
+	}
+	pluginDir := m.pluginDir
+	if pluginDir == "" {
+		pluginDir = "/runtime/supervisor/plugins"
+	}
 	body := map[string]any{
 		"config-version": 8,
 		"server":         map[string]any{"host": "0.0.0.0", "port": 8317},
 		"management": map[string]any{"allow-remote": true, "secret-key": managedBcryptSecret,
 			"disable-control-panel": true, "disable-auto-update-panel": true},
 		"access": map[string]any{"api-keys": keys},
-		"oauth":  map[string]any{"auth-dir": "/runtime/gateway/destination/auth"},
+		"oauth":  map[string]any{"auth-dir": authDir},
 		// The Supervisor template always publishes both the switch and its own
 		// plugin root: the root is a sibling of the destination directory so an
 		// installed plugin survives a re-stage, and only this exact closed shape
 		// is the managed posture.
-		"plugins":       map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"},
+		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
 		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": usage}},
+	}
+	if m.pluginsOn {
+		body["plugins"] = map[string]any{"enabled": true, "dir": pluginDir, "configs": map[string]any{"sample": map[string]any{"enabled": true}}}
+	}
+	for k, v := range m.extraRoots {
+		body[k] = v
 	}
 	data, _ := json.Marshal(body)
 	return data
@@ -144,8 +163,10 @@ func managedFixture(t *testing.T) (*Service, *managedCPA, *ModelSource, string) 
 	cpa := &managedCPA{management: strings.Repeat("e", 64)}
 	server := cpa.serve(t)
 	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: managedRuntimeIdentity, Generation: 9,
+		ProtocolVersion:       "v1",
 		State:                 model.RuntimeStateReady,
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.55"}}}
+		CPAObservedVersion:    "v8.0.55",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.55"}}}
 	source := &ModelSource{install: ManagedInstall{
 		RunID: "managed:operation-default-install", Generation: "9", Identity: managedRuntimeIdentity,
 		ArtifactID: managedArtifact(), BaseURL: server.URL, ManagementKey: cpa.management,
@@ -246,16 +267,22 @@ func TestManagedLoneKeyRevocationIsRefused(t *testing.T) {
 }
 
 func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
-	for _, scenario := range []string{"identity", "generation", "artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-protocol", "missing-artifact", "invalid-artifact", "invalid-engine", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			switch scenario {
 			case "identity":
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
-			case "generation":
-				s.runtime.(*observedRuntime).status.Generation = 10
-			case "artifact":
-				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+			case "zero-generation":
+				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-protocol":
+				s.runtime.(*observedRuntime).status.ProtocolVersion = ""
+			case "missing-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
+			case "invalid-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
+			case "invalid-engine":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.Engine = "envoy"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -268,7 +295,7 @@ func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
 				t.Fatalf("drifted target wrote: %v keys=%v", err, cpa.snapshot())
 			}
 			switch scenario {
-			case "identity", "generation":
+			case "identity":
 				if !errors.Is(err, ErrGeneration) {
 					t.Fatalf("drifted target code %v", err)
 				}
@@ -376,7 +403,7 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
 		t.Fatal("restored destination not proven")
 	}
-	for _, scenario := range []string{"identity", "generation", "artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-protocol", "missing-artifact", "invalid-artifact", "invalid-engine", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
@@ -385,10 +412,16 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 			switch scenario {
 			case "identity":
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
-			case "generation":
-				s.runtime.(*observedRuntime).status.Generation = 10
-			case "artifact":
-				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+			case "zero-generation":
+				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-protocol":
+				s.runtime.(*observedRuntime).status.ProtocolVersion = ""
+			case "missing-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
+			case "invalid-artifact":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
+			case "invalid-engine":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.Engine = "envoy"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -407,28 +440,103 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 	}
 }
 
+func TestManagedAuthoritySurvivesSupervisorRestartUpdateAndOperatorEdits(t *testing.T) {
+	s, cpa, _, installedID := managedFixture(t)
+	if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
+		t.Fatal(err)
+	}
+	// Operator adds an AI provider, edits routing/requests, and enables plugins.
+	cpa.mu.Lock()
+	cpa.pluginsOn = true
+	cpa.extraRoots = map[string]any{
+		"api-keys": map[string]any{
+			"openai-compatibility": []any{
+				map[string]any{"name": "mock", "base-url": "http://127.0.0.1:38339/v1", "keys": []any{map[string]any{"api-key": "sk-mock"}}},
+			},
+		},
+		"routing":  map[string]any{"strategy": "round-robin"},
+		"requests": map[string]any{"passthrough-headers": true},
+	}
+	cpa.mu.Unlock()
+	// Supervisor restarts with a new random generation and an updated CPA artifact.
+	s.runtime.(*observedRuntime).status.Generation = 884219
+	s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+
+	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
+		t.Fatal("managed admission lost after operator config edit and Supervisor restart")
+	}
+	if key, err := s.ConfigTarget(t.Context(), 9); err != nil || key == "" {
+		t.Fatalf("ConfigTarget failed after Supervisor restart: %v", err)
+	}
+}
+
 // The destination posture is part of the proof: a CPA that keeps the credential
 // but drops client authentication or remote management is not admitted.
 func TestDefaultInstallCPAAuthorityProvenRejectsDestinationPostureDrift(t *testing.T) {
-	for _, scenario := range []string{"dirty", "forged-management"} {
+	for _, scenario := range []string{"dirty", "forged-management", "untrusted-auth-suffix", "untrusted-plugin-suffix", "gateway-destination-auth"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, _, installedID := managedFixture(t)
 			if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
 				t.Fatal(err)
 			}
+			cpa.mu.Lock()
 			switch scenario {
 			case "dirty":
-				cpa.mu.Lock()
 				cpa.dirtyConfig = true
-				cpa.mu.Unlock()
 			case "forged-management":
-				cpa.mu.Lock()
 				cpa.management = strings.Repeat("z", 64)
-				cpa.mu.Unlock()
+			case "untrusted-auth-suffix":
+				cpa.authDir = "/tmp/foreign/supervisor/destination/auth"
+			case "untrusted-plugin-suffix":
+				cpa.pluginDir = "/tmp/foreign/supervisor/plugins"
+			case "gateway-destination-auth":
+				cpa.authDir = "/runtime/gateway/destination/auth"
 			}
+			cpa.mu.Unlock()
 			if s.DefaultInstallCPAAuthorityProven(t.Context()) {
 				t.Fatalf("%s destination proven", scenario)
 			}
 		})
+	}
+}
+
+func TestValidManagerOwnedDestinationCheckpoint(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for name, tc := range map[string]struct {
+		cp   bootstrap.FreshStrategyCheckpoint
+		want bool
+	}{
+		"committed new_managed with managed digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "managed:sha256:" + digest},
+			want: true,
+		},
+		"committed adopt network_existing with external digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: true,
+		},
+		"unmigrated new_managed without destination identity": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed"},
+			want: false,
+		},
+		"new_managed with wrong prefix": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+		"new_managed with truncated digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "managed:sha256:abcd"},
+			want: false,
+		},
+		"adopt legacy_managed excluded": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptLegacyManaged, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+		"connect_external excluded": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+	} {
+		if got := ValidManagerOwnedDestinationCheckpoint(tc.cp); got != tc.want {
+			t.Fatalf("%s: ValidManagerOwnedDestinationCheckpoint = %v, want %v", name, got, tc.want)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package freshkeyapply
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -105,6 +104,17 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 	return s
 }
 
+// SetTrustedSupervisorRoots binds a Manager-owned key authority to the
+// installation's canonical Runtime Supervisor root(s).
+func (s *Service) SetTrustedSupervisorRoots(roots []string) {
+	if s == nil {
+		return
+	}
+	if transport, ok := s.wire.(*cpa.Transport); ok {
+		transport.SetTrustedSupervisorRoots(roots)
+	}
+}
+
 // ManagedEndpoint is the normalized destination CPA address this authority
 // writes through. It is configuration, not a credential.
 func (s *Service) ManagedEndpoint() string {
@@ -153,8 +163,7 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 		// qualify; an adopted destination is bound by the `external:` digest the
 		// adoption recorded, so the prefix is read from the strategy and never
 		// guessed from the value.
-		prefix, owned := managerOwnedDestinationPrefix(op.Strategy)
-		return owned && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, prefix)
+		return ValidManagerOwnedDestinationCheckpoint(op.Strategy)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;
 		// the Host permit remains the write authority for whatever it names.

@@ -87,25 +87,83 @@ func freshPaths(cfg config.Config) (sqliterepo.InspectionPaths, error) {
 
 var errFreshExternalPermitRevoked = errors.New("fresh external host permit revoked")
 
+// runtimeLifecycleMutex is a context-cancellable 1-slot semaphore shared
+// between explicit operator lifecycle mutations and automatic reconcile cycles.
+type runtimeLifecycleMutex struct {
+	initOnce sync.Once
+	ch       chan struct{}
+	onWait   func()
+}
+
+func (m *runtimeLifecycleMutex) tokenCh() chan struct{} {
+	m.initOnce.Do(func() {
+		m.ch = make(chan struct{}, 1)
+		m.ch <- struct{}{}
+	})
+	return m.ch
+}
+
+func (m *runtimeLifecycleMutex) unlockFunc(ch chan struct{}) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ch <- struct{}{}
+		})
+	}
+}
+
+func (m *runtimeLifecycleMutex) Lock(ctx context.Context) (func(), error) {
+	if m == nil {
+		return func() {}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ch := m.tokenCh()
+	select {
+	case <-ch:
+		if err := ctx.Err(); err != nil {
+			ch <- struct{}{}
+			return nil, err
+		}
+		return m.unlockFunc(ch), nil
+	default:
+	}
+	if m.onWait != nil {
+		m.onWait()
+	}
+	select {
+	case <-ch:
+		if err := ctx.Err(); err != nil {
+			ch <- struct{}{}
+			return nil, err
+		}
+		return m.unlockFunc(ch), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 type freshApplication struct {
-	cfg             config.Config
-	store           freshstore.Store
-	authority       *fresh.Service
-	routing         *freshrouting.Service
-	strategy        *freshstrategy.Service
-	runtime         runtimeservice.RuntimeClient
-	artifact        *runtimeservice.ArtifactClient
-	runtimeExternal *runtimeservice.ExternalClient
-	runtimeSettings setting.Repository
-	runtimeJournal  *freshRuntimeJournal
-	externalPermit  func(bootstrap.FreshOperation, uint64, string, string, string) bool
-	protector       *security.Protector
-	fixed           http.Handler
-	keyRepo         *keyrepo.Repository
-	keys            *freshkeys.Service
-	keyApply        *freshkeyapply.Service
-	updates         *updatecheck.Service
-	gatewayConfig   *freshconfig.Service
+	cfg                config.Config
+	store              freshstore.Store
+	authority          *fresh.Service
+	routing            *freshrouting.Service
+	strategy           *freshstrategy.Service
+	runtime            runtimeservice.RuntimeClient
+	artifact           *runtimeservice.ArtifactClient
+	runtimeExternal    *runtimeservice.ExternalClient
+	runtimeSettings    setting.Repository
+	runtimeJournal     *freshRuntimeJournal
+	runtimeLifecycleMu runtimeLifecycleMutex
+	externalPermit     func(bootstrap.FreshOperation, uint64, string, string, string) bool
+	protector          *security.Protector
+	fixed              http.Handler
+	keyRepo            *keyrepo.Repository
+	keys               *freshkeys.Service
+	keyApply           *freshkeyapply.Service
+	updates            *updatecheck.Service
+	gatewayConfig      *freshconfig.Service
 	// pluginCapability is the short-lived proof behind X-CPA-SUPPORT-PLUGIN.
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
@@ -309,12 +367,15 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if a.keyApply == nil && runtime != nil && h1Valid {
 		// Default Compose installations derive CPA management authority from
 		// the committed destination and the protected Manager connection.
+		supervisorRoots := cfg.TrustedSupervisorRoots()
 		a.managedSource = managedInstallSource(st, opened.Protector, cfg.CPAUpstreamURL)
 		a.keyApply = freshkeyapply.NewManaged(a.keyRepo, a.keys, runtime, cfg.CPAUpstreamURL, a.managedSource)
+		a.keyApply.SetTrustedSupervisorRoots(supervisorRoots)
 		a.gatewayConfig = freshconfig.New(st, a.keyApply.ConfigTarget, a.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
 		// The destination address is the managed installation's own CPA, not the
 		// private loopback profile the default Transport dials.
 		a.gatewayConfig.EnableManaged(cfg.CPAUpstreamURL)
+		a.gatewayConfig.SetTrustedSupervisorRoots(supervisorRoots)
 		// New Managed and Adopt prove different destination postures, so the page
 		// asks the same committed checkpoint the key authority asks.
 		a.gatewayConfig.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
@@ -322,7 +383,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			if err != nil {
 				return cpa.DestinationPosture{}, false
 			}
-			return cpa.PostureFor(install.Strategy)
+			return cpa.PostureForWithSupervisorRoots(install.Strategy, supervisorRoots)
 		})
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this
@@ -581,6 +642,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			w.WriteHeader(http.StatusConflict)
 			return
+		}
+		if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), next.Operation); err != nil {
+			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 		}
 		// Completion is the moment the install-derived CPA authority exists, so
 		// the same idempotent startup path as a resumed install runs now: it
@@ -945,18 +1009,20 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	// Workers started by an in-process completion must use the host lifetime,
 	// not the request that triggered them.
 	app.runCtx = ctx
+	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
 	h.SetFreshHandler(app)
-	if app.runtimeExternal == nil && app.runtime != nil && app.runtimeSettings != nil {
-		reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, log.Printf)
+	// The reconciler worker itself is cheap and decides nothing until the store
+	// answers; LoadEmbeddedRuntimeDesiredState is the real gate and re-reads the
+	// committed checkpoint on every cycle, so an operation that commits
+	// `connect_external` after this process started stops being driven. Starting it
+	// unconditionally keeps that gate in one place instead of splitting the
+	// decision between startup and each cycle.
+	if desired := app.desiredStateStore(); app.runtime != nil && desired != nil {
+		reconciler := runtimeservice.NewReconciler(app.runtime, desired, runtimeservice.DefaultReconcileInterval, log.Printf)
 		go reconciler.Run(ctx)
 	}
-	if opened.Record.Operation.ProductComplete {
-		if err := app.migrateManagedDestination(ctx); err != nil {
-			// Migration is durable and idempotent; keep the completed Fresh
-			// server available while a typed blocker waits for the next startup.
-			log.Printf("Fresh managed destination migration unavailable: %v", err)
-		}
-		app.startUsageCollection(opened.Record.Operation)
+	if op.ProductComplete {
+		app.startUsageCollection(op)
 	}
 	go restoreFreshRouting(ctx, app.routing)
 	go app.runFreshUpdateChecks(ctx)

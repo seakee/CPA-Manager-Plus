@@ -95,6 +95,49 @@ record therefore keeps loading after a Runtime stop or a Config save, and
 unreadable compatibility bytes lock only the domain that reads them, never the
 Manager record.
 
+A Manager-owned installation (New Managed, or an adoption with
+`network_existing`) also derives its lifecycle from that row after a container
+restart, `compose down`/`up` or a host reboot. Completion seeds
+`runtime_desired_v1=running` once, and never overwrites an existing row, so the
+only installation that stays down is one an operator stopped on the Runtime page
+before the restart. An incomplete Manager-owned installation has no such row: it
+derives an in-memory Running obligation instead, and only once its pinned engine
+artifact reports ready.
+
+Every automatic Start fences one artifact. A completed installation fences the
+active artifact the Supervisor reports in the same cycle, exactly as the Console
+Start does, so an engine replaced in place by `prepare_update`/`activate_update`
+is what the restart launches — the Fresh checkpoint keeps the install-time
+artifact as audit evidence and is deliberately not the runtime authority. An
+incomplete installation is the exception: it may only ever launch the artifact
+its wizard committed, so that pinned target overrides the observation. A store
+that cannot answer, or answers with a non-canonical identity, refuses the Start
+instead of falling back to an unfenced one.
+
+The reconcile worker therefore asks the committed checkpoint on *every* cycle
+whether this process may drive a Runtime at all. `runtime_desired_v1` is the
+*desired* lifecycle, never the authority over one: the committed Fresh
+checkpoint is. A Connect External installation, an operation that has not
+committed yet, and an unmigrated or operator-managed checkpoint (one carrying no
+verified `DestinationConnectionIdentity`) all answer "no desired state", so a row
+that outlives a mode change can drive neither a Start nor a Stop. A checkpoint
+the Manager cannot read reports its error and mutates nothing in that cycle,
+rather than degrading to an unowned Runtime. The worker is started
+unconditionally and the decision stays inside that one gate, which is what makes
+a `connect_external` commit that lands after the process started take effect on
+the next cycle.
+
+An automatic Start that is accepted, running or otherwise unresolved is replayed
+under its original operation ID, so the Supervisor journal answers it
+idempotently. A Start the Supervisor durably records as failed is never replayed:
+the journal keeps that failure forever, so the next attempt waits out its retry
+delay and is issued under a new attempt ID, at most `DefaultReconcileStartAttempts`
+times per Runtime identity, generation and desired revision. Re-executing is safe
+because the Supervisor's ownership fence turns a second spawn into a state
+conflict instead of a second child. After the last attempt the Runtime stays
+stopped until an operator starts it; recovery, an ambiguous selection or an
+incomplete staged destination never auto-starts at all.
+
 ## Admin and transport boundary
 
 Only administrator keys are supported. Generated keys reuse the existing secure

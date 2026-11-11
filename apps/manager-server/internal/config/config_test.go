@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -472,6 +473,69 @@ func TestNormalizeCollectorMode(t *testing.T) {
 	}
 }
 
+func TestTrustedSupervisorRootsMatchesDeploymentLayouts(t *testing.T) {
+	clearConfigEnv(t)
+	if runtime.GOOS == "windows" {
+		for name, cfg := range map[string]Config{
+			"empty":        {},
+			"posix-data":   {DataDir: "/data"},
+			"drive-volume": {DataDir: `C:\ProgramData\cpa-manager-plus\data`},
+			"unc-volume":   {DataDir: `\\server\share\cpa-manager-plus\data`},
+		} {
+			if got := cfg.TrustedSupervisorRoots(); len(got) != 0 {
+				t.Fatalf("windows %s roots = %v, want fail-closed empty slice", name, got)
+			}
+		}
+		customRoot := t.TempDir()
+		t.Setenv("USAGE_DATA_DIR", filepath.Join(customRoot, "data"))
+		t.Setenv("CPAMP_RUNTIME_DATA_DIR", filepath.Join(customRoot, "rt-data"))
+		t.Setenv("CPAMP_RUNTIME_JOURNAL_PATH", filepath.Join(customRoot, "custom-sup", "operations.sqlite"))
+		loaded, err := LoadWithoutCreatingDefault()
+		if err != nil {
+			t.Fatalf("LoadWithoutCreatingDefault() error = %v", err)
+		}
+		if got := loaded.TrustedSupervisorRoots(); len(got) != 0 {
+			t.Fatalf("windows env-configured roots = %v, want fail-closed empty slice", got)
+		}
+		return
+	}
+
+	if got := (Config{}).TrustedSupervisorRoots(); len(got) != 2 || got[0] != "/data/runtime/supervisor" || got[1] != "/runtime/supervisor" {
+		t.Fatalf("empty DataDir roots = %v, want container defaults", got)
+	}
+	if got := (Config{DataDir: "/data"}).TrustedSupervisorRoots(); len(got) != 2 || got[0] != "/data/runtime/supervisor" || got[1] != "/runtime/supervisor" {
+		t.Fatalf("/data DataDir roots = %v, want container defaults", got)
+	}
+	if got := (Config{DataDir: "/opt/cpa-manager-plus/data"}).TrustedSupervisorRoots(); len(got) != 1 || got[0] != "/opt/cpa-manager-plus/data/runtime/supervisor" {
+		t.Fatalf("native /opt DataDir roots = %v, want [/opt/cpa-manager-plus/data/runtime/supervisor]", got)
+	}
+	if got := (Config{DataDir: "/var/lib/cpa-manager-plus"}).TrustedSupervisorRoots(); len(got) != 1 || got[0] != "/var/lib/cpa-manager-plus/runtime/supervisor" {
+		t.Fatalf("custom DataDir roots = %v, want [/var/lib/cpa-manager-plus/runtime/supervisor]", got)
+	}
+
+	customRoot := t.TempDir()
+	t.Setenv("USAGE_DATA_DIR", filepath.Join(customRoot, "data"))
+	t.Setenv("CPAMP_RUNTIME_DATA_DIR", filepath.Join(customRoot, "rt-data"))
+	loaded, err := LoadWithoutCreatingDefault()
+	if err != nil {
+		t.Fatalf("LoadWithoutCreatingDefault() error = %v", err)
+	}
+	wantRT := filepath.ToSlash(filepath.Join(customRoot, "rt-data", "supervisor"))
+	if got := loaded.TrustedSupervisorRoots(); len(got) != 1 || got[0] != wantRT {
+		t.Fatalf("CPAMP_RUNTIME_DATA_DIR roots = %v, want [%s]", got, wantRT)
+	}
+
+	t.Setenv("CPAMP_RUNTIME_JOURNAL_PATH", filepath.Join(customRoot, "custom-sup", "operations.sqlite"))
+	loadedJournal, err := LoadWithoutCreatingDefault()
+	if err != nil {
+		t.Fatalf("LoadWithoutCreatingDefault() error = %v", err)
+	}
+	wantSup := filepath.ToSlash(filepath.Join(customRoot, "custom-sup"))
+	if got := loadedJournal.TrustedSupervisorRoots(); len(got) != 1 || got[0] != wantSup {
+		t.Fatalf("CPAMP_RUNTIME_JOURNAL_PATH roots = %v, want [%s]", got, wantSup)
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -501,6 +565,8 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_IMPORT_SESSION_TTL_MINUTES",
 		"CPAMP_RUNTIME_URL",
 		"CPAMP_RUNTIME_TOKEN_FILE",
+		"CPAMP_RUNTIME_DATA_DIR",
+		"CPAMP_RUNTIME_JOURNAL_PATH",
 		"USAGE_ARCHIVE_RETENTION_ENABLED",
 		"USAGE_ARCHIVE_RETENTION_DAYS",
 

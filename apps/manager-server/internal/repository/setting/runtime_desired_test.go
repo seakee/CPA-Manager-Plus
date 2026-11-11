@@ -90,6 +90,37 @@ func TestEmbeddedRuntimeDesiredConcurrentSameChangeIncrementsOnce(t *testing.T) 
 	}
 }
 
+func TestSeedEmbeddedRuntimeDesiredLifecycleIfAbsentPreservesExistingState(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := New(db)
+
+	seeded, err := repository.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(t.Context(), model.EmbeddedRuntimeDesiredRunning)
+	if err != nil || !seeded {
+		t.Fatalf("initial seed = (%v, %v), want (true, nil)", seeded, err)
+	}
+	loaded, found, err := repository.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || loaded.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning || loaded.Revision != 1 {
+		t.Fatalf("seeded state = %#v found=%v err=%v", loaded, found, err)
+	}
+
+	stopped, err := repository.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredStopped)
+	if err != nil {
+		t.Fatalf("set stopped: %v", err)
+	}
+	seededAgain, err := repository.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(t.Context(), model.EmbeddedRuntimeDesiredRunning)
+	if err != nil || seededAgain {
+		t.Fatalf("re-seed after stop = (%v, %v), want (false, nil)", seededAgain, err)
+	}
+	after, found, err := repository.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || after != stopped {
+		t.Fatalf("state after re-seed = %#v want %#v", after, stopped)
+	}
+}
+
 type unexpectedRevisionError struct {
 	revision uint64
 }

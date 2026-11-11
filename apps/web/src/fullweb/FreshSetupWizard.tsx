@@ -421,7 +421,10 @@ export function FreshSetupWizard({
         const status = managedTarget(await transport.request('installation/runtime'));
         if (
           status.runtimeIdentity !== current.strategy.targetIdentity ||
-          status.runtimeGeneration !== current.strategy.targetGeneration ||
+          (!/^managed:sha256:[a-f0-9]{64}$/.test(
+            current.strategy.destinationConnectionIdentity || ''
+          ) &&
+            status.runtimeGeneration !== current.strategy.targetGeneration) ||
           status.activeGatewayArtifact.artifactId !== current.strategy.targetArtifactId
         )
           throw new Error('CPA identity changed');

@@ -82,7 +82,12 @@ describe('Canonical key detail and rename', () => {
     renderer.root
       .findAllByType('button')
       .find((item) => item.props['aria-label'] === text || item.props.children === text)!;
-  async function mount(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, id = key.id, usageResponse?: unknown) {
+  async function mount(
+    fetchMock: typeof fetch,
+    id = key.id,
+    usageResponse?: unknown,
+    gatewayPending?: boolean
+  ) {
     const routedFetch = vi.fn<typeof fetch>((input, init) => {
       if (String(input).endsWith('/api-keys/' + id + '/usage')) {
         return Promise.resolve(Response.json(usageResponse ?? {
@@ -103,6 +108,7 @@ describe('Canonical key detail and rename', () => {
           id={id}
           key={id}
           client={createPublicApiClient(() => context, routedFetch)}
+          gatewayPending={gatewayPending}
           credential="admin-memory"
           onUnauthorized={unauthorized}
           onPending={pending}
@@ -551,5 +557,14 @@ describe('Canonical key detail and rename', () => {
     );
     expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-totals' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-series' })).toHaveLength(0);
+  });
+
+  it('shows connectionPending when gatewayPending is true and hides it once admitted', async () => {
+    await mount(vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(key)));
+    expect(view()).toContain(k('connectionPending'));
+
+    await act(async () => renderer.unmount());
+    await mount(vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(key)), key.id, undefined, false);
+    expect(view()).not.toContain(k('connectionPending'));
   });
 });

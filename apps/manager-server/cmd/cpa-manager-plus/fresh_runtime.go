@@ -665,6 +665,18 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "desired_lifecycle_unavailable")
 		return
 	}
+	// Acquire the shared lifecycle lock on the caller's HTTP context before
+	// observing Status, reserving an accepted journal row, or starting the 40s
+	// mutation budget. A request cancelled while an automatic reconcile holds
+	// the lock exits cleanly without leaving a non-terminal journal blocker, and
+	// once acquired the submission observes post-reconcile Status and receives
+	// its full mutation budget.
+	unlockLifecycle, err := a.runtimeLifecycleMu.Lock(r.Context())
+	if err != nil {
+		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unreachable")
+		return
+	}
+	defer unlockLifecycle()
 	// The desired lifecycle is the Runtime domain's own durable record. Unreadable
 	// bytes there lock only that domain, and the lock is decided before any
 	// Supervisor call: a mutation whose follow-up write can never be read back is

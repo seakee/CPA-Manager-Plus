@@ -36,6 +36,7 @@ export function FreshKeyDetails({
   onClose,
   onRequestOperation,
   open = true,
+  gatewayPending = true,
 }: {
   id: string;
   client: ReturnType<typeof createPublicApiClient>;
@@ -46,6 +47,7 @@ export function FreshKeyDetails({
   onClose: () => void;
   onRequestOperation?: (mode: 'replace' | 'revoke') => void;
   open?: boolean;
+  gatewayPending?: boolean;
 }) {
   const [record, setRecord] = useState<Key | null>(null);
   const [usage, setUsage] = useState<KeyUsage | null>(null);
@@ -381,7 +383,9 @@ export function FreshKeyDetails({
                     <h4>{k('access')}</h4>
                   </header>
                   <div className="key-detail-section-body">
-                    <p className="key-detail-description">{k('connectionPending')}</p>
+                    {gatewayPending && (
+                      <p className="key-detail-description">{k('connectionPending')}</p>
+                    )}
                     <details className="key-installation-details">
                       <summary>{k('advancedInstallation')}</summary>
                       {record.lifecycle !== 'superseded' ? (

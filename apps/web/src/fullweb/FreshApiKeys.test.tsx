@@ -496,7 +496,18 @@ describe('Fresh client key persistence UI', () => {
     expect(button(t('keysCreate')).props.disabled).toBe(true);
   });
 
-  it('does not treat malformed or Gateway-effective state as a valid list', async () => {
+  it('rejects malformed gatewayPending payloads and hides the pending banner once admitted', async () => {
+    await mount(
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          Response.json({ keys: [key], gatewayPending: 'false', revocationAvailable: true })
+        )
+    );
+    expect(view()).not.toContain(key.id);
+    expect(button(t('keysCreate')).props.disabled).toBe(true);
+    expect(view()).toContain(t('keysUnavailable'));
+
     await mount(
       vi
         .fn<typeof fetch>()
@@ -504,9 +515,9 @@ describe('Fresh client key persistence UI', () => {
           Response.json({ keys: [key], gatewayPending: false, revocationAvailable: true })
         )
     );
-    expect(view()).not.toContain(key.id);
-    expect(button(t('keysCreate')).props.disabled).toBe(true);
-    expect(view()).toContain(t('keysUnavailable'));
+    expect(view()).toContain(key.id);
+    expect(view()).not.toContain(k('unavailable'));
+    expect(view()).not.toContain(k('unavailableHelp'));
   });
 
   it('creates a named key and recovers from partial name-save failure without re-creating the key', async () => {

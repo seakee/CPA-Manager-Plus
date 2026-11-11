@@ -12,18 +12,25 @@ import (
 )
 
 func TestStableReconcileOperationID(t *testing.T) {
-	base := StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart)
-	if base != StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart) {
+	artifactA := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+	artifactB := model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	base := StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1)
+	if base != StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1) {
 		t.Fatal("same reconcile tuple produced different operation IDs")
 	}
-	if len([]byte(base)) > 128 || !strings.HasPrefix(base, "runtime-reconcile/v1:") {
+	if len([]byte(base)) > 128 || !strings.HasPrefix(base, "runtime-reconcile/v2:") {
 		t.Fatalf("operation ID = %q length=%d", base, len([]byte(base)))
 	}
 	for name, candidate := range map[string]string{
-		"revision":   StableReconcileOperationID(4, "runtime-01", 7, model.RuntimeOperationStart),
-		"identity":   StableReconcileOperationID(3, "runtime-02", 7, model.RuntimeOperationStart),
-		"generation": StableReconcileOperationID(3, "runtime-01", 8, model.RuntimeOperationStart),
-		"action":     StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStop),
+		"revision":   StableReconcileOperationID(4, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 1),
+		"identity":   StableReconcileOperationID(3, "runtime-02", 7, model.RuntimeOperationStart, artifactA, 1),
+		"generation": StableReconcileOperationID(3, "runtime-01", 8, model.RuntimeOperationStart, artifactA, 1),
+		"action":     StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStop, artifactA, 1),
+		// The Supervisor folds the artifact into its Start request fingerprint, so
+		// one operation ID must never describe two of them.
+		"artifact":       StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactB, 1),
+		"empty artifact": StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, "", 1),
+		"attempt":        StableReconcileOperationID(3, "runtime-01", 7, model.RuntimeOperationStart, artifactA, 2),
 	} {
 		if candidate == base {
 			t.Fatalf("%s change did not change operation ID", name)
@@ -203,6 +210,425 @@ func TestCanceledReconcileWorkerNeverSubmitsStop(t *testing.T) {
 	}
 }
 
+type transientDesiredStore struct {
+	mu    sync.Mutex
+	calls int
+	state model.EmbeddedRuntimeDesiredState
+}
+
+func (s *transientDesiredStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.calls == 1 {
+		return model.EmbeddedRuntimeDesiredState{}, false, errors.New("transient store read failure")
+	}
+	return s.state, true, nil
+}
+
+func TestReconcileRunRetriesTransientDesiredStateErrorBeforeFullInterval(t *testing.T) {
+	client := &recordingRuntimeClient{status: embeddedReconcileStatus(
+		model.RuntimeStateOffline,
+		recovery(model.RuntimeRecoveryStateInactive),
+	)}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	client.start = func(request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+		close(started)
+		cancel()
+		return runtimeOperationResult(request, model.RuntimeOperationStart, model.RuntimeOperationSucceeded), nil
+	}
+	store := &transientDesiredStore{
+		state: model.EmbeddedRuntimeDesiredState{
+			DesiredLifecycle: model.EmbeddedRuntimeDesiredRunning,
+			Revision:         1,
+			UpdatedAtMS:      1,
+		},
+	}
+	NewReconciler(client, store, 10*time.Second, nil).Run(ctx)
+	select {
+	case <-started:
+	default:
+		t.Fatal("Reconciler.Run did not retry transient desired-state error within short backoff window")
+	}
+	if got := len(client.startRequests()); got != 1 {
+		t.Fatalf("Start calls after short retry = %d, want 1", got)
+	}
+}
+
+type lockingDesiredStore struct {
+	initOnce sync.Once
+	ch       chan struct{}
+	stateMu  sync.Mutex
+	state    model.EmbeddedRuntimeDesiredState
+	found    bool
+	onRead   func(call int, state model.EmbeddedRuntimeDesiredState)
+	readCall int
+}
+
+func (s *lockingDesiredStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.initOnce.Do(func() {
+		s.ch = make(chan struct{}, 1)
+		s.ch <- struct{}{}
+	})
+	select {
+	case <-s.ch:
+		if err := ctx.Err(); err != nil {
+			s.ch <- struct{}{}
+			return nil, err
+		}
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				s.ch <- struct{}{}
+			})
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (s *lockingDesiredStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	s.stateMu.Lock()
+	s.readCall++
+	call := s.readCall
+	state, found := s.state, s.found
+	onRead := s.onRead
+	s.stateMu.Unlock()
+	if onRead != nil {
+		onRead(call, state)
+	}
+	return state, found, nil
+}
+
+func (s *lockingDesiredStore) setDesired(lifecycle model.EmbeddedRuntimeDesiredLifecycle, revision uint64) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.state = model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: lifecycle,
+		Revision:         revision,
+		UpdatedAtMS:      int64(revision),
+	}
+	s.found = true
+}
+
+func TestReconcileSerializesWithConcurrentLifecycleStopAcrossBothWindows(t *testing.T) {
+	t.Run("window 1: reconciler pre-reads running before operator Stop completes", func(t *testing.T) {
+		client := &recordingRuntimeClient{status: embeddedReconcileStatus(
+			model.RuntimeStateReady,
+			recovery(model.RuntimeRecoveryStateArmed),
+		)}
+		store := &lockingDesiredStore{}
+		store.setDesired(model.EmbeddedRuntimeDesiredRunning, 1)
+		reconciler := NewReconciler(client, store, time.Second, nil)
+
+		store.onRead = func(call int, state model.EmbeddedRuntimeDesiredState) {
+			if call != 1 {
+				return
+			}
+			unlock, err := store.LockEmbeddedRuntimeLifecycle(t.Context())
+			if err != nil {
+				t.Errorf("LockEmbeddedRuntimeLifecycle error = %v", err)
+				return
+			}
+			defer unlock()
+			_, err = client.Stop(t.Context(), model.RuntimeMutationRequest{
+				OperationID:               "runtime-ui/v1:stop-window-1",
+				ExpectedRuntimeIdentity:   "runtime-01",
+				ExpectedRuntimeGeneration: 7,
+			})
+			if err != nil {
+				t.Errorf("operator Stop error = %v", err)
+			}
+			offline := embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive))
+			client.setStatus(offline)
+			store.setDesired(model.EmbeddedRuntimeDesiredStopped, 2)
+		}
+
+		if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		if got := len(client.startRequests()); got != 0 {
+			t.Fatalf("Reconciler submitted Start after operator Stop in window 1: %#v", client.startRequests())
+		}
+	})
+
+	t.Run("window 2: operator Stop succeeds at Supervisor before desired row is updated", func(t *testing.T) {
+		client := &recordingRuntimeClient{status: embeddedReconcileStatus(
+			model.RuntimeStateReady,
+			recovery(model.RuntimeRecoveryStateArmed),
+		)}
+		store := &lockingDesiredStore{}
+		store.setDesired(model.EmbeddedRuntimeDesiredRunning, 1)
+		reconciler := NewReconciler(client, store, time.Second, nil)
+
+		stopReachedSupervisor := make(chan struct{})
+		reconcilePreReadOldRow := make(chan struct{})
+		store.onRead = func(call int, state model.EmbeddedRuntimeDesiredState) {
+			if call == 1 && state.DesiredLifecycle == model.EmbeddedRuntimeDesiredRunning {
+				close(reconcilePreReadOldRow)
+			}
+		}
+		client.stop = func(request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+			offline := embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive))
+			client.setStatus(offline)
+			close(stopReachedSupervisor)
+			<-reconcilePreReadOldRow
+			return runtimeOperationResult(request, model.RuntimeOperationStop, model.RuntimeOperationSucceeded), nil
+		}
+
+		reconcileErrCh := make(chan error, 1)
+		go func() {
+			<-stopReachedSupervisor
+			reconcileErrCh <- reconciler.ReconcileOnce(t.Context())
+		}()
+
+		func() {
+			unlock, err := store.LockEmbeddedRuntimeLifecycle(t.Context())
+			if err != nil {
+				t.Fatalf("LockEmbeddedRuntimeLifecycle error = %v", err)
+			}
+			defer unlock()
+			if _, err := client.Stop(t.Context(), model.RuntimeMutationRequest{
+				OperationID:               "runtime-ui/v1:stop-window-2",
+				ExpectedRuntimeIdentity:   "runtime-01",
+				ExpectedRuntimeGeneration: 7,
+			}); err != nil {
+				t.Fatalf("operator Stop error = %v", err)
+			}
+			store.setDesired(model.EmbeddedRuntimeDesiredStopped, 2)
+		}()
+
+		if err := <-reconcileErrCh; err != nil {
+			t.Fatalf("concurrent ReconcileOnce() error = %v", err)
+		}
+		if got := len(client.startRequests()); got != 0 {
+			t.Fatalf("Reconciler submitted Start after operator Stop in window 2: %#v", client.startRequests())
+		}
+	})
+}
+
+func TestReconcileOnceExitsPromptlyWhenContextCancelsWaitingForLifecycleLock(t *testing.T) {
+	client := &recordingRuntimeClient{status: embeddedReconcileStatus(
+		model.RuntimeStateOffline,
+		recovery(model.RuntimeRecoveryStateInactive),
+	)}
+	store := &lockingDesiredStore{}
+	store.setDesired(model.EmbeddedRuntimeDesiredRunning, 1)
+	reconciler := NewReconciler(client, store, time.Second, nil)
+
+	unlock, err := store.LockEmbeddedRuntimeLifecycle(t.Context())
+	if err != nil {
+		t.Fatalf("LockEmbeddedRuntimeLifecycle error = %v", err)
+	}
+	defer unlock()
+
+	preReadDone := make(chan struct{})
+	store.onRead = func(call int, _ model.EmbeddedRuntimeDesiredState) {
+		if call == 1 {
+			close(preReadDone)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- reconciler.ReconcileOnce(ctx)
+	}()
+
+	<-preReadDone
+	cancel()
+	select {
+	case gotErr := <-errCh:
+		if !errors.Is(gotErr, context.Canceled) {
+			t.Fatalf("ReconcileOnce error = %v, want context.Canceled", gotErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReconcileOnce stayed blocked on lifecycle lock after context cancellation")
+	}
+	if got := len(client.startRequests()); got != 0 {
+		t.Fatalf("Start submitted after context cancellation: %#v", got)
+	}
+}
+
+func TestReconcileStartFencesTheActiveArtifact(t *testing.T) {
+	observed := model.RuntimeArtifactID("sha256:" + strings.Repeat("d", 64))
+	committed := model.RuntimeArtifactID("sha256:" + strings.Repeat("c", 64))
+	offlineStatus := func() model.RuntimeObservedStatus {
+		status := embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive))
+		status.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: observed}
+		return status
+	}
+
+	t.Run("completed installation fences the observed active artifact", func(t *testing.T) {
+		// An in-place engine update replaces the Supervisor's selection while the
+		// Fresh checkpoint keeps the install-time artifact, so a store that reports
+		// no pin (a completed installation) must fall back to the observation.
+		for name, store := range map[string]DesiredStateStore{
+			"does not publish an installation authority": desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			"completed installation": &committedDesiredStore{
+				staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			},
+		} {
+			client := &recordingRuntimeClient{status: offlineStatus()}
+			if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err != nil {
+				t.Fatalf("%s: ReconcileOnce() error = %v", name, err)
+			}
+			requests := client.startRequests()
+			if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != observed {
+				t.Fatalf("%s: Start requests = %#v", name, requests)
+			}
+		}
+	})
+
+	t.Run("incomplete installation overrides the observation with the pin", func(t *testing.T) {
+		client := &recordingRuntimeClient{status: offlineStatus()}
+		store := &committedDesiredStore{
+			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			artifact:           committed,
+			artifactFound:      true,
+		}
+		if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		requests := client.startRequests()
+		if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != committed {
+			t.Fatalf("Start requests = %#v", requests)
+		}
+	})
+
+	t.Run("no observed artifact leaves Start unfenced", func(t *testing.T) {
+		client := &recordingRuntimeClient{
+			status: embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive)),
+		}
+		if err := NewReconciler(client, desiredStore(model.EmbeddedRuntimeDesiredRunning, 5), time.Second, nil).
+			ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		requests := client.startRequests()
+		if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != "" {
+			t.Fatalf("Start requests = %#v", requests)
+		}
+	})
+
+	// A Manager that cannot name the engine its installation pinned must not
+	// restart one: an unreadable or non-canonical authority is a refusal, not a
+	// silent fallback to the observation.
+	for name, store := range map[string]*committedDesiredStore{
+		"unreadable": {
+			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			artifactFound:      true,
+			artifactErr:        errors.New("Fresh store unavailable"),
+		},
+		"non-canonical": {
+			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredRunning, 5),
+			artifact:           "sha256:not-a-digest",
+			artifactFound:      true,
+		},
+	} {
+		client := &recordingRuntimeClient{status: offlineStatus()}
+		if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err == nil {
+			t.Fatalf("%s: ReconcileOnce() error = nil", name)
+		}
+		if len(client.startRequests()) != 0 || len(client.stopRequests()) != 0 {
+			t.Fatalf("%s: unexpected mutations start=%#v stop=%#v", name, client.startRequests(), client.stopRequests())
+		}
+	}
+
+	// Stop is unchanged: the Supervisor's StopRequest carries no artifact, so no
+	// artifact authority may leak into it - not the pin, and not the observation.
+	t.Run("Stop stays artifact-free", func(t *testing.T) {
+		status := embeddedReconcileStatus(model.RuntimeStateReady, recovery(model.RuntimeRecoveryStateArmed))
+		status.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: observed}
+		client := &recordingRuntimeClient{status: status}
+		store := &committedDesiredStore{
+			staticDesiredStore: desiredStore(model.EmbeddedRuntimeDesiredStopped, 5),
+			artifact:           committed,
+			artifactFound:      true,
+		}
+		if err := NewReconciler(client, store, time.Second, nil).ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		requests := client.stopRequests()
+		if len(requests) != 1 || requests[0].ExpectedActiveArtifactID != "" ||
+			requests[0].ExpectedRuntimeIdentity != "runtime-01" || requests[0].ExpectedRuntimeGeneration != 7 {
+			t.Fatalf("Stop requests = %#v", requests)
+		}
+	})
+}
+
+// One automatic Start failure must not end the Manager's obligation to converge
+// until the Supervisor generation changes. The bound is what keeps a permanently
+// broken destination from spawning in a loop, and the rotation is only allowed
+// after the Supervisor durably recorded the previous attempt as failed.
+func TestReconcileBoundsAutomaticStartRetries(t *testing.T) {
+	client := &recordingRuntimeClient{
+		status: embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive)),
+	}
+	client.start = func(request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+		result := runtimeOperationResult(request, model.RuntimeOperationStart, model.RuntimeOperationFailed)
+		result.Failure = &model.RuntimeOperationFailure{Code: "process_start_failed"}
+		return result, nil
+	}
+	now := time.Unix(1_700_000_000, 0)
+	reconciler := NewReconciler(client, desiredStore(model.EmbeddedRuntimeDesiredRunning, 4), time.Second, nil)
+	reconciler.now = func() time.Time { return now }
+
+	if err := reconciler.ReconcileOnce(t.Context()); !errors.Is(err, ErrReconcileOperationIncomplete) {
+		t.Fatalf("first attempt error = %v", err)
+	}
+	if got := len(client.startRequests()); got != 1 {
+		t.Fatalf("Start calls after the first failure = %d", got)
+	}
+
+	// The retry window is closed until the delay elapses; a new operation ID
+	// before then would let an unreachable Runtime accumulate spawn attempts.
+	now = now.Add(time.Second)
+	if err := reconciler.ReconcileOnce(t.Context()); !errors.Is(err, ErrReconcileStartDeferred) {
+		t.Fatalf("deferred attempt error = %v", err)
+	}
+	if got := len(client.startRequests()); got != 1 {
+		t.Fatalf("Start calls inside the retry window = %d", got)
+	}
+
+	for attempt := 2; attempt <= DefaultReconcileStartAttempts; attempt++ {
+		now = now.Add(reconcileStartRetryDelay(attempt - 1))
+		if err := reconciler.ReconcileOnce(t.Context()); !errors.Is(err, ErrReconcileOperationIncomplete) {
+			t.Fatalf("attempt %d error = %v", attempt, err)
+		}
+		if got := len(client.startRequests()); got != attempt {
+			t.Fatalf("Start calls after attempt %d = %d", attempt, got)
+		}
+	}
+	now = now.Add(reconcileStartRetryDelay(DefaultReconcileStartAttempts))
+	if err := reconciler.ReconcileOnce(t.Context()); !errors.Is(err, ErrReconcileStartExhausted) {
+		t.Fatalf("exhausted attempt error = %v", err)
+	}
+	requests := client.startRequests()
+	if len(requests) != DefaultReconcileStartAttempts {
+		t.Fatalf("Start calls = %d want %d", len(requests), DefaultReconcileStartAttempts)
+	}
+	for index := 1; index < len(requests); index++ {
+		if requests[index].OperationID == requests[index-1].OperationID {
+			t.Fatalf("attempt %d replayed the failed operation ID %q", index+1, requests[index].OperationID)
+		}
+	}
+
+	// A new Supervisor generation reopens the bounded budget: the failure was
+	// bound to the old generation's child.
+	next := embeddedReconcileStatus(model.RuntimeStateOffline, recovery(model.RuntimeRecoveryStateInactive))
+	next.Generation = 8
+	client.setStatus(next)
+	if err := reconciler.ReconcileOnce(t.Context()); !errors.Is(err, ErrReconcileOperationIncomplete) {
+		t.Fatalf("next generation error = %v", err)
+	}
+	if got := len(client.startRequests()); got != DefaultReconcileStartAttempts+1 {
+		t.Fatalf("Start calls after the generation change = %d", got)
+	}
+}
+
 func recovery(state model.RuntimeRecoveryState) *model.RuntimeRecoveryObservation {
 	return &model.RuntimeRecoveryObservation{State: state, AttemptsRemaining: 2}
 }
@@ -244,6 +670,20 @@ func desiredStore(lifecycle model.EmbeddedRuntimeDesiredLifecycle, revision uint
 
 func (s *staticDesiredStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
 	return s.state, s.found, s.err
+}
+
+// committedDesiredStore adds the optional Manager-committed artifact authority to
+// the plain desired-state store, so the tests can distinguish a store that owns
+// an installation from one that does not.
+type committedDesiredStore struct {
+	*staticDesiredStore
+	artifact      model.RuntimeArtifactID
+	artifactFound bool
+	artifactErr   error
+}
+
+func (s *committedDesiredStore) LoadEmbeddedRuntimeCommittedArtifact(context.Context) (model.RuntimeArtifactID, bool, error) {
+	return s.artifact, s.artifactFound, s.artifactErr
 }
 
 type recordingRuntimeClient struct {

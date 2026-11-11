@@ -461,6 +461,25 @@ describe('PR check classifier', () => {
     }
   });
 
+  it('runs the Runtime lifecycle smokes for the Fresh Manager runtime lane', () => {
+    // The Fresh command files own the Manager half of the Runtime lifecycle:
+    // the desired state, every submitted Start/Stop and the artifact an
+    // automatic restart is allowed to launch. They live in the command package,
+    // so they do not inherit the internal Runtime module path.
+    for (const filePath of [
+      'apps/manager-server/cmd/cpa-manager-plus/fresh.go',
+      'apps/manager-server/cmd/cpa-manager-plus/fresh_runtime.go',
+      'apps/manager-server/cmd/cpa-manager-plus/fresh_managed.go',
+      'apps/manager-server/cmd/cpa-manager-plus/fresh_managed_migration.go',
+      'apps/manager-server/internal/service/runtime/reconciler.go',
+    ]) {
+      const checks = classifyChangedFiles([filePath]);
+      expect(checks.runtime_lifecycle, filePath).toBe(true);
+      expect(checks.docker_all_images, filePath).toBe(true);
+      expect(checks.docker, filePath).toBe(true);
+    }
+  });
+
   it('runs Docker failure validation for every combined Runtime lifecycle family', () => {
     for (const filePath of [
       'apps/ingress/internal/ingress/proxy.go',

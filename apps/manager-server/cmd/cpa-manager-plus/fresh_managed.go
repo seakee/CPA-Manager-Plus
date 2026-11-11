@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 // managedInstallSource is the only default-install authority. It re-reads the
@@ -35,7 +39,7 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 		}
 		record, err := store.Load(ctx)
 		if err != nil {
-			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
+			return freshkeyapply.ManagedInstall{}, fmt.Errorf("%w: %w", freshkeyapply.ErrUnavailable, err)
 		}
 		checkpoint := record.Operation.Strategy
 		if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" || record.Connection == nil {
@@ -137,4 +141,197 @@ func (a *freshApplication) installInitialClientKey(ctx context.Context, op boots
 		return freshstrategy.InitialClientKey{}, err
 	}
 	return freshstrategy.InitialClientKey{KeyID: string(key.ID), Secret: key.Secret}, nil
+}
+
+// prepareCompletedStartup runs legacy destination migration before HTTP routes
+// or the Runtime reconciler start, reloads the operation so a newly migrated
+// checkpoint is observed, and seeds the initial Running desired state.
+func (a *freshApplication) prepareCompletedStartup(ctx context.Context, op bootstrap.FreshOperation) bootstrap.FreshOperation {
+	if a == nil || !op.ProductComplete {
+		return op
+	}
+	if err := a.migrateManagedDestination(ctx); err != nil {
+		// Migration is durable and idempotent; keep the completed Fresh
+		// server available while a typed blocker waits for the next startup.
+		log.Printf("Fresh managed destination migration unavailable: %v", err)
+	} else if a.store != nil {
+		if reloaded, loadErr := a.store.Load(ctx); loadErr == nil {
+			op = reloaded.Operation
+		} else {
+			log.Printf("Fresh post-migration operation load unavailable: %v", loadErr)
+		}
+	}
+	if _, err := a.ensureManagedRuntimeDesiredRunning(ctx, op); err != nil {
+		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
+	}
+	return op
+}
+
+// ensureManagedRuntimeDesiredRunning atomically seeds the durable Running
+// desired state once a Manager-owned destination checkpoint (New Managed or
+// Adopt) is committed and complete, preserving any existing runtime_desired_v1
+// row and refusing unmigrated or operator-managed checkpoints.
+func (a *freshApplication) ensureManagedRuntimeDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (bool, error) {
+	if a == nil || a.runtime == nil || a.runtimeSettings == nil || !op.ProductComplete || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+		return false, nil
+	}
+	return a.runtimeSettings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx, model.EmbeddedRuntimeDesiredRunning)
+}
+
+type freshDesiredStateStore struct {
+	app *freshApplication
+}
+
+// freshDesiredStateStore answers both Runtime reconcile questions the Manager
+// owns: what lifecycle the installation wants, and which engine artifact it
+// committed to.
+var (
+	_ runtimeservice.DesiredStateStore      = freshDesiredStateStore{}
+	_ runtimeservice.CommittedArtifactStore = freshDesiredStateStore{}
+	_ runtimeservice.LifecycleLocker        = freshDesiredStateStore{}
+)
+
+func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore {
+	if a == nil || a.runtimeSettings == nil {
+		return nil
+	}
+	return freshDesiredStateStore{app: a}
+}
+
+func (s freshDesiredStateStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if s.app == nil {
+		return func() {}, nil
+	}
+	return s.app.runtimeLifecycleMu.Lock(ctx)
+}
+
+// LoadEmbeddedRuntimeDesiredState is the reconcile gate, so it runs on every
+// cycle and reads the committed Fresh checkpoint first. A Manager-owned
+// installation is the only one whose Runtime this process may drive: Connect
+// External points at the operator's CPA, an uncommitted operation has no
+// installation yet, and an unmigrated or operator-managed checkpoint was never
+// staged by this Manager. All three answer "no desired state", which makes the
+// reconciler decide nothing at all — no Start and, just as importantly, no Stop.
+//
+// The checkpoint read is also the durable lock on the domain: an unreadable
+// checkpoint returns its error, so this cycle mutates nothing rather than acting
+// on `runtime_desired_v1` alone. That row can outlive a mode change, and it is
+// not evidence that this process owns the Runtime it names.
+func (s freshDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	var zero model.EmbeddedRuntimeDesiredState
+	if s.app == nil || s.app.runtimeSettings == nil {
+		return zero, false, nil
+	}
+	op, owned, err := s.app.managedCheckpoint(ctx)
+	if err != nil {
+		return zero, false, err
+	}
+	if !owned {
+		return zero, false, nil
+	}
+	// The persisted row is the completed installation's desire. While
+	// ProductComplete is false it must stay absent, and the obligation is derived
+	// in memory instead.
+	desired, found, err := s.app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx)
+	if err != nil || found {
+		return desired, found, err
+	}
+	return s.app.incompleteManagedDesiredRunning(ctx, op)
+}
+
+// managedCheckpoint reads the committed Fresh checkpoint and reports whether it
+// names an installation this Manager staged, which is the only authority that may
+// drive this process's Runtime. It reads on every call rather than caching a
+// startup decision: an operation that was uncommitted when the process started
+// can commit `connect_external` later, and the reconciler must stop driving the
+// Runtime from that moment on.
+//
+// A checkpoint it cannot read is an error, never a silent "not owned": the
+// distinguishing claim is that the Manager can name the installation whose
+// Runtime it drives.
+func (a *freshApplication) managedCheckpoint(ctx context.Context) (bootstrap.FreshOperation, bool, error) {
+	if a == nil || a.store == nil {
+		return bootstrap.FreshOperation{}, false, nil
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil {
+		return bootstrap.FreshOperation{}, false, err
+	}
+	return record.Operation, freshkeyapply.ValidManagerOwnedDestinationCheckpoint(record.Operation.Strategy), nil
+}
+
+// LoadEmbeddedRuntimeCommittedArtifact reports the engine artifact a *running*
+// Manager-owned installation is pinned to, and nothing else. It reads the Fresh
+// checkpoint — the Manager's own committed target — and never a Runtime
+// observation.
+//
+// Only an incomplete installation is pinned. `prepare_update`/`activate_update`
+// replace the active engine in place and persist the new selection in the
+// Supervisor, while the checkpoint deliberately keeps the install-time artifact
+// as audit and qualification evidence; fencing a completed installation to it
+// would refuse every restart after an update. A completed installation therefore
+// answers "not found" and the reconciler fences the Supervisor's same-cycle
+// observation instead, exactly as the Console Start does.
+//
+// An unreadable checkpoint, or a Manager-owned checkpoint whose target is not a
+// canonical artifact identity, is an error: the reconciler refuses to start an
+// engine it cannot name.
+func (s freshDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
+	if s.app == nil {
+		return "", false, nil
+	}
+	op, owned, err := s.app.managedCheckpoint(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if !owned || op.ProductComplete {
+		return "", false, nil
+	}
+	artifactID := model.RuntimeArtifactID(op.Strategy.TargetArtifactID)
+	if !artifactID.IsValid() {
+		return "", false, fmt.Errorf("Fresh managed checkpoint target artifact %q is not a canonical SHA-256 identity",
+			op.Strategy.TargetArtifactID)
+	}
+	return artifactID, true, nil
+}
+
+// incompleteManagedDesiredRunning is the in-memory obligation of a Manager-owned
+// installation that has not completed yet: while ProductComplete is false the
+// durable row must stay absent, so the desire is derived from the pinned engine
+// the Manager already started. op is the checkpoint the caller's gate read, so
+// this decision and the ownership decision are made over the same bytes.
+func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	var zero model.EmbeddedRuntimeDesiredState
+	if a == nil || a.runtime == nil || a.managedSource == nil {
+		return zero, false, nil
+	}
+	if op.ProductComplete {
+		return zero, false, nil
+	}
+	if _, err := a.managedSource(ctx); err != nil {
+		return zero, false, fmt.Errorf("resolve incomplete managed destination authority: %w", err)
+	}
+	if a.artifact != nil {
+		artifactStatus, artifactErr := a.artifact.Status(ctx)
+		if artifactErr != nil {
+			return zero, false, artifactErr
+		}
+		if !artifactStatus.Ready() || artifactStatus.Active.ArtifactID != op.Strategy.TargetArtifactID {
+			return zero, false, nil
+		}
+	}
+	status, err := a.observeInstallationRuntime(ctx)
+	if err != nil {
+		return zero, false, err
+	}
+	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil ||
+		string(status.Identity) != op.Strategy.TargetIdentity ||
+		string(status.ActiveGatewayArtifact.ArtifactID) != op.Strategy.TargetArtifactID {
+		return zero, false, nil
+	}
+	return model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: model.EmbeddedRuntimeDesiredRunning,
+		Revision:         1,
+		UpdatedAtMS:      1,
+	}, true, nil
 }

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -14,6 +16,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
+
+const freshKeysGatewayAdmissionTimeout = 1500 * time.Millisecond
 
 // Called only after canonical routing and the existing Admin verifier succeed.
 func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
@@ -96,6 +100,12 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 				return
 			}
 		}
+		gatewayPending := true
+		if op.Routing.Committed {
+			admitCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+			gatewayPending = !a.gatewayAdmissionProven(admitCtx)
+			cancel()
+		}
 		writeFreshJSON(w, struct {
 			Keys                []freshkeys.Key `json:"keys"`
 			GatewayPending      bool            `json:"gatewayPending"`
@@ -104,7 +114,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			// for: the keys are the Manager's own records, and none of them
 			// claims an observed effect.
 			PresenceUnverified bool `json:"presenceUnverified"`
-		}{keys, true, a.keyApply.KeyOperationsEnabled(), unverified})
+		}{keys, gatewayPending, a.keyApply.KeyOperationsEnabled(), unverified})
 	case strings.HasPrefix(resource, "api-keys/requests/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(resource, "api-keys/requests/")
 		key, err := a.keys.Lookup(r.Context(), id)

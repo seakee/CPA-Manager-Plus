@@ -149,8 +149,17 @@ const triggersManagerRuntime = (filePath) =>
   filePath === 'apps/manager-server/internal/store/store.go' ||
   managerServerDependencyFile(filePath);
 
+// The Fresh wizard owns the Manager half of the Runtime lifecycle: it seeds the
+// durable desired state, submits every Start and Stop, derives the reconcile
+// obligation of an incomplete installation, and fences the artifact an automatic
+// restart may launch. Those files live in the command package, so they are named
+// here rather than being implied by a module path.
+const triggersFreshRuntimeLifecycle = (filePath) =>
+  filePath.startsWith('apps/manager-server/cmd/cpa-manager-plus/fresh');
+
 const triggersRuntimeLifecycle = (filePath) =>
   triggersManagerRuntime(filePath) ||
+  triggersFreshRuntimeLifecycle(filePath) ||
   startsWithPath(filePath, 'apps/runtime-supervisor') ||
   startsWithPath(filePath, 'apps/ingress') ||
   startsWithPath(filePath, 'docker/runtime') ||

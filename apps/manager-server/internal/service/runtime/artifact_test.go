@@ -243,3 +243,35 @@ func TestArtifactClientMapsSupervisorErrorCodesAndRejectsUnknownFields(t *testin
 		}
 	}
 }
+
+func TestArtifactStatusReadyMirrorsSlimWizardGate(t *testing.T) {
+	otherID := "sha256:" + strings.Repeat("b", 64)
+	readyAcquired := ArtifactStatus{
+		SchemaVersion: 1,
+		Pinned:        ArtifactPinned{Version: "8.0.55", ArtifactID: testArtifactID},
+		Active:        &ArtifactActive{ArtifactID: testArtifactID, Origin: "acquired"},
+		Required:      false,
+	}
+	if !readyAcquired.Ready() {
+		t.Fatal("acquired matching artifact reported not Ready")
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ArtifactStatus)
+	}{
+		{name: "required missing", mutate: func(s *ArtifactStatus) { s.Active = nil; s.Required = true }},
+		{name: "pinned mismatch", mutate: func(s *ArtifactStatus) { s.Active = &ArtifactActive{ArtifactID: otherID, Origin: "acquired"} }},
+		{name: "recovery required", mutate: func(s *ArtifactStatus) {
+			s.Operation = &ArtifactOperation{ID: "op-rec", Source: "upload", Phase: "failed", Code: ArtifactCodeRecoveryRequired}
+		}},
+		{name: "invalid schema", mutate: func(s *ArtifactStatus) { s.SchemaVersion = 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := readyAcquired
+			tc.mutate(&candidate)
+			if candidate.Ready() {
+				t.Fatalf("%s reported Ready: %+v", tc.name, candidate)
+			}
+		})
+	}
+}

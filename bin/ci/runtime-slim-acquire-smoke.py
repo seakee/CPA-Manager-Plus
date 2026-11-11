@@ -498,7 +498,35 @@ def main(argv):
             "gatewayModelsInvalidKeyStatus": models_code,
         }
 
-        # Step (e): docker restart -> GET immediately shows active acquired with operation=null, and gateway is healthy again.
+        def fetch_runtime_status():
+            status_code, status_body = public_http(
+                slim_origin,
+                console_api + "runtime/status",
+                auth_scheme="Bearer",
+                auth_token=admin_key,
+            )
+            return status_body if status_code == 200 and isinstance(status_body, dict) else None
+
+        def await_gateway_status(expected, description, timeout=90):
+            wait_until(
+                lambda: (fetch_runtime_status() or {}).get("status") == expected,
+                description,
+                timeout=timeout,
+            )
+            return fetch_runtime_status() or {}
+
+        def cpa_process_or_none():
+            try:
+                return inspect_cpa_process(slim_dc)
+            except RuntimeError:
+                return None
+
+        # Step (e): docker restart -> the committed Manager-owned installation
+        # starts the pinned engine on its own. Completion persists
+        # runtime_desired_v1=running and the Reconciler's Start carries the
+        # committed artifact (internal/service/runtime/reconciler.go), so this
+        # step submits no runtime operation at all: a restart must not need one.
+        committed_generation = (rt_status.get("gateway") or {}).get("generation")
         run(["docker", "restart", slim_cid])
         slim_origin = "http://" + slim_dc("port", "cpa-manager-plus", "18317").strip().splitlines()[-1]
 
@@ -522,41 +550,106 @@ def main(argv):
             "origin": "acquired",
         }, restarted_artifact
         assert restarted_artifact.get("operation") is None, restarted_artifact
-
-        # Fresh complete (apps/manager-server/cmd/cpa-manager-plus/fresh.go:552-571) does not write runtime_desired_v1 and Reconciler.ReconcileOnce (internal/service/runtime/reconciler.go:92-122) omits expectedActiveArtifactId, so both full and slim require an explicit start via submitRuntimeOperation (fresh_runtime.go:715-727,854-861) after container restart.
-        start_code, start_op = public_http(
-            slim_origin,
-            console_api + "runtime/operations",
-            method="POST",
-            body={"action": "start", "requestId": "s2a-restart-start"},
-            auth_scheme="Bearer",
-            auth_token=admin_key,
-        )
-        assert start_code in (200, 202) and isinstance(start_op, dict), (start_code, start_op)
-        wait_until(
-            lambda: inspect_state(slim_cid) == ("running", "healthy"),
-            "slim container healthy after docker restart",
-            timeout=90,
-        )
-        wait_until(
-            lambda: (
-                public_http(slim_origin, console_api + "runtime/status", auth_scheme="Bearer", auth_token=admin_key)[1]
-                or {}
-            ).get("status")
-            == "ready",
-            "Gateway ready after docker restart",
-            timeout=60,
-        )
+        await_gateway_status("ready", "Gateway ready after docker restart with no start operation", timeout=120)
+        restarted_status = fetch_runtime_status() or {}
+        restarted_gateway = restarted_status.get("gateway") or {}
+        # A restart is a new Supervisor generation: the ready gateway below is the
+        # process that generation started, not the one observed before.
+        assert restarted_gateway.get("generation") not in (None, committed_generation), restarted_status
+        assert restarted_gateway.get("artifactId") == expected_artifact_id, restarted_status
+        restarted_models_code, _ = public_http(slim_origin, "/v1/models", auth_scheme="Bearer", auth_token="invalid-client-key")
+        assert restarted_models_code == 401, restarted_models_code
         restarted_proc = inspect_cpa_process(slim_dc)
         assert restarted_proc.get("EXE") == expected_staged_exe and restarted_proc.get("SHA") == pin, restarted_proc
         evidence["stepE_afterRestart"] = {
             "artifactStatus": restarted_artifact,
+            "runtimeStatus": restarted_status,
+            "gatewayModelsInvalidKeyStatus": restarted_models_code,
             "cpaProcess": restarted_proc,
+        }
+
+        # Step (f): the one exception. A stop submitted from the runtime status page
+        # persists runtime_desired_v1=stopped, so the same restart must leave CPA
+        # down. The assertion is repeated after more than one reconcile interval so
+        # a delayed automatic start cannot slip through.
+        stop_code, stop_op = public_http(
+            slim_origin,
+            console_api + "runtime/operations",
+            method="POST",
+            body={"action": "stop", "requestId": "a1-stop-before-restart"},
+            auth_scheme="Bearer",
+            auth_token=admin_key,
+        )
+        assert stop_code == 200 and isinstance(stop_op, dict) and stop_op.get("state") == "succeeded", (stop_code, stop_op)
+        await_gateway_status("offline", "Gateway offline after the runtime page stop", timeout=90)
+        run(["docker", "restart", slim_cid])
+        slim_origin = "http://" + slim_dc("port", "cpa-manager-plus", "18317").strip().splitlines()[-1]
+        stopped_after_restart = await_gateway_status(
+            "offline",
+            "Gateway still offline after restarting an explicitly stopped runtime",
+            timeout=120,
+        )
+        assert cpa_process_or_none() is None, "an explicitly stopped runtime was started by the container restart"
+        time.sleep(3 * 5 + 2)
+        assert (fetch_runtime_status() or {}).get("status") == "offline", "an explicitly stopped runtime started later"
+        assert cpa_process_or_none() is None, "an explicitly stopped runtime started later"
+        evidence["stepF_restartAfterStop"] = {
+            "stopOperation": stop_op,
+            "runtimeStatus": stopped_after_restart,
+            "cpaProcess": None,
+        }
+
+        # Step (g): an explicit start makes the installation running again, and that
+        # desire survives the next restart, which needs no further operation.
+        start_code, start_op = public_http(
+            slim_origin,
+            console_api + "runtime/operations",
+            method="POST",
+            body={"action": "start", "requestId": "a1-start-after-stop"},
+            auth_scheme="Bearer",
+            auth_token=admin_key,
+        )
+        assert start_code == 200 and isinstance(start_op, dict) and start_op.get("state") == "succeeded", (start_code, start_op)
+        await_gateway_status("ready", "Gateway ready after the runtime page start", timeout=120)
+        run(["docker", "restart", slim_cid])
+        slim_origin = "http://" + slim_dc("port", "cpa-manager-plus", "18317").strip().splitlines()[-1]
+        started_status = await_gateway_status(
+            "ready",
+            "Gateway ready after restarting a runtime the user started",
+            timeout=120,
+        )
+        started_proc = inspect_cpa_process(slim_dc)
+        assert started_proc.get("EXE") == expected_staged_exe and started_proc.get("SHA") == pin, started_proc
+        evidence["stepG_restartAfterStart"] = {
+            "startOperation": start_op,
+            "runtimeStatus": started_status,
+            "cpaProcess": started_proc,
+        }
+
+        # Step (h): the Compose equivalent of `down`/`up`. The container is removed
+        # and recreated from the same volume, so the persisted desired lifecycle and
+        # the committed artifact are all the recreated Manager has to go on.
+        slim_dc("stop")
+        slim_dc("rm", "-f")
+        slim_dc("up", "-d", "--no-build", "--pull", "never")
+        slim_cid = slim_dc("ps", "-q", "cpa-manager-plus").strip()
+        assert slim_cid, "recreated cpa-manager-plus container ID is empty"
+        slim_origin = "http://" + slim_dc("port", "cpa-manager-plus", "18317").strip().splitlines()[-1]
+        recreated_status = await_gateway_status(
+            "ready",
+            "Gateway ready after the Compose container was recreated on the same volume",
+            timeout=180,
+        )
+        recreated_proc = inspect_cpa_process(slim_dc)
+        assert recreated_proc.get("EXE") == expected_staged_exe and recreated_proc.get("SHA") == pin, recreated_proc
+        evidence["stepH_recreatedContainer"] = {
+            "runtimeStatus": recreated_status,
+            "cpaProcess": recreated_proc,
         }
 
         slim_dc("down", "-v", "--remove-orphans", check=False)
 
-        # Step (f): full image, fresh volume -> GET returns required=false and active.origin=="bundled";
+        # Step (i): full image, fresh volume -> GET returns required=false and active.origin=="bundled";
         # PUT upload returns 409 artifact_already_active and origin stays bundled.
         full_port = pick_smoke_port()
         full_dc, full_override = make_dc(full_project, full_meta, full_port, "full")
@@ -610,8 +703,8 @@ def main(argv):
             "-c",
             "test ! -e /data/runtime/supervisor/active/cpa/selection.json",
         )
-        evidence["stepF_fullImageArtifact"] = full_artifact
-        evidence["stepF_fullImageUploadRejected"] = {
+        evidence["stepI_fullImageArtifact"] = full_artifact
+        evidence["stepI_fullImageUploadRejected"] = {
             "uploadStatus": full_upload_code,
             "uploadResponse": full_upload_resp,
             "statusAfterUpload": full_after_upload,

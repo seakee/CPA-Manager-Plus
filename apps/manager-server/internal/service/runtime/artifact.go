@@ -180,6 +180,16 @@ func (s ArtifactStatus) Validate() error {
 	return nil
 }
 
+// Ready mirrors the Fresh wizard's isArtifactReady predicate (#1166): the
+// pinned engine artifact is active, not required, and not awaiting Supervisor
+// recovery.
+func (s ArtifactStatus) Ready() bool {
+	if s.Validate() != nil || s.Required || s.Active == nil || s.Active.ArtifactID != s.Pinned.ArtifactID {
+		return false
+	}
+	return !(s.Operation != nil && s.Operation.Phase == "failed" && s.Operation.Code == ArtifactCodeRecoveryRequired)
+}
+
 type ArtifactProbeResult struct {
 	Reachable bool   `json:"reachable"`
 	Code      string `json:"code"`

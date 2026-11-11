@@ -338,7 +338,7 @@ finally:
 if not rows:
     raise SystemExit("operation journal contains no Manager Start evidence")
 for operation_id, state in rows:
-    if not operation_id.startswith("runtime-reconcile/v1:"):
+    if not operation_id.startswith("runtime-reconcile/v2:"):
         raise SystemExit(f"unexpected Start operation ID: {operation_id!r}")
     if state != "succeeded":
         raise SystemExit(f"Manager Start is not succeeded: {(operation_id, state)!r}")
@@ -382,7 +382,7 @@ assert_lifecycle_counts() {
   local expected_restart_total="$5"
   local context="$6"
   local actual
-  actual="$(journal_count "${database_path}" start "${generation}" 'runtime-reconcile/v1:' - -)"
+  actual="$(journal_count "${database_path}" start "${generation}" 'runtime-reconcile/v2:' - -)"
   assert_equal "${actual}" "${expected_reconcile_starts}" "${context} reconcile Start count"
   actual="$(journal_count "${database_path}" auto_recovery - - - -)"
   assert_equal "${actual}" "${expected_auto_total}" "${context} auto_recovery count"
@@ -437,7 +437,7 @@ read -r baseline_desired baseline_revision baseline_updated_at < <(desired_obser
 assert_equal "${baseline_desired}" 'running' 'baseline desired lifecycle'
 baseline_journal="$(snapshot_runtime_journal scenario-a-journal)"
 assert_lifecycle_counts "${baseline_journal}" "${baseline_generation}" 1 0 0 'scenario A'
-assert_equal "$(journal_count "${baseline_journal}" start "${baseline_generation}" 'runtime-reconcile/v1:' succeeded -)" '1' 'baseline succeeded reconcile Start count'
+assert_equal "$(journal_count "${baseline_journal}" start "${baseline_generation}" 'runtime-reconcile/v2:' succeeded -)" '1' 'baseline succeeded reconcile Start count'
 assert_manager_starts_are_reconcile_operations "${baseline_journal}"
 
 scenario 'B — Ingress hard failure is edge-only'
@@ -500,8 +500,8 @@ assert_not_equal "${scenario_d_generation}" '0' 'scenario D RuntimeGeneration mu
 assert_not_equal "${scenario_d_generation}" "${baseline_generation}" 'Runtime restart must create a new generation'
 assert_equal "$(printf '%s' "$scenario_d_inactive" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'Runtime restart artifact identity'
 scenario_d_pre_journal="$(snapshot_runtime_journal scenario-d-before-reconcile)"
-assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${baseline_generation}" 'runtime-reconcile/v1:' succeeded -)" '1' 'old-generation Start evidence after Runtime restart'
-assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${scenario_d_generation}" 'runtime-reconcile/v1:' - -)" '0' 'new generation before Manager reconcile'
+assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${baseline_generation}" 'runtime-reconcile/v2:' succeeded -)" '1' 'old-generation Start evidence after Runtime restart'
+assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${scenario_d_generation}" 'runtime-reconcile/v2:' - -)" '0' 'new generation before Manager reconcile'
 "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
 paused_manager_pid=""
 scenario_d_ready="$(wait_runtime_observation ready armed local 120)"
@@ -512,7 +512,7 @@ assert_not_equal "$(service_pid cpamp-runtime-supervisor)" "${supervisor_pid_bef
 scenario_d_cpa_pid="$(runtime_cpa_pid)"
 scenario_d_journal="$(snapshot_runtime_journal scenario-d-journal)"
 assert_lifecycle_counts "${scenario_d_journal}" "${scenario_d_generation}" 1 0 0 'scenario D'
-assert_equal "$(journal_count "${scenario_d_journal}" start "${baseline_generation}" 'runtime-reconcile/v1:' succeeded -)" '1' 'scenario D durable old-generation history'
+assert_equal "$(journal_count "${scenario_d_journal}" start "${baseline_generation}" 'runtime-reconcile/v2:' succeeded -)" '1' 'scenario D durable old-generation history'
 scenario_d_manager_database="$(snapshot_manager_database scenario-d-manager)"
 read -r scenario_d_desired scenario_d_revision scenario_d_updated_at < <(desired_observation "${scenario_d_manager_database}")
 assert_equal "${scenario_d_desired}" 'running' 'scenario D desired lifecycle'
@@ -640,7 +640,7 @@ scenario_h_final_generation="$(printf '%s' "${scenario_h_new_inactive}" | json_u
 assert_not_equal "${scenario_h_final_generation}" "${scenario_h_generation}" 'manual-intervention recovery must use a new generation'
 scenario_h_before_final_reconcile="$(snapshot_runtime_journal scenario-h-before-final-reconcile)"
 assert_equal "$(journal_count "${scenario_h_before_final_reconcile}" auto_recovery "${scenario_h_generation}" 'auto-recovery-' failed process_recovery_start_failed)" '3' 'failed recovery history after Supervisor restart'
-assert_equal "$(journal_count "${scenario_h_before_final_reconcile}" start "${scenario_h_final_generation}" 'runtime-reconcile/v1:' - -)" '0' 'final generation before Manager reconcile'
+assert_equal "$(journal_count "${scenario_h_before_final_reconcile}" start "${scenario_h_final_generation}" 'runtime-reconcile/v2:' - -)" '0' 'final generation before Manager reconcile'
 "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
 paused_manager_pid=""
 scenario_h_final_ready="$(wait_runtime_observation ready armed local 120)"
@@ -652,7 +652,7 @@ sleep 7
 
 final_journal="$(snapshot_runtime_journal final-journal)"
 assert_lifecycle_counts "${final_journal}" "${scenario_h_final_generation}" 1 4 0 'final stack'
-assert_equal "$(journal_count "${final_journal}" start - 'runtime-reconcile/v1:' succeeded -)" '4' 'total generation-scoped Manager Start evidence'
+assert_equal "$(journal_count "${final_journal}" start - 'runtime-reconcile/v2:' succeeded -)" '4' 'total generation-scoped Manager Start evidence'
 assert_equal "$(journal_count "${final_journal}" auto_recovery "${scenario_d_generation}" 'auto-recovery-' succeeded -)" '1' 'successful recovery history'
 assert_equal "$(journal_count "${final_journal}" auto_recovery "${scenario_h_generation}" 'auto-recovery-' failed process_recovery_start_failed)" '3' 'manual-intervention failure history'
 assert_manager_starts_are_reconcile_operations "${final_journal}"

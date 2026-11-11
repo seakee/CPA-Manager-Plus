@@ -56,15 +56,18 @@ func (s *Service) ConfigTarget(ctx context.Context, generation uint64) (string, 
 // DefaultInstallCPAAuthorityProven is the Manager-internal admission predicate
 // exposed for Gateway admission. It requires, in this order, that
 //
-//  1. this Manager was constructed with the install-derived default profile;
-//  2. the committed New Managed checkpoint and the protected Manager
+//  1. this Manager was constructed with ProfileManaged (used by both New
+//     Managed and Adopt; Connect External does not route model traffic through
+//     CPAMP Ingress and carries no ProfileManaged permit);
+//  2. the committed New Managed or Adopt checkpoint and the protected Manager
 //     connection still decrypt to one credential for the configured address;
-//  3. the authenticated Runtime status matches the recorded identity,
-//     generation, artifact and ready state;
-//  4. the destination CPA still presents the managed template posture; and
-//  5. client authentication is on, proven by at least one installed client key
+//  3. the authenticated Runtime status matches the recorded Runtime identity,
+//     carries a live Supervisor generation and valid active CPA artifact, and
+//     is Ready;
+//  4. the destination CPA still satisfies its strategy's destination posture
+//     (new_managed or adopt_existing); and
+//  5. client authentication is on, proven by at least one valid client key
 //     (a CPA with no client key accepts unauthenticated Gateway traffic).
-//
 // It intentionally returns only a boolean and never a credential. A Gateway
 // that needs the authority itself must call the same profile through ConfigTarget
 // and must not copy this predicate's observations.
