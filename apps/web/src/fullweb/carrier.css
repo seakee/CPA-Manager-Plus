@@ -1497,9 +1497,7 @@ input {
   font-size: 14px;
 }
 
-/* Shared keyboard-focus fallback for controls without their own ring. The two
-   wrappers below paint the ring for a whole group, so their children must not add
-   a second line inside (or right next to) it. */
+/* Shared keyboard-focus ring for controls without a more specific one. */
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
@@ -1509,9 +1507,30 @@ select:focus-visible {
   outline-offset: 3px;
 }
 
-.searchBox > :focus-visible,
+/* `.input-wrap` draws the ring on the wrapper — but only for a keyboard-focused field.
+   A field in any other focus state hides the UA outline too, because that pair would
+   otherwise stack the wrapper ring and a browser-coloured line next to it. */
 .input-wrap > .form-input:focus-visible {
   outline: none;
+}
+
+.input-wrap > .form-input:focus {
+  outline: none;
+}
+
+/* Forced colours replace every custom outline with a system colour, so the keyboard
+   ring keeps a visible, high-contrast fallback here instead of vanishing. */
+@media (forced-colors: active) {
+  input:focus-visible,
+  summary:focus-visible,
+  select:focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  .input-wrap:has(> .form-input:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
 }
 
 @media (min-width: 1600px) {
