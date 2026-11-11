@@ -63,7 +63,7 @@ const externalRejectionPersistBudgetDefault = 5 * time.Second
 // not be verified within its bounded persistence window (for example due to a
 // SQLite read error, corrupt row, or wedged persistence slot), so callers must
 // fail closed locally without presenting the stored credential to CPA.
-var errExternalRejectionUnavailable = errors.New("external rejection state unavailable")
+var errExternalRejectionUnavailable = cpa.ErrExternalRejectionUnavailable
 
 type externalRejectionGrantKey struct {
 	identity   string
@@ -442,7 +442,7 @@ func (a *freshApplication) externalReadGrantFor(ctx context.Context, record fres
 	}
 	refused, checkErr := a.rejection.check(ctx, grant.Identity, grant.Credential)
 	if checkErr != nil {
-		return externalReadGrant{}, fmt.Errorf("%w: %w", freshkeyapply.ErrExternalUnavailable, checkErr)
+		return externalReadGrant{}, checkErr
 	}
 	grant.Refused = refused
 	return grant, nil
@@ -469,7 +469,7 @@ func (a *freshApplication) externalReadTargetFor(ctx context.Context, record fre
 	}
 	refused, checkErr := a.rejection.check(ctx, grant.Identity, grant.Credential)
 	if checkErr != nil {
-		return externalReadGrant{}, freshkeyapply.ExternalInstall{}, fmt.Errorf("%w: %w", freshkeyapply.ErrExternalUnavailable, checkErr)
+		return externalReadGrant{}, freshkeyapply.ExternalInstall{}, checkErr
 	}
 	grant.Refused = refused
 	return grant, install, nil

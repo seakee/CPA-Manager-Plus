@@ -24,6 +24,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	codexsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
@@ -3493,6 +3494,256 @@ func TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutS
 		}
 		if durableRows != 0 {
 			t.Fatalf("late pre-rebind INSERT left %d durable refusal rows after deferred cleanup, want 0", durableRows)
+		}
+	})
+}
+
+// TestExternalPostPrecheckRejectionReadFailureFailsClosedAcrossWireSurfaces
+// verifies that when a route-level precheck succeeds (SELECT #1) and the
+// subsequent wire-phase refusal lookup fails (SELECT #2 or #3), every native
+// and bridged synchronous surface fails closed with HTTP 503
+// external_cpa_authority_unavailable, sends zero CPA requests on the failing
+// wire call, and performs zero fallback work (such as unproxied catalog
+// downloads, HTTP 200 degraded capability payloads, HTTP 200 needs_review
+// outcomes, or generic 500s).
+func TestExternalPostPrecheckRejectionReadFailureFailsClosedAcrossWireSurfaces(t *testing.T) {
+	const wantUnavailable = "external_cpa_authority_unavailable"
+	var catalogHits atomic.Int32
+	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		catalogHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openai":{"models":{"gpt-4o":{"id":"gpt-4o","cost":{"input":2.5,"output":10}}}}}`))
+	}))
+	t.Cleanup(catalogServer.Close)
+
+	newApp := func(t *testing.T, cpaURL string) (*freshApplication, *rejectionSQLController) {
+		t.Helper()
+		app := newExternalApp(t, cpaURL, externalAuthorityManagement)
+		catalogURL := catalogServer.URL
+		disabledURL := ""
+		app.legacyApp.ModelPriceService = modelpricesvc.NewMultiSourceWithModelsDev(
+			app.legacyApp.Store, &catalogURL, &disabledURL, &disabledURL, app.legacyApp.ManagerConfigService,
+		)
+		app.legacy = guardFreshExternalLegacy(guardFreshLegacyWrites(router.New(app.legacyApp), nil), app)
+		app.gatewayConfig = gatewayFor(app)
+		t.Cleanup(func() { _ = app.legacyApp.CodexInspectionService.StopAndWait(context.Background()) })
+		ctrl := &rejectionSQLController{}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		return app, ctrl
+	}
+
+	armFailOnSelectFrom := func(ctrl *rejectionSQLController, failFrom int32) *atomic.Int32 {
+		seq := &atomic.Int32{}
+		ctrl.mu.Lock()
+		ctrl.onSelect = func() error {
+			if seq.Add(1) >= failFrom {
+				return errors.New("simulated post-precheck sqlite select I/O error")
+			}
+			return nil
+		}
+		ctrl.mu.Unlock()
+		return seq
+	}
+
+	t.Run("model_prices_sync_aborts_without_catalog_download", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app, ctrl := newApp(t, cpaSrv.server.URL)
+		catalogHits.Store(0)
+		armFailOnSelectFrom(ctrl, 2)
+
+		res := gatewayRequest(t, app, http.MethodPost, "cpamp/v0/management/model-prices/sync", `{}`, "application/json")
+		if res.Code != http.StatusServiceUnavailable || errorCode(t, res) != wantUnavailable {
+			t.Errorf("model-prices/sync = %d %s, want 503 %s", res.Code, res.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load(); got != 0 {
+			t.Errorf("model-prices/sync CPA requests = %d, want 0", got)
+		}
+		if got := catalogHits.Load(); got != 0 {
+			t.Errorf("model-prices/sync catalog downloads = %d, want 0 (no unproxied fallback)", got)
+		}
+	})
+
+	t.Run("gateway_config_read_and_save_fail_closed_with_503", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app, ctrl := newApp(t, cpaSrv.server.URL)
+
+		initial := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		if initial.Code != http.StatusOK {
+			t.Fatalf("initial gateway/config = %d %s, want 200", initial.Code, initial.Body.String())
+		}
+		var view freshconfig.View
+		if err := json.Unmarshal(initial.Body.Bytes(), &view); err != nil {
+			t.Fatalf("decode gateway/config: %v", err)
+		}
+		var routingBaseline string
+		for _, g := range view.Groups {
+			if g.ID == "routing" {
+				routingBaseline = g.Baseline
+				break
+			}
+		}
+		cpaBefore := cpaSrv.requests.Load()
+
+		// SELECT #1 = route precheck (ok), SELECT #2 = ReadConfigDocument wire gate (fails).
+		armFailOnSelectFrom(ctrl, 2)
+		resRead := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		if resRead.Code != http.StatusServiceUnavailable || errorCode(t, resRead) != wantUnavailable {
+			t.Errorf("gateway/config GET on ReadConfigDocument failure = %d %s, want 503 %s", resRead.Code, resRead.Body.String(), wantUnavailable)
+		}
+
+		// SELECT #1 = route precheck (ok), SELECT #2 = SaveGroup wire gate (fails).
+		armFailOnSelectFrom(ctrl, 2)
+		saveBody := `{"requestId":"` + strings.Repeat("8", 32) + `","expected":{"generation":"` + view.Generation + `","baseline":"` + routingBaseline + `"},"edits":[{"path":"routing.strategy","action":"set","value":"fill-first"}]}`
+		resSave := gatewayRequest(t, app, http.MethodPost, "gateway/config/groups/routing", saveBody, "application/json")
+		if resSave.Code != http.StatusServiceUnavailable || errorCode(t, resSave) != wantUnavailable {
+			t.Errorf("gateway/config POST save on wire gate failure = %d %s, want 503 %s", resSave.Code, resSave.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load() - cpaBefore; got != 0 {
+			t.Errorf("gateway/config additional CPA requests = %d, want 0", got)
+		}
+	})
+
+	t.Run("account_action_enable_and_delete_return_503", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app, ctrl := newApp(t, cpaSrv.server.URL)
+		cand, err := app.legacyApp.Store.UpsertAccountActionCandidate(t.Context(), model.AccountActionCandidateUpsert{
+			ActionType:      model.AccountActionTypeReview,
+			Provider:        "codex",
+			AuthFileName:    "codex-1.json",
+			AuthIndex:       "idx-1",
+			AccountSnapshot: "acct-1@example.com",
+			ReasonCode:      "quota_exhausted",
+			Reason:          "test candidate",
+			SeenAtMS:        time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		armFailOnSelectFrom(ctrl, 2)
+		enableRes := gatewayRequest(t, app, http.MethodPost,
+			"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/enable", `{}`, "application/json")
+		if enableRes.Code != http.StatusServiceUnavailable || errorCode(t, enableRes) != wantUnavailable {
+			t.Errorf("account-action enable = %d %s, want 503 %s", enableRes.Code, enableRes.Body.String(), wantUnavailable)
+		}
+
+		armFailOnSelectFrom(ctrl, 2)
+		delRes := gatewayRequest(t, app, http.MethodDelete,
+			"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/auth-file", "", "")
+		if delRes.Code != http.StatusServiceUnavailable || errorCode(t, delRes) != wantUnavailable {
+			t.Errorf("account-action delete = %d %s, want 503 %s", delRes.Code, delRes.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load(); got != 0 {
+			t.Errorf("account-action CPA requests = %d, want 0", got)
+		}
+	})
+
+	t.Run("codex_inspection_actions_return_503_and_run_marks_failed", func(t *testing.T) {
+		var authListCalls atomic.Int32
+		var probeCalls atomic.Int32
+		var mutationCalls atomic.Int32
+		cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+				authListCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"files":[{"id":"runtime-auth-2","name":"codex-2.json","provider":"codex","account":"acct-2@example.com","auth_index":"idx-2","disabled":false,"status":"ok","state":"ready"}]}`))
+			case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v0/management/api-call"):
+				probeCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status_code":200,"body":{}}`))
+			default:
+				mutationCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}
+		}))
+		t.Cleanup(cpaServer.Close)
+
+		app, ctrl := newApp(t, cpaServer.URL)
+		seededRun, err := app.legacyApp.Store.CreateCodexInspectionRun(t.Context(), model.CodexInspectionRun{
+			TriggerType: model.CodexInspectionTriggerManual,
+			Status:      model.CodexInspectionStatusCompleted,
+			StartedAtMS: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seededResult, err := app.legacyApp.Store.InsertCodexInspectionResult(t.Context(), model.CodexInspectionResult{
+			RunID:           seededRun.ID,
+			AccountKey:      "codex:codex-2.json:idx-2",
+			FileName:        "codex-2.json",
+			DisplayAccount:  "acct-2@example.com",
+			AccountSnapshot: "acct-2@example.com",
+			AuthIndex:       "idx-2",
+			Provider:        "codex",
+			Action:          "disable",
+			ActionReason:    "quota check",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		actionBody := `{"resultIds":[` + strconv.FormatInt(seededResult.ID, 10) + `]}`
+
+		// 1. Fail on SELECT #2 (validateActionItems -> fetchAuthFiles).
+		armFailOnSelectFrom(ctrl, 2)
+		actRes1 := gatewayRequest(t, app, http.MethodPost,
+			"cpamp/v0/management/codex-inspection/runs/"+strconv.FormatInt(seededRun.ID, 10)+"/actions", actionBody, "application/json")
+		if actRes1.Code != http.StatusServiceUnavailable || errorCode(t, actRes1) != wantUnavailable {
+			t.Errorf("codex-inspection actions (validate phase) = %d %s, want 503 %s", actRes1.Code, actRes1.Body.String(), wantUnavailable)
+		}
+		if got := authListCalls.Load(); got != 0 {
+			t.Errorf("codex-inspection actions (validate phase) auth-files calls = %d, want 0", got)
+		}
+
+		// 2. Fail on SELECT #3 (validateActionItems succeeds, executeAction target resolution fails before any mutation).
+		armFailOnSelectFrom(ctrl, 3)
+		actRes2 := gatewayRequest(t, app, http.MethodPost,
+			"cpamp/v0/management/codex-inspection/runs/"+strconv.FormatInt(seededRun.ID, 10)+"/actions", actionBody, "application/json")
+		if actRes2.Code != http.StatusServiceUnavailable || errorCode(t, actRes2) != wantUnavailable {
+			t.Errorf("codex-inspection actions (execute phase) = %d %s, want 503 %s", actRes2.Code, actRes2.Body.String(), wantUnavailable)
+		}
+		if got := mutationCalls.Load(); got != 0 {
+			t.Errorf("codex-inspection actions mutation calls = %d, want 0", got)
+		}
+
+		// 3. Inspection run failing on probe wire gate after fetchAuthFiles succeeds:
+		// must record status="failed" (never "completed") with 0 probe calls.
+		armFailOnSelectFrom(ctrl, 2)
+		runDetail, runErr := app.legacyApp.CodexInspectionService.Run(
+			app.withExternalSavedCredentialGate(t.Context()),
+			codexsvc.RunRequest{TriggerType: "manual", TriggerKey: "post-auth-files-fault"},
+		)
+		if runErr == nil || runDetail.Run.Status != model.CodexInspectionStatusFailed {
+			t.Errorf("codex-inspection run after probe wire-gate fault = (status=%q, err=%v), want status=%q and non-nil error",
+				runDetail.Run.Status, runErr, model.CodexInspectionStatusFailed)
+		}
+		if got := probeCalls.Load(); got != 0 {
+			t.Errorf("codex-inspection probe calls = %d, want 0", got)
+		}
+	})
+
+	t.Run("api_keys_list_and_initial_install_return_503", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app, ctrl := newApp(t, cpaSrv.server.URL)
+		stagedKey := stageExternalKeyForGateTest(t, app, "7", false)
+
+		armFailOnSelectFrom(ctrl, 2)
+		listRes := gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+		if listRes.Code != http.StatusServiceUnavailable || errorCode(t, listRes) != wantUnavailable {
+			t.Errorf("api-keys list = %d %s, want 503 %s", listRes.Code, listRes.Body.String(), wantUnavailable)
+		}
+
+		armFailOnSelectFrom(ctrl, 2)
+		installRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json")
+		if installRes.Code != http.StatusServiceUnavailable || errorCode(t, installRes) != wantUnavailable {
+			t.Errorf("api-keys initial-install = %d %s, want 503 %s", installRes.Code, installRes.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load(); got != 0 {
+			t.Errorf("api-keys CPA requests = %d, want 0", got)
 		}
 	})
 }

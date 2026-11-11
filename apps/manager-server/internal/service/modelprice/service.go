@@ -530,7 +530,7 @@ func (s *Service) resolveCPAProxyURL(ctx context.Context) (string, error) {
 	if cpa.HasExternalSavedCredentialGate(ctx) {
 		cfg, err := cpa.FetchManagementConfig(ctx, "", "")
 		if err != nil {
-			if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+			if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 				return "", err
 			}
 			return "", nil

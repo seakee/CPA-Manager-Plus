@@ -37,6 +37,14 @@ var ErrManagementClientForbidden = fmt.Errorf("%w: %w", ErrManagementRejected, e
 // surface may treat it as a retry or as a missing proof.
 var ErrExternalTargetMoved = errors.New("external cpa target moved")
 
+// ErrExternalRejectionUnavailable reports that the Manager could not read or
+// verify the durable External management-credential refusal state within its
+// bounded persistence window (for example due to a SQLite read failure, a
+// corrupt refusal row, or a wedged persistence slot). Callers must fail closed
+// with a local unavailable response rather than falling back, retrying, or
+// contacting the External CPA.
+var ErrExternalRejectionUnavailable = errors.New("external cpa rejection state unavailable")
+
 // ExternalKeySnapshot is the user's CPA client-key list together with the digest
 // of the configuration that list belongs to. An External CPA owns its own
 // posture, key naming and extra credentials, so the only facts this Manager may

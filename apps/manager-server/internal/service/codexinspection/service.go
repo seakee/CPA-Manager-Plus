@@ -579,7 +579,11 @@ func (s *Service) executeRun(ctx context.Context, req RunRequest, run model.Code
 		"targetTypes":   settings.TargetProviders(),
 	})
 
-	results := s.inspectAccounts(ctx, setup, settings, sampled, logger)
+	results, inspectErr := s.inspectAccounts(ctx, setup, settings, sampled, logger)
+	if inspectErr != nil {
+		logger.error(persistCtx, "凭证健康巡检探测中断", map[string]any{"error": inspectErr.Error()})
+		return s.failRun(persistCtx, run, inspectErr)
+	}
 	if err := ctx.Err(); err != nil {
 		// Persist the partial probe set once, with a bounded budget, before the
 		// lifecycle transition below. Avoid a second full pass here: a large
@@ -610,8 +614,12 @@ func (s *Service) executeRun(ctx context.Context, req RunRequest, run model.Code
 	}
 
 	results = resolveAutoActionResults(settings.AutoActionMode, results)
-	actionOutcomes := s.executeAutoActions(ctx, setup, settings, results, logger)
+	actionOutcomes, autoGateErr := s.executeAutoActionsWithBlocker(ctx, setup, settings, results, logger)
 	actionSummary := summarizeActionOutcomes(actionOutcomes)
+	if autoGateErr != nil && actionSummary.Success == 0 {
+		logger.error(persistCtx, "凭证健康巡检自动处理中断", map[string]any{"error": autoGateErr.Error()})
+		return s.failRun(persistCtx, run, autoGateErr)
+	}
 	results = applyActionOutcomes(results, actionOutcomes)
 	resultWriteFailures := 0
 	hasAutoActionMode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone) != model.CodexInspectionAutoActionNone || settings.AutoRecoverEnabled
@@ -1468,9 +1476,13 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(validationOutcomes)+len(validItems))
 	outcomes = append(outcomes, preflightOutcomes...)
 	outcomes = append(outcomes, validationOutcomes...)
-	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, sourceFileMembers, logger, "手动处理", false, func(item model.CodexInspectionResult) string {
+	executedOutcomes, gateBlockerErr := s.executeActionItemsWithBlocker(ctx, setup, settings, validItems, sourceFileMembers, logger, "手动处理", false, func(item model.CodexInspectionResult) string {
 		return item.Action
-	})...)
+	})
+	outcomes = append(outcomes, executedOutcomes...)
+	if gateBlockerErr != nil && summarizeActionOutcomes(outcomes).Success == 0 {
+		return ExecuteActionsResult{}, gateBlockerErr
+	}
 	if len(outcomes) == 0 {
 		return ExecuteActionsResult{}, ErrNoActionableResults
 	}
@@ -1685,14 +1697,19 @@ func (s *Service) inspectAccounts(
 	settings model.ManagerCodexInspectionConfig,
 	accounts []account,
 	logger runLogger,
-) []model.CodexInspectionResult {
+) ([]model.CodexInspectionResult, error) {
 	if len(accounts) == 0 {
-		return nil
+		return nil, nil
 	}
 	workers := settings.Workers
 	if workers <= 0 {
 		workers = 1
 	}
+
+	probeCtx, cancelProbes := context.WithCancel(ctx)
+	defer cancelProbes()
+	var gateErrMu sync.Mutex
+	var gateErr error
 
 	jobs := make(chan account)
 	results := make(chan model.CodexInspectionResult, len(accounts))
@@ -1702,7 +1719,16 @@ func (s *Service) inspectAccounts(
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
-				results <- s.inspectSingleAccount(ctx, setup, settings, item, logger)
+				res, probeErr := s.inspectSingleAccount(probeCtx, setup, settings, item, logger)
+				if probeErr != nil {
+					gateErrMu.Lock()
+					if gateErr == nil {
+						gateErr = probeErr
+						cancelProbes()
+					}
+					gateErrMu.Unlock()
+				}
+				results <- res
 			}
 		}()
 	}
@@ -1711,7 +1737,7 @@ func (s *Service) inspectAccounts(
 		defer close(jobs)
 		for _, item := range accounts {
 			select {
-			case <-ctx.Done():
+			case <-probeCtx.Done():
 				return
 			case jobs <- item:
 			}
@@ -1720,6 +1746,10 @@ func (s *Service) inspectAccounts(
 
 	wg.Wait()
 	close(results)
+
+	if gateErr != nil {
+		return nil, gateErr
+	}
 
 	out := make([]model.CodexInspectionResult, 0, len(accounts))
 	for result := range results {
@@ -1731,7 +1761,7 @@ func (s *Service) inspectAccounts(
 		}
 		return out[i].FileName < out[j].FileName
 	})
-	return out
+	return out, nil
 }
 
 func (s *Service) inspectSingleAccount(
@@ -1740,7 +1770,7 @@ func (s *Service) inspectSingleAccount(
 	settings model.ManagerCodexInspectionConfig,
 	item account,
 	logger runLogger,
-) model.CodexInspectionResult {
+) (model.CodexInspectionResult, error) {
 	if item.Provider == "xai" {
 		return s.inspectSingleXAIAccount(ctx, setup, settings, item, logger)
 	}
@@ -1755,18 +1785,21 @@ func (s *Service) inspectSingleAccount(
 			"fileName":       item.FileName,
 			"displayAccount": item.DisplayAccount,
 		})
-		return base
+		return base, nil
 	}
 
 	var response apiCallResponse
 	var err error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		response, err = s.requestCodexUsage(ctx, setup, settings, item)
-		if err == nil || errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+		if err == nil || errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 			break
 		}
 	}
 	if err != nil {
+		if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			return base, err
+		}
 		base.Action = "keep"
 		base.ActionReason = "探测异常，保留账号"
 		base.Error = truncate(err.Error(), maxStoredBodyText)
@@ -1777,7 +1810,7 @@ func (s *Service) inspectSingleAccount(
 			"displayAccount": item.DisplayAccount,
 			"error":          err.Error(),
 		})
-		return base
+		return base, nil
 	}
 	if !response.HasStatusCode {
 		base.Action = "keep"
@@ -1790,7 +1823,7 @@ func (s *Service) inspectSingleAccount(
 			"displayAccount": item.DisplayAccount,
 			"body":           truncate(response.BodyText, maxStoredBodyText),
 		})
-		return base
+		return base, nil
 	}
 
 	statusCode := response.StatusCode
@@ -1853,7 +1886,7 @@ func (s *Service) inspectSingleAccount(
 		"usedPercent":    nullableFloat(decision.UsedPercent),
 		"isQuota":        decision.IsQuota,
 	})
-	return base
+	return base, nil
 }
 
 func (s *Service) requestCodexUsage(
@@ -1993,9 +2026,20 @@ func (s *Service) executeAutoActions(
 	results []model.CodexInspectionResult,
 	logger runLogger,
 ) []ActionOutcome {
+	outcomes, _ := s.executeAutoActionsWithBlocker(ctx, setup, settings, results, logger)
+	return outcomes
+}
+
+func (s *Service) executeAutoActionsWithBlocker(
+	ctx context.Context,
+	setup store.Setup,
+	settings model.ManagerCodexInspectionConfig,
+	results []model.CodexInspectionResult,
+	logger runLogger,
+) ([]ActionOutcome, error) {
 	mode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone)
 	if mode == model.CodexInspectionAutoActionNone && !settings.AutoRecoverEnabled {
-		return nil
+		return nil, nil
 	}
 	items, preflightOutcomes := selectAutoActionItems(mode, settings.AutoRecoverEnabled, results)
 	logCtx := context.WithoutCancel(ctx)
@@ -2004,7 +2048,7 @@ func (s *Service) executeAutoActions(
 		requestedCount = countSuggestedActionResults(results)
 	}
 	if requestedCount == 0 {
-		return nil
+		return nil, nil
 	}
 	logger.info(logCtx, "自动处理账号开始", map[string]any{
 		"requestedCount": requestedCount,
@@ -2025,6 +2069,9 @@ func (s *Service) executeAutoActions(
 		actionFor,
 	)
 	if validationErr != nil {
+		if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(validationErr, cpa.ErrExternalRejectionUnavailable) {
+			return nil, validationErr
+		}
 		validationOutcomes = completeCanceledActionOutcomes(
 			items,
 			validationOutcomes,
@@ -2040,10 +2087,16 @@ func (s *Service) executeAutoActions(
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(validationOutcomes)+len(validItems))
 	outcomes = append(outcomes, preflightOutcomes...)
 	outcomes = append(outcomes, validationOutcomes...)
+	var execGateErr error
 	if len(validItems) > 0 {
-		outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, sourceFileMembers, logger, "自动处理", true, actionFor)...)
+		var executed []ActionOutcome
+		executed, execGateErr = s.executeActionItemsWithBlocker(ctx, setup, settings, validItems, sourceFileMembers, logger, "自动处理", true, actionFor)
+		outcomes = append(outcomes, executed...)
 	}
 	summary := summarizeActionOutcomes(outcomes)
+	if execGateErr != nil && summary.Success == 0 {
+		return outcomes, execGateErr
+	}
 	remainingCount := countPendingActionResults(results, outcomes)
 	completionDetail := map[string]any{
 		"successCount":     summary.Success,
@@ -2057,7 +2110,7 @@ func (s *Service) executeAutoActions(
 	} else {
 		logger.success(logCtx, "自动处理账号完成", completionDetail)
 	}
-	return outcomes
+	return outcomes, nil
 }
 
 func countSuggestedActionResults(results []model.CodexInspectionResult) int {
@@ -2104,7 +2157,26 @@ func (s *Service) executeActionItems(
 	automatic bool,
 	actionFor func(model.CodexInspectionResult) string,
 ) []ActionOutcome {
+	outcomes, _ := s.executeActionItemsWithBlocker(ctx, setup, settings, items, sourceFileMembers, logger, logPrefix, automatic, actionFor)
+	return outcomes
+}
+
+func (s *Service) executeActionItemsWithBlocker(
+	ctx context.Context,
+	setup store.Setup,
+	settings model.ManagerCodexInspectionConfig,
+	items []model.CodexInspectionResult,
+	sourceFileMembers map[string][]model.CodexInspectionResult,
+	logger runLogger,
+	logPrefix string,
+	automatic bool,
+	actionFor func(model.CodexInspectionResult) string,
+) ([]ActionOutcome, error) {
 	logCtx := context.WithoutCancel(ctx)
+	actionCtx, cancelActions := context.WithCancel(ctx)
+	defer cancelActions()
+	var gateErrMu sync.Mutex
+	var gateErr error
 	workers := settings.DeleteWorkers
 	if workers <= 0 {
 		workers = 1
@@ -2125,7 +2197,7 @@ func (s *Service) executeActionItems(
 			defer wg.Done()
 			for {
 				select {
-				case <-ctx.Done():
+				case <-actionCtx.Done():
 					return
 				case item, ok := <-jobs:
 					if !ok {
@@ -2155,9 +2227,17 @@ func (s *Service) executeActionItems(
 							fileLock.Lock()
 							defer fileLock.Unlock()
 						}
-						return s.executeAction(ctx, setup, actionItem, sourceMembers, automatic)
+						return s.executeAction(actionCtx, setup, actionItem, sourceMembers, automatic)
 					}()
 					if executeErr != nil {
+						if cpa.HasExternalSavedCredentialGate(ctx) && (errors.Is(executeErr, cpa.ErrManagementRejected) || errors.Is(executeErr, cpa.ErrExternalTargetMoved) || errors.Is(executeErr, cpa.ErrExternalRejectionUnavailable)) {
+							gateErrMu.Lock()
+							if gateErr == nil {
+								gateErr = executeErr
+								cancelActions()
+							}
+							gateErrMu.Unlock()
+						}
 						outcome.Success = false
 						outcome.Status = model.CodexInspectionActionStatusFailed
 						outcome.Error = executeErr.Error()
@@ -2184,35 +2264,49 @@ func (s *Service) executeActionItems(
 	}
 	for _, item := range items {
 		select {
-		case <-ctx.Done():
+		case <-actionCtx.Done():
 			close(jobs)
 			wg.Wait()
 			close(outcomes)
+			cause := ctx.Err()
+			gateErrMu.Lock()
+			blocker := gateErr
+			gateErrMu.Unlock()
+			if cause == nil {
+				cause = blocker
+			}
 			return completeCanceledActionOutcomes(
 				items,
 				collectActionOutcomes(outcomes, len(items)),
 				actionFor,
-				ctx.Err(),
+				cause,
 				logger,
 				logCtx,
 				logPrefix,
-			)
+			), blocker
 		case jobs <- item:
 		}
 	}
 	close(jobs)
 	wg.Wait()
 	close(outcomes)
+	gateErrMu.Lock()
+	blocker := gateErr
+	gateErrMu.Unlock()
+	cause := ctx.Err()
+	if cause == nil {
+		cause = blocker
+	}
 
 	return completeCanceledActionOutcomes(
 		items,
 		collectActionOutcomes(outcomes, len(items)),
 		actionFor,
-		ctx.Err(),
+		cause,
 		logger,
 		logCtx,
 		logPrefix,
-	)
+	), blocker
 }
 
 func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []ActionOutcome {
@@ -3473,7 +3567,7 @@ func (s *Service) validateActionItems(
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, nil, ctxErr
 		}
-		if cpa.HasExternalSavedCredentialGate(ctx) && (errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved)) {
+		if cpa.HasExternalSavedCredentialGate(ctx) && (errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable)) {
 			return nil, nil, nil, err
 		}
 		message := fmt.Sprintf("刷新认证文件失败，已拒绝执行：%v", err)

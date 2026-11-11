@@ -72,6 +72,10 @@ func (a *freshApplication) initialClientKey(w http.ResponseWriter, r *http.Reque
 			writeExternalCredentialWaitCancelled(w)
 			return
 		}
+		if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			writeExternalAuthorityUnavailable(w)
+			return
+		}
 		code := "s1_observation_unavailable"
 		w.Header().Set("Content-Type", "application/json")
 		switch {

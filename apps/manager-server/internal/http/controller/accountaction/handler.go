@@ -108,6 +108,10 @@ func (h *Handler) writeCandidateResult(w http.ResponseWriter, item any, err erro
 			response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
 			return
 		}
+		if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			response.JSON(w, http.StatusServiceUnavailable, map[string]string{"code": "external_cpa_authority_unavailable"})
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, accountactionsvc.ErrCandidateNotFound) {
 			status = http.StatusNotFound

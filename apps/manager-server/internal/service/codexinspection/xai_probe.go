@@ -79,6 +79,7 @@ type xaiInferenceProbe struct {
 	Healthy    bool
 	StatusCode int
 	Decision   *xaiProbeDecision
+	Err        error
 }
 
 func (s *Service) inspectSingleXAIAccount(
@@ -87,7 +88,7 @@ func (s *Service) inspectSingleXAIAccount(
 	settings model.ManagerCodexInspectionConfig,
 	item account,
 	logger runLogger,
-) model.CodexInspectionResult {
+) (model.CodexInspectionResult, error) {
 	base := resultFromAccount(item)
 	if item.AuthIndex == "" {
 		base.ActionReason = "monitoring.xai_inspection_reason_missing_auth_index"
@@ -105,14 +106,14 @@ func (s *Service) inspectSingleXAIAccount(
 			"inferenceEnabled": settings.XAIInferenceEnabled,
 			"action":           base.Action,
 		})
-		return base
+		return base, nil
 	}
 
 	var billing xaiBillingProbe
 	var billingErr error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		billing, billingErr = s.requestXAIBilling(ctx, setup, settings, item)
-		if errors.Is(billingErr, cpa.ErrManagementRejected) || errors.Is(billingErr, cpa.ErrExternalTargetMoved) {
+		if errors.Is(billingErr, cpa.ErrManagementRejected) || errors.Is(billingErr, cpa.ErrExternalTargetMoved) || errors.Is(billingErr, cpa.ErrExternalRejectionUnavailable) {
 			break
 		}
 		if billingErr == nil && (!xaiProbeShouldRetry(billing) || attempt == settings.Retries) {
@@ -120,6 +121,9 @@ func (s *Service) inspectSingleXAIAccount(
 		}
 	}
 	if billingErr != nil {
+		if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(billingErr, cpa.ErrExternalRejectionUnavailable) {
+			return base, billingErr
+		}
 		billing.Failures = append(billing.Failures, *xaiDecision(0, "upstream_error", billingErr.Error()))
 		billing.Partial = true
 	}
@@ -130,10 +134,13 @@ func (s *Service) inspectSingleXAIAccount(
 	if !settings.XAIInferenceEnabled {
 		base = resolveXAIBasicInspectionResult(base, billing)
 		logXAIInspectionResult(ctx, logger, item, base, billing, nil)
-		return base
+		return base, nil
 	}
 
 	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item, billing.OfficialAPIHealthy)
+	if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(inference.Err, cpa.ErrExternalRejectionUnavailable) {
+		return base, inference.Err
+	}
 	if inference.Healthy {
 		base.Action = "keep"
 		base.ActionReason = "monitoring.xai_inspection_reason_inference_healthy"
@@ -169,7 +176,7 @@ func (s *Service) inspectSingleXAIAccount(
 		base.ErrorDetail = decision.ErrorDetail
 	}
 	logXAIInspectionResult(ctx, logger, item, base, billing, &inference.Healthy)
-	return base
+	return base, nil
 }
 
 func logXAIInspectionResult(
@@ -303,6 +310,9 @@ func (s *Service) requestXAIInferenceWithRetries(
 	var probe xaiInferenceProbe
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		probe = s.requestXAIInference(ctx, setup, settings, item, forceOfficialAPI)
+		if errors.Is(probe.Err, cpa.ErrManagementRejected) || errors.Is(probe.Err, cpa.ErrExternalTargetMoved) || errors.Is(probe.Err, cpa.ErrExternalRejectionUnavailable) {
+			break
+		}
 		if probe.Healthy || probe.Decision == nil || !xaiInferenceShouldRetry(*probe.Decision) {
 			break
 		}
@@ -352,7 +362,7 @@ func (s *Service) requestXAIInference(
 		string(data),
 	)
 	if err != nil {
-		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error())}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error()), Err: err}
 	}
 	if !response.HasStatusCode {
 		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "protocol_changed", "xAI inference response missing status_code")}

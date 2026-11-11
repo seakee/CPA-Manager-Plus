@@ -91,6 +91,9 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			case errors.Is(listErr, errExternalCredentialWaitCancelled):
 				writeExternalCredentialWaitCancelled(w)
 				return
+			case errors.Is(listErr, cpa.ErrExternalRejectionUnavailable):
+				writeExternalAuthorityUnavailable(w)
+				return
 			case errors.Is(listErr, cpa.ErrExternalTargetMoved):
 				// The connection no longer names the committed target. The staged
 				// keys are not an effect of any CPA, so the list is a typed blocker

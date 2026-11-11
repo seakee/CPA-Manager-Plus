@@ -83,6 +83,10 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 		writeExternalCredentialWaitCancelled(w)
 		return
 	}
+	if errors.Is(e, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	var rejection freshconfig.Rejection
 	var refusal freshconfig.CPARejection
 	var writeError cpa.ConfigWriteError

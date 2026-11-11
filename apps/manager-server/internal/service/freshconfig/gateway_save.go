@@ -429,6 +429,14 @@ func (s *Service) failGroupOperation(ctx context.Context, group string, operatio
 		}
 		return next, cause
 	}
+	if !applied && errors.Is(cause, cpa.ErrExternalRejectionUnavailable) {
+		next := operation
+		next.State, next.Code = "failed", ReasonUnavailable
+		if err := s.updateGroupOperation(ctx, group, operation, next); err != nil {
+			return operation, err
+		}
+		return next, cause
+	}
 	var rejection cpa.ConfigWriteError
 	if applied || !errors.As(cause, &rejection) || !rejection.Definite() {
 		// A lost or unreadable response, or any failure after part of the save was
@@ -454,7 +462,7 @@ func (s *Service) failGroupOperation(ctx context.Context, group string, operatio
 
 // reconcileGroup resolves an unknown group operation that was never acknowledged.
 func (s *Service) reconcileGroup(ctx context.Context, _ freshstore.Record, auth authority, operation freshstore.ConfigGroupOperation) (freshstore.ConfigGroupOperation, error) {
-	return s.resolveGroupOperation(ctx, operation.Group, auth, operation)
+	return s.resolveGroupOperationWithMode(ctx, operation.Group, auth, operation, true)
 }
 
 // resolveGroupOperation records what a read-back proves. Every edited leaf in
@@ -462,12 +470,16 @@ func (s *Service) reconcileGroup(ctx context.Context, _ freshstore.Record, auth 
 // write_not_applied only when CPA never acknowledged the write; after an
 // acknowledged write it is the superseded outcome of a later writer.
 func (s *Service) resolveGroupOperation(ctx context.Context, group string, auth authority, operation freshstore.ConfigGroupOperation) (freshstore.ConfigGroupOperation, error) {
+	return s.resolveGroupOperationWithMode(ctx, group, auth, operation, false)
+}
+
+func (s *Service) resolveGroupOperationWithMode(ctx context.Context, group string, auth authority, operation freshstore.ConfigGroupOperation, reconcile bool) (freshstore.ConfigGroupOperation, error) {
 	if operation.State != "unknown" {
 		return operation, nil
 	}
 	document, err := auth.wire.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
-		if auth.mode == ModeExternal && errors.Is(err, cpa.ErrManagementRejected) {
+		if auth.mode == ModeExternal && (errors.Is(err, cpa.ErrManagementRejected) || (reconcile && errors.Is(err, cpa.ErrExternalRejectionUnavailable))) {
 			return operation, err
 		}
 		return operation, cpa.ErrApplyUnknown

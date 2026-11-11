@@ -162,5 +162,9 @@ func writeExternalCodexInspectionBlocker(w http.ResponseWriter, err error) bool 
 		response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
 		return true
 	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		response.JSON(w, http.StatusServiceUnavailable, map[string]string{"code": "external_cpa_authority_unavailable"})
+		return true
+	}
 	return false
 }

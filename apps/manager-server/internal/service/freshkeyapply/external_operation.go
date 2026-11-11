@@ -266,7 +266,7 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 	step := o.Steps[index].Name
 	grant, err := s.keyPermit(ctx, o.ID, step)
 	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 			return r, err
 		}
 		return r, ErrExternalUnavailable
@@ -355,6 +355,13 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 			o.Steps[index].State = "unattempted"
 			o.Outcome = "pending"
 		}
+		if errors.Is(writeErr, cpa.ErrExternalRejectionUnavailable) {
+			// The saved-credential wire gate refused locally before presenting the
+			// credential to CPA, so no byte of the key list was written.
+			o.Steps[index].Returned = false
+			o.Steps[index].State = "unattempted"
+			o.Outcome = "pending"
+		}
 		// Retain the attempt on a lost client: the journal, not the reply, is the
 		// evidence a later reconcile reads.
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -377,7 +384,7 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 func (s *Service) externalKeyGrantHeld(ctx context.Context, grant KeyPermit, operationID, step string) error {
 	current, err := s.keyPermit(ctx, operationID, step)
 	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 			return err
 		}
 		return ErrExternalUnavailable

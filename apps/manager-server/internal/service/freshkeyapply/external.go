@@ -163,6 +163,9 @@ func (s *Service) externalAuthority(ctx context.Context) (ExternalInstall, error
 		if errors.Is(err, cpa.ErrExternalTargetMoved) {
 			return ExternalInstall{}, cpa.ErrExternalTargetMoved
 		}
+		if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			return ExternalInstall{}, cpa.ErrExternalRejectionUnavailable
+		}
 		if errors.Is(err, ErrGeneration) || errors.Is(err, cpa.ErrSourceConflict) || errors.Is(err, cpa.ErrApplyUnknown) {
 			return ExternalInstall{}, err
 		}
@@ -299,7 +302,7 @@ func (s *Service) ExternalKeyList(ctx context.Context, keys []freshkeys.Key) ([]
 	}
 	present, err := s.ExternalKeyPresence(ctx, ids)
 	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 			return nil, true, err
 		}
 		return keys, true, nil

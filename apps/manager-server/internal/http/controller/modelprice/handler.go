@@ -68,6 +68,10 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 				response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
 				return
 			}
+			if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+				response.JSON(w, http.StatusServiceUnavailable, map[string]string{"code": "external_cpa_authority_unavailable"})
+				return
+			}
 			response.Error(w, modelPriceMutationStatus(err, response.ModelPriceErrorStatus(err)), err)
 			return
 		}
