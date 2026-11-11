@@ -272,6 +272,7 @@ func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper,
 // remaining limit is a fact about the destination or the installation, so the
 // page can name it where the operator is choosing instead of after a submit.
 func (s *Service) Preflight(ctx context.Context, target, keeper, mode string, generation uint64) error {
+	s = s.active()
 	if s == nil {
 		return ErrUnavailable
 	}

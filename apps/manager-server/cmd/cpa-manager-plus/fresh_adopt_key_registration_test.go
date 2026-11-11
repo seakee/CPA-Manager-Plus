@@ -64,10 +64,31 @@ func (activeAdoptRoutingDriver) Apply(context.Context, freshrouting.State) error
 func (activeAdoptRoutingDriver) Verify(context.Context, freshrouting.State) error { return nil }
 
 func wireAdoptManagedAuthority(app *freshApplication, rt *migrationRuntime, destinationURL string) {
-	source := managedInstallSource(app.store, app.protector, destinationURL)
+	storeView := freshStoreView{app: app}
+	source := managedInstallSource(storeView, app.protector, destinationURL)
 	app.managedSource = source
-	app.keyApply = freshkeyapply.NewManaged(app.keyRepo, app.keys, rt, destinationURL, source)
-	app.gatewayConfig = freshconfig.New(app.store, app.keyApply.ConfigTarget,
+	app.runtime = rt
+	managedAuthority := freshkeyapply.NewManaged(app.keyRepo, app.keys, gatedEmbeddedRuntimeClient{app: app}, destinationURL, source)
+	externalSource := externalInstallSource(storeView, app.protector)
+	app.externalSource = externalSource
+	externalAuthority := freshkeyapply.NewExternal(app.keyRepo, app.keys, externalSource)
+	app.keyApply = freshkeyapply.NewStrategySelector(
+		func(op bootstrap.FreshOperation) *freshkeyapply.Service {
+			switch {
+			case isCommittedExternalStrategy(op.Strategy):
+				return externalAuthority
+			case freshkeyapply.ManagerOwnedStrategy(op.Strategy):
+				return managedAuthority
+			default:
+				return nil
+			}
+		},
+		func() (bootstrap.FreshOperation, bool) {
+			op, loadErr := app.current(context.Background())
+			return op, loadErr == nil
+		},
+	)
+	app.gatewayConfig = freshconfig.New(storeView, app.keyApply.ConfigTarget,
 		app.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
 	app.gatewayConfig.EnableManaged(destinationURL)
 	app.gatewayConfig.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
@@ -77,6 +98,7 @@ func wireAdoptManagedAuthority(app *freshApplication, rt *migrationRuntime, dest
 		}
 		return cpa.PostureFor(install.Strategy)
 	})
+	app.gatewayConfig.EnableExternal(app.keyApply.ExternalTarget)
 	app.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, app.v8PluginCapable)
 	app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
 }
@@ -417,6 +439,7 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
 		ctx := t.Context()
 		realStore := fixture.app.store
+		fixture.app.pluginCapability = nil
 
 		// Outermost first Load failure (`failFromCall: 1`) through both ServeHTTP
 		// (`canonical`) and `canonicalAPI`, plus inner Load failure (`failFromCall: 2`),
@@ -1370,4 +1393,85 @@ func TestValidateFreshAuthorityBodyRejectsNullAndMissingAdmissionFields(t *testi
 	if err := validateFreshAuthorityBody([]byte(base+`,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":true}}`), op, true); err != nil {
 		t.Fatalf("valid admitted=true rejected: %v", err)
 	}
+}
+
+// Production wiring builds `app.keyApply` via `NewStrategySelector` backed by
+// `gatedEmbeddedRuntimeClient`: completion, historical backfill, direct
+// `RegisterAdoption`, `store.Load` outage classification, and key revocation
+// `Preflight` must all delegate through the active Managed authority without
+// triggering any embedded Runtime lifecycle mutation.
+func TestAdoptCompletionBackfillAndKeyPreflightWorkThroughStrategySelectorAndGatedRuntime(t *testing.T) {
+	t.Run("completion and key revocation preflight delegate through StrategySelector", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+
+		completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if completeResp.Code != http.StatusOK {
+			t.Fatalf("POST complete via StrategySelector = %d %s, want 200", completeResp.Code, completeResp.Body.String())
+		}
+		listed, err := fixture.app.keys.List(ctx)
+		if err != nil || len(listed) != len(adoptedClientKeys) {
+			t.Fatalf("listed adopted keys = %#v (%v), want %d", listed, err, len(adoptedClientKeys))
+		}
+		// Idempotent RegisterAdoption through the StrategySelector wrapper.
+		if replayed, regErr := fixture.app.keyApply.RegisterAdoption(ctx, adoptedClientKeys); regErr != nil || len(replayed) != len(adoptedClientKeys) {
+			t.Fatalf("StrategySelector.RegisterAdoption replay = %#v (%v)", replayed, regErr)
+		}
+
+		preflightPath := "api-keys/" + string(listed[0].ID) + "/revocation/" + string(listed[1].ID) + "/revoke"
+		preflightResp := gatewayRequest(t, fixture.app, http.MethodGet, preflightPath, "", "")
+		if preflightResp.Code != http.StatusOK {
+			t.Fatalf("GET %s via StrategySelector = %d %s, want 200", preflightPath, preflightResp.Code, preflightResp.Body.String())
+		}
+		var preflight struct {
+			Ready  bool   `json:"ready"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(preflightResp.Body.Bytes(), &preflight); err != nil || !preflight.Ready || preflight.Reason != "" {
+			t.Fatalf("preflight verdict = %+v (%v), want ready=true", preflight, err)
+		}
+	})
+
+	t.Run("historical backfill uses read-only gated runtime Status and preserves 503 on store outage", func(t *testing.T) {
+		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+		ctx := t.Context()
+		loaded := fixture.reload(t)
+		preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		upgraded := newFreshApplication(fixture.opened, config.Config{}, nil)
+		wireAdoptManagedAuthority(upgraded, fixture.runtime, fixture.destination.URL())
+		realStore := upgraded.store
+		upgraded.pluginCapability = nil
+		startsBefore := len(fixture.runtime.starts)
+		stagesBefore := len(fixture.runtime.stages)
+
+		// Store read outage inside reconcileCompletedAdoption under StrategySelector
+		// must return 503 adopt_installation_unavailable, never 409.
+		upgraded.store = &loadFailingStore{
+			Store:        realStore,
+			failFromCall: 4,
+			err:          errors.New("simulated sqlite read outage during replay"),
+		}
+		upgraded.routing = freshrouting.New(upgraded.store, activeAdoptRoutingDriver{store: upgraded.store})
+		outageResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if outageResp.Code != http.StatusServiceUnavailable || errorCode(t, outageResp) != "adopt_installation_unavailable" {
+			t.Fatalf("POST complete replay store outage = %d %s, want 503 adopt_installation_unavailable", outageResp.Code, outageResp.Body.String())
+		}
+
+		upgraded.store = realStore
+		upgraded.routing = freshrouting.New(realStore, activeAdoptRoutingDriver{store: realStore})
+		upgraded.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, upgraded.v8PluginCapable)
+		upgraded.prepareCompletedStartup(ctx, preUpgrade.Operation)
+		if len(fixture.runtime.starts) != startsBefore || len(fixture.runtime.stages) != stagesBefore {
+			t.Fatalf("historical backfill mutated runtime lifecycle: starts %d->%d, stages %d->%d",
+				startsBefore, len(fixture.runtime.starts), stagesBefore, len(fixture.runtime.stages))
+		}
+		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, true)
+	})
 }

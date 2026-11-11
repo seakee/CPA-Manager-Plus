@@ -354,8 +354,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		writeFreshJSON(w, op)
 		return
 	}
-	if op.Strategy.Stage != "committed" || record.Connection == nil || a.keyApply == nil ||
-		a.keyApply.Profile() != freshkeyapply.ProfileManaged ||
+	authority := a.keyApply.ForOperation(op)
+	if op.Strategy.Stage != "committed" || record.Connection == nil || authority == nil ||
+		authority.Profile() != freshkeyapply.ProfileManaged ||
 		!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
 		w.WriteHeader(http.StatusConflict)
 		return
@@ -527,7 +528,7 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 // live Runtime and destination CPA read-only and commits the registration in
 // one immediate SQLite transaction without rewriting the Fresh revision.
 func (a *freshApplication) reconcileCompletedAdoption(ctx context.Context) adoptCompletion {
-	if a == nil || a.store == nil || a.keyApply == nil || a.keyApply.Profile() != freshkeyapply.ProfileManaged {
+	if a == nil || a.store == nil || a.keyApply == nil {
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
 	}
 	a.adoptMigrationMu.Lock()
@@ -542,7 +543,10 @@ func (a *freshApplication) reconcileCompletedAdoption(ctx context.Context) adopt
 		if !op.ProductComplete || op.Strategy.Strategy != bootstrap.AdoptExisting {
 			return adoptCompletion{next: current}
 		}
-		if op.Strategy.Stage != "committed" || current.Connection == nil || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+		authority := a.keyApply.ForOperation(op)
+		if authority == nil || authority.Profile() != freshkeyapply.ProfileManaged ||
+			op.Strategy.Stage != "committed" || current.Connection == nil ||
+			!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
 			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
 		}
 		ready, err := a.keyApply.AdoptionRegistrationReady(ctx)

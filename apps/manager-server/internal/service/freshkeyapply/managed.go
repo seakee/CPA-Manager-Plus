@@ -120,6 +120,7 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 // SetTrustedSupervisorRoots binds a Manager-owned key authority to the
 // installation's canonical Runtime Supervisor root(s).
 func (s *Service) SetTrustedSupervisorRoots(roots []string) {
+	s = s.active()
 	if s == nil {
 		return
 	}
@@ -300,6 +301,7 @@ func (p PreparedAdoption) Generation() string { return p.journal.Generation }
 // PrepareAdoption validates and encrypts the destination's Client Keys and binds
 // the one-shot install journal metadata without touching SQLite.
 func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (PreparedAdoption, error) {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil || s.registrationPermit == nil {
 		return PreparedAdoption{}, ErrUnavailable
 	}
@@ -324,6 +326,7 @@ func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (Prepar
 // CommitAdoptionTx commits every prepared adopted Client Key and claims the
 // one-shot install journal inside the caller's completion CAS transaction.
 func (s *Service) CommitAdoptionTx(ctx context.Context, tx *sql.Tx, prepared PreparedAdoption, runtimeIdentity string) ([]freshkeys.Key, error) {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil || tx == nil || len(prepared.records) == 0 {
 		return nil, ErrUnavailable
 	}
@@ -355,6 +358,10 @@ func (s *Service) CommitAdoptionTx(ctx context.Context, tx *sql.Tx, prepared Pre
 // source binding owned by another identity, or a journal owned by another
 // installation is refused as ErrAdoptionConflict.
 func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]freshkeys.Key, error) {
+	s = s.active()
+	if s == nil {
+		return nil, ErrUnavailable
+	}
 	prepared, err := s.PrepareAdoption(ctx, secrets)
 	if err != nil {
 		return nil, err
@@ -402,6 +409,7 @@ func (s *Service) requireInstallJournal(ctx context.Context, p Permit) error {
 // destination CPA re-proof, and returns ErrAdoptionConflict when a foreign or
 // inconsistent journal is present.
 func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
 		return false, ErrUnavailable
 	}
@@ -422,6 +430,7 @@ func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
 // VerifyRuntimeTarget proves the live Runtime identity, Ready state and active
 // CPA artifact for the committed Managed installation.
 func (s *Service) VerifyRuntimeTarget(ctx context.Context) error {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged {
 		return ErrUnavailable
 	}
