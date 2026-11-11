@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 // Verdict is private, request-bound and never stored. It is not an effective
@@ -18,12 +19,22 @@ type Verdict struct {
 	Model          string `json:"model,omitempty"`
 }
 
+// privateChatKeyLength is the canonical Key workspace secret length. This
+// consumer is the private S1/S2 chat proof: it proves a credential this Manager
+// minted, by shape first and by the installation's own staged secret second.
+//
+// An adopted installation carries the source CPA's opaque keys instead, which
+// this proof cannot represent, so the length gate refuses them fail-closed rather
+// than admitting a shape this Manager never minted. Gateway traffic for an
+// adopted destination is admitted by the installation authority, not here.
+const privateChatKeyLength = model.WorkspaceClientKeyLength
+
 // Admit consumes the existing S1 authority with NEW observations for this call.
 // It neither reads the five-second UI observation nor installs/replaces a Key.
 func (s *Service) Admit(ctx context.Context, candidate string, generation uint64, binding string) (Verdict, error) {
 	deny := Verdict{}
 	s = s.active()
-	if s == nil || !identity.IsValidSHA256Hex(binding) || len(candidate) != 73 {
+	if s == nil || !identity.IsValidSHA256Hex(binding) || len(candidate) != privateChatKeyLength {
 		return deny, ErrUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)

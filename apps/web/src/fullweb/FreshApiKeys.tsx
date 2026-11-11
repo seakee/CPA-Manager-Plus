@@ -424,7 +424,7 @@ export function FreshApiKeys({
     (key) =>
       (filter === 'all' || (filter === 'replaced') === (key.lifecycle === 'superseded')) &&
       (!query ||
-        [keyDisplayName(key, k('installerOrigin'), t('keysUnnamed')), key.maskedPreview, key.id].some((value) =>
+        [keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed')), key.maskedPreview, key.id].some((value) =>
           value.toLocaleLowerCase().includes(query)
         ))
   );
@@ -902,7 +902,7 @@ export function FreshApiKeys({
                               disabled={locked}
                               onClick={() => setSelected(key.id)}
                             >
-                              {keyDisplayName(key, k('installerOrigin'), t('keysUnnamed'))}
+                              {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}
                             </button>
                             <small title={key.id}>
                               <code>{key.maskedPreview}</code>
@@ -942,7 +942,7 @@ export function FreshApiKeys({
                           </button>
                           {revocationAvailable && key.lifecycle !== 'superseded' && (
                             <DropdownMenu
-                              ariaLabel={k('moreActions') + ': ' + keyDisplayName(key, k('installerOrigin'), t('keysUnnamed'))}
+                              ariaLabel={k('moreActions') + ': ' + keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}
                               triggerLabel="⋮"
                               triggerClassName="btn btn-ghost btn-xs"
                               disabled={locked || operationPending}
@@ -988,6 +988,14 @@ export function FreshApiKeys({
             <div>
               <strong>{k('unavailable')}</strong>
               <p>{k('unavailableHelp')}</p>
+            </div>
+          </aside>
+        )}
+        {!!keys?.some((key) => key.origin === 'adopted') && (
+          <aside className="key-gateway-note" data-testid="adopted-key-note">
+            <FullWebIcon name="shield" />
+            <div>
+              <p>{k('adoptedOriginNote')}</p>
             </div>
           </aside>
         )}

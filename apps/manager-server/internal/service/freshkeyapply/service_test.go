@@ -32,6 +32,9 @@ type fakeWire struct {
 	calls            int
 	configured, auth bool
 	fail             error
+	// maxKeys is the client-key bound this fake destination enforces, so a test
+	// can state the boundary a destination posture has. Zero is unbounded.
+	maxKeys int
 }
 
 func (w *fakeWire) InstallOne(context.Context, cpa.TargetProof, string, string) (cpa.InstallResult, error) {
@@ -42,6 +45,22 @@ func (w *fakeWire) Configured(context.Context, string, string) (bool, error) {
 	return w.configured, nil
 }
 func (w *fakeWire) AuthSweep(context.Context, string) (bool, error) { return w.auth, nil }
+
+// ValidKeySet is the destination's own list policy: a non-empty list of unique,
+// non-empty credentials within the bound this fake was given.
+func (w *fakeWire) ValidKeySet(keys []string) bool {
+	if len(keys) == 0 || (w.maxKeys > 0 && len(keys) > w.maxKeys) {
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if key == "" || seen[key] {
+			return false
+		}
+		seen[key] = true
+	}
+	return true
+}
 
 func fixture(t *testing.T) (*Service, *fakeWire, *observedRuntime, string) {
 	t.Helper()

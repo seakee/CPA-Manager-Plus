@@ -336,6 +336,55 @@ func TestExternalRevokeAndLastKeyProtection(t *testing.T) {
 	}
 }
 
+// An unsettled journal is one operation at a time, and the read-only answer must
+// say so before the operator submits. `BeginOperation` is what refuses the second
+// intent, so the preflight asks the same rule: otherwise the drawer offers a
+// selection whose submit returns `key_operation_conflict` — the one limit the
+// preflight exists to name instead of discovering after the click.
+func TestExternalPreflightNamesAnUnsettledJournal(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	target, _ := harness.staged(t, strings.Repeat("2", 32))
+	keeper, _ := harness.staged(t, strings.Repeat("3", 32))
+	if _, err := harness.service.Apply(ctx, target, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.service.Apply(ctx, keeper, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, keeper, "revoke", 1); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	writes := harness.cpa.writes
+	// The journal is pending, so every later intent of this connection is refused
+	// until it settles — by the read-only answer and by the write alike.
+	for name, call := range map[string]func() error{
+		"preflight": func() error {
+			return harness.service.Preflight(ctx, target, keeper, "revoke", 1)
+		},
+		"prepare": func() error {
+			_, err := harness.service.Prepare(ctx, strings.Repeat("5", 32), target, keeper, "revoke", 1)
+			return err
+		},
+	} {
+		if err := call(); !errors.Is(err, repo.ErrConflict) {
+			t.Fatalf("%s against a pending journal = %v", name, err)
+		}
+	}
+	if harness.cpa.writes != writes {
+		t.Fatal("an intent refused by the journal reached the user's CPA")
+	}
+	// Once the first operation commits, the same preflight answers for a new
+	// selection again: the journal gate is the pending state, not the connection.
+	if _, err := harness.service.ContinueOperation(ctx, strings.Repeat("4", 32), 1); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	next, _ := harness.staged(t, strings.Repeat("6", 32))
+	if err := harness.service.Preflight(ctx, keeper, next, "replace", 1); err != nil {
+		t.Fatalf("preflight after the journal settled: %v", err)
+	}
+}
+
 // An edit the user makes between Prepare and Continue settles by read-back. The
 // journal's generation is the connection, so the edit never invalidates it; the
 // step's own fact is what it settles on, so the operation reaches a terminal state

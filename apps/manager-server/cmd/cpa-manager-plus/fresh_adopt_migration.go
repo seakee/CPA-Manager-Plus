@@ -3,16 +3,19 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
@@ -306,6 +309,15 @@ type adoptCompleteRequest struct {
 //  7. an accepted set of retryable items names the durable run's current
 //     generation, verified again in the completion's own CAS.
 //
+// Only once all of them hold are the destination's client keys registered in the
+// Key workspace and the install journal claimed for this run: that is the write
+// that makes the adopted installation manageable afterwards, and it must not
+// happen for a migration that is not finished. A destination list this
+// installation cannot represent — a key it already retired, a journal another
+// installation owns — is answered with `adopt_installation_conflict`, because no
+// retry changes those facts; a storage failure keeps the retryable
+// `adopt_installation_unavailable`.
+//
 // Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
 // sets `ProductComplete` runs under the same lock, so a run can never start
 // between the last check and the write. The lock is released before the reply is
@@ -324,20 +336,38 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if op.ProductComplete {
-		// A replay is also the retry trigger for a completion whose usage startup
-		// failed. It changes nothing and re-asks the idempotent startup path.
+		// An already-completed adoption replays its registration proof so an
+		// installation completed on an earlier build obtains its adopted key
+		// records and one-shot install journal once under the same read-only
+		// destination checks, while a conflict or outage fails closed instead of
+		// answering 200 silently.
+		decision := a.reconcileCompletedAdoption(r.Context())
+		if decision.code != "" {
+			writeFreshAdoptCompleteError(w, decision.status, decision.code, decision.retryable)
+			return
+		}
+		if decision.status != 0 {
+			w.WriteHeader(decision.status)
+			return
+		}
 		a.startUsageCollection(op)
 		writeFreshJSON(w, op)
 		return
 	}
-	if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil || a.keyApply == nil ||
-		!a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation) {
+	authority := a.keyApply.ForOperation(op)
+	if op.Strategy.Stage != "committed" || record.Connection == nil || authority == nil ||
+		authority.Profile() != freshkeyapply.ProfileManaged ||
+		!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
 		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	if a.protector == nil {
+		writeFreshAdoptCompleteError(w, http.StatusServiceUnavailable, "adopt_installation_unavailable", 0)
 		return
 	}
 	managementKey, err := a.protector.UnprotectString(record.Connection.ManagementKey)
 	if err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		writeFreshAdoptCompleteError(w, http.StatusServiceUnavailable, "adopt_installation_unavailable", 0)
 		return
 	}
 	a.adoptMigrationMu.Lock()
@@ -354,6 +384,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 	if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), decision.next.Operation); err != nil {
 		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 	}
+	// The gateway reported no plugin support while completion was pending, and
+	// that answer may be cached; the completed install has to be probed afresh.
+	a.pluginCapability.reprove(r.Context())
 	// Completion is the moment the install-derived CPA authority exists, so the
 	// same idempotent startup path as a resumed install runs now.
 	a.startUsageCollection(decision.next.Operation)
@@ -386,7 +419,22 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_running"}
 	}
 	current, err := a.store.Load(ctx)
-	if err != nil || current.Operation.Identity != op.Identity {
+	if err != nil {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+	}
+	if current.Operation.Identity != op.Identity {
+		return adoptCompletion{status: http.StatusConflict}
+	}
+	if freshAuth {
+		if err := a.authority.ValidateContinuation(current, continuation); err != nil {
+			return adoptCompletion{status: http.StatusConflict}
+		}
+	}
+	// The shape the CAS insists on is decided here first, before anything is
+	// written. A registration that outlived a checkpoint this completion may no
+	// longer finish would hand the gateway configuration page and the key journal
+	// authority over an installation that is not (or is no longer) this adoption.
+	if current.Operation.Strategy.Stage != "committed" || current.Operation.Strategy.Strategy != bootstrap.AdoptExisting || current.Operation.ProductComplete {
 		return adoptCompletion{status: http.StatusConflict}
 	}
 	record := current
@@ -403,7 +451,8 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	// One authenticated read of the destination is conditions 3 and 4: the Adopt
 	// posture proves the key this Manager installed, and the snapshot carries the
 	// client keys the destination actually has.
-	if _, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey); err != nil {
+	destinationKeys, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey)
+	if err != nil {
 		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
 	}
 	if !summary.Finished || len(summary.Items) < summary.Planned {
@@ -418,7 +467,23 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	if retryable > 0 && !request.AcceptRetryable {
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_retryable", retryable: retryable}
 	}
-	next, err := a.store.Update(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record) error {
+	// Completion commits the destination's Client Keys, the one-shot install
+	// journal and `ProductComplete` in one immediate SQLite transaction. Any
+	// conflict (a retired key, a foreign journal, a stale continuation or a
+	// moved revision) or storage failure rolls back the whole transaction so no
+	// incomplete adoption ever exposes adopted keys or write authority.
+	prepared, err := a.keyApply.PrepareAdoption(ctx, destinationKeys)
+	if err != nil {
+		if errors.Is(err, freshkeyapply.ErrAdoptionConflict) || errors.Is(err, freshkeyapply.ErrGeneration) {
+			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+		}
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+	}
+	updater, ok := a.store.(freshstore.TransactionalUpdater)
+	if !ok {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+	}
+	next, err := updater.UpdateTx(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record, tx *sql.Tx) error {
 		if freshAuth {
 			if err := a.authority.ValidateContinuation(*record, continuation); err != nil {
 				return err
@@ -427,24 +492,157 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 		if record.Operation.Strategy.Stage != "committed" || record.Operation.Strategy.Strategy != bootstrap.AdoptExisting || record.Operation.ProductComplete {
 			return freshstore.ErrConflict
 		}
-		// The durable generation, checked in the same CAS that completes the
-		// installation: a run that replaced the acknowledged one — even one whose
-		// retryable items are identical — makes this acknowledgement stale, and the
-		// operator is told to read the current run rather than finish over a
-		// confirmation they did not give.
 		if request.AcceptRetryable && (record.AdoptionSummary == nil || record.AdoptionSummary.RunID != request.RunID) {
 			return errAdoptMigrationRunChanged
+		}
+		if freshkeyapply.ManagedRunID(string(record.Operation.Identity.OperationID)) != prepared.RunID() ||
+			strconv.FormatUint(record.Operation.Strategy.TargetGeneration, 10) != prepared.Generation() {
+			return freshstore.ErrConflict
+		}
+		if _, err := a.keyApply.CommitAdoptionTx(ctx, tx, prepared, record.Operation.Strategy.TargetIdentity); err != nil {
+			return err
 		}
 		record.Operation.ProductComplete = true
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errAdoptMigrationRunChanged) {
+		switch {
+		case errors.Is(err, errAdoptMigrationRunChanged):
 			return adoptCompletion{status: http.StatusConflict, code: adoptMigrationRunChanged}
+		case errors.Is(err, freshkeyapply.ErrAdoptionConflict), errors.Is(err, freshkeyapply.ErrGeneration):
+			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+		case errors.Is(err, freshstore.ErrConflict), errors.Is(err, freshstore.ErrNotFresh), errors.Is(err, fresh.ErrAuthority):
+			return adoptCompletion{status: http.StatusConflict}
+		default:
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
 		}
-		return adoptCompletion{status: http.StatusConflict}
 	}
 	return adoptCompletion{next: next}
+}
+
+// reconcileCompletedAdoption ensures a completed Managed Adopt installation
+// holds its adopted Client Keys, source bindings and one-shot install journal.
+// Normal post-PR completions already satisfy AdoptionRegistrationReady in one
+// local SQLite read and return immediately without network or write work; an
+// upgraded installation completed before journaled adoption existed proves its
+// live Runtime and destination CPA read-only and commits the registration in
+// one immediate SQLite transaction without rewriting the Fresh revision.
+func (a *freshApplication) reconcileCompletedAdoption(ctx context.Context) adoptCompletion {
+	if a == nil || a.store == nil || a.keyApply == nil {
+		return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+	}
+	a.adoptMigrationMu.Lock()
+	var didBackfill bool
+	var completedOp bootstrap.FreshOperation
+	decision := func() adoptCompletion {
+		current, err := a.store.Load(ctx)
+		if err != nil {
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		op := current.Operation
+		if !op.ProductComplete || op.Strategy.Strategy != bootstrap.AdoptExisting {
+			return adoptCompletion{next: current}
+		}
+		authority := a.keyApply.ForOperation(op)
+		if authority == nil || authority.Profile() != freshkeyapply.ProfileManaged ||
+			op.Strategy.Stage != "committed" || current.Connection == nil ||
+			!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+		}
+		ready, err := a.keyApply.AdoptionRegistrationReady(ctx)
+		if err != nil {
+			if errors.Is(err, freshkeyapply.ErrAdoptionConflict) || errors.Is(err, freshkeyapply.ErrGeneration) {
+				return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+			}
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		if ready {
+			return adoptCompletion{next: current}
+		}
+		if a.protector == nil {
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		managementKey, err := a.protector.UnprotectString(current.Connection.ManagementKey)
+		if err != nil {
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		if err := a.keyApply.VerifyRuntimeTarget(ctx); err != nil {
+			if errors.Is(err, freshkeyapply.ErrGeneration) {
+				return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+			}
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
+		}
+		destinationKeys, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey)
+		if err != nil {
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
+		}
+		prepared, err := a.keyApply.PrepareAdoption(ctx, destinationKeys)
+		if err != nil {
+			if errors.Is(err, freshkeyapply.ErrAdoptionConflict) || errors.Is(err, freshkeyapply.ErrGeneration) {
+				return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+			}
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		updater, ok := a.store.(freshstore.TransactionalUpdater)
+		if !ok {
+			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+		}
+		err = updater.WithRecordTx(ctx, func(record freshstore.Record, tx *sql.Tx) error {
+			if record.Operation.Identity != op.Identity || !record.Operation.ProductComplete ||
+				record.Operation.Strategy.Stage != "committed" || record.Operation.Strategy.Strategy != bootstrap.AdoptExisting {
+				return freshstore.ErrConflict
+			}
+			if freshkeyapply.ManagedRunID(string(record.Operation.Identity.OperationID)) != prepared.RunID() ||
+				strconv.FormatUint(record.Operation.Strategy.TargetGeneration, 10) != prepared.Generation() {
+				return freshstore.ErrConflict
+			}
+			_, commitErr := a.keyApply.CommitAdoptionTx(ctx, tx, prepared, record.Operation.Strategy.TargetIdentity)
+			return commitErr
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, freshkeyapply.ErrAdoptionConflict), errors.Is(err, freshkeyapply.ErrGeneration):
+				return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+			case errors.Is(err, freshstore.ErrConflict), errors.Is(err, freshstore.ErrNotFresh):
+				return adoptCompletion{status: http.StatusConflict}
+			default:
+				return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+			}
+		}
+		didBackfill = true
+		completedOp = current.Operation
+		return adoptCompletion{next: current}
+	}()
+	a.adoptMigrationMu.Unlock()
+	if didBackfill {
+		a.pluginCapability.reprove(ctx)
+		a.startUsageCollection(completedOp)
+	}
+	return decision
+}
+
+func (a *freshApplication) awaitCompletedAdoptionBackfill(ctx context.Context) {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	decision := a.reconcileCompletedAdoption(probeCtx)
+	cancel()
+	if decision.status == 0 || decision.status == http.StatusConflict {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		decision = a.reconcileCompletedAdoption(probeCtx)
+		cancel()
+		if decision.status == 0 || decision.status == http.StatusConflict {
+			return
+		}
+	}
 }
 
 // writeFreshAdoptCompleteError refuses one adoption completion with the code the

@@ -92,12 +92,20 @@ func (t *Transport) KeySnapshot(ctx context.Context, management string) (KeySnap
 	return result, nil
 }
 
+// ValidKeySet reports whether a whole-list write of keys would be accepted by
+// this destination's own posture. It is exactly the policy WriteKeySet applies
+// before it sends anything, exported so the journal can refuse a step whose end
+// state the destination could never hold while nothing has been attempted yet.
+func (t *Transport) ValidKeySet(keys []string) bool {
+	return t.postureOf().validKeys(keys)
+}
+
 // WriteKeySet is called only after a durable per-step claim and a current Host
 // source/writer grant. It sends one request, never retries, and never clears Keys.
 func (t *Transport) WriteKeySet(ctx context.Context, management string, keys []string) error {
 	// The writer accepts exactly what the snapshot policy of this destination
 	// accepts, so a list the read would refuse can never be written.
-	if !t.postureOf().validKeys(keys) {
+	if !t.ValidKeySet(keys) {
 		return ErrSourceConflict
 	}
 	body, _ := json.Marshal(keys)

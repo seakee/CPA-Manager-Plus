@@ -1,0 +1,249 @@
+package freshkeys
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
+)
+
+// An adopted destination's client keys are stored as canonical records of their
+// own origin: the Key workspace lists them with the masked rendering their shape
+// allows, and the secret never leaves the protected record.
+func TestRegisterAdoptedStoresMaskedAdoptedRecords(t *testing.T) {
+	_, service, _, _ := installKeyStore(t)
+	ctx := t.Context()
+	secrets := []string{"sk-adopt-source-key-01", "short"}
+	keys, err := service.RegisterAdopted(ctx, secrets)
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("register: %#v %v", keys, err)
+	}
+	want := []string{"…y-01", "…"}
+	for index, key := range keys {
+		if key.Origin != repo.OriginAdopted || key.Lifecycle != "active" || key.MaskedPreview != want[index] {
+			t.Fatalf("key %d = %#v, want preview %q", index, key, want[index])
+		}
+	}
+	// The stored rows decrypt back to exactly the destination's secrets, which is
+	// what a revoke or replace step consumes.
+	for index, key := range keys {
+		if err := service.WithStagedSecret(ctx, string(key.ID), func(secret string) error {
+			if secret != secrets[index] {
+				t.Fatalf("staged secret %d = %q", index, secret)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed, err := service.List(ctx)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("list = %#v %v", listed, err)
+	}
+	// The workspace projection still works with a non-canonical adopted record in
+	// the same table: the staged key proof reads every row.
+	if matched, err := service.MatchStagedSecret(ctx, "cpamp_sk_"+strings.Repeat("d", 64)); err != nil || matched {
+		t.Fatalf("staged key proof over an adopted record: %v %v", matched, err)
+	}
+}
+
+// Registration is idempotent per secret: a replayed completion returns the
+// existing record, and a secret that is already this Manager's key keeps that one
+// identity instead of registering a second one.
+func TestRegisterAdoptedReplaysInsteadOfDuplicating(t *testing.T) {
+	_, service, _, _ := installKeyStore(t)
+	ctx := t.Context()
+	workspace, _, err := service.Create(ctx, strings.Repeat("c", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := service.RegisterAdopted(ctx, []string{"source-client-one"})
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("register: %#v %v", keys, err)
+	}
+	replayed, err := service.RegisterAdopted(ctx, []string{"source-client-one"})
+	if err != nil || len(replayed) != 1 || replayed[0].ID != keys[0].ID {
+		t.Fatalf("replay = %#v %v", replayed, err)
+	}
+	// A destination that carries a key this workspace already minted keeps that
+	// canonical record: one secret has exactly one identity.
+	existing, err := service.RegisterAdopted(ctx, []string{workspace.CreatedSecret})
+	if err != nil || len(existing) != 1 || existing[0].ID != workspace.Key.ID || existing[0].Origin != repo.OriginWorkspace {
+		t.Fatalf("workspace secret registered twice: %#v %v", existing, err)
+	}
+	if listed, err := service.List(ctx); err != nil || len(listed) != 2 {
+		t.Fatalf("list = %#v %v", listed, err)
+	}
+}
+
+// A digest that resolves to a superseded record is refused: that identity was
+// retired by a committed key operation, so it can neither become the
+// installation's key nor be revived by an adoption.
+func TestRegisterAdoptedRefusesASupersededRecord(t *testing.T) {
+	db, service, _, _ := installKeyStore(t)
+	ctx := t.Context()
+	workspace, _, err := service.Create(ctx, strings.Repeat("e", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`update gateway_api_key_identities set lifecycle='superseded', revision=revision+1 where id=?`, string(workspace.Key.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.RegisterAdopted(ctx, []string{workspace.CreatedSecret}); !errors.Is(err, ErrAdoptedSecretRetired) {
+		t.Fatalf("superseded registration = %v", err)
+	}
+	listed, err := service.List(ctx)
+	if err != nil || len(listed) != 1 || listed[0].Lifecycle != "superseded" || listed[0].Origin != repo.OriginWorkspace {
+		t.Fatalf("a retired record was rewritten: %#v %v", listed, err)
+	}
+}
+
+// A registration outside the adoption bound is refused before anything is
+// written, and a duplicate secret in one call is refused rather than silently
+// collapsed.
+func TestRegisterAdoptedRefusesMalformedInput(t *testing.T) {
+	_, service, _, _ := installKeyStore(t)
+	ctx := t.Context()
+	for name, secrets := range map[string][]string{
+		"empty":           {},
+		"empty secret":    {""},
+		"duplicate":       {"source-client-one", "source-client-one"},
+		"invalid utf8":    {string([]byte{0xff, 0xfe, 0xfd})},
+		"overlong secret": {"source-client-one", strings.Repeat("k", maxAdoptedSecretLength+1)},
+	} {
+		if _, err := service.RegisterAdopted(ctx, secrets); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	if listed, err := service.List(ctx); err != nil || len(listed) != 0 {
+		t.Fatalf("a refused registration wrote a record: %#v %v", listed, err)
+	}
+}
+
+// RegisterAdopted is all-or-nothing across the whole slice: when a later key in
+// the batch is retired or its source binding is already owned by another
+// identity, earlier valid keys in the same call leave neither workspace rows
+// nor source bindings behind.
+func TestRegisterAdoptedRollsBackBatchWhenNthKeyFails(t *testing.T) {
+	t.Run("retired key after valid keys", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		ctx := t.Context()
+		retired, _, err := service.Create(ctx, strings.Repeat("a", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`update gateway_api_key_identities set lifecycle='superseded', revision=revision+1 where id=?`, string(retired.Key.ID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`update gateway_api_key_source_bindings set retired_at_ms=1 where api_key_id=?`, string(retired.Key.ID)); err != nil {
+			t.Fatal(err)
+		}
+		_, err = service.RegisterAdopted(ctx, []string{"source-batch-first", "source-batch-second", retired.CreatedSecret})
+		if !errors.Is(err, ErrAdoptedSecretRetired) {
+			t.Fatalf("retired third key = %v, want ErrAdoptedSecretRetired", err)
+		}
+		listed, err := service.List(ctx)
+		if err != nil || len(listed) != 1 || listed[0].ID != retired.Key.ID {
+			t.Fatalf("batch refusal left workspace keys: %#v %v", listed, err)
+		}
+		var activeBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&activeBindings); err != nil || activeBindings != 0 {
+			t.Fatalf("batch refusal left %d active source bindings: %v", activeBindings, err)
+		}
+	})
+
+	t.Run("source binding conflict after valid keys", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		ctx := t.Context()
+		foreignID := strings.Repeat("b", 32)
+		if _, err := db.Exec(`insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) values(?,1,'active',1,1)`, foreignID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`insert into gateway_api_key_source_bindings(api_key_id,runtime_identity,api_key_hash,first_seen_at_ms,last_seen_at_ms) values(?,'embedded-default',?,1,1)`,
+			foreignID, SecretDigest("source-owned-third")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := service.RegisterAdopted(ctx, []string{"source-clean-first", "source-clean-second", "source-owned-third"})
+		if !errors.Is(err, repo.ErrSourceOwned) {
+			t.Fatalf("source-owned third key = %v, want ErrSourceOwned", err)
+		}
+		listed, err := service.List(ctx)
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("source-binding refusal left workspace keys: %#v %v", listed, err)
+		}
+		var activeBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&activeBindings); err != nil || activeBindings != 1 {
+			t.Fatalf("source-binding refusal changed bindings to %d: %v", activeBindings, err)
+		}
+	})
+}
+
+// Reusing a secret already staged in the Key workspace must bind or validate
+// its source runtime identity inside the same transaction: missing bindings
+// are created, matching bindings replay idempotently, and bindings pointing at
+// a different runtime fail closed as ErrSourceOwned without leaving siblings.
+func TestRegisterAdoptedBindsOrValidatesExistingWorkspaceKeySourceInTx(t *testing.T) {
+	t.Run("existing workspace key without binding acquires current runtime binding", func(t *testing.T) {
+		db, preCommitSvc, protector, _ := installKeyStore(t)
+		ctx := t.Context()
+		staged, _, err := preCommitSvc.Create(ctx, strings.Repeat("1", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		registered, err := service.RegisterAdopted(ctx, []string{staged.CreatedSecret, "adopted-new-peer"})
+		if err != nil || len(registered) != 2 {
+			t.Fatalf("RegisterAdopted = %#v %v", registered, err)
+		}
+		if registered[0].ID != staged.Key.ID || registered[0].Origin != "workspace" || registered[1].Origin != "adopted" {
+			t.Fatalf("registered origins/IDs = %#v", registered)
+		}
+		var boundCount int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='embedded-default'`).Scan(&boundCount); err != nil || boundCount != 2 {
+			t.Fatalf("active bindings for embedded-default = %d (%v), want 2", boundCount, err)
+		}
+		// Replaying with the same runtime identity stays idempotent.
+		if _, err = service.RegisterAdopted(ctx, []string{staged.CreatedSecret, "adopted-new-peer"}); err != nil {
+			t.Fatalf("replay RegisterAdopted: %v", err)
+		}
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null and runtime_identity='embedded-default'`).Scan(&boundCount); err != nil || boundCount != 2 {
+			t.Fatalf("active bindings after replay = %d (%v), want 2", boundCount, err)
+		}
+	})
+
+	t.Run("existing workspace key bound to another runtime refuses and rolls back batch", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		ctx := t.Context()
+		otherRuntimeSvc := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "external-other", nil
+		}))
+		staged, _, err := otherRuntimeSvc.Create(ctx, strings.Repeat("2", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		adoptSvc := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		if _, err = adoptSvc.RegisterAdopted(ctx, []string{"adopted-first-before-conflict", staged.CreatedSecret}); !errors.Is(err, repo.ErrSourceOwned) {
+			t.Fatalf("foreign-runtime existing key = %v, want ErrSourceOwned", err)
+		}
+		listed, err := adoptSvc.List(ctx)
+		if err != nil || len(listed) != 1 || listed[0].ID != staged.Key.ID {
+			t.Fatalf("foreign-runtime conflict leaked peer key: %#v %v", listed, err)
+		}
+		var embeddedBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where runtime_identity='embedded-default'`).Scan(&embeddedBindings); err != nil || embeddedBindings != 0 {
+			t.Fatalf("foreign-runtime conflict left %d embedded-default bindings: %v", embeddedBindings, err)
+		}
+	})
+}

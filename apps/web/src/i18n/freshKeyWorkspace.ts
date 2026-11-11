@@ -2,6 +2,9 @@ import { fullWebLanguage } from './fullweb';
 
 const en = {
   installerOrigin: 'Installation key',
+  adoptedOrigin: 'Adopted key',
+  adoptedOriginNote:
+    'Keys marked as adopted were already in use on the source CPA when this installation took it over; Manager has not re-verified them.',
   copyKey: 'Copy key',
   keyCopied: 'Key copied. It was not stored in this browser.',
   keyCopyFailed: 'Clipboard unavailable. Try copying the key again.',
@@ -137,6 +140,14 @@ const en = {
   replaceStep2: '2. Update your clients: Switch them to the new key and verify access yourself.',
   replaceStep3:
     '3. Revoke the old key: Keep another effective key and check the gateway result. No client is switched automatically.',
+  operationBlockedSourceConflict:
+    'The destination CPA’s key list does not match this operation: it may carry a key the Manager never registered or already revoked, the key this operation would write, or already the most keys this Manager will rewrite there. Nothing was written.',
+  operationBlockedInstalledKey:
+    'Keep this installation’s own key as the target or the keeper: only that key can carry the operation.',
+  operationBlockedCredentialRejected:
+    'The destination CPA refused the stored Management Key. Rebinding the connection with the current Management Key is the only way forward; retrying this operation changes nothing.',
+  operationBlockedUnavailable:
+    'This operation cannot be prepared right now. Check the installation state and retry.',
   lastKeyProtectionTitle: 'Last active key protection',
   lastKeyProtectionHelp:
     'Manager blocks revoking the only remaining saved key to prevent accidental lockout. Create a replacement key first, then use Replace or Revoke.',
@@ -145,6 +156,9 @@ const en = {
 };
 const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
+  adoptedOrigin: '接管时带来的密钥',
+  adoptedOriginNote:
+    '标记为“接管”的密钥在接管时就已在源 CPA 上使用；Manager 尚未重新校验它们。',
   copyKey: '复制密钥',
   keyCopied: '密钥已复制，未保存在此浏览器中。',
   keyCopyFailed: '剪贴板不可用，请重试复制密钥。',
@@ -270,6 +284,14 @@ const zh: typeof en = {
   replaceStep1: '1. 新建替代密钥：保存一次性完整密钥，新旧密钥保持独立。',
   replaceStep2: '2. 更新客户端：将相关客户端切换到新密钥，并自行验证接入。',
   replaceStep3: '3. 撤销旧密钥：保留另一把有效密钥并核对网关结果；不会自动切换客户端。',
+  operationBlockedSourceConflict:
+    '目标 CPA 的密钥列表与本次操作不符：其中可能有 Manager 未登记或已撤销的密钥，可能已包含本次要写入的密钥，也可能已经持有本 Manager 会在此重写的上限数量密钥。未写入任何内容。',
+  operationBlockedInstalledKey:
+    '目标或 keeper 必须是本安装当前使用的那把密钥，否则无法执行。',
+  operationBlockedCredentialRejected:
+    '目标 CPA 拒绝了这个已保存的管理密钥。唯一出路是用当前管理密钥重新绑定连接；重复这次操作不会有任何改变。',
+  operationBlockedUnavailable:
+    '当前无法准备这次操作。请检查安装状态后重试。',
   lastKeyProtectionTitle: '最后一把有效密钥保护',
   lastKeyProtectionHelp:
     '为防止客户端流量意外中断，当仅剩 1 把已保存密钥时禁止直接撤销。请先创建一把新密钥并完成客户端配置，再执行替换或撤销。',
@@ -277,6 +299,9 @@ const zh: typeof en = {
 };
 const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
+  adoptedOrigin: '接管時帶來的金鑰',
+  adoptedOriginNote:
+    '標記為「接管」的金鑰在接管時就已在來源 CPA 上使用；Manager 尚未重新驗證它們。',
   copyKey: '複製金鑰',
   keyCopied: '金鑰已複製，未儲存在此瀏覽器中。',
   keyCopyFailed: '剪貼簿無法使用，請重試複製金鑰。',
@@ -402,6 +427,14 @@ const tw: typeof en = {
   replaceStep1: '1. 新增替代金鑰：儲存一次性完整金鑰，新舊金鑰保持獨立。',
   replaceStep2: '2. 更新用戶端：將相關用戶端切換至新金鑰，並自行驗證接入。',
   replaceStep3: '3. 撤銷舊金鑰：保留另一把有效金鑰並核對閘道結果；不會自動切換用戶端。',
+  operationBlockedSourceConflict:
+    '目標 CPA 的金鑰清單與本次操作不符：其中可能有 Manager 未登記或已撤銷的金鑰，可能已包含本次要寫入的金鑰，也可能已經持有本 Manager 會在此重寫的上限數量金鑰。未寫入任何內容。',
+  operationBlockedInstalledKey:
+    '目標或 keeper 必須是本安裝目前使用的那把金鑰，否則無法執行。',
+  operationBlockedCredentialRejected:
+    '目標 CPA 拒絕了這個已儲存的管理金鑰。唯一出路是用目前的管理金鑰重新綁定連線；重複這次操作不會有任何改變。',
+  operationBlockedUnavailable:
+    '目前無法準備這次操作。請檢查安裝狀態後重試。',
   lastKeyProtectionTitle: '最後一把有效金鑰保護',
   lastKeyProtectionHelp:
     '為防止用戶端流量意外中斷，當僅剩 1 把已儲存金鑰時禁止直接撤銷。請先建立一把新金鑰並完成用戶端設定，再執行替換或撤銷。',
@@ -409,6 +442,9 @@ const tw: typeof en = {
 };
 const ru: typeof en = {
   installerOrigin: 'Ключ установки',
+  adoptedOrigin: 'Ключ принятого CPA',
+  adoptedOriginNote:
+    'Ключи с пометкой «принятый» уже использовались в исходном CPA на момент переноса; Manager их не перепроверял.',
   copyKey: 'Скопировать ключ',
   keyCopied: 'Ключ скопирован. В этом браузере он не сохранён.',
   keyCopyFailed: 'Буфер обмена недоступен. Попробуйте скопировать ключ ещё раз.',
@@ -542,6 +578,14 @@ const ru: typeof en = {
   replaceStep2: '2. Переключите клиентов на новый ключ и проверьте доступ самостоятельно.',
   replaceStep3:
     '3. Отзовите старый ключ, сохранив другой действующий ключ. Проверьте шлюз; клиенты автоматически не переключаются.',
+  operationBlockedSourceConflict:
+    'Список ключей на целевом CPA не соответствует этой операции: в нём может быть ключ, который Manager не регистрировал или уже отозвал, ключ, который эта операция должна записать, либо уже достигнут предел ключей, который этот Manager готов там переписать. Ничего не записано.',
+  operationBlockedInstalledKey:
+    'Целью или keeper должен быть ключ этой установки: только он может нести операцию.',
+  operationBlockedCredentialRejected:
+    'Целевой CPA отклонил сохранённый управляющий ключ. Единственный путь вперёд — заново привязать подключение с текущим управляющим ключом; повтор этой операции ничего не изменит.',
+  operationBlockedUnavailable:
+    'Сейчас эту операцию нельзя подготовить. Проверьте состояние установки и повторите попытку.',
   lastKeyProtectionTitle: 'Защита последнего активного ключа',
   lastKeyProtectionHelp:
     'Нельзя отозвать единственный сохранённый ключ. Сначала создайте новый ключ для замены.',

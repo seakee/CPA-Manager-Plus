@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -73,11 +75,15 @@ func withSupportPluginHeader(next http.Handler, capable func(*http.Request) bool
 		return http.NotFoundHandler()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !supportPluginHeaderApplies(r) || capable == nil || !capable(r) {
+		if !supportPluginHeaderApplies(r) || capable == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(&supportPluginResponseWriter{ResponseWriter: w}, r)
+		next.ServeHTTP(&supportPluginResponseWriter{
+			ResponseWriter: w,
+			request:        r,
+			capable:        capable,
+		}, r)
 	})
 }
 
@@ -95,18 +101,26 @@ func (a *freshApplication) supportPluginCapable(r *http.Request) bool {
 }
 
 // supportPluginResponseWriter adds the support header to a successful response
-// only, including one that writes a body without an explicit status.
+// only, evaluated when the status line commits so state changes performed by
+// the handler (such as completing an installation) are reflected immediately.
 type supportPluginResponseWriter struct {
 	http.ResponseWriter
+	request   *http.Request
+	capable   func(*http.Request) bool
 	committed bool
 }
 
 func (w *supportPluginResponseWriter) WriteHeader(status int) {
-	if !w.committed {
-		w.committed = true
-		if status < http.StatusBadRequest {
-			w.Header().Set(supportPluginHeader, supportPluginHeaderValue)
-		}
+	if w.committed {
+		return
+	}
+	if status >= 100 && status < http.StatusOK && status != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.committed = true
+	if status >= http.StatusOK && status < http.StatusBadRequest && w.capable != nil && w.capable(w.request) {
+		w.Header().Set(supportPluginHeader, supportPluginHeaderValue)
 	}
 	w.ResponseWriter.WriteHeader(status)
 }
@@ -122,6 +136,34 @@ func (w *supportPluginResponseWriter) Write(body []byte) (int, error) {
 // hijacking and deadlines keep working through the wrapper.
 func (w *supportPluginResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// Flush commits the implied 200 status (stamping X-CPA-SUPPORT-PLUGIN when
+// proven) before flushing the underlying writer, so both direct http.Flusher
+// callers (such as externalLegacyRecorder) and http.ResponseController.Flush
+// emit the header on the first streamed chunk instead of skipping WriteHeader
+// via Unwrap.
+func (w *supportPluginResponseWriter) Flush() {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+		return
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Hijack hands the raw connection to upgraders (101 Switching Protocols /
+// WebSocket) for both direct http.Hijacker assertions and
+// http.ResponseController.Hijack, marking the response committed on success so
+// headers are never touched after takeover.
+func (w *supportPluginResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil {
+		w.committed = true
+	}
+	return conn, rw, err
 }
 
 // pluginResourceRequest reports whether a request addresses the CPA plugin
@@ -161,16 +203,17 @@ func pluginResourceRequest(r *http.Request) bool {
 // connection could land after the new one was saved and be served as the new
 // one's answer.
 type pluginCapabilityProbe struct {
-	mu       sync.Mutex
-	ttl      time.Duration
-	timeout  time.Duration
-	at       time.Time
-	proven   bool
-	proving  bool
-	epoch    uint64
-	probe    func(context.Context) bool
-	now      func() time.Time
-	launch   func(func())
+	mu           sync.Mutex
+	ttl          time.Duration
+	timeout      time.Duration
+	at           time.Time
+	proven       bool
+	proving      bool
+	provingEpoch uint64
+	epoch        uint64
+	probe        func(context.Context) bool
+	now          func() time.Time
+	launch       func(func())
 }
 
 func newPluginCapabilityProbe(ttl, timeout time.Duration, probe func(context.Context) bool) *pluginCapabilityProbe {
@@ -192,10 +235,12 @@ func (p *pluginCapabilityProbe) capable(context.Context) bool {
 	p.mu.Lock()
 	proven := p.proven
 	stale := p.at.IsZero() || p.now().Sub(p.at) >= p.ttl
-	start := stale && !p.proving
+	inFlight := p.proving && p.provingEpoch == p.epoch
+	start := stale && !inFlight
 	epoch := p.epoch
 	if start {
 		p.proving = true
+		p.provingEpoch = epoch
 	}
 	p.mu.Unlock()
 	if start {
@@ -218,15 +263,16 @@ func (p *pluginCapabilityProbe) refresh(epoch uint64) {
 			proven = false
 		}
 		p.mu.Lock()
-		// A forget() while this proof was running means the answer describes a
-		// connection that is no longer saved, so it is dropped rather than
-		// stamped fresh. The cleared in-flight flag still lets the next read
-		// prove the new connection.
+		// A forget() or reprove() while this proof was running means the answer
+		// describes a connection that is no longer current, so it is dropped
+		// rather than stamped fresh, and cannot clear a newer epoch's flight.
 		if p.epoch == epoch {
 			p.proven = proven
 			p.at = p.now()
 		}
-		p.proving = false
+		if p.provingEpoch == epoch {
+			p.proving = false
+		}
 		p.mu.Unlock()
 	}()
 	proven = p.probe(ctx)
@@ -245,6 +291,38 @@ func (p *pluginCapabilityProbe) forget() {
 	p.proven = false
 	p.epoch++
 	p.mu.Unlock()
+}
+
+// reprove invalidates any cached or in-flight answer from an earlier state,
+// launches a fresh proof on the probe's detached runtime, and waits up to the
+// caller's deadline (bounded by p.timeout) so the completion response and the
+// first Console navigation after it carry the proven capability immediately.
+func (p *pluginCapabilityProbe) reprove(ctx context.Context) {
+	if p == nil || p.probe == nil {
+		return
+	}
+	done := make(chan struct{})
+	p.mu.Lock()
+	p.at = time.Time{}
+	p.proven = false
+	p.epoch++
+	epoch := p.epoch
+	p.proving = true
+	p.provingEpoch = epoch
+	p.mu.Unlock()
+	p.launch(func() {
+		defer close(done)
+		p.refresh(epoch)
+	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	select {
+	case <-done:
+	case <-waitCtx.Done():
+	}
 }
 
 // v8PluginCapable runs one proof against the saved connection.

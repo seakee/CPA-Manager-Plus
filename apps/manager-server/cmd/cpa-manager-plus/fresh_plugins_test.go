@@ -1,14 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
 func TestWithSupportPluginHeaderAnnouncesCapabilityOnSuccess(t *testing.T) {
@@ -337,6 +344,48 @@ func TestPluginCapabilityProbeDiscardsAProofThatOutlivedItsConnection(t *testing
 	}
 }
 
+// An old-epoch proof still in flight when completion calls reprove must neither
+// block the new epoch's proof from starting nor overwrite the completed answer
+// when the stale probe eventually returns.
+func TestPluginCapabilityProbeReproveSupersedesInFlightEpoch(t *testing.T) {
+	oldEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	oldDone := make(chan struct{})
+	var calls, launches atomic.Int32
+	probe := newPluginCapabilityProbe(time.Hour, time.Minute, func(context.Context) bool {
+		if calls.Add(1) == 1 {
+			close(oldEntered)
+			<-releaseOld
+			return false
+		}
+		return true
+	})
+	probe.launch = func(refresh func()) {
+		if launches.Add(1) == 1 {
+			go func() {
+				defer close(oldDone)
+				refresh()
+			}()
+			return
+		}
+		go refresh()
+	}
+	if probe.capable(context.Background()) {
+		t.Fatal("probe reported capable before first proof finished")
+	}
+	<-oldEntered
+
+	probe.reprove(context.Background())
+	if !probe.capable(context.Background()) {
+		t.Fatal("reprove did not establish capability while old epoch was in flight")
+	}
+	close(releaseOld)
+	<-oldDone
+	if !probe.capable(context.Background()) {
+		t.Fatal("late old-epoch completion clobbered reproven capability")
+	}
+}
+
 // Concurrent reads, forgets and refreshes must be safe under -race: the epoch
 // and the in-flight flag are the only shared state the answer depends on.
 func TestPluginCapabilityProbeIsRaceFree(t *testing.T) {
@@ -370,4 +419,381 @@ func TestPluginCapabilityProbeIsRaceFree(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// Streaming responses and 101 connection upgrades through `withSupportPluginHeader`
+// and `app.ServeHTTP` must preserve `http.Flusher`, `http.Hijacker`, and
+// `http.ResponseController`: the first streamed chunk arrives with
+// `X-CPA-SUPPORT-PLUGIN: 1` before the handler finishes, and Hijack hands over
+// the raw socket without touching headers after takeover.
+func TestWithSupportPluginHeaderPreservesStreamingFlushAndHijack(t *testing.T) {
+	t.Run("streamed chunk via ServeHTTP and externalLegacyRecorder arrives with header before handler finishes", func(t *testing.T) {
+		releaseUpstream := make(chan struct{})
+		closeRelease := sync.OnceFunc(func() { close(releaseUpstream) })
+		upstream := newProbeCPA(t, externalAuthorityManagement)
+		streamLogs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			switch r.URL.Path {
+			case "/v8/management/config":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"plugins":{"dir":"/var/lib/cpa/plugins"}}`))
+			case "/v0/management/logs":
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("first-chunk\n"))
+				w.(http.Flusher).Flush()
+				<-releaseUpstream
+				_, _ = w.Write([]byte("second-chunk\n"))
+			default:
+				upstream.server.Config.Handler.ServeHTTP(w, r)
+			}
+		}))
+		t.Cleanup(streamLogs.Close)
+
+		app := newExternalApp(t, streamLogs.URL, externalAuthorityManagement)
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+		app.gatewayConfig = gatewayFor(app)
+		app.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, app.v8PluginCapable)
+		app.pluginCapability.reprove(t.Context())
+		upstreamTarget, err := url.Parse(streamLogs.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reverseProxy := httputil.NewSingleHostReverseProxy(upstreamTarget)
+		origDirector := reverseProxy.Director
+		reverseProxy.Director = func(req *http.Request) {
+			origDirector(req)
+			req.Header.Set("Authorization", "Bearer "+externalAuthorityManagement)
+		}
+		app.legacy = guardFreshExternalLegacy(reverseProxy, app)
+		server := httptest.NewServer(app)
+		t.Cleanup(server.Close)
+		t.Cleanup(closeRelease)
+
+		reqCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/control/api/v2/cpamp/v0/management/logs", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", gateAdmin)
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do streamed GET: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("streamed status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get(supportPluginHeader); got != supportPluginHeaderValue {
+			t.Fatalf("streamed %s = %q, want %q", supportPluginHeader, got, supportPluginHeaderValue)
+		}
+		reader := bufio.NewReader(resp.Body)
+		firstLine, err := reader.ReadString('\n')
+		if err != nil || firstLine != "first-chunk\n" {
+			t.Fatalf("first streamed chunk before handler returned = %q (%v)", firstLine, err)
+		}
+
+		closeRelease()
+		secondLine, err := reader.ReadString('\n')
+		if err != nil || secondLine != "second-chunk\n" {
+			t.Fatalf("second streamed chunk = %q (%v)", secondLine, err)
+		}
+	})
+
+	t.Run("ResponseController Flush stamps header before committing underlying wire headers", func(t *testing.T) {
+		release := make(chan struct{})
+		closeRelease := sync.OnceFunc(func() { close(release) })
+		handler := withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Errorf("ResponseController.Flush: %v", err)
+				return
+			}
+			_, _ = w.Write([]byte("head-flushed\n"))
+			_ = http.NewResponseController(w).Flush()
+			<-release
+			_, _ = w.Write([]byte("tail\n"))
+		}), func(*http.Request) bool { return true })
+
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		t.Cleanup(closeRelease)
+
+		reqCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/console/api/v2/operation", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if got := resp.Header.Get(supportPluginHeader); got != supportPluginHeaderValue {
+			t.Fatalf("ResponseController flushed %s = %q, want %q", supportPluginHeader, got, supportPluginHeaderValue)
+		}
+		reader := bufio.NewReader(resp.Body)
+		line, err := reader.ReadString('\n')
+		if err != nil || line != "head-flushed\n" {
+			t.Fatalf("first flushed line = %q (%v)", line, err)
+		}
+		closeRelease()
+		tail, err := reader.ReadString('\n')
+		if err != nil || tail != "tail\n" {
+			t.Fatalf("tail line = %q (%v)", tail, err)
+		}
+	})
+
+	t.Run("Hijack works via ResponseController and direct http.Hijacker without post-takeover header mutation", func(t *testing.T) {
+		for _, mode := range []string{"response-controller", "direct-hijacker", "external-legacy-recorder"} {
+			t.Run(mode, func(t *testing.T) {
+				var capableCalls atomic.Int32
+				inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					target := w
+					if mode == "external-legacy-recorder" {
+						var gate externalCredentialGate
+						gate.acquire(r.Context())
+						hold, _ := beginExternalCredentialHold(r.Context(), &gate, 0)
+						target = &externalLegacyRecorder{ResponseWriter: w, hold: hold}
+					}
+					var (
+						conn net.Conn
+						rw   *bufio.ReadWriter
+						err  error
+					)
+					if mode == "response-controller" {
+						conn, rw, err = http.NewResponseController(target).Hijack()
+					} else {
+						conn, rw, err = target.(http.Hijacker).Hijack()
+					}
+					if err != nil {
+						t.Errorf("Hijack (%s): %v", mode, err)
+						return
+					}
+					defer conn.Close()
+					// Late WriteHeader after Hijack must be short-circuited by the wrapper
+					// without invoking capable, mutating headers, or forwarding to net/http.
+					target.WriteHeader(http.StatusOK)
+					if got := target.Header().Get(supportPluginHeader); got != "" {
+						t.Errorf("Hijack (%s) stamped %s=%q on response headers", mode, supportPluginHeader, got)
+					}
+					_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: demo\r\nConnection: Upgrade\r\n\r\nupgraded\n")
+					_ = rw.Flush()
+				})
+				handler := withSupportPluginHeader(inner, func(*http.Request) bool {
+					capableCalls.Add(1)
+					return true
+				})
+				server := httptest.NewServer(handler)
+				t.Cleanup(server.Close)
+
+				dialed, err := net.Dial("tcp", server.Listener.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer dialed.Close()
+				_ = dialed.SetDeadline(time.Now().Add(5 * time.Second))
+				if _, err := dialed.Write([]byte("GET /console/api/v2/cpamp/ws HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\nUpgrade: demo\r\n\r\n")); err != nil {
+					t.Fatal(err)
+				}
+				reader := bufio.NewReader(dialed)
+				statusLine, err := reader.ReadString('\n')
+				if err != nil || !strings.Contains(statusLine, "101 Switching Protocols") {
+					t.Fatalf("hijacked status line = %q (%v)", statusLine, err)
+				}
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						t.Fatal(err)
+					}
+					if line == "\r\n" {
+						break
+					}
+					if strings.HasPrefix(strings.ToUpper(line), supportPluginHeader+":") {
+						t.Fatalf("hijacked 101 response leaked %s header: %q", supportPluginHeader, line)
+					}
+				}
+				upgradedMsg, err := reader.ReadString('\n')
+				if err != nil || upgradedMsg != "upgraded\n" {
+					t.Fatalf("hijacked stream = %q (%v)", upgradedMsg, err)
+				}
+				if got := capableCalls.Load(); got != 0 {
+					t.Fatalf("Hijack (%s) called capable %d times, want 0", mode, got)
+				}
+			})
+		}
+
+		// Non-hijackable writers still report http.ErrNotSupported without latching committed.
+		rec := httptest.NewRecorder()
+		var hijackErr error
+		withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _, hijackErr = http.NewResponseController(w).Hijack()
+			w.WriteHeader(http.StatusOK)
+		}), func(*http.Request) bool { return true }).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/console/api/v2/operation", nil))
+		if !errors.Is(hijackErr, http.ErrNotSupported) {
+			t.Fatalf("unsupported Hijack err = %v, want ErrNotSupported", hijackErr)
+		}
+		if got := rec.Header().Get(supportPluginHeader); got != supportPluginHeaderValue {
+			t.Fatalf("fallback response after unsupported Hijack %s = %q, want %q", supportPluginHeader, got, supportPluginHeaderValue)
+		}
+	})
+}
+
+type spyStatusWriter struct {
+	header      http.Header
+	statuses    []int
+	headerSnap  []string
+	hijackConn  net.Conn
+	hijackRW    *bufio.ReadWriter
+	allowHijack bool
+}
+
+func newSpyStatusWriter() *spyStatusWriter {
+	return &spyStatusWriter{header: make(http.Header)}
+}
+
+func (w *spyStatusWriter) Header() http.Header { return w.header }
+
+func (w *spyStatusWriter) WriteHeader(status int) {
+	w.statuses = append(w.statuses, status)
+	w.headerSnap = append(w.headerSnap, w.header.Get(supportPluginHeader))
+}
+
+func (w *spyStatusWriter) Write(p []byte) (int, error) {
+	if len(w.statuses) == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return len(p), nil
+}
+
+func (w *spyStatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if !w.allowHijack {
+		return nil, nil, http.ErrNotSupported
+	}
+	return w.hijackConn, w.hijackRW, nil
+}
+
+// `X-CPA-SUPPORT-PLUGIN` must be stamped only on final 2xx/3xx responses (never
+// on 101 Switching Protocols or 100/103 informational statuses), and duplicate
+// or post-Hijack WriteHeader calls must short-circuit without forwarding.
+func TestWithSupportPluginHeaderStatusAndDuplicateWriteHeaderBoundaries(t *testing.T) {
+	t.Run("WriteHeader 101 Switching Protocols neither stamps header nor allows follow-up WriteHeader", func(t *testing.T) {
+		spy := newSpyStatusWriter()
+		var capableCalls atomic.Int32
+		withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusSwitchingProtocols)
+			w.WriteHeader(http.StatusOK)
+		}), func(*http.Request) bool {
+			capableCalls.Add(1)
+			return true
+		}).ServeHTTP(spy, httptest.NewRequest(http.MethodGet, "/console/api/v2/cpamp/ws", nil))
+		if len(spy.statuses) != 1 || spy.statuses[0] != http.StatusSwitchingProtocols {
+			t.Fatalf("underlying WriteHeader statuses = %v, want [101]", spy.statuses)
+		}
+		if got := spy.Header().Get(supportPluginHeader); got != "" {
+			t.Fatalf("101 response %s = %q, want empty", supportPluginHeader, got)
+		}
+		if got := capableCalls.Load(); got != 0 {
+			t.Fatalf("capable calls on 101 = %d, want 0", got)
+		}
+	})
+
+	t.Run("informational 100 and 103 do not stamp header early and preserve final status evaluation", func(t *testing.T) {
+		for _, finalStatus := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+			spy := newSpyStatusWriter()
+			var capableCalls atomic.Int32
+			withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusContinue)
+				w.WriteHeader(http.StatusEarlyHints)
+				w.WriteHeader(finalStatus)
+				w.WriteHeader(http.StatusOK)
+			}), func(*http.Request) bool {
+				capableCalls.Add(1)
+				return true
+			}).ServeHTTP(spy, httptest.NewRequest(http.MethodGet, "/console/api/v2/operation", nil))
+			if len(spy.statuses) != 3 || spy.statuses[0] != http.StatusContinue || spy.statuses[1] != http.StatusEarlyHints || spy.statuses[2] != finalStatus {
+				t.Fatalf("statuses (final=%d) = %v, want [100 103 %d]", finalStatus, spy.statuses, finalStatus)
+			}
+			if spy.headerSnap[0] != "" || spy.headerSnap[1] != "" {
+				t.Fatalf("informational responses carried %s: %v", supportPluginHeader, spy.headerSnap[:2])
+			}
+			wantFinal := ""
+			wantCalls := int32(0)
+			if finalStatus == http.StatusOK {
+				wantFinal = supportPluginHeaderValue
+				wantCalls = 1
+			}
+			if spy.headerSnap[2] != wantFinal || spy.Header().Get(supportPluginHeader) != wantFinal {
+				t.Fatalf("final=%d %s = %q (snap=%q), want %q", finalStatus, supportPluginHeader, spy.Header().Get(supportPluginHeader), spy.headerSnap[2], wantFinal)
+			}
+			if got := capableCalls.Load(); got != wantCalls {
+				t.Fatalf("final=%d capable calls = %d, want %d", finalStatus, got, wantCalls)
+			}
+		}
+	})
+
+	t.Run("double WriteHeader short-circuits second call without mutating header or forwarding", func(t *testing.T) {
+		spyFailFirst := newSpyStatusWriter()
+		var failCapable atomic.Int32
+		withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusOK)
+		}), func(*http.Request) bool {
+			failCapable.Add(1)
+			return true
+		}).ServeHTTP(spyFailFirst, httptest.NewRequest(http.MethodGet, "/console/api/v2/operation", nil))
+		if len(spyFailFirst.statuses) != 1 || spyFailFirst.statuses[0] != http.StatusServiceUnavailable {
+			t.Fatalf("503->200 underlying statuses = %v, want [503]", spyFailFirst.statuses)
+		}
+		if got := spyFailFirst.Header().Get(supportPluginHeader); got != "" || failCapable.Load() != 0 {
+			t.Fatalf("503->200 %s = %q (capable=%d), want empty/0", supportPluginHeader, got, failCapable.Load())
+		}
+
+		spyOKFirst := newSpyStatusWriter()
+		var okCapable atomic.Int32
+		withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}), func(*http.Request) bool {
+			okCapable.Add(1)
+			return true
+		}).ServeHTTP(spyOKFirst, httptest.NewRequest(http.MethodGet, "/console/api/v2/operation", nil))
+		if len(spyOKFirst.statuses) != 1 || spyOKFirst.statuses[0] != http.StatusOK {
+			t.Fatalf("200->503 underlying statuses = %v, want [200]", spyOKFirst.statuses)
+		}
+		if got := spyOKFirst.Header().Get(supportPluginHeader); got != supportPluginHeaderValue || okCapable.Load() != 1 {
+			t.Fatalf("200->503 %s = %q (capable=%d), want 1/1", supportPluginHeader, got, okCapable.Load())
+		}
+	})
+
+	t.Run("WriteHeader after Hijack does not forward to underlying writer or stamp header", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+		spy := newSpyStatusWriter()
+		spy.allowHijack = true
+		spy.hijackConn = serverConn
+		spy.hijackRW = bufio.NewReadWriter(bufio.NewReader(serverConn), bufio.NewWriter(serverConn))
+		var capableCalls atomic.Int32
+		withSupportPluginHeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if _, _, err := http.NewResponseController(w).Hijack(); err != nil {
+				t.Fatalf("Hijack: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		}), func(*http.Request) bool {
+			capableCalls.Add(1)
+			return true
+		}).ServeHTTP(spy, httptest.NewRequest(http.MethodGet, "/console/api/v2/cpamp/ws", nil))
+		if len(spy.statuses) != 0 {
+			t.Fatalf("WriteHeader forwarded after Hijack: %v", spy.statuses)
+		}
+		if got := spy.Header().Get(supportPluginHeader); got != "" || capableCalls.Load() != 0 {
+			t.Fatalf("post-Hijack WriteHeader %s = %q (capable=%d), want empty/0", supportPluginHeader, got, capableCalls.Load())
+		}
+	})
 }

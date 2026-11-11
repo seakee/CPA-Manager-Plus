@@ -315,6 +315,26 @@ func (r *repository) Create(ctx context.Context, id bootstrap.FreshIdentity, adm
 	return v, tx.Commit()
 }
 func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, revision uint64, fn func(*Record) error) (Record, error) {
+	return r.UpdateTx(ctx, id, revision, func(record *Record, _ *sql.Tx) error {
+		return fn(record)
+	})
+}
+func (r *repository) WithRecordTx(ctx context.Context, fn func(Record, *sql.Tx) error) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	v, err := load(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err = fn(v, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (r *repository) UpdateTx(ctx context.Context, id bootstrap.FreshIdentity, revision uint64, fn func(*Record, *sql.Tx) error) (Record, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Record{}, err
@@ -343,7 +363,7 @@ func (r *repository) Update(ctx context.Context, id bootstrap.FreshIdentity, rev
 		copy := *v.Connection
 		before.Connection = &copy
 	}
-	if err = fn(&v); err != nil {
+	if err = fn(&v, tx); err != nil {
 		return Record{}, err
 	}
 	if err = validateConfigJournalUpdate(before.Config, v.Config); err != nil {

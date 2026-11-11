@@ -259,12 +259,22 @@ func newManagedInstallHarnessWith(t *testing.T, install managedInstallSetup, wit
 	harness := &managedInstallHarness{app: app, destination: destination, endpoint: destinationServer.URL}
 	if withInstallKey {
 		checkpoint := record.Operation.Strategy
-		key, err := app.keyApply.EnsureInitialInstall(t.Context(), freshkeyapply.ManagedRunID(string(record.Operation.Identity.OperationID)), checkpoint.TargetGeneration)
-		if err != nil {
-			t.Fatal(err)
+		if checkpoint.Strategy == bootstrap.AdoptExisting {
+			const adoptedSeed = "adopted-client-key-01"
+			destination.seed(adoptedSeed)
+			registered, err := app.keyApply.RegisterAdoption(t.Context(), []string{adoptedSeed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			harness.installKey = freshkeys.InitialKey{ID: registered[0].ID, RequestID: registered[0].RequestID, Secret: adoptedSeed}
+		} else {
+			key, err := app.keyApply.EnsureInitialInstall(t.Context(), freshkeyapply.ManagedRunID(string(record.Operation.Identity.OperationID)), checkpoint.TargetGeneration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination.seed(key.Secret)
+			harness.installKey = key
 		}
-		destination.seed(key.Secret)
-		harness.installKey = key
 	}
 	return harness
 }
@@ -768,8 +778,11 @@ func TestGatewayAdmissionProvenBindsManagedAndAdoptedToConfiguredSupervisorRoot(
 					t.Fatal(installErr)
 				}
 				destination.seed(key.Secret)
+			} else {
+				if _, regErr := app.keyApply.RegisterAdoption(t.Context(), []string{"source-key-one", "source-key-two"}); regErr != nil {
+					t.Fatal(regErr)
+				}
 			}
-
 			// 1. Custom <DataDir>/runtime/supervisor root is admitted.
 			if !app.gatewayAdmissionProven(t.Context()) {
 				t.Fatalf("configured custom Supervisor root (%s) was not admitted for %s", customSupRoot, tc.name)

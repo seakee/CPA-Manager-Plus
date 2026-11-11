@@ -559,6 +559,44 @@ describe('Canonical key detail and rename', () => {
     expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-series' })).toHaveLength(0);
   });
 
+  it('copies an adopted key once the returned secret reproduces its own mask', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const adopted = { ...key, origin: 'adopted' as const, maskedPreview: '…-two', name: '' };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(adopted))
+      .mockResolvedValueOnce(Response.json({ secret: 'source-client-two' }));
+    await mount(fetchMock, adopted.id);
+    expect(view()).toContain(k('adoptedOrigin'));
+    await act(async () => renderer.root.findByProps({ 'data-testid': 'copy-saved-client-secret' }).props.onClick());
+    expect(fetchMock.mock.calls[1]).toMatchObject([
+      'https://manager.example/console/api/v2/api-keys/' + adopted.id + '/secret',
+      { method: 'POST', cache: 'no-store' },
+    ]);
+    expect(writeText).toHaveBeenCalledWith('source-client-two');
+    expect(renderer.root.findByProps({ 'data-testid': 'copy-saved-client-secret-feedback' }).props.children).toBe(
+      k('keyCopied')
+    );
+  });
+
+  it('refuses an adopted secret that does not reproduce the stored mask', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const adopted = { ...key, origin: 'adopted' as const, maskedPreview: '…-two', name: '' };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(adopted))
+      .mockResolvedValueOnce(Response.json({ secret: 'source-client-one' }));
+    await mount(fetchMock, adopted.id);
+    await act(async () => renderer.root.findByProps({ 'data-testid': 'copy-saved-client-secret' }).props.onClick());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(renderer.root.findByProps({ 'data-testid': 'copy-saved-client-secret-feedback' }).props.children).toBe(
+      k('keyCopyFailed')
+    );
+    expect(view()).not.toContain('source-client-one');
+  });
+
   it('shows connectionPending when gatewayPending is true and hides it once admitted', async () => {
     await mount(vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(key)));
     expect(view()).toContain(k('connectionPending'));

@@ -4,6 +4,7 @@ package freshstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 
@@ -98,4 +99,15 @@ type Store interface {
 	Load(context.Context) (Record, error)
 	Create(context.Context, bootstrap.FreshIdentity, *model.AdminCredential) (Record, error)
 	Update(context.Context, bootstrap.FreshIdentity, uint64, func(*Record) error) (Record, error)
+}
+
+// TransactionalUpdater runs an auxiliary SQLite write inside the same immediate
+// transaction as the Fresh CAS update, so domain records that exist only once a
+// checkpoint transition commits roll back whenever the CAS refuses or fails.
+type TransactionalUpdater interface {
+	UpdateTx(context.Context, bootstrap.FreshIdentity, uint64, func(*Record, *sql.Tx) error) (Record, error)
+	// WithRecordTx loads the current Fresh record inside an immediate SQLite
+	// transaction and passes it by value as a read-only snapshot alongside *sql.Tx:
+	// mutations to the value are never persisted and Operation.Revision is unchanged.
+	WithRecordTx(context.Context, func(Record, *sql.Tx) error) error
 }

@@ -31,11 +31,11 @@ func decodeKeyOperation(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
-func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResult, err error) {
-	if err == nil {
-		writeFreshJSON(w, result)
-		return
-	}
+
+// keyOperationCode is the one vocabulary a refused key operation is reported in.
+// The preflight answers with the same code the prepare it predicts would return,
+// so the page states the limit instead of translating a second set of reasons.
+func keyOperationCode(err error) (int, string) {
 	status, code := 503, "key_operation_unknown"
 	switch {
 	case errors.Is(err, freshkeys.ErrRequest):
@@ -66,6 +66,15 @@ func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResu
 	case errors.Is(err, cpa.ErrSourceConflict):
 		status, code = 409, "key_operation_source_conflict"
 	}
+	return status, code
+}
+
+func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResult, err error) {
+	if err == nil {
+		writeFreshJSON(w, result)
+		return
+	}
+	status, code := keyOperationCode(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	writeFreshJSON(w, struct {
@@ -93,6 +102,49 @@ func (a *freshApplication) prepareClientKeyOperation(w http.ResponseWriter, r *h
 	result, err := a.keyApply.Prepare(r.Context(), body.RequestID, target, body.KeeperID, body.Mode, op.Strategy.TargetGeneration)
 	keyOperationReply(w, result, err)
 }
+
+// preflightClientKeyOperation answers whether one revoke or replace would be
+// accepted, and the reason when it would not. It writes nothing: the drawer asks
+// it before it offers the submit, so every remaining limit — a destination key the
+// Manager never staged, the installation's own key, the last effective key — is
+// named where the operator is choosing instead of surfacing as a conflict.
+func (a *freshApplication) preflightClientKeyOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, target, keeper, mode string) {
+	if !a.keyOperationTarget(op) {
+		w.WriteHeader(409)
+		return
+	}
+	// The preflight is asked again on every selection the drawer shows, so it is a
+	// poll. A credential the user's CPA already refused is never presented by it:
+	// five failed authentications ban the address for thirty minutes, and the
+	// answer is the same blocker the submit would give, written locally.
+	grant := a.externalReadGrant(r.Context())
+	if grant.Refused {
+		keyOperationPreflightReply(w, false, freshconfig.ReasonManagementRejected)
+		return
+	}
+	err := a.keyApply.Preflight(r.Context(), target, keeper, mode, op.Strategy.TargetGeneration)
+	// The first 401 a preflight meets is the refusal of the credential it
+	// presented, so it is filed against this request's grant like every other
+	// browser-driven read of the user's CPA.
+	a.noteExternalRejection(r.Context(), grant, err)
+	reason := ""
+	if err != nil {
+		_, reason = keyOperationCode(err)
+	}
+	keyOperationPreflightReply(w, err == nil, reason)
+}
+
+// keyOperationPreflightReply writes the readiness verdict the drawer renders. Every
+// limit keeps this one shape, including the typed External blockers: the page
+// names each of them in place and disables the submit, so a refusal is never a
+// second error channel the drawer would have to translate.
+func keyOperationPreflightReply(w http.ResponseWriter, ready bool, reason string) {
+	writeFreshJSON(w, struct {
+		Ready  bool   `json:"ready"`
+		Reason string `json:"reason"`
+	}{ready, reason})
+}
+
 func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
 	if !a.keyOperationTarget(op) {
 		w.WriteHeader(409)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
@@ -67,7 +68,10 @@ func (s *Service) ConfigTarget(ctx context.Context, generation uint64) (string, 
 //     is Ready;
 //  4. the destination CPA still satisfies its strategy's destination posture
 //     (new_managed or adopt_existing); and
-//  5. client authentication is on, proven by at least one valid client key
+//  5. for an `adopt_existing` installation, durable `ProductComplete` holds and
+//     the one-shot initial key install journal matches this installation's run,
+//     generation and provider seed; and
+//  6. client authentication is on, proven by at least one valid client key
 //     (a CPA with no client key accepts unauthenticated Gateway traffic).
 // It intentionally returns only a boolean and never a credential. A Gateway
 // that needs the authority itself must call the same profile through ConfigTarget
@@ -85,6 +89,11 @@ func (s *Service) DefaultInstallCPAAuthorityProven(ctx context.Context) bool {
 	}
 	if _, err = s.target(ctx, p); err != nil {
 		return false
+	}
+	if p.Strategy == string(bootstrap.AdoptExisting) {
+		if err = s.requireInstallJournal(ctx, p); err != nil {
+			return false
+		}
 	}
 	// KeySnapshot re-reads the destination config, proves the managed posture
 	// with an empty client set, and then requires the same non-empty client

@@ -590,6 +590,10 @@ const enBlockers: Record<string, string> = {
     'The destination CPA did not verify after the copy. Retry before completing.',
   adoption_snapshot_unavailable:
     'The recorded adoption snapshot could not be read. Retry the attempt.',
+  adopt_installation_unavailable:
+    'The adopted CPA’s client keys could not be recorded in the Manager. Check the Manager’s encryption key and storage, then retry.',
+  adopt_installation_conflict:
+    'This adoption cannot be recorded: the destination carries a client key this Manager already retired, or the installation record belongs to another run. Re-adopt from a source CPA whose keys this Manager has not retired.',
   adopt_plugin_optin_conflict:
     'This attempt recorded a different plugin choice. Reload the page and resume with the recorded choice.',
   management_connection_invalid: 'The source address is not a usable http or https URL.',
@@ -624,6 +628,10 @@ const zhBlockers: Record<string, string> = {
   adoption_destination_start_failed: '目标 CPA 启动失败。请重试本次操作。',
   adoption_destination_verification_required: '复制后未能校验目标 CPA。请重试后再完成。',
   adoption_snapshot_unavailable: '无法读取已记录的快照。请重试本次操作。',
+  adopt_installation_unavailable:
+    '无法把接管到的客户端密钥登记到 Manager。请检查 Manager 的加密密钥与存储后重试。',
+  adopt_installation_conflict:
+    '无法登记这次接管：目标 CPA 带有本 Manager 已撤销的客户端密钥，或安装记录属于另一次安装。请改用未被本 Manager 撤销过密钥的源 CPA 重新接管。',
   adopt_plugin_optin_conflict: '本次操作记录的插件选项不同。请刷新页面并按已记录的选项继续。',
   management_connection_invalid: '源地址不是可用的 http 或 https 地址。',
   management_secret_storage_unavailable: '无法安全保存管理密钥。请检查管理程序的加密密钥与存储。',
@@ -652,6 +660,10 @@ const twBlockers: Record<string, string> = {
   adoption_destination_start_failed: '目標 CPA 啟動失敗。請重試本次操作。',
   adoption_destination_verification_required: '複製後無法驗證目標 CPA。請重試後再完成。',
   adoption_snapshot_unavailable: '無法讀取已記錄的快照。請重試本次操作。',
+  adopt_installation_unavailable:
+    '無法把接管到的用戶端金鑰登記到 Manager。請檢查 Manager 的加密金鑰與儲存後重試。',
+  adopt_installation_conflict:
+    '無法登記這次接管：目標 CPA 帶有本 Manager 已撤銷的用戶端金鑰，或安裝記錄屬於另一次安裝。請改用未被本 Manager 撤銷過金鑰的來源 CPA 重新接管。',
   adopt_plugin_optin_conflict: '本次操作記錄的外掛選項不同。請重新整理頁面並依已記錄的選項繼續。',
   management_connection_invalid: '來源位址不是可用的 http 或 https 位址。',
   management_secret_storage_unavailable: '無法安全保存管理金鑰。請檢查管理程式的加密金鑰與儲存。',
@@ -690,6 +702,10 @@ const ruBlockers: Record<string, string> = {
     'Целевой CPA не прошёл проверку после копирования. Повторите перед завершением.',
   adoption_snapshot_unavailable:
     'Не удалось прочитать сохранённый снимок переноса. Повторите попытку.',
+  adopt_installation_unavailable:
+    'Не удалось записать клиентские ключи принятого CPA в Manager. Проверьте ключ шифрования и хранилище Manager и повторите попытку.',
+  adopt_installation_conflict:
+    'Этот перенос нельзя зафиксировать: целевой CPA содержит клиентский ключ, который Manager уже отозвал, либо запись установки принадлежит другому запуску. Выполните перенос заново из CPA, ключи которого Manager не отзывал.',
   adopt_plugin_optin_conflict:
     'Для этой попытки записан другой выбор плагинов. Перезагрузите страницу и продолжите с записанным выбором.',
   management_connection_invalid: 'Адрес источника не является рабочим URL http или https.',

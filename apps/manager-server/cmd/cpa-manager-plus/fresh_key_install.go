@@ -45,7 +45,8 @@ func (a *freshApplication) initialClientKey(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	if a.keyApply == nil || !a.keyApply.Targets(op, freshkeyapply.SurfaceKeyInstall) {
+	if a.keyApply == nil || !a.keyApply.Targets(op, freshkeyapply.SurfaceKeyInstall) ||
+		(r.Method == http.MethodPost && op.Strategy.Strategy == bootstrap.AdoptExisting) {
 		if r.Method == http.MethodPost {
 			w.WriteHeader(409)
 			return

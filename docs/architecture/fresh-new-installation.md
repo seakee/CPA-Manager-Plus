@@ -273,6 +273,107 @@ on-demand read behind the copy button, and it refuses a superseded key. The
 `initial-install` route observes the already-installed key and writes nothing,
 while a later workspace key cannot consume that single journal (409).
 
+#### Adopted Client Keys (`origin = 'adopted'`)
+
+An `adopt_existing` installation stages the source CPA's own client key list to the
+destination, so the keys that authenticate model traffic there were never minted by
+this Manager: their shape is the source CPA's — any printable token up to the
+adoption bound — not one of the two canonical shapes above. Completion is where
+they become Manager-managed. `POST complete` commits one canonical row for each
+destination key that has no Manager record yet (`origin = 'adopted'`, protected
+ciphertext, `sha256` digest, masked preview and optional source binding). A
+destination key whose secret hash already matches an active canonical key, such
+as a pre-staged workspace key, keeps that row's ID and origin; the same
+transaction adds or verifies its runtime source binding. The same transaction
+also claims the one-shot initial-install journal and sets `ProductComplete = true`;
+it is a single immediate SQLite transaction (`freshstore.TransactionalUpdater` +
+`freshkeyapply.CommitAdoptionTx`).
+
+- On an `adopt_existing` installation, `freshkeyapply.Service.Targets` is the
+  synchronous strategy, durable `ProductComplete`, and committed-checkpoint
+  discriminator; actual write and admission authorization comes from
+  `ConfigTarget`, `operationTarget` (the key-operation journal), and
+  `DefaultInstallCPAAuthorityProven` calling `requireInstallJournal` ->
+  `VerifyAdoptionRegistration` (`AdoptedSetSHA256` on the one-shot journal
+  paired with `fresh_s1_adoption_registration_v1`, canonical key rows, and
+  `gateway_api_key_source_bindings` for the committed Runtime identity). Any
+  replay of `RegisterAdoptionTx` against an already-committed adoption set must
+  match the committed canonical key-set digest (`AdoptedSetSHA256`,
+  order-independent) inside the transaction before staging rows, or fail closed
+  with `ErrJournalConflict` (`409 adopt_installation_conflict`). The commitment
+  records the one-shot adoption registration; it does not track later changes
+  to the destination CPA's live key list. Once registration is ready, an
+  ordinary completed replay returns without re-registering. Both `POST
+  api-keys/<id>/initial-install` and `freshkeyapply.Service.Apply` reject
+  `adopt_existing` (`409 Conflict`, no journal or CPA write), while `GET
+  api-keys/<id>/initial-install` retains read-only membership observation
+  (`cpa.Transport.Configured`). If completion is rejected by CAS, continuation
+  expiry, a retired destination key, a source binding conflict, a foreign or
+  divergent-set journal (`409 adopt_installation_conflict`), or a
+  decryption/storage failure — including an outermost Fresh store read outage on
+  the canonical route (`503 adopt_installation_unavailable`) — the rejected
+  transaction rolls back completely and leaves no newly staged workspace records,
+  source bindings, journal changes, or write authority. A registration that
+  another attempt already committed, and the authority it carries, stay intact.
+- An `adopt_existing` installation that reached `ProductComplete = true` on a
+  build prior to journaled adoption — or one carrying only an unverified
+  non-adoption `InitialInstall` row without `CommitAdoptionTx` evidence — fails
+  closed in `DefaultInstallCPAAuthorityProven`, `ConfigTarget`, the
+  key-operation journal, and `AdoptionRegistrationReady` until backfilled. On
+  Manager startup (`prepareCompletedStartup`, with background retry while the
+  embedded CPA starts) and on an explicit `POST complete` replay,
+  `reconcileCompletedAdoption` re-proves the live Runtime target and destination
+  CPA read-only and commits the adopted keys, source bindings, and atomic
+  registration journal inside one immediate `freshstore.WithRecordTx`
+  transaction without bumping `Operation.Revision` (or returns `409`/`503` on
+  `POST complete` if a conflict or outage prevents backfill). Completion also
+  actively re-proves `X-CPA-SUPPORT-PLUGIN` (`pluginCapability.reprove`,
+  superseding any stale in-flight epoch) and evaluates the header on the final
+  `2xx`/`3xx` response commit (preserving `Unwrap`, `http.Flusher`, and
+  `http.Hijacker`) so the first post-completion Console navigation observes
+  plugin support immediately.
+- The `initial-install` read-only observation (`GET`) reads an adopted destination
+  by **membership**: `cpa.Transport.Configured` answers whether the staged secret is
+  one of the keys the CPA serves, because an adopted `access.api-keys` is the source
+  CPA's list and the single-key reading could never be true there. Membership is the
+  only configured fact an adoption can state — `AuthSweep` remains the live proof —
+  and the relaxation is confined to the adopted posture: a New Managed destination
+  still requires the list to be exactly the staged key.
+- Chat admission does **not** widen with it. `freshkeyapply.Service.Admit` is the
+  private S1/S2 install proof, and its first gate is the canonical Key workspace
+  length (`privateChatKeyLength`), so an adopted credential — any printable token
+  of the source CPA's shape — is `ErrUnavailable` before the destination is asked
+  anything. Gateway traffic for an adopted destination is admitted by the
+  installation authority, not by that proof.
+- Registration is idempotent by digest: a retried or resumed completion replays the
+  existing rows (`secret_hash` is the fence) instead of creating a second identity;
+  a destination key that already exists in this workspace keeps its single record
+  and acquires its active `gateway_api_key_source_bindings` row for the target
+  runtime inside the same transaction (while an active binding owned by another
+  identity or runtime is refused as `ErrSourceOwned` and rolls back the batch). A
+  digest that resolves to a `superseded` row is likewise refused, because the key
+  operation journal already committed that retirement and the installation may
+  neither own nor revive it.
+- The masked preview is `…` plus the last four characters, and only once the secret
+  is at least 16 characters long — four characters are then at most a quarter of it.
+  A shorter adopted secret is shown as `…` alone. `validKey` in the panel accepts
+  exactly that shape for `origin = 'adopted'`, and the copy button validates the
+  returned secret against the stored preview (`maskedPreviewFor`) instead of
+  assuming one of the two canonical shapes.
+- `POST api-keys/<APIKeyID>/secret` serves adopted keys too, under the same rules as
+  every other key: authenticated Admin only, `Cache-Control: no-store`, superseded
+  keys refused. The plaintext is returned only for that explicit copy action; the
+  list and detail projections stay masked.
+- `sqlite.Migrate` (`ensureFreshKeyOrigins`) widens pre-adoption
+  `fresh_client_api_keys` tables inside a `BEGIN IMMEDIATE` transaction after
+  re-checking `sqlite_master` under the write lock, so concurrent openers
+  rebuild the table at most once. Because `origin = 'adopted'` records are
+  linked to `gateway_api_key_identities`, `gateway_api_key_source_bindings` and
+  the `fresh_s1_initial_key_install_v1` journal, downgrading to a pre-adoption
+  binary after completing an adoption requires restoring the pre-upgrade backup
+  of the SQLite database and `data.key` rather than deleting
+  `fresh_client_api_keys` rows in isolation.
+
 #### Where the installer Client Key lives at rest
 
 The installer Client Key is a working credential for model traffic, not a
@@ -318,6 +419,36 @@ committed New Managed connection and an authenticated Runtime status matching
 the recorded identity, generation, and artifact. Private attested installs
 continue to use their explicit host-permit profile.
 
+#### Revoking and replacing a Client Key
+
+A revoke or replace is one journaled operation made of one or two whole-list
+writes, because the CPA v8 API has no single-key endpoint. `Prepare` journals the
+sorted digests of the destination's key list as `snapshotSha256`, and every later
+step compares the live list with that snapshot before it writes: `Continue`
+refuses with `cpa.ErrSourceConflict` when the destination drifted, and the step's
+post-check compares it with the set the step should leave.
+
+Each write is a whole-list PUT, so the list it states is a fact this Manager owes
+before it journals anything. The operation is walked in the order its steps will
+run — a replace adds the keeper before it revokes the target — and each step's
+end state is asked of the destination's own posture, the same policy
+`WriteKeySet` applies. A New Managed destination holds at most two Client Keys,
+so replacing one of two would have to write three: that selection is refused
+with `cpa.ErrSourceConflict` *before* the first attempt is recorded, because a
+refused write after the attempt would leave the journal at an unknown effect that
+no read-back can settle. An adopted destination keeps whatever the source CPA
+had, up to the adoption bound (`adoptMaxClientKeys`), so a three-key installation
+revokes one key and leaves the other two; every key that is not the one the step
+removes must be a credential this Manager staged and still keeps, since a
+credential it never registered, or one it already retired, is the operator's own
+change and is never dropped by a whole-list write.
+
+The same rules are asked as a read —
+`GET api-keys/<target>/revocation/<keeper>/<mode>` — which answers `{ready, reason}`
+with the code the matching `POST` would refuse with, so the drawer names the
+limit where the operator is choosing instead of offering a submit that can only
+end in a conflict. That read writes nothing and journals nothing.
+
 ### Trust boundary and durable authority
 
 The managed profile is selected by the server-owned Fresh checkpoint, not by a
@@ -352,10 +483,16 @@ profile the Manager constructed — the managed destination for the default
 Compose install, the attested private target for the host-permit profile — and
 takes the asking surface as an argument, so each surface keeps the contract it
 shipped with instead of a second inline check. Initial install, key
-revoke/replace and the private chat consumer all ask it and refuse an adopted,
-External or uncommitted checkpoint. The gateway configuration page asks the
-same discriminator under its own surface: on a managed install it refuses the
-same checkpoints, while on a private host-permit install it keeps the attested
+revoke/replace and the private chat consumer all ask it. Under the managed
+profile it answers for a `new_managed` checkpoint and for a **completed**
+`adopt_existing` checkpoint (`ProductComplete = true`) — an unfinished adoption
+holds no target or write authority — while under the private profile the same
+surfaces still require the attested `new_managed` strategy, so an adopted,
+External or uncommitted checkpoint is refused there;
+chat admission then narrows further at its own length gate, since the proof it
+carries is the one this Manager minted. The gateway configuration page asks the
+same discriminator under its own surface: on a managed install it answers with
+the managed profile, while on a private host-permit install it keeps the attested
 private target scope its page and field journal shipped with, including an
 adopted checkpoint that names that target. On an External install the page and
 the key surfaces ask the same discriminator under `ProfileExternal`: the target
@@ -416,11 +553,23 @@ confirms it, exactly as on Managed. A write is only sent while the start
 state still holds: the credential it removes is carried, the CPA keeps another
 one, and — for a revoke — that keeper is a credential this Manager staged and has
 installed. Revoking the only credential is refused with `ErrLastKey`, because
-that would leave the user's CPA accepting unauthenticated clients. The External
-Apply refuses while a journal entry has not settled, and re-reads the document
-digest and the membership immediately before its own PUT, so a credential the
-user revoked on their CPA is not knowingly added back. That read is not a
-compare-and-swap: a whole-list PUT replaces whatever the CPA holds when it
+that would leave the user's CPA accepting unauthenticated clients.
+
+A write is a whole-list PUT, so the only set it may rewrite is the set it
+verified: `snapshotSha256`, the drift comparison and the post-check are the ones
+described under **Revoking and replacing a Client Key**. Connect External shares
+that read-only preflight route
+(`GET api-keys/<target>/revocation/<keeper>/<mode>`) but keeps its own membership
+rule — the user's credential is accepted by the rule Connect External itself
+applies, with no two-key bound and no requirement that the other keys were staged
+by this Manager — because the destination is not one this Manager installed.
+
+The External Apply refuses while a journal entry has not settled, and re-reads the
+document digest and the membership immediately before its own PUT, so a
+credential the user revoked on their CPA is not knowingly added back. The
+preflight asks the same unsettled-journal rule, so the drawer cannot offer a
+selection whose submit would answer `key_operation_conflict`. The pre-PUT read is
+not a compare-and-swap: a whole-list PUT replaces whatever the CPA holds when it
 arrives, so a change that lands between the re-read and the PUT is still
 overwritten — the check narrows the window, it does not close it. The gateway
 configuration page keeps #1090's External semantics: scalars are best-effort with

@@ -39,6 +39,12 @@ func (s *Service) continueH1(ctx context.Context, o *repo.Operation, n int, gene
 	}
 	t := s.wire.(*cpa.Transport)
 	e = s.keyPair(ctx, o.TargetID, o.KeeperID, false, func(old, next string) error {
+		// H1 runs only in the private S1 profile, whose destination holds exactly the
+		// key this Manager installed. Its step sets are therefore fixed at one or two
+		// entries and always satisfy that destination's posture, which is why the
+		// whole-list policy that `keyOperationPrerequisites` asks is not repeated
+		// here. A profile whose destination can carry more than two keys must not
+		// reach this journal.
 		before, after := []string{old, next}, []string{next}
 		if step.Name == "add" {
 			before, after = []string{old}, []string{old, next}

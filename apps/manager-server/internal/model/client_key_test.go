@@ -66,3 +66,26 @@ func TestMaskedClientKeyKeepsOnlyPrefixAndLastFour(t *testing.T) {
 		t.Fatal("invalid secret produced a preview")
 	}
 }
+
+// A key this Manager did not mint has the source CPA's own shape, so it is
+// rendered as the ellipsis and the last four characters it shares with the
+// canonical policy — never more than a quarter of the secret.
+func TestMaskedImportedClientKeyKeepsTheLastFourOrNothing(t *testing.T) {
+	for secret, want := range map[string]string{
+		"sk-adopt-source-key-01":     "…y-01",
+		"source-client-two":          "…-two",
+		"short":                      "…",
+		"123456789012345":            "…",
+		"1234567890123456":           "…3456",
+		"0123456789abcdef0123456789": "…6789",
+	} {
+		if got := MaskedImportedClientKey(secret); got != want {
+			t.Fatalf("imported mask of %q = %q, want %q", secret, got, want)
+		}
+	}
+	// Runes, not bytes: the last four characters of a non-ASCII secret are never
+	// a split code point.
+	if got := MaskedImportedClientKey("ključ-初-a1ü2-üöä-asdf"); got != "…asdf" {
+		t.Fatalf("rune mask = %q", got)
+	}
+}
