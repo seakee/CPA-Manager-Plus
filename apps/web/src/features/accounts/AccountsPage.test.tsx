@@ -75,6 +75,9 @@ import {
   listPendingAccountDirectReauths,
 } from './model/accountDirectReauth';
 import { useUsageHeaderSnapshotStore } from '@/stores/useUsageHeaderSnapshotStore';
+// The real store is the only switch under test; `@/stores` is mocked in this file.
+import { useLanguageStore } from '@/stores/useLanguageStore';
+import i18n from '@/i18n';
 import { publishAccountCredentialMutationRevision } from '@/stores';
 import { AccountsPage } from './AccountsPage';
 
@@ -549,12 +552,14 @@ const { mocks } = vi.hoisted(() => {
         setKimiQuota: vi.fn(),
         setXaiQuota: vi.fn(),
       },
-      t: (key: string, options?: Record<string, unknown>) => {
+      // `language` is the language of the hook call that produced this translator,
+      // matching a `t` bound to i18next's current language.
+      t: (key: string, options?: Record<string, unknown>, language?: string) => {
         if (key === 'auth_files.codex_plan_filter_unknown') return 'Unknown plan';
         // Quota window labels go through the real catalogs, so a language switch
         // shows up in the rendered title instead of the raw key.
         if (key.startsWith('codex_quota.') && key.endsWith('_window')) {
-          return mocks.translate?.(key, options) ?? key;
+          return mocks.translate?.(key, options, language ?? mocks.language) ?? key;
         }
         if (!options) return key;
         const parts: string[] = [];
@@ -571,12 +576,20 @@ const { mocks } = vi.hoisted(() => {
       },
       quotaDisplayWindowsOverride: null as AccountQuotaDisplayWindow[] | null,
       language: 'en',
-      translate: null as null | ((key: string, options?: Record<string, unknown>) => string),
+      // Components subscribe to the language the way the real hook subscribes to
+      // its i18next instance, so a switch has to notify them.
+      languageListeners: new Set<() => void>(),
+      translate: null as null | ((
+        key: string,
+        options?: Record<string, unknown>,
+        language?: string
+      ) => string),
     },
   };
 });
 
 vi.mock('react-i18next', async () => {
+  const { useMemo, useSyncExternalStore } = await import('react');
   const [{ default: i18next }, { default: en }, { default: zhCN }, { default: zhTW }, { default: ru }] =
     await Promise.all([
       import('i18next'),
@@ -598,17 +611,32 @@ vi.mock('react-i18next', async () => {
     initAsync: false,
     interpolation: { escapeValue: false },
   });
-  mocks.translate = (key, options) =>
+  mocks.translate = (key, options, language) =>
     instance.t(key, {
-      lng: mocks.language,
+      lng: language ?? mocks.language,
       defaultValue: typeof options?.defaultValue === 'string' ? options.defaultValue : key,
     });
+  const readLanguage = () => mocks.language;
+  const subscribeLanguage = (listener: () => void) => {
+    mocks.languageListeners.add(listener);
+    return () => {
+      mocks.languageListeners.delete(listener);
+    };
+  };
   return {
     initReactI18next: { type: '3rdParty', init: () => {} },
-    useTranslation: () => ({
-      t: mocks.t,
-      i18n: { language: mocks.language || 'en' },
-    }),
+    // The real hook re-renders its consumer when i18next announces a language
+    // change and hands out a translator bound to that language; keep both, so a
+    // component that captures translated strings instead of re-deriving them
+    // from `t` shows up as a failure here.
+    useTranslation: () => {
+      const language = useSyncExternalStore(subscribeLanguage, readLanguage, readLanguage);
+      const t = useMemo(
+        () => (key: string, options?: Record<string, unknown>) => mocks.t(key, options, language),
+        [language]
+      );
+      return { t, i18n: { language } };
+    },
   };
 });
 
@@ -1286,6 +1314,23 @@ const flushPromises = async () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+};
+
+// The app switches language through this store, which also drives `i18n`;
+// `react-i18next` is mocked in this file, so mirror the store change into the
+// mock and notify the components subscribed through it.
+useLanguageStore.subscribe((state, previous) => {
+  if (state.language === previous.language) return;
+  mocks.language = state.language;
+  mocks.languageListeners.forEach((listener) => listener());
+});
+
+const switchAppLanguage = async (language: 'en' | 'ru') => {
+  await act(async () => {
+    useLanguageStore.getState().setLanguage(language);
+    await Promise.resolve();
+  });
+  await flushPromises();
 };
 
 const runCodexReauthSuccessAndCaptureError = async (): Promise<unknown> => {
@@ -14946,7 +14991,7 @@ describe('AccountsPage replacement flows', () => {
     expect(resetAction.props.disabled).toBe(false);
   });
 
-  it('renders the quota window labels in the console language', async () => {
+  it('retranslates an open quota panel when the language switches in place', async () => {
     const demoEntry = Object.values(getDemoQuotaStoreState().codexQuota)[0];
     const demoWindows = demoEntry.windows ?? [];
     expect(demoWindows.length).toBeGreaterThan(0);
@@ -14955,33 +15000,65 @@ describe('AccountsPage replacement flows', () => {
       'codex.json': { ...demoEntry, authFileKey: 'codex.json::auth-1' },
     };
 
-    const labelsFor = async (language: 'en' | 'ru') => {
-      mocks.language = language;
-      const renderer = await renderAccountsPage();
-      await openCodexQuotaTab(renderer, 'codex.json');
-      const labels = renderer.root
-        .findAll(
-          (node) =>
-            typeof node.props?.className === 'string' && node.props.className.includes('titleLabel')
-        )
-        .map((node) => readText(node.props.children));
-      mountedAccountsRenderers.delete(renderer);
-      await act(async () => renderer.unmount());
-      return labels;
+    await switchAppLanguage('en');
+
+    const renderer = await renderAccountsPage();
+    await openCodexQuotaTab(renderer, 'codex.json');
+    const quotaPanel = renderer.root.findAll(
+      (node) =>
+        node.props?.role === 'dialog' && node.findAllByType(QuotaWindowCard).length > 0
+    )[0];
+    expect(quotaPanel).toBeDefined();
+
+    const titleElement = (windowKey: string) => {
+      const card = quotaPanel
+        .findAllByType(QuotaWindowCard)
+        .find((node) => node.props.window?.key === windowKey);
+      expect(card).toBeDefined();
+      // The card titles itself through the one `strong` that carries an
+      // accessible name; the percentage beside it is a plain value.
+      const titles = card!.findAll(
+        (node) => node.type === 'strong' && typeof node.props.title === 'string'
+      );
+      expect(titles).toHaveLength(1);
+      return titles[0];
+    };
+    const visibleTitle = (windowKey: string) => readText(titleElement(windowKey).props.children);
+    // The expectation is the catalog entry of the window's own label key, not a
+    // literal translation, and it is read with the language under test.
+    const expectedTitle = (windowKey: string, language: 'en' | 'ru') => {
+      const demoWindow = demoWindows.find((window) => window.id === windowKey);
+      expect(demoWindow?.labelKey).toBeTruthy();
+      return mocks.translate!(demoWindow!.labelKey!, undefined, language);
     };
 
-    const english = await labelsFor('en');
-    const russian = await labelsFor('ru');
-
-    expect(english.length).toBeGreaterThanOrEqual(demoWindows.length);
-    expect(russian).toHaveLength(english.length);
-    // The page hands the builder the active translator, so the same windows are
-    // titled differently in each language and never fall back to the raw fixture label.
-    expect(russian).not.toEqual(english);
-    for (const [index, label] of russian.entries()) {
-      expect(label).not.toContain('codex_quota.');
-      expect(label).not.toBe(demoWindows[index]?.label);
+    for (const window of demoWindows) {
+      expect(visibleTitle(window.id)).toBe(expectedTitle(window.id, 'en'));
     }
+
+    // Keep the panel mounted and switch the language the way the app does.
+    const switchWindowId = demoWindows[0].id;
+    const renderedTitle = titleElement(switchWindowId);
+
+    await switchAppLanguage('ru');
+    expect(i18n.language).toBe('ru');
+
+    // The element captured before the switch is the one showing the new title,
+    // so the panel re-translated instead of being rebuilt in the new language.
+    expect(readText(renderedTitle.props.children)).toBe(expectedTitle(switchWindowId, 'ru'));
+    for (const window of demoWindows) {
+      expect(visibleTitle(window.id)).toBe(expectedTitle(window.id, 'ru'));
+    }
+    const russianPanelText = readText(quotaPanel);
+    for (const window of demoWindows) {
+      // No window keeps the English title or a raw label key after the switch.
+      expect(russianPanelText).not.toContain(expectedTitle(window.id, 'en'));
+      expect(visibleTitle(window.id)).not.toContain('codex_quota.');
+    }
+
+    // Switching back leaves nothing from the language that was shown before.
+    await switchAppLanguage('en');
+    expect(readText(renderedTitle.props.children)).toBe(expectedTitle(switchWindowId, 'en'));
   });
 
   it('verifies live reset credits before showing confirmation or consuming', async () => {
