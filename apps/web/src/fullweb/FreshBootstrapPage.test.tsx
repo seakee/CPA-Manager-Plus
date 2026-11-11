@@ -107,7 +107,9 @@ const storage = new Map<string, string>();
 
 const isHost = (className: string) => (node: ReactTestInstance) =>
   typeof node.type === 'string' &&
-  String(node.props?.className ?? '').split(' ').includes(className);
+  String(node.props?.className ?? '')
+    .split(' ')
+    .includes(className);
 
 /** Each visible block carrying that class, as its own string. */
 function blocksOf(root: ReactTestInstance, className: string): string[] {
@@ -564,7 +566,13 @@ describe('FreshBootstrapPage product preview workflow', () => {
   });
 
   it.each([
-    ['unsupported_upgrade', 'unsupported_upgrade', 'admin_session', 'qualification_unavailable', true],
+    [
+      'unsupported_upgrade',
+      'unsupported_upgrade',
+      'admin_session',
+      'qualification_unavailable',
+      true,
+    ],
     ['recovery_required', 'recovery', 'host_intervention', 'recovery_host_intervention', false],
   ])(
     'routes non-Fresh %s to its own authentication or host gate',
@@ -591,9 +599,15 @@ describe('FreshBootstrapPage product preview workflow', () => {
         );
       });
       if (status === 'unsupported_upgrade') {
-        expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
-        expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
-        expect(renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })).toHaveLength(0);
+        expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(
+          1
+        );
+        expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
+          0
+        );
+        expect(
+          renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })
+        ).toHaveLength(0);
         return;
       }
       expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toMatch(CJK);
@@ -787,9 +801,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(detail).toMatch(CJK);
     expect(detail).not.toBe(textOf(findByTestId(renderer.root, 'init-error-title')));
     // The transport failure keeps the named recovery affordances on screen.
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
-    ).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })).toHaveLength(1);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-authority-error'))).toMatch(CJK);
   });
 
@@ -855,12 +867,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
       for (const state of states) {
         vi.stubGlobal(
           'fetch',
-          vi.fn().mockResolvedValue(
-            Response.json(
-              { contract_version: 'cpamp.phase4-01.discovery.v1', ...state.payload },
-              { status: state.httpStatus }
+          vi
+            .fn()
+            .mockResolvedValue(
+              Response.json(
+                { contract_version: 'cpamp.phase4-01.discovery.v1', ...state.payload },
+                { status: state.httpStatus }
+              )
             )
-          )
         );
         setFullWebLanguage(language);
         let renderer!: ReactTestRenderer;
@@ -953,9 +967,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(cardText).toContain(identity.operationId);
       expect(cardText).toContain(`#${handoff.claimGeneration}`);
       expect(cardText).toContain('cpa-manager-plus initialize');
-      expect(
-        renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
-      ).toHaveLength(1);
+      expect(renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })).toHaveLength(1);
       await act(async () => renderer.unmount());
     }
   );
@@ -1179,18 +1191,16 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
       // Option 2 must be executable on a Docker named volume and must never
       // hard-code a single pre-release image tag.
-      const ownershipCommand = textOf(
-        findByTestId(renderer.root, 'legacy-ownership-command')
-      );
+      const ownershipCommand = textOf(findByTestId(renderer.root, 'legacy-ownership-command'));
       expect(ownershipCommand).toContain('docker stop <v2_container>');
       expect(ownershipCommand).toContain(
         `seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'`
       );
       expect(ownershipCommand).toContain('docker start <v2_container>');
       expect(ownershipCommand).not.toContain('2.0.0-beta.1');
-      expect(
-        textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))
-      ).toContain(`seakee/cpa-manager-plus:${__APP_VERSION__}`);
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        `seakee/cpa-manager-plus:${__APP_VERSION__}`
+      );
       expect(textOf(instructions)).toContain('/data/runtime');
       expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
         0
@@ -1208,7 +1218,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     }
   );
 
-  it('re-derives the 1.x volume card copy across all four languages via the header switcher without refetching', async () => {
+  it('re-translates the one 1.x volume guidance card through the header switcher without refetching', async () => {
     setFullWebLanguage('zh-CN');
     const discovery = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({
@@ -1228,55 +1238,124 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
 
-    const snapshotCard = (locale: 'zh-CN' | 'zh-TW' | 'en' | 'ru') => {
-      const gate = findByTestId(renderer.root, 'bootstrap-no-handoff');
-      assertCardHeaderReads(locale, gate);
-      const [pageTitle] = blocksOf(gate, 'wizard-title');
-      const [pageDesc] = blocksOf(gate, 'wizard-desc');
-      const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
-      const [guidanceTitle] = blocksOf(guidance, 'alert-title');
-      const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
-      assertCopyIn(locale, guidanceTitle);
-      assertCopyIn(locale, guidanceDesc);
-      const instructions = findByTestId(renderer.root, 'legacy-ownership-instructions');
-      const stepTitles = blocksOf(instructions, 'alert-title');
-      const stepDescs = blocksOf(instructions, 'alert-desc');
-      for (const block of [...stepTitles, ...stepDescs]) {
-        assertCopyIn(locale, block);
+    // The card is found the way a reader finds it: the page landmark, the one
+    // live status region, the card's heading and intro, the two numbered host
+    // options and the action that re-asks discovery. No style class is part of
+    // the contract, so renaming one cannot fail this test or hide a card.
+    const live = (role: string) => {
+      const out: ReactTestInstance[] = [];
+      const walk = (node: ReactTestInstance) => {
+        if (typeof node.type === 'string' && node.props?.role === role) {
+          out.push(node);
+          return;
+        }
+        node.children.forEach((child) => {
+          if (typeof child !== 'string') walk(child as ReactTestInstance);
+        });
+      };
+      walk(renderer.root);
+      return out;
+    };
+    const statusRegion = live('status');
+    expect(statusRegion).toHaveLength(1);
+    const [status] = statusRegion;
+    // A status region carries its own name and value as its first two blocks.
+    const statusBody = status.children[0] as ReactTestInstance;
+    const [statusTitle, statusDetail] = statusBody.children as ReactTestInstance[];
+
+    const [card] = renderer.root.findAll((node) => node.type === 'section');
+    expect(card.props['data-testid']).toBe('bootstrap-no-handoff');
+    const [heading] = card.findAll((node) => node.type === 'h1');
+    const [intro] = card.findAll((node) => node.type === 'p');
+
+    // The two numbered options are the next region in the card body; each names
+    // its option in one block and explains it in the next, both in the reader's
+    // language, so the assertions never depend on how the blocks are styled.
+    const options = (status.parent as ReactTestInstance).children[1] as ReactTestInstance;
+    const optionBlocks = options.children.map(
+      (option) =>
+        ((option as ReactTestInstance).children[0] as ReactTestInstance)
+          .children as ReactTestInstance[]
+    );
+    expect(optionBlocks).toHaveLength(2);
+    const [[upgradeTitle, upgradeDetail], [ownershipTitle, ownershipDetail]] = optionBlocks;
+
+    // The one action that re-asks discovery, taken from the card body.
+    const recheck = (status.parent as ReactTestInstance).children.find(
+      (child) => typeof child !== 'string' && (child as ReactTestInstance).type === 'button'
+    ) as ReactTestInstance;
+
+    // Each pass reads the same nodes again: a card that kept the strings it was
+    // fetched with re-renders nothing on a switch and fails the script check.
+    const snapshot = (language: Language) => {
+      const blocks = {
+        heading: textOf(heading),
+        intro: textOf(intro),
+        title: textOf(statusTitle),
+        detail: textOf(statusDetail),
+        upgradeTitle: textOf(upgradeTitle),
+        upgradeDetail: textOf(upgradeDetail),
+        ownershipTitle: textOf(ownershipTitle),
+        ownershipDetail: textOf(ownershipDetail),
+        recheck: textOf(recheck),
+      };
+      for (const block of [
+        blocks.heading,
+        blocks.intro,
+        blocks.title,
+        blocks.detail,
+        blocks.upgradeTitle,
+        blocks.upgradeDetail,
+        blocks.ownershipTitle,
+        blocks.ownershipDetail,
+        blocks.recheck,
+      ]) {
+        assertCopyIn(language, block);
       }
-      const recheck = textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery'));
-      assertCopyIn(locale, recheck);
-      return { pageTitle, pageDesc, guidanceTitle, guidanceDesc, stepTitles, stepDescs, recheck };
+      expect(blocks.title).not.toBe(blocks.detail);
+      expect(blocks.upgradeTitle).not.toBe(blocks.ownershipTitle);
+      expect(blocks.upgradeDetail).not.toBe(blocks.ownershipDetail);
+      return blocks;
     };
 
-    const simplified = snapshotCard('zh-CN');
-
     const switcher = findByTestId(renderer.root, 'bootstrap-language');
-    await act(async () => switcher.props.onChange({ target: { value: 'zh-TW' } }));
-    const traditional = snapshotCard('zh-TW');
-    expect(traditional.pageTitle).not.toBe(simplified.pageTitle);
-    expect(traditional.pageDesc).not.toBe(simplified.pageDesc);
-    expect(traditional.guidanceTitle).not.toBe(simplified.guidanceTitle);
-    expect(traditional.guidanceDesc).not.toBe(simplified.guidanceDesc);
-    expect(traditional.stepTitles).not.toEqual(simplified.stepTitles);
-    expect(traditional.stepDescs).not.toEqual(simplified.stepDescs);
+    const switchTo = async (language: Language) => {
+      await act(async () => switcher.props.onChange({ target: { value: language } }));
+      // The page's own control kept the choice and wrote the Console's store.
+      expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe(language);
+      expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
+        state: { language },
+      });
+    };
+
+    const simplified = snapshot('zh-CN');
+    await switchTo('zh-TW');
+    const traditional = snapshot('zh-TW');
+    // Traditional is its own table, not Simplified handed back unchanged.
+    expect(traditional.heading).not.toBe(simplified.heading);
+    expect(traditional.intro).not.toBe(simplified.intro);
+    expect(traditional.title).not.toBe(simplified.title);
+    expect(traditional.detail).not.toBe(simplified.detail);
+    expect(traditional.upgradeTitle).not.toBe(simplified.upgradeTitle);
+    expect(traditional.upgradeDetail).not.toBe(simplified.upgradeDetail);
+    expect(traditional.ownershipTitle).not.toBe(simplified.ownershipTitle);
+    expect(traditional.ownershipDetail).not.toBe(simplified.ownershipDetail);
     expect(traditional.recheck).not.toBe(simplified.recheck);
-    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
-      state: { language: 'zh-TW' },
-    });
 
-    await act(async () => switcher.props.onChange({ target: { value: 'en' } }));
-    snapshotCard('en');
-    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
-      state: { language: 'en' },
-    });
+    await switchTo('en');
+    const english = snapshot('en');
+    expect(english.title).not.toBe(traditional.title);
+    expect(english.detail).not.toBe(traditional.detail);
+    expect(english.upgradeTitle).not.toBe(traditional.upgradeTitle);
+    expect(english.ownershipTitle).not.toBe(traditional.ownershipTitle);
 
-    await act(async () => switcher.props.onChange({ target: { value: 'ru' } }));
-    snapshotCard('ru');
-    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
-      state: { language: 'ru' },
-    });
+    await switchTo('ru');
+    const russian = snapshot('ru');
+    expect(russian.heading).not.toBe(english.heading);
+    expect(russian.title).not.toBe(english.title);
+    expect(russian.detail).not.toBe(english.detail);
 
+    // Four languages, one discovery answer: the payload was never re-fetched.
     expect(discovery).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
   });
