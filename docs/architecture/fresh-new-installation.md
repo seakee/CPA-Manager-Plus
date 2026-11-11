@@ -297,7 +297,10 @@ immediate SQLite transaction (`freshstore.TransactionalUpdater` +
   replay of `RegisterAdoptionTx` against an already-committed adoption set must
   match the committed canonical key-set digest (`AdoptedSetSHA256`,
   order-independent) inside the transaction before staging rows, or fail closed
-  with `ErrJournalConflict` (`409 adopt_installation_conflict`). Both `POST
+  with `ErrJournalConflict` (`409 adopt_installation_conflict`). The commitment
+  records the one-shot adoption registration; it does not track later changes
+  to the destination CPA's live key list. Once registration is ready, an
+  ordinary completed replay returns without re-registering. Both `POST
   api-keys/<id>/initial-install` and `freshkeyapply.Service.Apply` reject
   `adopt_existing` (`409 Conflict`, no journal or CPA write), while `GET
   api-keys/<id>/initial-install` retains read-only membership observation
@@ -305,9 +308,10 @@ immediate SQLite transaction (`freshstore.TransactionalUpdater` +
   expiry, a retired destination key, a source binding conflict, a foreign or
   divergent-set journal (`409 adopt_installation_conflict`), or a
   decryption/storage failure — including an outermost Fresh store read outage on
-  the canonical route (`503 adopt_installation_unavailable`) — the transaction
-  rolls back completely: neither adopted workspace records, nor source bindings,
-  nor the journal, nor write authority remain behind.
+  the canonical route (`503 adopt_installation_unavailable`) — the rejected
+  transaction rolls back completely and leaves no newly staged workspace records,
+  source bindings, journal changes, or write authority. A registration that
+  another attempt already committed, and the authority it carries, stay intact.
 - An `adopt_existing` installation that reached `ProductComplete = true` on a
   build prior to journaled adoption — or one carrying only an unverified
   non-adoption `InitialInstall` row without `CommitAdoptionTx` evidence — fails
