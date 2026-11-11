@@ -2037,4 +2037,45 @@ describe('Plugin quota display windows', () => {
     });
     expect(windows).toHaveLength(0);
   });
+
+  it('does not fabricate a quota window from summary-only plugin data', () => {
+    const stores = storesWithPluginQuota();
+    const record = stores.pluginQuota![pluginStoreKey];
+    record.groups = [];
+    record.summary = [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+      {
+        key: 'extra_credits',
+        label: 'Extra balance',
+        value: 12.5,
+        unit: null,
+        format: 'currency',
+        currency: 'USD',
+      },
+    ];
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    // Summary metrics are label/value facts, not timed windows with a progress bar.
+    expect(windows).toHaveLength(0);
+  });
+
+  it('still renders window buckets alongside retained summary evidence', () => {
+    const stores = storesWithPluginQuota();
+    const record = stores.pluginQuota![pluginStoreKey];
+    record.summary = [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+    ];
+    const row = buildRow(pluginFile, stores);
+    const windows = buildAccountQuotaDisplayWindows(row, {
+      stores,
+      translateQuotaWindowLabel,
+      t,
+    });
+    expect(windows).toHaveLength(3);
+    expect(windows.every((window) => window.source === 'plugin')).toBe(true);
+  });
 });

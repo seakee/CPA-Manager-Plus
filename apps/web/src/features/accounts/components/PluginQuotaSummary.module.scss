@@ -1,0 +1,71 @@
+@use '@/styles/variables.scss' as *;
+
+/**
+ * Generic plugin quota summary facts. Compact mode sits inside the credential
+ * list quota cells (including inline detail triggers), detail mode is the
+ * restrained section in the quota detail tab. Label/value text only: no
+ * categorical palette, meters, or charts.
+ */
+
+.pluginQuotaSummary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-xs $spacing-sm;
+  min-width: 0;
+}
+
+.pluginQuotaSummaryItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pluginQuotaSummaryLabel {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.pluginQuotaSummaryValue {
+  color: var(--text-primary, inherit);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.pluginQuotaSummaryValueUnknown {
+  color: var(--text-tertiary, var(--text-secondary));
+  font-weight: 400;
+}
+
+.pluginQuotaSummaryDetail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: $spacing-xs;
+
+  .pluginQuotaSummaryItem {
+    justify-content: space-between;
+    gap: $spacing-sm;
+  }
+
+  .pluginQuotaSummaryLabel {
+    font-size: 12px;
+    max-width: 60%;
+    white-space: normal;
+  }
+
+  .pluginQuotaSummaryValue {
+    font-size: 12px;
+    white-space: normal;
+    text-align: right;
+  }
+}

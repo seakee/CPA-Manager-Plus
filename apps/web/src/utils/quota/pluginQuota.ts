@@ -7,7 +7,7 @@
  * plugin quota endpoint `POST /v0/management/plugins/{pluginId}/quota`.
  */
 
-import type { AuthFileItem, PluginListEntry } from '@/types';
+import type { AuthFileItem, PluginListEntry, PluginQuotaSummaryItem } from '@/types';
 
 const readTrimmedString = (value: unknown): string => {
   if (typeof value !== 'string' && typeof value !== 'number') return '';
@@ -106,3 +106,108 @@ export const parsePluginQuotaWindowSeconds = (window: string | undefined): numbe
   if (normalized.includes('month')) return 30 * 86400;
   return null;
 };
+
+const formatNumberWith = (
+  value: number,
+  locale: string | undefined,
+  options: Intl.NumberFormatOptions = {}
+): string | null => {
+  try {
+    return new Intl.NumberFormat(locale || undefined, options).format(value);
+  } catch {
+    return null;
+  }
+};
+
+// Whether this locale/formatting rounds the value's magnitude down to an
+// exact-zero display ("0"/"-0"), which would hide meaningful nonzero quota
+// evidence behind a reported-zero look.
+const rendersAsZero = (
+  value: number,
+  locale: string | undefined,
+  options: Intl.NumberFormatOptions = {}
+): boolean => {
+  const zeroDisplay = formatNumberWith(0, locale, options);
+  if (zeroDisplay === null) return false;
+  const magnitudeDisplay = formatNumberWith(Math.abs(value), locale, options);
+  return magnitudeDisplay !== null && magnitudeDisplay === zeroDisplay;
+};
+
+const formatSummaryDecimal = (value: number, locale?: string): string => {
+  const formatted = formatNumberWith(value, locale);
+  if (formatted === null) return String(value);
+  if (value !== 0 && rendersAsZero(value, locale)) {
+    // Keep meaningful nonzero precision with explicit fraction digits, then
+    // fall back to a faithful plain/scientific representation for values too
+    // small for any fixed cap. Genuine zero never enters this branch.
+    const preciseOptions = { maximumFractionDigits: 20 };
+    if (!rendersAsZero(value, locale, preciseOptions)) {
+      return formatNumberWith(value, locale, preciseOptions) ?? String(value);
+    }
+    return String(value);
+  }
+  return formatted;
+};
+
+/**
+ * Format one generic plugin quota summary item using only its declared
+ * primitive value and metadata. Numeric percent values are reported as-is
+ * (32 with unit "%" displays "32%", never 3,200%), currency values use the
+ * declared currency code, textual values stay plain text, and missing or
+ * invalid values return null so callers can show an unknown presentation
+ * instead of a fabricated zero.
+ */
+export const formatPluginQuotaSummaryValue = (
+  item: Pick<PluginQuotaSummaryItem, 'value' | 'unit' | 'format' | 'currency'>,
+  locale?: string
+): string | null => {
+  if (typeof item.value === 'number') {
+    if (!Number.isFinite(item.value)) return null;
+    const format = (item.format ?? '').trim().toLowerCase();
+    const unit = (item.unit ?? '').trim();
+    if (format === 'currency') {
+      const currency = (item.currency ?? '').trim();
+      if (currency) {
+        try {
+          const currencyOptions: Intl.NumberFormatOptions = { style: 'currency', currency };
+          const formatted = new Intl.NumberFormat(locale || undefined, currencyOptions).format(
+            item.value
+          );
+          // A tiny nonzero balance must not display as an exact zero balance.
+          if (item.value !== 0 && rendersAsZero(item.value, locale, currencyOptions)) {
+            const preciseOptions = { ...currencyOptions, maximumFractionDigits: 20 };
+            if (!rendersAsZero(item.value, locale, preciseOptions)) {
+              return new Intl.NumberFormat(locale || undefined, preciseOptions).format(item.value);
+            }
+            return `${formatSummaryDecimal(item.value, locale)} ${currency}`;
+          }
+          return formatted;
+        } catch {
+          // Unsupported currency code: keep the declared code as plain text
+          // instead of inventing a conversion.
+          return `${formatSummaryDecimal(item.value, locale)} ${currency}`;
+        }
+      }
+      return `${formatSummaryDecimal(item.value, locale)}${unit ? ` ${unit}` : ''}`;
+    }
+    const formatted = formatSummaryDecimal(item.value, locale);
+    if (!unit) return format === 'percent' ? `${formatted}%` : formatted;
+    // Percent-like units join directly ("32%"); word units keep a space.
+    return unit.startsWith('%') ? `${formatted}${unit}` : `${formatted} ${unit}`;
+  }
+  if (typeof item.value === 'string') {
+    const text = item.value.trim();
+    return text || null;
+  }
+  return null;
+};
+
+/**
+ * Whether at least one normalized summary item carries a meaningful value.
+ * Numeric zero and nonempty text count as evidence; all-null or invalid
+ * summaries do not, so callers can keep treating them as failures instead of
+ * replacing real facts with unknown placeholders.
+ */
+export const hasMeaningfulPluginQuotaSummaryValue = (
+  items: PluginQuotaSummaryItem[]
+): boolean => items.some((item) => item.value !== null);

@@ -5,6 +5,7 @@ import { CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import { buildQuotaCredentialIdentity } from '@/utils/quota/credentialScope';
 import {
   hasConfirmedXaiBillingEntitlement,
+  resolveAccountPluginQuotaSummaryItems,
   resolveAccountQuota,
   type AccountQuotaStores,
 } from './accountQuotaSummary';
@@ -740,5 +741,80 @@ describe('resolveAccountQuota — plugin credentials', () => {
     expect(summary.status).toBe('error');
     expect(summary.error).toBe('plugin unavailable');
     expect(summary.errorStatus).toBe(502);
+  });
+});
+
+describe('resolveAccountPluginQuotaSummaryItems', () => {
+  const makePluginState = (
+    overrides: Partial<PluginQuotaState> = {}
+  ): PluginQuotaState => ({
+    status: 'success',
+    authFileKey: 'cc.json::cc-1',
+    authFileName: 'cc.json',
+    authIndex: 'cc-1',
+    authFileIdentityVerified: true,
+    fetchedAtMs: 1726398000000,
+    pluginId: 'commandcode',
+    quotaProvider: 'commandcode',
+    subscription: null,
+    summary: [
+      { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%', format: 'number', currency: null },
+      {
+        key: 'extra_credits',
+        label: 'Extra balance',
+        value: 12.5,
+        unit: null,
+        format: 'currency',
+        currency: 'USD',
+      },
+    ],
+    serverTimeOffsetMs: null,
+    groups: [],
+    ...overrides,
+  });
+
+  const makePluginFile = (): AuthFileItem =>
+    ({ name: 'cc.json', type: 'commandcode', provider: 'commandcode', authIndex: 'cc-1' }) as AuthFileItem;
+
+  const storesWithPluginState = (state: PluginQuotaState): AccountQuotaStores => {
+    const stores = emptyStores();
+    stores.pluginQuota = { 'cc.json::cc-1': state };
+    return stores;
+  };
+
+  it('returns the identity-scoped plugin summary items', () => {
+    const stores = storesWithPluginState(makePluginState());
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)).toHaveLength(2);
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)[0]?.key).toBe(
+      'usage_percent'
+    );
+  });
+
+  it('keeps the retained summary readable while a transient refresh failed', () => {
+    const stores = storesWithPluginState(
+      makePluginState({ status: 'error', error: 'bridge unavailable', errorStatus: 503 })
+    );
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), stores)).toHaveLength(2);
+  });
+
+  it('returns no items when the credential has no scoped plugin snapshot', () => {
+    expect(resolveAccountPluginQuotaSummaryItems(makePluginFile(), emptyStores())).toEqual([]);
+  });
+
+  it('does not leak another credential identity summary', () => {
+    const stores = storesWithPluginState(makePluginState());
+    const otherFile = {
+      name: 'cc.json',
+      type: 'commandcode',
+      provider: 'commandcode',
+      authIndex: 'cc-2',
+    } as AuthFileItem;
+    expect(resolveAccountPluginQuotaSummaryItems(otherFile, stores)).toEqual([]);
+  });
+
+  it('keeps built-in providers on their own adapters without plugin summary leakage', () => {
+    const stores = storesWithPluginState(makePluginState());
+    const claudeFile = { name: 'cc.json', type: 'claude', authIndex: 'cc-1' } as AuthFileItem;
+    expect(resolveAccountPluginQuotaSummaryItems(claudeFile, stores)).toEqual([]);
   });
 });

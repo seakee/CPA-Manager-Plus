@@ -8,12 +8,19 @@ const { pluginsApiMocks } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/services/api/plugins', () => ({
-  pluginsApi: {
-    list: pluginsApiMocks.list,
-    fetchQuota: pluginsApiMocks.fetchQuota,
-  },
-}));
+vi.mock('@/services/api/plugins', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/api/plugins')>();
+  return {
+    ...actual,
+    pluginsApi: {
+      list: pluginsApiMocks.list,
+      // Apply the real response normalization so fixtures stay raw, exactly
+      // like the payloads PLUGIN_CONFIG receives in production.
+      fetchQuota: async (...args: Parameters<typeof actual.pluginsApi.fetchQuota>) =>
+        actual.normalizePluginQuotaResponse(await pluginsApiMocks.fetchQuota(...args)),
+    },
+  };
+});
 
 import type { CodexQuotaState, PluginListEntry } from '@/types';
 import { buildCodexQuotaWindowInfos, CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
@@ -1750,6 +1757,138 @@ describe('PLUGIN_CONFIG', () => {
     ).rejects.toThrow('missing auth_index');
     expect(pluginsApiMocks.list).not.toHaveBeenCalled();
     expect(pluginsApiMocks.fetchQuota).not.toHaveBeenCalled();
+  });
+
+  it('accepts a summary-only quota response as valid partial evidence', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [{ key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%' }],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      { name: 'plugin.json', auth_index: 'auth-8', quota_plugin_id: 'clinepassbridge' },
+      pluginQuotaT
+    );
+    expect(data.groups).toEqual([]);
+    expect(data.summary).toHaveLength(1);
+    expect(data.summary[0]?.value).toBe(32);
+  });
+
+  it('accepts a subscription-only quota response while quota stays unknown', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: { plan: 'CommandCode Pro', tierName: null, tierId: null },
+      summary: [],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      { name: 'plugin.json', auth_index: 'auth-9', quota_plugin_id: 'clinepassbridge' },
+      pluginQuotaT
+    );
+    expect(data.groups).toEqual([]);
+    expect(data.summary).toEqual([]);
+    expect(data.subscription?.plan).toBe('CommandCode Pro');
+  });
+
+  it('still fails on a genuinely empty quota response', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    await expect(
+      PLUGIN_CONFIG.fetchQuota(
+        { name: 'plugin.json', auth_index: 'auth-10', quota_plugin_id: 'clinepassbridge' },
+        pluginQuotaT
+      )
+    ).rejects.toThrow('empty quota data');
+  });
+
+  it('fails when every summary value normalized to null or invalid', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [
+        { key: 'broken', label: 'Malformed synthetic summary', value: { remaining: 1 } },
+        { key: 'missing', label: 'Unknown synthetic metric', value: null },
+      ],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    await expect(
+      PLUGIN_CONFIG.fetchQuota(
+        { name: 'plugin.json', auth_index: 'auth-11', quota_plugin_id: 'clinepassbridge' },
+        pluginQuotaT
+      )
+    ).rejects.toThrow('empty quota data');
+  });
+
+  it('fails on a missing-only summary with no subscription or windows', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [{ key: 'missing', label: 'Unknown synthetic metric', value: null }],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    await expect(
+      PLUGIN_CONFIG.fetchQuota(
+        { name: 'plugin.json', auth_index: 'auth-12', quota_plugin_id: 'clinepassbridge' },
+        pluginQuotaT
+      )
+    ).rejects.toThrow('empty quota data');
+  });
+
+  it('fails when the subscription normalizes to null and no quota evidence exists', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: { plan: { name: 'Malformed synthetic plan' } },
+      summary: [],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    await expect(
+      PLUGIN_CONFIG.fetchQuota(
+        { name: 'plugin.json', auth_index: 'auth-13', quota_plugin_id: 'clinepassbridge' },
+        pluginQuotaT
+      )
+    ).rejects.toThrow('empty quota data');
+  });
+
+  it('accepts zero and text summary values as meaningful evidence', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [
+        { key: 'zero', label: 'Extra balance', value: 0, format: 'currency', currency: 'USD' },
+        { key: 'text', label: 'Status', value: ' limited ' },
+      ],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      { name: 'plugin.json', auth_index: 'auth-14', quota_plugin_id: 'clinepassbridge' },
+      pluginQuotaT
+    );
+    expect(data.summary[0]?.value).toBe(0);
+    expect(data.summary[1]?.value).toBe('limited');
+  });
+
+  it('accepts mixed valid and missing summary items and keeps unknown fields', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [
+        { key: 'usage_percent', label: 'Usage (rounded)', value: 32, unit: '%' },
+        { key: 'missing', label: 'Unknown synthetic metric', value: null },
+      ],
+      groups: [],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      { name: 'plugin.json', auth_index: 'auth-15', quota_plugin_id: 'clinepassbridge' },
+      pluginQuotaT
+    );
+    expect(data.summary).toHaveLength(2);
+    expect(data.summary[0]?.value).toBe(32);
+    expect(data.summary[1]?.value).toBeNull();
   });
 
   it('resolves the plugin id from the credential entry when present', async () => {

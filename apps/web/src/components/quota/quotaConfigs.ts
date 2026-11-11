@@ -31,6 +31,7 @@ import type {
   QuotaFetchContext,
 } from '@/utils/quota';
 import {
+  hasMeaningfulPluginQuotaSummaryValue,
   readAuthFileQuotaAuthIndex,
   readAuthFileQuotaPluginId,
   readAuthFileQuotaProvider,
@@ -1002,7 +1003,16 @@ export const PLUGIN_CONFIG: QuotaConfig<PluginQuotaState, PluginQuotaData> = {
     }
 
     const data = await pluginsApi.fetchQuota(pluginId, authIndex);
-    if (data.groups.length === 0 && data.summary.length === 0) {
+    // Only meaningful normalized evidence counts: valid windows, a summary
+    // item with a real value (numeric zero and text count), or known
+    // subscription metadata. An all-null/invalid summary is not evidence: the
+    // refresh stays an observable failure so a previous scoped good snapshot
+    // is retained with feedback instead of being replaced by placeholders.
+    if (
+      data.groups.length === 0 &&
+      !hasMeaningfulPluginQuotaSummaryValue(data.summary) &&
+      !data.subscription
+    ) {
       throw new Error(t('plugin_quota.empty_data'));
     }
     return {

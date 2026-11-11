@@ -195,11 +195,14 @@ import {
   mergeCodexResetCreditsFromQuotaSnapshots,
   mergeAccountQuotaSnapshotWindows,
 } from '@/features/accounts/model/accountQuotaSnapshots';
+import { resolveAccountPluginQuotaSummaryItems } from '@/features/accounts/model/accountQuotaSummary';
+import { formatPluginQuotaSummaryValue } from '@/utils/quota/pluginQuota';
 import {
   ACCOUNT_OVERVIEW_ACTIVITY_RANGE_MS,
   buildAccountDetailViewModel,
   buildOverviewRecentStatus,
 } from '@/features/accounts/model/accountDetailViewModel';
+import { PluginQuotaSummary } from '@/features/accounts/components/PluginQuotaSummary';
 import {
   ACCOUNT_SORT_DEFAULT_DIRECTIONS,
   ACCOUNT_SORT_FIELD_OPTIONS,
@@ -463,7 +466,13 @@ const getMainListQuotaWindowLimit = (
       ? ANTIGRAVITY_MAIN_LIST_QUOTA_WINDOW_LIMIT
       : 2;
   }
-  return layoutMode === 'table' ? 4 : 2;
+  if (layoutMode === 'table') return 4;
+  // User-approved amendment (2026-11-11): genuine plugin-served rows show all
+  // three approved reported windows (5h/weekly/monthly) in the grid. Every
+  // built-in provider keeps the existing limit of 2.
+  return !isQuotaRefreshSupportedProvider(row.provider) && isPluginQuotaCandidateFile(row.raw)
+    ? 3
+    : 2;
 };
 
 const getCardQuotaWindowGroups = (
@@ -8868,6 +8877,12 @@ export function AccountsPage() {
       resetDisplayLabel && resetDisplayLabel !== '-'
         ? `${t('accounts.col_reset')}: ${resetDisplayLabel}`
         : '',
+      // Plugin-reported caveats (e.g. relative reset text) and an honest
+      // unknown-boundary note stay in the existing tooltip; no reset is invented.
+      window.source === 'plugin' && window.description ? window.description : '',
+      window.source === 'plugin' && window.windowMode === 'unknown'
+        ? t('accounts.detail_current_window_boundary_unconfirmed')
+        : '',
     ]
       .filter(Boolean)
       .join('. ');
@@ -9007,6 +9022,7 @@ export function AccountsPage() {
       quotaWindows,
       getMainListQuotaWindowLimit(effectiveLayoutMode, row)
     );
+    const pluginSummaryItems = resolveAccountPluginQuotaSummaryItems(row.raw, baseQuotaStores);
     const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
     const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
     const item = buildAccountListItem(row, {
@@ -9043,13 +9059,18 @@ export function AccountsPage() {
       quotaWindows.length > 0
         ? t('accounts.quota_details_only')
         : t('accounts.quota_source_none');
+    const pluginSummaryTitleLines = pluginSummaryItems.map((item) => {
+      const valueText = formatPluginQuotaSummaryValue(item, i18n.language) ?? '-';
+      return `${item.label}: ${valueText}`;
+    });
     const quotaWindowTitle =
-      mainListWindows
-        .map((window) => {
+      [
+        ...mainListWindows.map((window) => {
           const label = getQuotaWindowReadableLabel(window, t);
           return `${label}: ${formatPercent(window.remainingPercent)}`;
-        })
-        .join('\n') || quotaEmptyLabel;
+        }),
+        ...pluginSummaryTitleLines,
+      ].join('\n') || quotaEmptyLabel;
     const healthTitle = t(
       item.health.tooltipKey,
       formatQuotaResetTooltipParams(
@@ -9077,6 +9098,7 @@ export function AccountsPage() {
       quotaWindows,
       quotaLifecycleBarOverride,
       mainListWindows,
+      pluginSummaryItems,
       quotaCooldown,
       codexStatus,
       item,
@@ -9699,11 +9721,21 @@ export function AccountsPage() {
                               )
                             )}
                       </div>
-                    ) : (
+                    ) : null}
+                    {ctx.pluginSummaryItems.length > 0 ? (
+                      <div className={styles.accountGridCardPluginQuotaSummary}>
+                        <PluginQuotaSummary
+                          items={ctx.pluginSummaryItems}
+                          variant="compact"
+                          locale={i18n.language}
+                        />
+                      </div>
+                    ) : null}
+                    {ctx.mainListWindows.length === 0 && ctx.pluginSummaryItems.length === 0 ? (
                       <span className={styles.quotaEmptyState} data-account-quota-empty="true">
                         {ctx.quotaEmptyLabel}
                       </span>
-                    )}
+                    ) : null}
                   </div>
 
                   <div
@@ -9930,22 +9962,30 @@ export function AccountsPage() {
                       onOpen: () => void openAccountDetail(row, 'quota'),
                       children: (
                         <span className={styles.quotaWindowGrid} title={ctx.quotaWindowTitle}>
-                        {ctx.mainListWindows.length > 0 ? (
-                          ctx.mainListWindows.map((window, windowIndex) =>
-                            renderSingleQuotaWindowCard(
-                              row,
-                              window,
-                              windowIndex,
-                              ctx.codexResetCreditsCount,
-                              ctx.hasCodexResetCredits,
-                              ctx.quotaLifecycleBarOverride
+                        {ctx.mainListWindows.length > 0
+                          ? ctx.mainListWindows.map((window, windowIndex) =>
+                              renderSingleQuotaWindowCard(
+                                row,
+                                window,
+                                windowIndex,
+                                ctx.codexResetCreditsCount,
+                                ctx.hasCodexResetCredits,
+                                ctx.quotaLifecycleBarOverride
+                              )
                             )
-                          )
-                        ) : (
+                          : null}
+                        {ctx.pluginSummaryItems.length > 0 ? (
+                          <PluginQuotaSummary
+                            items={ctx.pluginSummaryItems}
+                            variant="compact"
+                            locale={i18n.language}
+                          />
+                        ) : null}
+                        {ctx.mainListWindows.length === 0 && ctx.pluginSummaryItems.length === 0 ? (
                           <span className={styles.quotaEmptyState} data-account-quota-empty="true">
                             {ctx.quotaEmptyLabel}
                           </span>
-                        )}
+                        ) : null}
                       </span>
                       ),
                     });
@@ -10049,6 +10089,10 @@ export function AccountsPage() {
       quotaCooldown: selectedQuotaCooldown,
       codexStatus: selectedCodexStatus,
       quotaWindows: selectedQuotaWindows,
+      pluginQuotaSummaryItems: resolveAccountPluginQuotaSummaryItems(
+        selectedRow.raw,
+        baseQuotaStores
+      ),
       windowUsageByKey: matchingAccountWindowUsageByKey,
       actionCandidates: accountActionCandidates,
       matchedActionCandidates: actionCandidatesByRowKey.get(selectedRow.selectionKey) ?? [],

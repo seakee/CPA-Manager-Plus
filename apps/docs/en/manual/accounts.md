@@ -73,6 +73,10 @@ After a successful xAI OAuth quota refresh, CPAMP queries `/user?include=subscri
 
 CPA plugins can declare a `quota_provider` capability. When a credential entry advertises `supports_quota`, Accounts shows the regular quota refresh actions for it. Refreshing resolves the owning plugin from the credential entry (`quota_plugin_id`) or the plugin registry (`quota_provider`), then queries CPA's generic plugin quota endpoint, which asks the plugin for live data. Plugin quota windows follow the same refresh, caching, and evidence rules as built-in providers.
 
+Besides quota windows, a plugin can report label/value quota summary facts (for example an overall usage percentage or an extra balance with an explicit currency). CPAMP shows these facts as declared in the card list, table list, and the quota detail tab: declared units, currencies, and precision caveats are preserved, a reported `0` stays visible, and missing or invalid data stays unknown — it is never converted into a window percentage or turned into an invented total or reset time. A summary-only response is still valid partial evidence; subscription metadata is kept while quota stays unknown; genuinely empty responses remain failures, and a failed refresh retains the previous scoped snapshot.
+
+For known plugin-reported window fractions such as the 5-hour, weekly, and monthly windows, the card and table credential lists themselves render real progress bars in the existing style even when an exact reset timestamp is absent — including a genuine 0% zero-width bar. The plugin's own relative-reset description is preserved and unknown period boundaries are marked as not confirmed; CPAMP does not infer absolute reset times and does not enable interval usage or forecasts that lack their existing evidence.
+
 ## Quota Cooldown And Account Actions
 
 When quota cooldown is enabled and a supported account reaches a strict exhaustion signal, CPAMP can temporarily disable the related credential and restore it after recovery. Auto-restore only affects credentials disabled by that cooldown record; it does not override manual, inspection-owned, or authentication-failure disables.

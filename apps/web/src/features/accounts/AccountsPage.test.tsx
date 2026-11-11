@@ -23,6 +23,7 @@ import type {
   CodexRateLimitResetCredit,
   MetaQuotaData,
   OAuthModelAliasEntry,
+  PluginQuotaState,
 } from '@/types';
 import type {
   AccountActionCandidatesResponse,
@@ -234,6 +235,64 @@ const makeCodexFile = (name: string, authIndex: string, account: string): AuthFi
     priority: 0,
     disabled: false,
   }) as AuthFileItem;
+
+const makePluginFile = (name: string, authIndex: string, account: string): AuthFileItem =>
+  ({
+    name,
+    type: 'commandcode',
+    provider: 'commandcode',
+    authIndex,
+    account,
+    priority: 0,
+    disabled: false,
+    supports_quota: true,
+    quota_provider: 'commandcode',
+  }) as AuthFileItem;
+
+const makePluginQuotaSummaryItems = (): PluginQuotaState['summary'] => [
+  {
+    key: 'usage_percent',
+    label: 'Usage (rounded)',
+    value: 32,
+    unit: '%',
+    format: 'number',
+    currency: null,
+  },
+  {
+    key: 'extra_credits',
+    label: 'Extra balance',
+    value: 12.5,
+    unit: null,
+    format: 'currency',
+    currency: 'USD',
+  },
+];
+
+const makePluginQuotaState = (
+  file: AuthFileItem,
+  overrides: Partial<PluginQuotaState> = {}
+): PluginQuotaState => {
+  const identity = buildQuotaCredentialIdentity(file);
+  const storeKey = getQuotaCredentialStoreKey(file);
+  return {
+    status: 'success',
+    ...identity,
+    authFileKey: storeKey,
+    fetchedAtMs: 1_726_398_000_000,
+    pluginId: 'commandcode',
+    quotaProvider: 'commandcode',
+    subscription: { plan: 'CommandCode Pro', tierName: null, tierId: null },
+    summary: makePluginQuotaSummaryItems(),
+    serverTimeOffsetMs: null,
+    groups: [],
+    ...overrides,
+  };
+};
+
+const seedPluginQuotaState = (file: AuthFileItem, state: PluginQuotaState) => {
+  const storeKey = getQuotaCredentialStoreKey(file);
+  (mocks.quotaState.pluginQuota as Record<string, PluginQuotaState>)[storeKey] = state;
+};
 
 const CODEX_MAIN_MODEL = 'gpt-5.6-sol';
 const CODEX_MAIN_SCOPE = { kind: 'family', key: 'codex_main', complete: true } as const;
@@ -572,6 +631,7 @@ const { mocks } = vi.hoisted(() => {
         devinQuota: {},
         kimiQuota: {},
         metaQuota: {},
+        pluginQuota: {},
         xaiQuota: {},
         setAntigravityQuota: vi.fn(),
         setClaudeQuota: vi.fn(),
@@ -579,6 +639,7 @@ const { mocks } = vi.hoisted(() => {
         setDevinQuota: vi.fn(),
         setKimiQuota: vi.fn(),
         setMetaQuota: vi.fn(),
+        setPluginQuota: vi.fn(),
         setXaiQuota: vi.fn(),
       },
       t: (key: string, options?: Record<string, unknown>) => {
@@ -1452,6 +1513,7 @@ describe('AccountsPage replacement flows', () => {
     mocks.quotaState.devinQuota = {};
     mocks.quotaState.kimiQuota = {};
     mocks.quotaState.metaQuota = {};
+    mocks.quotaState.pluginQuota = {};
     mocks.quotaState.xaiQuota = {};
     mocks.quotaDisplayWindowsOverride = null;
     mocks.quotaState.setAntigravityQuota.mockReset();
@@ -1460,6 +1522,7 @@ describe('AccountsPage replacement flows', () => {
     mocks.quotaState.setDevinQuota.mockReset();
     mocks.quotaState.setKimiQuota.mockReset();
     mocks.quotaState.setMetaQuota.mockReset();
+    mocks.quotaState.setPluginQuota.mockReset();
     mocks.quotaState.setXaiQuota.mockReset();
     mocks.loadFiles.mockReset();
     mocks.loadFiles.mockImplementation(async () => mocks.files);
@@ -1485,6 +1548,336 @@ describe('AccountsPage replacement flows', () => {
     });
     expect(JSON.stringify(renderer.toJSON())).toContain('codex.json');
     expect(findLoadingSpinners(renderer.root)).toHaveLength(0);
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('shows generic plugin summary facts in the card list without a fabricated window', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(pluginFile, makePluginQuotaState(pluginFile));
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    expect(card.findAllByProps({ 'data-plugin-quota-summary': 'true' })).toHaveLength(1);
+    const cardText = readText(card);
+    expect(cardText).toContain('Usage (rounded)');
+    expect(cardText).toContain('32%');
+    expect(cardText).toContain('Extra balance');
+    expect(cardText).toContain('$12.50');
+    // No timed-window presentation may be fabricated from summary facts.
+    expect(
+      card.findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+    ).toHaveLength(0);
+    expect(card.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(0);
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('renders plugin windows and the summary side by side in the table quota cell', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=table' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              {
+                id: '5h',
+                label: '5h',
+                window: '5h',
+                remainingFraction: 0.4,
+                resetTime: '2026-11-09T06:36:53Z',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowCards = card.findAll(
+      (node) => typeof node.props['data-account-quota-window'] === 'string'
+    );
+    expect(windowCards.length).toBeGreaterThan(0);
+    expect(card.findAllByProps({ 'data-plugin-quota-summary': 'true' })).toHaveLength(1);
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('carries the scoped plugin summary into the detail quota tab', async () => {
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(pluginFile, makePluginQuotaState(pluginFile));
+
+    const renderer = await renderAccountsPage();
+    await act(async () => {
+      findDetailButtonByName(renderer, pluginFile.name).props.onClick();
+    });
+    await flushPromises();
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.detail_tab_quota').props.onClick();
+    });
+    await flushPromises();
+
+    const section = renderer.root.findAllByProps({ 'data-account-plugin-quota-summary': 'true' });
+    expect(section).toHaveLength(1);
+    const output = JSON.stringify(renderer.toJSON());
+    expect(output).toContain('Usage (rounded)');
+    expect(output).toContain('32%');
+    expect(output).toContain('$12.50');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('does not leak another credential plugin summary into a sibling card', async () => {
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    const otherFile = makePluginFile('cc-auth.json', 'cc-2', 'other@example.com');
+    mocks.files = [pluginFile, otherFile];
+    seedPluginQuotaState(pluginFile, makePluginQuotaState(pluginFile));
+
+    const renderer = await renderAccountsPage();
+    const otherCard = findAccountCardByKey(renderer, `${otherFile.name}\u0000cc-2`);
+    expect(otherCard.findAllByProps({ 'data-plugin-quota-summary': 'true' })).toHaveLength(0);
+    expect(otherCard.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(1);
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('renders plugin 5h/weekly fractions as real bars in the grid without an absolute reset', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              { id: '5h', label: '5h', window: '5h', remainingFraction: 0.68, description: 'resets in 2h' },
+              { id: 'weekly', label: 'weekly', window: 'weekly', remainingFraction: 0.59 },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowKeys = card
+      .findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+      .map((node) => node.props['data-account-quota-window'] as string);
+    expect(windowKeys).toEqual(['windows:5h', 'windows:weekly']);
+    expect(findQuotaBarByWindow(card, 'windows:5h').props.style.width).toBe('68%');
+    expect(findQuotaBarByWindow(card, 'windows:weekly').props.style.width).toBe('59%');
+    expect(readText(card)).toContain('68%');
+    expect(readText(card)).toContain('59%');
+    const fiveHourCard = card.findByProps({ 'data-account-quota-window': 'windows:5h' });
+    expect(fiveHourCard.props.title).toContain('resets in 2h');
+    // Unknown boundary stays honest: no fabricated reset clock in the tooltip.
+    expect(fiveHourCard.props.title).toContain('accounts.detail_current_window_boundary_unconfirmed');
+    expect(fiveHourCard.props.title).not.toContain('accounts.col_reset');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('renders a true-zero plugin fraction as a genuine zero-width bar in the grid', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [{ id: '5h', label: '5h', window: '5h', remainingFraction: 0 }],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    expect(findQuotaBarByWindow(card, 'windows:5h').props.style.width).toBe('0%');
+    expect(readText(card)).toContain('0%');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('renders plugin 5h/weekly fraction bars in the table quota cell', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=table' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              { id: '5h', label: '5h', window: '5h', remainingFraction: 0.68 },
+              { id: 'weekly', label: 'weekly', window: 'weekly', remainingFraction: 0.59 },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowKeys = card
+      .findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+      .map((node) => node.props['data-account-quota-window'] as string);
+    expect(windowKeys).toEqual(['windows:5h', 'windows:weekly']);
+    expect(findQuotaBarByWindow(card, 'windows:5h').props.style.width).toBe('68%');
+    expect(findQuotaBarByWindow(card, 'windows:weekly').props.style.width).toBe('59%');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('shows all three approved plugin windows in the outer grid alongside summary facts', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        summary: [
+          {
+            key: 'usage_percent',
+            label: 'Usage (rounded)',
+            value: 32,
+            unit: '%',
+            format: 'number',
+            currency: null,
+          },
+        ],
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              { id: '5h', label: '5h', window: '5h', remainingFraction: 0.68 },
+              { id: 'weekly', label: 'weekly', window: 'weekly', remainingFraction: 0.59 },
+              { id: 'monthly', label: 'monthly', window: 'monthly', remainingFraction: 0.52 },
+              { id: 'milestone', label: 'milestone', window: 'milestone', remainingFraction: 0.5 },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowKeys = card
+      .findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+      .map((node) => node.props['data-account-quota-window'] as string);
+    // All three approved unknown-boundary windows are visible; unknown kinds stay excluded.
+    expect(windowKeys).toEqual(['windows:5h', 'windows:weekly', 'windows:monthly']);
+    expect(findQuotaBarByWindow(card, 'windows:5h').props.style.width).toBe('68%');
+    expect(findQuotaBarByWindow(card, 'windows:weekly').props.style.width).toBe('59%');
+    expect(findQuotaBarByWindow(card, 'windows:monthly').props.style.width).toBe('52%');
+    // Summary facts remain visible text alongside the bars.
+    expect(card.findAllByProps({ 'data-plugin-quota-summary': 'true' })).toHaveLength(1);
+    expect(readText(card)).toContain('32%');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('excludes unknown-boundary daily from the outer grid without displacing approved windows', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              { id: '5h', label: '5h', window: '5h', remainingFraction: 0.68 },
+              { id: 'daily', label: 'daily', window: 'daily', remainingFraction: 0.8 },
+              { id: 'weekly', label: 'weekly', window: 'weekly', remainingFraction: 0.59 },
+              { id: 'monthly', label: 'monthly', window: 'monthly', remainingFraction: 0.52 },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowKeys = card
+      .findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+      .map((node) => node.props['data-account-quota-window'] as string);
+    expect(windowKeys).toEqual(['windows:5h', 'windows:weekly', 'windows:monthly']);
+    expect(readText(card)).not.toContain('80%');
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it('renders all three approved plugin windows in the outer table quota cell', async () => {
+    mocks.location = { pathname: '/accounts', search: '?layout=table' };
+    const pluginFile = makePluginFile('cc-auth.json', 'cc-1', 'cc@example.com');
+    mocks.files = [pluginFile];
+    seedPluginQuotaState(
+      pluginFile,
+      makePluginQuotaState(pluginFile, {
+        groups: [
+          {
+            id: 'windows',
+            label: 'Windows',
+            buckets: [
+              { id: '5h', label: '5h', window: '5h', remainingFraction: 0.68 },
+              { id: 'weekly', label: 'weekly', window: 'weekly', remainingFraction: 0.59 },
+              { id: 'monthly', label: 'monthly', window: 'monthly', remainingFraction: 0.52 },
+            ],
+          },
+        ],
+      })
+    );
+
+    const renderer = await renderAccountsPage();
+    const card = findAccountCardByKey(renderer, `${pluginFile.name}\u0000cc-1`);
+    const windowKeys = card
+      .findAll((node) => typeof node.props['data-account-quota-window'] === 'string')
+      .map((node) => node.props['data-account-quota-window'] as string);
+    expect(windowKeys).toEqual(['windows:5h', 'windows:weekly', 'windows:monthly']);
+    expect(findQuotaBarByWindow(card, 'windows:5h').props.style.width).toBe('68%');
+    expect(findQuotaBarByWindow(card, 'windows:weekly').props.style.width).toBe('59%');
+    expect(findQuotaBarByWindow(card, 'windows:monthly').props.style.width).toBe('52%');
+
     await act(async () => {
       renderer.unmount();
     });

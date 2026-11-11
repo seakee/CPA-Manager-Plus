@@ -300,19 +300,43 @@ export interface PluginStoreInstallOptions {
 const readFiniteNumber = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
 
+// Subscription fields follow the established string contract. Objects,
+// booleans, arrays, and nonfinite numbers must not be stringified into a
+// believable plan/tier label.
+const normalizeQuotaSubscriptionField = (value: unknown): string | null => {
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
+  return null;
+};
+
 const normalizeQuotaSubscription = (
   value: unknown
 ): PluginQuotaResponse['subscription'] => {
   if (!isRecord(value)) return null;
-  const plan = asString(value.plan).trim();
-  const tierName = asString(value.tierName ?? value.tier_name).trim();
-  const tierId = asString(value.tierId ?? value.tier_id).trim();
+  const plan = normalizeQuotaSubscriptionField(value.plan);
+  const tierName = normalizeQuotaSubscriptionField(value.tierName ?? value.tier_name);
+  const tierId = normalizeQuotaSubscriptionField(value.tierId ?? value.tier_id);
   if (!plan && !tierName && !tierId) return null;
   return {
     plan: plan || null,
     tierName: tierName || null,
     tierId: tierId || null,
   };
+};
+
+// Only established primitive quota values are meaningful: finite numbers and
+// non-empty text. Booleans, objects, and arrays must not be stringified into
+// believable quota values, and missing data must stay null (never zero).
+const normalizeQuotaSummaryValue = (value: unknown): string | number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') return value.trim() || null;
+  return null;
+};
+
+const normalizeQuotaSummaryMeta = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
 };
 
 const normalizeQuotaSummaryItems = (value: unknown): PluginQuotaSummaryItem[] =>
@@ -322,14 +346,13 @@ const normalizeQuotaSummaryItems = (value: unknown): PluginQuotaSummaryItem[] =>
           if (!isRecord(item)) return null;
           const label = asString(item.label).trim();
           if (!label) return null;
-          const numericValue = readFiniteNumber(item.value);
           return {
             key: asString(item.key).trim() || `summary-${index}`,
             label,
-            value: numericValue ?? (asString(item.value).trim() || null),
-            unit: asString(item.unit).trim() || null,
-            format: asString(item.format).trim() || null,
-            currency: asString(item.currency).trim() || null,
+            value: normalizeQuotaSummaryValue(item.value),
+            unit: normalizeQuotaSummaryMeta(item.unit),
+            format: normalizeQuotaSummaryMeta(item.format),
+            currency: normalizeQuotaSummaryMeta(item.currency),
           };
         })
         .filter((item): item is PluginQuotaSummaryItem => Boolean(item))

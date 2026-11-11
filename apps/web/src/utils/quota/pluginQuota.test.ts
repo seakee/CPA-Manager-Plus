@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { AuthFileItem, PluginListEntry } from '@/types';
+import type { AuthFileItem, PluginListEntry, PluginQuotaSummaryItem } from '@/types';
 import {
+  formatPluginQuotaSummaryValue,
   getPluginQuotaWindowLabelKey,
+  hasMeaningfulPluginQuotaSummaryValue,
   isPluginQuotaCandidateFile,
   parsePluginQuotaWindowSeconds,
   readAuthFileQuotaAuthIndex,
@@ -119,5 +121,161 @@ describe('parsePluginQuotaWindowSeconds', () => {
   it('returns null for unknown windows', () => {
     expect(parsePluginQuotaWindowSeconds('milestone')).toBeNull();
     expect(parsePluginQuotaWindowSeconds(undefined)).toBeNull();
+  });
+});
+
+describe('formatPluginQuotaSummaryValue', () => {
+  const makeItem = (
+    overrides: Partial<PluginQuotaSummaryItem>
+  ): Pick<PluginQuotaSummaryItem, 'value' | 'unit' | 'format' | 'currency'> => ({
+    value: null,
+    unit: null,
+    format: null,
+    currency: null,
+    ...overrides,
+  });
+
+  it('renders a declared percent value as-is without rescaling', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 32, format: 'number', unit: '%' }))).toBe(
+      '32%'
+    );
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 32, format: 'percent' }))).toBe('32%');
+    // 32% must never become 3,200%.
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 32, format: 'number', unit: '%' }))).not.
+      toBe('3,200%');
+  });
+
+  it('keeps a valid zero visible instead of hiding it', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 0, format: 'number', unit: '%' }))).toBe(
+      '0%'
+    );
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: 0, format: 'currency', currency: 'USD' }), 'en')
+    ).toBe('$0.00');
+  });
+
+  it('formats declared currency values with the declared currency code', () => {
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: 12.5, format: 'currency', currency: 'USD' }), 'en')
+    ).toBe('$12.50');
+  });
+
+  it('falls back to plain text for an unsupported currency code', () => {
+    const formatted = formatPluginQuotaSummaryValue(
+      makeItem({ value: 12.5, format: 'currency', currency: 'NOPE' }),
+      'en'
+    );
+    expect(formatted).toContain('12.5');
+    expect(formatted).toContain('NOPE');
+  });
+
+  it('keeps plain credit counts in their declared unit', () => {
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: 1234, format: 'number', unit: 'credits' }), 'en')
+    ).toBe('1,234 credits');
+  });
+
+  it('keeps textual values as plain text without inventing units', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 'unlimited', unit: '%' }))).toBe(
+      'unlimited'
+    );
+  });
+
+  it('returns null for missing or invalid values instead of a fabricated zero', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: null }))).toBeNull();
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: Number.NaN, format: 'number' }))).toBeNull();
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: Number.POSITIVE_INFINITY, format: 'number' }))
+    ).toBeNull();
+  });
+
+  it('falls back to a plain decimal for unknown formats with numeric values', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 42, format: 'tiles' }), 'en')).toBe('42');
+  });
+
+  it('keeps the declared unit when a currency value has no currency code', () => {
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: 12.5, format: 'currency', unit: 'USD' }), 'en')
+    ).toBe('12.5 USD');
+  });
+
+  it('falls back to plain decimals when the locale itself is unsupported', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 1234.5, format: 'number' }), 'x-invalid')).toBe(
+      '1234.5'
+    );
+  });
+
+  it('preserves meaningful nonzero credit precision instead of rounding to zero', () => {
+    const small = formatPluginQuotaSummaryValue(
+      makeItem({ value: 0.0004, format: 'number', unit: 'credits' }),
+      'en'
+    );
+    expect(small).toBe('0.0004 credits');
+    const negativeSmall = formatPluginQuotaSummaryValue(
+      makeItem({ value: -0.0004, format: 'number', unit: 'credits' }),
+      'en'
+    );
+    expect(negativeSmall).toBe('-0.0004 credits');
+  });
+
+  it('renders an extremely small finite value faithfully instead of as zero', () => {
+    const tiny = formatPluginQuotaSummaryValue(
+      makeItem({ value: 1e-25, format: 'number', unit: 'credits' }),
+      'en'
+    );
+    // Numeric meaning: not an exact-zero display, and the value stays readable.
+    expect(tiny).not.toBe('0 credits');
+    expect(tiny).toContain('1e-25');
+  });
+
+  it('keeps small declared-currency values distinct from a zero balance', () => {
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: 0.004, format: 'currency', currency: 'USD' }), 'en')
+    ).toBe('$0.004');
+    expect(
+      formatPluginQuotaSummaryValue(makeItem({ value: -0.004, format: 'currency', currency: 'USD' }), 'en')
+    ).toBe('-$0.004');
+  });
+
+  it('keeps genuine zero and ordinary currency displays unchanged', () => {
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 0, format: 'number', unit: 'credits' }), 'en')).toBe(
+      '0 credits'
+    );
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 0, format: 'currency', currency: 'USD' }), 'en')).toBe(
+      '$0.00'
+    );
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 12.5, format: 'currency', currency: 'USD' }), 'en')).toBe(
+      '$12.50'
+    );
+    expect(formatPluginQuotaSummaryValue(makeItem({ value: 32, format: 'number', unit: '%' }), 'en')).toBe('32%');
+  });
+});
+
+describe('hasMeaningfulPluginQuotaSummaryValue', () => {
+  const makeItem = (
+    value: PluginQuotaSummaryItem['value']
+  ): PluginQuotaSummaryItem => ({
+    key: 'item',
+    label: 'Item',
+    value,
+    unit: null,
+    format: null,
+    currency: null,
+  });
+
+  it('treats zero, text, and numbers as meaningful evidence', () => {
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(0)])).toBe(true);
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(' limited ')])).toBe(true);
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(32)])).toBe(true);
+  });
+
+  it('treats all-null and missing summaries as not meaningful', () => {
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(null)])).toBe(false);
+    expect(hasMeaningfulPluginQuotaSummaryValue([])).toBe(false);
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(null), makeItem(null)])).toBe(false);
+  });
+
+  it('accepts a single meaningful item among unknown ones', () => {
+    expect(hasMeaningfulPluginQuotaSummaryValue([makeItem(null), makeItem(32)])).toBe(true);
   });
 });

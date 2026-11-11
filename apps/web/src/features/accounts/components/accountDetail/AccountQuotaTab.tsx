@@ -21,6 +21,7 @@ import {
 import { useInterval } from '@/hooks/useInterval';
 import { formatCompactNumber, formatUsd } from '@/utils/usage';
 import { QuotaWindowCard } from '../QuotaWindowCard';
+import { PluginQuotaSummary } from '../PluginQuotaSummary';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
 type MetricTone = 'blue' | 'green' | 'teal' | 'amber';
@@ -144,6 +145,7 @@ export function AccountQuotaTab({
   const { t, i18n } = useTranslation();
   const history = detailView.history;
   const allWindows = detailView.quota.windows;
+  const pluginSummaryItems = detailView.quota.pluginSummaryItems ?? [];
   const standardWindows = allWindows.filter(
     (window) => getAccountQuotaSemanticGroup(window) === 'standard'
   );
@@ -244,7 +246,7 @@ export function AccountQuotaTab({
 
 
 
-      {standardWindows.length > 0 || allWindows.length === 0 ? (
+      {standardWindows.length > 0 || (allWindows.length === 0 && pluginSummaryItems.length === 0) ? (
         <section className={styles.quotaSection} data-quota-window-group="standard">
           <div className={styles.quotaSectionHeading}>
             <h3>{t('accounts.detail_quota_standard_title', { defaultValue: '标准额度' })}</h3>
@@ -314,6 +316,20 @@ export function AccountQuotaTab({
               />
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {pluginSummaryItems.length > 0 ? (
+        <section
+          className={styles.quotaSection}
+          data-quota-window-group="plugin-summary"
+          data-account-plugin-quota-summary="true"
+        >
+          <div className={styles.quotaSectionHeading}>
+            <h3>{t('accounts.detail_plugin_quota_summary')}</h3>
+            <span>{t('accounts.detail_plugin_quota_summary_desc')}</span>
+          </div>
+          <PluginQuotaSummary items={pluginSummaryItems} variant="detail" locale={i18n.language} />
         </section>
       ) : null}
 

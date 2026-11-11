@@ -1985,6 +1985,8 @@
     "detail_quota_other_items": "其他額度項目",
     "detail_quota_other_items_desc": "金額、產品及其他不屬於已識別標準或模型視窗的額度。",
     "detail_quota_reset_records": "重置記錄",
+    "detail_plugin_quota_summary": "外掛額度摘要",
+    "detail_plugin_quota_summary_desc": "所屬外掛回報的標籤/數值事實（總體用量、額外餘額等）。按宣告原樣顯示；缺失資料保持未知，不會變成視窗百分比。",
     "detail_no_quota_windows": "該帳號暫未解析出額度視窗。",
     "detail_window_requests": "視窗請求",
     "detail_window_tokens": "視窗 Token",

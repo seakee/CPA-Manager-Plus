@@ -1987,6 +1987,8 @@
     "detail_quota_other_items": "Other quota items",
     "detail_quota_other_items_desc": "Amount, product, and other quota items not classified as standard or model windows.",
     "detail_quota_reset_records": "Reset records",
+    "detail_plugin_quota_summary": "Plugin quota summary",
+    "detail_plugin_quota_summary_desc": "Label/value facts reported by the owning plugin (overall usage, extra balance). Shown as declared; missing data stays unknown and is not a window percentage.",
     "detail_no_quota_windows": "No quota window was resolved for this account.",
     "detail_window_requests": "Window requests",
     "detail_window_tokens": "Window tokens",
