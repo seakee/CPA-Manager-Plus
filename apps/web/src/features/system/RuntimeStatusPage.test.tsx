@@ -215,16 +215,55 @@ describe('RuntimeStatusPage state wording', () => {
     return renderer!.root.findByProps({ 'data-testid': testID }).props.children as string;
   }
 
-  function statusClient(status: unknown): PublicApiClient {
+  function statusClient(status: unknown, operationState = 'running'): PublicApiClient {
     return {
       get: vi.fn(async (resource: string) => {
         if (resource === 'runtime/status') return status;
         if (resource === 'runtime/artifact') throw new PublicApiError('network');
         throw new Error(`unexpected resource ${resource}`);
       }) as PublicApiClient['get'],
-      post: vi.fn(async () => ({ action: 'start', state: 'running' })),
+      post: vi.fn(async () => ({ action: 'start', state: operationState })),
       put: vi.fn(),
     } as unknown as PublicApiClient;
+  }
+
+  // The text of an operation line, which is a sentence plus an optional trailing
+  // note, so the strings it renders are read out of the node.
+  function operationText() {
+    const children = renderer!.root.findByProps({
+      'data-testid': 'runtime-status-operation',
+    }).props.children as unknown;
+    return (Array.isArray(children) ? children : [children])
+      .filter((child): child is string => typeof child === 'string')
+      .join('');
+  }
+
+  // This language's own entry, without the zh-CN fallback: a missing key comes
+  // back as the key itself, so a state that only appears translated because the
+  // default language filled the gap cannot pass.
+  function ownText(language: string, key: string, vars?: Record<string, string>) {
+    return i18n.t(key, { lng: language, fallbackLng: false, ...vars });
+  }
+
+  // One observation per state, mounted fresh so each one is rendered by the page
+  // exactly as it renders a real response.
+  async function renderObservation(
+    status: string,
+    gateway: Record<string, unknown> = { state: status, ready: status === 'ready' }
+  ) {
+    if (renderer) {
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+    }
+    await mount(
+      statusClient({
+        mode: 'embedded',
+        status,
+        observedAt: '2026-11-09T00:00:00Z',
+        manager: { state: status },
+        gateway,
+      })
+    );
   }
 
   it('names the Manager and gateway states in the console language, never the wire value', async () => {
@@ -283,16 +322,10 @@ describe('RuntimeStatusPage state wording', () => {
         .props.onClick();
     });
 
-    const text = () => {
-      const children = renderer!.root.findByProps({
-        'data-testid': 'runtime-status-operation',
-      }).props.children as unknown;
-      return (Array.isArray(children) ? children : [children])
-        .filter((child): child is string => typeof child === 'string')
-        .join('');
-    };
-    expect(text()).toContain(i18n.t('runtime_status.operation_running', { lng: 'zh-CN' }));
-    expect(text()).not.toContain('running');
+    expect(operationText()).toContain(
+      i18n.t('runtime_status.operation_running', { lng: 'zh-CN' })
+    );
+    expect(operationText()).not.toMatch(/\brunning\b/);
   });
 
   it('serves the demo fixture instead of the unavailable observation on the demo site', async () => {
@@ -318,21 +351,69 @@ describe('RuntimeStatusPage state wording', () => {
   });
 
   it.each(['zh-CN', 'zh-TW', 'en', 'ru'])(
-    'names every Manager, gateway and operation state in %s',
+    'renders every Manager, gateway and operation state in %s',
     async (language) => {
-      // A missing entry would print the wire value in that language, so the
-      // catalog itself is asserted for the states the Manager actually reports.
-      for (const state of ['ready', 'offline', 'starting', 'unknown']) {
+      await act(async () => {
+        await i18n.changeLanguage(language);
+      });
+
+      // The Manager's closed state set, rendered one observation at a time. The
+      // expected sentence is looked up in this language without the zh-CN
+      // fallback, so an entry this language does not carry renders as the key
+      // instead of the default language's sentence and fails here.
+      for (const state of ['ready', 'offline', 'starting', 'unknown'] as const) {
+        await renderObservation(state);
         const key = `runtime_status.state_${state}`;
-        expect(i18n.exists(key, { lng: language }), key).toBe(true);
+        const expected = ownText(language, key);
+        expect(expected, key).not.toBe(key);
+        for (const testID of [
+          'runtime-status-state',
+          'runtime-status-manager-state',
+          'runtime-status-gateway-state',
+        ]) {
+          expect(stateNode(testID), `${testID}/${language}`).toBe(expected);
+          // The wire word is never what the page shows an operator.
+          expect(stateNode(testID), `${testID}/${language}`).not.toBe(state);
+        }
       }
-      for (const state of ['accepted', 'running', 'succeeded', 'failed']) {
+
+      // The operation states a Start leaves on screen, driven through the same
+      // button an operator presses rather than through the label helper.
+      for (const state of ['accepted', 'running', 'succeeded', 'failed'] as const) {
+        if (renderer) {
+          await act(async () => renderer!.unmount());
+          renderer = undefined;
+        }
+        await mount(
+          statusClient(
+            {
+              mode: 'embedded',
+              status: 'ready',
+              observedAt: '2026-11-09T00:00:00Z',
+              manager: { state: 'ready' },
+              gateway: { state: 'offline', ready: false, capabilities: ['start', 'stop'] },
+            },
+            state
+          )
+        );
+        await act(async () => {
+          await renderer!.root
+            .findByProps({ 'data-testid': 'runtime-status-start' })
+            .props.onClick();
+        });
+
         const key = `runtime_status.operation_${state}`;
-        expect(i18n.exists(key, { lng: language }), key).toBe(true);
-        // The named state is a sentence in that language, never the wire word.
-        expect(i18n.t(key, { lng: language }), key).not.toBe(state);
+        const expectedState = ownText(language, key);
+        expect(expectedState, key).not.toBe(key);
+        expect(expectedState, key).not.toBe(state);
+        const expected = ownText(language, 'runtime_status.operation_status', {
+          action: ownText(language, 'runtime_status.start'),
+          state: expectedState,
+        });
+        // The line is this language's sentence, not a key left unresolved.
+        expect(expected, key).not.toContain('runtime_status.');
+        expect(operationText(), `${key}/${language}`).toBe(expected);
       }
-      expect(i18n.t('runtime_status.operation_unknown', { lng: language })).not.toBe('unknown');
     }
   );
 });

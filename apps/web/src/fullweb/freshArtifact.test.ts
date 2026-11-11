@@ -330,21 +330,3 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
   });
 });
 
-it('tailors the network remedy to the source that actually failed', () => {
-  for (const language of ['en', 'zh-CN', 'zh-TW', 'ru']) {
-    const generic = mapArtifactErrorCode('download_failed', '8.0.55', language);
-    const github = mapArtifactErrorCode('download_failed', '8.0.55', language, 'github');
-    const cdn = mapArtifactErrorCode('download_failed', '8.0.55', language, 'cdn');
-    // The official release and an unrecorded source keep the remedy that retries
-    // the download; a failed CDN prefix names a different one, because "retry the
-    // download" would send the operator back to the prefix that just failed.
-    expect(github.remedy, language).toBe(generic.remedy);
-    expect(cdn.remedy, language).not.toBe(generic.remedy);
-    // The failure stays the same failure: only the recovery changes with source.
-    expect(cdn.message, language).toBe(generic.message);
-    // A broken archive is its own failure regardless of where it arrived from.
-    expect(mapArtifactErrorCode('archive_invalid', '8.0.55', language, 'cdn').remedy).toBe(
-      mapArtifactErrorCode('archive_invalid', '8.0.55', language).remedy
-    );
-  }
-});

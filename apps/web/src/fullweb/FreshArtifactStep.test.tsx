@@ -433,6 +433,57 @@ describe('FreshArtifactStep', () => {
     );
   });
 
+  it('keeps the retry remedy when the official GitHub download fails', async () => {
+    // The official release fails as a download, so the remedy an operator reads
+    // is the retry one; the CDN remedy would send them to a prefix that never
+    // failed. Asserted through the alert, in every display language, against the
+    // catalogs rather than a copied sentence.
+    const statuses: ArtifactStatus[] = [
+      makeStatus(),
+      makeStatus({
+        operation: {
+          id: 'op-gh',
+          source: 'github',
+          phase: 'failed',
+          receivedBytes: 0,
+          totalBytes: 0,
+          code: 'download_failed',
+        },
+      }),
+    ];
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(
+        async () => statuses.shift() ?? statuses[statuses.length - 1] ?? makeStatus()
+      ),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<ArtifactTransport['acquire']>(async () => ({
+        id: 'op-gh',
+        source: 'github',
+        phase: 'downloading',
+        receivedBytes: 0,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={vi.fn()} />);
+    });
+    await click('artifact-acquire-btn');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(byID('artifact-error').props['data-error-code']).toBe('download_failed');
+    for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
+      await switchLanguage(language);
+      const remedy = byID('artifact-error-remedy').props.children as string;
+      expect(remedy, language).toBe(artifactText('remedy_network', undefined, language));
+      expect(remedy, language).not.toBe(artifactText('remedy_cdn', undefined, language));
+    }
+    await switchLanguage('zh-CN');
+  });
+
   it('renders unreadable status as unavailable and never calls onReady', async () => {
     const transport: ArtifactTransport = {
       readStatus: vi.fn(async () => {

@@ -406,6 +406,14 @@ it('does not commit the route or finish while managed CPA is not ready', async (
     )
   ).toBe(false);
   expect(JSON.stringify(renderer.toJSON())).toContain(j('waitingRuntime'));
+  // The waiting note is on screen and renders from the journey catalog, so the
+  // switch alone repaints it in each language instead of keeping the first one.
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(JSON.stringify(renderer.toJSON()), language).toContain(
+      j('waitingRuntime', language)
+    );
+  }
 });
 
 it('keeps an unverified CPA readiness refusal resumable instead of freezing the installation', async () => {
@@ -900,17 +908,47 @@ it('retranslates a message that is already on screen when the language changes',
   expect(previous).not.toBe(englishText);
 });
 
-it('names the journey setup, waiting and copy messages in all four languages', () => {
-  // The five messages the wizard renders from the journey dictionary. A missing
-  // translation would show English to an operator who selected another language,
-  // so each one is asserted against the English entry rather than a sentence.
-  const keys = ['setupError', 'invalidSetup', 'waitingRuntime', 'copied', 'copyFailed'] as const;
-  for (const key of keys) {
-    const english = j(key, 'en');
-    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
-      expect(j(key, language), `${key}/${language}`).not.toBe(english);
-      expect(j(key, language), `${key}/${language}`).not.toBe('');
-    }
+it('renders the copy feedback in the operator language, including the failure', async () => {
+  // The journey keeps the key in state, so the sentence on screen follows the
+  // switch. Driven through the Copy button an operator presses and compared
+  // with the catalog per language; a language that has no sentence leaves the
+  // node empty instead of showing the English one.
+  await setup();
+  await input('admin-key-input', admin);
+  const writeText = vi.fn(async () => {});
+  vi.stubGlobal('navigator', { clipboard: { writeText } });
+
+  await act(async () => {
+    await renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(j('copy')))!
+      .props.onClick();
+  });
+  expect(writeText).toHaveBeenCalledWith(admin);
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(String(renderer.root.findAllByProps({ role: 'status' })[0].props.children)).toBe(
+      j('copied', language)
+    );
+  }
+
+  // A denied clipboard is the failure path: the next attempt clears the success
+  // note, and the failure sentence is what stays on screen.
+  writeText.mockImplementation(async () => {
+    throw new Error('clipboard denied');
+  });
+  await act(async () => {
+    await renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(j('copy')))!
+      .props.onClick();
+  });
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(renderer.root.findAllByProps({ role: 'status' }), language).toHaveLength(0);
+    expect(String(renderer.root.findAllByProps({ role: 'alert' })[0].props.children)).toBe(
+      j('copyFailed', language)
+    );
   }
 });
 
