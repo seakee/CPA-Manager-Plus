@@ -533,13 +533,17 @@ input {
   transition: border-color 0.15s ease;
 }
 
-/* The wrapper is the only focus carrier: one 2px outline, neutral border, no inset ring. */
+/* The wrapper is the only focus carrier: a neutral border and the focus fill for any
+   focus, plus one 2px ring for keyboard focus. */
 .input-wrap:focus-within {
   border-color: var(--app-input-border);
   background: var(--app-input-bg-focus);
+  box-shadow: none;
+}
+
+.input-wrap:has(> .form-input:focus-visible) {
   outline: 2px solid var(--app-input-border-focus);
   outline-offset: 1px;
-  box-shadow: none;
 }
 
 .form-input {

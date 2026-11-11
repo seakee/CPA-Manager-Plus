@@ -165,10 +165,27 @@ $toolbar-control-height: var(--control-height-sm);
     background-color $transition-fast,
     border-color $transition-fast;
 
-  &:hover,
-  &:focus-within {
+  &:hover {
     border-color: var(--primary-color);
     background: var(--surface-subtle-hover);
+  }
+
+  &:focus-within {
+    background: var(--surface-subtle-hover);
+  }
+
+  /* The box is the only keyboard ring carrier for the field and its clear button; an
+     accent border underneath the ring would read as a second frame. */
+  &:has(> :focus-visible) {
+    border-color: var(--border-subtle);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+
+  .searchClear:focus-visible {
+    background: transparent;
+    color: var(--text-primary);
+    outline: none;
   }
 }
 
@@ -260,6 +277,15 @@ $toolbar-control-height: var(--control-height-sm);
   }
 }
 
+/* The group clips its children, so the keyboard ring is drawn inside and the trigger
+   and clear buttons must not add a ring of their own. Declared after the state rules so
+   an applied filter does not keep an accent border underneath the ring. */
+.modelFilterControl:has(> :focus-visible) {
+  border-color: var(--border-subtle);
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: -2px;
+}
+
 .modelFilterTrigger {
   display: flex;
   align-items: center;
@@ -273,6 +299,8 @@ $toolbar-control-height: var(--control-height-sm);
   color: var(--text-primary);
   cursor: pointer;
   text-align: left;
+  /* The wrapping group paints the keyboard ring; this button must not add a second one. */
+  outline: none;
 
   &:disabled {
     cursor: not-allowed;
@@ -326,6 +354,8 @@ $toolbar-control-height: var(--control-height-sm);
   color: var(--text-secondary);
   cursor: pointer;
   flex-shrink: 0;
+  /* The wrapping group paints the keyboard ring; this button must not add a second one. */
+  outline: none;
 
   &:hover {
     background: var(--surface-subtle-hover);
@@ -420,10 +450,19 @@ $toolbar-control-height: var(--control-height-sm);
     border-color $transition-fast,
     background-color $transition-fast;
 
-  &:hover,
-  &:focus-within {
+  &:hover {
     border-color: var(--primary-color);
     background: var(--surface-subtle-hover);
+  }
+
+  &:focus-within {
+    background: var(--surface-subtle-hover);
+  }
+
+  /* The focused button draws the 2px ring; an accent border on the group would be a
+     second focus line right next to it. */
+  &:has(:focus-visible) {
+    border-color: var(--border-subtle);
   }
 }
 
