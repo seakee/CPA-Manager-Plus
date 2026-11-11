@@ -1497,6 +1497,9 @@ input {
   font-size: 14px;
 }
 
+/* Shared keyboard-focus fallback for controls without their own ring. The two
+   wrappers below paint the ring for a whole group, so their children must not add
+   a second line inside (or right next to) it. */
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
@@ -1504,6 +1507,11 @@ summary:focus-visible,
 select:focus-visible {
   outline: 2px solid var(--primary-color);
   outline-offset: 3px;
+}
+
+.searchBox > :focus-visible,
+.input-wrap > .form-input:focus-visible {
+  outline: none;
 }
 
 @media (min-width: 1600px) {

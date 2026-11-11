@@ -174,12 +174,16 @@ $toolbar-control-height: var(--control-height-sm);
     background: var(--surface-subtle-hover);
   }
 
-  /* The box is the only keyboard ring carrier for the field and its clear button; an
-     accent border underneath the ring would read as a second frame. */
+  /* The box is the only keyboard ring carrier for the field and its clear button — an
+     accent border or a child outline underneath the ring would read as a second frame. */
   &:has(> :focus-visible) {
     border-color: var(--border-subtle);
     outline: 2px solid var(--app-input-border-focus);
     outline-offset: 1px;
+  }
+
+  > :focus-visible {
+    outline: none;
   }
 
   .searchClear:focus-visible {
@@ -300,7 +304,9 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   text-align: left;
   /* The wrapping group paints the keyboard ring; this button must not add a second one. */
-  outline: none;
+  &:focus-visible {
+    outline: none;
+  }
 
   &:disabled {
     cursor: not-allowed;
@@ -355,7 +361,9 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   flex-shrink: 0;
   /* The wrapping group paints the keyboard ring; this button must not add a second one. */
-  outline: none;
+  &:focus-visible {
+    outline: none;
+  }
 
   &:hover {
     background: var(--surface-subtle-hover);
