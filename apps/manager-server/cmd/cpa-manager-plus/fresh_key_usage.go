@@ -12,6 +12,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
@@ -76,12 +77,26 @@ func (a *freshApplication) usageMonitoringEnabled(ctx context.Context) (bool, er
 	return *cfg.Collector.Enabled, nil
 }
 
-// applyUsageMonitoringSwitch reconciles this process with the switch the
+// applyUsageMonitoringSwitch reconciles this process with the narrow switch the
 // administrator just wrote. Off stops the Collector and drops the latched start,
 // so the workspace stops claiming a stream the switch forbids; On re-arms
-// through the one startup entry point, which records the collection window only
-// after it proved the authority.
+// through the one startup entry point without restarting an already-running
+// Collector.
 func (a *freshApplication) applyUsageMonitoringSwitch(ctx context.Context, op bootstrap.FreshOperation) {
+	a.reconcileUsageMonitoring(ctx, op, false)
+}
+
+// applyUsageManagerConfig reconciles the host-bound Collector after a
+// whole-document Manager Config PUT. Unlike the narrow switch PATCH, a full PUT
+// may change queue, poll interval, batch size, TLS or CPA credentials while
+// leaving collector.enabled true; the Collector restarts on a.runCtx only when
+// its effective configuration or authority changed, and stops if the updated
+// configuration no longer proves an authority.
+func (a *freshApplication) applyUsageManagerConfig(ctx context.Context, op bootstrap.FreshOperation) {
+	a.reconcileUsageMonitoring(ctx, op, true)
+}
+
+func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op bootstrap.FreshOperation, reloadConfig bool) {
 	if a == nil || a.usage == nil {
 		return
 	}
@@ -91,6 +106,9 @@ func (a *freshApplication) applyUsageMonitoringSwitch(ctx context.Context, op bo
 	}
 	if a.runCtx != nil && a.usageProjection != nil {
 		startFreshDatabaseMaintenance(a.runCtx, a.cfg.DBPath)
+	}
+	if hook := a.beforeUsageReconcileLock; hook != nil {
+		hook()
 	}
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
@@ -106,7 +124,9 @@ func (a *freshApplication) applyUsageMonitoringSwitch(ctx context.Context, op bo
 		return
 	}
 	if a.usageCollectorStarted && a.collectionPhase() != usageapp.PhaseStopped {
-		return
+		if !reloadConfig || a.runningCollectorMatchesConfigLocked(reconcileCtx, op) {
+			return
+		}
 	}
 	a.stopUsageCollectionLocked(reconcileCtx)
 	if a.runCtx == nil || a.usageProjection == nil {
@@ -116,6 +136,61 @@ func (a *freshApplication) applyUsageMonitoringSwitch(ctx context.Context, op bo
 	if a.attemptUsageStart(a.runCtx, op) {
 		a.usageStarted = true
 	}
+}
+
+func (a *freshApplication) runningCollectorMatchesConfigLocked(ctx context.Context, op bootstrap.FreshOperation) bool {
+	if a.legacyCollector == nil {
+		return false
+	}
+	activeCfg, active := a.legacyCollector.ActiveRuntimeConfig()
+	if !active {
+		return false
+	}
+	checkpoint := op.Strategy
+	switch {
+	case a.privateCollector != nil:
+		desiredCfg, ok := a.privateCollectorDesiredConfig(ctx)
+		return ok && activeCfg == desiredCfg
+	case checkpoint.Strategy == bootstrap.ConnectExternal && a.externalSource != nil:
+		install, err := a.externalSource(ctx)
+		if err != nil {
+			return false
+		}
+		desiredCfg, err := a.usageRuntimeConfig(ctx, install.BaseURL, install.ManagementKey)
+		return err == nil && activeCfg == desiredCfg
+	case freshkeyapply.ManagerOwnedStrategy(checkpoint) && a.managedSource != nil:
+		install, err := a.managedSource(ctx)
+		if err != nil {
+			return false
+		}
+		desiredCfg, err := a.usageRuntimeConfig(ctx, install.BaseURL, install.ManagementKey)
+		return err == nil && activeCfg == desiredCfg
+	default:
+		return false
+	}
+}
+
+func (a *freshApplication) privateCollectorDesiredConfig(ctx context.Context) (collector.RuntimeConfig, bool) {
+	if a.cfg.CPAUpstreamURL != "" && a.cfg.ManagementKey != "" {
+		return collector.RuntimeConfig{
+			CPAUpstreamURL: a.cfg.CPAUpstreamURL,
+			ManagementKey:  a.cfg.ManagementKey,
+			CollectorMode:  a.cfg.CollectorMode,
+			Queue:          a.cfg.Queue,
+			PopSide:        a.cfg.PopSide,
+			BatchSize:      a.cfg.BatchSize,
+			PollInterval:   a.cfg.PollInterval,
+			TLSSkipVerify:  a.cfg.TLSSkipVerify,
+		}, true
+	}
+	if a.runtimeSettings == nil {
+		return collector.RuntimeConfig{}, false
+	}
+	managerCfg, ok, err := a.runtimeSettings.LoadManagerConfig(ctx)
+	if err != nil || !ok || managerCfg.CPAConnection.CPABaseURL == "" || managerCfg.CPAConnection.ManagementKey == "" {
+		return collector.RuntimeConfig{}, false
+	}
+	return collectorservice.RuntimeConfigFromManagerConfigWithFallback(managerCfg, a.cfg), true
 }
 
 // startUsageCollection arms the real usage chain of a completed installation:
@@ -221,19 +296,18 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				// Managed and External installs have no other authority. Usage
 				// stays unavailable instead of collecting from an unverified CPA.
 				log.Printf("Fresh usage collection unavailable: %v", err)
+				a.setUsageStartReason(usageStartReasonNoAuthority)
 				return false
 			}
-			if err := a.legacyCollector.StartRuntime(ctx, collector.RuntimeConfig{
-				CPAUpstreamURL: install.BaseURL,
-				ManagementKey:  install.ManagementKey,
-				CollectorMode:  a.cfg.CollectorMode,
-				Queue:          a.cfg.Queue,
-				PopSide:        a.cfg.PopSide,
-				BatchSize:      a.cfg.BatchSize,
-				PollInterval:   a.cfg.PollInterval,
-				TLSSkipVerify:  a.cfg.TLSSkipVerify,
-			}); err != nil {
+			runtimeCfg, err := a.usageRuntimeConfig(ctx, install.BaseURL, install.ManagementKey)
+			if err != nil {
+				log.Printf("Fresh usage collection configuration unavailable: %v", err)
+				a.setUsageStartReason(usageStartReasonCollectorFailed)
+				return false
+			}
+			if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
 				log.Printf("Fresh usage collection unavailable: %v", err)
+				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false
 			}
 			// A live phase is not proof: the Collector reports "starting" before
@@ -242,9 +316,13 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 			if err := a.sampleUsageAuthority(ctx, install.BaseURL, install.ManagementKey); err != nil {
 				_ = a.legacyCollector.Stop(ctx)
 				log.Printf("Fresh usage collection sample unavailable: %v", err)
+				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false
 			}
 			started = a.collectionPhase() != usageapp.PhaseStopped
+			if !started {
+				a.setUsageStartReason(usageStartReasonCollectorFailed)
+			}
 		default:
 			// No Collector authority is configured for this strategy: nothing
 			// starts, so nothing may be claimed either. Returning success here

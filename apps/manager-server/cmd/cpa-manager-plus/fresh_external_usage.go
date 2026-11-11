@@ -15,6 +15,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 )
 
 // Stable codes of a Collector start this Manager refused to claim. They reach
@@ -39,19 +40,45 @@ type usageStartOutcome struct {
 	Reason  string
 }
 
-// usageRuntimeConfig is the Collector configuration of one resolved CPA
-// authority plus the Manager-wide transport settings.
-func (a *freshApplication) usageRuntimeConfig(baseURL, managementKey string) collector.RuntimeConfig {
+// usageRuntimeConfig resolves the Collector configuration for one CPA authority
+// by combining persisted Manager collector settings (when not env-managed) with
+// the process defaults.
+func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, managementKey string) (collector.RuntimeConfig, error) {
+	mode := managerconfig.CollectorMode(a.cfg.CollectorMode)
+	queue := managerconfig.ValueOr(a.cfg.Queue, "usage")
+	popSide := managerconfig.NormalizePopSide(a.cfg.PopSide, "right")
+	batchSize := managerconfig.PositiveOrDefault(a.cfg.BatchSize, 100, 100)
+	pollIntervalMS := managerconfig.PositiveOrDefault(int(a.cfg.PollInterval/time.Millisecond), 500, 500)
+	tlsSkipVerify := a.cfg.TLSSkipVerify
+
+	if a.runtimeSettings != nil && (a.cfg.CPAUpstreamURL == "" || a.cfg.ManagementKey == "") {
+		managerCfg, found, err := a.runtimeSettings.LoadManagerConfig(ctx)
+		if err != nil {
+			return collector.RuntimeConfig{}, err
+		}
+		if found {
+			if strings.TrimSpace(managerCfg.Collector.CollectorMode) != "" {
+				mode = managerconfig.CollectorMode(managerCfg.Collector.CollectorMode)
+			}
+			queue = managerconfig.ValueOr(strings.TrimSpace(managerCfg.Collector.Queue), queue)
+			if strings.TrimSpace(managerCfg.Collector.PopSide) != "" {
+				popSide = managerconfig.NormalizePopSide(managerCfg.Collector.PopSide, popSide)
+			}
+			batchSize = managerconfig.PositiveOrDefault(managerCfg.Collector.BatchSize, batchSize, 100)
+			pollIntervalMS = managerconfig.PositiveOrDefault(managerCfg.Collector.PollIntervalMS, pollIntervalMS, 500)
+			tlsSkipVerify = managerCfg.Collector.TLSSkipVerify
+		}
+	}
 	return collector.RuntimeConfig{
 		CPAUpstreamURL: baseURL,
 		ManagementKey:  managementKey,
-		CollectorMode:  a.cfg.CollectorMode,
-		Queue:          a.cfg.Queue,
-		PopSide:        a.cfg.PopSide,
-		BatchSize:      a.cfg.BatchSize,
-		PollInterval:   a.cfg.PollInterval,
-		TLSSkipVerify:  a.cfg.TLSSkipVerify,
-	}
+		CollectorMode:  mode,
+		Queue:          queue,
+		PopSide:        popSide,
+		BatchSize:      batchSize,
+		PollInterval:   time.Duration(pollIntervalMS) * time.Millisecond,
+		TLSSkipVerify:  tlsSkipVerify,
+	}, nil
 }
 
 // sampleUsageAuthority proves, with one authenticated management read, that the
@@ -203,7 +230,12 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		log.Printf("Fresh external key usage bindings unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	}
-	if err := a.legacyCollector.StartRuntime(ctx, a.usageRuntimeConfig(install.BaseURL, install.ManagementKey)); err != nil {
+	runtimeCfg, err := a.usageRuntimeConfig(ctx, install.BaseURL, install.ManagementKey)
+	if err != nil {
+		log.Printf("Fresh external usage collection configuration unavailable: %v", err)
+		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+	}
+	if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
 	}

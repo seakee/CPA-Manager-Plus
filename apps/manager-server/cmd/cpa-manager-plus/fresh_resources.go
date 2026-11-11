@@ -606,9 +606,10 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 }
 
 // serveLegacyResource forwards one bridged request and, when that request wrote
-// the request-monitoring switch, reconciles this process with what the write
-// stored. The switch is the administrator's own statement about collection, so a
-// successful write must reach the Collector now instead of at the next restart.
+// Manager's usage-service configuration, reconciles the host-bound Collector
+// with what was stored. A narrow PATCH flips only collector.enabled and keeps a
+// live Collector untouched on On->On; a whole-document PUT reloads the
+// Collector whenever its effective RuntimeConfig or connection authority changed.
 func (a *freshApplication) serveLegacyResource(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -623,7 +624,11 @@ func (a *freshApplication) serveLegacyResource(
 	recorder := &legacyStatusRecorder{ResponseWriter: w}
 	a.legacy.ServeHTTP(recorder, clone)
 	if recorder.status >= http.StatusOK && recorder.status < http.StatusMultipleChoices {
-		a.applyUsageMonitoringSwitch(r.Context(), op)
+		if r.Method == http.MethodPut {
+			a.applyUsageManagerConfig(r.Context(), op)
+		} else {
+			a.applyUsageMonitoringSwitch(r.Context(), op)
+		}
 	}
 }
 

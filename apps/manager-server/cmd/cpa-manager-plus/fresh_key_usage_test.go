@@ -23,10 +23,13 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -1011,15 +1014,184 @@ func TestUsageMonitoringSwitchWriteStopsAndRestartsCollection(t *testing.T) {
 	})
 }
 
+func TestUsageManagerConfigPutReloadsRunningCollectorWithoutRestartingUnchanged(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	initialKey := strings.Repeat("a", 64)
+	rotatedKey := strings.Repeat("b", 64)
+	var activeKey atomic.Value
+	activeKey.Store(initialKey)
+
+	rotatedPollObserved := make(chan string, 1)
+	var rotatedPollOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expected := "Bearer " + activeKey.Load().(string)
+		if r.Header.Get("Authorization") != expected {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		switch {
+		case r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet:
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case r.URL.Path == "/v0/management/usage-statistics-enabled" && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.URL.Path == "/v0/management/usage-queue" && r.Method == http.MethodGet:
+			if r.Header.Get("Authorization") == "Bearer "+rotatedKey {
+				count := r.URL.Query().Get("count")
+				rotatedPollOnce.Do(func() { rotatedPollObserved <- count })
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("[]"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	normalizedURL, err := cpa.NormalizeV8BaseURL(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{
+		CPAUpstreamURL: normalizedURL,
+		CollectorMode:  "http",
+	})
+	protectedInitial, err := opened.Protector.ProtectString(initialKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeObs := validInstallationRuntime()
+	updated, err := app.store.Update(hostCtx, current.Operation.Identity, current.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                string(runtimeObs.Identity),
+			TargetGeneration:              uint64(runtimeObs.Generation),
+			TargetArtifactID:              string(runtimeObs.ActiveGatewayArtifact.ArtifactID),
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(normalizedURL),
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL:    normalizedURL,
+			ManagementKey: protectedInitial,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := app.store.Update(hostCtx, updated.Operation.Identity, updated.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.managedSource = managedInstallSource(app.store, opened.Protector, normalizedURL)
+
+	app.startUsageCollection(completed.Operation)
+	if !app.usageCollectionStarted() {
+		t.Fatalf("initial collection did not start (reason=%q)", app.usageStartBlock())
+	}
+	initialStarts := app.legacyCollector.StartCount()
+
+	// 1. Whole-document PUT that leaves effective Collector RuntimeConfig and
+	// credential unchanged must not restart the running Collector.
+	unchangedBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":25000,"tlsSkipVerify":false}}}`, normalizedURL)
+	unchangedResp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", unchangedBody, "application/json")
+	if unchangedResp.Code != http.StatusOK {
+		t.Fatalf("unchanged PUT = %d %s", unchangedResp.Code, unchangedResp.Body.String())
+	}
+	if got := app.legacyCollector.StartCount() - initialStarts; got != 0 {
+		t.Fatalf("unchanged PUT restarted Collector: StartCount delta = %d, want 0", got)
+	}
+
+	// 2. Whole-document PUT (via cpamp/config alias) updating queue, pollInterval,
+	// batchSize, popSide, tlsSkipVerify and rotating managementKey reloads the
+	// running Collector on hostCtx so the next poll uses the new parameters/key.
+	activeKey.Store(rotatedKey)
+	changedBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q,"managementKey":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage-priority","popSide":"left","batchSize":17,"pollIntervalMs":25,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL, rotatedKey)
+	changedResp := gatewayRequest(t, app, http.MethodPut, "cpamp/config", changedBody, "application/json")
+	if changedResp.Code != http.StatusOK {
+		t.Fatalf("changed PUT = %d %s", changedResp.Code, changedResp.Body.String())
+	}
+	if got := app.legacyCollector.StartCount() - initialStarts; got != 1 {
+		t.Fatalf("changed PUT StartCount delta = %d, want 1", got)
+	}
+	activeCfg, active := app.legacyCollector.ActiveRuntimeConfig()
+	if !active {
+		t.Fatal("Collector is not active after changed PUT")
+	}
+	if activeCfg.ManagementKey != rotatedKey ||
+		activeCfg.Queue != "usage-priority" ||
+		activeCfg.PopSide != "left" ||
+		activeCfg.BatchSize != 17 ||
+		activeCfg.PollInterval != 25*time.Millisecond ||
+		!activeCfg.TLSSkipVerify {
+		t.Fatalf("active runtime config did not pick up PUT update: %+v", activeCfg)
+	}
+	select {
+	case count := <-rotatedPollObserved:
+		if count != "17" {
+			t.Fatalf("reloaded Collector polled count=%q, want 17", count)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reloaded Collector never polled upstream with rotated management key and updated batch size")
+	}
+
+	// 3. Whole-document PUT storing a non-managed-shape credential that fails
+	// managedSource stops the running Collector instead of keeping the old run.
+	unmanagedKey := strings.Repeat("c", 32)
+	activeKey.Store(unmanagedKey)
+	unmanagedBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q,"managementKey":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage-priority","popSide":"left","batchSize":17,"pollIntervalMs":25,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL, unmanagedKey)
+	unmanagedResp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", unmanagedBody, "application/json")
+	if unmanagedResp.Code != http.StatusOK {
+		t.Fatalf("unmanaged-key PUT = %d %s", unmanagedResp.Code, unmanagedResp.Body.String())
+	}
+	if app.collectionPhase() != usageapp.PhaseStopped || app.usageCollectionStarted() {
+		t.Fatalf("Collector stayed active after authority became unavailable: phase=%s claimed=%v", app.collectionPhase(), app.usageCollectionStarted())
+	}
+	if app.usageStartBlock() != usageStartReasonNoAuthority {
+		t.Fatalf("blocked reason after authority loss = %q, want %q", app.usageStartBlock(), usageStartReasonNoAuthority)
+	}
+
+	// 4. Restoring a valid 64-char credential with collector.enabled=false keeps
+	// the Collector stopped under usage_monitoring_disabled.
+	activeKey.Store(rotatedKey)
+	disableBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q,"managementKey":%q},"collector":{"enabled":false,"collectorMode":"http","queue":"usage-priority","popSide":"left","batchSize":17,"pollIntervalMs":25,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL, rotatedKey)
+	disableResp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", disableBody, "application/json")
+	if disableResp.Code != http.StatusOK {
+		t.Fatalf("disable PUT = %d %s", disableResp.Code, disableResp.Body.String())
+	}
+	if app.collectionPhase() != usageapp.PhaseStopped || app.usageCollectionStarted() {
+		t.Fatalf("disable PUT left Collector active: phase=%s claimed=%v", app.collectionPhase(), app.usageCollectionStarted())
+	}
+	if app.usageStartBlock() != usageStartReasonMonitoringDisabled {
+		t.Fatalf("blocked reason after disable PUT = %q, want %q", app.usageStartBlock(), usageStartReasonMonitoringDisabled)
+	}
+}
+
 func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing.T) {
-	for range 12 {
+	t.Run("disable commits during startup sample and waits on usageStartMu", func(t *testing.T) {
 		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
 		var inSample sync.Once
 		sampleEntered := make(chan struct{})
 		releaseSample := make(chan struct{})
+		var sampleCalls atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/v0/management/config":
+				sampleCalls.Add(1)
 				inSample.Do(func() { close(sampleEntered) })
 				<-releaseSample
 				w.Header().Set("X-CPA-Version", "v8.0.13")
@@ -1027,9 +1199,10 @@ func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing
 			case "/v0/management/usage-queue":
 				_, _ = w.Write([]byte("[]"))
 			default:
-				w.WriteHeader(http.StatusNotFound)
+				http.NotFound(w, r)
 			}
 		}))
+		defer server.Close()
 
 		_, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
 		markFreshProductComplete(t, app)
@@ -1044,15 +1217,17 @@ func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing
 		if err := app.runtimeSettings.SaveManagerConfig(hostCtx, store.ManagerConfig{
 			Collector: store.ManagerCollectorConfig{Enabled: &on},
 		}); err != nil {
-			stopHost()
-			server.Close()
 			t.Fatal(err)
 		}
 		op, err := app.current(hostCtx)
 		if err != nil {
-			stopHost()
-			server.Close()
 			t.Fatal(err)
+		}
+
+		var reconcileHookOnce sync.Once
+		patchReadyForLock := make(chan struct{})
+		app.beforeUsageReconcileLock = func() {
+			reconcileHookOnce.Do(func() { close(patchReadyForLock) })
 		}
 
 		var wg sync.WaitGroup
@@ -1069,29 +1244,107 @@ func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing
 				t.Errorf("concurrent PATCH false = %d %s", resp.Code, resp.Body.String())
 			}
 		}()
-		<-sampleEntered
-		// Let PATCH commit false and enter applyUsageMonitoringSwitch while
-		// startUsageCollection holds usageStartMu inside sampleUsageAuthority.
-		time.Sleep(5 * time.Millisecond)
+
+		select {
+		case <-patchReadyForLock:
+		case <-time.After(5 * time.Second):
+			t.Fatal("PATCH disable did not commit and reach usageStartMu while startup sample was held")
+		}
+		storedCfg, found, err := app.runtimeSettings.LoadManagerConfig(hostCtx)
+		if err != nil || !found || storedCfg.Collector.Enabled == nil || *storedCfg.Collector.Enabled {
+			t.Fatalf("expected enabled=false persisted before releasing startup sample, got found=%v cfg=%+v err=%v", found, storedCfg.Collector, err)
+		}
 		close(releaseSample)
 		wg.Wait()
 
+		if got := app.legacyCollector.StartCount(); got != 1 {
+			t.Fatalf("StartCount = %d, want 1", got)
+		}
+		if got := sampleCalls.Load(); got != 1 {
+			t.Fatalf("sample calls = %d, want 1", got)
+		}
 		if app.collectionPhase() != usageapp.PhaseStopped {
-			stopHost()
-			server.Close()
 			t.Fatalf("concurrent disable left collector phase = %s, want stopped", app.collectionPhase())
 		}
 		if app.usageCollectionStarted() {
-			stopHost()
-			server.Close()
 			t.Fatal("concurrent disable left collection claimed")
 		}
 		if app.usageStartBlock() != usageStartReasonMonitoringDisabled {
-			stopHost()
-			server.Close()
 			t.Fatalf("blocked reason = %q, want %q", app.usageStartBlock(), usageStartReasonMonitoringDisabled)
 		}
-		stopHost()
-		server.Close()
-	}
+	})
+
+	t.Run("disable reconciles before startup acquires usageStartMu", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var remoteCalls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			remoteCalls.Add(1)
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+
+		_, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
+		markFreshProductComplete(t, app)
+		app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+			return freshkeyapply.ManagedInstall{
+				BaseURL:       server.URL,
+				ManagementKey: strings.Repeat("a", 64),
+				Strategy:      string(bootstrap.NewManaged),
+			}, nil
+		}
+		on := true
+		if err := app.runtimeSettings.SaveManagerConfig(hostCtx, store.ManagerConfig{
+			Collector: store.ManagerCollectorConfig{Enabled: &on},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		op, err := app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		reconcileHoldingReady := make(chan struct{})
+		releaseReconcile := make(chan struct{})
+		var hookOnce sync.Once
+		app.beforeUsageReconcileLock = func() {
+			hookOnce.Do(func() {
+				close(reconcileHoldingReady)
+				<-releaseReconcile
+			})
+		}
+
+		patchDone := make(chan struct{})
+		go func() {
+			defer close(patchDone)
+			resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+			if resp.Code != http.StatusOK {
+				t.Errorf("PATCH false = %d %s", resp.Code, resp.Body.String())
+			}
+		}()
+
+		select {
+		case <-reconcileHoldingReady:
+		case <-time.After(5 * time.Second):
+			t.Fatal("PATCH disable did not reach usageStartMu barrier")
+		}
+		close(releaseReconcile)
+		<-patchDone
+
+		app.startUsageCollection(op)
+		if got := app.legacyCollector.StartCount(); got != 0 {
+			t.Fatalf("StartCount = %d, want 0 when disable committed first", got)
+		}
+		if got := remoteCalls.Load(); got != 0 {
+			t.Fatalf("remote CPA calls = %d, want 0 when disable committed first", got)
+		}
+		if app.collectionPhase() != usageapp.PhaseStopped || app.usageCollectionStarted() {
+			t.Fatalf("collector started despite disabled switch: phase=%s claimed=%v", app.collectionPhase(), app.usageCollectionStarted())
+		}
+		if app.usageStartBlock() != usageStartReasonMonitoringDisabled {
+			t.Fatalf("blocked reason = %q, want %q", app.usageStartBlock(), usageStartReasonMonitoringDisabled)
+		}
+	})
 }

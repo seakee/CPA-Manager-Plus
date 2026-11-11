@@ -202,10 +202,11 @@ type freshApplication struct {
 	// usageStartMu serializes post-completion startup attempts and guards the
 	// two success flags below. Only a fully successful attempt is recorded, so a
 	// failed start is retried by a completion replay or a later trigger.
-	usageStartMu          sync.Mutex
-	usageStarted          bool
-	usageWorkersStarted   bool
-	usageCollectorStarted bool
+	usageStartMu             sync.Mutex
+	beforeUsageReconcileLock func()
+	usageStarted             bool
+	usageWorkersStarted      bool
+	usageCollectorStarted    bool
 	// usageStartReason is the stable code of the last refused Collector start.
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.

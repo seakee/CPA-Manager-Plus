@@ -145,6 +145,17 @@ func (m *Manager) Status() Status {
 	return m.status
 }
 
+// ActiveRuntimeConfig reports the configuration of the currently active
+// Collector run, or false when the Collector is stopped.
+func (m *Manager) ActiveRuntimeConfig() (RuntimeConfig, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel == nil || m.status.Collector == "stopped" {
+		return RuntimeConfig{}, false
+	}
+	return m.runtimeCfg, true
+}
+
 func (m *Manager) SetUsageEventHandler(handler UsageEventHandler) {
 	m.mu.Lock()
 	m.usageEventHandler = handler

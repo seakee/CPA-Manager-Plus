@@ -14,6 +14,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
 
 // externalRejectionKey is the one settings row that records that the user's CPA
@@ -56,8 +57,9 @@ type externalReadGrant struct {
 // presented once more. Only a rebind, or a re-verify that proves the stored key
 // works again, clears it.
 type externalRejection struct {
-	db *sql.DB
-	mu sync.Mutex
+	db           *sql.DB
+	mu           sync.Mutex
+	beforeRecord func()
 }
 
 func newExternalRejection(db *sql.DB) *externalRejection {
@@ -100,6 +102,9 @@ func (r *externalRejection) record(ctx context.Context, identity, credential str
 	raw, err := json.Marshal(externalRejectionRecord{Identity: identity, Credential: credential, AtMS: time.Now().UnixMilli()})
 	if err != nil {
 		return
+	}
+	if r.beforeRecord != nil {
+		r.beforeRecord()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,6 +166,29 @@ func (a *freshApplication) externalReadGrantFor(ctx context.Context, record fres
 	}
 	grant.Refused = a.rejection.refused(ctx, grant.Identity, grant.Credential)
 	return grant
+}
+
+// externalReadTargetFor resolves both the External read grant and the decrypted
+// installation target from one already-loaded Fresh record snapshot so the
+// refusal check, the outbound request and any recorded rejection name the same
+// credential envelope even across a concurrent rebind.
+func (a *freshApplication) externalReadTargetFor(ctx context.Context, record freshstore.Record) (externalReadGrant, freshkeyapply.ExternalInstall, error) {
+	if a == nil || a.externalSource == nil {
+		return externalReadGrant{}, freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+	}
+	install, err := a.externalSource(withFreshRecordSnapshot(ctx, record))
+	if err != nil {
+		return externalReadGrant{}, freshkeyapply.ExternalInstall{}, err
+	}
+	if a.rejection == nil || record.Connection == nil || record.Connection.ManagementKey == "" {
+		return externalReadGrant{}, install, nil
+	}
+	grant := externalReadGrant{
+		Identity:   install.Identity,
+		Credential: envelopeDigest(record.Connection.ManagementKey),
+	}
+	grant.Refused = a.rejection.refused(ctx, grant.Identity, grant.Credential)
+	return grant, install, nil
 }
 
 // envelopeDigest is the stable identity of one protected credential envelope. It

@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -496,5 +498,212 @@ func TestConsoleModelListHonoursExternalCredentialRejectionGate(t *testing.T) {
 				t.Fatalf("short-circuited model list sent %d additional requests to External CPA", after-before)
 			}
 		})
+	}
+}
+
+// waitNotifyContext signals entered once Done() is consulted on a blocking
+// select, while keeping its cancellation tied to parent.
+type waitNotifyContext struct {
+	context.Context
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (c *waitNotifyContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
+// rebindAfterGateLoadStore replaces the stored External management credential
+// immediately after externalConsoleModelList performs its in-gate store.Load,
+// exposing any mismatch if grant and outbound credential came from separate loads.
+type rebindAfterGateLoadStore struct {
+	freshstore.Store
+	loads  atomic.Int32
+	onLoad func(count int32)
+}
+
+func (s *rebindAfterGateLoadStore) Load(ctx context.Context) (freshstore.Record, error) {
+	record, err := s.Store.Load(context.WithoutCancel(ctx))
+	if err == nil && s.onLoad != nil {
+		s.onLoad(s.loads.Add(1))
+	}
+	return record, err
+}
+
+// TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate proves that
+// when an External CPA rejects the saved management credential (401 or 403),
+// externalConsoleModelList records the durable rejection while still holding
+// legacyCredentialGate so concurrent model-list and legacy management reads
+// never submit the rejected credential a second time.
+func TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var upstreamAuthAttempts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v8/management/config", "/v0/management/api-keys":
+					upstreamAuthAttempts.Add(1)
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"error":"rejected"}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+
+			app := newExternalApp(t, upstream.URL, externalAuthorityManagement)
+			app.store = uncancellableStore{app.store}
+
+			atBeforeRecord := make(chan struct{})
+			allowRecord := make(chan struct{})
+			var recordOnce sync.Once
+			app.rejection.beforeRecord = func() {
+				recordOnce.Do(func() {
+					close(atBeforeRecord)
+					<-allowRecord
+				})
+			}
+
+			firstResp := httptest.NewRecorder()
+			firstDone := make(chan struct{})
+			go func() {
+				defer close(firstDone)
+				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil)
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				app.canonicalAPI(firstResp, req)
+			}()
+
+			select {
+			case <-atBeforeRecord:
+			case <-time.After(5 * time.Second):
+				t.Fatal("first model-list request never reached rejection recording")
+			}
+
+			waiterModelEntered := make(chan struct{})
+			waiterLegacyEntered := make(chan struct{})
+			waiterModelResp := httptest.NewRecorder()
+			waiterLegacyResp := httptest.NewRecorder()
+
+			var waiters sync.WaitGroup
+			waiters.Add(2)
+			go func() {
+				defer waiters.Done()
+				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterModelEntered}
+				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				app.canonicalAPI(waiterModelResp, req)
+			}()
+			go func() {
+				defer waiters.Done()
+				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterLegacyEntered}
+				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v0/management/api-keys", nil).WithContext(ctx)
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				app.canonicalAPI(waiterLegacyResp, req)
+			}()
+
+			select {
+			case <-waiterModelEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("concurrent model-list waiter did not reach credential gate")
+			}
+			select {
+			case <-waiterLegacyEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("concurrent legacy waiter did not reach credential gate")
+			}
+
+			close(allowRecord)
+			<-firstDone
+			waiters.Wait()
+
+			for name, resp := range map[string]*httptest.ResponseRecorder{
+				"first model list":      firstResp,
+				"concurrent model list": waiterModelResp,
+				"concurrent legacy":     waiterLegacyResp,
+			} {
+				if resp.Code != http.StatusConflict || errorCode(t, resp) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("%s = %d %s, want 409 %s", name, resp.Code, resp.Body.String(), freshconfig.ReasonManagementRejected)
+				}
+			}
+			if got := upstreamAuthAttempts.Load(); got != 1 {
+				t.Fatalf("External CPA received %d bad-credential management requests across concurrent burst, want 1", got)
+			}
+		})
+	}
+}
+
+// TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot proves that a
+// concurrent rebind occurring right after externalConsoleModelList loads the
+// Fresh record cannot split the grant digest from the credential sent upstream.
+func TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot(t *testing.T) {
+	staleKey := strings.Repeat("1", 64)
+	reboundBadKey := strings.Repeat("2", 64)
+	var presented []string
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		presented = append(presented, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer upstream.Close()
+
+	app := newExternalApp(t, upstream.URL, staleKey)
+	baseStore := app.store
+	rebinder, ok := baseStore.(freshstore.ConnectionRebinder)
+	if !ok {
+		t.Fatal("fixture store does not implement ConnectionRebinder")
+	}
+	protectedRebound, err := app.protector.ProtectString(reboundBadKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Load #1 is canonicalAPI's auth/completion check; Load #2 is
+	// consoleModelList's strategy dispatch; Load #3 is
+	// externalConsoleModelList's in-gate snapshot. Advancing the stored
+	// connection right after Load #3 simulates a concurrent rebind before any
+	// separate externalSource Load could run.
+	wrapper := &rebindAfterGateLoadStore{
+		Store: baseStore,
+		onLoad: func(count int32) {
+			if count != 3 {
+				return
+			}
+			rec, loadErr := baseStore.Load(context.Background())
+			if loadErr != nil {
+				t.Errorf("load for rebind: %v", loadErr)
+				return
+			}
+			if _, rebindErr := rebinder.RebindConnection(
+				context.Background(),
+				rec.Operation.Identity,
+				rec.Operation.Revision,
+				model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protectedRebound},
+			); rebindErr != nil {
+				t.Errorf("rebind connection: %v", rebindErr)
+			}
+		},
+	}
+	app.store = wrapper
+	app.externalSource = externalInstallSource(app.store, app.protector)
+
+	resp := installationAPI(t, app, http.MethodGet, "cpamp/v1/models", strategyTestAdmin)
+	if resp.Code != http.StatusConflict || errorCode(t, resp) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("first model list = %d %s, want 409", resp.Code, resp.Body.String())
+	}
+
+	mu.Lock()
+	gotPresented := append([]string(nil), presented...)
+	mu.Unlock()
+	if len(gotPresented) != 1 || gotPresented[0] != "Bearer "+staleKey {
+		t.Fatalf("presented headers = %v, want single [Bearer %s]", gotPresented, staleKey)
+	}
+	// Because staleKey was presented and recorded (not reboundBadKey), the
+	// newly stored reboundBadKey has not been falsely pre-marked refused.
+	if app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("stale credential's 401 falsely marked the concurrently rebound credential refused")
 	}
 }

@@ -107,34 +107,42 @@ func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *ht
 		writeConsoleModelListUnavailable(w)
 		return
 	}
-	grant := a.externalReadGrantFor(ctx, record)
+	grant, install, err := a.externalReadTargetFor(ctx, record)
+	if err != nil {
+		gate.release()
+		writeConsoleModelListUnavailable(w)
+		return
+	}
 	if grant.Refused {
 		gate.release()
 		writeExternalManagementRejected(w)
 		return
 	}
-	install, err := a.externalSource(ctx)
-	if err != nil || install.BaseURL == "" || install.ManagementKey == "" {
+	if install.BaseURL == "" || install.ManagementKey == "" {
 		gate.release()
 		writeConsoleModelListUnavailable(w)
 		return
 	}
 	hold, requestCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	defer hold.finish()
 	document, err := cpa.NewTransportForEndpoint(install.BaseURL).ExternalReadConfigDocument(requestCtx, install.ManagementKey)
-	hold.finish()
 	if err != nil {
 		switch {
 		case errors.Is(err, cpa.ErrManagementClientForbidden):
 			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			hold.finish()
 			writeExternalManagementForbidden(w)
 		case errors.Is(err, cpa.ErrManagementRejected):
 			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			hold.finish()
 			writeExternalManagementRejected(w)
 		default:
+			hold.finish()
 			writeConsoleModelListUnavailable(w)
 		}
 		return
 	}
+	hold.finish()
 	clientKey := firstCPAClientKey(document)
 	if clientKey == "" {
 		writeConsoleModelListEmpty(w)
