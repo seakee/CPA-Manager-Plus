@@ -585,10 +585,7 @@ func (a *freshApplication) checkUnresolvedEmbeddedStarts(
 
 	var remaining []freshUnresolvedEmbeddedStart
 	reobserveStatus := false
-	for _, entry := range snapshot {
-		if now.Sub(entry.dispatchedAt) >= freshRuntimeOperationUnknownBound {
-			continue
-		}
+	for i, entry := range snapshot {
 		if entry.runtimeIdentity != "" &&
 			(entry.runtimeIdentity != identity || entry.runtimeGeneration != uint64(generation)) {
 			continue
@@ -607,21 +604,25 @@ func (a *freshApplication) checkUnresolvedEmbeddedStarts(
 				var protocolErr *runtimeservice.ProtocolError
 				if errors.As(err, &protocolErr) && protocolErr != nil &&
 					protocolErr.Code == runtimeservice.ProtocolErrorOperationNotFound {
+					reobserveStatus = true
 					continue
 				}
-				remaining = append(remaining, entry)
+				remaining = append(remaining, snapshot[i:]...)
 				gate.mu.Lock()
 				gate.unresolvedStarts = remaining
 				gate.mu.Unlock()
 				return false, err
 			}
-			if obs.Validate() == nil && obs.State == model.RuntimeOperationFailed {
-				continue
-			}
-			if obs.Validate() == nil && obs.State == model.RuntimeOperationSucceeded {
+			if obs.Validate() == nil &&
+				(obs.State == model.RuntimeOperationFailed || obs.State == model.RuntimeOperationSucceeded) {
 				reobserveStatus = true
 				continue
 			}
+			remaining = append(remaining, entry)
+			continue
+		}
+		if now.Sub(entry.dispatchedAt) >= freshRuntimeOperationUnknownBound {
+			continue
 		}
 		remaining = append(remaining, entry)
 	}
@@ -695,11 +696,25 @@ func (a *freshApplication) verifyEmbeddedRuntimeStoppedForExternalCommit(ctx con
 			return errors.New("embedded Runtime status re-observation is invalid or unknown")
 		}
 	}
-	if observed.State != model.RuntimeStateOffline ||
-		(observed.Recovery != nil && observed.Recovery.State == model.RuntimeRecoveryStateRecovering) {
+	if !embeddedRuntimeStoppedForExternalCommit(observed) {
 		return &freshstrategy.Blocker{Code: "embedded_runtime_not_stopped"}
 	}
 	return nil
+}
+
+func embeddedRuntimeStoppedForExternalCommit(observed model.RuntimeObservedStatus) bool {
+	if observed.State != model.RuntimeStateOffline {
+		return false
+	}
+	if observed.Recovery == nil {
+		return true
+	}
+	switch observed.Recovery.State {
+	case model.RuntimeRecoveryStateInactive, model.RuntimeRecoveryStateManualIntervention:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *freshApplication) beginExternalCommit(ctx context.Context) (func(committed bool), error) {
@@ -833,15 +848,17 @@ func (c gatedEmbeddedRuntimeClient) Start(ctx context.Context, request model.Run
 		return model.RuntimeOperationResult{}, err
 	}
 	out, callErr := client.Start(ctx, request)
-	c.app.recordEmbeddedStartOutcome(
-		model.RuntimeOperationStart,
-		request.OperationID,
-		request.ExpectedRuntimeIdentity,
-		uint64(request.ExpectedRuntimeGeneration),
-		"",
-		out,
-		callErr,
-	)
+	if request.Validate() == nil {
+		c.app.recordEmbeddedStartOutcome(
+			model.RuntimeOperationStart,
+			request.OperationID,
+			request.ExpectedRuntimeIdentity,
+			uint64(request.ExpectedRuntimeGeneration),
+			"",
+			out,
+			callErr,
+		)
+	}
 	release()
 	return out, callErr
 }
@@ -861,15 +878,17 @@ func (c gatedEmbeddedRuntimeClient) Restart(ctx context.Context, request model.R
 		return model.RuntimeOperationResult{}, err
 	}
 	out, callErr := client.Restart(ctx, request)
-	c.app.recordEmbeddedStartOutcome(
-		model.RuntimeOperationRestart,
-		request.OperationID,
-		request.ExpectedRuntimeIdentity,
-		uint64(request.ExpectedRuntimeGeneration),
-		"",
-		out,
-		callErr,
-	)
+	if request.ExpectedActiveArtifactID == "" && request.Validate() == nil {
+		c.app.recordEmbeddedStartOutcome(
+			model.RuntimeOperationRestart,
+			request.OperationID,
+			request.ExpectedRuntimeIdentity,
+			uint64(request.ExpectedRuntimeGeneration),
+			"",
+			out,
+			callErr,
+		)
+	}
 	release()
 	return out, callErr
 }
@@ -889,15 +908,17 @@ func (c gatedEmbeddedRuntimeClient) ActivateUpdate(ctx context.Context, request 
 		return model.RuntimeOperationResult{}, err
 	}
 	out, callErr := client.ActivateUpdate(ctx, request)
-	c.app.recordEmbeddedStartOutcome(
-		model.RuntimeOperationActivateUpdate,
-		request.OperationID,
-		request.ExpectedRuntimeIdentity,
-		uint64(request.ExpectedRuntimeGeneration),
-		request.TargetVersion,
-		out,
-		callErr,
-	)
+	if request.Validate() == nil {
+		c.app.recordEmbeddedStartOutcome(
+			model.RuntimeOperationActivateUpdate,
+			request.OperationID,
+			request.ExpectedRuntimeIdentity,
+			uint64(request.ExpectedRuntimeGeneration),
+			request.TargetVersion,
+			out,
+			callErr,
+		)
+	}
 	release()
 	return out, callErr
 }

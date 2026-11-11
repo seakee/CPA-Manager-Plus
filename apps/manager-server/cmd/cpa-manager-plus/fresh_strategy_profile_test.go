@@ -1618,6 +1618,260 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		}
 		releaseOnce.Do(func() { close(releaseSpawn) })
 	})
+
+	t.Run("offline_with_armed_or_recovering_automatic_recovery_blocks_external_commit_until_disarmed", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		var recoveryState atomic.Value
+		recoveryState.Store("armed")
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path != "/v1/runtime/status" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			recState := recoveryState.Load().(string)
+			attempts := "3"
+			if recState == "inactive" || recState == "manual_intervention" {
+				attempts = "0"
+			}
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"` + recState + `","attemptsRemaining":` + attempts + `}}`))
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("armed-recovery-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, blockedState := range []string{"armed", "recovering"} {
+			recoveryState.Store(blockedState)
+			res := postConnectExternal(t, app, externalServer.URL)
+			if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), `"embedded_runtime_not_stopped"`) {
+				t.Fatalf("ConnectExternal with offline + recovery=%s = %d %s, want 409 embedded_runtime_not_stopped",
+					blockedState, res.Code, res.Body.String())
+			}
+		}
+
+		// Once automatic recovery is disarmed (manual_intervention), offline is stable and ConnectExternal commits.
+		recoveryState.Store("manual_intervention")
+		okRes := postConnectExternal(t, app, externalServer.URL)
+		if okRes.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal with offline + recovery=manual_intervention = %d %s, want 200", okRes.Code, okRes.Body.String())
+		}
+	})
+
+	t.Run("transient_observe_update_error_preserves_trailing_unresolved_start", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		var observeCalls atomic.Int32
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/activate-update", "/v1/runtime/operations/start":
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/v1/runtime/operations/update":
+				if observeCalls.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"error":{"code":"operation_persistence_unavailable","message":"busy"}}`))
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"operation_not_found","message":"not found"}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("observe-preserve-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Populate [activate_update, start] in unresolvedStarts via dropped Supervisor RPCs.
+		_, _ = app.embeddedRuntimeClient().ActivateUpdate(t.Context(), model.RuntimeActivateUpdateRequest{
+			RuntimeMutationRequest: model.RuntimeMutationRequest{
+				OperationID:               "activate-01",
+				ExpectedRuntimeIdentity:   "runtime-01",
+				ExpectedRuntimeGeneration: 1,
+			},
+			ExpectedActiveArtifactID: artifactID,
+			TargetVersion:            "8.0.56",
+		})
+		_, _ = app.embeddedRuntimeClient().Start(t.Context(), model.RuntimeMutationRequest{
+			OperationID:               "start-02",
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 1,
+			ExpectedActiveArtifactID:  artifactID,
+		})
+
+		firstRes := postConnectExternal(t, app, externalServer.URL)
+		if firstRes.Code != http.StatusServiceUnavailable {
+			t.Fatalf("first ConnectExternal on transient ObserveUpdateOperation 503 = %d %s, want 503", firstRes.Code, firstRes.Body.String())
+		}
+
+		// On retry, activate-01 resolves as operation_not_found, while trailing start-02 MUST remain fenced.
+		secondRes := postConnectExternal(t, app, externalServer.URL)
+		if secondRes.Code != http.StatusConflict || !strings.Contains(secondRes.Body.String(), `"embedded_runtime_start_unresolved"`) {
+			t.Fatalf("second ConnectExternal after transient observe error = %d %s, want 409 embedded_runtime_start_unresolved",
+				secondRes.Code, secondRes.Body.String())
+		}
+	})
+
+	t.Run("failed_activate_update_rollback_to_running_embedded_cpa_reobserves_status_and_blocks_external_commit", func(t *testing.T) {
+		externalServer := newExternalUpstream(t)
+		var statusCalls atomic.Int32
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				// Initial fence probe sees offline right before ActivateUpdate finishes rolling
+				// back to the prior running Embedded CPA; re-observation sees ready + armed.
+				if statusCalls.Add(1) == 1 {
+					_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"ready","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"armed","attemptsRemaining":3}}`))
+			case "/v1/runtime/operations/activate-update":
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/v1/runtime/operations/update":
+				_, _ = w.Write([]byte(`{"operationId":"activate-rollback-01","operationType":"activate_update","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"failed","createdAt":"2026-11-11T00:00:00Z","updatedAt":"2026-11-11T00:00:02Z","completedAt":"2026-11-11T00:00:02Z","error":{"code":"internal_error","message":"candidate failed; rolled back to prior CPA"}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("activate-rollback-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		app.strategy = freshstrategy.New(freshstrategy.Options{
+			Protector:     opened.Protector,
+			Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		})
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _ = app.embeddedRuntimeClient().ActivateUpdate(t.Context(), model.RuntimeActivateUpdateRequest{
+			RuntimeMutationRequest: model.RuntimeMutationRequest{
+				OperationID:               "activate-rollback-01",
+				ExpectedRuntimeIdentity:   "runtime-01",
+				ExpectedRuntimeGeneration: 1,
+			},
+			ExpectedActiveArtifactID: artifactID,
+			TargetVersion:            "8.0.56",
+		})
+
+		res := postConnectExternal(t, app, externalServer.URL)
+		if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), `"embedded_runtime_not_stopped"`) {
+			t.Fatalf("ConnectExternal after failed ActivateUpdate rollback = %d %s, want 409 embedded_runtime_not_stopped",
+				res.Code, res.Body.String())
+		}
+	})
 }
 
 // TestRuntimeModeFollowsCommittedStrategyWithoutRuntimeClient verifies P2-1:
