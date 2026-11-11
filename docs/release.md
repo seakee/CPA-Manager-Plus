@@ -576,7 +576,7 @@ it is not a pre-generated claim about mutable base-image packages. Regenerate it
 when the Go/Web manifests or lock change:
 
 ```sh
-python3 bin/release/collect-third-party-licenses.py source --root . \
+python3 bin/release/collect-third-party-licenses.py source-inventory --root . \
   --output bin/release/embedded-third-party-inventory.txt
 ```
 
