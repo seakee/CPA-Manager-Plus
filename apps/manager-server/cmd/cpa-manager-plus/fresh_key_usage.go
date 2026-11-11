@@ -305,6 +305,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false
 			}
+			a.activeExternalGrant.Store(activeCollectorGrant{})
 			if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
 				log.Printf("Fresh usage collection unavailable: %v", err)
 				a.setUsageStartReason(usageStartReasonCollectorFailed)

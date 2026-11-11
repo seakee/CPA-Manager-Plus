@@ -124,11 +124,16 @@ func (a *freshApplication) stopUsageCollection(ctx context.Context) {
 	a.stopUsageCollectionLocked(ctx)
 }
 
+type activeCollectorGrant struct {
+	grant externalReadGrant
+	runID uint64
+}
+
 func (a *freshApplication) stopUsageCollectionLocked(ctx context.Context) {
 	if a.legacyCollector != nil {
 		_ = a.legacyCollector.Stop(ctx)
 	}
-	a.activeExternalGrant.Store(externalReadGrant{})
+	a.activeExternalGrant.Store(activeCollectorGrant{})
 	a.usageStarted = false
 	a.usageCollectorStarted = false
 	a.setUsageStartReason("")
@@ -186,14 +191,6 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	if !gate.acquire(ctx) {
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	}
-	gateReleased := false
-	releaseGate := func() {
-		if !gateReleased {
-			gateReleased = true
-			gate.release()
-		}
-	}
-	defer releaseGate()
 
 	var (
 		grant   externalReadGrant
@@ -204,6 +201,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		var record freshstore.Record
 		record, err = a.store.Load(ctx)
 		if err != nil {
+			gate.release()
 			log.Printf("Fresh external usage collection unavailable: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 		}
@@ -212,37 +210,41 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		install, err = a.externalSource(ctx)
 	}
 	if err != nil {
+		gate.release()
 		if errors.Is(err, cpa.ErrManagementRejected) {
-			releaseGate()
 			return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 		}
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	}
 	if grant.Refused {
-		releaseGate()
+		gate.release()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
 	rejectExternalCredential := func(rejectErr error) usageStartOutcome {
 		a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
-		releaseGate()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
+	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	defer hold.finish()
 	// Collection is only worth arming on a CPA this Manager can prove it manages:
 	// the version contract decides the enable write and every later write, so a
 	// CPA that does not serve it starts nothing. The refusal is the same typed
 	// code the write surfaces answer with, never an unexplained empty window.
-	switch report, err := cpa.ObserveExternalVersion(ctx, install.BaseURL, install.ManagementKey); {
+	switch report, err := cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey); {
 	case errors.Is(err, cpa.ErrManagementRejected):
-		return rejectExternalCredential(err)
+		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		hold.finish()
+		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	case err != nil:
+		hold.finish()
 		log.Printf("Fresh external usage version unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	case report.WriteBlocked:
-		releaseGate()
+		hold.finish()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonVersionUnsupported)
 	}
-	// The first authenticated sample of this attempt is also the read of the
+	hold.finish()
 	// switch that decides whether anything has to be written at all.
 	enabled, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
 	switch {
@@ -280,7 +282,6 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
 	}
-	releaseGate()
 	// Staged keys are attributed to the connection identity, never to a raw
 	// address and never to the managed destination: another CPA is another
 	// identity, so a rebind can never inherit this history.
@@ -293,14 +294,22 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		log.Printf("Fresh external usage collection configuration unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	}
+	expectedRunID := a.legacyCollector.StartCount() + 1
+	a.activeExternalGrant.Store(activeCollectorGrant{
+		grant: grant,
+		runID: expectedRunID,
+	})
 	if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
+		a.activeExternalGrant.Store(activeCollectorGrant{})
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
+	}
+	if hook := a.afterExternalCollectorStart; hook != nil {
+		hook()
 	}
 	if a.collectionPhase() == usageapp.PhaseStopped {
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
 	}
-	a.activeExternalGrant.Store(grant)
 	return usageStartOutcome{Started: true}
 }
 
@@ -321,16 +330,32 @@ func (a *freshApplication) refuseExternalUsage(ctx context.Context, reason strin
 // latch: a live Collector that kept retrying a rotated credential would turn the
 // user's rotation into an address ban, and a latched start would keep the
 // workspace claiming coverage that no longer exists.
-func (a *freshApplication) reportCollectorAuthRejection() {
+func (a *freshApplication) reportCollectorAuthRejection(runID uint64) {
+	if done := a.afterCollectorAuthRejection; done != nil {
+		defer done(runID)
+	}
+	if hook := a.beforeCollectorAuthRejectionLock; hook != nil {
+		hook(runID)
+	}
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
-	if grant, ok := a.activeExternalGrant.Load().(externalReadGrant); ok && grant.Identity != "" && grant.Credential != "" {
+	if a.legacyCollector != nil {
+		if runID != 0 && a.legacyCollector.StartCount() != runID {
+			return
+		}
+		if a.collectionPhase() != usageapp.PhaseStopped {
+			return
+		}
+	}
+	if active, ok := a.activeExternalGrant.Load().(activeCollectorGrant); ok &&
+		(runID == 0 || active.runID == runID) &&
+		active.grant.Identity != "" && active.grant.Credential != "" {
 		recordCtx := a.runCtx
 		if recordCtx == nil {
 			recordCtx = context.Background()
 		}
-		a.noteExternalRejection(recordCtx, grant, cpa.ErrManagementRejected)
-		a.activeExternalGrant.Store(externalReadGrant{})
+		a.noteExternalRejection(recordCtx, active.grant, cpa.ErrManagementRejected)
+		a.activeExternalGrant.Store(activeCollectorGrant{})
 	}
 	a.usageCollectorStarted = false
 	a.usageStarted = false

@@ -932,3 +932,154 @@ func TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection(t *testing.
 		})
 	}
 }
+
+// TestExternalCollectorAuthRejectionScopesGrantToActiveRun proves both halves
+// of the run-scoped External Collector grant invariant:
+//  1. A stale Collector run's delayed reportCollectorAuthRejection arriving
+//     after POST external/rebind already started a new Collector run never
+//     marks the rebound credential as refused or clears the new run's latches.
+//  2. An immediate in-window Collector auth refusal firing before
+//     startExternalUsageCollector finishes checking collectionPhase still
+//     observes its pre-stored grant and records externalReadGrant.Refused.
+func TestExternalCollectorAuthRejectionScopesGrantToActiveRun(t *testing.T) {
+	t.Run("stale run auth refusal across rebind does not poison rebound credential", func(t *testing.T) {
+		h := newExternalUsageHarness(t)
+		h.cpa.enabled.Store(true)
+		h.app.startUsageCollection(h.operation(t))
+		if !h.app.usageCollectionStarted() {
+			t.Fatal("initial collection did not start")
+		}
+		waitForCondition(t, func() bool { return h.cpa.queueReads.Load() > 0 })
+
+		staleAtLock := make(chan struct{})
+		releaseStale := make(chan struct{})
+		staleDone := make(chan struct{})
+		var lockOnce, doneOnce sync.Once
+		h.app.beforeCollectorAuthRejectionLock = func(runID uint64) {
+			if runID == 1 {
+				lockOnce.Do(func() {
+					close(staleAtLock)
+					<-releaseStale
+				})
+			}
+		}
+		h.app.afterCollectorAuthRejection = func(runID uint64) {
+			if runID == 1 {
+				doneOnce.Do(func() { close(staleDone) })
+			}
+		}
+
+		rotated := strings.Repeat("e", 64)
+		h.cpa.management.Store(rotated)
+
+		select {
+		case <-staleAtLock:
+		case <-time.After(5 * time.Second):
+			t.Fatal("run #1 did not reach reportCollectorAuthRejection after key rotation")
+		}
+
+		rebindResp := h.call(t, http.MethodPost, "external/rebind", rebindBody("", rotated))
+		if rebindResp.Code != http.StatusOK {
+			t.Fatalf("rebind = %d %s", rebindResp.Code, rebindResp.Body.String())
+		}
+		if got := h.app.legacyCollector.StartCount(); got != 2 {
+			t.Fatalf("StartCount after rebind = %d, want 2", got)
+		}
+		if !h.app.usageCollectionStarted() {
+			t.Fatalf("collection did not restart on rebound credential (reason=%q)", h.app.usageStartBlock())
+		}
+
+		close(releaseStale)
+		select {
+		case <-staleDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stale reportCollectorAuthRejection did not finish")
+		}
+
+		if h.app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("stale run #1 auth refusal falsely marked the rebound credential as refused")
+		}
+		if !h.app.usageCollectionStarted() || h.app.collectionPhase() == usageapp.PhaseStopped {
+			t.Fatalf("stale run #1 auth refusal cleared active run #2 state: started=%v phase=%s", h.app.usageCollectionStarted(), h.app.collectionPhase())
+		}
+		if got := h.app.usageStartBlock(); got != "" {
+			t.Fatalf("stale run #1 auth refusal set usageStartBlock = %q, want empty", got)
+		}
+		if usageResp := h.call(t, http.MethodGet, "external/usage", ""); usageResp.Code != http.StatusOK {
+			t.Fatalf("GET external/usage after stale callback = %d %s, want 200", usageResp.Code, usageResp.Body.String())
+		}
+	})
+
+	t.Run("immediate in-window auth refusal before StartRuntime return records grant", func(t *testing.T) {
+		var upstreamCalls atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstreamCalls.Add(1)
+			switch r.URL.Path {
+			case "/v0/management/config":
+				w.Header().Set("X-CPA-Version", "v8.0.13")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			case "/v0/management/usage-statistics-enabled":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+			case "/v0/management/usage-queue":
+				// Key rotated right before the Collector's first queue poll.
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer upstream.Close()
+
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+		app := newExternalApp(t, upstream.URL, externalAuthorityManagement)
+		app.runCtx = hostCtx
+		app.cfg.CollectorMode = "http"
+
+		inWindowAtLock := make(chan struct{})
+		rejectionDone := make(chan struct{})
+		var lockOnce, doneOnce sync.Once
+		app.beforeCollectorAuthRejectionLock = func(uint64) {
+			lockOnce.Do(func() { close(inWindowAtLock) })
+		}
+		app.afterExternalCollectorStart = func() {
+			<-inWindowAtLock
+		}
+		app.afterCollectorAuthRejection = func(uint64) {
+			doneOnce.Do(func() { close(rejectionDone) })
+		}
+
+		record, err := app.store.Load(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app.startUsageCollection(record.Operation)
+
+		select {
+		case <-rejectionDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-window reportCollectorAuthRejection did not complete")
+		}
+
+		if !app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("immediate in-window Collector auth refusal did not persist externalReadGrant.Refused")
+		}
+		if app.usageCollectionStarted() || app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("collector remained active after in-window refusal: started=%v phase=%s", app.usageCollectionStarted(), app.collectionPhase())
+		}
+		if got := app.usageStartBlock(); got != freshconfig.ReasonManagementRejected {
+			t.Fatalf("usageStartBlock = %q, want %q", got, freshconfig.ReasonManagementRejected)
+		}
+
+		callsAfterRefusal := upstreamCalls.Load()
+		modelsResp := installationAPI(t, app, http.MethodGet, "cpamp/v1/models", strategyTestAdmin)
+		if modelsResp.Code != http.StatusConflict || errorCode(t, modelsResp) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("cpamp/v1/models after in-window refusal = %d %s, want 409", modelsResp.Code, modelsResp.Body.String())
+		}
+		if got := upstreamCalls.Load() - callsAfterRefusal; got != 0 {
+			t.Fatalf("cpamp/v1/models sent %d upstream requests after recorded in-window refusal, want 0", got)
+		}
+	})
+}

@@ -202,11 +202,14 @@ type freshApplication struct {
 	// usageStartMu serializes post-completion startup attempts and guards the
 	// two success flags below. Only a fully successful attempt is recorded, so a
 	// failed start is retried by a completion replay or a later trigger.
-	usageStartMu             sync.Mutex
-	beforeUsageReconcileLock func()
-	usageStarted             bool
-	usageWorkersStarted      bool
-	usageCollectorStarted    bool
+	usageStartMu                     sync.Mutex
+	beforeUsageReconcileLock         func()
+	beforeCollectorAuthRejectionLock func(runID uint64)
+	afterCollectorAuthRejection      func(runID uint64)
+	afterExternalCollectorStart      func()
+	usageStarted                     bool
+	usageWorkersStarted              bool
+	usageCollectorStarted            bool
 	// usageStartReason is the stable code of the last refused Collector start.
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.
@@ -290,7 +293,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// terminal, not a retry: the Collector stops itself and reports, and this
 	// application records the blocker and drops the started latch so the
 	// workspace stops claiming coverage.
-	legacyCollector.SetAuthRejectionHandler(a.reportCollectorAuthRejection)
+	legacyCollector.SetAuthRejectionRunHandler(a.reportCollectorAuthRejection)
 	// The Collector is the only writer of Fresh usage events, so its inserts are
 	// exactly what the canonical identity projection must attribute.
 	a.usageProjection = identityprojection.NewWorker(legacyStore.IdentityProjections)
