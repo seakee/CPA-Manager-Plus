@@ -189,9 +189,12 @@ jobs:
         working-directory: apps/manager-server
         run: go test -race ./internal/domain/bootstrap
 
+      # The cmd package alone runs close to Go's 10-minute default under -race on
+      # hosted runners; an explicit ceiling keeps a slow runner from reading as a
+      # hang while still stopping a real one.
       - name: Race test Fresh admission and authentication cutover
         working-directory: apps/manager-server
-        run: go test -race ./cmd/cpa-manager-plus ./internal/processlock ./internal/repository/freshstore ./internal/repository/freshkeys ./internal/service/fresh ./internal/service/freshrouting ./internal/service/freshstrategy ./internal/service/cpa ./internal/service/freshkeyapply ./internal/service/freshconfig ./internal/http/controller/freshbootstrap
+        run: go test -race -timeout 20m ./cmd/cpa-manager-plus ./internal/processlock ./internal/repository/freshstore ./internal/repository/freshkeys ./internal/service/fresh ./internal/service/freshrouting ./internal/service/freshstrategy ./internal/service/cpa ./internal/service/freshkeyapply ./internal/service/freshconfig ./internal/http/controller/freshbootstrap
 
       - name: Race test Runtime ownership paths
         if: needs.changes.outputs.manager_runtime == 'true'
