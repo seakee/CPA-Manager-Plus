@@ -286,18 +286,24 @@ initial-install journal, and sets `ProductComplete = true` inside a single
 immediate SQLite transaction (`freshstore.TransactionalUpdater` +
 `freshkeyapply.CommitAdoptionTx`).
 
-- Every install-derived write or admission consumer on an `adopt_existing`
-  installation (`Targets`, `ConfigTarget`, `DefaultInstallCPAAuthorityProven`,
-  and the key-operation journal) requires **both** durable `ProductComplete`
-  and atomic `CommitAdoptionTx` registration evidence (`AdoptedSetSHA256` on the
-  one-shot journal paired with `fresh_s1_adoption_registration_v1`, canonical
-  key rows, and `gateway_api_key_source_bindings` for the committed Runtime
-  identity). Both `POST api-keys/<id>/initial-install` and
-  `freshkeyapply.Service.Apply` reject `adopt_existing` (`409 Conflict`, no
-  journal or CPA write), while `GET api-keys/<id>/initial-install` retains
-  read-only membership observation (`cpa.Transport.Configured`). If completion
-  is rejected by CAS, continuation expiry, a retired destination key, a source
-  binding conflict, a foreign journal (`409 adopt_installation_conflict`), or a
+- On an `adopt_existing` installation, `freshkeyapply.Service.Targets` is the
+  synchronous strategy, durable `ProductComplete`, and committed-checkpoint
+  discriminator; actual write and admission authorization comes from
+  `ConfigTarget`, `operationTarget` (the key-operation journal), and
+  `DefaultInstallCPAAuthorityProven` calling `requireInstallJournal` ->
+  `VerifyAdoptionRegistration` (`AdoptedSetSHA256` on the one-shot journal
+  paired with `fresh_s1_adoption_registration_v1`, canonical key rows, and
+  `gateway_api_key_source_bindings` for the committed Runtime identity). Any
+  replay of `RegisterAdoptionTx` against an already-committed adoption set must
+  match the committed canonical key-set digest (`AdoptedSetSHA256`,
+  order-independent) inside the transaction before staging rows, or fail closed
+  with `ErrJournalConflict` (`409 adopt_installation_conflict`). Both `POST
+  api-keys/<id>/initial-install` and `freshkeyapply.Service.Apply` reject
+  `adopt_existing` (`409 Conflict`, no journal or CPA write), while `GET
+  api-keys/<id>/initial-install` retains read-only membership observation
+  (`cpa.Transport.Configured`). If completion is rejected by CAS, continuation
+  expiry, a retired destination key, a source binding conflict, a foreign or
+  divergent-set journal (`409 adopt_installation_conflict`), or a
   decryption/storage failure — including an outermost Fresh store read outage on
   the canonical route (`503 adopt_installation_unavailable`) — the transaction
   rolls back completely: neither adopted workspace records, nor source bindings,
