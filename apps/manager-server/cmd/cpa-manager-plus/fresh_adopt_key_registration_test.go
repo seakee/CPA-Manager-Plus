@@ -10,9 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -57,6 +58,7 @@ func wireAdoptManagedAuthority(app *freshApplication, rt *migrationRuntime, dest
 		return cpa.PostureFor(install.Strategy)
 	})
 }
+
 // Completion is where an adopted destination's client keys become the Key
 // workspace's records and the install journal is claimed, so the credentials the
 // console listed as migrated are the credentials it can now revoke or replace.
@@ -470,9 +472,26 @@ func TestAdoptCompletionEnablesRealConfigAndPluginWritesAcrossRestart(t *testing
 		t.Fatalf("pre-completion plugin capability = %+v", beforePlugin.Capability)
 	}
 	assertNoAdoptWriteAuthority(t, fixture, strings.Repeat("a", 32), strings.Repeat("b", 32))
+	// The navigation's plugin answer is wired as production wires it, with the
+	// refresh run inline so each read observes the proof it triggered. A page
+	// load during the wizard caches "no plugins" for a whole TTL.
+	navigation := newPluginCapabilityProbe(time.Hour, time.Minute, fixture.app.v8PluginCapable)
+	navigation.launch = func(refresh func()) { refresh() }
+	fixture.app.pluginCapability = navigation
+	navigation.capable(ctx)
+	if navigation.capable(ctx) {
+		t.Fatal("plugin support advertised before adoption completed")
+	}
 
 	if response := fixture.complete(t); response.Code != http.StatusOK {
 		t.Fatalf("complete = %d %s", response.Code, response.Body.String())
+	}
+	// Completion changes what the saved connection can serve, so the cached
+	// pre-completion answer must not outlive it: the first read re-proves and the
+	// next one advertises plugins.
+	navigation.capable(ctx)
+	if !navigation.capable(ctx) {
+		t.Fatal("plugin support still hidden after adoption completed")
 	}
 
 	// 1. Gateway configuration: perform a real group save and read back.

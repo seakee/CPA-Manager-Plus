@@ -371,6 +371,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 	if _, err := a.ensureManagedRuntimeDesiredRunning(r.Context(), decision.next.Operation); err != nil {
 		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 	}
+	// The gateway reported no plugin support while completion was pending, and
+	// that answer may be cached; the completed install has to be probed afresh.
+	a.pluginCapability.forget()
 	// Completion is the moment the install-derived CPA authority exists, so the
 	// same idempotent startup path as a resumed install runs now.
 	a.startUsageCollection(decision.next.Operation)
