@@ -1028,6 +1028,41 @@ it('names the recorded External refusal instead of the generic setup error', asy
   expect(alert).not.toBe(j('setupError'));
 });
 
+it('turns each guarded Supervisor refusal into its own recovery message', async () => {
+  const cases = [
+    ['embedded_supervisor_status_unavailable', 'setupBlockerSupervisorUnavailable'],
+    ['embedded_runtime_start_unresolved', 'setupBlockerRuntimeStartUnresolved'],
+    ['embedded_runtime_not_stopped', 'setupBlockerRuntimeNotStopped'],
+    ['embedded_runtime_recovery_unverified', 'setupBlockerRuntimeRecoveryUnverified'],
+  ] as const;
+  // The sentences that cover every unfinished setup, and every other mapped
+  // refusal: none of them may stand in for the state the Manager named.
+  const generic = new Set([j('setupError'), s('runtimeVerifyRequired')]);
+  for (const [, key] of cases) generic.add(x(key));
+  generic.add(x('setupBlockerUnreachable'));
+  for (const [code, key] of cases) {
+    await setup({ external: true, externalRefusal: code });
+    await click('setup-review');
+    await input('confirm-key-saved-checkbox', true);
+    await click('setup-execute');
+    const alert = renderer.root.findByProps({ role: 'alert' }).props.children;
+    // The operator reads the recovery for the state the Manager named, not a
+    // sentence that covers every unfinished setup.
+    expect(code + ': ' + String(alert)).toBe(code + ': ' + x(key));
+    expect(alert).not.toBe(j('setupError'));
+    for (const other of generic) if (other !== x(key)) expect(alert).not.toBe(other);
+  }
+});
+
+it('keeps the generic setup error for a Supervisor refusal it cannot name', async () => {
+  await setup({ external: true, externalRefusal: 'embedded_runtime_unknown_state' });
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  const alert = renderer.root.findByProps({ role: 'alert' }).props.children;
+  expect(alert).toBe(j('setupError'));
+});
+
 it('states what the review does not migrate for each installation method', async () => {
   await setup({ external: true });
   await click('setup-review');

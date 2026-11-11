@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import type { FreshOperation } from './bootstrapTransport';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
-import { setFullWebLanguage } from '../i18n/fullweb';
+import { fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
 const initial: FreshOperation = {
   identity: {
@@ -274,5 +275,75 @@ describe('Fresh External initialization', () => {
     await ui.click('external-review');
     expect(ui.has('external-connect')).toBe(false);
     expect(ui.post).not.toHaveBeenCalled();
+  });
+
+  it('turns each guarded Supervisor refusal into its own recovery message', async () => {
+    const cases = [
+      ['embedded_supervisor_status_unavailable', 'setupBlockerSupervisorUnavailable'],
+      ['embedded_runtime_start_unresolved', 'setupBlockerRuntimeStartUnresolved'],
+      ['embedded_runtime_not_stopped', 'setupBlockerRuntimeNotStopped'],
+      ['embedded_runtime_recovery_unverified', 'setupBlockerRuntimeRecoveryUnverified'],
+    ] as const;
+    const generic = new Set([
+      t('externalConflict'),
+      t('externalUnavailable'),
+      t('externalSourceAuthRejected'),
+    ]);
+    for (const [code, key] of cases) {
+      // The wire shape the Manager writes: a bounded code beside its English
+      // Action sentence, which no localized surface may render.
+      const post = vi
+        .fn()
+        .mockRejectedValue(
+          new PublicApiError(
+            'http',
+            409,
+            undefined,
+            code,
+            undefined,
+            'cpamp-runtime-supervisor is configured (CPAMP_RUNTIME_URL) but unreachable.'
+          )
+        );
+      const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+      await ui.prepare();
+      await ui.click('external-connect');
+      const alert = ui.renderer.root.findByProps({ role: 'alert' }).props.children;
+      expect(code + ': ' + String(alert)).toBe(code + ': ' + x(key));
+      expect(alert).not.toBe(t('externalConflict'));
+      for (const other of generic) expect(alert).not.toBe(other);
+      const shown = JSON.stringify(ui.renderer.toJSON());
+      expect(shown).not.toContain('CPAMP_RUNTIME_URL) but unreachable');
+      expect(shown).not.toContain(
+        'restart cpamp-runtime-supervisor or the container, then retry Connect External'
+      );
+    }
+  });
+
+  it('keeps the generic conflict for a refusal it cannot name', async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValue(new PublicApiError('http', 409, undefined, 'embedded_runtime_unknown'));
+    const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+    await ui.prepare();
+    await ui.click('external-connect');
+    expect(ui.renderer.root.findByProps({ role: 'alert' }).props.children).toBe(
+      t('externalConflict')
+    );
+  });
+
+  it('re-reads the recovery message in the operator language after a switch', async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValue(
+        new PublicApiError('http', 409, undefined, 'embedded_supervisor_status_unavailable')
+      );
+    const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+    await ui.prepare();
+    await ui.click('external-connect');
+    await act(async () => setFullWebLanguage('ru'));
+    expect(ui.renderer.root.findByProps({ role: 'alert' }).props.children).toBe(
+      x('setupBlockerSupervisorUnavailable')
+    );
+    expect(String(x('setupBlockerSupervisorUnavailable'))).toContain('cpamp-runtime-supervisor');
   });
 });
