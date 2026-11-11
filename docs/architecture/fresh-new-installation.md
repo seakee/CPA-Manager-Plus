@@ -279,18 +279,24 @@ An `adopt_existing` installation stages the source CPA's own client key list to 
 destination, so the keys that authenticate model traffic there were never minted by
 this Manager: their shape is the source CPA's — any printable token up to the
 adoption bound — not one of the two canonical shapes above. Completion is where
-they become Manager-managed: `freshkeyapply.RegisterAdoption` records one canonical
-row per destination key with `origin = 'adopted'`, the protected ciphertext, the
-`sha256` digest and a masked preview, and then claims the same one-shot
-initial-install journal as a `new_managed` install.
+they become Manager-managed: `POST complete` commits one canonical row per
+destination key (`origin = 'adopted'`, protected ciphertext, `sha256` digest,
+masked preview and optional source binding), claims the one-shot
+initial-install journal, and sets `ProductComplete = true` inside a single
+immediate SQLite transaction (`freshstore.TransactionalUpdater` +
+`freshkeyapply.CommitAdoptionTx`).
 
-- The journal's `KeyID` is the first registered adopted key, bound to the staged
-  run, Runtime generation and provider seed. That binding is what
-  `freshkeyapply.operationTarget` compares, so the gateway configuration page, the
-  plugin runtime switch and the revoke/replace journal all answer for an adopted
-  installation exactly as for a New Managed one. Registering does not relax any
-  check: a journal another installation owns, or a destination key this Manager
-  already retired, is `ErrAdoptionConflict` and never a silent rebind.
+- Every install-derived write or admission consumer on an `adopt_existing`
+  installation (`Targets`, `ConfigTarget`, `DefaultInstallCPAAuthorityProven`,
+  and the key-operation journal) requires **both** durable `ProductComplete`
+  and the matching one-shot install journal (`KeyID` bound to the first
+  registered adopted key and to the staged run, Runtime generation and provider
+  seed). If completion is rejected by CAS, continuation expiry, a retired
+  destination key, a source binding conflict, a foreign journal (`409
+  adopt_installation_conflict`), or a decryption/storage failure (`503
+  adopt_installation_unavailable`), the transaction rolls back completely:
+  neither adopted workspace records, nor source bindings, nor the journal, nor
+  write authority remain behind.
 - The `initial-install` observation reads an adopted destination by **membership**:
   `cpa.Transport.Configured` answers whether the staged secret is one of the keys
   the CPA serves, because an adopted `access.api-keys` is the source CPA's list
@@ -320,6 +326,15 @@ initial-install journal as a `new_managed` install.
   every other key: authenticated Admin only, `Cache-Control: no-store`, superseded
   keys refused. The plaintext is returned only for that explicit copy action; the
   list and detail projections stay masked.
+- `sqlite.Migrate` (`ensureFreshKeyOrigins`) widens pre-adoption
+  `fresh_client_api_keys` tables inside a `BEGIN IMMEDIATE` transaction after
+  re-checking `sqlite_master` under the write lock, so concurrent openers
+  rebuild the table at most once. Because `origin = 'adopted'` records are
+  linked to `gateway_api_key_identities`, `gateway_api_key_source_bindings` and
+  the `fresh_s1_initial_key_install_v1` journal, downgrading to a pre-adoption
+  binary after completing an adoption requires restoring the pre-upgrade backup
+  of the SQLite database and `data.key` rather than deleting
+  `fresh_client_api_keys` rows in isolation.
 
 #### Where the installer Client Key lives at rest
 
@@ -431,10 +446,11 @@ Compose install, the attested private target for the host-permit profile — and
 takes the asking surface as an argument, so each surface keeps the contract it
 shipped with instead of a second inline check. Initial install, key
 revoke/replace and the private chat consumer all ask it. Under the managed
-profile it answers for a `new_managed` and an `adopt_existing` checkpoint alike —
-that is the install-derived authority an adoption registers — while under the
-private profile the same surfaces still require the attested `new_managed`
-strategy, so an adopted, External or uncommitted checkpoint is refused there;
+profile it answers for a `new_managed` checkpoint and for a **completed**
+`adopt_existing` checkpoint (`ProductComplete = true`) — an unfinished adoption
+holds no target or write authority — while under the private profile the same
+surfaces still require the attested `new_managed` strategy, so an adopted,
+External or uncommitted checkpoint is refused there;
 chat admission then narrows further at its own length gate, since the proof it
 carries is the one this Manager minted. The gateway configuration page asks the
 same discriminator under its own surface: on a managed install it answers with
