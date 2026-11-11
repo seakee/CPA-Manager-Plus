@@ -271,6 +271,10 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 				resolvedGrant, _, targetErr := app.externalReadTargetFor(snapshotCtx, record)
 				if targetErr != nil {
 					gate.release()
+					if ctx.Err() != nil {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
 					if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusConflict)
@@ -284,7 +288,17 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 				}
 				grant = resolvedGrant
 			} else {
-				grant = app.externalReadGrantFor(snapshotCtx, record)
+				resolvedGrant, grantErr := app.externalReadGrantFor(snapshotCtx, record)
+				if grantErr != nil {
+					gate.release()
+					if ctx.Err() != nil {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
+					writeExternalAuthorityUnavailable(w)
+					return
+				}
+				grant = resolvedGrant
 			}
 			if grant.Refused {
 				gate.release()
@@ -338,6 +352,10 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			resolvedGrant, install, targetErr := app.externalReadTargetFor(snapshotCtx, record)
 			if targetErr != nil {
 				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
 				if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusConflict)
@@ -352,7 +370,17 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			grant = resolvedGrant
 			snapshotCtx = proxysvc.WithSavedSetupOverride(snapshotCtx, install.BaseURL, install.ManagementKey)
 		} else {
-			grant = app.externalReadGrantFor(snapshotCtx, record)
+			resolvedGrant, grantErr := app.externalReadGrantFor(snapshotCtx, record)
+			if grantErr != nil {
+				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			grant = resolvedGrant
 		}
 		if grant.Refused {
 			gate.release()

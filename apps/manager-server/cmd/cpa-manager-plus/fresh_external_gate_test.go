@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -756,13 +759,24 @@ func TestExternalProviderBoundPathsOutliveHeaderBudgetWhileConsoleReadsExpire(t 
 
 	releaseHungReads := make(chan struct{})
 	defer close(releaseHungReads)
-	providerReady := make(chan struct{})
+	type providerGateRun struct {
+		entered chan struct{}
+		ready   chan struct{}
+		once    sync.Once
+	}
+	var activeProviderRun atomic.Value
+	activeProviderRun.Store(&providerGateRun{
+		entered: make(chan struct{}),
+		ready:   make(chan struct{}),
+	})
 
 	upstream := newGateUpstream(t, externalAuthorityManagement)
 	upstream.handle.Store(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/management/api-call/", "/v0/management/oauth-callback":
-			<-providerReady
+			run := activeProviderRun.Load().(*providerGateRun)
+			run.once.Do(func() { close(run.entered) })
+			<-run.ready
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v0/management/config.yaml":
@@ -784,24 +798,34 @@ func TestExternalProviderBoundPathsOutliveHeaderBudgetWhileConsoleReadsExpire(t 
 
 	for _, providerPath := range []string{"/v0/management/api-call/", "/v0/management/oauth-callback"} {
 		t.Run(strings.Trim(providerPath, "/"), func(t *testing.T) {
-			providerReady = make(chan struct{})
+			run := &providerGateRun{
+				entered: make(chan struct{}),
+				ready:   make(chan struct{}),
+			}
+			activeProviderRun.Store(run)
 			providerDone := make(chan int, 1)
 			go func() {
 				providerDone <- gateRequest(t, app, http.MethodPost, providerPath, gateAdmin).Code
 			}()
 
+			select {
+			case <-run.entered:
+			case <-time.After(5 * time.Second):
+				close(run.ready)
+				t.Fatalf("%s did not enter upstream handler before reference budget expirations", providerPath)
+			}
+
 			// Drive two real sequential console-read header-budget expirations (>= 2*budget
-			// elapsed wall-clock time) before allowing the provider-bound response headers.
+			// elapsed wall-clock time) after provider entry before allowing response headers.
 			if code := gateRequest(t, refAppA, http.MethodGet, "/v0/management/config.yaml", gateAdmin).Code; code != http.StatusBadGateway {
-				close(providerReady)
+				close(run.ready)
 				t.Fatalf("first hung config.yaml read = %d, want 502", code)
 			}
 			if code := gateRequest(t, refAppB, http.MethodGet, "/v0/management/config.yaml", gateAdmin).Code; code != http.StatusBadGateway {
-				close(providerReady)
+				close(run.ready)
 				t.Fatalf("second hung config.yaml read = %d, want 502", code)
 			}
-			close(providerReady)
-
+			close(run.ready)
 			select {
 			case code := <-providerDone:
 				if code != http.StatusOK {
@@ -2811,6 +2835,664 @@ func TestExternalWedgedRefusalPersistenceFailsClosedWithinBoundAndFreesGate(t *t
 		}
 		if sent := cpaSrv.requests.Load() - beforeWave2Refusal; sent != 1 {
 			t.Fatalf("wave 2 sent %d refused secondKey requests to CPA, want 1", sent)
+		}
+	})
+}
+
+type rejectionSQLController struct {
+	inFlight      atomic.Int32
+	maxConcurrent atomic.Int32
+	selectCalls   atomic.Int32
+
+	mu          sync.Mutex
+	onSelect    func() error
+	onDelete    func() error
+	afterInsert func(error)
+	afterDelete func(error)
+}
+
+func (c *rejectionSQLController) trackEnter() func() {
+	cur := c.inFlight.Add(1)
+	for {
+		prev := c.maxConcurrent.Load()
+		if cur <= prev || c.maxConcurrent.CompareAndSwap(prev, cur) {
+			break
+		}
+	}
+	return func() {
+		c.inFlight.Add(-1)
+	}
+}
+
+type controlledSQLiteConnector struct {
+	base driver.Driver
+	dsn  string
+	ctrl *rejectionSQLController
+}
+
+func (c controlledSQLiteConnector) Connect(context.Context) (driver.Conn, error) {
+	raw, err := c.base.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &controlledSQLiteConn{raw: raw, ctrl: c.ctrl}, nil
+}
+
+func (c controlledSQLiteConnector) Driver() driver.Driver { return c.base }
+
+type controlledSQLiteConn struct {
+	raw  driver.Conn
+	ctrl *rejectionSQLController
+}
+
+func (c *controlledSQLiteConn) Prepare(query string) (driver.Stmt, error) {
+	return c.raw.Prepare(query)
+}
+
+func (c *controlledSQLiteConn) Close() error { return c.raw.Close() }
+
+func (c *controlledSQLiteConn) Begin() (driver.Tx, error) { return c.raw.Begin() }
+
+func (c *controlledSQLiteConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	done := c.ctrl.trackEnter()
+	defer done()
+	if strings.Contains(strings.ToLower(query), "from settings") {
+		c.ctrl.selectCalls.Add(1)
+		c.ctrl.mu.Lock()
+		hook := c.ctrl.onSelect
+		c.ctrl.mu.Unlock()
+		if hook != nil {
+			if err := hook(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if qc, ok := c.raw.(driver.QueryerContext); ok {
+		rows, err := qc.QueryContext(ctx, query, args)
+		if !errors.Is(err, driver.ErrSkip) {
+			return rows, err
+		}
+	}
+	stmt, err := c.raw.Prepare(query)
+	if err != nil {
+		return nil, err
+	}
+	if sq, ok := stmt.(driver.StmtQueryContext); ok {
+		rows, qErr := sq.QueryContext(ctx, args)
+		if qErr != nil {
+			_ = stmt.Close()
+			return nil, qErr
+		}
+		return &closingDriverRows{Rows: rows, stmt: stmt}, nil
+	}
+	vals := make([]driver.Value, len(args))
+	for i, a := range args {
+		vals[i] = a.Value
+	}
+	rows, qErr := stmt.Query(vals)
+	if qErr != nil {
+		_ = stmt.Close()
+		return nil, qErr
+	}
+	return &closingDriverRows{Rows: rows, stmt: stmt}, nil
+}
+
+func (c *controlledSQLiteConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	done := c.ctrl.trackEnter()
+	defer done()
+	lower := strings.ToLower(strings.TrimSpace(query))
+	var (
+		afterDelete func(error)
+		afterInsert func(error)
+	)
+	switch {
+	case strings.HasPrefix(lower, "delete from settings"):
+		c.ctrl.mu.Lock()
+		hook := c.ctrl.onDelete
+		afterDelete = c.ctrl.afterDelete
+		c.ctrl.mu.Unlock()
+		if hook != nil {
+			if err := hook(); err != nil {
+				if afterDelete != nil {
+					afterDelete(err)
+				}
+				return nil, err
+			}
+		}
+	case strings.HasPrefix(lower, "insert into settings"):
+		c.ctrl.mu.Lock()
+		afterInsert = c.ctrl.afterInsert
+		c.ctrl.mu.Unlock()
+	}
+	runExec := func() (driver.Result, error) {
+		if ec, ok := c.raw.(driver.ExecerContext); ok {
+			res, err := ec.ExecContext(ctx, query, args)
+			if !errors.Is(err, driver.ErrSkip) {
+				return res, err
+			}
+		}
+		stmt, err := c.raw.Prepare(query)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = stmt.Close() }()
+		if se, ok := stmt.(driver.StmtExecContext); ok {
+			return se.ExecContext(ctx, args)
+		}
+		vals := make([]driver.Value, len(args))
+		for i, a := range args {
+			vals[i] = a.Value
+		}
+		return stmt.Exec(vals)
+	}
+	res, err := runExec()
+	if afterInsert != nil {
+		afterInsert(err)
+	}
+	if afterDelete != nil {
+		afterDelete(err)
+	}
+	return res, err
+}
+
+type closingDriverRows struct {
+	driver.Rows
+	stmt driver.Stmt
+}
+
+func (r *closingDriverRows) Close() error {
+	err1 := r.Rows.Close()
+	err2 := r.stmt.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
+func openControlledRejectionDB(t *testing.T, app *freshApplication, ctrl *rejectionSQLController) *sql.DB {
+	t.Helper()
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatalf("load fresh record for db path: %v", err)
+	}
+	dbPath := rec.Operation.Identity.DatabasePath
+	dsn := "file:" + filepath.ToSlash(dbPath) + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)"
+	db := sql.OpenDB(controlledSQLiteConnector{
+		base: app.rejection.db.Driver(),
+		dsn:  dsn,
+		ctrl: ctrl,
+	})
+	db.SetMaxOpenConns(4)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestExternalRejectionReadFailureFailsClosedAndRetainsPositiveBlocker verifies
+// that (1) a durable refusal write retains positive refusal state in memory so
+// subsequent requests in the same process answer 409 external_management_key_rejected
+// even if SQLite SELECT later fails, and (2) on cold start (empty in-memory
+// cache), a SQLite SELECT failure or corrupt refusal row fails closed across
+// native and bridged routes with zero additional CPA requests rather than
+// treating lookup failure as "not refused".
+func TestExternalRejectionReadFailureFailsClosedAndRetainsPositiveBlocker(t *testing.T) {
+	const rotatedKey = "read-fault-rotated-0000111122223333444455556666777788889999aa"
+
+	t.Run("in_process_retains_positive_blocker_when_sqlite_select_fails", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+
+		ctrl := &rejectionSQLController{}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+
+		first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("first gateway/config = %d %s, want 409 %s", first.Code, first.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("initial refusal CPA requests = %d, want 1", got)
+		}
+
+		ctrl.mu.Lock()
+		ctrl.onSelect = func() error {
+			return errors.New("simulated post-write sqlite select failure")
+		}
+		ctrl.mu.Unlock()
+		beforeSelects := ctrl.selectCalls.Load()
+
+		if cfgRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusConflict || errorCode(t, cfgRes) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("gateway/config under post-write select fault = %d %s, want 409", cfgRes.Code, cfgRes.Body.String())
+		}
+		if modelsRes := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsRes.Code != http.StatusConflict || errorCode(t, modelsRes) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("cpamp/v1/models under post-write select fault = %d %s, want 409", modelsRes.Code, modelsRes.Body.String())
+		}
+		if legacyRes := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); legacyRes.Code != http.StatusConflict || errorCode(t, legacyRes) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("legacy api-keys under post-write select fault = %d %s, want 409", legacyRes.Code, legacyRes.Body.String())
+		}
+		if got := ctrl.selectCalls.Load() - beforeSelects; got != 0 {
+			t.Fatalf("expected retained positive blocker to avoid SQLite SELECT, got %d SELECT calls", got)
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("CPA requests after post-write select fault = %d, want 1", got)
+		}
+	})
+
+	t.Run("cold_start_select_error_and_corrupt_row_fail_closed_across_surfaces", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+		stagedKey := stageExternalKeyForGateTest(t, app, "6", false)
+
+		baseRejectionDB := app.rejection.db
+		first := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+		var statusBody freshRuntimeStatusResponse
+		if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &statusBody) != nil || statusBody.ErrorCode != freshconfig.ReasonManagementRejected {
+			t.Fatalf("initial runtime/status = %d %s", first.Code, first.Body.String())
+		}
+		var savedValue string
+		if err := baseRejectionDB.QueryRowContext(
+			t.Context(),
+			`SELECT value FROM settings WHERE key = ?`,
+			externalRejectionKey,
+		).Scan(&savedValue); err != nil {
+			t.Fatalf("read persisted refusal row: %v", err)
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("initial refusal CPA requests = %d, want 1", got)
+		}
+
+		assertAllSurfacesFailClosed := func(label string) {
+			t.Helper()
+			if cfgRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: gateway/config = %d %s, want 503", label, cfgRes.Code, cfgRes.Body.String())
+			}
+			if modelsRes := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: cpamp/v1/models = %d %s, want 503", label, modelsRes.Code, modelsRes.Body.String())
+			}
+			if keysRes := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: api-keys list = %d %s, want 503", label, keysRes.Code, keysRes.Body.String())
+			}
+			if applyRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json"); applyRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: api-keys initial-install = %d %s, want 503", label, applyRes.Code, applyRes.Body.String())
+			}
+			if usageRes := gatewayRequest(t, app, http.MethodGet, "external/usage", "", ""); usageRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: GET external/usage = %d %s, want 503", label, usageRes.Code, usageRes.Body.String())
+			}
+			if confirmRes := gatewayRequest(t, app, http.MethodPost, "external/usage", `{"requestId":"`+strings.Repeat("b", 32)+`","confirmEnableStatistics":true}`, "application/json"); confirmRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: POST external/usage = %d %s, want 503", label, confirmRes.Code, confirmRes.Body.String())
+			}
+			rtRes := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+			var rtBody freshRuntimeStatusResponse
+			if rtRes.Code != http.StatusOK || json.Unmarshal(rtRes.Body.Bytes(), &rtBody) != nil || rtBody.Status != "unknown" || rtBody.ErrorCode != "runtime_unreachable" {
+				t.Fatalf("%s: runtime/status = %d %s, want 200 status=unknown errorCode=runtime_unreachable", label, rtRes.Code, rtRes.Body.String())
+			}
+			if legacyRes := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); legacyRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: legacy /v0/management/api-keys = %d %s, want 503", label, legacyRes.Code, legacyRes.Body.String())
+			}
+			inspectReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectReq.Header.Set("Content-Type", "application/json")
+			inspectReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			inspectRes := httptest.NewRecorder()
+			app.canonicalAPI(inspectRes, inspectReq)
+			if inspectRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: codex-inspection/run = %d %s, want 503", label, inspectRes.Code, inspectRes.Body.String())
+			}
+			if got := cpaSrv.requests.Load(); got != 1 {
+				t.Fatalf("%s: CPA received %d total requests, want 1 (zero additional requests)", label, got)
+			}
+		}
+
+		// 1. Cold-start instance with empty localBlocked and failing SQLite SELECT.
+		ctrl := &rejectionSQLController{
+			onSelect: func() error {
+				return errors.New("simulated cold-start sqlite select I/O error")
+			},
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		assertAllSurfacesFailClosed("cold_start_select_error")
+
+		// 2. Cold-start instance with corrupt JSON in fresh_external_rejection_v1.
+		ctrl.mu.Lock()
+		ctrl.onSelect = nil
+		ctrl.mu.Unlock()
+		if _, err := baseRejectionDB.ExecContext(
+			t.Context(),
+			`UPDATE settings SET value = '{corrupt' WHERE key = ?`,
+			externalRejectionKey,
+		); err != nil {
+			t.Fatalf("corrupt refusal row: %v", err)
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		assertAllSurfacesFailClosed("cold_start_corrupt_row")
+
+		// 3. Restore valid durable refusal row: cold-start read returns 409 rejected with 0 CPA hits.
+		if _, err := baseRejectionDB.ExecContext(
+			t.Context(),
+			`UPDATE settings SET value = ? WHERE key = ?`,
+			savedValue,
+			externalRejectionKey,
+		); err != nil {
+			t.Fatalf("restore refusal row: %v", err)
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		if recovered := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); recovered.Code != http.StatusConflict || errorCode(t, recovered) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("gateway/config after restoring durable row = %d %s, want 409", recovered.Code, recovered.Body.String())
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("CPA requests after restoring durable row = %d, want 1", got)
+		}
+	})
+}
+
+// TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutSlotReuse
+// exercises real driver-level non-returning SELECT and DELETE calls plus an
+// already-running INSERT finishing after rebind, proving bounded handler
+// completion, zero premature dbSlot reuse, and zero additional refused-key CPA
+// requests.
+func TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutSlotReuse(t *testing.T) {
+	t.Run("non_returning_select_bounds_caller_frees_gate_and_prevents_slot_reuse", func(t *testing.T) {
+		const rotatedKey = "nonreturning-select-rotated-0000111122223333444455556666777788"
+		cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+
+		// Persist durable refusal first.
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
+			t.Fatalf("initial refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("initial CPA requests = %d, want 1", got)
+		}
+
+		allowSelectReturn := make(chan struct{})
+		var allowOnce sync.Once
+		releaseSelect := func() { allowOnce.Do(func() { close(allowSelectReturn) }) }
+		t.Cleanup(releaseSelect)
+
+		selectEntered := make(chan struct{})
+		var selectOnce sync.Once
+		ctrl := &rejectionSQLController{
+			onSelect: func() error {
+				selectOnce.Do(func() { close(selectEntered) })
+				<-allowSelectReturn
+				return errors.New("stalled select released during cleanup")
+			},
+		}
+
+		// Simulate cold start so lookup must consult SQLite SELECT.
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		persistClockCh := make(chan time.Time, 2)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return persistClockCh, func() {}
+		}
+
+		leaderDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			leaderDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		}()
+
+		select {
+		case <-selectEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("cold-start lookup never entered SQLite SELECT")
+		}
+
+		waiterParked := make(chan struct{})
+		var waiterOnce sync.Once
+		app.legacyCredentialGate.onWait = func() {
+			waiterOnce.Do(func() { close(waiterParked) })
+		}
+		defer func() { app.legacyCredentialGate.onWait = nil }()
+
+		waiterDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			waiterDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+
+		select {
+		case <-waiterParked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("waiter never parked on legacyCredentialGate while SELECT was blocked")
+		}
+
+		// Expire leader's SELECT deadline: leader must return 503 locally and
+		// release legacyCredentialGate while the stalled SELECT still holds dbSlot.
+		persistClockCh <- time.Now()
+		select {
+		case leaderRes := <-leaderDone:
+			if leaderRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("leader under non-returning SELECT = %d %s, want 503", leaderRes.Code, leaderRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("leader remained stuck in non-returning SELECT after persist deadline")
+		}
+
+		// Expire waiter's dbSlot acquisition deadline: waiter must also return 503
+		// without spawning a second SQL operation while the first SELECT remains blocked.
+		persistClockCh <- time.Now()
+		select {
+		case waiterRes := <-waiterDone:
+			if waiterRes.Code != http.StatusServiceUnavailable {
+				t.Fatalf("waiter under wedged SELECT dbSlot = %d %s, want 503", waiterRes.Code, waiterRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("waiter remained stuck waiting on wedged SELECT dbSlot")
+		}
+
+		if got := ctrl.maxConcurrent.Load(); got != 1 {
+			t.Fatalf("max concurrent rejection SQL operations = %d, want 1 (no premature slot reuse)", got)
+		}
+		if got := ctrl.selectCalls.Load(); got != 1 {
+			t.Fatalf("total SQLite SELECT calls while first remained wedged = %d, want 1", got)
+		}
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("CPA received %d total requests, want 1 (zero additional requests)", got)
+		}
+	})
+
+	t.Run("non_returning_delete_on_rebind_completes_within_bound_without_slot_reuse", func(t *testing.T) {
+		const secondKey = "nonreturning-delete-second-0000111122223333444455556666777788"
+		const thirdKey = "nonreturning-delete-third-aaaabbbbccccddddeeeeffff000011112222"
+		cpaSrv := newStatefulExternalCPA(t, secondKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+
+		allowDeleteReturn := make(chan struct{})
+		var allowOnce sync.Once
+		releaseDelete := func() { allowOnce.Do(func() { close(allowDeleteReturn) }) }
+		t.Cleanup(releaseDelete)
+
+		deleteEntered := make(chan struct{})
+		var deleteOnce sync.Once
+		ctrl := &rejectionSQLController{}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
+			t.Fatalf("initial refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+
+		ctrl.mu.Lock()
+		ctrl.onDelete = func() error {
+			deleteOnce.Do(func() { close(deleteEntered) })
+			<-allowDeleteReturn
+			return errors.New("stalled delete released during cleanup")
+		}
+		ctrl.mu.Unlock()
+
+		persistClockCh := make(chan time.Time, 2)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return persistClockCh, func() {}
+		}
+
+		rebindDone := make(chan *httptest.ResponseRecorder, 1)
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, secondKey, strings.Repeat("c", 32))
+		go func() {
+			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		}()
+
+		select {
+		case <-deleteEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("rebind clear never entered SQLite DELETE")
+		}
+
+		persistClockCh <- time.Now()
+		select {
+		case rebindRes := <-rebindDone:
+			if rebindRes.Code != http.StatusOK {
+				t.Fatalf("external/rebind under non-returning DELETE = %d %s, want 200", rebindRes.Code, rebindRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("external/rebind remained stuck in non-returning DELETE after persist deadline")
+		}
+
+		// While DELETE still holds dbSlot, reads on the rebound secondKey must
+		// succeed without blocking on dbSlot or resurrecting the stale refusal.
+		if cfgOK := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgOK.Code != http.StatusOK {
+			t.Fatalf("gateway/config after rebind with wedged DELETE = %d %s, want 200", cfgOK.Code, cfgOK.Body.String())
+		}
+		if modelsOK := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsOK.Code != http.StatusOK {
+			t.Fatalf("cpamp/v1/models after rebind with wedged DELETE = %d %s, want 200", modelsOK.Code, modelsOK.Body.String())
+		}
+
+		// Rotate CPA to thirdKey while DELETE still holds dbSlot: refusal of secondKey
+		// times out on dbSlot, installs localBlocked, and prevents secondKey retries.
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = thirdKey
+		cpaSrv.mu.Unlock()
+		beforeRefusal := cpaSrv.requests.Load()
+
+		refuseDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			refuseDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+		persistClockCh <- time.Now()
+		select {
+		case refuseRes := <-refuseDone:
+			if refuseRes.Code != http.StatusConflict || errorCode(t, refuseRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("refusal under wedged DELETE slot = %d %s, want 409", refuseRes.Code, refuseRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("refusal hung waiting on wedged DELETE dbSlot")
+		}
+
+		if followUp := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); followUp.Code != http.StatusConflict || errorCode(t, followUp) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("follow-up after refusal under wedged DELETE = %d %s, want 409", followUp.Code, followUp.Body.String())
+		}
+		if sent := cpaSrv.requests.Load() - beforeRefusal; sent != 1 {
+			t.Fatalf("refused secondKey sent %d times to CPA, want 1", sent)
+		}
+		if got := ctrl.maxConcurrent.Load(); got != 1 {
+			t.Fatalf("max concurrent rejection SQL operations = %d, want 1 (no premature slot reuse)", got)
+		}
+	})
+
+	t.Run("late_running_insert_completing_after_rebind_is_flushed_before_cold_start", func(t *testing.T) {
+		const secondKey = "late-insert-second-0000111122223333444455556666777788889999aa"
+		cpaSrv := newStatefulExternalCPA(t, secondKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+		baseDB := app.rejection.db
+
+		allowInsertFinish := make(chan struct{})
+		var allowOnce sync.Once
+		releaseInsert := func() { allowOnce.Do(func() { close(allowInsertFinish) }) }
+		t.Cleanup(releaseInsert)
+
+		insertEntered := make(chan struct{})
+		var insertOnce sync.Once
+		deleteCompleted := make(chan error, 1)
+		var deleteDoneOnce sync.Once
+
+		ctrl := &rejectionSQLController{
+			afterInsert: func(err error) {
+				if err == nil {
+					insertOnce.Do(func() { close(insertEntered) })
+					<-allowInsertFinish
+				}
+			},
+			afterDelete: func(err error) {
+				deleteDoneOnce.Do(func() { deleteCompleted <- err })
+			},
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+
+		persistClockCh := make(chan time.Time, 2)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return persistClockCh, func() {}
+		}
+
+		// 1. Trigger refusal on K1; pause inside driver ExecContext(INSERT) after epoch check.
+		refuseDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			refuseDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+		select {
+		case <-insertEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("refusal never entered driver ExecContext(INSERT)")
+		}
+
+		// Expire record() persistence deadline so Request 1 finishes while INSERT is still in flight.
+		persistClockCh <- time.Now()
+		select {
+		case refuseRes := <-refuseDone:
+			if refuseRes.Code != http.StatusConflict {
+				t.Fatalf("initial refusal = %d %s, want 409", refuseRes.Code, refuseRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("initial refusal did not complete on persist deadline")
+		}
+
+		// 2. Rebind to secondKey while K1's INSERT is still running inside the driver.
+		rebindDone := make(chan *httptest.ResponseRecorder, 1)
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, secondKey, strings.Repeat("f", 32))
+		go func() {
+			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		}()
+		// Expire clear()'s slot wait so rebind finishes while INSERT still holds dbSlot.
+		persistClockCh <- time.Now()
+		select {
+		case rebindRes := <-rebindDone:
+			if rebindRes.Code != http.StatusOK {
+				t.Fatalf("rebind while INSERT in flight = %d %s, want 200", rebindRes.Code, rebindRes.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("rebind did not complete while INSERT held dbSlot")
+		}
+
+		var rowsWhilePaused int
+		if err := baseDB.QueryRowContext(
+			t.Context(),
+			`SELECT count(*) FROM settings WHERE key = ?`,
+			externalRejectionKey,
+		).Scan(&rowsWhilePaused); err != nil || rowsWhilePaused != 1 {
+			t.Fatalf("expected late INSERT to have committed 1 row before return, count=%d err=%v", rowsWhilePaused, err)
+		}
+
+		// 3. Let the late INSERT return so deferred pending-clear cleanup deletes the row under dbSlot.
+		releaseInsert()
+		select {
+		case delErr := <-deleteCompleted:
+			if delErr != nil {
+				t.Fatalf("deferred pending-clear DELETE failed: %v", delErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("deferred pending-clear DELETE never ran after late INSERT finished")
+		}
+
+		var durableRows int
+		if err := baseDB.QueryRowContext(
+			t.Context(),
+			`SELECT count(*) FROM settings WHERE key = ?`,
+			externalRejectionKey,
+		).Scan(&durableRows); err != nil {
+			t.Fatalf("query settings after deferred cleanup: %v", err)
+		}
+		if durableRows != 0 {
+			t.Fatalf("late pre-rebind INSERT left %d durable refusal rows after deferred cleanup, want 0", durableRows)
 		}
 	})
 }
