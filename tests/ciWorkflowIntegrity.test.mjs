@@ -263,7 +263,7 @@ describe('GitHub Actions workflow integrity', () => {
     const goVersions = {};
     for (const module of ['manager-server', 'ingress', 'runtime-supervisor']) {
       goVersions[module] = goDirective(module);
-      expectAtLeast(goVersions[module], '1.26.10', `apps/${module}/go.mod go directive`);
+      expectAtLeast(goVersions[module], '1.26.11', `apps/${module}/go.mod go directive`);
     }
     // The toolchain must not fork: setup-go reads the manifest, the images bake
     // the Dockerfile version, so all three manifests and all three build stages
@@ -292,7 +292,7 @@ describe('GitHub Actions workflow integrity', () => {
     );
     expect(imageGoMatches.length).toBeGreaterThanOrEqual(3);
     for (const version of imageGoMatches) {
-      expectAtLeast(version, '1.26.10', 'Dockerfile golang base');
+      expectAtLeast(version, '1.26.11', 'Dockerfile golang base');
     }
     expect(new Set(imageGoMatches).size, JSON.stringify(imageGoMatches)).toBe(1);
     expect(
@@ -308,7 +308,7 @@ describe('GitHub Actions workflow integrity', () => {
         expect(match[1], `${file} ${match[0]}`).toMatch(/^\d+\.\d+\.\d+$/);
       }
       for (const match of text.matchAll(/^\s*GO_VERSION:\s*'([^']+)'/gm)) {
-        expectAtLeast(match[1], '1.26.10', `${file} GO_VERSION`);
+        expectAtLeast(match[1], '1.26.11', `${file} GO_VERSION`);
       }
       for (const match of text.matchAll(/^\s*NODE_VERSION:\s*'([^']+)'/gm)) {
         expectAtLeast(match[1], '22.23.4', `${file} NODE_VERSION`);
