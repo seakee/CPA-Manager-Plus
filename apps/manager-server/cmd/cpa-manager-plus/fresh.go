@@ -559,9 +559,14 @@ func (a *freshApplication) canonical(w http.ResponseWriter, r *http.Request) {
 	api := http.HandlerFunc(a.canonicalAPI)
 	if op.Routing.Committed {
 		snapshot := a.routing.Snapshot(r.Context())
+		if !snapshot.PublicAPIActive() && snapshot.State == routing.SnapshotUnavailable {
+			snapshot = a.routing.Snapshot(r.Context())
+		}
 		if !snapshot.PublicAPIActive() {
 			if snapshot.State == routing.SnapshotUnavailable {
-				if _, loadErr := a.store.Load(r.Context()); loadErr != nil && !errors.Is(loadErr, freshstore.ErrNotFresh) {
+				reloaded, loadErr := a.store.Load(r.Context())
+				if loadErr != nil && !errors.Is(loadErr, freshstore.ErrNotFresh) ||
+					loadErr == nil && reloaded.Operation.Routing.Committed {
 					writeFreshCanonicalStoreUnavailable(w, r)
 					return
 				}

@@ -106,5 +106,8 @@ type Store interface {
 // checkpoint transition commits roll back whenever the CAS refuses or fails.
 type TransactionalUpdater interface {
 	UpdateTx(context.Context, bootstrap.FreshIdentity, uint64, func(*Record, *sql.Tx) error) (Record, error)
+	// WithRecordTx loads the current Fresh record inside an immediate SQLite
+	// transaction and passes it by value as a read-only snapshot alongside *sql.Tx:
+	// mutations to the value are never persisted and Operation.Revision is unchanged.
 	WithRecordTx(context.Context, func(Record, *sql.Tx) error) error
 }

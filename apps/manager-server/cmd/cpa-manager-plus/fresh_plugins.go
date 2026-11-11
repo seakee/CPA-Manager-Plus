@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -129,6 +131,34 @@ func (w *supportPluginResponseWriter) Write(body []byte) (int, error) {
 // hijacking and deadlines keep working through the wrapper.
 func (w *supportPluginResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// Flush commits the implied 200 status (stamping X-CPA-SUPPORT-PLUGIN when
+// proven) before flushing the underlying writer, so both direct http.Flusher
+// callers (such as externalLegacyRecorder) and http.ResponseController.Flush
+// emit the header on the first streamed chunk instead of skipping WriteHeader
+// via Unwrap.
+func (w *supportPluginResponseWriter) Flush() {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+		return
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Hijack hands the raw connection to upgraders (101 Switching Protocols /
+// WebSocket) for both direct http.Hijacker assertions and
+// http.ResponseController.Hijack, marking the response committed on success so
+// headers are never touched after takeover.
+func (w *supportPluginResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil {
+		w.committed = true
+	}
+	return conn, rw, err
 }
 
 // pluginResourceRequest reports whether a request addresses the CPA plugin

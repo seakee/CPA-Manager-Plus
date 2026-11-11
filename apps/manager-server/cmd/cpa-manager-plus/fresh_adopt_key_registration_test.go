@@ -5,12 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"slices"
-	"strings"
-	"sync/atomic"
-	"testing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
@@ -21,6 +15,12 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	freshkeyssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
 )
 
 // adoptedClientKeys are the source CPA's client keys of this fixture. They carry
@@ -176,13 +176,22 @@ func TestAdoptCompletionRegistersTheDestinationKeys(t *testing.T) {
 
 type loadFailingStore struct {
 	freshstore.Store
-	failFromCall int32
-	calls        atomic.Int32
-	err          error
+	failFromCall  int32
+	failOnlyCall  int32
+	failUntilCall int32
+	calls         atomic.Int32
+	err           error
 }
 
 func (s *loadFailingStore) Load(ctx context.Context) (freshstore.Record, error) {
-	if s.calls.Add(1) >= s.failFromCall {
+	n := s.calls.Add(1)
+	if s.failOnlyCall > 0 && n == s.failOnlyCall {
+		return freshstore.Record{}, s.err
+	}
+	if s.failUntilCall > 0 && n >= s.failFromCall && n <= s.failUntilCall {
+		return freshstore.Record{}, s.err
+	}
+	if s.failUntilCall == 0 && s.failFromCall > 0 && n >= s.failFromCall {
 		return freshstore.Record{}, s.err
 	}
 	return s.Store.Load(ctx)
@@ -423,6 +432,35 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 			if apiResp.Code != http.StatusServiceUnavailable || errorCode(t, apiResp) != "adopt_installation_unavailable" {
 				t.Fatalf("canonicalAPI store.Load outage (failFromCall=%d) = %d %s", failAt, apiResp.Code, apiResp.Body.String())
 			}
+		}
+
+		// One-shot transient failure on call #2 (`a.routing.Snapshot` inside
+		// `canonical`) followed by immediate recovery must serve the recovered
+		// committed route instead of returning a spurious 404.
+		fixture.app.store = &loadFailingStore{
+			Store:        realStore,
+			failOnlyCall: 2,
+			err:          errors.New("transient snapshot sqlite read blip"),
+		}
+		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
+		recoveredOp := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/operation", "", "")
+		if recoveredOp.Code != http.StatusOK {
+			t.Errorf("transient Snapshot blip on committed route = %d %s, want 200", recoveredOp.Code, recoveredOp.Body.String())
+		}
+
+		// If `a.routing.Snapshot` remains unavailable across retry while a subsequent
+		// `a.store.Load` confirms `Routing.Committed` is still true, `canonical`
+		// must return 503 rather than misreporting 404.
+		fixture.app.store = &loadFailingStore{
+			Store:         realStore,
+			failFromCall:  2,
+			failUntilCall: 3,
+			err:           errors.New("transient snapshot unavailability"),
+		}
+		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
+		stillCommittedUnavailable := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		if stillCommittedUnavailable.Code != http.StatusServiceUnavailable || errorCode(t, stillCommittedUnavailable) != "adopt_installation_unavailable" {
+			t.Fatalf("SnapshotUnavailable with committed reload = %d %s, want 503 adopt_installation_unavailable", stillCommittedUnavailable.Code, stillCommittedUnavailable.Body.String())
 		}
 
 		fixture.app.store = &loadFailingStore{
@@ -736,13 +774,13 @@ func TestAdoptCompletionReusesPreStagedWorkspaceKeysAndBindsSourceAtomically(t *
 
 // An Adopt installation that reached `ProductComplete=true` on a build prior to
 // journaled adoption has neither adopted workspace keys nor an install journal:
-//   1. before backfill, Gateway admission, config saves, plugin toggles and key
-//      operations all fail closed consistently (no admission without a journal);
-//   2. if backfill meets a foreign journal or an unproven destination, `POST
-//      complete` refuses with 409/503 instead of returning a silent 200; and
-//   3. `prepareCompletedStartup` (on Manager restart) or `POST complete`
-//      atomically backfills the adopted keys, source bindings and journal once
-//      without bumping `Operation.Revision`, restoring full authority.
+//  1. before backfill, Gateway admission, config saves, plugin toggles and key
+//     operations all fail closed consistently (no admission without a journal);
+//  2. if backfill meets a foreign journal or an unproven destination, `POST
+//     complete` refuses with 409/503 instead of returning a silent 200; and
+//  3. `prepareCompletedStartup` (on Manager restart) or `POST complete`
+//     atomically backfills the adopted keys, source bindings and journal once
+//     without bumping `Operation.Revision`, restoring full authority.
 func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDeterministically(t *testing.T) {
 	t.Run("fails closed before backfill and recovers on prepareCompletedStartup", func(t *testing.T) {
 		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
