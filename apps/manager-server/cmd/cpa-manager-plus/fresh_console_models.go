@@ -110,6 +110,14 @@ func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *ht
 	grant, install, err := a.externalReadTargetFor(ctx, record)
 	if err != nil {
 		gate.release()
+		if ctx.Err() != nil {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
+		if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			writeExternalAuthorityUnavailable(w)
+			return
+		}
 		writeConsoleModelListUnavailable(w)
 		return
 	}

@@ -21,13 +21,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	codexsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
@@ -2802,13 +2805,16 @@ func TestExternalWedgedRefusalPersistenceFailsClosedWithinBoundAndFreesGate(t *t
 		}
 
 		// Wave 2: while the persistence slot is STILL held forever by Wave 1,
-		// rebind to secondKey recovers service, and a subsequent rotation to
-		// thirdKey hits semaphore-wait contention on record() yet still bounds
-		// the wait, installs local fail-closed state for secondKey, and frees the gate.
+		// rebind to secondKey commits the replacement credential and reports
+		// retryable 503 external_rebind_unavailable because durable DELETE cannot
+		// acquire the wedged slot, while in-process reads on secondKey still work
+		// via pendingClear and a subsequent rotation to thirdKey hits semaphore-wait
+		// contention on record() yet still bounds the wait, installs local
+		// fail-closed state for secondKey, and frees the gate.
 		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
 			cpaSrv.server.URL, secondKey, strings.Repeat("e", 32))
-		if rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json"); rebindRes.Code != http.StatusOK {
-			t.Fatalf("rebind while persistence slot wedged = %d %s", rebindRes.Code, rebindRes.Body.String())
+		if rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json"); rebindRes.Code != http.StatusServiceUnavailable || errorCode(t, rebindRes) != "external_rebind_unavailable" {
+			t.Fatalf("rebind while persistence slot wedged = %d %s, want 503 external_rebind_unavailable", rebindRes.Code, rebindRes.Body.String())
 		}
 		if okRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); okRes.Code != http.StatusOK {
 			t.Fatalf("gateway/config on rebound secondKey = %d %s", okRes.Code, okRes.Body.String())
@@ -3104,23 +3110,26 @@ func TestExternalRejectionReadFailureFailsClosedAndRetainsPositiveBlocker(t *tes
 
 		assertAllSurfacesFailClosed := func(label string) {
 			t.Helper()
-			if cfgRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: gateway/config = %d %s, want 503", label, cfgRes.Code, cfgRes.Body.String())
+			const wantUnavailable = "external_cpa_authority_unavailable"
+			if cfgRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusServiceUnavailable || errorCode(t, cfgRes) != wantUnavailable {
+				t.Fatalf("%s: gateway/config = %d %s, want 503 %s", label, cfgRes.Code, cfgRes.Body.String(), wantUnavailable)
 			}
-			if modelsRes := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: cpamp/v1/models = %d %s, want 503", label, modelsRes.Code, modelsRes.Body.String())
+			for _, modelRoute := range []string{"cpamp/v1/models", "cpamp/models"} {
+				if modelsRes := gatewayRequest(t, app, http.MethodGet, modelRoute, "", ""); modelsRes.Code != http.StatusServiceUnavailable || errorCode(t, modelsRes) != wantUnavailable {
+					t.Fatalf("%s: %s = %d %s, want 503 %s", label, modelRoute, modelsRes.Code, modelsRes.Body.String(), wantUnavailable)
+				}
 			}
-			if keysRes := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: api-keys list = %d %s, want 503", label, keysRes.Code, keysRes.Body.String())
+			if keysRes := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysRes.Code != http.StatusServiceUnavailable || errorCode(t, keysRes) != wantUnavailable {
+				t.Fatalf("%s: api-keys list = %d %s, want 503 %s", label, keysRes.Code, keysRes.Body.String(), wantUnavailable)
 			}
-			if applyRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json"); applyRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: api-keys initial-install = %d %s, want 503", label, applyRes.Code, applyRes.Body.String())
+			if applyRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json"); applyRes.Code != http.StatusServiceUnavailable || errorCode(t, applyRes) != wantUnavailable {
+				t.Fatalf("%s: api-keys initial-install = %d %s, want 503 %s", label, applyRes.Code, applyRes.Body.String(), wantUnavailable)
 			}
-			if usageRes := gatewayRequest(t, app, http.MethodGet, "external/usage", "", ""); usageRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: GET external/usage = %d %s, want 503", label, usageRes.Code, usageRes.Body.String())
+			if usageRes := gatewayRequest(t, app, http.MethodGet, "external/usage", "", ""); usageRes.Code != http.StatusServiceUnavailable || errorCode(t, usageRes) != wantUnavailable {
+				t.Fatalf("%s: GET external/usage = %d %s, want 503 %s", label, usageRes.Code, usageRes.Body.String(), wantUnavailable)
 			}
-			if confirmRes := gatewayRequest(t, app, http.MethodPost, "external/usage", `{"requestId":"`+strings.Repeat("b", 32)+`","confirmEnableStatistics":true}`, "application/json"); confirmRes.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s: POST external/usage = %d %s, want 503", label, confirmRes.Code, confirmRes.Body.String())
+			if confirmRes := gatewayRequest(t, app, http.MethodPost, "external/usage", `{"requestId":"`+strings.Repeat("b", 32)+`","confirmEnableStatistics":true}`, "application/json"); confirmRes.Code != http.StatusServiceUnavailable || errorCode(t, confirmRes) != wantUnavailable {
+				t.Fatalf("%s: POST external/usage = %d %s, want 503 %s", label, confirmRes.Code, confirmRes.Body.String(), wantUnavailable)
 			}
 			rtRes := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
 			var rtBody freshRuntimeStatusResponse
@@ -3341,8 +3350,8 @@ func TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutS
 		persistClockCh <- time.Now()
 		select {
 		case rebindRes := <-rebindDone:
-			if rebindRes.Code != http.StatusOK {
-				t.Fatalf("external/rebind under non-returning DELETE = %d %s, want 200", rebindRes.Code, rebindRes.Body.String())
+			if rebindRes.Code != http.StatusServiceUnavailable || errorCode(t, rebindRes) != "external_rebind_unavailable" {
+				t.Fatalf("external/rebind under non-returning DELETE = %d %s, want 503 external_rebind_unavailable", rebindRes.Code, rebindRes.Body.String())
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("external/rebind remained stuck in non-returning DELETE after persist deadline")
@@ -3457,8 +3466,8 @@ func TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutS
 		persistClockCh <- time.Now()
 		select {
 		case rebindRes := <-rebindDone:
-			if rebindRes.Code != http.StatusOK {
-				t.Fatalf("rebind while INSERT in flight = %d %s, want 200", rebindRes.Code, rebindRes.Body.String())
+			if rebindRes.Code != http.StatusServiceUnavailable || errorCode(t, rebindRes) != "external_rebind_unavailable" {
+				t.Fatalf("rebind while INSERT in flight = %d %s, want 503 external_rebind_unavailable", rebindRes.Code, rebindRes.Body.String())
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("rebind did not complete while INSERT held dbSlot")
@@ -3495,13 +3504,17 @@ func TestExternalNonReturningRejectionSelectAndDeleteCompleteWithinBoundWithoutS
 		if durableRows != 0 {
 			t.Fatalf("late pre-rebind INSERT left %d durable refusal rows after deferred cleanup, want 0", durableRows)
 		}
+		retryRes := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		if retryRes.Code != http.StatusOK {
+			t.Fatalf("retry rebind after deferred cleanup = %d %s, want 200", retryRes.Code, retryRes.Body.String())
+		}
 	})
 }
 
 // TestExternalPostPrecheckRejectionReadFailureFailsClosedAcrossWireSurfaces
 // verifies that when a route-level precheck succeeds (SELECT #1) and the
-// subsequent wire-phase refusal lookup fails (SELECT #2 or #3), every native
-// and bridged synchronous surface fails closed with HTTP 503
+// subsequent wire-phase refusal lookup fails (SELECT #2 or #3), every two-phase
+// native and bridged synchronous surface fails closed with HTTP 503
 // external_cpa_authority_unavailable, sends zero CPA requests on the failing
 // wire call, and performs zero fallback work (such as unproxied catalog
 // downloads, HTTP 200 degraded capability payloads, HTTP 200 needs_review
@@ -3896,6 +3909,211 @@ func TestExternalKeyOperationPreflightAndPrepareEnforceGateAndRejectionUnavailab
 		}
 		if got := cpaSrv.requests.Load() - cpaBefore; got != 0 {
 			t.Errorf("wire-phase preflight/prepare contacted CPA %d times, want 0", got)
+		}
+	})
+}
+
+// TestExternalSameKeyReverifyPropagatesDeleteFailureAcrossRestartAndRecoversOnRetry
+// verifies that when a proven re-verify or rotation cannot commit the durable
+// refusal DELETE in SQLite:
+//  1. POST external/rebind returns a retryable 503 external_rebind_unavailable
+//     rather than claiming 200 reverified/rebound.
+//  2. Reopening the exact same SQLite database in a fresh Manager instance
+//     exhibits state consistent with that non-success verdict (same-K1 remains
+//     blocked until clear commits; K2 rotation retains its already-committed
+//     replacement credential).
+//  3. Retrying POST external/rebind after the DELETE fault clears removes the
+//     durable refusal row and succeeds across subsequent restarts.
+func TestExternalSameKeyReverifyPropagatesDeleteFailureAcrossRestartAndRecoversOnRetry(t *testing.T) {
+	newRestartableExternalApp := func(t *testing.T, cpaURL, management string) (*freshApplication, func() *freshApplication) {
+		t.Helper()
+		currentApp, closeCurrent := newA3TestApp(t)
+		var closeMu sync.Mutex
+		closeActive := func() {
+			closeMu.Lock()
+			fn := closeCurrent
+			closeCurrent = nil
+			closeMu.Unlock()
+			if fn != nil {
+				fn()
+			}
+		}
+		t.Cleanup(closeActive)
+
+		baseURL, err := cpa.NormalizeV8BaseURL(cpaURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protected, err := currentApp.protector.ProtectString(management)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := currentApp.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = currentApp.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Strategy = record.Operation.Strategy
+			r.Operation.Strategy.Strategy = "connect_external"
+			r.Operation.Strategy.Stage = "committed"
+			r.Operation.Strategy.TargetIdentity = freshkeyapply.ExternalIdentity(baseURL)
+			r.Operation.Strategy.TargetGeneration = 1
+			r.Operation.ProductComplete = true
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: baseURL, ManagementKey: protected}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		currentApp.externalSource = externalInstallSource(currentApp.store, currentApp.protector)
+		currentApp.keyApply = freshkeyapply.NewExternal(currentApp.keyRepo, currentApp.keys, currentApp.externalSource)
+		currentApp.gatewayConfig = gatewayFor(currentApp)
+
+		paths := legacypreflight.DefaultPaths(record.Operation.Identity.DatabasePath)
+		paths.Config = filepath.Join(filepath.Dir(paths.Database), "config.json")
+
+		restart := func() *freshApplication {
+			t.Helper()
+			closeActive()
+			reopened, openErr := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+			if openErr != nil {
+				t.Fatalf("reopen same sqlite database: %v", openErr)
+			}
+			closeMu.Lock()
+			closeCurrent = func() { _ = reopened.Close() }
+			closeMu.Unlock()
+			restarted := newFreshApplication(reopened, config.Config{}, nil)
+			restarted.externalSource = externalInstallSource(restarted.store, restarted.protector)
+			restarted.keyApply = freshkeyapply.NewExternal(restarted.keyRepo, restarted.keys, restarted.externalSource)
+			restarted.gatewayConfig = gatewayFor(restarted)
+			return restarted
+		}
+		return currentApp, restart
+	}
+
+	t.Run("same_key_reverify_delete_fault_reports_503_matches_reopened_sqlite_and_recovers_on_retry", func(t *testing.T) {
+		const temporaryBanKey = "temporary-ban-placeholder-000011112222333344445555666677778888"
+		cpaSrv := newStatefulExternalCPA(t, temporaryBanKey)
+		app, restart := newRestartableExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+
+		// 1. Persist durable refusal for K1 (externalAuthorityManagement).
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("initial refusal = %d %s, want 409 %s", first.Code, first.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+
+		// 2. CPA accepts K1 again, while SQLite DELETE on fresh_external_rejection_v1 fails.
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = externalAuthorityManagement
+		cpaSrv.mu.Unlock()
+
+		if _, err := app.rejection.db.ExecContext(
+			t.Context(),
+			`CREATE TRIGGER block_rejection_delete BEFORE DELETE ON settings WHEN OLD.key = 'fresh_external_rejection_v1' BEGIN SELECT RAISE(ABORT, 'simulated rejection delete fault'); END;`,
+		); err != nil {
+			t.Fatalf("install delete fault trigger: %v", err)
+		}
+
+		reverifyBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, externalAuthorityManagement, strings.Repeat("1", 32))
+		reverifyFault := gatewayRequest(t, app, http.MethodPost, "external/rebind", reverifyBody, "application/json")
+		if reverifyFault.Code != http.StatusServiceUnavailable || errorCode(t, reverifyFault) != "external_rebind_unavailable" {
+			t.Errorf("same-key re-verify under DELETE fault = %d %s, want 503 external_rebind_unavailable", reverifyFault.Code, reverifyFault.Body.String())
+		}
+
+		// 3. Restart on the exact same SQLite file: because durable DELETE did not
+		// commit (and rebind reported 503, not 200), the restarted Manager still sees
+		// the durable refusal row and sends 0 CPA requests.
+		restartedBeforeClear := restart()
+		cpaBeforeRestartRead := cpaSrv.requests.Load()
+		if cfgRes := gatewayRequest(t, restartedBeforeClear, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusConflict || errorCode(t, cfgRes) != freshconfig.ReasonManagementRejected {
+			t.Errorf("restarted app gateway/config before durable clear = %d %s, want 409 %s", cfgRes.Code, cfgRes.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if modelsRes := gatewayRequest(t, restartedBeforeClear, http.MethodGet, "cpamp/v1/models", "", ""); modelsRes.Code != http.StatusConflict || errorCode(t, modelsRes) != freshconfig.ReasonManagementRejected {
+			t.Errorf("restarted app cpamp/v1/models before durable clear = %d %s, want 409 %s", modelsRes.Code, modelsRes.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if got := cpaSrv.requests.Load() - cpaBeforeRestartRead; got != 0 {
+			t.Errorf("restarted app contacted CPA %d times while refusal row remained, want 0", got)
+		}
+
+		// 4. Clear the DELETE fault and retry same-K1 re-verify: durable clear commits.
+		if _, err := restartedBeforeClear.rejection.db.ExecContext(t.Context(), `DROP TRIGGER block_rejection_delete;`); err != nil {
+			t.Fatalf("drop delete fault trigger: %v", err)
+		}
+		reverifyOK := gatewayRequest(t, restartedBeforeClear, http.MethodPost, "external/rebind", reverifyBody, "application/json")
+		if reverifyOK.Code != http.StatusOK {
+			t.Fatalf("retry same-key re-verify after fault cleared = %d %s, want 200", reverifyOK.Code, reverifyOK.Body.String())
+		}
+		var okBody struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(reverifyOK.Body.Bytes(), &okBody); err != nil || okBody.Status != "reverified" {
+			t.Fatalf("retry same-key re-verify body = %s, want status=reverified", reverifyOK.Body.String())
+		}
+
+		// 5. Restart on the exact same SQLite file again: refusal row is gone and K1 reads succeed.
+		restartedAfterClear := restart()
+		var remaining int
+		if err := restartedAfterClear.rejection.db.QueryRowContext(
+			t.Context(),
+			`SELECT count(*) FROM settings WHERE key = ?`,
+			externalRejectionKey,
+		).Scan(&remaining); err != nil || remaining != 0 {
+			t.Fatalf("remaining refusal rows after retry clear = %d (err=%v), want 0", remaining, err)
+		}
+		if restartedAfterClear.externalReadGrant(t.Context()).Refused {
+			t.Fatal("restarted app after durable clear still marked K1 refused")
+		}
+		if cfgOK := gatewayRequest(t, restartedAfterClear, http.MethodGet, "gateway/config", "", ""); cfgOK.Code != http.StatusOK {
+			t.Fatalf("restarted app gateway/config after durable clear = %d %s, want 200", cfgOK.Code, cfgOK.Body.String())
+		}
+		if modelsOK := gatewayRequest(t, restartedAfterClear, http.MethodGet, "cpamp/v1/models", "", ""); modelsOK.Code != http.StatusOK {
+			t.Fatalf("restarted app cpamp/v1/models after durable clear = %d %s, want 200", modelsOK.Code, modelsOK.Body.String())
+		}
+	})
+
+	t.Run("k2_rotation_keeps_committed_credential_under_delete_fault_and_clears_row_on_same_process_retry", func(t *testing.T) {
+		const rotatedKey = "rebind-k2-delete-fault-0000111122223333444455556666777788889999"
+		cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+		app, restart := newRestartableExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
+			t.Fatalf("initial refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+		if _, err := app.rejection.db.ExecContext(
+			t.Context(),
+			`CREATE TRIGGER block_rejection_delete_k2 BEFORE DELETE ON settings WHEN OLD.key = 'fresh_external_rejection_v1' BEGIN SELECT RAISE(ABORT, 'simulated k2 rejection delete fault'); END;`,
+		); err != nil {
+			t.Fatalf("install delete fault trigger: %v", err)
+		}
+
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, rotatedKey, strings.Repeat("2", 32))
+		rebindFault := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		if rebindFault.Code != http.StatusServiceUnavailable || errorCode(t, rebindFault) != "external_rebind_unavailable" {
+			t.Errorf("K2 rebind under DELETE fault = %d %s, want 503 external_rebind_unavailable", rebindFault.Code, rebindFault.Body.String())
+		}
+
+		// Retry in the same process once the transient DELETE fault clears (keeping
+		// the exact same requestId and K2 managementKey, matching FreshRebindDialog).
+		if _, err := app.rejection.db.ExecContext(t.Context(), `DROP TRIGGER block_rejection_delete_k2;`); err != nil {
+			t.Fatalf("drop delete fault trigger: %v", err)
+		}
+		retryK2 := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		if retryK2.Code != http.StatusOK {
+			t.Fatalf("same-process retry K2 rebind after fault cleared = %d %s, want 200", retryK2.Code, retryK2.Body.String())
+		}
+
+		// Restart on the exact same SQLite file: K2 is committed and durable refusal row is gone.
+		restartedK2 := restart()
+		var remaining int
+		if err := restartedK2.rejection.db.QueryRowContext(
+			t.Context(),
+			`SELECT count(*) FROM settings WHERE key = ?`,
+			externalRejectionKey,
+		).Scan(&remaining); err != nil || remaining != 0 {
+			t.Fatalf("remaining refusal rows after K2 retry clear = %d (err=%v), want 0", remaining, err)
+		}
+		if cfgOK := gatewayRequest(t, restartedK2, http.MethodGet, "gateway/config", "", ""); cfgOK.Code != http.StatusOK {
+			t.Fatalf("restarted app gateway/config on committed K2 = %d %s, want 200", cfgOK.Code, cfgOK.Body.String())
 		}
 	})
 }

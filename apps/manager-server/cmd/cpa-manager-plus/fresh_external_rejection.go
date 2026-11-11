@@ -173,27 +173,32 @@ func (r *externalRejection) isLocallyBlocked(identity, credential string) bool {
 	return ok
 }
 
-func (r *externalRejection) flushPendingClearUnderSlot(opCtx context.Context) {
+func (r *externalRejection) flushPendingClearUnderSlot(opCtx context.Context) error {
 	if r == nil || r.db == nil {
-		return
+		return nil
 	}
 	r.memMu.Lock()
 	if !r.pendingClear {
 		r.memMu.Unlock()
-		return
+		return nil
 	}
 	seq := r.clearSeq
 	r.memMu.Unlock()
-	if opCtx == nil || opCtx.Err() != nil {
-		return
+	if opCtx == nil {
+		return context.Canceled
 	}
-	if _, err := r.db.ExecContext(opCtx, `delete from settings where key = ?`, externalRejectionKey); err == nil {
-		r.memMu.Lock()
-		if r.clearSeq == seq {
-			r.pendingClear = false
-		}
-		r.memMu.Unlock()
+	if err := opCtx.Err(); err != nil {
+		return err
 	}
+	if _, err := r.db.ExecContext(opCtx, `delete from settings where key = ?`, externalRejectionKey); err != nil {
+		return err
+	}
+	r.memMu.Lock()
+	if r.clearSeq == seq {
+		r.pendingClear = false
+	}
+	r.memMu.Unlock()
+	return nil
 }
 
 // check reports whether the CPA has refused the credential of exactly this
@@ -249,7 +254,7 @@ func (r *externalRejection) load(ctx context.Context) (externalRejectionRecord, 
 	done := make(chan externalRejectionLoadResult, 1)
 	go func() {
 		defer func() {
-			r.flushPendingClearUnderSlot(loadCtx)
+			_ = r.flushPendingClearUnderSlot(loadCtx)
 			<-slot
 		}()
 		if r.hasPendingClear() {
@@ -322,7 +327,7 @@ func (r *externalRejection) record(ctx context.Context, identity, credential str
 				if cleanCtx.Err() != nil {
 					cleanCtx, cleanCancel = r.withPersistDeadline(context.Background())
 				}
-				r.flushPendingClearUnderSlot(cleanCtx)
+				_ = r.flushPendingClearUnderSlot(cleanCtx)
 				if cleanCancel != nil {
 					cleanCancel()
 				}
@@ -363,9 +368,13 @@ func (r *externalRejection) record(ctx context.Context, identity, credential str
 
 // clear forgets the refusal. It runs only behind proof that the stored credential
 // authenticates again: the successful read of a rebind or of a same-key re-verify.
-func (r *externalRejection) clear(ctx context.Context) {
+// If the durable DELETE cannot commit within persistBudget (or SQLite returns an
+// error), clear keeps pendingClear armed for the current process and returns an
+// error so external/rebind does not claim durable completion before restart-safe
+// state is written.
+func (r *externalRejection) clear(ctx context.Context) error {
 	if r == nil {
-		return
+		return nil
 	}
 	r.memMu.Lock()
 	r.epoch++
@@ -374,7 +383,7 @@ func (r *externalRejection) clear(ctx context.Context) {
 	r.pendingClear = r.db != nil
 	r.memMu.Unlock()
 	if r.db == nil {
-		return
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -385,17 +394,21 @@ func (r *externalRejection) clear(ctx context.Context) {
 	select {
 	case slot <- struct{}{}:
 	case <-clearCtx.Done():
-		return
+		return fmt.Errorf("%w: %w", errExternalRejectionUnavailable, clearCtx.Err())
 	}
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
 		defer func() { <-slot }()
-		r.flushPendingClearUnderSlot(clearCtx)
+		done <- r.flushPendingClearUnderSlot(clearCtx)
 	}()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("%w: %w", errExternalRejectionUnavailable, err)
+		}
+		return nil
 	case <-clearCtx.Done():
+		return fmt.Errorf("%w: %w", errExternalRejectionUnavailable, clearCtx.Err())
 	}
 }
 
@@ -543,12 +556,17 @@ func (a *freshApplication) noteExternalRejection(ctx context.Context, grant exte
 }
 
 // clearExternalRejection forgets a recorded refusal after a read proved that the
-// stored credential authenticates again.
-func (a *freshApplication) clearExternalRejection(ctx context.Context) {
+// stored credential authenticates again, returning an error if the durable row
+// could not be deleted.
+func (a *freshApplication) clearExternalRejection(ctx context.Context) error {
 	if a == nil || a.rejection == nil {
-		return
+		return nil
 	}
-	a.rejection.clear(ctx)
+	if err := a.rejection.clear(ctx); err != nil {
+		log.Printf("Fresh external rejection durable clear failed: %v", err)
+		return err
+	}
+	return nil
 }
 
 // observeExternalHoldHeaders installs a response-header observer that claims
