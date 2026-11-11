@@ -293,10 +293,25 @@ immediate SQLite transaction (`freshstore.TransactionalUpdater` +
   registered adopted key and to the staged run, Runtime generation and provider
   seed). If completion is rejected by CAS, continuation expiry, a retired
   destination key, a source binding conflict, a foreign journal (`409
-  adopt_installation_conflict`), or a decryption/storage failure (`503
-  adopt_installation_unavailable`), the transaction rolls back completely:
+  adopt_installation_conflict`), or a decryption/storage failure — including an
+  outermost Fresh store read outage on the canonical route (`503
+  adopt_installation_unavailable`) — the transaction rolls back completely:
   neither adopted workspace records, nor source bindings, nor the journal, nor
   write authority remain behind.
+- An `adopt_existing` installation that reached `ProductComplete = true` on a
+  build prior to journaled adoption holds no matching install journal and is
+  therefore denied by `DefaultInstallCPAAuthorityProven` as well as by config
+  and key-operation consumers until backfilled. On Manager startup
+  (`prepareCompletedStartup`, with background retry while the embedded CPA
+  starts) and on an explicit `POST complete` replay, `reconcileCompletedAdoption`
+  re-proves the live Runtime target and destination CPA read-only and commits
+  the adopted keys, source bindings and one-shot journal inside one immediate
+  `freshstore.WithRecordTx` transaction without bumping `Operation.Revision`
+  (or returns `409`/`503` on `POST complete` if a conflict or outage prevents
+  backfill). Completion also actively re-proves `X-CPA-SUPPORT-PLUGIN`
+  (`pluginCapability.reprove`, superseding any stale in-flight epoch) and
+  evaluates the header at response commit time so the first post-completion
+  Console navigation observes plugin support immediately.
 - The `initial-install` observation reads an adopted destination by **membership**:
   `cpa.Transport.Configured` answers whether the staged secret is one of the keys
   the CPA serves, because an adopted `access.api-keys` is the source CPA's list
@@ -311,9 +326,12 @@ immediate SQLite transaction (`freshstore.TransactionalUpdater` +
   anything. Gateway traffic for an adopted destination is admitted by the
   installation authority, not by that proof.
 - Registration is idempotent by digest: a retried or resumed completion replays the
-  existing rows (`secret_hash` is the fence) instead of creating a second identity,
-  and a destination key that is already this workspace's own key keeps that one
-  record. A digest that resolves to a `superseded` row is refused, because the key
+  existing rows (`secret_hash` is the fence) instead of creating a second identity;
+  a destination key that already exists in this workspace keeps its single record
+  and acquires its active `gateway_api_key_source_bindings` row for the target
+  runtime inside the same transaction (while an active binding owned by another
+  identity or runtime is refused as `ErrSourceOwned` and rolls back the batch). A
+  digest that resolves to a `superseded` row is likewise refused, because the key
   operation journal already committed that retirement and the installation may
   neither own nor revive it.
 - The masked preview is `…` plus the last four characters, and only once the secret
