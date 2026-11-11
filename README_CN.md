@@ -110,6 +110,12 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 - 对明确额度耗尽执行受控冷却，并将认证故障汇总到账号处理队列，支持复核与恢复。
 - 打开统一的 [凭证管理演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts)。
 
+### Windows 桌面浮窗
+
+Windows 原生包包含独立的深色桌面置顶浮窗（Win32 宿主 + WebView2，直接复用确认设计稿） `cpa-manager-plus-monitor.exe`。运行 `cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang zh`，在密码遮罩连接表单中输入 **CPAMP 管理员密钥**。命令行不接受密钥。可选的记住密钥使用当前用户 DPAPI 加密与私有 Windows DACL；窗口设置不含密钥。
+
+展开显示最近已记录模型、输入/输出/缓存/合计、本次预估费用、今日统计、输出 tok/s、流式首字延迟、总耗时和两条更早请求。收起为小条，保留模型、今日 Token 与三项性能指标。速度遵循上游 **输出 Token ÷ 总耗时**，不减去 TTFT。遥测或价格缺失显示 `—`，费用为估算。隐藏暂停轮询，关闭只退出浮窗，不停止 Manager。详见[原生浮窗操作、安全与构建说明](apps/docs/deployment/native.md#windows-桌面浮窗)。
+
 ### 生产运维
 
 - 使用单 Docker 容器，或 Linux、macOS、Windows 的 amd64/arm64 原生包运行；完整栈可以与 CPA 一起部署。

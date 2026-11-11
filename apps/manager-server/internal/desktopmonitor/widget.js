@@ -1,0 +1,91 @@
+(() => {
+ 'use strict';
+ const q=(s,r=document)=>r.querySelector(s), qa=(s,r=document)=>Array.from(r.querySelectorAll(s));
+ const expanded=q('#expanded'), compact=q('#compact'), settings=q('#connection-form');
+ let state=null, keyEdited=false;
+ const tr=(cn,en)=>state?.lang==='en'?en:cn;
+ const send=(action,extra={})=>{if(window.chrome?.webview)window.chrome.webview.postMessage(JSON.stringify({action,...extra}));};
+ const number=n=>typeof n==='number'&&n>=0?new Intl.NumberFormat('en-US').format(n):'—';
+ const abbreviated=n=>{if(typeof n!=='number'||n<0)return '—';if(n>=1e6)return (n/1e6).toFixed(2).replace(/0+$/,'').replace(/\.$/,'')+'M';if(n>=1e3)return (n/1e3).toFixed(1).replace(/\.0$/,'')+'K';return String(n);};
+ const money=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0?'$'+n.toFixed(4).replace(/0{1,2}$/,''):'—';
+ const seconds=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0?(n/1000).toFixed(2):'—';
+ const speed=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0?n.toFixed(1):'—';
+ const time=ms=>{if(!ms)return '—';return new Date(ms).toLocaleTimeString('en-GB',{hour12:false});};
+ const set=(e,text)=>{const s=String(text??'—');if(e.textContent!==s)e.textContent=s;};
+ const value=(e,text)=>{const s=String(text);if(e.firstChild?.nodeType===Node.TEXT_NODE){if(e.firstChild.nodeValue!==s)e.firstChild.nodeValue=s;}else e.prepend(document.createTextNode(s));};
+ const compactName=document.createElement('span');compactName.className='compact-model-name';const compactModel=q('.compact-model',compact);for(const n of [...compactModel.childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();compactModel.append(compactName);
+ const pending=[...qa('.icon-button',expanded),...qa('.icon-button',compact)];
+ // Keep the SVG controls from the approved design; their actions are native.
+ pending.forEach((b,i)=>{b.dataset.action=['pin','compact','close','pin','compact'][i];b.title=['置顶 / 取消置顶','收起','关闭','置顶 / 取消置顶','展开'][i];b.setAttribute('aria-label',['置顶','收起','关闭','置顶','展开'][i]);});
+ qa('.footer-link',expanded).forEach(e=>{e.dataset.action='panel';e.tabIndex=0;e.setAttribute('role','button');});
+ qa('.connection,.brand').forEach(e=>{e.dataset.action='settings';e.title='连接设置';});
+ document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(b){if(b.dataset.action==='cancel')q('#manager-key').value='';send(b.dataset.action);}});
+ document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('.footer-link'))send('panel');if(e.key==='Escape'){q('#manager-key').value='';send('cancel');}});
+ qa('.titlebar').forEach(bar=>bar.addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('button,[data-action]'))return;e.preventDefault();send('drag');}));
+ q('#manager-key').addEventListener('input',()=>{keyEdited=true;});
+ q('#settings-form').addEventListener('submit',e=>{e.preventDefault();const key=q('#manager-key').value;send('connect',{base:q('#manager-url').value,key,keepKey:!keyEdited&&!!state?.hasKey,remember:q('#remember-key').checked,allowHTTP:q('#allow-http').checked});q('#manager-key').value='';keyEdited=false;});
+ const relative=()=>{if(!state)return;const e=q('.window-footer>span:first-child',expanded);if(!state.updatedAt){set(e,tr('尚未更新','Not updated'));return;}const elapsed=Math.max(0,Math.floor((Date.now()-state.updatedAt)/1000));set(e,elapsed<60?elapsed+tr(' 秒前更新',' s ago'):Math.floor(elapsed/60)+tr(' 分钟前更新',' min ago'));};
+ window.applyMonitorState=s=>{
+   if(!s||typeof s!=='object')return;
+   const previous=state;state=s;
+   document.body.dataset.compact=String(!!s.compact);document.body.dataset.editing=String(!!s.editing);
+   settings.hidden=!s.editing;
+   if(s.editing&&(!previous?.editing||previous.base!==s.base)){
+     q('#manager-url').value=s.base||'';q('#manager-key').value='';q('#manager-key').placeholder=s.hasKey?'已保存；留空保留密钥':'输入 CPAMP 管理员密钥';keyEdited=false;q('#remember-key').checked=!!s.remember;q('#allow-http').checked=!!s.allowHTTP;
+   }
+   if(!previous||previous.lang!==s.lang){
+    set(q('.status-row>span:first-child',expanded),tr('最近调用模型','Latest model'));
+    qa('.performance .metric-label',expanded).forEach((e,i)=>set(e,[tr('输出速度','Output speed'),tr('首字延迟','TTFT'),tr('总耗时','Duration')][i]));
+    value(q('.section-title',expanded),tr('本次消耗','Request tokens'));
+    qa('.tokens .metric-label',expanded).forEach((e,i)=>set(e,[tr('输入','Input'),tr('输出','Output'),tr('合计','Total')][i]));
+    set(q('.cost-line>span',expanded),tr('本次预估费用','Request estimate'));
+    value(q('.daily-head',expanded),tr('今日累计','Today'));
+    qa('.daily-metrics .metric-label',expanded).forEach((e,i)=>set(e,['Token',tr('请求','Requests'),tr('预估费用','Estimate')][i]));
+    set(q('.history-label',expanded),tr('更早的调用','Earlier calls'));value(q('.footer-link',expanded),tr('打开面板','Open panel'));
+    set(q('.compact-usage small',compact),tr('今日','Today'));set(q('.compact-performance>span:nth-child(2) small',compact),tr('首字','TTFT'));set(q('.compact-performance>span:nth-child(3) small',compact),tr('耗时','Duration'));
+    set(q('.settings-title',settings),tr('连接设置','Connection'));
+    set(q('label[for=manager-url]',settings),tr('Manager 地址','Manager URL'));set(q('label[for=manager-key]',settings),tr('管理员密钥','Administrator key'));
+    set(q('.settings-actions button[type=button]',settings),tr('取消','Cancel'));set(q('.settings-actions button[type=submit]',settings),tr('连接','Connect'));
+   }
+   set(q('#connection-error'),s.notice||'');
+   qa('.icon-button[data-action="pin"]').forEach(b=>{b.classList.toggle('pinned',!!s.pinned);b.setAttribute('aria-pressed',String(!!s.pinned));});
+   const connected=s.status==='connected';
+   const statusText={connected:tr('已连接','Connected'),offline:tr('连接中断','Offline'),unauthorized:tr('密钥无效','Key rejected'),disconnected:tr('未连接','Disconnected')}[s.status]||tr('未连接','Disconnected');
+   const connection=q('.connection',expanded);
+   // Preserve the leading SVG while updating the status label.
+   for(const n of [...connection.childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();
+   connection.append(document.createTextNode(statusText));
+   connection.style.color=connected?'var(--muted)':'#f0b05f';
+   q('svg',connection).style.color=connected?'var(--green)':'#f0b05f';
+   connection.title=s.partial?'历史记录不完整':statusText;
+   const r=s.latest||{};
+   set(q('.model-name',expanded),r.model||'—');
+   const info=q('.request-info',expanded), spans=qa(':scope>span',info);
+   const outcome=r.timestamp?(r.failed?tr('失败','Failed'):tr('已完成','Completed')):(s.loaded?tr('暂无记录','No requests'):tr('尚未加载','Not loaded'));
+   const success=q('.success',info);for(const n of [...success.childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();success.append(document.createTextNode(outcome));success.style.color=r.failed?'#f0b05f':'var(--green)';
+   set(q('time',info),time(r.timestamp));set(spans[spans.length-1],r.timestamp?(r.stream?tr('流式请求','Streaming'):tr('非流式 / 未知','Nonstream / unknown')):'');
+   q('.performance>div:first-child',expanded).title=tr('输出 Token ÷ 完整请求耗时（与 CPAMP 监控一致）','Output tokens / full request duration (CPAMP monitoring)');
+   const metrics=qa('.performance .metric-value',expanded);
+   value(metrics[0],speed(r.speed));value(metrics[1],seconds(r.ttft));value(metrics[2],seconds(r.duration));
+   const tokens=qa('.tokens .metric-value',expanded);[r.input,r.output,r.total].forEach((n,i)=>set(tokens[i],number(n)));
+   const note=q('.token-note',expanded);for(const n of [...note.childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();note.append(document.createTextNode(tr('输入中含缓存命中 ','Input includes cache hits ')+number(r.cached)));
+   set(q('.cost-line strong',expanded),money(r.cost));
+   const daily=qa('.daily-metrics .metric-value',expanded);
+   set(daily[0],abbreviated(s.todayTokens));value(daily[1],number(s.todayCalls));set(daily[2],money(s.todayCost));
+   const d=new Date(s.updatedAt||Date.now());set(q('.daily-head time',expanded),s.lang==='en'?d.toLocaleDateString('en-US',{month:'short',day:'numeric'}):(d.getMonth()+1)+' 月 '+d.getDate()+' 日');
+   qa('.history-row',expanded).forEach((e,i)=>{const h=(s.history||[])[i]||{};set(q('.history-model',e),h.model||'—');set(q('.history-count',e),abbreviated(h.total));set(q('.history-time',e),h.timestamp?time(h.timestamp).slice(0,5):'—');});
+   const cm=q('.compact-model',compact);set(compactName,r.model||'—');cm.title=r.model||'—';
+   const healthy=connected&&!!r.timestamp&&!r.failed;const mark=q('svg',cm);mark.style.color=healthy?'var(--green)':(s.status==='offline'||s.status==='unauthorized'||r.failed?'#f0b05f':'var(--muted)');q('use',mark).setAttribute('href',healthy?'#check':'#info');
+   q('use',success).setAttribute('href',r.failed?'#info':'#check');
+   const cu=q('.compact-usage',compact);for(const n of [...cu.childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();cu.append(document.createTextNode(abbreviated(s.todayTokens)));
+   const cp=qa('.compact-performance>span',compact);
+   value(cp[0],speed(r.speed));for(const n of [...cp[1].childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();cp[1].append(document.createTextNode(seconds(r.ttft)+' s'));
+   for(const n of [...cp[2].childNodes])if(n.nodeType===Node.TEXT_NODE)n.remove();cp[2].append(document.createTextNode(seconds(r.duration)+' s'));
+   compact.title=statusText+(s.updatedAt?' · 最后更新 '+time(s.updatedAt):'');
+   relative();measure();
+ };
+ const measure=()=>{if(!state)return;const e=state?.editing?settings:(state?.compact?compact:expanded);const r=e.getBoundingClientRect();send('measure',{width:Math.ceil(r.width),height:Math.ceil(r.height)});};
+ new ResizeObserver(measure).observe(document.body);
+ setInterval(relative,1000);
+ send('ready');
+})();

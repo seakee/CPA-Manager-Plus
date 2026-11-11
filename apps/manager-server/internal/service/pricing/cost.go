@@ -223,6 +223,18 @@ func CostForModelCandidatesWithServiceTier(modelNames []string, serviceTier stri
 	return 0
 }
 
+// HasModelPrice reports whether any candidate resolves to a price, including
+// the built-in official fallback. Callers use it to distinguish "no price"
+// from a legitimately configured zero/free price.
+func HasModelPrice(modelNames []string, prices map[string]model.ModelPrice) bool {
+	for _, name := range modelNames {
+		if _, ok := resolveModelPrice(name, prices); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // SumCost folds CostForModel over a slice of (model, tokens) tuples.
 type Item struct {
 	Model  string
