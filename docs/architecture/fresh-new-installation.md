@@ -279,11 +279,14 @@ An `adopt_existing` installation stages the source CPA's own client key list to 
 destination, so the keys that authenticate model traffic there were never minted by
 this Manager: their shape is the source CPA's — any printable token up to the
 adoption bound — not one of the two canonical shapes above. Completion is where
-they become Manager-managed: `POST complete` commits one canonical row per
-destination key (`origin = 'adopted'`, protected ciphertext, `sha256` digest,
-masked preview and optional source binding), claims the one-shot
-initial-install journal, and sets `ProductComplete = true` inside a single
-immediate SQLite transaction (`freshstore.TransactionalUpdater` +
+they become Manager-managed. `POST complete` commits one canonical row for each
+destination key that has no Manager record yet (`origin = 'adopted'`, protected
+ciphertext, `sha256` digest, masked preview and optional source binding). A
+destination key whose secret hash already matches an active canonical key, such
+as a pre-staged workspace key, keeps that row's ID and origin; the same
+transaction adds or verifies its runtime source binding. The same transaction
+also claims the one-shot initial-install journal and sets `ProductComplete = true`;
+it is a single immediate SQLite transaction (`freshstore.TransactionalUpdater` +
 `freshkeyapply.CommitAdoptionTx`).
 
 - On an `adopt_existing` installation, `freshkeyapply.Service.Targets` is the
