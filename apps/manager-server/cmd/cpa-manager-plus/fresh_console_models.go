@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -63,7 +62,7 @@ func (a *freshApplication) consoleModelList(w http.ResponseWriter, r *http.Reque
 			writeConsoleModelListUnavailable(w)
 			return
 		}
-		if record.Operation.Strategy.Strategy == bootstrap.ConnectExternal {
+		if isCommittedExternalStrategy(record.Operation.Strategy) {
 			a.externalConsoleModelList(w, r, record)
 			return
 		}
@@ -103,7 +102,7 @@ func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *ht
 		return
 	}
 	record, err := a.store.Load(ctx)
-	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || record.Operation.Strategy.Stage != "committed" {
+	if err != nil || !isCommittedExternalStrategy(record.Operation.Strategy) {
 		gate.release()
 		writeConsoleModelListUnavailable(w)
 		return
@@ -186,7 +185,7 @@ func (a *freshApplication) consoleCPADestination(ctx context.Context) (string, s
 				return "", "", errConsoleModelListUnavailable
 			}
 			switch {
-			case op.Strategy.Strategy == bootstrap.ConnectExternal:
+			case isCommittedExternalStrategy(op.Strategy):
 				if a.externalSource == nil {
 					return "", "", errConsoleModelListUnavailable
 				}

@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
@@ -617,7 +616,7 @@ func (a *freshApplication) checkExternalSavedCredentialPrecheck(ctx context.Cont
 		}
 		return nil
 	}
-	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+	if !isCommittedExternalStrategy(record.Operation.Strategy) {
 		return nil
 	}
 	gate := &a.legacyCredentialGate
@@ -633,7 +632,7 @@ func (a *freshApplication) checkExternalSavedCredentialPrecheck(ctx context.Cont
 			}
 			return nil
 		}
-		if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		if !isCommittedExternalStrategy(record.Operation.Strategy) {
 			return nil
 		}
 	}

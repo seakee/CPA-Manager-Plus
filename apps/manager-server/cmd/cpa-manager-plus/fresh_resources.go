@@ -189,7 +189,7 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 		}
 		return legacyDecisionPassthrough, freshstore.Record{}
 	}
-	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+	if !isCommittedExternalStrategy(record.Operation.Strategy) {
 		// New Managed and Adopt keep the bridge they have always had: on those
 		// profiles it is the Console's own contract, not a duplicate route.
 		return legacyDecisionPassthrough, record
@@ -260,7 +260,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 				writeExternalAuthorityUnavailable(w)
 				return
 			}
-			if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || !freshAdminAuthenticated(record, r) {
+			if !isCommittedExternalStrategy(record.Operation.Strategy) || !freshAdminAuthenticated(record, r) {
 				gate.release()
 				next.ServeHTTP(w, r)
 				return
@@ -326,7 +326,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			writeExternalAuthorityUnavailable(w)
 			return
 		}
-		if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || !freshAdminAuthenticated(record, r) {
+		if !isCommittedExternalStrategy(record.Operation.Strategy) || !freshAdminAuthenticated(record, r) {
 			gate.release()
 			next.ServeHTTP(w, r)
 			return

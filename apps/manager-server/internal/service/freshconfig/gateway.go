@@ -453,7 +453,7 @@ func (s *Service) usesExternal(op bootstrap.FreshOperation) bool {
 	if !s.managed {
 		return true
 	}
-	return op.Strategy.Strategy == bootstrap.ConnectExternal
+	return op.Strategy.Strategy == bootstrap.ConnectExternal && op.Strategy.Stage == "committed"
 }
 
 // resolve proves the active profile for this installation checkpoint and

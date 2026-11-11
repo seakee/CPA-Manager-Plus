@@ -288,7 +288,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		if loadErr != nil {
 			return false
 		}
-		return record.Operation.Strategy.Strategy != bootstrap.ConnectExternal
+		return !isCommittedExternalStrategy(record.Operation.Strategy)
 	})
 	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
 		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
@@ -315,14 +315,12 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// externalConnection is the Manager-configured External CPA. It is the only
 	// source of an External management credential; no environment fallback exists.
 	externalConnection := func(ctx context.Context) (string, string, error) {
-		if a.externalSource != nil {
-			if record, ok := freshRecordSnapshotFromContext(ctx); ok && record.Operation.Strategy.Strategy == bootstrap.ConnectExternal {
-				install, err := a.externalSource(ctx)
-				if err != nil {
-					return "", "", err
-				}
-				return install.BaseURL, install.ManagementKey, nil
+		if a.store != nil && a.externalSource != nil {
+			install, err := a.externalSource(ctx)
+			if err != nil {
+				return "", "", err
 			}
+			return install.BaseURL, install.ManagementKey, nil
 		}
 		managerCfg, found, err := settings.LoadManagerConfig(ctx)
 		if err != nil {

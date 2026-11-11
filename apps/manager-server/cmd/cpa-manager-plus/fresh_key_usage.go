@@ -153,7 +153,7 @@ func (a *freshApplication) runningCollectorMatchesConfigLocked(ctx context.Conte
 	case a.privateCollector != nil:
 		desiredCfg, ok := a.privateCollectorDesiredConfig(ctx)
 		return ok && activeCfg == desiredCfg
-	case checkpoint.Strategy == bootstrap.ConnectExternal && a.externalSource != nil:
+	case isCommittedExternalStrategy(checkpoint) && a.externalSource != nil:
 		install, err := a.externalSource(ctx)
 		if err != nil {
 			return false
@@ -249,7 +249,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// The projection and identity workers maintain attribution independently of
 	// the Collector authority, so they start once the keys are attributable.
 	if !a.usageWorkersStarted {
-		if a.startIdentityWorker != nil && checkpoint.Strategy != bootstrap.ConnectExternal {
+		if a.startIdentityWorker != nil && !isCommittedExternalStrategy(checkpoint) {
 			a.startIdentityWorker(ctx)
 		}
 		a.usageProjection.Start(ctx)
@@ -283,7 +283,7 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 			// Only the explicit private profile owns a host-supplied Collector
 			// authority.
 			started = a.privateCollector(ctx)
-		case checkpoint.Strategy == bootstrap.ConnectExternal && a.externalSource != nil:
+		case isCommittedExternalStrategy(checkpoint) && a.externalSource != nil:
 			// An External installation collects from the user's own CPA through
 			// the committed connection. A refused start proves nothing, so no
 			// collection window is recorded for it.
