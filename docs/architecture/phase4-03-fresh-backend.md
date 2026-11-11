@@ -127,13 +127,16 @@ unconditionally and the decision stays inside that one gate, which is what makes
 a `connect_external` commit that lands after the process started take effect on
 the next cycle.
 
-A Start the Supervisor records as failed is replayed under its original operation
-ID. A *new* attempt is issued only after that durable failure, after its retry
-delay, and at most `DefaultReconcileStartAttempts` times per generation, because
-the Supervisor's ownership fence turns a second spawn into a state conflict
-instead of a second child. After the last attempt the Runtime stays stopped until
-an operator starts it; recovery, an ambiguous selection or an incomplete staged
-destination never auto-starts at all.
+An automatic Start that is accepted, running or otherwise unresolved is replayed
+under its original operation ID, so the Supervisor journal answers it
+idempotently. A Start the Supervisor durably records as failed is never replayed:
+the journal keeps that failure forever, so the next attempt waits out its retry
+delay and is issued under a new attempt ID, at most `DefaultReconcileStartAttempts`
+times per Runtime identity, generation and desired revision. Re-executing is safe
+because the Supervisor's ownership fence turns a second spawn into a state
+conflict instead of a second child. After the last attempt the Runtime stays
+stopped until an operator starts it; recovery, an ambiguous selection or an
+incomplete staged destination never auto-starts at all.
 
 ## Admin and transport boundary
 
