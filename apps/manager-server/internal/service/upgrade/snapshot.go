@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	_ "modernc.org/sqlite"
 )
 
@@ -210,6 +211,9 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBase string) (model.UpgradeOperation, bool, error) {
 	if _, err := os.Lstat(databasePath); err != nil {
 		if os.IsNotExist(err) {
+			if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+				return model.UpgradeOperation{}, false, sideErr
+			}
 			return model.UpgradeOperation{}, false, nil
 		}
 		return model.UpgradeOperation{}, false, err

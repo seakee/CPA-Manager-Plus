@@ -18,6 +18,7 @@ import (
 	"time"
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -25,7 +26,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
-	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // journalOnlyOperationStore is a native-v2 store whose operation table no longer
@@ -232,159 +233,193 @@ func TestRefusedAdmissionLeavesTheSourceMarkerUntouched(t *testing.T) {
 	}
 }
 
-// TestConcurrentFailingObservationsShareOneFlight pins the coalescing rule for a
-// failed observation: a document about this moment (an unavailable one) is not
-// remembered, but every caller that joined the flight is answered with the one
-// observation that produced it. COALESCE only successes would make each waiter run
-// its own fenced read of a source nobody is writing.
+// TestConcurrentFailingObservationsShareOneFlight enforces that concurrent
+// public discovery HTTP requests against a failing source coalesce onto one
+// observation flight without sleeping, return 503 to every caller in that
+// flight, and do not remember the failed result for subsequent requests.
 func TestConcurrentFailingObservationsShareOneFlight(t *testing.T) {
-	observer := &discoveryObservation{}
-	databasePath := filepath.Join(t.TempDir(), "usage.sqlite")
-	release := make(chan struct{})
-	started := make(chan struct{})
-	var reads atomic.Int32
-	read := func() (bootstrap.PublicDiscovery, bool) {
-		if reads.Add(1) == 1 {
-			close(started)
-		}
-		<-release
-		return bootstrapdiscovery.Unavailable(), false
+	t.Setenv(legacyRootEnvironment, "")
+	_, paths := legacyWALVolumeWithPendingWAL(t, "failing-flight-key-123456")
+	walPath := paths.Database + "-wal"
+	walBytes, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatalf("read WAL: %v", err)
+	}
+	walBytes[0] ^= 0xff
+	if err := os.WriteFile(walPath, walBytes, 0o600); err != nil {
+		t.Fatalf("write corrupt WAL header: %v", err)
 	}
 
-	results := make([]bootstrap.PublicDiscovery, 3)
-	var wg sync.WaitGroup
-	observe := func(index int) {
-		defer wg.Done()
-		observer.observe(context.Background(), databasePath, read, func(projection bootstrap.PublicDiscovery) {
-			results[index] = projection
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+	origBefore := beforeDiscoveryObservation
+	beforeDiscoveryObservation = func() {
+		enterOnce.Do(func() {
+			close(entered)
+			<-release
 		})
 	}
+	defer func() { beforeDiscoveryObservation = origBefore }()
+
+	var joiners atomic.Int32
+	allJoined := make(chan struct{})
+	origJoin := afterDiscoveryFlightJoin
+	afterDiscoveryFlightJoin = func() {
+		if joiners.Add(1) == 2 {
+			close(allJoined)
+		}
+	}
+	defer func() { afterDiscoveryFlightJoin = origJoin }()
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	defer h.BeginWritableStartup()
+
+	statuses := make([]int, 3)
+	bodies := make([]string, 3)
+	var wg sync.WaitGroup
+	callDiscovery := func(idx int) {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil)
+		h.ServeHTTP(rec, req)
+		statuses[idx] = rec.Code
+		bodies[idx] = rec.Body.String()
+	}
+
 	wg.Add(1)
-	go observe(0)
-	<-started
-	// The first observation cannot clear its flight while it is blocked in read,
-	// so the others join it as soon as they reach it.
+	go callDiscovery(0)
+	<-entered
+
 	wg.Add(2)
-	go observe(1)
-	go observe(2)
-	time.Sleep(50 * time.Millisecond)
+	go callDiscovery(1)
+	go callDiscovery(2)
+	<-allJoined
+
 	close(release)
 	wg.Wait()
 
-	if ran := observer.observations(); ran != 1 {
-		t.Fatalf("%d observations for three concurrent requests, want 1", ran)
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations for 3 concurrent requests = %d, want 1", ran)
 	}
-	if executed := reads.Load(); executed != 1 {
-		t.Fatalf("%d reads for three concurrent requests, want 1", executed)
-	}
-	for index, projection := range results {
-		if projection.Status != bootstrap.PublicUnavailable {
-			t.Fatalf("request %d was answered %+v, want the fail-closed document", index, projection)
+	for idx, status := range statuses {
+		if status != http.StatusServiceUnavailable || !strings.Contains(bodies[idx], `"status":"unavailable"`) {
+			t.Fatalf("request %d = %d (%s), want 503 unavailable", idx, status, bodies[idx])
 		}
+	}
+
+	// A failed observation is never remembered across flights: a subsequent
+	// request executes a fresh observation instead of hitting a cached failure.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("follow-up request = %d, want 503", rec.Code)
+	}
+	if ran := h.discoveryObserver.observations(); ran != 2 {
+		t.Fatalf("observations after follow-up request = %d, want 2", ran)
 	}
 }
 
-// TestCachedProjectionIsDroppedWhenTheProbeCannotProveQuiescence pins the cache's
-// revalidation answer: only "nobody holds this marker" (or no marker at all) may
-// serve a remembered document. Any other probe failure drops the entry and answers
-// unavailable, because an unreadable marker is not proof of the quiescence the
-// projection was granted on.
+// TestCachedProjectionIsDroppedWhenTheProbeCannotProveQuiescence warms the
+// public discovery cache through a real HTTP GET on a 1.x source, proves a
+// quiet source serves the remembered 200 without re-observing, and proves a
+// probe failure returns 503 and invalidates the cached projection so a later
+// quiet request must re-observe.
 func TestCachedProjectionIsDroppedWhenTheProbeCannotProveQuiescence(t *testing.T) {
-	observer := &discoveryObservation{}
-	dir := t.TempDir()
-	databasePath := filepath.Join(dir, "usage.sqlite")
-	if err := os.WriteFile(databasePath, []byte("SQLite format 3\x00"), 0o600); err != nil {
-		t.Fatalf("write the source database: %v", err)
-	}
-	identity, ok := upgradeservice.LegacySourceIdentity(databasePath)
-	if !ok {
-		t.Fatal("identify the source")
-	}
-	seedCache := func() {
-		observer.mu.Lock()
-		defer observer.mu.Unlock()
-		observer.sourceState(databasePath).cached = discoveryObservationCache{
-			identity:   identity,
-			ready:      true,
-			projection: bootstrapdiscovery.UnsupportedUpgrade(),
-		}
-	}
-	// Positive control: with the marker proving quiescence, the document is served
-	// from memory and no observation runs.
-	seedCache()
-	var served bootstrap.PublicDiscovery
-	observer.observe(context.Background(), databasePath, func() (bootstrap.PublicDiscovery, bool) {
-		t.Fatal("a remembered projection must be served without a new observation")
-		return bootstrap.PublicDiscovery{}, false
-	}, func(projection bootstrap.PublicDiscovery) {
-		served = projection
-	})
-	if served.Status != bootstrap.PublicUnsupportedUpgrade {
-		t.Fatalf("cached projection = %+v, want the remembered document", served)
+	t.Setenv(legacyRootEnvironment, "")
+	_, paths := legacyWALSourceFixture(t, "cache-quiescence-key-123456")
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	defer h.BeginWritableStartup()
+
+	getDiscovery := func() (int, string) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+		return rec.Code, rec.Body.String()
 	}
 
-	original := probeSource
-	probeSource = func(string) error { return errors.New("marker unreadable") }
-	defer func() { probeSource = original }()
-	seedCache()
-	var dropped bootstrap.PublicDiscovery
-	observer.observe(context.Background(), databasePath, func() (bootstrap.PublicDiscovery, bool) {
-		t.Fatal("an unprovable source must not be answered by a new observation")
-		return bootstrap.PublicDiscovery{}, false
-	}, func(projection bootstrap.PublicDiscovery) {
-		dropped = projection
-	})
-	if dropped.Status != bootstrap.PublicUnavailable {
-		t.Fatalf("projection after a failed revalidation = %+v, want the fail-closed document", dropped)
+	// Warm the cache naturally via HTTP.
+	if code, body := getDiscovery(); code != http.StatusOK || !strings.Contains(body, `"status":"unsupported_upgrade"`) {
+		t.Fatalf("initial discovery = %d (%s), want 200 unsupported_upgrade", code, body)
 	}
-	observer.mu.Lock()
-	ready := observer.sourceState(databasePath).cached.ready
-	observer.mu.Unlock()
-	if ready {
-		t.Fatal("a failed revalidation left the remembered projection in place")
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after initial GET = %d, want 1", ran)
+	}
+	// Positive control: second GET hits the warmed cache without re-observing.
+	if code, body := getDiscovery(); code != http.StatusOK || !strings.Contains(body, `"status":"unsupported_upgrade"`) {
+		t.Fatalf("cached discovery = %d (%s), want 200 unsupported_upgrade", code, body)
+	}
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after cached GET = %d, want 1", ran)
+	}
+
+	origProbe := probeSource
+	probeSource = func(string) error { return errors.New("marker unreadable") }
+	code, body := getDiscovery()
+	probeSource = origProbe
+	if code != http.StatusServiceUnavailable || !strings.Contains(body, `"status":"unavailable"`) {
+		t.Fatalf("discovery with failed probe = %d (%s), want 503 unavailable", code, body)
+	}
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after failed probe = %d, want 1 (no new observation on unprovable probe)", ran)
+	}
+
+	// Because the cached entry was dropped on the probe failure, the next GET
+	// after probe recovery must run a fresh observation (observations == 2).
+	if code, body := getDiscovery(); code != http.StatusOK || !strings.Contains(body, `"status":"unsupported_upgrade"`) {
+		t.Fatalf("discovery after probe recovery = %d (%s), want 200 unsupported_upgrade", code, body)
+	}
+	if ran := h.discoveryObserver.observations(); ran != 2 {
+		t.Fatalf("observations after probe recovery = %d, want 2 (dropped cache entry must re-observe)", ran)
 	}
 }
 
-// TestCanceledRequestIsNotAnsweredFromTheCache is the cancellation boundary of the
-// cache hit: the request may be canceled while the revalidation is still running,
-// and a caller that is already gone must never receive the remembered document.
+// TestCanceledRequestIsNotAnsweredFromTheCache warms the public discovery cache
+// via HTTP on a real 1.x source and verifies that a request canceled during
+// cache revalidation receives fail-closed 503 without triggering an observation,
+// while subsequent uncanceled requests continue to hit the warmed cache.
 func TestCanceledRequestIsNotAnsweredFromTheCache(t *testing.T) {
-	observer := &discoveryObservation{}
-	databasePath := filepath.Join(t.TempDir(), "usage.sqlite")
-	if err := os.WriteFile(databasePath, []byte("SQLite format 3\x00"), 0o600); err != nil {
-		t.Fatalf("write the source database: %v", err)
+	t.Setenv(legacyRootEnvironment, "")
+	_, paths := legacyWALSourceFixture(t, "cache-cancel-key-123456")
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	defer h.BeginWritableStartup()
+
+	warmRec := httptest.NewRecorder()
+	h.ServeHTTP(warmRec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+	if warmRec.Code != http.StatusOK || !strings.Contains(warmRec.Body.String(), `"status":"unsupported_upgrade"`) {
+		t.Fatalf("warm discovery = %d (%s), want 200 unsupported_upgrade", warmRec.Code, warmRec.Body.String())
 	}
-	identity, ok := upgradeservice.LegacySourceIdentity(databasePath)
-	if !ok {
-		t.Fatal("identify the source")
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after warm GET = %d, want 1", ran)
 	}
-	observer.mu.Lock()
-	observer.sourceState(databasePath).cached = discoveryObservationCache{
-		identity:   identity,
-		ready:      true,
-		projection: bootstrapdiscovery.UnsupportedUpgrade(),
-	}
-	observer.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	original := afterCacheRevalidation
+	origAfter := afterCacheRevalidation
 	afterCacheRevalidation = cancel
-	defer func() { afterCacheRevalidation = original }()
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil).WithContext(ctx)
+	h.ServeHTTP(cancelRec, cancelReq)
+	afterCacheRevalidation = origAfter
 
-	var served bootstrap.PublicDiscovery
-	observed := false
-	observer.observe(ctx, databasePath, func() (bootstrap.PublicDiscovery, bool) {
-		observed = true
-		return bootstrap.PublicDiscovery{}, false
-	}, func(projection bootstrap.PublicDiscovery) {
-		served = projection
-	})
-	if observed {
-		t.Fatal("a canceled request ran an observation")
+	if cancelRec.Code != http.StatusServiceUnavailable || !strings.Contains(cancelRec.Body.String(), `"status":"unavailable"`) {
+		t.Fatalf("canceled cached GET = %d (%s), want 503 unavailable", cancelRec.Code, cancelRec.Body.String())
 	}
-	if served.Status != bootstrap.PublicUnavailable {
-		t.Fatalf("canceled request was answered %+v, want the fail-closed document", served)
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after canceled cached GET = %d, want 1", ran)
+	}
+
+	followRec := httptest.NewRecorder()
+	h.ServeHTTP(followRec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+	if followRec.Code != http.StatusOK || !strings.Contains(followRec.Body.String(), `"status":"unsupported_upgrade"`) {
+		t.Fatalf("uncanceled follow-up GET = %d (%s), want 200 unsupported_upgrade", followRec.Code, followRec.Body.String())
+	}
+	if ran := h.discoveryObserver.observations(); ran != 1 {
+		t.Fatalf("observations after uncanceled follow-up GET = %d, want 1", ran)
 	}
 }
 
@@ -576,4 +611,436 @@ func TestJournalOnlyOperationStoreFailsClosedOnCorruptWALHeaderAndPendingRollbac
 			t.Fatalf("non-empty rollback journal checks mutated source")
 		}
 	})
+}
+
+// walOnlyMutationOnLegacyStore writes an uncheckpointed WAL transaction on top
+// of a 1.x main database file and exits without checkpointing, so the main
+// database file alone still looks like an intact 1.x store while the committed
+// state in the WAL contains v2-only schema or a Fresh operation marker.
+func walOnlyMutationOnLegacyStore(t *testing.T, mode string) (string, sqliterepo.InspectionPaths) {
+	t.Helper()
+	dir, paths := legacyWALSourceFixture(t, "wal-only-mutation-key-123456")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWALOnlyMutationOnLegacyStoreFixtureProcess$")
+	cmd.Env = append(os.Environ(),
+		"CPAMP_WAL_ONLY_LEGACY_DB="+paths.Database,
+		"CPAMP_WAL_ONLY_LEGACY_MODE="+mode,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wal-only mutation fixture (%s): %v %s", mode, err, out)
+	}
+	walInfo, err := os.Lstat(paths.Database + "-wal")
+	if err != nil || walInfo.Size() == 0 {
+		t.Fatalf("expected non-empty WAL for %s (err=%v)", mode, err)
+	}
+	_ = os.Remove(paths.Database + "-shm")
+	return dir, paths
+}
+
+func TestWALOnlyMutationOnLegacyStoreFixtureProcess(t *testing.T) {
+	database := os.Getenv("CPAMP_WAL_ONLY_LEGACY_DB")
+	if database == "" {
+		return
+	}
+	mode := os.Getenv("CPAMP_WAL_ONLY_LEGACY_MODE")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA wal_autocheckpoint = 0`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+	switch mode {
+	case "legacy-event":
+		if _, err := db.Exec(`INSERT INTO usage_events (total_tokens) VALUES (99)`); err != nil {
+			t.Fatalf("insert WAL-only legacy usage event: %v", err)
+		}
+	case "v2-table":
+		if _, err := db.Exec(`CREATE TABLE upgrade_operations (id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL)`); err != nil {
+			t.Fatalf("create WAL-only v2 table: %v", err)
+		}
+	case "fresh-marker":
+		if _, err := db.Exec(`INSERT INTO settings (key, value) VALUES ('fresh_operation_v1', '{"state":"pending"}')`); err != nil {
+			t.Fatalf("insert WAL-only fresh marker: %v", err)
+		}
+	default:
+		t.Fatalf("unknown mode %q", mode)
+	}
+	os.Exit(0)
+}
+
+// TestUnreadableLockFailsClosedOnCorruptOrUncheckpointedV2WAL enforces that
+// when .manager.lock returns EACCES, public discovery still validates non-empty
+// WAL headers and replays valid WALs in a private snapshot rather than reading
+// only the main database file with immutable=1, while leaving the source tree
+// and marker ctime unchanged.
+func TestUnreadableLockFailsClosedOnCorruptOrUncheckpointedV2WAL(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
+	}
+
+	t.Run("valid-1x-pending-wal-projects-ownership-recovery", func(t *testing.T) {
+		t.Setenv(legacyRootEnvironment, "")
+		dir, paths := legacyWALVolumeWithPendingWAL(t, "unreadable-lock-valid-wal-key")
+		_ = os.Remove(paths.Database + "-shm")
+		beforeTree := readSourceTree(t, dir)
+		markerPath := paths.Database + ".manager.lock"
+		if err := os.Chmod(markerPath, 0o000); err != nil {
+			t.Fatalf("chmod marker: %v", err)
+		}
+		beforeMarker := discoveryMarkerState(t, markerPath)
+
+		h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+		h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+		defer h.BeginWritableStartup()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"reason":"source_ownership_unavailable"`) {
+			_ = os.Chmod(markerPath, 0o600)
+			t.Fatalf("valid 1.x WAL with unreadable lock = %d (%s), want 200 source_ownership_unavailable", rec.Code, rec.Body.String())
+		}
+		if afterMarker := discoveryMarkerState(t, markerPath); afterMarker != beforeMarker {
+			_ = os.Chmod(markerPath, 0o600)
+			t.Fatalf("marker changed: %s -> %s", beforeMarker, afterMarker)
+		}
+		if err := os.Chmod(markerPath, 0o600); err != nil {
+			t.Fatalf("restore marker mode: %v", err)
+		}
+		if afterTree := readSourceTree(t, dir); !reflect.DeepEqual(beforeTree, afterTree) {
+			t.Fatalf("source tree changed on valid 1.x WAL inspection")
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) (string, sqliterepo.InspectionPaths)
+	}{
+		{
+			name: "corrupt-wal-magic",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				dir, paths := walOnlyMutationOnLegacyStore(t, "legacy-event")
+				walPath := paths.Database + "-wal"
+				walBytes, err := os.ReadFile(walPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				walBytes[0] ^= 0xff
+				if err := os.WriteFile(walPath, walBytes, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return dir, paths
+			},
+		},
+		{
+			name: "corrupt-wal-checksum",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				dir, paths := walOnlyMutationOnLegacyStore(t, "legacy-event")
+				walPath := paths.Database + "-wal"
+				walBytes, err := os.ReadFile(walPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				walBytes[24] ^= 0xff
+				if err := os.WriteFile(walPath, walBytes, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return dir, paths
+			},
+		},
+		{
+			name: "truncated-wal-header",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				dir, paths := walOnlyMutationOnLegacyStore(t, "legacy-event")
+				if err := os.WriteFile(paths.Database+"-wal", []byte("short-wal-header"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return dir, paths
+			},
+		},
+		{
+			name: "unreadable-nonempty-wal",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				return walOnlyMutationOnLegacyStore(t, "legacy-event")
+			},
+		},
+		{
+			name: "wal-only-v2-table",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				dir, paths := walOnlyMutationOnLegacyStore(t, "v2-table")
+				if present, err := legacypreflight.RecordedOperationTablePresent(t.Context(), paths.Database); err != nil || present {
+					t.Fatalf("main file unexpectedly contains upgrade_operations (present=%v, err=%v)", present, err)
+				}
+				return dir, paths
+			},
+		},
+		{
+			name: "wal-only-fresh-marker",
+			setup: func(t *testing.T) (string, sqliterepo.InspectionPaths) {
+				return walOnlyMutationOnLegacyStore(t, "fresh-marker")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(legacyRootEnvironment, "")
+			dir, paths := tc.setup(t)
+			beforeTree := readSourceTree(t, dir)
+			walPath := paths.Database + "-wal"
+			var (
+				beforeWALState string
+				origWALMode    os.FileMode
+			)
+			if tc.name == "unreadable-nonempty-wal" {
+				walInfo, err := os.Lstat(walPath)
+				if err != nil {
+					t.Fatalf("stat WAL: %v", err)
+				}
+				origWALMode = walInfo.Mode().Perm()
+				if err := os.Chmod(walPath, 0o000); err != nil {
+					t.Fatalf("chmod WAL: %v", err)
+				}
+				beforeWALState = discoveryMarkerState(t, walPath)
+			}
+			markerPath := paths.Database + ".manager.lock"
+			markerInfo, err := os.Lstat(markerPath)
+			if err != nil {
+				t.Fatalf("stat marker: %v", err)
+			}
+			origMarkerMode := markerInfo.Mode().Perm()
+			if err := os.Chmod(markerPath, 0o000); err != nil {
+				t.Fatalf("chmod marker: %v", err)
+			}
+			beforeMarker := discoveryMarkerState(t, markerPath)
+
+			h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+			h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+			defer h.BeginWritableStartup()
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+			afterMarker := discoveryMarkerState(t, markerPath)
+			var afterWALState string
+			if tc.name == "unreadable-nonempty-wal" {
+				afterWALState = discoveryMarkerState(t, walPath)
+				if err := os.Chmod(walPath, origWALMode); err != nil {
+					t.Fatalf("restore WAL mode: %v", err)
+				}
+			}
+			if err := os.Chmod(markerPath, origMarkerMode); err != nil {
+				t.Fatalf("restore marker mode: %v", err)
+			}
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"status":"unavailable"`) {
+				t.Fatalf("%s discovery = %d (%s), want 503 unavailable", tc.name, rec.Code, rec.Body.String())
+			}
+			if afterMarker != beforeMarker {
+				t.Fatalf("%s rewrote marker: %s -> %s", tc.name, beforeMarker, afterMarker)
+			}
+			if tc.name == "unreadable-nonempty-wal" && afterWALState != beforeWALState {
+				t.Fatalf("%s rewrote WAL metadata: %s -> %s", tc.name, beforeWALState, afterWALState)
+			}
+			if afterTree := readSourceTree(t, dir); !reflect.DeepEqual(beforeTree, afterTree) {
+				t.Fatalf("%s mutated source tree", tc.name)
+			}
+		})
+	}
+}
+
+// TestUpgradeAuthInvalidatesCachedCredentialWhenCorruptWALRestoresMtime proves
+// at the HTTP boundary that corrupting the WAL in place and restoring its mtime
+// invalidates the credential verification cache via ctime so neither upgrade
+// authenticate nor upgrade status returns 200.
+func TestUpgradeAuthInvalidatesCachedCredentialWhenCorruptWALRestoresMtime(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	const adminKey = "mtime-restored-wal-admin-key-01"
+	dir, paths := legacyWALVolumeWithPendingWAL(t, adminKey)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	defer h.BeginWritableStartup()
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	callRoute := func(method, route string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, server.URL+route, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+adminKey)
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(raw)
+	}
+
+	// Warm the credential cache over HTTP.
+	if code, body := callRoute(http.MethodPost, upgradeauth.Path); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("initial upgrade authenticate = %d (%s), want 200", code, body)
+	}
+
+	walPath := paths.Database + "-wal"
+	origStat, err := os.Lstat(walPath)
+	if err != nil {
+		t.Fatalf("stat WAL before rewrite: %v", err)
+	}
+	origID, err := copyinmarker.Identity(walPath)
+	if err != nil {
+		t.Fatalf("identify WAL before rewrite: %v", err)
+	}
+	origStamp, err := copyinmarker.ChangeStamp(walPath)
+	if err != nil {
+		t.Fatalf("change stamp before rewrite: %v", err)
+	}
+
+	walFile, err := os.OpenFile(walPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open WAL in place: %v", err)
+	}
+	var firstByte [1]byte
+	if _, err := walFile.ReadAt(firstByte[:], 0); err != nil {
+		_ = walFile.Close()
+		t.Fatalf("read WAL byte 0: %v", err)
+	}
+	firstByte[0] ^= 0xff
+	if _, err := walFile.WriteAt(firstByte[:], 0); err != nil {
+		_ = walFile.Close()
+		t.Fatalf("corrupt WAL byte 0 in place: %v", err)
+	}
+	if err := walFile.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+	if err := os.Chtimes(walPath, origStat.ModTime(), origStat.ModTime()); err != nil {
+		t.Fatalf("restore WAL mtime: %v", err)
+	}
+
+	afterStat, err := os.Lstat(walPath)
+	if err != nil {
+		t.Fatalf("stat WAL after rewrite: %v", err)
+	}
+	afterID, err := copyinmarker.Identity(walPath)
+	if err != nil {
+		t.Fatalf("identify WAL after rewrite: %v", err)
+	}
+	afterStamp, err := copyinmarker.ChangeStamp(walPath)
+	if err != nil {
+		t.Fatalf("change stamp after rewrite: %v", err)
+	}
+	if afterID != origID || afterStat.Size() != origStat.Size() || afterStat.ModTime().UnixNano() != origStat.ModTime().UnixNano() {
+		t.Fatalf("WAL rewrite did not preserve inode/size/mtime")
+	}
+	if afterStamp == origStamp {
+		t.Fatalf("WAL change stamp did not advance (%s)", afterStamp)
+	}
+	beforeCallsTree := readSourceTree(t, dir)
+
+	if code, body := callRoute(http.MethodPost, upgradeauth.Path); code != http.StatusServiceUnavailable {
+		t.Fatalf("upgrade authenticate after mtime-restored WAL corruption = %d (%s), want 503", code, body)
+	}
+	statusRoute := bootstrap.FixedBootstrapAPIPath + "installation/upgrade/status"
+	if code, body := callRoute(http.MethodGet, statusRoute); code != http.StatusServiceUnavailable {
+		t.Fatalf("upgrade status after mtime-restored WAL corruption = %d (%s), want 503", code, body)
+	}
+	if afterCallsTree := readSourceTree(t, dir); !reflect.DeepEqual(beforeCallsTree, afterCallsTree) {
+		t.Fatalf("failed auth/status mutated source tree")
+	}
+}
+
+// TestUpgradeAuthInvalidatesCachedCredentialWhenRotatedKeyRestoresMtime proves
+// at the HTTP boundary that rotating the admin credential in place and
+// restoring mtime invalidates the cached pass for the previous admin key.
+func TestUpgradeAuthInvalidatesCachedCredentialWhenRotatedKeyRestoresMtime(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	const (
+		originalKey = "http-original-legacy-key-00001"
+		rotatedKey  = "http-rotated-legacy-key-000002"
+	)
+	_, paths := legacyWALSourceFixture(t, originalKey)
+	_, donorPaths := legacyWALSourceFixture(t, rotatedKey)
+	donorBytes, err := os.ReadFile(donorPaths.Database)
+	if err != nil {
+		t.Fatalf("read donor database: %v", err)
+	}
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	defer h.BeginWritableStartup()
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	authenticate := func(key string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, server.URL+upgradeauth.Path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(raw)
+	}
+
+	if code, body := authenticate(originalKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("initial authenticate = %d (%s), want 200", code, body)
+	}
+
+	origStat, err := os.Lstat(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origID, err := copyinmarker.Identity(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbFile, err := os.OpenFile(paths.Database, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbFile.WriteAt(donorBytes, 0); err != nil {
+		_ = dbFile.Close()
+		t.Fatal(err)
+	}
+	if err := dbFile.Truncate(int64(len(donorBytes))); err != nil {
+		_ = dbFile.Close()
+		t.Fatal(err)
+	}
+	if err := dbFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(paths.Database, origStat.ModTime(), origStat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	afterStat, err := os.Lstat(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterID, err := copyinmarker.Identity(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterID != origID || afterStat.Size() != origStat.Size() || afterStat.ModTime().UnixNano() != origStat.ModTime().UnixNano() {
+		t.Fatalf("database rewrite did not preserve inode/size/mtime")
+	}
+
+	if code, body := authenticate(originalKey); code != http.StatusUnauthorized {
+		t.Fatalf("authenticate with old key after mtime-restored rotation = %d (%s), want 401", code, body)
+	}
+	if code, body := authenticate(rotatedKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("authenticate with rotated key = %d (%s), want 200", code, body)
+	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
@@ -136,9 +137,8 @@ func InspectReadOnlyLegacySource(
 			// be read without the marker.
 			// An unfenceable verdict is never marked reusable: cachedProjection
 			// requires ProbeExisting to prove quiescence, which an unreadable
-			// marker fails by definition, and classifyUnfenceableSource reads
-			// only the header and immutable catalogue without copying the store.
-			verdict := classifyUnfenceableSource(ctx, dbPath, info)
+			// marker fails by definition.
+			verdict := classifyUnfenceableSource(ctx, source, extraExcludedRoot, info)
 			consume(verdict)
 			return verdict, false
 		}
@@ -178,23 +178,50 @@ func InspectReadOnlyLegacySource(
 }
 
 // classifyUnfenceableSource answers for a database whose ownership marker this
-// process may not open. No fence can be taken, so nothing is copied, locked or
-// created: the file is read through an immutable handle, which ignores any
-// journal beside it instead of joining it, and only the schema and the one
-// operation marker decide between the two conditions that look identical from
-// the outside. A store v2 has already opened — its own tables, or the Fresh
-// operation marker the v2 image writes at the start of its first boot — is
-// never presented as a 1.x source; a 1.x store whose files are root-owned is the
-// condition the host has to repair.
-func classifyUnfenceableSource(ctx context.Context, databasePath string, inspected os.FileInfo) LegacyDiscoveryObservation {
-	if ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
+// process may not open. No fence can be taken, so nothing beside the source is
+// created or modified: a cold database with no WAL is read through an immutable
+// handle verified against before/after file identity, while a database with a
+// non-empty WAL first validates the WAL header and then replays the WAL inside a
+// private snapshot outside every preserved root. A corrupt WAL header, an
+// unreadable WAL, a pending rollback journal, a store v2 has already opened (its
+// own tables in either the main file or the WAL), or the Fresh operation marker
+// is never presented as a 1.x source; only an intact 1.x store whose marker alone
+// is root-owned yields the host ownership recovery condition.
+func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extraExcludedRoot string, inspected os.FileInfo) LegacyDiscoveryObservation {
+	databasePath := strings.TrimSpace(source.Database)
+	if databasePath == "" || ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
 		return LegacyDiscoveryNone
 	}
 	// The database is not the only file this verdict speaks for. A sidecar beside
-	// it that is a link, a FIFO or a second name for another file describes a
-	// store no read of the file alone can account for, so it is refused instead of
-	// being projected as the ownership condition of a 1.x volume.
+	// it that is a link, a FIFO, a second name for another file, or a non-empty
+	// rollback journal describes a store no read-only classification can trust, so
+	// it fails closed instead of projecting the 1.x ownership card.
 	if err := AuditSourceSidecars(databasePath); err != nil {
+		return LegacyDiscoveryNone
+	}
+	walInfo, walErr := os.Lstat(databasePath + "-wal")
+	if walErr != nil && !os.IsNotExist(walErr) {
+		return LegacyDiscoveryNone
+	}
+	if walErr == nil && walInfo.Size() > 0 {
+		if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
+			return LegacyDiscoveryNone
+		}
+		if err := ValidatePreservedScratchDir("", source, ScratchRoot{Label: "the configured source root", Dir: extraExcludedRoot}); err != nil {
+			return LegacyDiscoveryNone
+		}
+		snapshot, err := OpenSnapshot(ctx, databasePath, "")
+		if err != nil {
+			return LegacyDiscoveryNone
+		}
+		verdict := classifyUnfenceableDatabase(ctx, snapshot.DB(), true)
+		if closeErr := snapshot.Close(); closeErr != nil || ctx.Err() != nil {
+			return LegacyDiscoveryNone
+		}
+		return verdict
+	}
+	before, err := identifySourceCredential(databasePath)
+	if err != nil {
 		return LegacyDiscoveryNone
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, true))
@@ -203,11 +230,31 @@ func classifyUnfenceableSource(ctx context.Context, databasePath string, inspect
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	defer func() { _ = db.Close() }()
+	verdict := classifyUnfenceableDatabase(ctx, db, false)
+	if closeErr := db.Close(); closeErr != nil || ctx.Err() != nil {
+		return LegacyDiscoveryNone
+	}
+	if err := AuditSourceSidecars(databasePath); err != nil {
+		return LegacyDiscoveryNone
+	}
+	after, err := identifySourceCredential(databasePath)
+	if err != nil || after != before {
+		return LegacyDiscoveryNone
+	}
+	return verdict
+}
+
+func classifyUnfenceableDatabase(ctx context.Context, db *sql.DB, verifyIntegrity bool) LegacyDiscoveryObservation {
+	if verifyIntegrity {
+		if err := quickCheckSource(ctx, db); err != nil {
+			return LegacyDiscoveryNone
+		}
+	}
 	// sourceKind is SourceKindLegacyManager only when the v2-only tables are
-	// absent, so a native v2 schema can never reach the ownership verdict.
+	// absent, so a native v2 schema — whether checkpointed or replayed from WAL —
+	// can never reach the ownership verdict.
 	schema, err := readSourceSchema(ctx, db)
-	if err != nil || schema.sourceKind() != SourceKindLegacyManager {
+	if err != nil || schema.sourceKind() != SourceKindLegacyManager || len(schema.v2OnlyTables()) != 0 {
 		return LegacyDiscoveryNone
 	}
 	var freshPresent bool

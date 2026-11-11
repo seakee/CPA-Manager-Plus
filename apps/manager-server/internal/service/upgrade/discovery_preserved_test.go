@@ -23,21 +23,35 @@ func observeOnce(t *testing.T, source PreservedSource) (LegacyDiscoveryObservati
 // "ownership unavailable" would send the operator to a chown the source does not
 // need, and would remember that answer for an unchanged source.
 func TestReadOnlyLegacyObservationDoesNotBlameTheMarkerForAnUnreadableSource(t *testing.T) {
-	fixture := newSourceFixture(t, nil)
-	wal := fixture.dbPath + "-wal"
-	writeFixtureFile(t, wal, "sidecar the process cannot read\n")
-	if err := os.Chmod(wal, 0o000); err != nil {
-		t.Fatalf("make the journal unreadable: %v", err)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
 	}
-	t.Cleanup(func() { _ = os.Chmod(wal, 0o600) })
+	t.Run("unreadable-wal-sidecar", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		wal := fixture.dbPath + "-wal"
+		writeFixtureFile(t, wal, "sidecar the process cannot read\n")
+		if err := os.Chmod(wal, 0o000); err != nil {
+			t.Fatalf("make the journal unreadable: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(wal, 0o600) })
 
-	verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
-	if verdict != LegacyDiscoveryNone {
-		t.Fatalf("verdict = %q, want the fail-closed observation", verdict)
-	}
-	if reusable {
-		t.Fatal("a verdict that names this moment was marked reusable")
-	}
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
+	t.Run("unreadable-database-with-readable-marker", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		if err := os.Chmod(fixture.dbPath, 0o000); err != nil {
+			t.Fatalf("make the database unreadable: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(fixture.dbPath, 0o600) })
+
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
 }
 
 // TestReadOnlyLegacyObservationAuditsSidecarsBeforeTheOwnershipVerdict pins the one
@@ -236,5 +250,33 @@ func TestPreservedScratchDirectoryKeepsOutOfTheDataKeyDirectory(t *testing.T) {
 	t.Setenv("TMPDIR", scratchDir)
 	if err := ValidatePreservedScratchDir("", source); err != nil {
 		t.Fatalf("default scratch outside the preserved trees = %v", err)
+	}
+}
+
+// TestReadOnlyLegacyObservationUnreadableMarkerFailsClosedOnCorruptWAL enforces
+// that an unreadable ownership marker never skips WAL header validation or
+// private WAL replay to project a corrupt WAL as a valid 1.x ownership problem.
+func TestReadOnlyLegacyObservationUnreadableMarkerFailsClosedOnCorruptWAL(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
+	}
+	fixture := newSourceFixture(t, nil)
+	marker := fixture.dbPath + ".manager.lock"
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatalf("make ownership marker unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+
+	wal := fixture.dbPath + "-wal"
+	if err := os.WriteFile(wal, []byte(strings.Repeat("x", 64)), 0o644); err != nil {
+		t.Fatalf("write corrupt WAL header: %v", err)
+	}
+
+	verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+	if verdict != LegacyDiscoveryNone {
+		t.Fatalf("verdict with unreadable marker and corrupt WAL = %q, want %q", verdict, LegacyDiscoveryNone)
+	}
+	if reusable {
+		t.Fatal("failed observation was marked reusable")
 	}
 }

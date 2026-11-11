@@ -229,6 +229,9 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	path := strings.TrimSpace(a.DatabasePath)
 	info, err := processlock.InspectSourceFile(path)
 	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(path); sideErr != nil {
+			return upgradeRecord{}, false, sideErr
+		}
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {

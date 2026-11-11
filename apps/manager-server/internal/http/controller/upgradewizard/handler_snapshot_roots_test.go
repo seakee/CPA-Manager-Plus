@@ -433,3 +433,110 @@ func TestPreservedStatusFailsClosedOnLinkedDatabaseAndSidecarsWithoutWAL(t *test
 		})
 	}
 }
+
+// TestPreservedStatusFailsClosedWhenTargetDatabaseMissingWithOrphanSidecars
+// enforces that a missing target database never answers 200 recorded:false when
+// orphan -wal, -shm, or -journal sidecars remain in the target directory.
+func TestPreservedStatusFailsClosedWhenTargetDatabaseMissingWithOrphanSidecars(t *testing.T) {
+	sourceRoot := legacySourceDir(t)
+	liveTarget := materializingManagerTarget(t, sourceRoot)
+	liveWALBytes, err := os.ReadFile(liveTarget + "-wal")
+	if err != nil || len(liveWALBytes) == 0 {
+		t.Fatalf("read valid WAL bytes (len=%d, err=%v)", len(liveWALBytes), err)
+	}
+
+	makeMissingTargetHandler := func(t *testing.T) (string, *Handler) {
+		t.Helper()
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(filepath.Join(dir, "data.key"), []byte("key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dbPath, &Handler{
+			LegacyRoot:           func() string { return sourceRoot },
+			Database:             func() string { return dbPath },
+			DataKey:              func() string { return filepath.Join(dir, "data.key") },
+			Timeout:              5 * time.Second,
+			PreserveManagerStore: true,
+		}
+	}
+
+	// Control: clean absent target with no sidecars reports recorded:false / preflight.
+	_, cleanHandler := makeMissingTargetHandler(t)
+	if status, body := snapshotRouteStatus(t, cleanHandler, testPrefix+StatusSuffix); status != http.StatusOK ||
+		!strings.Contains(body, `"recorded":false`) ||
+		!strings.Contains(body, `"nextAction":"preflight"`) {
+		t.Fatalf("clean missing target status = %d: %s, want 200 recorded:false/preflight", status, body)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, dbPath string)
+	}{
+		{
+			name: "orphan-valid-nonempty-wal",
+			plant: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-wal", liveWALBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan-corrupt-nonempty-wal",
+			plant: func(t *testing.T, dbPath string) {
+				corrupt := append([]byte(nil), liveWALBytes...)
+				corrupt[0] ^= 0xff
+				if err := os.WriteFile(dbPath+"-wal", corrupt, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan-empty-wal",
+			plant: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-wal", nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan-shm",
+			plant: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-shm", []byte("stale-wal-index"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan-journal",
+			plant: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-journal", nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan-wal-and-shm",
+			plant: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-wal", liveWALBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dbPath+"-shm", []byte("stale-wal-index"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath, handler := makeMissingTargetHandler(t)
+			tc.plant(t, dbPath)
+			status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+			if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeOperationUnread) {
+				t.Fatalf("%s status = %d (%s), want 503 %s", tc.name, status, body, CodeOperationUnread)
+			}
+			if _, err := os.Lstat(dbPath); !os.IsNotExist(err) {
+				t.Fatalf("%s status created missing target database (err=%v)", tc.name, err)
+			}
+		})
+	}
+}

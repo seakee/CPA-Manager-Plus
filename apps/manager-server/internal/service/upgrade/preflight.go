@@ -756,7 +756,11 @@ func verifyPreservedCredential(ctx context.Context, preserved PreservedSource, k
 		return err
 	}
 	cacheKey := credentialCacheKey(key, canonicalPath(databasePath), identity)
-	return sourceCredentialCache.verify(ctx, cacheKey, func() error {
+	stableIdentity := func() bool {
+		current, checkErr := identifySourceCredential(databasePath)
+		return checkErr == nil && !current.uncacheable && current == identity
+	}
+	return sourceCredentialCache.verifySource(ctx, cacheKey, !identity.uncacheable, stableIdentity, func() error {
 		// The first read of a source state pays for the copy and its digests, so
 		// its budget scales with every byte that read must carry — the database
 		// and a WAL that still holds committed rows, not the database file alone —
@@ -775,7 +779,17 @@ func verifyPreservedCredential(ctx context.Context, preserved PreservedSource, k
 			return openErr
 		}
 		defer func() { _ = source.close() }()
-		return verifyAdminCredential(ctx, source, key)
+		if err := verifyAdminCredential(ctx, source, key); err != nil {
+			return err
+		}
+		after, afterErr := identifySourceCredential(databasePath)
+		if afterErr != nil {
+			return afterErr
+		}
+		if after != identity {
+			return ErrSourceDatabaseChanged
+		}
+		return nil
 	})
 }
 

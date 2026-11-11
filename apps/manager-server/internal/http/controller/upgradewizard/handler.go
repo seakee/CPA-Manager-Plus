@@ -1233,9 +1233,17 @@ func emptyStatusDocument() statusDocument {
 func readRecordedStatus(ctx context.Context, databasePath string, document statusDocument) (statusDocument, bool, error) {
 	info, err := os.Stat(databasePath)
 	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
+		}
 		return document, false, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		if err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+			if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+				return statusDocument{}, false, sideErr
+			}
+		}
 		return document, false, nil
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath))
@@ -1252,7 +1260,7 @@ func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.Pres
 	databasePath := strings.TrimSpace(source.Database)
 	info, err := processlock.InspectSourceFile(databasePath)
 	if os.IsNotExist(err) {
-		if sideErr := upgradeservice.AuditSourceSidecars(databasePath); sideErr != nil {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
 			return statusDocument{}, false, sideErr
 		}
 		return document, false, nil
@@ -1264,10 +1272,8 @@ func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.Pres
 		return statusDocument{}, false, err
 	}
 	if info.Size() == 0 {
-		if walInfo, walErr := os.Lstat(databasePath + "-wal"); walErr == nil && walInfo.Size() > 0 {
-			return statusDocument{}, false, errors.New("empty database has a pending WAL sidecar")
-		} else if walErr != nil && !os.IsNotExist(walErr) {
-			return statusDocument{}, false, walErr
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
 		}
 		return document, false, nil
 	}
