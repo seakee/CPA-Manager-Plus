@@ -10,6 +10,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	accountactionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/accountaction"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
 type Handler struct {
@@ -98,6 +100,14 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) writeCandidateResult(w http.ResponseWriter, item any, err error) {
 	if err != nil {
+		if errors.Is(err, cpa.ErrManagementRejected) {
+			response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonManagementRejected})
+			return
+		}
+		if errors.Is(err, cpa.ErrExternalTargetMoved) {
+			response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, accountactionsvc.ErrCandidateNotFound) {
 			status = http.StatusNotFound

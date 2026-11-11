@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -117,6 +118,37 @@ func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	return true
 }
 
+// legacyBridgeServicePresentsSavedKey reports whether a Manager-local legacy
+// controller route internally presents the saved management credential to the
+// user's CPA (synchronously or on a detached async job). Unlike reverse-proxied
+// routes, these handlers run a precheck and carry withExternalSavedCredentialGate
+// on r.Context() so each individual outbound CPA HTTP call serializes at the wire
+// boundary without holding legacyCredentialGate across non-CPA catalog fetches,
+// retry backoffs, run leases, or local SQLite transactions.
+func legacyBridgeServicePresentsSavedKey(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	cleaned := strings.TrimRight(r.URL.Path, "/")
+	switch {
+	case r.Method == http.MethodPost && cleaned == "/v0/management/model-prices/sync":
+		return true
+	case r.Method == http.MethodPost && strings.HasPrefix(cleaned, "/v0/management/account-action-candidates/") && strings.HasSuffix(cleaned, "/enable"):
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/account-action-candidates/"), "/enable")
+		return candidateID != "" && !strings.Contains(candidateID, "/")
+	case r.Method == http.MethodDelete && strings.HasPrefix(cleaned, "/v0/management/account-action-candidates/") && strings.HasSuffix(cleaned, "/auth-file"):
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/account-action-candidates/"), "/auth-file")
+		return candidateID != "" && !strings.Contains(candidateID, "/")
+	case r.Method == http.MethodPost && cleaned == "/v0/management/codex-inspection/run":
+		return true
+	case r.Method == http.MethodPost && strings.HasPrefix(cleaned, "/v0/management/codex-inspection/runs/") && strings.HasSuffix(cleaned, "/actions"):
+		runID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/codex-inspection/runs/"), "/actions")
+		return runID != "" && !strings.Contains(runID, "/")
+	default:
+		return false
+	}
+}
+
 // externalLegacyDecision is the one answer the External cutover gives a legacy
 // request before anything is forwarded.
 type externalLegacyDecision int
@@ -131,9 +163,12 @@ const (
 	// legacyDecisionUnavailable is a saved-key request this Manager cannot decide
 	// because its own committed instruction is unreadable.
 	legacyDecisionUnavailable
-	// legacyDecisionGated is an admin-authorized request that will present the saved
-	// management key, so it is serialized and its refusal recorded.
+	// legacyDecisionGated is an admin-authorized reverse-proxied request that will
+	// present the saved management key, so it is serialized and its refusal recorded.
 	legacyDecisionGated
+	// legacyDecisionGatedService is an admin-authorized Manager-local controller
+	// action that internally presents the saved management key via CPA HTTP helpers.
+	legacyDecisionGatedService
 )
 
 // externalLegacyDecision decides one legacy request before anything is forwarded,
@@ -144,12 +179,13 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 		return legacyDecisionPassthrough, freshstore.Record{}
 	}
 	presents := legacyBridgePresentsSavedKey(r)
+	servicePresents := !presents && legacyBridgeServicePresentsSavedKey(r)
 	record, err := a.store.Load(r.Context())
 	if err != nil {
 		// Fail closed: without the committed instruction this Manager cannot prove
 		// which credential a saved-key request would present, and presenting a
 		// credential it cannot name is how an address gets banned.
-		if presents {
+		if presents || servicePresents {
 			return legacyDecisionUnavailable, freshstore.Record{}
 		}
 		return legacyDecisionPassthrough, freshstore.Record{}
@@ -162,7 +198,7 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
 		return legacyDecisionReplacedWrite, record
 	}
-	if !presents {
+	if !presents && !servicePresents {
 		return legacyDecisionPassthrough, record
 	}
 	// Admin authorization runs before the gate. A caller-auth plugin-management
@@ -171,6 +207,9 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 	// the saved key: neither may serialize a CPA read or file a refusal.
 	if !freshAdminAuthenticated(record, r) {
 		return legacyDecisionPassthrough, record
+	}
+	if servicePresents {
+		return legacyDecisionGatedService, record
 	}
 	return legacyDecisionGated, record
 }
@@ -205,10 +244,70 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		case legacyDecisionUnavailable:
 			writeExternalAuthorityUnavailable(w)
 			return
+		case legacyDecisionGatedService:
+			ctx := r.Context()
+			gate := &app.legacyCredentialGate
+			if !gate.acquire(ctx) {
+				writeExternalCredentialWaitCancelled(w)
+				return
+			}
+			record, err := app.store.Load(ctx)
+			if err != nil {
+				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || !freshAdminAuthenticated(record, r) {
+				gate.release()
+				next.ServeHTTP(w, r)
+				return
+			}
+			var grant externalReadGrant
+			snapshotCtx := withFreshRecordSnapshot(ctx, record)
+			if app.externalSource != nil {
+				resolvedGrant, _, targetErr := app.externalReadTargetFor(snapshotCtx, record)
+				if targetErr != nil {
+					gate.release()
+					if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusConflict)
+						writeFreshJSON(w, struct {
+							Code string `json:"code"`
+						}{freshconfig.ReasonTargetMoved})
+						return
+					}
+					writeExternalAuthorityUnavailable(w)
+					return
+				}
+				grant = resolvedGrant
+			} else {
+				grant = app.externalReadGrantFor(snapshotCtx, record)
+			}
+			if grant.Refused {
+				gate.release()
+				writeExternalManagementRejected(w)
+				return
+			}
+			gate.release()
+			next.ServeHTTP(w, r.WithContext(app.withExternalSavedCredentialGate(ctx)))
+			return
 		case legacyDecisionGated:
 		default:
 			next.ServeHTTP(w, r)
 			return
+		}
+		if app != nil && app.legacyApp != nil && app.legacyApp.ProxyService != nil {
+			nextReq, releaseAuthFile, status, authErr := app.legacyApp.ProxyService.AcquireRequestAuthFileMutation(r)
+			if authErr != nil {
+				response.Error(w, status, authErr)
+				return
+			}
+			defer releaseAuthFile()
+			r = nextReq
 		}
 		ctx := r.Context()
 		gate := &app.legacyCredentialGate
@@ -235,6 +334,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		}
 		var grant externalReadGrant
 		snapshotCtx := withFreshRecordSnapshot(ctx, record)
+		snapshotCtx = app.withExternalSavedCredentialGate(snapshotCtx)
 		if app.externalSource != nil {
 			resolvedGrant, install, targetErr := app.externalReadTargetFor(snapshotCtx, record)
 			if targetErr != nil {

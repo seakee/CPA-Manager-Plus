@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	usageapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityusage"
@@ -423,8 +424,9 @@ func (a *freshApplication) confirmExternalUsageCollection(w http.ResponseWriter,
 	// endpoint re-runs the collection start, and that start samples the CPA before
 	// it may write anything: answering the recorded blocker here is the same answer
 	// the read gives, and it costs the CPA no request.
-	if a.externalSavedCredentialRefused(r.Context()) {
+	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 		a.writeExternalUsageError(w, cpa.ErrManagementRejected)
+	}) {
 		return
 	}
 	// A confirm while collection is already live is a no-op: the switch it would
@@ -529,15 +531,33 @@ func (a *freshApplication) fetchExternalUsageUpstream(ctx context.Context) (cpa.
 	}
 	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
 	defer hold.finish()
-	report, err := cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey)
+	report, err := cpa.ObserveExternalVersion(cpa.WithoutExternalHeaderRelease(probeCtx), install.BaseURL, install.ManagementKey)
 	if err != nil {
 		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
 		hold.finish()
 		return cpa.ExternalVersionReport{}, false, err
 	}
-	enabled, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
+	var recorded atomic.Bool
+	secondCtx := cpa.WithExternalHeaderObserver(probeCtx, func(statusCode int, releaseGate bool) {
+		switch statusCode {
+		case http.StatusUnauthorized:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementRejected)
+			}
+		case http.StatusForbidden:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementClientForbidden)
+			}
+		}
+		if releaseGate {
+			hold.release()
+		}
+	})
+	enabled, err := cpa.FetchExternalUsageStatistics(secondCtx, install.BaseURL, install.ManagementKey)
 	if err != nil {
-		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		if !recorded.Load() {
+			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		}
 		hold.finish()
 		return cpa.ExternalVersionReport{}, false, err
 	}

@@ -36,7 +36,9 @@ func WithExternalSavedCredentialGate(ctx context.Context, gate ExternalSavedCred
 	return context.WithValue(ctx, externalSavedCredentialGateKey{}, gate)
 }
 
-func externalSavedCredentialGateFromContext(ctx context.Context) ExternalSavedCredentialGate {
+// ExternalSavedCredentialGateFromContext returns the active External
+// saved-credential gate bound to ctx, if any.
+func ExternalSavedCredentialGateFromContext(ctx context.Context) ExternalSavedCredentialGate {
 	if ctx == nil {
 		return nil
 	}
@@ -44,52 +46,144 @@ func externalSavedCredentialGateFromContext(ctx context.Context) ExternalSavedCr
 	return gate
 }
 
-type trustedCARootsKey struct{}
+// HasExternalSavedCredentialGate reports whether ctx carries an External
+// saved-credential wire gate.
+func HasExternalSavedCredentialGate(ctx context.Context) bool {
+	return ExternalSavedCredentialGateFromContext(ctx) != nil
+}
 
-// WithTrustedCARoots attaches a scoped X.509 root certificate pool for CPA
-// HTTP management requests executed on ctx, avoiding process-global mutations
-// of http.DefaultTransport in self-signed TLS tests.
-func WithTrustedCARoots(ctx context.Context, roots *x509.CertPool) context.Context {
-	if roots == nil {
+type externalHeaderObserverKey struct{}
+type externalKeepHoldKey struct{}
+
+// ExternalHeaderObserver is invoked as soon as an upstream HTTP response's
+// status headers arrive so 401/403 refusals can be recorded and the credential
+// gate released before streaming or decoding the response body.
+type ExternalHeaderObserver func(statusCode int, releaseGate bool)
+
+// WithExternalHeaderObserver attaches an upstream status-header observer to ctx.
+func WithExternalHeaderObserver(ctx context.Context, observer ExternalHeaderObserver) context.Context {
+	if observer == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, trustedCARootsKey{}, roots)
+	return context.WithValue(ctx, externalHeaderObserverKey{}, observer)
 }
 
-func trustedCARootsFromContext(ctx context.Context) *x509.CertPool {
+// WithoutExternalHeaderRelease marks a multi-request snapshot step (such as the
+// first GET of ExternalKeySnapshot) so 401/403 refusals are still recorded on
+// header receipt while keeping the gate held across a 200 header into the
+// companion GET.
+func WithoutExternalHeaderRelease(ctx context.Context) context.Context {
+	return context.WithValue(ctx, externalKeepHoldKey{}, true)
+}
+
+// ObserveExternalResponseStatus notifies any active External header observer
+// that upstream HTTP response headers with statusCode have been received.
+func ObserveExternalResponseStatus(ctx context.Context, statusCode int) {
 	if ctx == nil {
+		return
+	}
+	observer, _ := ctx.Value(externalHeaderObserverKey{}).(ExternalHeaderObserver)
+	if observer == nil {
+		return
+	}
+	keepHold, _ := ctx.Value(externalKeepHoldKey{}).(bool)
+	observer(statusCode, !keepHold)
+}
+
+// TrustedCARoots holds reusable pooled and direct HTTP transports configured
+// with a scoped X.509 root pool so self-signed TLS tests never mutate
+// http.DefaultTransport or allocate unclosed transports per request.
+type TrustedCARoots struct {
+	pooled *http.Transport
+	direct *http.Transport
+}
+
+// NewTrustedCARoots constructs reusable HTTP transports trusting pool.
+func NewTrustedCARoots(pool *x509.CertPool) *TrustedCARoots {
+	if pool == nil {
 		return nil
 	}
-	roots, _ := ctx.Value(trustedCARootsKey{}).(*x509.CertPool)
-	return roots
-}
-
-func managementHTTPClient(ctx context.Context, timeout time.Duration, direct bool) *http.Client {
-	roots := trustedCARootsFromContext(ctx)
-	if !direct && roots == nil {
-		return &http.Client{Timeout: timeout}
-	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	if direct {
-		tr.Proxy = nil
-		tr.DisableKeepAlives = true
-		tr.MaxResponseHeaderBytes = 32 << 10
-	}
-	if roots != nil {
+	build := func(direct bool) *http.Transport {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		if direct {
+			tr.Proxy = nil
+			tr.DisableKeepAlives = true
+			tr.MaxResponseHeaderBytes = 32 << 10
+		}
 		var tlsCfg *tls.Config
 		if tr.TLSClientConfig != nil {
 			tlsCfg = tr.TLSClientConfig.Clone()
 		} else {
 			tlsCfg = &tls.Config{}
 		}
-		tlsCfg.RootCAs = roots
+		tlsCfg.RootCAs = pool
 		tr.TLSClientConfig = tlsCfg
+		return tr
 	}
-	client := &http.Client{Transport: tr, Timeout: timeout}
-	if direct {
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &TrustedCARoots{
+		pooled: build(false),
+		direct: build(true),
 	}
-	return client
+}
+
+// CloseIdleConnections closes any idle connections held by the scoped
+// transports.
+func (r *TrustedCARoots) CloseIdleConnections() {
+	if r == nil {
+		return
+	}
+	if r.pooled != nil {
+		r.pooled.CloseIdleConnections()
+	}
+	if r.direct != nil {
+		r.direct.CloseIdleConnections()
+	}
+}
+
+type trustedCARootsKey struct{}
+
+// WithTrustedCARoots attaches reusable scoped TLS transports for CPA HTTP
+// management requests executed on ctx.
+func WithTrustedCARoots(ctx context.Context, roots *TrustedCARoots) context.Context {
+	if roots == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedCARootsKey{}, roots)
+}
+
+func trustedCARootsFromContext(ctx context.Context) *TrustedCARoots {
+	if ctx == nil {
+		return nil
+	}
+	roots, _ := ctx.Value(trustedCARootsKey{}).(*TrustedCARoots)
+	return roots
+}
+
+func managementHTTPClient(ctx context.Context, timeout time.Duration, direct bool) *http.Client {
+	roots := trustedCARootsFromContext(ctx)
+	if roots != nil {
+		tr := roots.pooled
+		if direct {
+			tr = roots.direct
+		}
+		client := &http.Client{Transport: tr, Timeout: timeout}
+		if direct {
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		}
+		return client
+	}
+	if !direct {
+		return &http.Client{Timeout: timeout}
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.DisableKeepAlives = true
+	tr.MaxResponseHeaderBytes = 32 << 10
+	return &http.Client{
+		Transport:     tr,
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 func (t *Transport) httpClient(ctx context.Context) *http.Client {
@@ -100,20 +194,7 @@ func (t *Transport) httpClient(ctx context.Context) *http.Client {
 	if roots == nil {
 		return t.client
 	}
-	base, ok := t.client.Transport.(*http.Transport)
-	if !ok || base == nil {
-		base = http.DefaultTransport.(*http.Transport)
-	}
-	cloned := base.Clone()
-	var tlsCfg *tls.Config
-	if cloned.TLSClientConfig != nil {
-		tlsCfg = cloned.TLSClientConfig.Clone()
-	} else {
-		tlsCfg = &tls.Config{}
-	}
-	tlsCfg.RootCAs = roots
-	cloned.TLSClientConfig = tlsCfg
 	clientCopy := *t.client
-	clientCopy.Transport = cloned
+	clientCopy.Transport = roots.direct
 	return &clientCopy
 }

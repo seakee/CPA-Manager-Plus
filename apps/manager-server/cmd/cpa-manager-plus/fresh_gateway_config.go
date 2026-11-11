@@ -79,6 +79,10 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 		writeFreshJSON(w, v)
 		return
 	}
+	if errors.Is(e, errExternalCredentialWaitCancelled) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
 	var rejection freshconfig.Rejection
 	var refusal freshconfig.CPARejection
 	var writeError cpa.ConfigWriteError
@@ -206,8 +210,9 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		}
 		// A key the user's CPA already refused is not presented again: this is
 		// the config page's own read, it polls, and five refusals ban the address.
-		if a.externalSavedCredentialRefused(r.Context()) {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, freshconfig.View{}, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
 		view, err := service.Read(a.withExternalSavedCredentialGate(r.Context()))
@@ -241,11 +246,12 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		if a.externalSavedCredentialRefused(r.Context()) {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			// The user's CPA already refused the stored credential. This save would
 			// present it once more, and five refusals ban the address for thirty
 			// minutes: the answer is the same blocker, written locally.
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
 		operation, err := service.SaveGroup(a.withExternalSavedCredentialGate(r.Context()), parts[1], q)
@@ -272,8 +278,9 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		if a.externalSavedCredentialRefused(r.Context()) {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
 		operation, err := service.SaveFamily(a.withExternalSavedCredentialGate(r.Context()), parts[1], q)
@@ -317,8 +324,9 @@ func (a *freshApplication) gatewayConfigOperation(w http.ResponseWriter, r *http
 		// CPA has already refused is never presented again: five refusals ban the
 		// address for thirty minutes, and this endpoint is polled. The plain
 		// inspection answers from the journal alone, so it stays ungated.
-		if a.externalSavedCredentialRefused(r.Context()) {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
 		operation, err := service.Operation(a.withExternalSavedCredentialGate(r.Context()), parts[1], true)

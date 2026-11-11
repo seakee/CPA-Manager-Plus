@@ -54,7 +54,7 @@ func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) 
 	if t == nil {
 		return ExternalKeySnapshot{}, ErrProofUnavailable
 	}
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		var out ExternalKeySnapshot
 		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if err := t.verifyExternalTarget(target); err != nil {
@@ -74,7 +74,7 @@ func (t *Transport) externalKeySnapshotDirect(ctx context.Context, management st
 	if t == nil || !validManagementKey(management) {
 		return snapshot, ErrProofUnavailable
 	}
-	code, body, err := t.request(ctx, http.MethodGet, "/v8/management/config/access/api-keys", management, nil)
+	code, body, err := t.request(WithoutExternalHeaderRelease(ctx), http.MethodGet, "/v8/management/config/access/api-keys", management, nil)
 	if err != nil {
 		return snapshot, ErrProofUnavailable
 	}
@@ -121,7 +121,7 @@ func (t *Transport) ExternalReadConfigDocument(ctx context.Context, management s
 	if t == nil {
 		return nil, ErrProofUnavailable
 	}
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		var out map[string]any
 		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if err := t.verifyExternalTarget(target); err != nil {
@@ -173,7 +173,7 @@ func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, 
 	if err != nil {
 		return ErrProofUnavailable
 	}
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		return gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if err := t.verifyExternalTarget(target); err != nil {
 				return err
@@ -262,7 +262,7 @@ func (t *ExternalConfigTransport) writeExternalConfigPath(ctx context.Context, m
 	if t == nil || t.Transport == nil {
 		return ErrProofUnavailable
 	}
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		return gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if err := t.Transport.verifyExternalTarget(target); err != nil {
 				return err
@@ -301,7 +301,7 @@ func (t *ExternalConfigTransport) ReadConfigFieldValue(ctx context.Context, mana
 	if t == nil || t.Transport == nil {
 		return "unknown", nil, ErrProofUnavailable
 	}
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		var presence string
 		var val any
 		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {

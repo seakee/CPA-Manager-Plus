@@ -54,8 +54,9 @@ func (a *freshApplication) initialClientKey(w http.ResponseWriter, r *http.Reque
 		writeFreshJSON(w, freshkeyapply.State{KeyID: id, ManagerStaged: true, RuntimeState: "effect_unknown"})
 		return
 	}
-	if a.externalSavedCredentialRefused(r.Context()) {
+	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 		writeExternalManagementRejected(w)
+	}) {
 		return
 	}
 	gateCtx := a.withExternalSavedCredentialGate(r.Context())
@@ -67,6 +68,10 @@ func (a *freshApplication) initialClientKey(w http.ResponseWriter, r *http.Reque
 		result, err = a.keyApply.Observe(gateCtx, id, op.Strategy.TargetGeneration)
 	}
 	if err != nil {
+		if errors.Is(err, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
 		code := "s1_observation_unavailable"
 		w.Header().Set("Content-Type", "application/json")
 		switch {

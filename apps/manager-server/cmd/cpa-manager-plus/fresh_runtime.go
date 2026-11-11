@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -1331,11 +1332,11 @@ func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, cli
 	gate := &a.legacyCredentialGate
 	alreadyHeld := hasExternalCredentialHold(ctx, gate)
 	requestCtx := ctx
+	var hold *externalCredentialHold
 	if !alreadyHeld {
 		if !gate.acquire(ctx) {
-			return model.RuntimeObservedStatus{}, false, ctx.Err()
+			return model.RuntimeObservedStatus{}, false, errExternalCredentialWaitCancelled
 		}
-		var hold *externalCredentialHold
 		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
 		defer hold.finish()
 	}
@@ -1370,9 +1371,28 @@ func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, cli
 	if grant.Refused {
 		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
 	}
-	observed, err := client.Status(withFreshRecordSnapshot(requestCtx, record))
+	var recorded atomic.Bool
+	statusCtx := withFreshRecordSnapshot(requestCtx, record)
+	statusCtx = cpa.WithExternalHeaderObserver(statusCtx, func(statusCode int, releaseGate bool) {
+		switch statusCode {
+		case http.StatusUnauthorized:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementRejected)
+			}
+		case http.StatusForbidden:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementClientForbidden)
+			}
+		}
+		if releaseGate && hold != nil {
+			hold.release()
+		}
+	})
+	observed, err := client.Status(statusCtx)
 	if err != nil {
-		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+		if !recorded.Load() {
+			a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+		}
 		return model.RuntimeObservedStatus{}, errors.Is(err, cpa.ErrManagementRejected), err
 	}
 	return observed, false, nil
@@ -1579,6 +1599,10 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		observed, err = statusClient.Status(r.Context())
 	}
 	if err != nil {
+		if errors.Is(err, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unreachable", a.runtimeJournal))
 		return
 	}

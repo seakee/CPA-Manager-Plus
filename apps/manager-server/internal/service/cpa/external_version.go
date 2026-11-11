@@ -77,7 +77,7 @@ func ObserveExternalVersion(ctx context.Context, baseURL string, managementKey s
 		return ExternalVersionReport{}, ErrProofUnavailable
 	}
 	tr := NewTransportForEndpoint(endpoint)
-	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
 		var report ExternalVersionReport
 		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if verifyErr := tr.verifyExternalTarget(target); verifyErr != nil {
@@ -119,6 +119,7 @@ func (t *Transport) observeVersion(ctx context.Context, managementKey string) (s
 	if err != nil {
 		return "", ErrProofUnavailable
 	}
+	ObserveExternalResponseStatus(ctx, response.StatusCode)
 	defer response.Body.Close()
 	switch {
 	case response.StatusCode >= 200 && response.StatusCode < 300:

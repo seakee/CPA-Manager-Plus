@@ -1762,7 +1762,7 @@ func (s *Service) inspectSingleAccount(
 	var err error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		response, err = s.requestCodexUsage(ctx, setup, settings, item)
-		if err == nil {
+		if err == nil || errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
 			break
 		}
 	}
@@ -1891,48 +1891,67 @@ func (s *Service) requestCodexUsageAt(
 	if err != nil {
 		return apiCallResponse{}, 0, err
 	}
-	requestCtx := ctx
-	cancel := func() {}
-	if settings.Timeout > 0 {
-		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+	callOnce := func(callCtx context.Context, baseURL, managementKey string) (apiCallResponse, int, error) {
+		reqCtx := callCtx
+		cancel := func() {}
+		if settings.Timeout > 0 {
+			reqCtx, cancel = context.WithTimeout(callCtx, time.Duration(settings.Timeout)*time.Millisecond)
+		}
+		defer cancel()
+		req, err := http.NewRequestWithContext(
+			reqCtx,
+			http.MethodPost,
+			cpa.NormalizeBaseURL(baseURL)+path,
+			bytes.NewReader(data),
+		)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		req.Header.Set("Authorization", "Bearer "+managementKey)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := s.client.Do(req)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
+			msg := fmt.Sprintf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
+			if res.StatusCode == http.StatusUnauthorized {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementRejected)
+			}
+			if res.StatusCode == http.StatusForbidden {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementClientForbidden)
+			}
+			return apiCallResponse{}, res.StatusCode, errors.New(msg)
+		}
+		var raw map[string]any
+		if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
+			return apiCallResponse{}, res.StatusCode, err
+		}
+		statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
+		statusCode := int(readFloat(statusRaw, 0))
+		bodyRaw, _ := firstValue(raw, "body")
+		bodyText, bodyValue := normalizeBody(bodyRaw)
+		return apiCallResponse{
+			StatusCode:    statusCode,
+			HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
+			BodyText:      bodyText,
+			Body:          bodyValue,
+		}, res.StatusCode, nil
 	}
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(
-		requestCtx,
-		http.MethodPost,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+path,
-		bytes.NewReader(data),
-	)
-	if err != nil {
-		return apiCallResponse{}, 0, err
+	if gate := cpa.ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out apiCallResponse
+		var status int
+		err := gate(ctx, func(gateCtx context.Context, target cpa.ExternalSavedCredentialTarget) error {
+			var callErr error
+			out, status, callErr = callOnce(gateCtx, target.BaseURL, target.ManagementKey)
+			return callErr
+		})
+		return out, status, err
 	}
-	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := s.client.Do(req)
-	if err != nil {
-		return apiCallResponse{}, 0, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
-		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
-	}
-
-	var raw map[string]any
-	if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
-		return apiCallResponse{}, res.StatusCode, err
-	}
-	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
-	statusCode := int(readFloat(statusRaw, 0))
-	bodyRaw, _ := firstValue(raw, "body")
-	bodyText, bodyValue := normalizeBody(bodyRaw)
-	return apiCallResponse{
-		StatusCode:    statusCode,
-		HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
-		BodyText:      bodyText,
-		Body:          bodyValue,
-	}, res.StatusCode, nil
+	return callOnce(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 }
 
 func decodeCPAAPICallResponse(body io.Reader, maxBytes int64, target any) error {
@@ -2742,47 +2761,63 @@ func (s *Service) deleteAuthFileOnly(ctx context.Context, setup store.Setup, pat
 }
 
 func (s *Service) deleteAuthFile(ctx context.Context, setup store.Setup, path string, fileName string) (error, int) {
-	endpoint := cpa.NormalizeBaseURL(setup.CPAUpstreamURL) + path + "?name=" + url.QueryEscape(fileName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
-	if err != nil {
-		return err, 0
-	}
-	return s.doCPAAction(req, setup.ManagementKey)
+	return s.doCPAActionAt(ctx, setup, http.MethodDelete, path+"?name="+url.QueryEscape(fileName), nil)
 }
 
-func (s *Service) patchAuthFile(ctx context.Context, setup store.Setup, path string, payload map[string]any) (error, int) {
-	data, err := json.Marshal(payload)
+func (s *Service) patchAuthFile(ctx context.Context, setup store.Setup, path string, bodyMap map[string]any) (error, int) {
+	data, err := json.Marshal(bodyMap)
 	if err != nil {
 		return err, 0
 	}
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPatch,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+path,
-		bytes.NewReader(data),
-	)
-	if err != nil {
-		return err, 0
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return s.doCPAAction(req, setup.ManagementKey)
+	return s.doCPAActionAt(ctx, setup, http.MethodPatch, path, data)
 }
 
-func (s *Service) doCPAAction(req *http.Request, managementKey string) (error, int) {
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := s.client.Do(req)
-	if err != nil {
-		return err, 0
+func (s *Service) doCPAActionAt(ctx context.Context, setup store.Setup, method, pathAndQuery string, data []byte) (error, int) {
+	run := func(callCtx context.Context, baseURL, managementKey string) (error, int) {
+		var bodyReader io.Reader
+		if len(data) > 0 {
+			bodyReader = bytes.NewReader(data)
+		}
+		req, err := http.NewRequestWithContext(callCtx, method, cpa.NormalizeBaseURL(baseURL)+pathAndQuery, bodyReader)
+		if err != nil {
+			return err, 0
+		}
+		if len(data) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "Bearer "+managementKey)
+		res, err := s.client.Do(req)
+		if err != nil {
+			return err, 0
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
+			msg := fmt.Sprintf("%s %s", res.Status, truncate(string(body), maxStoredBodyText))
+			if res.StatusCode == http.StatusUnauthorized {
+				return fmt.Errorf("%s: %w", msg, cpa.ErrManagementRejected), res.StatusCode
+			}
+			if res.StatusCode == http.StatusForbidden {
+				return fmt.Errorf("%s: %w", msg, cpa.ErrManagementClientForbidden), res.StatusCode
+			}
+			return errors.New(msg), res.StatusCode
+		}
+		if err := cpaauthfiles.ValidateActionResponse(res.Body); err != nil {
+			return err, res.StatusCode
+		}
+		return nil, res.StatusCode
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
-		return fmt.Errorf("%s %s", res.Status, truncate(string(body), maxStoredBodyText)), res.StatusCode
+	if gate := cpa.ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var status int
+		err := gate(ctx, func(gateCtx context.Context, target cpa.ExternalSavedCredentialTarget) error {
+			var actionErr error
+			actionErr, status = run(gateCtx, target.BaseURL, target.ManagementKey)
+			return actionErr
+		})
+		return err, status
 	}
-	if err := cpaauthfiles.ValidateActionResponse(res.Body); err != nil {
-		return err, res.StatusCode
-	}
-	return nil, res.StatusCode
+	return run(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 }
 
 type runLogger struct {
@@ -3437,6 +3472,9 @@ func (s *Service) validateActionItems(
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, nil, ctxErr
+		}
+		if cpa.HasExternalSavedCredentialGate(ctx) && (errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved)) {
+			return nil, nil, nil, err
 		}
 		message := fmt.Sprintf("刷新认证文件失败，已拒绝执行：%v", err)
 		outcomes := make([]ActionOutcome, 0, len(items))

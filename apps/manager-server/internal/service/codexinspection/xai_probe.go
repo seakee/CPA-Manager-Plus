@@ -3,6 +3,7 @@ package codexinspection
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -111,6 +112,9 @@ func (s *Service) inspectSingleXAIAccount(
 	var billingErr error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		billing, billingErr = s.requestXAIBilling(ctx, setup, settings, item)
+		if errors.Is(billingErr, cpa.ErrManagementRejected) || errors.Is(billingErr, cpa.ErrExternalTargetMoved) {
+			break
+		}
 		if billingErr == nil && (!xaiProbeShouldRetry(billing) || attempt == settings.Retries) {
 			break
 		}
@@ -866,45 +870,66 @@ func (s *Service) requestProviderAPICallAt(
 	if err != nil {
 		return apiCallResponse{}, 0, err
 	}
-	requestCtx := ctx
-	cancel := func() {}
-	if settings.Timeout > 0 {
-		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+	callOnce := func(callCtx context.Context, baseURL, managementKey string) (apiCallResponse, int, error) {
+		reqCtx := callCtx
+		cancel := func() {}
+		if settings.Timeout > 0 {
+			reqCtx, cancel = context.WithTimeout(callCtx, time.Duration(settings.Timeout)*time.Millisecond)
+		}
+		defer cancel()
+		req, err := http.NewRequestWithContext(
+			reqCtx,
+			http.MethodPost,
+			cpa.NormalizeBaseURL(baseURL)+"/v0/management/api-call",
+			strings.NewReader(string(data)),
+		)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		req.Header.Set("Authorization", "Bearer "+managementKey)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := s.client.Do(req)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
+			msg := fmt.Sprintf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
+			if res.StatusCode == http.StatusUnauthorized {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementRejected)
+			}
+			if res.StatusCode == http.StatusForbidden {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementClientForbidden)
+			}
+			return apiCallResponse{}, res.StatusCode, errors.New(msg)
+		}
+		var raw map[string]any
+		if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
+			return apiCallResponse{}, res.StatusCode, err
+		}
+		statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
+		bodyRaw, _ := firstValue(raw, "body")
+		bodyText, bodyValue := normalizeBody(bodyRaw)
+		return apiCallResponse{
+			StatusCode:    int(readFloat(statusRaw, 0)),
+			HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
+			BodyText:      bodyText,
+			Body:          bodyValue,
+		}, res.StatusCode, nil
 	}
-	defer cancel()
-	req, err := http.NewRequestWithContext(
-		requestCtx,
-		http.MethodPost,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+"/v0/management/api-call",
-		strings.NewReader(string(data)),
-	)
-	if err != nil {
-		return apiCallResponse{}, 0, err
+	if gate := cpa.ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out apiCallResponse
+		var status int
+		err := gate(ctx, func(gateCtx context.Context, target cpa.ExternalSavedCredentialTarget) error {
+			var callErr error
+			out, status, callErr = callOnce(gateCtx, target.BaseURL, target.ManagementKey)
+			return callErr
+		})
+		return out, status, err
 	}
-	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := s.client.Do(req)
-	if err != nil {
-		return apiCallResponse{}, 0, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
-		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
-	}
-	var raw map[string]any
-	if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
-		return apiCallResponse{}, res.StatusCode, err
-	}
-	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
-	bodyRaw, _ := firstValue(raw, "body")
-	bodyText, bodyValue := normalizeBody(bodyRaw)
-	return apiCallResponse{
-		StatusCode:    int(readFloat(statusRaw, 0)),
-		HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
-		BodyText:      bodyText,
-		Body:          bodyValue,
-	}, res.StatusCode, nil
+	return callOnce(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 }
 
 func resolveXAIUserID(file authFile) string {

@@ -11,6 +11,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
 type Handler struct {
@@ -58,6 +60,14 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := h.App.ModelPriceService.Sync(r.Context(), req)
 		if err != nil {
+			if errors.Is(err, cpa.ErrManagementRejected) {
+				response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonManagementRejected})
+				return
+			}
+			if errors.Is(err, cpa.ErrExternalTargetMoved) {
+				response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
+				return
+			}
 			response.Error(w, modelPriceMutationStatus(err, response.ModelPriceErrorStatus(err)), err)
 			return
 		}

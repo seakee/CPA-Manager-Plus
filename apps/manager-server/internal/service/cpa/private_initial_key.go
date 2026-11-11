@@ -130,6 +130,7 @@ func (t *Transport) request(ctx context.Context, method, path, managementKey str
 	if err != nil {
 		return 0, nil, ErrProofUnavailable
 	}
+	ObserveExternalResponseStatus(ctx, resp.StatusCode)
 	defer resp.Body.Close()
 	if resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity" {
 		return 0, nil, ErrProofUnavailable

@@ -1396,11 +1396,12 @@ func (l *channelListener) Addr() net.Addr {
 
 type selfSignedTLSCPAServer struct {
 	url                string
-	certPool           *x509.CertPool
+	roots              *cpa.TrustedCARoots
 	respAuthed         chan struct{}
 	handshakeRejected  chan string
 	respAuthCount      atomic.Int32
 	handshakeRejectCnt atomic.Int32
+	httpConnCnt        atomic.Int32
 }
 
 // startSelfSignedTLSCPAServer starts a single-port self-signed TLS endpoint
@@ -1443,9 +1444,11 @@ func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTL
 		t.Fatal(err)
 	}
 
+	roots := cpa.NewTrustedCARoots(pool)
+	t.Cleanup(roots.CloseIdleConnections)
 	s := &selfSignedTLSCPAServer{
 		url:               "https://" + ln.Addr().String(),
-		certPool:          pool,
+		roots:             roots,
 		respAuthed:        make(chan struct{}, 16),
 		handshakeRejected: make(chan string, 16),
 	}
@@ -1493,6 +1496,7 @@ func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTL
 					serveTestTLSResp(wrapped, br, expectedKey, s)
 					return
 				}
+				s.httpConnCnt.Add(1)
 				select {
 				case httpLn.conns <- wrapped:
 				case <-httpLn.done:
@@ -1595,7 +1599,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 		t.Fatal("default HTTP transport trusted self-signed certificate without scoped roots")
 	}
 
-	hostCtx, stopHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.certPool))
+	hostCtx, stopHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.roots))
 	defer stopHost()
 
 	gatewayRequestWithRoots := func(targetApp *freshApplication, method, resource, body, contentType string) *httptest.ResponseRecorder {
@@ -1607,7 +1611,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 			reader = bytes.NewReader([]byte(body))
 		}
 		req := httptest.NewRequest(method, "/control/api/v2/"+resource, reader)
-		req = req.WithContext(cpa.WithTrustedCARoots(req.Context(), tlsCPA.certPool))
+		req = req.WithContext(cpa.WithTrustedCARoots(req.Context(), tlsCPA.roots))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
@@ -1693,6 +1697,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	// 2. Whole-document PUT preserving tlsSkipVerify=true keeps the live TLS RESP
 	// session without restarting the Collector.
 	startsBeforePut := app.legacyCollector.StartCount()
+	httpConnsBeforePuts := tlsCPA.httpConnCnt.Load()
 	putTrueBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"resp","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":40,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL)
 	if resp := gatewayRequestWithRoots(app, http.MethodPut, "cpamp/usage-service/config", putTrueBody, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PUT tlsSkipVerify=true = %d %s", resp.Code, resp.Body.String())
@@ -1721,12 +1726,15 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	if got := tlsCPA.respAuthCount.Load() - authsBeforePutFalse; got != 0 {
 		t.Fatalf("Collector authenticated %d RESP sessions despite tlsSkipVerify=false, want 0", got)
 	}
+	if got := tlsCPA.httpConnCnt.Load() - httpConnsBeforePuts; got != 0 {
+		t.Fatalf("pooled TrustedCARoots opened %d new TLS HTTP connections across 2 whole-document PUTs (want 0; expected keep-alive reuse)", got)
+	}
 
 	// 4. Stop Managed collector and prove ConnectExternal on a freshstore-seeded
 	// skeleton row also establishes a real TLS RESP session when cfg.TLSSkipVerify=true.
 	_ = gatewayRequestWithRoots(app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
 	extApp := newExternalApp(t, normalizedURL, key)
-	extHostCtx, stopExtHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.certPool))
+	extHostCtx, stopExtHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.roots))
 	defer stopExtHost()
 	extApp.runCtx = extHostCtx
 	extApp.cfg.CollectorMode = "resp"

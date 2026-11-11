@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,7 +67,11 @@ func ObserveManagementAPI(ctx context.Context, baseURL string, key string) (stri
 	if err != nil {
 		return "", err
 	}
-	defer res.Body.Close()
+	ObserveExternalResponseStatus(ctx, res.StatusCode)
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxResponseBytes))
+		_ = res.Body.Close()
+	}()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return "", &managementStatusError{what: "management API validation failed", code: res.StatusCode, status: res.Status}
 	}
@@ -86,6 +91,19 @@ func FetchUsageConfig(ctx context.Context, baseURL string, key string) (UsageCon
 }
 
 func FetchManagementConfig(ctx context.Context, baseURL string, key string) (ManagementConfig, error) {
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var cfg ManagementConfig
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			var fetchErr error
+			cfg, fetchErr = fetchManagementConfigDirect(requestCtx, target.BaseURL, target.ManagementKey)
+			return fetchErr
+		})
+		return cfg, err
+	}
+	return fetchManagementConfigDirect(ctx, baseURL, key)
+}
+
+func fetchManagementConfigDirect(ctx context.Context, baseURL string, key string) (ManagementConfig, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, NormalizeBaseURL(baseURL)+"/v0/management/config", nil)
 	if err != nil {
 		return ManagementConfig{}, err
@@ -97,12 +115,16 @@ func FetchManagementConfig(ctx context.Context, baseURL string, key string) (Man
 		return ManagementConfig{}, err
 	}
 	defer res.Body.Close()
+	ObserveExternalResponseStatus(ctx, res.StatusCode)
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return ManagementConfig{}, errors.New("management API config request failed: " + res.Status)
+		return ManagementConfig{}, &managementStatusError{what: "management API config request failed", code: res.StatusCode, status: res.Status}
 	}
-
+	limited, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
+	if err != nil || len(limited) > maxResponseBytes {
+		return ManagementConfig{}, errors.New("management API config response invalid")
+	}
 	var raw map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+	if err := json.Unmarshal(limited, &raw); err != nil {
 		return ManagementConfig{}, err
 	}
 	usageEnabled := readBoolField(raw, "usage-statistics-enabled", "usageStatisticsEnabled")
@@ -142,7 +164,10 @@ func SetUsageStatisticsEnabled(ctx context.Context, baseURL string, key string, 
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxResponseBytes))
+		_ = res.Body.Close()
+	}()
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		return nil
 	}

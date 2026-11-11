@@ -2699,12 +2699,8 @@ func TestDoCPAActionRejectsLargeBusinessFailureResponse(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, upstream.URL, nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
 	svc := New(nil, nil, upstream.Client())
-	actionErr, statusCode := svc.doCPAAction(req, "management-key")
+	actionErr, statusCode := svc.doCPAActionAt(context.Background(), store.Setup{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key"}, http.MethodPost, "/", nil)
 	if actionErr == nil || !strings.Contains(actionErr.Error(), "denied") {
 		t.Fatalf("action error = %v, want denied failure", actionErr)
 	}

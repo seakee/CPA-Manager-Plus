@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -854,6 +856,14 @@ func newStatefulExternalCPA(t *testing.T, initialKey string) *statefulExternalCP
 			_, _ = w.Write([]byte(`{"usage-statistics-enabled":false,"redis-usage-queue-retention-seconds":60}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-statistics-enabled":
 			_, _ = w.Write([]byte(`{"usage-statistics-enabled":false}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"id":"codex-1.json","name":"codex-1.json","auth_index":"idx-1","type":"codex","account":"acct-1@example.com","disabled":true},{"id":"codex-2.json","name":"codex-2.json","auth_index":"idx-2","type":"codex","account":"acct-2@example.com","disabled":false}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"plan_type":"plus"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config":
 			rawKeys, _ := json.Marshal(keysSnapshot)
 			_, _ = w.Write([]byte(`{"routing":{"strategy":"round-robin","retry":{"request-retry":3}},"plugins":{"dir":"/var/lib/cpa/plugins"},"access":{"api-keys":` + string(rawKeys) + `}}`))
@@ -1523,4 +1533,495 @@ func TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind(t *testing.T) {
 			t.Fatal("refusal of pre-rebind snapshot poisoned reboundKey")
 		}
 	})
+}
+
+// TestExternalBridgedManagementServicesSerializeAndRecordRejection proves that
+// the cpamp-bridged Manager services that present the stored External
+// management credential internally (model-prices/sync, account-action-candidates
+// enable + delete auth-file, and codex-inspection run + actions) serialize
+// their outbound CPA calls on legacyCredentialGate, bind grant + credential to
+// one post-gate snapshot across rebinds, and record the first 401/403 refusal
+// before releasing the gate.
+func TestExternalBridgedManagementServicesSerializeAndRecordRejection(t *testing.T) {
+	const rotatedKey = "bridged-rotated-1111222233334444555566667777888899990000aaaabbbb"
+	const reboundKey = "bridged-rebound-aaaabbbbccccddddeeeeffff000011112222333344445555"
+
+	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openai":{"models":{"gpt-4o":{"id":"gpt-4o","cost":{"input":2.5,"output":10}}}}}`))
+	}))
+	t.Cleanup(catalogServer.Close)
+
+	newBridgedExternalApp := func(t *testing.T, cpaURL, managementKey string) *freshApplication {
+		t.Helper()
+		app := newExternalApp(t, cpaURL, managementKey)
+		catalogURL := catalogServer.URL
+		disabledURL := ""
+		app.legacyApp.ModelPriceService = modelpricesvc.NewMultiSourceWithModelsDev(
+			app.legacyApp.Store, &catalogURL, &disabledURL, &disabledURL, app.legacyApp.ManagerConfigService,
+		)
+		app.legacy = guardFreshExternalLegacy(guardFreshLegacyWrites(router.New(app.legacyApp), nil), app)
+		app.gatewayConfig = gatewayFor(app)
+		t.Cleanup(func() { _ = app.legacyApp.CodexInspectionService.StopAndWait(context.Background()) })
+		return app
+	}
+
+	leaders := []string{
+		"model_prices_sync",
+		"account_action_enable",
+		"account_action_delete_auth_file",
+		"codex_inspection_run_async",
+		"codex_inspection_execute_actions",
+	}
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		for _, leader := range leaders {
+			t.Run(http.StatusText(status)+"/"+leader, func(t *testing.T) {
+				cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+				app := newBridgedExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+
+				cand, err := app.legacyApp.Store.UpsertAccountActionCandidate(t.Context(), model.AccountActionCandidateUpsert{
+					ActionType:        model.AccountActionTypeReview,
+					Provider:          "codex",
+					AuthFileName:      "codex-1.json",
+					AuthIndex:         "idx-1",
+					AccountSnapshot:   "acct-1@example.com",
+					ReasonCode:        "quota_exhausted",
+					Reason:            "test candidate",
+					SeenAtMS:          time.Now().UnixMilli(),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				seededRun, err := app.legacyApp.Store.CreateCodexInspectionRun(t.Context(), model.CodexInspectionRun{
+					TriggerType: model.CodexInspectionTriggerManual,
+					Status:      model.CodexInspectionStatusCompleted,
+					StartedAtMS: time.Now().UnixMilli(),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				seededResult, err := app.legacyApp.Store.InsertCodexInspectionResult(t.Context(), model.CodexInspectionResult{
+					RunID:           seededRun.ID,
+					AccountKey:      "codex:codex-2.json:idx-2",
+					FileName:        "codex-2.json",
+					DisplayAccount:  "acct-2@example.com",
+					AccountSnapshot: "acct-2@example.com",
+					AuthIndex:       "idx-2",
+					Provider:        "codex",
+					Action:          "disable",
+					ActionReason:    "quota check",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				firstEntered := make(chan struct{})
+				secondEntered := make(chan struct{})
+				releaseFirst := make(chan struct{})
+				var enterCount atomic.Int32
+				cpaSrv.mu.Lock()
+				cpaSrv.activeKey = rotatedKey
+				cpaSrv.refuseStatus = status
+				cpaSrv.onRequest = func(_ *http.Request) bool {
+					n := enterCount.Add(1)
+					if n == 1 {
+						close(firstEntered)
+						<-releaseFirst
+					} else if n == 2 {
+						close(secondEntered)
+					}
+					return false
+				}
+				cpaSrv.mu.Unlock()
+
+				const followerCount = 3
+				var parkedWaiters atomic.Int32
+				allWaitersParked := make(chan struct{})
+				var parkedOnce sync.Once
+				app.legacyCredentialGate.onWait = func() {
+					if parkedWaiters.Add(1) >= followerCount {
+						parkedOnce.Do(func() { close(allWaitersParked) })
+					}
+				}
+				defer func() { app.legacyCredentialGate.onWait = nil }()
+
+				before := cpaSrv.requests.Load()
+				leaderErr := make(chan string, 1)
+				go func() {
+					switch leader {
+					case "model_prices_sync":
+						res := gatewayRequest(t, app, http.MethodPost, "cpamp/v0/management/model-prices/sync", `{}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "model-prices/sync = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "account_action_enable":
+						res := gatewayRequest(t, app, http.MethodPost,
+							"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/enable", `{}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "account-action enable = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "account_action_delete_auth_file":
+						res := gatewayRequest(t, app, http.MethodDelete,
+							"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/auth-file", "", "")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "account-action delete = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "codex_inspection_run_async":
+						res := gatewayRequest(t, app, http.MethodPost, "cpamp/v0/management/codex-inspection/run", `{}`, "application/json")
+						if res.Code != http.StatusOK && res.Code != http.StatusAccepted && res.Code != http.StatusConflict {
+							leaderErr <- "codex-inspection/run = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "codex_inspection_execute_actions":
+						actionBody := `{"resultIds":[` + strconv.FormatInt(seededResult.ID, 10) + `],"action":"disable"}`
+						res := gatewayRequest(t, app, http.MethodPost,
+							"cpamp/v0/management/codex-inspection/runs/"+strconv.FormatInt(seededRun.ID, 10)+"/actions", actionBody, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "codex-inspection actions = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					}
+					leaderErr <- ""
+				}()
+
+				select {
+				case <-firstEntered:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("leader %s never reached CPA", leader)
+				}
+
+				followerErrs := make(chan string, followerCount)
+				go func() {
+					res := gatewayRequest(t, app, http.MethodPost, "cpamp/v0/management/model-prices/sync", `{}`, "application/json")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower model-prices/sync = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodPost,
+						"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/enable", `{}`, "application/json")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower account-action enable = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodPost, "cpamp/v0/management/codex-inspection/run", `{}`, "application/json")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower codex-inspection/run = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+
+				select {
+				case <-allWaitersParked:
+				case <-secondEntered:
+				case <-time.After(5 * time.Second):
+				}
+				close(releaseFirst)
+
+				if msg := <-leaderErr; msg != "" {
+					t.Fatal(msg)
+				}
+				for range followerCount {
+					if msg := <-followerErrs; msg != "" {
+						t.Fatal(msg)
+					}
+				}
+				// Ensure any background inspection task has finished before checking state.
+				_ = app.legacyApp.CodexInspectionService.StopAndWait(t.Context())
+
+				if !app.externalReadGrant(t.Context()).Refused {
+					t.Fatalf("leader %s did not record durable credential refusal", leader)
+				}
+				if got := cpaSrv.requests.Load() - before; got != 1 {
+					t.Fatalf("External CPA received %d management requests across %s + concurrent bridged burst, want 1", got, leader)
+				}
+			})
+		}
+	}
+
+	t.Run("rebind while queued binds post-gate snapshot and preserves authFileMutations lock order", func(t *testing.T) {
+		const rotatedAgain = "bridged-rotated-again-9999888877776666555544443333222211110000"
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app := newBridgedExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+
+		cand, err := app.legacyApp.Store.UpsertAccountActionCandidate(t.Context(), model.AccountActionCandidateUpsert{
+			ActionType:      model.AccountActionTypeReview,
+			Provider:        "codex",
+			AuthFileName:    "codex-1.json",
+			AuthIndex:       "idx-1",
+			AccountSnapshot: "acct-1@example.com",
+			ReasonCode:      "quota_exhausted",
+			Reason:          "test candidate",
+			SeenAtMS:        time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		holderEntered := make(chan struct{})
+		releaseHolder := make(chan struct{})
+		var holderOnce sync.Once
+		cpaSrv.mu.Lock()
+		cpaSrv.onRequest = func(r *http.Request) bool {
+			if r.URL.Path == "/v0/management/api-keys" {
+				holderOnce.Do(func() {
+					close(holderEntered)
+					<-releaseHolder
+				})
+			}
+			return false
+		}
+		cpaSrv.mu.Unlock()
+
+		holderDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			holderDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		}()
+		select {
+		case <-holderEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("holder never reached CPA")
+		}
+
+		waiterParked := make(chan struct{})
+		var waiterOnce sync.Once
+		app.legacyCredentialGate.onWait = func() {
+			waiterOnce.Do(func() { close(waiterParked) })
+		}
+		defer func() { app.legacyCredentialGate.onWait = nil }()
+
+		enableDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			enableDone <- gatewayRequest(t, app, http.MethodPost,
+				"cpamp/v0/management/account-action-candidates/"+strconv.FormatInt(cand.ID, 10)+"/enable", `{}`, "application/json")
+		}()
+		select {
+		case <-waiterParked:
+		case res := <-enableDone:
+			close(releaseHolder)
+			<-holderDone
+			t.Fatalf("account-action enable did not wait on legacyCredentialGate: %d %s", res.Code, res.Body.String())
+		case <-time.After(5 * time.Second):
+			close(releaseHolder)
+			t.Fatal("account-action enable never parked on legacyCredentialGate")
+		}
+
+		// Rebind to reboundKey while waiter is parked, then rotate CPA again so
+		// reboundKey receives 401 when waiter proceeds.
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = reboundKey
+		cpaSrv.mu.Unlock()
+		rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind",
+			`{"requestId":"`+strings.Repeat("e", 32)+`","managementKey":"`+reboundKey+`"}`, "application/json")
+		if rebindRes.Code != http.StatusOK {
+			close(releaseHolder)
+			t.Fatalf("rebind = %d %s", rebindRes.Code, rebindRes.Body.String())
+		}
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = rotatedAgain
+		cpaSrv.authSeen = nil
+		cpaSrv.mu.Unlock()
+
+		close(releaseHolder)
+		if holder := <-holderDone; holder.Code != http.StatusOK {
+			t.Fatalf("holder = %d %s", holder.Code, holder.Body.String())
+		}
+		res := <-enableDone
+		if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("account-action enable = %d %s", res.Code, res.Body.String())
+		}
+		cpaSrv.mu.Lock()
+		seen := append([]string(nil), cpaSrv.authSeen...)
+		cpaSrv.mu.Unlock()
+		for _, line := range seen {
+			if strings.Contains(line, externalAuthorityManagement) {
+				t.Fatalf("account-action enable presented pre-rebind credential: %v", seen)
+			}
+		}
+		if !app.externalReadGrant(t.Context()).Refused {
+			t.Fatalf("account-action enable did not record refusal against reboundKey (seen=%v)", seen)
+		}
+	})
+}
+
+// TestExternalPrecheckPropagatesContextCancellationWhileWaitingOnGate proves
+// that when a caller's request context is cancelled while waiting on
+// legacyCredentialGate in the precheck, the route fails closed with
+// external_credential_wait_cancelled (499) rather than falling through to
+// local journal lookups or detaching collector startup onto runCtx.
+func TestExternalPrecheckPropagatesContextCancellationWhileWaitingOnGate(t *testing.T) {
+	cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+	app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+	app.gatewayConfig = gatewayFor(app)
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+	app.runCtx = hostCtx
+
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	var holderOnce sync.Once
+	cpaSrv.mu.Lock()
+	cpaSrv.onRequest = func(_ *http.Request) bool {
+		holderOnce.Do(func() {
+			close(holderEntered)
+			<-releaseHolder
+		})
+		return false
+	}
+	cpaSrv.mu.Unlock()
+
+	holderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		holderDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+	}()
+	select {
+	case <-holderEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder never reached CPA")
+	}
+
+	sendCancelledWhileWaiting := func(method, resource, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var waits atomic.Int32
+		app.legacyCredentialGate.onWait = func() {
+			if waits.Add(1) == 1 {
+				cancel()
+			} else {
+				stopHost()
+			}
+		}
+		defer func() { app.legacyCredentialGate.onWait = nil }()
+
+		var reader *bytes.Reader
+		if body == "" {
+			reader = bytes.NewReader(nil)
+		} else {
+			reader = bytes.NewReader([]byte(body))
+		}
+		req := httptest.NewRequest(method, "/control/api/v2/"+resource, reader).WithContext(ctx)
+		req.Header.Set("Authorization", gateAdmin)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		app.canonicalAPI(rec, req)
+		return rec
+	}
+
+	beforeCPA := cpaSrv.requests.Load()
+	reconcileRes := sendCancelledWhileWaiting(http.MethodPost,
+		"gateway/config/operations/"+strings.Repeat("a", 32)+"/reconcile", `{}`)
+	if reconcileRes.Code != statusClientClosedRequest || errorCode(t, reconcileRes) != externalCredentialWaitCancelled {
+		close(releaseHolder)
+		<-holderDone
+		t.Fatalf("cancelled reconcile = %d %s, want %d %s", reconcileRes.Code, reconcileRes.Body.String(), statusClientClosedRequest, externalCredentialWaitCancelled)
+	}
+
+	keyOpRes := sendCancelledWhileWaiting(http.MethodGet,
+		"api-keys/operations/"+strings.Repeat("9", 32), "")
+	if keyOpRes.Code != statusClientClosedRequest || errorCode(t, keyOpRes) != externalCredentialWaitCancelled {
+		close(releaseHolder)
+		<-holderDone
+		t.Fatalf("cancelled key operation check = %d %s, want %d %s", keyOpRes.Code, keyOpRes.Body.String(), statusClientClosedRequest, externalCredentialWaitCancelled)
+	}
+
+	usageConfirmRes := sendCancelledWhileWaiting(http.MethodPost,
+		"external/usage", `{"requestId":"`+strings.Repeat("b", 32)+`","confirmEnableStatistics":true}`)
+	if usageConfirmRes.Code != statusClientClosedRequest || errorCode(t, usageConfirmRes) != externalCredentialWaitCancelled {
+		close(releaseHolder)
+		<-holderDone
+		t.Fatalf("cancelled external/usage confirm = %d %s, want %d %s", usageConfirmRes.Code, usageConfirmRes.Body.String(), statusClientClosedRequest, externalCredentialWaitCancelled)
+	}
+	if app.externalUsageConfirmed.Load() || app.usageCollectionStarted() {
+		close(releaseHolder)
+		<-holderDone
+		t.Fatal("cancelled external/usage confirm mutated host collector state")
+	}
+	if got := cpaSrv.requests.Load() - beforeCPA; got != 0 {
+		close(releaseHolder)
+		<-holderDone
+		t.Fatalf("cancelled prechecks sent %d CPA requests, want 0", got)
+	}
+
+	close(releaseHolder)
+	if holder := <-holderDone; holder.Code != http.StatusOK {
+		t.Fatalf("holder = %d %s", holder.Code, holder.Body.String())
+	}
+}
+
+// TestExternalFreshNativeHeaderReceiptReleasesGateBeforeSlowBody proves that
+// once an upstream 200 response header arrives on a Fresh-native gated call,
+// legacyCredentialGate is released immediately before the response body
+// finishes streaming so one slow body cannot block other External surfaces.
+func TestExternalFreshNativeHeaderReceiptReleasesGateBeforeSlowBody(t *testing.T) {
+	headersFlushed := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var slowOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-CPA-Version", "v8.0.13")
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v8/management/config" {
+			slowOnce.Do(func() {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"routing":`))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				close(headersFlushed)
+				<-releaseBody
+				_, _ = w.Write([]byte(`{"strategy":"round-robin"}}`))
+			})
+			return
+		}
+		_, _ = w.Write([]byte(`{"usage-statistics-enabled":false}`))
+	}))
+	t.Cleanup(server.Close)
+
+	app := newExternalApp(t, server.URL, externalAuthorityManagement)
+	app.gatewayConfig = gatewayFor(app)
+
+	slowDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		slowDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+	}()
+	select {
+	case <-headersFlushed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow gateway/config never flushed upstream headers")
+	}
+
+	siblingDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		siblingDone <- gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+	}()
+
+	select {
+	case sibling := <-siblingDone:
+		var body freshRuntimeStatusResponse
+		if sibling.Code != http.StatusOK || json.Unmarshal(sibling.Body.Bytes(), &body) != nil || body.ErrorCode != "" {
+			close(releaseBody)
+			t.Fatalf("sibling runtime/status = %d %s", sibling.Code, sibling.Body.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		close(releaseBody)
+		t.Fatal("sibling runtime/status remained blocked on legacyCredentialGate while slow body streamed after 200 headers")
+	}
+
+	close(releaseBody)
+	slow := <-slowDone
+	if slow.Code != http.StatusOK {
+		t.Fatalf("slow gateway/config = %d %s", slow.Code, slow.Body.String())
+	}
 }

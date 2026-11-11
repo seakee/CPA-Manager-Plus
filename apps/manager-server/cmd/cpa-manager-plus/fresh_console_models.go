@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
@@ -125,15 +126,35 @@ func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *ht
 	}
 	hold, requestCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
 	defer hold.finish()
-	document, err := cpa.NewTransportForEndpoint(install.BaseURL).ExternalReadConfigDocument(requestCtx, install.ManagementKey)
+	var recorded atomic.Bool
+	docCtx := cpa.WithExternalHeaderObserver(requestCtx, func(statusCode int, releaseGate bool) {
+		switch statusCode {
+		case http.StatusUnauthorized:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementRejected)
+			}
+		case http.StatusForbidden:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementClientForbidden)
+			}
+		}
+		if releaseGate {
+			hold.release()
+		}
+	})
+	document, err := cpa.NewTransportForEndpoint(install.BaseURL).ExternalReadConfigDocument(docCtx, install.ManagementKey)
 	if err != nil {
 		switch {
 		case errors.Is(err, cpa.ErrManagementClientForbidden):
-			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			if !recorded.Load() {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			}
 			hold.finish()
 			writeExternalManagementForbidden(w)
 		case errors.Is(err, cpa.ErrManagementRejected):
-			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			if !recorded.Load() {
+				a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+			}
 			hold.finish()
 			writeExternalManagementRejected(w)
 		default:

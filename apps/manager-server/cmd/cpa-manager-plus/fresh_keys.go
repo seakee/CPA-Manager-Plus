@@ -80,13 +80,17 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			// five failed authentications ban the address for thirty minutes, and
 			// a page that refreshes is enough to reach that. The blocker is
 			// answered here, before any request leaves this process.
-			if a.externalSavedCredentialRefused(r.Context()) {
+			if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 				writeExternalManagementRejected(w)
+			}) {
 				return
 			}
 			var listErr error
 			keys, unverified, listErr = a.keyApply.ExternalKeyList(a.withExternalSavedCredentialGate(r.Context()), keys)
 			switch {
+			case errors.Is(listErr, errExternalCredentialWaitCancelled):
+				writeExternalCredentialWaitCancelled(w)
+				return
 			case errors.Is(listErr, cpa.ErrExternalTargetMoved):
 				// The connection no longer names the committed target. The staged
 				// keys are not an effect of any CPA, so the list is a typed blocker

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -287,11 +288,11 @@ func (a *freshApplication) runExternalSavedCredentialCall(
 	gate := &a.legacyCredentialGate
 	alreadyHeld := hasExternalCredentialHold(ctx, gate)
 	requestCtx := ctx
+	var hold *externalCredentialHold
 	if !alreadyHeld {
 		if !gate.acquire(ctx) {
-			return ctx.Err()
+			return errExternalCredentialWaitCancelled
 		}
-		var hold *externalCredentialHold
 		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
 		defer hold.finish()
 	}
@@ -319,43 +320,94 @@ func (a *freshApplication) runExternalSavedCredentialCall(
 	if grant.Refused {
 		return externalReadRefusedError()
 	}
+	var recorded atomic.Bool
 	snapshotCtx := withFreshRecordSnapshot(requestCtx, record)
+	snapshotCtx = cpa.WithExternalHeaderObserver(snapshotCtx, func(statusCode int, releaseGate bool) {
+		switch statusCode {
+		case http.StatusUnauthorized:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementRejected)
+			}
+		case http.StatusForbidden:
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementClientForbidden)
+			}
+		}
+		if releaseGate && hold != nil {
+			hold.release()
+		}
+	})
 	err = call(snapshotCtx, cpa.ExternalSavedCredentialTarget{
 		BaseURL:       install.BaseURL,
 		ManagementKey: install.ManagementKey,
 	})
-	if err != nil {
+	if err != nil && !recorded.Load() {
 		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
 	}
 	return err
 }
 
-// externalSavedCredentialRefused checks under legacyCredentialGate whether the
-// committed External installation's currently stored credential is already
-// refused, releasing the gate immediately before any local service mutex is
-// acquired.
-func (a *freshApplication) externalSavedCredentialRefused(ctx context.Context) bool {
+// checkExternalSavedCredentialPrecheck checks under legacyCredentialGate whether
+// the committed External installation's currently stored credential is already
+// refused or the caller cancelled while waiting on the gate, releasing the gate
+// immediately before any local service mutex is acquired.
+func (a *freshApplication) checkExternalSavedCredentialPrecheck(ctx context.Context) error {
 	if a == nil || a.rejection == nil || a.externalSource == nil || a.store == nil {
-		return false
+		return nil
+	}
+	if ctx.Err() != nil {
+		return errExternalCredentialWaitCancelled
 	}
 	record, err := a.store.Load(ctx)
-	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
-		return false
+	if err != nil {
+		if ctx.Err() != nil {
+			return errExternalCredentialWaitCancelled
+		}
+		return nil
+	}
+	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		return nil
 	}
 	gate := &a.legacyCredentialGate
 	if !hasExternalCredentialHold(ctx, gate) {
 		if !gate.acquire(ctx) {
-			return false
+			return errExternalCredentialWaitCancelled
 		}
 		defer gate.release()
 		record, err = a.store.Load(ctx)
-		if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
-			return false
+		if err != nil {
+			if ctx.Err() != nil {
+				return errExternalCredentialWaitCancelled
+			}
+			return nil
+		}
+		if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+			return nil
 		}
 	}
 	grant, _, targetErr := a.externalReadTargetFor(ctx, record)
 	if targetErr != nil {
+		if ctx.Err() != nil {
+			return errExternalCredentialWaitCancelled
+		}
+		return nil
+	}
+	if grant.Refused {
+		return externalReadRefusedError()
+	}
+	return nil
+}
+
+func (a *freshApplication) writeExternalSavedCredentialPrecheck(w http.ResponseWriter, ctx context.Context, onRefused func()) bool {
+	err := a.checkExternalSavedCredentialPrecheck(ctx)
+	switch {
+	case errors.Is(err, errExternalCredentialWaitCancelled):
+		writeExternalCredentialWaitCancelled(w)
+		return true
+	case errors.Is(err, cpa.ErrManagementRejected):
+		onRefused()
+		return true
+	default:
 		return false
 	}
-	return grant.Refused
 }

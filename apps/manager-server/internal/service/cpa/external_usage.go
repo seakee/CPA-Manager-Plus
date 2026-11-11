@@ -99,6 +99,7 @@ func externalUsageRequest(ctx context.Context, method, baseURL, key string, payl
 		}
 		return 0, nil, ErrProofUnavailable
 	}
+	ObserveExternalResponseStatus(ctx, res.StatusCode)
 	defer res.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 	if err != nil {

@@ -175,6 +175,7 @@ type freshApplication struct {
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
 	legacy           http.Handler
+	legacyApp        *app.Context
 	// upgradeWizard is the one Upgrade reader this application serves. It is
 	// built once: the handler owns the per-request mount flight and the one
 	// bounded lookup a poll joins, so constructing one per request would give
@@ -271,6 +272,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
+	a.legacyApp = legacyContext
 	// Fresh owns Collector lifecycle on a.runCtx: narrow monitoring-switch PATCH
 	// updates only Manager's DB settings row, ConnectExternal blocks whole-config
 	// PUT and skips Get's optional CPA usage probe (External posture lives on
