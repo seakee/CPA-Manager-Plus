@@ -312,6 +312,11 @@ $toolbar-control-height: var(--control-height-sm);
     border-radius: var(--app-radius-sm) 0 0 var(--app-radius-sm);
   }
 
+  /* Without an active filter the trigger is the group's only control. */
+  &:only-child:focus-visible {
+    border-radius: var(--app-radius-sm);
+  }
+
   &:disabled {
     cursor: not-allowed;
   }
