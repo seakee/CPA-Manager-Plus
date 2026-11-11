@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOOTSTRAP_UI, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
 import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
-import { bootstrapDiscoveryText } from '../i18n/bootstrapDiscovery';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import { activateFreshLanguage, FRESH_LANGUAGE_STORAGE_KEY } from './freshLanguage';
 
@@ -1150,12 +1149,28 @@ describe('FreshBootstrapPage product preview workflow', () => {
         );
       });
 
-      // The card is the page's status message for this source state. Its wording
-      // is the dictionary's business, not this test's: what the operator can act
-      // on is the read-only guidance below it.
+      const gate = findByTestId(renderer.root, 'bootstrap-no-handoff');
+      assertCardHeaderReads(locale, gate);
+
       const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
       expect(guidance.props['role']).toBe('status');
-      expect(textOf(guidance)).not.toBe('');
+      const [guidanceTitle] = blocksOf(guidance, 'alert-title');
+      const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
+      assertCopyIn(locale, guidanceTitle);
+      assertCopyIn(locale, guidanceDesc);
+      expect(guidanceDesc).not.toBe(guidanceTitle);
+
+      const instructions = findByTestId(renderer.root, 'legacy-ownership-instructions');
+      const stepTitles = blocksOf(instructions, 'alert-title');
+      const stepDescs = blocksOf(instructions, 'alert-desc');
+      expect(stepTitles).toHaveLength(2);
+      expect(stepDescs).toHaveLength(2);
+      for (const block of [...stepTitles, ...stepDescs]) {
+        assertCopyIn(locale, block);
+      }
+      expect(stepTitles[0]).not.toBe(stepTitles[1]);
+      expect(stepDescs[0]).not.toBe(stepDescs[1]);
+
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         '--entrypoint cpa-manager-plus'
       );
@@ -1176,15 +1191,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(
         textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))
       ).toContain(`seakee/cpa-manager-plus:${__APP_VERSION__}`);
-      expect(textOf(findByTestId(renderer.root, 'legacy-ownership-instructions'))).toContain(
-        '/data/runtime'
-      );
+      expect(textOf(instructions)).toContain('/data/runtime');
       expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
         0
       );
-      expect(
-        textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery')).length
-      ).toBeGreaterThan(0);
+      assertCopyIn(locale, textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery')));
       // The read-only card offers no Fresh write control in any language.
       expect(renderer.root.findAllByProps({ 'data-testid': 'admin-init-form' })).toHaveLength(0);
 
@@ -1197,41 +1208,76 @@ describe('FreshBootstrapPage product preview workflow', () => {
     }
   );
 
-  it('re-derives the 1.x volume card copy when the page language changes', async () => {
+  it('re-derives the 1.x volume card copy across all four languages via the header switcher without refetching', async () => {
     setFullWebLanguage('zh-CN');
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        Response.json({
-          contract_version: 'cpamp.phase4-01.discovery.v1',
-          status: 'recovery_required',
-          mode: 'recovery',
-          auth_entry: 'host_intervention',
-          reason: 'source_ownership_unavailable',
-          authentication_required: false,
-        })
-      )
+    const discovery = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        contract_version: 'cpamp.phase4-01.discovery.v1',
+        status: 'recovery_required',
+        mode: 'recovery',
+        auth_entry: 'host_intervention',
+        reason: 'source_ownership_unavailable',
+        authentication_required: false,
+      })
     );
+    vi.stubGlobal('fetch', discovery);
     let renderer!: ReactTestRenderer;
     await act(async () => {
       renderer = create(
         <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
       );
     });
-    // The discovery answer is fetched once and kept in state, so the card must
-    // follow the page's language instead of the language it was fetched in.
-    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-      bootstrapDiscoveryText('ownershipGuidanceTitle', 'zh-CN')
-    );
-    await act(async () => {
-      setFullWebLanguage('en');
-      renderer.update(
-        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
-      );
+
+    const snapshotCard = (locale: 'zh-CN' | 'zh-TW' | 'en' | 'ru') => {
+      const gate = findByTestId(renderer.root, 'bootstrap-no-handoff');
+      assertCardHeaderReads(locale, gate);
+      const [pageTitle] = blocksOf(gate, 'wizard-title');
+      const [pageDesc] = blocksOf(gate, 'wizard-desc');
+      const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
+      const [guidanceTitle] = blocksOf(guidance, 'alert-title');
+      const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
+      assertCopyIn(locale, guidanceTitle);
+      assertCopyIn(locale, guidanceDesc);
+      const instructions = findByTestId(renderer.root, 'legacy-ownership-instructions');
+      const stepTitles = blocksOf(instructions, 'alert-title');
+      const stepDescs = blocksOf(instructions, 'alert-desc');
+      for (const block of [...stepTitles, ...stepDescs]) {
+        assertCopyIn(locale, block);
+      }
+      const recheck = textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery'));
+      assertCopyIn(locale, recheck);
+      return { pageTitle, pageDesc, guidanceTitle, guidanceDesc, stepTitles, stepDescs, recheck };
+    };
+
+    const simplified = snapshotCard('zh-CN');
+
+    const switcher = findByTestId(renderer.root, 'bootstrap-language');
+    await act(async () => switcher.props.onChange({ target: { value: 'zh-TW' } }));
+    const traditional = snapshotCard('zh-TW');
+    expect(traditional.pageTitle).not.toBe(simplified.pageTitle);
+    expect(traditional.pageDesc).not.toBe(simplified.pageDesc);
+    expect(traditional.guidanceTitle).not.toBe(simplified.guidanceTitle);
+    expect(traditional.guidanceDesc).not.toBe(simplified.guidanceDesc);
+    expect(traditional.stepTitles).not.toEqual(simplified.stepTitles);
+    expect(traditional.stepDescs).not.toEqual(simplified.stepDescs);
+    expect(traditional.recheck).not.toBe(simplified.recheck);
+    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
+      state: { language: 'zh-TW' },
     });
-    const guidance = textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'));
-    expect(guidance).toContain(bootstrapDiscoveryText('ownershipGuidanceTitle', 'en'));
-    expect(guidance).not.toContain(bootstrapDiscoveryText('ownershipGuidanceTitle', 'zh-CN'));
+
+    await act(async () => switcher.props.onChange({ target: { value: 'en' } }));
+    snapshotCard('en');
+    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
+      state: { language: 'en' },
+    });
+
+    await act(async () => switcher.props.onChange({ target: { value: 'ru' } }));
+    snapshotCard('ru');
+    expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
+      state: { language: 'ru' },
+    });
+
+    expect(discovery).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
   });
 

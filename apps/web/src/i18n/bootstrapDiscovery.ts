@@ -1,9 +1,9 @@
 import { fullWebLanguage } from './fullweb';
 
-// The copy of the one Bootstrap card this build adds: the guidance for a 1.x
-// data volume that was mounted at /data. The rest of the Bootstrap page keeps
-// the text it had; the page's language switcher and full dictionary belong to
-// the page-level i18n work, not to this card.
+// Localized copy for the Bootstrap guidance card shown when a 1.x data volume
+// is mounted at /data with root-owned marker or key files. Entries are resolved
+// at render time so switching the Bootstrap page language re-translates a
+// discovery response that was fetched once.
 const en = {
   ownershipStepTag: 'Upgrade Gate · 1.x Volume Guidance',
   ownershipPageTitle: '1.x data volume detected — mount for Upgrade or fix file ownership',
