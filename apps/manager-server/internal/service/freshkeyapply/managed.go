@@ -2,9 +2,9 @@ package freshkeyapply
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -45,6 +45,10 @@ type ManagedInstall struct {
 	// Managed or Adopt. It selects the destination posture, so it is a fact of the
 	// installation and never a caller input.
 	Strategy string
+	// ProductComplete reports whether the durable Fresh operation has committed
+	// product completion. An adoption holds no install-derived write or admission
+	// authority until completion itself has committed.
+	ProductComplete bool
 }
 
 // ManagedSource reloads and validates that authority on every call. It must
@@ -61,7 +65,7 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 	s.profile = ProfileManaged
 	s.endpoint = endpoint
 	s.source = source
-	s.permit = func() (Permit, error) {
+	managedPermit := func(requireComplete bool) (Permit, error) {
 		if source == nil {
 			return Permit{}, ErrUnavailable
 		}
@@ -76,6 +80,9 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 		if _, owned := cpa.PostureFor(install.Strategy); !owned {
 			return Permit{}, ErrUnavailable
 		}
+		if requireComplete && install.Strategy == string(bootstrap.AdoptExisting) && !install.ProductComplete {
+			return Permit{}, ErrUnavailable
+		}
 		// The credential and the transport must address the same CPA; a moved
 		// destination is a different installation, never a silent rebind.
 		if cpa.NormalizeBaseURL(install.BaseURL) != cpa.NormalizeBaseURL(s.endpoint) {
@@ -87,6 +94,8 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 			Profile: ProfileManaged, Identity: install.Identity, ArtifactID: install.ArtifactID,
 		}, nil
 	}
+	s.permit = func() (Permit, error) { return managedPermit(true) }
+	s.registrationPermit = func() (Permit, error) { return managedPermit(false) }
 	s.keyOperations = true
 	transport := cpa.NewTransportForEndpoint(endpoint)
 	// The destination posture follows the committed strategy, never the transport's
@@ -168,6 +177,9 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 		// qualify; an adopted destination is bound by the `external:` digest the
 		// adoption recorded, so the prefix is read from the strategy and never
 		// guessed from the value.
+		if op.Strategy.Strategy == bootstrap.AdoptExisting && !op.ProductComplete {
+			return false
+		}
 		return ValidManagerOwnedDestinationCheckpoint(op.Strategy)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;
@@ -269,10 +281,59 @@ func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey stri
 	return snap.Keys, nil
 }
 
+// PreparedAdoption holds the encrypted candidate records and one-shot journal
+// metadata prepared ahead of the completion transaction, so the SQLite write
+// transaction performs no key generation, encryption or nested store reads.
+type PreparedAdoption struct {
+	records []repo.Record
+	journal repo.InitialInstall
+}
+
+// RunID reports the managed installation run identity the adoption was prepared for.
+func (p PreparedAdoption) RunID() string { return p.journal.RunID }
+
+// Generation reports the Runtime target generation the adoption was prepared for.
+func (p PreparedAdoption) Generation() string { return p.journal.Generation }
+
+// PrepareAdoption validates and encrypts the destination's Client Keys and binds
+// the one-shot install journal metadata without touching SQLite.
+func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (PreparedAdoption, error) {
+	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil || s.registrationPermit == nil {
+		return PreparedAdoption{}, ErrUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return PreparedAdoption{}, err
+	}
+	p, err := s.registrationPermit()
+	if err != nil {
+		return PreparedAdoption{}, err
+	}
+	records, err := s.keys.PrepareAdopted(secrets)
+	if err != nil {
+		return PreparedAdoption{}, mapAdoptionRegistrationError(err)
+	}
+	journal := repo.InitialInstall{
+		RunID: p.RunID, Generation: p.Generation,
+		AttemptedAtMS: time.Now().UnixMilli(), ProviderSeedSHA256: p.S2B.Binding(),
+	}
+	return PreparedAdoption{records: records, journal: journal}, nil
+}
+
+// CommitAdoptionTx commits every prepared adopted Client Key and claims the
+// one-shot install journal inside the caller's completion CAS transaction.
+func (s *Service) CommitAdoptionTx(ctx context.Context, tx *sql.Tx, prepared PreparedAdoption, runtimeIdentity string) ([]freshkeys.Key, error) {
+	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil || tx == nil || len(prepared.records) == 0 {
+		return nil, ErrUnavailable
+	}
+	keys, err := s.keys.RegisterAdoptedWithJournalTx(ctx, tx, prepared.records, runtimeIdentity, prepared.journal)
+	if err != nil {
+		return nil, mapAdoptionRegistrationError(err)
+	}
+	return keys, nil
+}
+
 // RegisterAdoption persists the Manager-side installation an adopted destination
-// needs, and it is the only place one is created for an adoption.
-//
-// Two facts become durable together, in this order:
+// needs in one atomic SQLite transaction:
 //
 //  1. one canonical record per Client Key the destination carries, so the Key
 //     workspace lists the credentials the adopted CPA actually has and the normal
@@ -282,55 +343,31 @@ func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey stri
 //     install all require the run, generation and provider seed the destination
 //     was staged under, and an adoption staged its destination itself.
 //
-// Both writes are idempotent, so a completion interrupted between them and
-// retried replays instead of registering a second identity or a second journal.
-// The journal is the same one-shot record a New Managed install claims, so an
-// adoption is refused when another installation already owns it rather than
-// overwriting what that installation's key operations are bound to.
-//
-// A destination list this installation cannot represent — a key it already
-// retired, a binding another installation owns, a list outside the adoption
-// bound — is ErrAdoptionConflict: no retry changes those facts, and the operator
-// resolves them at the source CPA instead of waiting for a transient failure.
+// Either every key and the one-shot journal commit together, or nothing is
+// written. Replays with the same binding are idempotent; a retired key, a
+// source binding owned by another identity, or a journal owned by another
+// installation is refused as ErrAdoptionConflict.
 func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]freshkeys.Key, error) {
-	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
-		return nil, ErrUnavailable
-	}
-	p, err := s.permit()
+	prepared, err := s.PrepareAdoption(ctx, secrets)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := s.keys.RegisterAdopted(ctx, secrets)
+	keys, err := s.keys.RegisterAdoptedWithJournal(ctx, prepared.records, prepared.journal)
 	if err != nil {
-		if errors.Is(err, freshkeys.ErrRequest) || errors.Is(err, freshkeys.ErrAdoptedSecretRetired) ||
-			errors.Is(err, repo.ErrSourceOwned) {
-			return nil, fmt.Errorf("%w: %w", ErrAdoptionConflict, err)
-		}
-		return nil, err
-	}
-	ids := make([]string, 0, len(keys))
-	for _, key := range keys {
-		ids = append(ids, string(key.ID))
-	}
-	journal := repo.InitialInstall{KeyID: ids[0], RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli(), ProviderSeedSHA256: p.S2B.Binding()}
-	if err := s.repo.ClaimInitialInstall(ctx, journal); err != nil {
-		if !errors.Is(err, repo.ErrConflict) {
-			return nil, err
-		}
-		// The journal is written once. A replay must present this adoption's own
-		// binding — the same run, generation and provider seed the destination was
-		// staged under — and one of the keys just registered; anything else is a
-		// different installation and is refused rather than rebound.
-		existing, readErr := s.repo.InitialInstall(ctx)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if existing == nil || existing.RunID != p.RunID || existing.Generation != p.Generation ||
-			existing.ProviderSeedSHA256 != p.S2B.Binding() || !slices.Contains(ids, existing.KeyID) {
-			return nil, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
-		}
+		return nil, mapAdoptionRegistrationError(err)
 	}
 	return keys, nil
+}
+
+func mapAdoptionRegistrationError(err error) error {
+	if errors.Is(err, freshkeys.ErrRequest) || errors.Is(err, freshkeys.ErrAdoptedSecretRetired) ||
+		errors.Is(err, repo.ErrSourceOwned) {
+		return fmt.Errorf("%w: %w", ErrAdoptionConflict, err)
+	}
+	if errors.Is(err, repo.ErrJournalConflict) {
+		return fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
+	}
+	return err
 }
 
 // targetProof is the caller-observed target handed to the single write. A

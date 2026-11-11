@@ -53,6 +53,7 @@ type Service struct {
 	runtime        runtimeservice.RuntimeClient
 	wire           wire
 	permit         func() (Permit, error)
+	registrationPermit func() (Permit, error)
 	keyPermit      func(context.Context, string, string) (KeyPermit, error)
 	source         ManagedSource
 	externalSource ExternalSource

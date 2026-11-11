@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -1469,22 +1470,32 @@ func ensureFreshKeyColumns(db *sql.DB) error {
 // including one created by this build — is left untouched, so the rebuild runs at
 // most once per database.
 func ensureFreshKeyOrigins(db *sql.DB) error {
-	var definition string
-	err := db.QueryRow(`select sql from sqlite_master where type='table' and name='fresh_client_api_keys'`).Scan(&definition)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	needsRebuild, err := freshKeyOriginsNeedWidening(db)
+	if err != nil || !needsRebuild {
+		return err
 	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(definition, "'adopted'") {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `begin immediate`); err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `rollback`)
+		}
+	}()
+	// Re-check inside the write transaction: a concurrent opener may have read
+	// the old table definition before acquiring the write lock and finished
+	// widening the table first.
+	needsRebuild, err = freshKeyOriginsNeedWidening(conn)
+	if err != nil || !needsRebuild {
+		return err
+	}
 	for _, statement := range []string{
 		`drop table if exists fresh_client_api_keys_adopted`,
 		`create table fresh_client_api_keys_adopted (
@@ -1505,11 +1516,29 @@ func ensureFreshKeyOrigins(db *sql.DB) error {
 		`create unique index if not exists idx_fresh_client_api_keys_installer
 			on fresh_client_api_keys(origin) where origin = 'installer'`,
 	} {
-		if _, err := tx.Exec(statement); err != nil {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("widen fresh client key origins: %w", err)
 		}
 	}
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, `commit`); err != nil {
+		return fmt.Errorf("widen fresh client key origins: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func freshKeyOriginsNeedWidening(q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (bool, error) {
+	var definition string
+	err := q.QueryRowContext(context.Background(), `select sql from sqlite_master where type='table' and name='fresh_client_api_keys'`).Scan(&definition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !strings.Contains(definition, "'adopted'"), nil
 }
 
 // Binding revision changes only when fields used by temporal identity mapping change.

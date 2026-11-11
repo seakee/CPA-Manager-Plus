@@ -1,6 +1,7 @@
 package freshkeys
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -119,4 +120,68 @@ func TestRegisterAdoptedRefusesMalformedInput(t *testing.T) {
 	if listed, err := service.List(ctx); err != nil || len(listed) != 0 {
 		t.Fatalf("a refused registration wrote a record: %#v %v", listed, err)
 	}
+}
+
+// RegisterAdopted is all-or-nothing across the whole slice: when a later key in
+// the batch is retired or its source binding is already owned by another
+// identity, earlier valid keys in the same call leave neither workspace rows
+// nor source bindings behind.
+func TestRegisterAdoptedRollsBackBatchWhenNthKeyFails(t *testing.T) {
+	t.Run("retired key after valid keys", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		ctx := t.Context()
+		retired, _, err := service.Create(ctx, strings.Repeat("a", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`update gateway_api_key_identities set lifecycle='superseded', revision=revision+1 where id=?`, string(retired.Key.ID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`update gateway_api_key_source_bindings set retired_at_ms=1 where api_key_id=?`, string(retired.Key.ID)); err != nil {
+			t.Fatal(err)
+		}
+		_, err = service.RegisterAdopted(ctx, []string{"source-batch-first", "source-batch-second", retired.CreatedSecret})
+		if !errors.Is(err, ErrAdoptedSecretRetired) {
+			t.Fatalf("retired third key = %v, want ErrAdoptedSecretRetired", err)
+		}
+		listed, err := service.List(ctx)
+		if err != nil || len(listed) != 1 || listed[0].ID != retired.Key.ID {
+			t.Fatalf("batch refusal left workspace keys: %#v %v", listed, err)
+		}
+		var activeBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&activeBindings); err != nil || activeBindings != 0 {
+			t.Fatalf("batch refusal left %d active source bindings: %v", activeBindings, err)
+		}
+	})
+
+	t.Run("source binding conflict after valid keys", func(t *testing.T) {
+		db, _, protector, _ := installKeyStore(t)
+		service := New(repo.New(db), protector, WithSourceRuntime(func(context.Context) (string, error) {
+			return "embedded-default", nil
+		}))
+		ctx := t.Context()
+		foreignID := strings.Repeat("b", 32)
+		if _, err := db.Exec(`insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) values(?,1,'active',1,1)`, foreignID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`insert into gateway_api_key_source_bindings(api_key_id,runtime_identity,api_key_hash,first_seen_at_ms,last_seen_at_ms) values(?,'embedded-default',?,1,1)`,
+			foreignID, SecretDigest("source-owned-third")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := service.RegisterAdopted(ctx, []string{"source-clean-first", "source-clean-second", "source-owned-third"})
+		if !errors.Is(err, repo.ErrSourceOwned) {
+			t.Fatalf("source-owned third key = %v, want ErrSourceOwned", err)
+		}
+		listed, err := service.List(ctx)
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("source-binding refusal left workspace keys: %#v %v", listed, err)
+		}
+		var activeBindings int
+		if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&activeBindings); err != nil || activeBindings != 1 {
+			t.Fatalf("source-binding refusal changed bindings to %d: %v", activeBindings, err)
+		}
+	})
 }

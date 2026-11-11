@@ -74,7 +74,8 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 			ManagementKey: key,
 			// The strategy is what selects the destination posture; the plugin
 			// switch is the operator's own and is not part of the proof.
-			Strategy: string(checkpoint.Strategy),
+			Strategy:        string(checkpoint.Strategy),
+			ProductComplete: record.Operation.ProductComplete,
 		}, nil
 	}
 }

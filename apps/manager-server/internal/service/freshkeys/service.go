@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -151,12 +152,12 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 // that is already a canonical record of this workspace keeps that single identity.
 // A digest that resolves to a superseded record is refused instead: that identity
 // is retired history, so the installation can neither own it nor revive it.
-func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key, error) {
+func (s *Service) PrepareAdopted(secrets []string) ([]repo.Record, error) {
 	if s == nil || s.repo == nil || s.protector == nil || len(secrets) == 0 || len(secrets) > maxAdoptedSecrets {
 		return nil, ErrRequest
 	}
-	// The whole list is validated before the first write: a refusal must leave
-	// the workspace exactly as it found it.
+	// The whole list is validated and encrypted before the first SQLite write:
+	// a refusal or protector failure leaves the workspace untouched.
 	seen := make(map[string]bool, len(secrets))
 	for _, secret := range secrets {
 		if secret == "" || len(secret) > maxAdoptedSecretLength || !utf8.ValidString(secret) || seen[secret] {
@@ -164,57 +165,83 @@ func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key,
 		}
 		seen[secret] = true
 	}
-	runtimeIdentity := s.runtimeIdentity(ctx)
-	keys := make([]Key, 0, len(secrets))
+	candidates := make([]repo.Record, 0, len(secrets))
 	for _, secret := range secrets {
-		hash := digest(secret)
-		record, err := s.repo.ByHash(ctx, hash)
+		ciphertext, err := s.protector.ProtectString(secret)
 		if err != nil {
 			return nil, err
 		}
-		if record != nil && record.Identity.Lifecycle != identity.LifecycleActive {
-			// A superseded record is retained history, not a reusable identity: it
-			// was retired by a committed key operation, so binding the installation
-			// to it would name a key no write path may consume. The operator's source
-			// CPA still carries a credential this Manager already revoked, which is a
-			// conflict to resolve there, never a registration to replay.
+		id, err := identity.NewAPIKeyID()
+		if err != nil {
+			return nil, err
+		}
+		requestID, err := identity.NewAPIKeyID()
+		if err != nil {
+			return nil, err
+		}
+		now := s.now()
+		candidates = append(candidates, repo.Record{
+			RequestID:  string(requestID),
+			Identity:   identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},
+			Ciphertext: ciphertext, Hash: digest(secret), Preview: model.MaskedImportedClientKey(secret), NameRevision: 1, Origin: repo.OriginAdopted,
+		})
+	}
+	return candidates, nil
+}
+
+func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key, error) {
+	candidates, err := s.PrepareAdopted(secrets)
+	if err != nil {
+		return nil, err
+	}
+	records, err := s.repo.StageAdopted(ctx, candidates, s.runtimeIdentity(ctx))
+	if err != nil {
+		if errors.Is(err, repo.ErrRetired) {
 			return nil, ErrAdoptedSecretRetired
 		}
-		if record == nil {
-			ciphertext, err := s.protector.ProtectString(secret)
-			if err != nil {
-				return nil, err
-			}
-			id, err := identity.NewAPIKeyID()
-			if err != nil {
-				return nil, err
-			}
-			requestID, err := identity.NewAPIKeyID()
-			if err != nil {
-				return nil, err
-			}
-			now := s.now()
-			v := repo.Record{
-				RequestID:  string(requestID),
-				Identity:   identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},
-				Ciphertext: ciphertext, Hash: hash, Preview: model.MaskedImportedClientKey(secret), NameRevision: 1, Origin: repo.OriginAdopted,
-			}
-			created, err := s.repo.CreateAdopted(ctx, v, runtimeIdentity)
-			if err != nil {
-				return nil, err
-			}
-			if created {
-				record = &v
-			} else if record, err = s.repo.ByHash(ctx, hash); err != nil {
-				return nil, err
-			}
-			if record == nil {
-				return nil, errors.New("adopted client key registration lost its record")
-			}
-		}
-		keys = append(keys, public(*record))
+		return nil, err
 	}
-	return keys, nil
+	return publicKeys(records), nil
+}
+
+// RegisterAdoptedWithJournal commits every adopted Client Key and claims the
+// one-shot initial install journal in one atomic SQLite transaction.
+func (s *Service) RegisterAdoptedWithJournal(ctx context.Context, candidates []repo.Record, journal repo.InitialInstall) ([]Key, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrRequest
+	}
+	records, err := s.repo.RegisterAdoption(ctx, candidates, s.runtimeIdentity(ctx), journal)
+	if err != nil {
+		if errors.Is(err, repo.ErrRetired) {
+			return nil, ErrAdoptedSecretRetired
+		}
+		return nil, err
+	}
+	return publicKeys(records), nil
+}
+
+// RegisterAdoptedWithJournalTx commits every adopted Client Key and claims the
+// one-shot initial install journal inside a caller-owned write transaction.
+func (s *Service) RegisterAdoptedWithJournalTx(ctx context.Context, tx *sql.Tx, candidates []repo.Record, runtimeIdentity string, journal repo.InitialInstall) ([]Key, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrRequest
+	}
+	records, err := s.repo.RegisterAdoptionTx(ctx, tx, candidates, runtimeIdentity, journal)
+	if err != nil {
+		if errors.Is(err, repo.ErrRetired) {
+			return nil, ErrAdoptedSecretRetired
+		}
+		return nil, err
+	}
+	return publicKeys(records), nil
+}
+
+func publicKeys(records []repo.Record) []Key {
+	keys := make([]Key, 0, len(records))
+	for _, record := range records {
+		keys = append(keys, public(record))
+	}
+	return keys
 }
 
 // Bounds of one adoption's client key list. The destination proof already

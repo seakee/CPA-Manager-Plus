@@ -1,6 +1,8 @@
 package freshkeyapply
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -22,7 +24,7 @@ var adoptedSourceKeys = []string{"source-client-one", "source-client-two"}
 // destination CPA is the Supervisor's own, carrying the two client keys the
 // adoption staged, and the checkpoint strategy is the one that selects the
 // adopted posture.
-func adoptedFixture(t *testing.T, clientKeys ...string) (*Service, *managedCPA, *ModelSource) {
+func adoptedFixtureWithDB(t *testing.T, clientKeys ...string) (*Service, *managedCPA, *ModelSource, *sql.DB) {
 	t.Helper()
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "manager.sqlite"))
 	if err != nil {
@@ -34,7 +36,9 @@ func adoptedFixture(t *testing.T, clientKeys ...string) (*Service, *managedCPA, 
 	}
 	r := repo.New(db)
 	protector, _ := security.NewProtector([]byte("isolated-adopted-test-key"))
-	keys := freshkeys.New(r, protector)
+	keys := freshkeys.New(r, protector, freshkeys.WithSourceRuntime(func(context.Context) (string, error) {
+		return managedRuntimeIdentity, nil
+	}))
 	cpa := &managedCPA{management: strings.Repeat("e", 64), keys: slices.Clone(clientKeys)}
 	server := cpa.serve(t)
 	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: managedRuntimeIdentity, Generation: 9,
@@ -45,9 +49,15 @@ func adoptedFixture(t *testing.T, clientKeys ...string) (*Service, *managedCPA, 
 	source := &ModelSource{install: ManagedInstall{
 		RunID: "managed:operation-adoption", Generation: "9", Identity: managedRuntimeIdentity,
 		ArtifactID: managedArtifact(), BaseURL: server.URL, ManagementKey: cpa.management,
-		Strategy: "adopt_existing",
+		Strategy: "adopt_existing", ProductComplete: true,
 	}}
-	return NewManaged(r, keys, rt, server.URL, source.get), cpa, source
+	return NewManaged(r, keys, rt, server.URL, source.get), cpa, source, db
+}
+
+func adoptedFixture(t *testing.T, clientKeys ...string) (*Service, *managedCPA, *ModelSource) {
+	t.Helper()
+	s, cpa, source, _ := adoptedFixtureWithDB(t, clientKeys...)
+	return s, cpa, source
 }
 
 // An adopted destination's client keys become the installation's own keys and the
@@ -98,28 +108,51 @@ func TestRegisterAdoptionRecordsTheDestinationKeysAndTheInstallJournal(t *testin
 	}
 }
 
-// The install journal is what the gateway configuration page and the key
-// operation journal require. Before completion's registration it does not exist,
-// so the adopted installation has no configuration authority; afterwards it has
-// exactly the one a New Managed install derives.
+// Config, admission and key-operation authority require BOTH the claimed
+// one-shot install journal AND durable `ProductComplete`. If completion has not
+// committed yet — even after `RegisterAdoption` wrote keys and claimed the
+// journal — every consumer fails closed until `ProductComplete` becomes true.
 func TestAdoptionRegistrationGrantsTheConfigAuthority(t *testing.T) {
-	s, cpa, _ := adoptedFixture(t, adoptedSourceKeys...)
+	s, cpa, source := adoptedFixture(t, adoptedSourceKeys...)
+	source.set(func(install *ManagedInstall) { install.ProductComplete = false })
 	ctx := t.Context()
 	if _, err := s.ConfigTarget(ctx, 9); err == nil {
 		t.Fatal("an unresolved adoption already held configuration authority")
 	}
-	if _, err := s.RegisterAdoption(ctx, adoptedSourceKeys); err != nil {
+	if s.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatal("an incomplete adoption was admitted before registration")
+	}
+	keys, err := s.RegisterAdoption(ctx, adoptedSourceKeys)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Registration alone — before `ProductComplete` commits — grants neither
+	// config writes, Gateway admission, nor key-operation authority.
+	if _, err := s.ConfigTarget(ctx, 9); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("incomplete adoption granted ConfigTarget: %v", err)
+	}
+	if s.DefaultInstallCPAAuthorityProven(ctx) {
+		t.Fatal("incomplete adoption proved Gateway admission before ProductComplete")
+	}
+	if _, err := s.Prepare(ctx, strings.Repeat("1", 32), string(keys[0].ID), string(keys[1].ID), "revoke", 9); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("incomplete adoption prepared a key operation: %v", err)
+	}
+	// Conversely, `ProductComplete` without a matching install journal still
+	// refuses configuration writes.
+	unregistered, _, _ := adoptedFixture(t, adoptedSourceKeys...)
+	if _, err := unregistered.ConfigTarget(ctx, 9); !errors.Is(err, ErrGeneration) {
+		t.Fatalf("completed adoption without journal granted ConfigTarget: %v", err)
+	}
+	// Once `ProductComplete` commits alongside the claimed journal, authority
+	// and admission become active for the staged generation only.
+	source.set(func(install *ManagedInstall) { install.ProductComplete = true })
 	managementKey, err := s.ConfigTarget(ctx, 9)
 	if err != nil || managementKey != cpa.management {
 		t.Fatalf("config authority = %q %v", managementKey, err)
 	}
 	if !s.DefaultInstallCPAAuthorityProven(ctx) {
-		t.Fatal("the adopted destination is not admitted after registration")
+		t.Fatal("the completed adopted destination is not admitted")
 	}
-	// A generation other than the staged one is still refused: registration
-	// carries the binding forward, it does not replace it.
 	if _, err := s.ConfigTarget(ctx, 10); !errors.Is(err, ErrGeneration) {
 		t.Fatalf("foreign generation = %v", err)
 	}
@@ -225,10 +258,11 @@ func TestAdoptedInstallationRevokesAndReplacesWithThreeKeys(t *testing.T) {
 	}
 }
 
-// The journal is written once. An adoption that finds another installation's
-// journal is refused instead of inheriting the key operations bound to it.
+// The journal and the adopted key batch commit together or not at all. An
+// adoption that meets another installation's journal — or a retired key later
+// in the batch — leaves neither adopted workspace records nor source bindings.
 func TestAdoptionRegistrationRefusesAnotherInstallationsJournal(t *testing.T) {
-	s, _, source := adoptedFixture(t, adoptedSourceKeys...)
+	s, _, source, db := adoptedFixtureWithDB(t, adoptedSourceKeys...)
 	ctx := t.Context()
 	owner, _, err := s.keys.Create(ctx, strings.Repeat("b", 32))
 	if err != nil {
@@ -237,32 +271,28 @@ func TestAdoptionRegistrationRefusesAnotherInstallationsJournal(t *testing.T) {
 	if err = s.repo.ClaimInitialInstall(ctx, repo.InitialInstall{KeyID: string(owner.Key.ID), RunID: "managed:another-install", Generation: "9", AttemptedAtMS: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.RegisterAdoption(ctx, adoptedSourceKeys); !errors.Is(err, ErrGeneration) {
+	var bindingsBefore int
+	if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings`).Scan(&bindingsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RegisterAdoption(ctx, adoptedSourceKeys); !errors.Is(err, ErrAdoptionConflict) || !errors.Is(err, ErrGeneration) {
 		t.Fatalf("foreign journal = %v", err)
 	}
 	source.set(func(install *ManagedInstall) { install.RunID = "managed:operation-adoption" })
-	if _, err = s.RegisterAdoption(ctx, adoptedSourceKeys); !errors.Is(err, ErrGeneration) {
+	if _, err = s.RegisterAdoption(ctx, adoptedSourceKeys); !errors.Is(err, ErrAdoptionConflict) || !errors.Is(err, ErrGeneration) {
 		t.Fatalf("journal rebound to a second run: %v", err)
 	}
 	journal, err := s.repo.InitialInstall(ctx)
 	if err != nil || journal == nil || journal.RunID != "managed:another-install" {
 		t.Fatalf("journal was rewritten: %#v %v", journal, err)
 	}
-	// The refusal happens after the Key records, so the installation is left in a
-	// visible half-state: the workspace lists the keys while no journal binds them
-	// to an installation, and every surface that needs one keeps refusing.
 	listed, err := s.keys.List(ctx)
-	if err != nil || len(listed) != 1+len(adoptedSourceKeys) {
-		t.Fatalf("keys registered before the refusal = %#v %v", listed, err)
+	if err != nil || len(listed) != 1 || listed[0].ID != owner.Key.ID {
+		t.Fatalf("refused registration leaked adopted keys: %#v %v", listed, err)
 	}
-	adopted := 0
-	for _, key := range listed {
-		if key.Origin == repo.OriginAdopted {
-			adopted++
-		}
-	}
-	if adopted != len(adoptedSourceKeys) {
-		t.Fatalf("adopted records after the refusal = %d", adopted)
+	var bindingsAfter int
+	if err = db.QueryRow(`select count(*) from gateway_api_key_source_bindings`).Scan(&bindingsAfter); err != nil || bindingsAfter != bindingsBefore {
+		t.Fatalf("refused registration changed source bindings from %d to %d: %v", bindingsBefore, bindingsAfter, err)
 	}
 }
 

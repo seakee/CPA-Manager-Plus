@@ -92,17 +92,16 @@ func TestTargetsSelectsTheProfileOfTheService(t *testing.T) {
 	t.Run("managed refuses an unbound checkpoint", func(t *testing.T) {
 		sameAnswer(t, managed, operation(unboundManaged), false, canonicalSurfaces...)
 	})
-	t.Run("managed owns an adopted destination on every surface", func(t *testing.T) {
-		// Adopt is Manager-owned: this Manager staged the destination, started it
-		// and holds the install-derived credential. Its connection identity is the
-		// `external:` digest the adoption recorded, so the prefix comes from the
-		// strategy and is never inferred from the value.
+	t.Run("managed owns a completed adopted destination and refuses an incomplete one", func(t *testing.T) {
 		adopted := bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
 			TargetIdentity: managedRuntimeIdentity, TargetGeneration: 9, TargetArtifactID: managedArtifact(),
 			DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("f", 64),
 		}
-		sameAnswer(t, managed, operation(adopted), true, canonicalSurfaces...)
+		sameAnswer(t, managed, operation(adopted), false, canonicalSurfaces...)
+		completed := operation(adopted)
+		completed.ProductComplete = true
+		sameAnswer(t, managed, completed, true, canonicalSurfaces...)
 	})
 	t.Run("managed refuses an adopted checkpoint bound by the managed prefix", func(t *testing.T) {
 		// The two identities are distinct values. An adopted checkpoint carrying

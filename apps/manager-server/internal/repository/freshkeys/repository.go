@@ -43,6 +43,18 @@ var ErrConflict = errors.New("staged key name revision conflict")
 // binding to another identity, so no second attribution may be created.
 var ErrSourceOwned = errors.New("staged key source is bound to another identity")
 
+// ErrRetired means a staged key's secret digest already belongs to a canonical
+// identity whose lifecycle is no longer active.
+var ErrRetired = errors.New("staged key identity is retired")
+
+// ErrJournalConflict means the one-shot initial key install journal is already
+// bound to a different installation run, generation, provider seed or key.
+var ErrJournalConflict = errors.New("initial key install journal is bound to another installation")
+
+type queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 type Repository struct{ db *sql.DB }
 
 func New(db *sql.DB) *Repository { return &Repository{db: db} }
@@ -199,60 +211,99 @@ func (r *Repository) CreateInstaller(ctx context.Context, v Record) (bool, error
 	return true, nil
 }
 
-// CreateAdopted persists one Client Key an adopted destination already carried.
-//
-// It is the same canonical record as any other staged key — protected secret,
-// digest, masked preview — and it is fenced by the same unique secret hash, so a
-// replayed completion finds the record instead of registering the credential
-// twice. The origin is the only difference: this Manager never minted the
-// secret, it read it from the destination it had just staged and verified.
-func (r *Repository) CreateAdopted(ctx context.Context, v Record, runtimeIdentity string) (bool, error) {
-	v.Origin = OriginAdopted
-	if v.Identity.Validate() != nil || !security.IsValidProtectedEnvelope(v.Ciphertext) || !identity.IsValidSHA256Hex(v.Hash) || v.Preview == "" || v.Identity.CreatedAtMS <= 0 {
-		return false, errors.New("invalid adopted client key")
-	}
-	if runtimeIdentity != "" && strings.TrimSpace(runtimeIdentity) != runtimeIdentity {
-		return false, errors.New("invalid adopted client key source")
-	}
+// StageAdopted persists every Client Key of an adopted destination in one
+// transaction. Either every record (reusing an active identity that already
+// owns the digest, or creating the identity, encrypted record and optional
+// source binding) commits together, or none do.
+func (r *Repository) StageAdopted(ctx context.Context, candidates []Record, runtimeIdentity string) ([]Record, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer tx.Rollback()
-	var exists int
-	if err = tx.QueryRowContext(ctx, "select count(*) from fresh_client_api_keys where secret_hash=? or request_id=?", v.Hash, v.RequestID).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists != 0 {
-		return false, nil
-	}
-	i := v.Identity
-	if _, err = tx.ExecContext(ctx, "insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) values(?,?,?,?,?)", i.ID, i.Revision, i.Lifecycle, i.CreatedAtMS, i.UpdatedAtMS); err != nil {
-		return false, err
-	}
-	if _, err = tx.ExecContext(ctx, "insert into fresh_client_api_keys(request_id,api_key_id,secret_ciphertext,secret_hash,masked_preview,origin) values(?,?,?,?,?,?)", v.RequestID, i.ID, v.Ciphertext, v.Hash, v.Preview, v.Origin); err != nil {
-		return false, err
-	}
-	if runtimeIdentity != "" {
-		if err = bindSource(ctx, tx, i.ID, runtimeIdentity, v.Hash, i.CreatedAtMS); err != nil {
-			return false, err
-		}
+	records, err := stageAdoptedTx(ctx, tx, candidates, runtimeIdentity)
+	if err != nil {
+		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
-		return false, err
+		return nil, err
 	}
-	return true, nil
+	return records, nil
+}
+
+func stageAdoptedTx(ctx context.Context, tx *sql.Tx, candidates []Record, runtimeIdentity string) ([]Record, error) {
+	if len(candidates) == 0 {
+		return nil, errors.New("invalid adopted client key")
+	}
+	if runtimeIdentity != "" && strings.TrimSpace(runtimeIdentity) != runtimeIdentity {
+		return nil, errors.New("invalid adopted client key source")
+	}
+	resolved := make([]Record, 0, len(candidates))
+	for _, v := range candidates {
+		v.Origin = OriginAdopted
+		v.NameRevision = 1
+		if v.Identity.Validate() != nil || !security.IsValidProtectedEnvelope(v.Ciphertext) || !identity.IsValidSHA256Hex(v.Hash) || v.Preview == "" || v.Identity.CreatedAtMS <= 0 {
+			return nil, errors.New("invalid adopted client key")
+		}
+		existing, err := byHash(ctx, tx, v.Hash)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if existing.Identity.Lifecycle != identity.LifecycleActive {
+				return nil, ErrRetired
+			}
+			if runtimeIdentity != "" {
+				var conflict bool
+				if err = tx.QueryRowContext(ctx, `select exists(
+					select 1 from gateway_api_key_source_bindings
+					where api_key_hash = ? and retired_at_ms is null and api_key_id <> ?)`, existing.Hash, string(existing.Identity.ID)).Scan(&conflict); err != nil {
+					return nil, err
+				}
+				if conflict {
+					return nil, ErrSourceOwned
+				}
+			}
+			resolved = append(resolved, *existing)
+			continue
+		}
+		var requestExists int
+		if err = tx.QueryRowContext(ctx, "select count(*) from fresh_client_api_keys where request_id=?", v.RequestID).Scan(&requestExists); err != nil {
+			return nil, err
+		}
+		if requestExists != 0 {
+			return nil, errors.New("duplicate adopted client key request")
+		}
+		i := v.Identity
+		if _, err = tx.ExecContext(ctx, "insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) values(?,?,?,?,?)", i.ID, i.Revision, i.Lifecycle, i.CreatedAtMS, i.UpdatedAtMS); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, "insert into fresh_client_api_keys(request_id,api_key_id,secret_ciphertext,secret_hash,masked_preview,origin) values(?,?,?,?,?,?)", v.RequestID, i.ID, v.Ciphertext, v.Hash, v.Preview, v.Origin); err != nil {
+			return nil, err
+		}
+		if runtimeIdentity != "" {
+			if err = bindSource(ctx, tx, i.ID, runtimeIdentity, v.Hash, i.CreatedAtMS); err != nil {
+				return nil, err
+			}
+		}
+		resolved = append(resolved, v)
+	}
+	return resolved, nil
 }
 
 // ByHash returns the canonical record of one secret digest, or nil while no
 // record owns it. The digest is unique, so this is the idempotent lookup a
 // replayed registration replays.
 func (r *Repository) ByHash(ctx context.Context, hash string) (*Record, error) {
+	return byHash(ctx, r.db, hash)
+}
+
+func byHash(ctx context.Context, q queryer, hash string) (*Record, error) {
 	if !identity.IsValidSHA256Hex(hash) {
 		return nil, errors.New("invalid staged client secret digest")
 	}
 	var v Record
-	err := r.db.QueryRowContext(ctx, `select k.request_id, i.id, i.revision, i.lifecycle, i.created_at_ms, i.updated_at_ms,
+	err := q.QueryRowContext(ctx, `select k.request_id, i.id, i.revision, i.lifecycle, i.created_at_ms, i.updated_at_ms,
 		k.secret_ciphertext, k.secret_hash, k.masked_preview, k.name, k.name_revision, k.origin from fresh_client_api_keys k
 		join gateway_api_key_identities i on i.id=k.api_key_id where k.secret_hash=?`, hash).
 		Scan(&v.RequestID, &v.Identity.ID, &v.Identity.Revision, &v.Identity.Lifecycle, &v.Identity.CreatedAtMS, &v.Identity.UpdatedAtMS, &v.Ciphertext, &v.Hash, &v.Preview, &v.Name, &v.NameRevision, &v.Origin)
