@@ -45,11 +45,13 @@ type Options struct {
 	FreshAdmission   bool
 	ValidatedHop     *legacyartifact.ValidatedHopEvidence
 	readOnlySnapshot bool
-	// observeOnly replaces the ownership fence with a shared, non-blocking probe
-	// of the same marker. The authentication leaf sets it: proving a credential
-	// must work on a source mounted read-only, where the marker cannot be opened
-	// for writing at all. It is never set on a path that admits a writer.
-	observeOnly bool
+	// ObserveOnly replaces the ownership fence with a shared, non-blocking probe
+	// of the same marker. The authentication leaf and the public discovery
+	// observation set it: proving a credential or describing a source must work
+	// on media mounted read-only, where the marker cannot be opened for writing at
+	// all, and it must not rewrite a marker the process is not yet admitted on.
+	// It is never set on a path that admits a writer.
+	ObserveOnly bool
 	adminKey    string
 	// UpgradeAdmission is the injected, read-only Upgrade operation reader. Nil
 	// keeps the pre-seam behavior: no source is admitted on an Upgrade record.
@@ -122,7 +124,7 @@ const DiscoveryInspectionTimeout = 2 * time.Second
 // retained as coordination evidence, but public discovery never enters the
 // general recovery-copy inspection path and never creates a marker.
 //
-// The marker is taken as a fence, except when Options.observeOnly asks only for
+// The marker is taken as a fence, except when Options.ObserveOnly asks only for
 // its state: that mode reads a source mounted read-only and must not need write
 // access to the marker.
 func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, options Options, consume func(Report, error)) {
@@ -147,7 +149,7 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 		return
 	}
 
-	lock, err := fenceSource(paths.Database, options.observeOnly)
+	lock, err := fenceSource(paths.Database, options.ObserveOnly)
 	if err != nil && !errors.Is(err, processlock.ErrNoExistingLock) {
 		consume(Report{}, errors.New("source ownership unavailable"))
 		return
@@ -369,6 +371,9 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 			if err := validatePendingSource(ctx, paths, options, lock); err != nil {
 				return nil, err
 			}
+			if err := lock.Tighten(); err != nil {
+				return nil, err
+			}
 			owned = true
 			return &Admission{Lock: lock, PendingFresh: receipt}, nil
 		}
@@ -415,6 +420,14 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	}
 	if !options.FreshAdmission && before.Observed.FreshOwnershipCheckpointPresent {
 		return nil, errors.New("Fresh store requires its product-owned admission path")
+	}
+	// The marker is tightened here, not when it was opened: an admission that is
+	// refused must leave the source exactly as found, and the refusal cases above
+	// (a 1.x volume, an unfinished operation, an unreadable record) are reached
+	// through the fence every start. Applying the owner-only mode is the first
+	// write this process makes to a source it now owns.
+	if err := lock.Tighten(); err != nil {
+		return nil, err
 	}
 	owned = true
 	if freshAdmission != nil {

@@ -275,26 +275,21 @@ func (s *credentialSource) close() error {
 // credential, so an integrity scan here would make a large source time out on a
 // route that never sees the database otherwise. The full preflight keeps the
 // check where the source is actually being qualified.
-func openCredentialSource(ctx context.Context, path string, extraRoots ...string) (*credentialSource, error) {
+func openCredentialSource(ctx context.Context, preserved PreservedSource, extraRoots ...ScratchRoot) (*credentialSource, error) {
+	path := preserved.Database
 	if _, err := inspectSourceDatabase(path); err != nil {
 		return nil, err
 	}
 	// The private copy must never land in the tree this step preserves, whichever
-	// state the source is in: the default scratch directory is checked too,
-	// because a host whose TMPDIR points into the source root would otherwise
-	// hide a full database copy there. extraRoots is the second tree a
-	// materialized Manager target must stay out of: the configured 1.x source
-	// volume the copy-in was reading.
-	if err := ValidateScratchDir("", filepath.Dir(path), ""); err != nil {
+	// state the source is in: the source database's own directory, the directory
+	// holding the data key its secrets are sealed with, and the default scratch
+	// directory are all checked, because a host whose TMPDIR points into the source
+	// root would otherwise hide a full database copy there. extraRoots is the rest
+	// of the trees a materialized Manager target must stay out of: the Manager data
+	// root that owns the store and the configured 1.x source volume the copy-in was
+	// reading.
+	if err := ValidatePreservedScratchDir("", preserved, extraRoots...); err != nil {
 		return nil, credentialSourceError(err)
-	}
-	for _, root := range extraRoots {
-		if strings.TrimSpace(root) == "" {
-			continue
-		}
-		if err := ValidateScratchDir("", root, ""); err != nil {
-			return nil, credentialSourceError(err)
-		}
 	}
 	snapshot, err := OpenSnapshot(ctx, path, "")
 	if err != nil {

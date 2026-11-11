@@ -60,6 +60,14 @@ const SourceDatabaseName = databaseFileName
 // SourceDatabasePath is the 1.x Manager database inside a 1.x data directory.
 func SourceDatabasePath(root string) string { return filepath.Join(root, databaseFileName) }
 
+// SourceDataKeyPath is the data key that belongs to a source database. The 1.x
+// layout keeps it beside the database, and a reader that stages a private copy of
+// that source must stay out of its directory exactly as it stays out of the
+// database's own.
+func SourceDataKeyPath(databasePath string) string {
+	return filepath.Join(filepath.Dir(strings.TrimSpace(databasePath)), dataKeyFileName)
+}
+
 // Result is the observable outcome of a copy-in. It reports what was recorded,
 // never an authority: Stage and DomainsDone are the persisted row, the
 // fingerprints are the two source observations, and BackupManifestSHA256 names

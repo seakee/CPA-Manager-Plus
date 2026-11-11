@@ -1025,31 +1025,40 @@ func managerBootstrapURL(healthURL string) string {
 }
 
 func httpEndpointStatusOK(ctx context.Context, client *http.Client, healthURL, bootstrapURL string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-	if err != nil {
+	status, ok := httpGetStatus(ctx, client, healthURL)
+	if !ok {
 		return false
+	}
+	if status == http.StatusOK {
+		return true
+	}
+	if status != http.StatusServiceUnavailable || bootstrapURL == "" {
+		return false
+	}
+	// Check the in-memory read-only shell at /.well-known/cpamp-bootstrap/ui
+	// before probing /.well-known/cpamp-bootstrap. Before startup admission
+	// settles (and after BeginWritableStartup on store-open failure), /ui
+	// answers 404, so Ingress still waits; once read-only discovery is mounted,
+	// /ui answers 200 immediately without waiting on a large SQLite snapshot.
+	uiStatus, uiOK := httpGetStatus(ctx, client, strings.TrimRight(bootstrapURL, "/")+"/ui")
+	if uiOK && uiStatus == http.StatusOK {
+		return true
+	}
+	bootStatus, ok := httpGetStatus(ctx, client, bootstrapURL)
+	return ok && bootStatus == http.StatusOK
+}
+
+func httpGetStatus(ctx context.Context, client *http.Client, targetURL string) (int, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, false
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		return true
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable && bootstrapURL != "" {
-		bootReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, bootstrapURL, nil)
-		if reqErr != nil {
-			return false
-		}
-		bootResp, doErr := client.Do(bootReq)
-		if doErr != nil {
-			return false
-		}
-		_ = bootResp.Body.Close()
-		return bootResp.StatusCode == http.StatusOK
-	}
-	return false
+	return resp.StatusCode, true
 }
 
 func buildSysProcAttr(spec ChildSpec, setCreds bool) *syscall.SysProcAttr {

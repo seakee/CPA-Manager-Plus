@@ -566,12 +566,13 @@ func inspectFiles(paths InspectionPaths) ([]InspectionFile, error) {
 	entries := []struct {
 		role, path string
 		directory  bool
+		sourceFile bool
 	}{
-		{"database", paths.Database, false}, {"wal", paths.Database + "-wal", false},
-		{"shm", paths.Database + "-shm", false}, {"journal", paths.Database + "-journal", false},
-		{"config", paths.Config, false}, {"data-key", paths.DataKey, false},
-		{"archives", paths.Archives, true}, {"source-directory", filepath.Dir(paths.Database), true},
-		{"process-lock", paths.Database + ".manager.lock", false},
+		{"database", paths.Database, false, true}, {"wal", paths.Database + "-wal", false, true},
+		{"shm", paths.Database + "-shm", false, true}, {"journal", paths.Database + "-journal", false, true},
+		{"config", paths.Config, false, false}, {"data-key", paths.DataKey, false, false},
+		{"archives", paths.Archives, true, false}, {"source-directory", filepath.Dir(paths.Database), true, false},
+		{"process-lock", paths.Database + ".manager.lock", false, false},
 	}
 	files := make([]InspectionFile, 0, len(entries))
 	for _, entry := range entries {
@@ -593,6 +594,14 @@ func inspectFiles(paths InspectionPaths) ([]InspectionFile, error) {
 		file.State = "present"
 		if (entry.directory && !info.IsDir()) || (!entry.directory && !info.Mode().IsRegular()) {
 			file.State = "unsupported"
+		} else if entry.sourceFile {
+			if _, srcErr := processlock.InspectSourceFile(entry.path); srcErr != nil {
+				if errors.Is(srcErr, processlock.ErrSymlinkedDatabase) || errors.Is(srcErr, processlock.ErrHardLinked) {
+					file.State = "unsupported"
+				} else {
+					return nil, srcErr
+				}
+			}
 		}
 		files = append(files, file)
 	}
@@ -661,6 +670,25 @@ func validateReadOnlySnapshotSource(databasePath string, files []InspectionFile)
 // Every read-only source read opens this copy instead of the source: an open in
 // place writes SQLite coordination files beside the database even under
 // mode=ro, and this inspection promises to preserve the tree byte for byte.
+// CopySourceForRead copies the database and the named sidecars into a private
+// scratch directory and returns the copy's database path plus the cleanup that
+// removes the directory. It exists for readers that must prove something about a
+// source this process may not own: the copy obeys the inspection staging rules —
+// it never lands in the source, the archive or the data-key directory — and it is
+// only returned when the source inventory is unchanged across the copy, so the
+// caller reads one state without ever opening the source itself.
+func CopySourceForRead(ctx context.Context, paths InspectionPaths, sidecars ...string) (string, func(), error) {
+	files, err := inspectFiles(paths)
+	if err != nil {
+		return "", func() {}, errors.New("source inventory failed")
+	}
+	staging, err := copyInspectionSnapshot(ctx, paths, files, "cpamp-startup-read-", sidecars...)
+	if err != nil {
+		return "", func() {}, err
+	}
+	return filepath.Join(staging, "source.sqlite"), func() { _ = os.RemoveAll(staging) }, nil
+}
+
 func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []InspectionFile, prefix string, sidecars ...string) (string, error) {
 	tempDir, err := inspectionTempDirectory(paths)
 	if err != nil {
@@ -675,10 +703,27 @@ func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []
 		_ = os.RemoveAll(staging)
 		return "", copyErr
 	}
+	if err := inspectCopyableSource(files, ""); err != nil {
+		return discard(err)
+	}
+	if len(files) > 3 && files[3].State != "missing" && files[3].Size > 0 {
+		return discard(errors.New("inspection source has a pending rollback journal"))
+	}
+	// The members that are not copied are audited too. A source whose journal,
+	// WAL index or rollback journal is a link, a FIFO or a second name for another
+	// file is a source no single state describes, and reading the database beside
+	// it would report a state the tree does not actually hold. The copied members
+	// get the same policy from copyInspectionFile.
+	if err := auditInspectionSidecars(paths.Database); err != nil {
+		return discard(err)
+	}
 	if err := copyInspectionFile(ctx, paths.Database, databasePath); err != nil {
 		return discard(err)
 	}
 	for _, suffix := range sidecars {
+		if err := inspectCopyableSource(files, suffix); err != nil {
+			return discard(err)
+		}
 		if err := copyInspectionFile(ctx, paths.Database+suffix, databasePath+suffix); err != nil {
 			return discard(err)
 		}
@@ -686,6 +731,13 @@ func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []
 	copied, copyErr := inspectFiles(paths)
 	if copyErr != nil || !sameInspectionFiles(files, copied) {
 		return discard(errors.New("source changed during inspection copy"))
+	}
+	if walInfo, walErr := os.Lstat(databasePath + "-wal"); walErr == nil && walInfo.Size() > 0 {
+		if err := ValidateWALHeader(databasePath); err != nil {
+			return discard(err)
+		}
+	} else if walErr != nil && !os.IsNotExist(walErr) {
+		return discard(walErr)
 	}
 	return staging, nil
 }
@@ -741,11 +793,11 @@ func (r *inspectionContextReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-// Validate the small WAL header before letting SQLite inspect a copy. A malformed
-// header must not silently become a successful read of the checkpointed DB.
-// SQLite owns committed-frame validation and native recovery; this is not a
-// complete integrity check, legacy recovery authorization or backup validator.
-func validateInspectionWALHeader(databasePath string) error {
+// ValidateWALHeader checks the 32-byte WAL header magic, format version, page
+// size, checksum words, and database header page-size agreement before SQLite
+// opens a non-empty WAL copy. A malformed or truncated WAL header must fail
+// closed rather than silently falling back to pre-WAL main-database pages.
+func ValidateWALHeader(databasePath string) error {
 	wal, err := os.Open(databasePath + "-wal")
 	if err != nil {
 		return err
@@ -781,6 +833,9 @@ func validateInspectionWALHeader(databasePath string) error {
 	if _, err := io.ReadFull(db, dbHeader[:]); err != nil {
 		return err
 	}
+	if string(dbHeader[:16]) != "SQLite format 3\x00" {
+		return errors.New("SQLite header invalid")
+	}
 	dbPageSize := uint32(binary.BigEndian.Uint16(dbHeader[16:18]))
 	if dbPageSize == 1 {
 		dbPageSize = 65536
@@ -789,6 +844,10 @@ func validateInspectionWALHeader(databasePath string) error {
 		return errors.New("WAL/database page size mismatch")
 	}
 	return nil
+}
+
+func validateInspectionWALHeader(databasePath string) error {
+	return ValidateWALHeader(databasePath)
 }
 
 func inspectionTempDirectory(paths InspectionPaths) (string, error) {
@@ -825,12 +884,60 @@ func inspectionTempDirectory(paths InspectionPaths) (string, error) {
 	return tempDir, nil
 }
 
+// auditInspectionSidecars applies the shared source-file policy to every journal
+// member that exists beside the database. It is the members-not-copied half of
+// the audit copyInspectionFile performs on the members it reads: one policy for
+// the whole source tree, whichever side of the copy a file is on. A missing member
+// is the normal shape of a cleanly stopped writer's tree.
+func auditInspectionSidecars(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := processlock.InspectSourceFile(databasePath + suffix); err != nil && !os.IsNotExist(err) {
+			return errors.New("inspection source holds an unsupported journal file")
+		}
+	}
+	return nil
+}
+
+// inspectCopyableSource refuses a member the inventory already called
+// unsupported. Copying it would follow a symlink out of the source or block on a
+// FIFO until the context expired, so the copy is decided from the inventory the
+// caller hashed, not from whatever the path names now.
+func inspectCopyableSource(files []InspectionFile, suffix string) error {
+	role := map[string]string{"": "database", "-wal": "wal", "-shm": "shm", "-journal": "journal"}[suffix]
+	if role == "" {
+		return errors.New("inspection copy requested an unknown member")
+	}
+	for _, file := range files {
+		if file.Role != role {
+			continue
+		}
+		if file.State == "unsupported" {
+			return errors.New("inspection source holds an unsupported " + role + " file")
+		}
+		return nil
+	}
+	return nil
+}
+
 func copyInspectionFile(ctx context.Context, source, destination string) error {
+	// Re-check the member before reading it: the inventory above was taken
+	// earlier, and a path swapped for a symlink or a FIFO since then must not be
+	// followed or waited on.
+	inspected, err := os.Lstat(source)
+	if err != nil || !inspected.Mode().IsRegular() {
+		return errors.New("inspection copy source unavailable")
+	}
+	if _, err := processlock.InspectDatabaseFile(source); err != nil {
+		return errors.New("inspection copy source unavailable")
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return errors.New("inspection copy source unavailable")
 	}
 	defer input.Close()
+	if err := processlock.OpenedDatabase(input, inspected); err != nil {
+		return errors.New("inspection copy source unavailable")
+	}
 	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return errors.New("inspection copy destination unavailable")

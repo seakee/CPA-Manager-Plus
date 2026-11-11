@@ -120,6 +120,23 @@ linux/amd64 Native 使用同版包的 `bin/cpa-manager-plus upgrade ...`；停�
 | `upgrade_source_busy` / `upgrade_store_locked` | 停止真实源/目标 Manager，不能移除锁文件规避 |
 | `upgrade_source_changed` | 源仍在变化；停止所有写入，重新评估源和备份 |
 | `upgrade_rollback_image_unpinned` / `upgrade_rollback_volume_unbound` | 提供精确旧镜像和原卷映射，不能改用新空卷 |
+| `source_ownership_unavailable`（`/.well-known/cpamp-bootstrap`） | 1.x 数据卷被直接挂到了 `/data`（锁/密钥属主为 `0:0`，而 v2 Manager 以 `10002:10002` 运行）：停止容器并改挂新 `/data` + 只读 `/legacy:ro`；若仅需只读查看升级入口，只修改 `usage.sqlite*` 与 `data.key` 属主为 `10002:10002`，切勿递归 `chown -R /data`（`/data/runtime` 必须保持 `0:0`） |
+
+### 误将 1.x 数据卷挂到 `/data` 时
+
+1.x 容器以 `root`（`0:0`）写入 `/data/usage.sqlite.manager.lock` 与 `/data/data.key`（`0600`），而 v2 单镜像中的 Manager 以非特权用户 `10002:10002` 运行、Supervisor 要求 `/data/runtime` 保持 `0:0`。若误把 1.x 卷直接挂到 `/data`，v2 会停留在只读引导页（`/.well-known/cpamp-bootstrap/ui`）并报告 `source_ownership_unavailable`，且未修改 1.x 数据库与密钥文件：
+
+1. **推荐做法（标准升级）**：停止当前容器，保留原 1.x 卷只读挂到 `/legacy:ro`，为 `/data` 创建全新空卷后按上文执行 `upgrade preflight` 与 `upgrade run`。
+2. **仅打开只读升级入口验证原 1.x 管理员密钥**：Docker 命名卷在宿主机上不存在 `/data` 路径，所以不要直接在宿主机执行 `chown /data/...`，改用“停止正在运行该卷的 v2 容器 → 一次性容器挂载该卷修改属主 → 启动 v2 容器 → 回到引导页重新检查”：
+
+   ```bash
+   docker stop <v2_container>
+   docker run --rm -u 0:0 --entrypoint sh -v <1x_volume>:/data seakee/cpa-manager-plus:<v2_tag> \
+     -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'
+   docker start <v2_container>
+   ```
+
+   只修改 `usage.sqlite*` 与 `data.key` 的属主（属主变更只改文件元数据，不改写数据库内容）；切勿执行 `chown -R 10002:10002 /data`，`/data/runtime` 必须保持 `0:0`。完成后回到引导页点击“重新检查来源状态”。
 
 ## 1.x Stable：原部署方式内更新
 

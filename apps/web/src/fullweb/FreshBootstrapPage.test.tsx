@@ -107,7 +107,9 @@ const storage = new Map<string, string>();
 
 const isHost = (className: string) => (node: ReactTestInstance) =>
   typeof node.type === 'string' &&
-  String(node.props?.className ?? '').split(' ').includes(className);
+  String(node.props?.className ?? '')
+    .split(' ')
+    .includes(className);
 
 /** Each visible block carrying that class, as its own string. */
 function blocksOf(root: ReactTestInstance, className: string): string[] {
@@ -564,7 +566,13 @@ describe('FreshBootstrapPage product preview workflow', () => {
   });
 
   it.each([
-    ['unsupported_upgrade', 'unsupported_upgrade', 'admin_session', 'qualification_unavailable', true],
+    [
+      'unsupported_upgrade',
+      'unsupported_upgrade',
+      'admin_session',
+      'qualification_unavailable',
+      true,
+    ],
     ['recovery_required', 'recovery', 'host_intervention', 'recovery_host_intervention', false],
   ])(
     'routes non-Fresh %s to its own authentication or host gate',
@@ -591,9 +599,15 @@ describe('FreshBootstrapPage product preview workflow', () => {
         );
       });
       if (status === 'unsupported_upgrade') {
-        expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
-        expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
-        expect(renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })).toHaveLength(0);
+        expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(
+          1
+        );
+        expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
+          0
+        );
+        expect(
+          renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })
+        ).toHaveLength(0);
         return;
       }
       expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toMatch(CJK);
@@ -787,9 +801,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(detail).toMatch(CJK);
     expect(detail).not.toBe(textOf(findByTestId(renderer.root, 'init-error-title')));
     // The transport failure keeps the named recovery affordances on screen.
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
-    ).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })).toHaveLength(1);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-authority-error'))).toMatch(CJK);
   });
 
@@ -855,12 +867,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
       for (const state of states) {
         vi.stubGlobal(
           'fetch',
-          vi.fn().mockResolvedValue(
-            Response.json(
-              { contract_version: 'cpamp.phase4-01.discovery.v1', ...state.payload },
-              { status: state.httpStatus }
+          vi
+            .fn()
+            .mockResolvedValue(
+              Response.json(
+                { contract_version: 'cpamp.phase4-01.discovery.v1', ...state.payload },
+                { status: state.httpStatus }
+              )
             )
-          )
         );
         setFullWebLanguage(language);
         let renderer!: ReactTestRenderer;
@@ -953,9 +967,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(cardText).toContain(identity.operationId);
       expect(cardText).toContain(`#${handoff.claimGeneration}`);
       expect(cardText).toContain('cpa-manager-plus initialize');
-      expect(
-        renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
-      ).toHaveLength(1);
+      expect(renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })).toHaveLength(1);
       await act(async () => renderer.unmount());
     }
   );
@@ -1113,5 +1125,253 @@ describe('FreshBootstrapPage product preview workflow', () => {
     // a zh-TW branch that collapsed into zh-CN could not pass this.
     expect(traditional.title).not.toBe(simplified.title);
     expect(traditional.desc).not.toBe(simplified.desc);
+  });
+
+  const isTestInstance = (node: ReactTestInstance | string): node is ReactTestInstance =>
+    typeof node !== 'string';
+
+  const elementChildren = (node: ReactTestInstance): ReactTestInstance[] =>
+    node.children.filter(isTestInstance);
+
+  // Finds the 1.x ownership guidance card purely by landmarks, live role,
+  // heading/paragraph/button elements, and structural position rather than CSS
+  // class names so renaming styling classes cannot break or hide assertions.
+  const locateOwnershipGuidanceCard = (root: ReactTestInstance) => {
+    const statusRegion: ReactTestInstance[] = [];
+    const walkRole = (node: ReactTestInstance) => {
+      if (typeof node.type === 'string' && node.props?.role === 'status') {
+        statusRegion.push(node);
+        return;
+      }
+      elementChildren(node).forEach(walkRole);
+    };
+    walkRole(root);
+    expect(statusRegion).toHaveLength(1);
+    const [status] = statusRegion;
+    const [statusBody] = elementChildren(status);
+    const [statusTitle, statusDetail] = elementChildren(statusBody);
+
+    const [card] = root.findAll((node) => node.type === 'section');
+    expect(card.props['data-testid']).toBe('bootstrap-no-handoff');
+    const [header] = elementChildren(card);
+    const [stepTag] = elementChildren(header);
+    const [heading] = card.findAll((node) => node.type === 'h1');
+    const [intro] = card.findAll((node) => node.type === 'p');
+
+    const statusParent = status.parent;
+    if (!statusParent) {
+      throw new Error('status region missing parent container');
+    }
+    const bodyChildren = elementChildren(statusParent);
+    const options = bodyChildren[1];
+    const optionBlocks = elementChildren(options).map((option) => {
+      const [content] = elementChildren(option);
+      return elementChildren(content);
+    });
+    expect(optionBlocks).toHaveLength(2);
+    const [[upgradeTitle, upgradeDetail], [ownershipTitle, ownershipDetail]] = optionBlocks;
+
+    const recheck = bodyChildren.find((child) => child.type === 'button');
+    if (!recheck) {
+      throw new Error('recheck button missing from ownership card body');
+    }
+
+    const snapshot = (language: Language) => {
+      const blocks = {
+        tag: textOf(stepTag),
+        heading: textOf(heading),
+        intro: textOf(intro),
+        title: textOf(statusTitle),
+        detail: textOf(statusDetail),
+        upgradeTitle: textOf(upgradeTitle),
+        upgradeDetail: textOf(upgradeDetail),
+        ownershipTitle: textOf(ownershipTitle),
+        ownershipDetail: textOf(ownershipDetail),
+        recheck: textOf(recheck),
+      };
+      assertLabelIn(language, blocks.tag);
+      for (const block of [
+        blocks.heading,
+        blocks.intro,
+        blocks.title,
+        blocks.detail,
+        blocks.upgradeTitle,
+        blocks.upgradeDetail,
+        blocks.ownershipTitle,
+        blocks.ownershipDetail,
+        blocks.recheck,
+      ]) {
+        assertCopyIn(language, block);
+      }
+      expect(blocks.heading).not.toBe(blocks.intro);
+      expect(blocks.title).not.toBe(blocks.detail);
+      expect(blocks.upgradeTitle).not.toBe(blocks.ownershipTitle);
+      expect(blocks.upgradeDetail).not.toBe(blocks.ownershipDetail);
+      return blocks;
+    };
+
+    return { options, recheck, snapshot };
+  };
+
+  it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
+    'renders root-owned 1.x volume guidance in %s and transitions to Upgrade entry after recheck',
+    async (locale) => {
+      setFullWebLanguage(locale);
+      const discovery = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          Response.json({
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'recovery_required',
+            mode: 'recovery',
+            auth_entry: 'host_intervention',
+            reason: 'source_ownership_unavailable',
+            authentication_required: false,
+          })
+        )
+        .mockResolvedValueOnce(
+          Response.json({
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'unsupported_upgrade',
+            mode: 'unsupported_upgrade',
+            auth_entry: 'admin_session',
+            reason: 'qualification_unavailable',
+            authentication_required: true,
+          })
+        );
+      vi.stubGlobal('fetch', discovery);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+        );
+      });
+
+      const cardView = locateOwnershipGuidanceCard(renderer.root);
+      cardView.snapshot(locale);
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        '--entrypoint cpa-manager-plus'
+      );
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        'upgrade preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json'
+      );
+      // Option 2 must be executable on a Docker named volume and must never
+      // hard-code a single pre-release image tag.
+      const ownershipCommand = textOf(findByTestId(renderer.root, 'legacy-ownership-command'));
+      expect(ownershipCommand).toContain('docker stop <v2_container>');
+      expect(ownershipCommand).toContain(
+        `seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'`
+      );
+      expect(ownershipCommand).toContain('docker start <v2_container>');
+      expect(ownershipCommand).not.toContain('2.0.0-beta.1');
+      expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
+        `seakee/cpa-manager-plus:${__APP_VERSION__}`
+      );
+      expect(textOf(cardView.options)).toContain('/data/runtime');
+      expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
+        0
+      );
+      // The read-only card offers no Fresh write control in any language.
+      expect(renderer.root.findAllByProps({ 'data-testid': 'admin-init-form' })).toHaveLength(0);
+
+      await act(async () => cardView.recheck.props.onClick());
+      expect(discovery).toHaveBeenCalledTimes(2);
+      expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
+      await act(async () => renderer.unmount());
+    }
+  );
+
+  it('re-translates the one 1.x volume guidance card through the header switcher without refetching', async () => {
+    setFullWebLanguage('zh-CN');
+    const discovery = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        contract_version: 'cpamp.phase4-01.discovery.v1',
+        status: 'recovery_required',
+        mode: 'recovery',
+        auth_entry: 'host_intervention',
+        reason: 'source_ownership_unavailable',
+        authentication_required: false,
+      })
+    );
+    vi.stubGlobal('fetch', discovery);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+
+    const { snapshot } = locateOwnershipGuidanceCard(renderer.root);
+
+    const switcher = findByTestId(renderer.root, 'bootstrap-language');
+    const switchTo = async (language: Language) => {
+      await act(async () => switcher.props.onChange({ target: { value: language } }));
+      // The page's own control kept the choice and wrote the Console's store.
+      expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe(language);
+      expect(JSON.parse(localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY) ?? 'null')).toMatchObject({
+        state: { language },
+      });
+    };
+
+    const simplified = snapshot('zh-CN');
+    await switchTo('zh-TW');
+    const traditional = snapshot('zh-TW');
+    // Traditional is its own table, not Simplified handed back unchanged.
+    expect(traditional.heading).not.toBe(simplified.heading);
+    expect(traditional.intro).not.toBe(simplified.intro);
+    expect(traditional.title).not.toBe(simplified.title);
+    expect(traditional.detail).not.toBe(simplified.detail);
+    expect(traditional.upgradeTitle).not.toBe(simplified.upgradeTitle);
+    expect(traditional.upgradeDetail).not.toBe(simplified.upgradeDetail);
+    expect(traditional.ownershipTitle).not.toBe(simplified.ownershipTitle);
+    expect(traditional.ownershipDetail).not.toBe(simplified.ownershipDetail);
+    expect(traditional.recheck).not.toBe(simplified.recheck);
+
+    await switchTo('en');
+    const english = snapshot('en');
+    expect(english.title).not.toBe(traditional.title);
+    expect(english.detail).not.toBe(traditional.detail);
+    expect(english.upgradeTitle).not.toBe(traditional.upgradeTitle);
+    expect(english.ownershipTitle).not.toBe(traditional.ownershipTitle);
+
+    await switchTo('ru');
+    const russian = snapshot('ru');
+    expect(russian.heading).not.toBe(english.heading);
+    expect(russian.title).not.toBe(english.title);
+    expect(russian.detail).not.toBe(english.detail);
+
+    // Four languages, one discovery answer: the payload was never re-fetched.
+    expect(discovery).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it('rejects inconsistent source_ownership_unavailable payloads fail-closed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'recovery_required',
+            mode: 'recovery',
+            auth_entry: 'host_intervention',
+            reason: 'source_ownership_unavailable',
+            authentication_required: true,
+          },
+          { status: 200 }
+        )
+      )
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'legacy-ownership-instructions' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
+    await act(async () => renderer.unmount());
   });
 });

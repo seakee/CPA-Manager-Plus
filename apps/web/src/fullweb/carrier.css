@@ -233,6 +233,18 @@ input {
   color: var(--text-tertiary);
 }
 
+.legacy-ownership-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.legacy-ownership-steps .code-block {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

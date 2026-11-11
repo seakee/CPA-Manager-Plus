@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
@@ -221,6 +224,107 @@ func TestStartupEntryRefusesSnapshotUnderTheFilesystemSourceRoot(t *testing.T) {
 		}
 		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != digest {
 			t.Fatalf("the refused entry read rewrote the target member %q", suffix)
+		}
+	}
+}
+
+// TestMountedSourceAuthenticationExcludesManagerDatabaseAndDataKeyDirectories
+// verifies that when a 1.x source is mounted, private credential snapshots on
+// both the entry leaf and the wizard routes also stay out of the Manager's own
+// database directory and custom data.key directory.
+func TestMountedSourceAuthenticationExcludesManagerDatabaseAndDataKeyDirectories(t *testing.T) {
+	for _, inside := range []string{"manager-db-dir", "manager-datakey-dir"} {
+		t.Run(inside, func(t *testing.T) {
+			key := "mounted-source-exclusion-key-" + inside
+			legacyDir, _ := legacyWALSourceFixture(t, key)
+			managerDBDir := t.TempDir()
+			managerKeyDir := t.TempDir()
+			managerPaths := sqliterepo.InspectionPaths{
+				Database: filepath.Join(managerDBDir, "usage.sqlite"),
+				DataKey:  filepath.Join(managerKeyDir, "data.key"),
+				Archives: filepath.Join(managerDBDir, "usage-archives"),
+			}
+			excludedScratch := managerDBDir
+			if inside == "manager-datakey-dir" {
+				excludedScratch = managerKeyDir
+			}
+			t.Setenv(legacyRootEnvironment, legacyDir)
+			t.Setenv("TMPDIR", excludedScratch)
+
+			h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+			h.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+			defer h.BeginWritableStartup()
+
+			for _, targetPath := range []struct {
+				method string
+				path   string
+			}{
+				{http.MethodPost, upgradeauth.Path},
+				{http.MethodGet, bootstrap.FixedBootstrapAPIPath + "installation/upgrade/status"},
+			} {
+				watch := watchSnapshots(t, excludedScratch)
+				req := httptest.NewRequest(targetPath.method, targetPath.path, nil)
+				req.Host = "manager.test"
+				req.Header.Set("Authorization", "Bearer "+key)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				names := watch()
+				if rec.Code != http.StatusServiceUnavailable {
+					t.Fatalf("%s %s with TMPDIR=%s answered %d: %s, want 503",
+						targetPath.method, targetPath.path, inside, rec.Code, rec.Body.String())
+				}
+				if len(names) != 0 {
+					t.Fatalf("%s %s staged %v inside %s", targetPath.method, targetPath.path, names, inside)
+				}
+			}
+		})
+	}
+}
+
+// TestFreshApplicationUpgradeWizardExcludesConfiguredDataKeyDirectory verifies
+// freshApplication.newUpgradeWizard wires DataKey from cfg.DataKeyPath so a
+// materializing store's private credential snapshot refuses TMPDIR inside the
+// custom data.key directory.
+func TestFreshApplicationUpgradeWizardExcludesConfiguredDataKeyDirectory(t *testing.T) {
+	const key = "fresh-app-wizard-datakey-exclusion"
+	_, sourcePaths := upgradeAuthSource(t, key)
+	target, before := materializingManagerStore(t, sourcePaths.Database)
+	keyDir := t.TempDir()
+	customKeyPath := filepath.Join(keyDir, "custom-data.key")
+	if err := os.WriteFile(customKeyPath, []byte("custom-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(legacyRootEnvironment, "")
+	t.Setenv("TMPDIR", keyDir)
+
+	app := &freshApplication{
+		cfg: config.Config{
+			DBPath:      target,
+			DataKeyPath: customKeyPath,
+		},
+	}
+	wizard := app.newUpgradeWizard()
+	watch := watchSnapshots(t, keyDir)
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/installation/upgrade/status", nil)
+	req.Host = "manager.test"
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	wizard.ServeHTTP(rec, req)
+	names := watch()
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("wizard status with TMPDIR in DataKeyPath dir = %d: %s, want 503", rec.Code, rec.Body.String())
+	}
+	if len(names) != 0 {
+		t.Fatalf("wizard staged %v inside custom DataKeyPath directory", names)
+	}
+	for suffix, digest := range before {
+		data, err := os.ReadFile(target + suffix)
+		if err != nil {
+			t.Fatalf("read target member %q: %v", suffix, err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != digest {
+			t.Fatalf("refused read rewrote target member %q", suffix)
 		}
 	}
 }

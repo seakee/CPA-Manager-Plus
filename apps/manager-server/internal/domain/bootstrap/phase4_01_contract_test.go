@@ -138,6 +138,7 @@ func TestPublicDiscoveryAndStatusAxesFailClosed(t *testing.T) {
 	mode := bootstrap.Fresh
 	for _, value := range []bootstrap.PublicDiscovery{
 		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicFreshClaimRequired, Mode: &mode, AuthenticationRequired: true, AuthEntry: bootstrap.AuthEntryFreshClaim, Reason: bootstrap.ReasonFreshClaimRequired},
+		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicRecoveryRequired, Mode: modePtr(bootstrap.Recovery), AuthenticationRequired: false, AuthEntry: bootstrap.AuthEntryHostIntervention, Reason: bootstrap.ReasonSourceOwnershipUnavailable},
 		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicUnavailable, AuthEntry: bootstrap.AuthEntryUnavailable, Reason: bootstrap.ReasonObservationUnavailable},
 	} {
 		if err := value.Validate(); err != nil {
@@ -147,6 +148,8 @@ func TestPublicDiscoveryAndStatusAxesFailClosed(t *testing.T) {
 	for _, value := range []bootstrap.PublicDiscovery{
 		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicUnsupportedUpgrade, Mode: modePtr(bootstrap.Upgrade), AuthenticationRequired: true, AuthEntry: bootstrap.AuthEntryAdminSession, Reason: bootstrap.ReasonQualificationUnavailable},
 		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicRecoveryRequired, Mode: modePtr(bootstrap.Completed), AuthEntry: bootstrap.AuthEntryHostIntervention, Reason: bootstrap.ReasonRecoveryHostIntervention},
+		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicRecoveryRequired, Mode: modePtr(bootstrap.Recovery), AuthenticationRequired: true, AuthEntry: bootstrap.AuthEntryHostIntervention, Reason: bootstrap.ReasonSourceOwnershipUnavailable},
+		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicUnsupportedUpgrade, Mode: modePtr(bootstrap.UnsupportedUpgrade), AuthenticationRequired: true, AuthEntry: bootstrap.AuthEntryAdminSession, Reason: bootstrap.ReasonSourceOwnershipUnavailable},
 		{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicUnavailable, Mode: &mode, AuthEntry: bootstrap.AuthEntryUnavailable, Reason: bootstrap.ReasonObservationUnavailable},
 	} {
 		if err := value.Validate(); err == nil {

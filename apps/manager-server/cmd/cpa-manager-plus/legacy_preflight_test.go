@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -87,7 +86,14 @@ func (w fenceCheckingDiscoveryWriter) WriteHeader(status int) {
 	w.ResponseRecorder.WriteHeader(status)
 }
 
-func TestReadOnlyDiscoveryRetainsFenceThroughResponseAndRevokesBeforeWrites(t *testing.T) {
+// TestReadOnlyDiscoveryObservesTheSourceWithoutFencingIt pins the contract the
+// public discovery path owes a source this process is not admitted on: it proves
+// quiescence with a shared, non-blocking probe, so it works where the marker
+// cannot be opened for writing at all and it leaves the marker — including the
+// change stamp the discovery cache is keyed on — exactly as it found it. A writer
+// that already holds the marker still wins: discovery never describes a source
+// another process is writing as quiet.
+func TestReadOnlyDiscoveryObservesTheSourceWithoutFencingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.sqlite")
 	db, err := sql.Open("sqlite", path)
@@ -109,28 +115,46 @@ func TestReadOnlyDiscoveryRetainsFenceThroughResponseAndRevokesBeforeWrites(t *t
 	}
 	handler := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
 	handler.EnableReadOnlyDiscovery(legacypreflight.DefaultPaths(path), legacypreflight.Options{}, time.Second)
+	locked := path + ".manager.lock"
+	before := discoveryMarkerState(t, locked)
+
 	response := httptest.NewRecorder()
-	checked := false
+	observedFree := false
 	handler.ServeHTTP(fenceCheckingDiscoveryWriter{response, func() {
-		checked = true
-		other, err := processlock.AcquireExisting(path)
-		if other != nil {
-			_ = other.Close()
+		observedFree = true
+		// The exclusive attempt goes through a read-only descriptor: that proves
+		// no write fence is held without chmod refreshing the marker's ctime.
+		contender, contenderErr := processlock.AcquireExistingReadOnly(path)
+		if contender != nil {
+			_ = contender.Close()
 		}
-		if !errors.Is(err, processlock.ErrLocked) {
-			t.Fatalf("discovery emitted its response without a fence: %v", err)
+		if contenderErr != nil {
+			t.Fatalf("public discovery held a write fence on the source: %v", contenderErr)
 		}
 	}}, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
-	if !checked || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"recovery"`) {
-		t.Fatalf("fenced response status=%d body=%s", response.Code, response.Body.String())
+	if !observedFree || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"recovery"`) {
+		t.Fatalf("observed response status=%d body=%s", response.Code, response.Body.String())
 	}
-	operatorLock, err := processlock.AcquireExisting(path)
+	if after := discoveryMarkerState(t, locked); after != before {
+		t.Fatalf("public discovery rewrote the ownership marker: %s -> %s", before, after)
+	}
+
+	// A writer that holds the marker is never described as a quiet source, even
+	// though the projection is already remembered for this unchanged source. The
+	// read-only acquire keeps the marker's metadata, so only the probe can refuse.
+	writer, err := processlock.AcquireExistingReadOnly(path)
 	if err != nil {
-		t.Fatalf("response retained its fence: %v", err)
+		t.Fatalf("take the ownership marker as a writer: %v", err)
 	}
-	if err := operatorLock.Close(); err != nil {
-		t.Fatal(err)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), `"mode"`) {
+		t.Fatalf("held source discovery status=%d body=%s", response.Code, response.Body.String())
 	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("release the ownership marker: %v", err)
+	}
+
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	response = httptest.NewRecorder()
@@ -138,6 +162,7 @@ func TestReadOnlyDiscoveryRetainsFenceThroughResponseAndRevokesBeforeWrites(t *t
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), `"mode"`) {
 		t.Fatalf("canceled request reused evidence: status=%d body=%s", response.Code, response.Body.String())
 	}
+
 	handler.BeginWritableStartup()
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, bootstrapdiscovery.Path, nil))

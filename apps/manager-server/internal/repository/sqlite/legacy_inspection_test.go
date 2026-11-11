@@ -563,3 +563,144 @@ func TestLegacyInspectionAggregateBudgetCannotReplaceExactMigration(t *testing.T
 		t.Fatal("bounded read changed source")
 	}
 }
+
+// TestCopySourceForReadRefusesALinkedSidecarItDoesNotCopy pins the sidecar half of
+// the source-file policy on the one path that copies a source this process may not
+// own. The WAL index is not copied, so a link in its place used to be ignored and
+// the database was reported as if it described the whole tree; it is now audited
+// with the members that are copied.
+func TestCopySourceForReadRefusesALinkedSidecarItDoesNotCopy(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "usage.sqlite")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("create the source database: %v", err)
+	}
+	if _, err := db.Exec(`create table settings (key text primary key, value text not null)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed the source database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the source database: %v", err)
+	}
+	target := filepath.Join(dir, "linked-index")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("write the link target: %v", err)
+	}
+	if err := os.Symlink(target, database+"-shm"); err != nil {
+		t.Fatalf("link the WAL index: %v", err)
+	}
+	paths := InspectionPaths{Database: database, DataKey: filepath.Join(dir, "data.key"), Archives: filepath.Join(dir, "usage-archives")}
+
+	_, cleanup, err := CopySourceForRead(context.Background(), paths, "-wal")
+	if err == nil {
+		cleanup()
+		t.Fatal("copied a source whose WAL index is a symbolic link")
+	}
+}
+
+func TestCopySourceForReadFailsClosedOnCorruptWALHeaderAndPendingRollbackJournal(t *testing.T) {
+	makeWALSource := func(t *testing.T) (string, InspectionPaths, []byte) {
+		t.Helper()
+		dir := t.TempDir()
+		database := filepath.Join(dir, "usage.sqlite")
+		db, err := sql.Open("sqlite", database)
+		if err != nil {
+			t.Fatalf("create database: %v", err)
+		}
+		for _, stmt := range []string{
+			`pragma journal_mode = wal`,
+			`create table settings (key text primary key, value text not null)`,
+			`pragma wal_checkpoint(truncate)`,
+			`pragma wal_autocheckpoint = 0`,
+			`insert into settings (key, value) values ('committed', 'in-wal')`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				_ = db.Close()
+				t.Fatalf("exec %q: %v", stmt, err)
+			}
+		}
+		walBytes, err := os.ReadFile(database + "-wal")
+		_ = db.Close()
+		if err != nil || len(walBytes) < 32 {
+			t.Fatalf("read WAL fixture (len=%d): %v", len(walBytes), err)
+		}
+		if err := os.WriteFile(database+"-wal", walBytes, 0o600); err != nil {
+			t.Fatalf("restore WAL fixture: %v", err)
+		}
+		paths := InspectionPaths{
+			Database: database,
+			DataKey:  filepath.Join(dir, "data.key"),
+			Archives: filepath.Join(dir, "usage-archives"),
+		}
+		return dir, paths, walBytes
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, database string, walBytes []byte)
+		args   []string
+	}{
+		{
+			name: "truncated-wal",
+			mutate: func(t *testing.T, database string, _ []byte) {
+				if err := os.WriteFile(database+"-wal", []byte("short-wal"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			args: []string{"-wal"},
+		},
+		{
+			name: "corrupt-wal-magic",
+			mutate: func(t *testing.T, database string, walBytes []byte) {
+				corrupt := append([]byte(nil), walBytes...)
+				corrupt[0] ^= 0xff
+				if err := os.WriteFile(database+"-wal", corrupt, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			args: []string{"-wal"},
+		},
+		{
+			name: "corrupt-wal-checksum",
+			mutate: func(t *testing.T, database string, walBytes []byte) {
+				corrupt := append([]byte(nil), walBytes...)
+				corrupt[24] ^= 0xff
+				if err := os.WriteFile(database+"-wal", corrupt, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			args: []string{"-wal"},
+		},
+		{
+			name: "pending-rollback-journal",
+			mutate: func(t *testing.T, database string, _ []byte) {
+				_ = os.Remove(database + "-wal")
+				if err := os.WriteFile(database+"-journal", []byte("hot-rollback-journal"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			args: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := t.TempDir()
+			t.Setenv("TMPDIR", scratch)
+			_, paths, walBytes := makeWALSource(t)
+			tc.mutate(t, paths.Database, walBytes)
+
+			copied, cleanup, err := CopySourceForRead(context.Background(), paths, tc.args...)
+			if err == nil {
+				cleanup()
+				t.Fatalf("CopySourceForRead(%s) succeeded with %q, want error", tc.name, copied)
+			}
+			entries, readErr := os.ReadDir(scratch)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("failed CopySourceForRead leaked scratch entries: %v", entries)
+			}
+		})
+	}
+}

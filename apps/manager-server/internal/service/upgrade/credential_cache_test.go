@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // TestCredentialVerifyBudgetScalesWithTheSourceAndCaps is the budget contract:
@@ -538,7 +540,7 @@ func TestVerifyAdminOwnerCancellationReturnsPromptly(t *testing.T) {
 		time.Sleep(80 * time.Millisecond)
 	}
 	started := time.Now()
-	err := VerifyAdminSource(ctx, fixture.dbPath, key)
+	err := VerifyAdminSource(ctx, PreservedSource{Database: fixture.dbPath}, key)
 	elapsed := time.Since(started)
 	waitForCredentialFlights(t, sourceCredentialCache)
 	if !errors.Is(err, ErrCredentialVerifyTimeout) {
@@ -600,7 +602,7 @@ func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
 	const key = "cancelled-cache-hit"
 	fixture := newCredentialFixture(t, key)
 	// Warm the cache with a real read of the real source.
-	if err := VerifyAdminSource(context.Background(), fixture.dbPath, key); err != nil {
+	if err := VerifyAdminSource(context.Background(), PreservedSource{Database: fixture.dbPath}, key); err != nil {
 		t.Fatalf("warm the credential cache: %v", err)
 	}
 	base, cancel := context.WithCancel(context.Background())
@@ -612,7 +614,7 @@ func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
 	// answer for a caller that is already gone is its own deadline.
 	sourceCredentialCache.mu.Lock()
 	result := make(chan error, 1)
-	go func() { result <- VerifyAdminSource(ctx, fixture.dbPath, key) }()
+	go func() { result <- VerifyAdminSource(ctx, PreservedSource{Database: fixture.dbPath}, key) }()
 	<-ctx.checked
 	cancel()
 	sourceCredentialCache.mu.Unlock()
@@ -625,4 +627,85 @@ func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
 	if !errors.Is(err, ErrCredentialVerifyTimeout) {
 		t.Fatalf("cancelled cache hit = %v, want %v", err, ErrCredentialVerifyTimeout)
 	}
+}
+
+// TestVerifyAdminSourceInvalidatesCacheWhenRewriteRestoresMtime enforces that
+// the credential cache incorporates the kernel metadata change stamp so an
+// in-place rewrite preserving inode, size, and mtime never serves a stale pass.
+func TestVerifyAdminSourceInvalidatesCacheWhenRewriteRestoresMtime(t *testing.T) {
+	t.Run("rotated-admin-credential-with-restored-mtime", func(t *testing.T) {
+		const (
+			originalKey = "alpha-legacy-admin-secret-0001"
+			rotatedKey  = "bravo-legacy-admin-secret-0002"
+		)
+		fixture := newCredentialFixture(t, originalKey)
+		donor := newCredentialFixture(t, rotatedKey)
+		donorBytes, err := os.ReadFile(donor.dbPath)
+		if err != nil {
+			t.Fatalf("read donor database: %v", err)
+		}
+
+		if err := VerifyAdminSource(context.Background(), PreservedSource{Database: fixture.dbPath}, originalKey); err != nil {
+			t.Fatalf("initial VerifyAdminSource: %v", err)
+		}
+
+		origStat, err := os.Lstat(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("stat database before rewrite: %v", err)
+		}
+		origID, err := copyinmarker.Identity(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("identify database before rewrite: %v", err)
+		}
+		origStamp, err := copyinmarker.ChangeStamp(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("change stamp before rewrite: %v", err)
+		}
+
+		file, err := os.OpenFile(fixture.dbPath, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open database in place: %v", err)
+		}
+		if _, err := file.WriteAt(donorBytes, 0); err != nil {
+			_ = file.Close()
+			t.Fatalf("overwrite database in place: %v", err)
+		}
+		if err := file.Truncate(int64(len(donorBytes))); err != nil {
+			_ = file.Close()
+			t.Fatalf("truncate database in place: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("close rewritten database: %v", err)
+		}
+		if err := os.Chtimes(fixture.dbPath, origStat.ModTime(), origStat.ModTime()); err != nil {
+			t.Fatalf("restore database mtime: %v", err)
+		}
+
+		afterStat, err := os.Lstat(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("stat database after rewrite: %v", err)
+		}
+		afterID, err := copyinmarker.Identity(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("identify database after rewrite: %v", err)
+		}
+		afterStamp, err := copyinmarker.ChangeStamp(fixture.dbPath)
+		if err != nil {
+			t.Fatalf("change stamp after rewrite: %v", err)
+		}
+		if afterID != origID || afterStat.Size() != origStat.Size() || afterStat.ModTime().UnixNano() != origStat.ModTime().UnixNano() {
+			t.Fatalf("fixture did not preserve inode/size/mtime: id %+v->%+v size %d->%d mtime %d->%d",
+				origID, afterID, origStat.Size(), afterStat.Size(), origStat.ModTime().UnixNano(), afterStat.ModTime().UnixNano())
+		}
+		if afterStamp == origStamp {
+			t.Fatalf("kernel change stamp did not advance on rewrite+chtimes (%s)", afterStamp)
+		}
+
+		if err := VerifyAdminSource(context.Background(), PreservedSource{Database: fixture.dbPath}, originalKey); !errors.Is(err, ErrAdminUnauthorized) {
+			t.Fatalf("VerifyAdminSource with old key after mtime-restored rotation = %v, want %v", err, ErrAdminUnauthorized)
+		}
+		if err := VerifyAdminSource(context.Background(), PreservedSource{Database: fixture.dbPath}, rotatedKey); err != nil {
+			t.Fatalf("VerifyAdminSource with rotated key = %v, want nil", err)
+		}
+	})
 }

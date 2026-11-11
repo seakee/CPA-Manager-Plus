@@ -37,6 +37,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -265,6 +267,12 @@ type Handler struct {
 	// and it is the surface's credential source when the mount holds no
 	// database the shared file policy accepts.
 	Database func() string
+	// DataKey returns the Manager data key that unlocks the store's secrets. It
+	// is often the file beside the database, and a configuration may place it
+	// elsewhere: every private copy taken beside this store must stay out of its
+	// directory too. Optional; an empty or nil accessor only omits that one
+	// exclusion.
+	DataKey func() string
 	// Timeout bounds one preflight. Zero uses DefaultTimeout.
 	Timeout time.Duration
 	// MountTimeout bounds the per-request wait on the mount lookup. Zero uses
@@ -280,6 +288,11 @@ type Handler struct {
 	// progress. Optional: when nil, the artifact routes report 503
 	// runtime_unavailable.
 	Artifact ArtifactRuntime
+	// PreserveManagerStore marks the Manager database path as an unadmitted,
+	// protected source (such as a 1.x volume mounted at /data during read-only
+	// discovery) so credential and status reads use private scratch snapshots
+	// instead of opening the database in place.
+	PreserveManagerStore bool
 	// lookupMount is the test seam for the mount lookup: a test substitutes a
 	// lookup that never answers to prove the bound and the one-in-flight rule.
 	// Production leaves it nil and the package's own inspectMount runs, so no
@@ -423,7 +436,14 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 	// process's live database.
 	var verifyErr error
 	if mount.database != "" {
-		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), database, key)
+		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), upgradeservice.PreservedSource{
+			Database: database,
+			// The 1.x source's own key sits beside its database; the Manager's
+			// configured key path belongs to the store, not to the mount.
+			DataKey: upgradeservice.SourceDataKeyPath(database),
+		}, key,
+			upgradeservice.ScratchRoot{Label: "the target root", Dir: parentDir(h.managerDatabase())},
+			upgradeservice.ScratchRoot{Label: "the Manager data key directory", Dir: parentDir(h.managerDataKey())})
 	} else {
 		// The Manager fallback is normally this process's live store and is read
 		// in place. When it is a copy-in target that was not materialized
@@ -442,6 +462,8 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 			Source:         mount.root,
 			SourceKnown:    mount.rootKnown,
 			SourceTimedOut: mount.code == CodeMountTimeout,
+			PreserveTarget: h.PreserveManagerStore,
+			DataKey:        h.managerDataKey(),
 		}, key)
 	}
 	switch {
@@ -499,6 +521,25 @@ func (h *Handler) managerDatabase() string {
 		return ""
 	}
 	return strings.TrimSpace(h.Database())
+}
+
+// managerDataKey is the configured data key of the store managerDatabase names.
+// It travels with every private copy taken beside that store: a configuration may
+// keep the key outside the database's directory, and a copy that landed in the
+// key's directory would write a full database into a tree the read preserves.
+func (h *Handler) managerDataKey() string {
+	if h.DataKey == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.DataKey())
+}
+
+func parentDir(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Dir(trimmed)
 }
 
 // mountResolution is the one answer about the operator's mount that a request
@@ -912,7 +953,22 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	document, err := readStatus(ctx, database)
+	var (
+		document statusDocument
+		err      error
+	)
+	if h.PreserveManagerStore {
+		if !mount.rootKnown || mount.code == CodeMountTimeout {
+			writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+			return
+		}
+		document, err = readStatusPreservingTarget(ctx, upgradeservice.PreservedSource{
+			Database: database,
+			DataKey:  h.managerDataKey(),
+		}, mount.root)
+	} else {
+		document, err = readStatus(ctx, database)
+	}
 	if err != nil {
 		// A row that contradicts itself is its own condition: it is not the same
 		// as a store this step cannot read, and neither is a 500.
@@ -1118,7 +1174,16 @@ func validateStatusRow(row statusRow) error {
 // The marker is read before the store, exactly like startup admission. Staging
 // is never polled; absent targets and foreign sidecars remain resume evidence.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
+	return readStatusWithOptions(ctx, upgradeservice.PreservedSource{Database: databasePath}, false, "")
+}
+
+func readStatusPreservingTarget(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string) (statusDocument, error) {
+	return readStatusWithOptions(ctx, source, true, sourceRoot)
+}
+
+func readStatusWithOptions(ctx context.Context, source upgradeservice.PreservedSource, preserve bool, sourceRoot string) (statusDocument, error) {
 	document := emptyStatusDocument()
+	databasePath := strings.TrimSpace(source.Database)
 	marker, inFlight, err := readCopyInMarker(databasePath)
 	if err != nil {
 		return statusDocument{}, err
@@ -1127,7 +1192,15 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		return withCopyInMarker(document, marker), nil
 	}
 	// A committing marker may outlive the atomically published operation row.
-	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
+	var (
+		recorded statusDocument
+		found    bool
+	)
+	if preserve {
+		recorded, found, err = readRecordedStatusPreserved(ctx, source, sourceRoot, document)
+	} else {
+		recorded, found, err = readRecordedStatus(ctx, databasePath, document)
+	}
 	if err != nil {
 		return statusDocument{}, err
 	}
@@ -1160,9 +1233,17 @@ func emptyStatusDocument() statusDocument {
 func readRecordedStatus(ctx context.Context, databasePath string, document statusDocument) (statusDocument, bool, error) {
 	info, err := os.Stat(databasePath)
 	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
+		}
 		return document, false, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		if err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+			if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+				return statusDocument{}, false, sideErr
+			}
+		}
 		return document, false, nil
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath))
@@ -1172,6 +1253,160 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	return readRecordedStatusFromDB(ctx, db, document)
+}
+
+// afterPreservedEvidenceProbe is a package-private synchronous test seam
+// exercising concurrent journal or database changes on the preserved status
+// fast path. Production leaves it nil.
+var afterPreservedEvidenceProbe func(databasePath string)
+
+type preservedMemberIdentity struct {
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	modifiedNS  int64
+	changeStamp string
+}
+
+type preservedDatabaseIdentity struct {
+	database preservedMemberIdentity
+	wal      preservedMemberIdentity
+	shm      preservedMemberIdentity
+	journal  preservedMemberIdentity
+}
+
+func inspectPreservedMember(path string) (preservedMemberIdentity, error) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
+		return preservedMemberIdentity{}, nil
+	}
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	id, err := copyinmarker.Identity(path)
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	stamp, err := copyinmarker.ChangeStamp(path)
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	return preservedMemberIdentity{
+		present:     true,
+		device:      id.Device,
+		inode:       id.Inode,
+		size:        info.Size(),
+		modifiedNS:  info.ModTime().UnixNano(),
+		changeStamp: stamp,
+	}, nil
+}
+
+func inspectPreservedDatabaseIdentity(databasePath string) (preservedDatabaseIdentity, error) {
+	if err := upgradeservice.AuditSourceSidecars(databasePath); err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	dbID, err := inspectPreservedMember(databasePath)
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	if !dbID.present {
+		return preservedDatabaseIdentity{}, os.ErrNotExist
+	}
+	walID, err := inspectPreservedMember(databasePath + "-wal")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	shmID, err := inspectPreservedMember(databasePath + "-shm")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	journalID, err := inspectPreservedMember(databasePath + "-journal")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	return preservedDatabaseIdentity{
+		database: dbID,
+		wal:      walID,
+		shm:      shmID,
+		journal:  journalID,
+	}, nil
+}
+
+func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string, document statusDocument) (statusDocument, bool, error) {
+	databasePath := strings.TrimSpace(source.Database)
+	info, err := processlock.InspectSourceFile(databasePath)
+	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
+		}
+		return document, false, nil
+	}
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	if err := upgradeservice.AuditSourceSidecars(databasePath); err != nil {
+		return statusDocument{}, false, err
+	}
+	if info.Size() == 0 {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
+		}
+		return document, false, nil
+	}
+	before, err := inspectPreservedDatabaseIdentity(databasePath)
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	// The table is looked up in the database file alone first: an immutable
+	// handle creates no -shm, so a clean 1.x volume — which never records an
+	// operation — is answered by the read-only status document instead of a full
+	// copy on every poll.
+	//
+	// A pending journal makes that lookup non-conclusive rather than negative.
+	// Baseline and post-read file + sidecar identities are verified so any WAL
+	// created during the immutable probe routes to the private snapshot below or
+	// fails closed instead of answering "nothing recorded".
+	inFile, journalPending, probeErr := legacypreflight.RecordedOperationEvidence(ctx, databasePath)
+	if probeErr != nil {
+		return statusDocument{}, false, probeErr
+	}
+	if afterPreservedEvidenceProbe != nil {
+		afterPreservedEvidenceProbe(databasePath)
+	}
+	if !inFile && !journalPending {
+		after, afterErr := inspectPreservedDatabaseIdentity(databasePath)
+		if afterErr != nil {
+			return statusDocument{}, false, afterErr
+		}
+		if after != before {
+			if after.wal.present && after.wal.size > 0 {
+				journalPending = true
+			} else {
+				return statusDocument{}, false, errors.New("preserved database changed during operation probe")
+			}
+		}
+	}
+	if !inFile && !journalPending {
+		return document, false, nil
+	}
+	// The private copy must stay out of every tree this read preserves: the source
+	// database's directory, the directory holding the data key its secrets are
+	// sealed with, and the configured 1.x source root.
+	if err := upgradeservice.ValidatePreservedScratchDir("", source,
+		upgradeservice.ScratchRoot{Label: "the configured source root", Dir: strings.TrimSpace(sourceRoot)}); err != nil {
+		return statusDocument{}, false, err
+	}
+	snapshot, err := upgradeservice.OpenSnapshotWithRetry(ctx, upgradeservice.OpenSnapshot, databasePath, "")
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	defer func() { _ = snapshot.Close() }()
+	return readRecordedStatusFromDB(ctx, snapshot.DB(), document)
+}
+
+func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDocument) (statusDocument, bool, error) {
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
 		return statusDocument{}, false, err
@@ -1180,7 +1415,7 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 		return document, false, nil
 	}
 	var row statusRow
-	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
+	err := db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
 		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
 		from upgrade_operations where id = 1`).Scan(&row.Stage, &row.Domains, &row.SourceKind, &row.SourceVersion,
 		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.CreatedAtMS, &row.UpdatedAtMS)

@@ -60,24 +60,31 @@ const (
 )
 
 // credentialFileIdentity is one file of the source as the cache sees it: the
-// volume and inode the filesystem assigned it, its size and its modification
-// time. A missing file carries present=false, which is itself part of the
-// identity: creating a WAL is a different source than not having one.
+// volume and inode the filesystem assigned it, its size, its modification time,
+// and its kernel metadata change stamp (ctime / ChangeTime) so an in-place
+// rewrite that restores mtime still invalidates any cached verdict. A missing
+// file carries present=false, which is itself part of the identity: creating a
+// WAL is a different source than not having one.
 type credentialFileIdentity struct {
-	present    bool
-	device     uint64
-	inode      uint64
-	size       int64
-	modifiedNS int64
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	modifiedNS  int64
+	changeStamp string
 }
 
-// sourceCredentialIdentity names one state of a source database. Both the
-// database and its WAL are described: a WAL append leaves the database file
-// untouched, so the database alone would answer from a state that no longer
-// exists.
+// sourceCredentialIdentity names one state of a source database and every
+// journal sidecar beside it, so a sidecar appearing or changing invalidates a
+// cached credential verdict instead of skipping source-file validation. When
+// uncacheable is true (for example on a filesystem without ctime/ChangeTime),
+// verifications still coalesce per flight but are never remembered across calls.
 type sourceCredentialIdentity struct {
-	database credentialFileIdentity
-	wal      credentialFileIdentity
+	database    credentialFileIdentity
+	wal         credentialFileIdentity
+	shm         credentialFileIdentity
+	journal     credentialFileIdentity
+	uncacheable bool
 }
 
 // readBytes is the size the first verification must read: the database plus a
@@ -106,47 +113,84 @@ func (i sourceCredentialIdentity) String() string {
 		if !value.present {
 			return "absent"
 		}
-		return fmt.Sprintf("%d:%d:%d:%d", value.device, value.inode, value.size, value.modifiedNS)
+		return fmt.Sprintf("%d:%d:%d:%d:%s", value.device, value.inode, value.size, value.modifiedNS, value.changeStamp)
 	}
-	return file(i.database) + "|" + file(i.wal)
+	return file(i.database) + "|" + file(i.wal) + "|" + file(i.shm) + "|" + file(i.journal)
 }
 
 // identifySourceCredential describes the source state the presented key would be
 // verified against. It stats only; it never opens the database.
 func identifySourceCredential(databasePath string) (sourceCredentialIdentity, error) {
-	database, err := identifyCredentialFile(databasePath)
+	database, dbUncacheable, err := identifyCredentialFile(databasePath)
 	if err != nil {
 		return sourceCredentialIdentity{}, err
 	}
-	wal, err := identifyCredentialFile(databasePath + "-wal")
+	wal, walUncacheable, err := identifyCredentialFile(databasePath + "-wal")
 	if err != nil {
 		return sourceCredentialIdentity{}, err
 	}
-	return sourceCredentialIdentity{database: database, wal: wal}, nil
+	shm, shmUncacheable, err := identifyCredentialFile(databasePath + "-shm")
+	if err != nil {
+		return sourceCredentialIdentity{}, err
+	}
+	journal, journalUncacheable, err := identifyCredentialFile(databasePath + "-journal")
+	if err != nil {
+		return sourceCredentialIdentity{}, err
+	}
+	return sourceCredentialIdentity{
+		database:    database,
+		wal:         wal,
+		shm:         shm,
+		journal:     journal,
+		uncacheable: dbUncacheable || walUncacheable || shmUncacheable || journalUncacheable,
+	}, nil
 }
 
-// identifyCredentialFile stats one source file. A missing file is the absent
-// state; any other failure means the source cannot be described and is reported
-// instead of being guessed at.
-func identifyCredentialFile(path string) (credentialFileIdentity, error) {
-	info, err := os.Stat(path)
+// identifyCredentialFile applies the shared source-file policy to one member and
+// records its identity including its change stamp. A missing file is the absent
+// state; any link, special file, multi-link file or stat failure is reported
+// instead of guessed at.
+var credentialChangeStamp = copyinmarker.ChangeStamp
+
+func identifyCredentialFile(path string) (credentialFileIdentity, bool, error) {
+	info, err := inspectSnapshotSourceFile(path)
 	if os.IsNotExist(err) {
-		return credentialFileIdentity{}, nil
+		return credentialFileIdentity{}, false, nil
 	}
 	if err != nil {
-		return credentialFileIdentity{}, err
+		return credentialFileIdentity{}, false, credentialSourceError(err)
 	}
 	identity, err := copyinmarker.Identity(path)
 	if err != nil {
-		return credentialFileIdentity{}, err
+		if os.IsNotExist(err) {
+			return credentialFileIdentity{}, false, ErrSourceDatabaseChanged
+		}
+		return credentialFileIdentity{}, false, credentialSourceError(err)
+	}
+	changeStamp, err := credentialChangeStamp(path)
+	if err != nil {
+		if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
+			return credentialFileIdentity{
+				present:    true,
+				device:     identity.Device,
+				inode:      identity.Inode,
+				size:       info.Size(),
+				modifiedNS: info.ModTime().UnixNano(),
+			}, true, nil
+		}
+		if os.IsNotExist(err) {
+			return credentialFileIdentity{}, false, ErrSourceDatabaseChanged
+		}
+		return credentialFileIdentity{}, false, credentialSourceError(err)
 	}
 	return credentialFileIdentity{
-		present:    true,
-		device:     identity.Device,
-		inode:      identity.Inode,
-		size:       info.Size(),
-		modifiedNS: info.ModTime().UnixNano(),
-	}, nil
+		present:     true,
+		device:      identity.Device,
+		inode:       identity.Inode,
+		size:        info.Size(),
+		modifiedNS:  info.ModTime().UnixNano(),
+		changeStamp: changeStamp,
+	}, false, nil
 }
 
 // credentialVerifyBudget is the deadline for one uncached verification. It
@@ -241,6 +285,16 @@ var errCredentialVerificationAborted = errors.New("source credential verificatio
 // admission slots; waiting for one is this caller's wait, not the shared work's,
 // and a caller that gives up while waiting starts nothing and leaves no flight.
 func (c *credentialCache) verify(ctx context.Context, key string, run func() error) error {
+	return c.verifySource(ctx, key, true, nil, run)
+}
+
+func (c *credentialCache) verifySource(
+	ctx context.Context,
+	key string,
+	cacheable bool,
+	revalidate func() bool,
+	run func() error,
+) error {
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
 	}
@@ -255,14 +309,19 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 		if err := ctx.Err(); err != nil {
 			return credentialTimeout(err)
 		}
-		return nil
-	}
-	if flight, running := c.flights[key]; running {
+		if revalidate != nil && !revalidate() {
+			c.forget(key)
+		} else {
+			return nil
+		}
+	} else {
+		if flight, running := c.flights[key]; running {
+			c.mu.Unlock()
+			noteFlightJoin(key)
+			return flight.wait(ctx)
+		}
 		c.mu.Unlock()
-		noteFlightJoin(key)
-		return flight.wait(ctx)
 	}
-	c.mu.Unlock()
 
 	// One slot per running verification. The send is the admission decision; a
 	// cancelled or expired caller never reaches it as an owner, including one
@@ -283,14 +342,17 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	c.mu.Lock()
 	if _, hit := c.entries[key]; hit {
 		c.mu.Unlock()
-		<-c.slots
-		// The same wait, and the same answer: a caller cancelled while it waited
-		// for a slot — or for the slot's mutex — is not handed a verdict that
-		// landed after it stopped waiting.
 		if err := ctx.Err(); err != nil {
+			<-c.slots
 			return credentialTimeout(err)
 		}
-		return nil
+		if revalidate != nil && !revalidate() {
+			c.forget(key)
+			c.mu.Lock()
+		} else {
+			<-c.slots
+			return nil
+		}
 	}
 	if flight, running := c.flights[key]; running {
 		c.mu.Unlock()
@@ -302,8 +364,23 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	c.flights[key] = flight
 	c.mu.Unlock()
 
-	go c.runFlight(key, flight, run)
+	go c.runFlight(key, cacheable, flight, run)
 	return flight.wait(ctx)
+}
+
+func (c *credentialCache) forget(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.entries[key]; !exists {
+		return
+	}
+	delete(c.entries, key)
+	for i, existing := range c.order {
+		if existing == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // afterFlightJoin is the package's synchronous test seam: it runs once a caller
@@ -323,7 +400,7 @@ func noteFlightJoin(key string) {
 // the flight is always completed and removed, so a concurrent request can never
 // wait on a flight nobody will finish, and a panic is never recorded as a
 // success. The admission slot is released on every path.
-func (c *credentialCache) runFlight(key string, flight *credentialFlight, run func() error) (err error) {
+func (c *credentialCache) runFlight(key string, cacheable bool, flight *credentialFlight, run func() error) (err error) {
 	completed := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -334,7 +411,7 @@ func (c *credentialCache) runFlight(key string, flight *credentialFlight, run fu
 		flight.err = err
 		if !completed {
 			flight.err = errCredentialVerificationAborted
-		} else if err == nil {
+		} else if err == nil && cacheable {
 			c.rememberLocked(key)
 		}
 		delete(c.flights, key)

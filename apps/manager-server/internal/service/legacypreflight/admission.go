@@ -25,6 +25,8 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
@@ -218,29 +220,76 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 // readRecordedUpgrade reads the row the admission decides on. Before the
 // incremental migration has ever run the table is absent, which is not an error:
 // no Upgrade operation has been recorded.
+//
+// The database file and every journal member beside it are audited by the shared
+// source-file policy first: a linked, special or multi-linked member, an
+// unreadable sidecar or a non-empty rollback journal is a state no file-only
+// answer can describe, so it is reported instead of being read as "no record".
 func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgradeRecord, bool, error) {
 	path := strings.TrimSpace(a.DatabasePath)
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) || info != nil && (!info.Mode().IsRegular() || info.Size() == 0) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(path); sideErr != nil {
+			return upgradeRecord{}, false, sideErr
+		}
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	db, err := sql.Open("sqlite", admissionDataSourceName(path))
+	if info.Size() == 0 {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(path); sideErr != nil {
+			return upgradeRecord{}, false, sideErr
+		}
+		return upgradeRecord{}, false, nil
+	}
+	// The operation table is looked up in the database file alone first when no
+	// journal is pending, bracketed by before/after file and sidecar identity. An
+	// immutable handle opens no journal and creates no -shm, so a cold source that
+	// records no operations — every clean 1.x volume — is answered without writing
+	// anything beside the tree v2 must leave untouched.
+	//
+	// A pending journal makes a file-only lookup non-conclusive, never negative:
+	// SQLite keeps both the table and its row in the journal until a checkpoint
+	// copies them into the file, so a pending journal (whether present at baseline
+	// or created during the immutable probe) forces the private copy below.
+	inFile, walPending, baseline, err := recordedOperationEvidenceWithBaseline(ctx, path)
+	if err != nil {
+		return upgradeRecord{}, false, err
+	}
+	if !inFile && !walPending {
+		return upgradeRecord{}, false, nil
+	}
+	readPath := path
+	if walPending {
+		copied, cleanup, copyErr := sqlite.CopySourceForRead(ctx, sqlite.InspectionPaths{
+			Database: path,
+			DataKey:  a.DataKeyPath,
+		}, "-wal")
+		if copyErr != nil {
+			return upgradeRecord{}, false, copyErr
+		}
+		defer cleanup()
+		readPath = copied
+	}
+	db, err := sql.Open("sqlite", admissionDataSourceName(readPath, !walPending))
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
-	var present int
-	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
-		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
-		return upgradeRecord{}, false, err
-	}
-	if present == 0 {
-		return upgradeRecord{}, false, nil
+	// The copy answers with the journal applied. A journal that held no schema of
+	// its own leaves the store exactly as the file described it: no operation, no
+	// evidence, and the ordinary admission answers.
+	if !inFile {
+		present, probeErr := recordedTablePresent(ctx, db)
+		if probeErr != nil {
+			return upgradeRecord{}, false, probeErr
+		}
+		if !present {
+			return upgradeRecord{}, false, nil
+		}
 	}
 	// The columns a reader may select depend on the build that wrote the table:
 	// a store that predates the completion gate has neither the verification
@@ -272,6 +321,14 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	err = db.QueryRowContext(ctx, `select `+strings.Join(selected, ", ")+
 		` from upgrade_operations where id = 1`).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
+		if !walPending {
+			if after, stateErr := inspectOperationEvidenceState(path); stateErr != nil || after != baseline {
+				if stateErr != nil {
+					return upgradeRecord{}, false, stateErr
+				}
+				return upgradeRecord{}, false, errors.New("database changed during recorded operation read")
+			}
+		}
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {
@@ -306,6 +363,14 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 		// for it. Both are read here, before the row can unlock the product.
 		if err := requireManagedDestinationAuthority(ctx, db, a, record); err != nil {
 			return upgradeRecord{}, false, err
+		}
+	}
+	if !walPending {
+		if after, stateErr := inspectOperationEvidenceState(path); stateErr != nil || after != baseline {
+			if stateErr != nil {
+				return upgradeRecord{}, false, stateErr
+			}
+			return upgradeRecord{}, false, errors.New("database changed during recorded operation read")
 		}
 	}
 	return record, true, nil
@@ -912,13 +977,178 @@ func containsRecordedDomain(domains []string, want string) bool {
 	return false
 }
 
-// admissionDataSourceName mirrors the bounded inspection DSN: read-only, no
-// persistence, and immutable only when there is no live WAL to join.
-func admissionDataSourceName(path string) string {
-	immutable := true
-	if info, err := os.Lstat(path + "-wal"); err == nil && info.Size() > 0 {
-		immutable = false
+// RecordedOperationTablePresent reports whether the database file names the
+// Upgrade operation table. The handle is immutable, so the answer describes the
+// file as written and never the journal beside it: a source that records no
+// operation — every clean 1.x volume — is answered without copying it or
+// creating anything beside it.
+//
+// A false answer is only conclusive when no journal is pending; record the two
+// facts together with RecordedOperationEvidence before deciding that a store
+// never recorded an operation.
+func RecordedOperationTablePresent(ctx context.Context, databasePath string) (bool, error) {
+	db, err := sql.Open("sqlite", admissionDataSourceName(databasePath, true))
+	if err != nil {
+		return false, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+	return recordedTablePresent(ctx, db)
+}
+
+// beforeOperationEvidenceProbe is a package-private synchronous test seam for
+// exercising concurrent journal creation between baseline capture and the
+// immutable table probe. Production leaves it nil.
+var beforeOperationEvidenceProbe func(databasePath string)
+
+type evidenceMemberIdentity struct {
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	modifiedNS  int64
+	changeStamp string
+}
+
+type operationEvidenceState struct {
+	database evidenceMemberIdentity
+	wal      evidenceMemberIdentity
+	shm      evidenceMemberIdentity
+	journal  evidenceMemberIdentity
+}
+
+func inspectEvidenceMember(path string) (evidenceMemberIdentity, error) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
+		return evidenceMemberIdentity{}, nil
+	}
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	id, err := copyinmarker.Identity(path)
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	stamp, err := copyinmarker.ChangeStamp(path)
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	return evidenceMemberIdentity{
+		present:     true,
+		device:      id.Device,
+		inode:       id.Inode,
+		size:        info.Size(),
+		modifiedNS:  info.ModTime().UnixNano(),
+		changeStamp: stamp,
+	}, nil
+}
+
+func inspectOperationEvidenceState(databasePath string) (operationEvidenceState, error) {
+	if err := auditAdmissionSidecars(databasePath); err != nil {
+		return operationEvidenceState{}, err
+	}
+	dbID, err := inspectEvidenceMember(databasePath)
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	if !dbID.present {
+		return operationEvidenceState{}, os.ErrNotExist
+	}
+	walID, err := inspectEvidenceMember(databasePath + "-wal")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	shmID, err := inspectEvidenceMember(databasePath + "-shm")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	journalID, err := inspectEvidenceMember(databasePath + "-journal")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	return operationEvidenceState{
+		database: dbID,
+		wal:      walID,
+		shm:      shmID,
+		journal:  journalID,
+	}, nil
+}
+
+func recordedOperationEvidenceWithBaseline(ctx context.Context, databasePath string) (bool, bool, operationEvidenceState, error) {
+	before, err := inspectOperationEvidenceState(databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	if before.wal.present && before.wal.size > 0 {
+		return false, true, before, nil
+	}
+	if beforeOperationEvidenceProbe != nil {
+		beforeOperationEvidenceProbe(databasePath)
+	}
+	inFile, err := RecordedOperationTablePresent(ctx, databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	after, err := inspectOperationEvidenceState(databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	if after != before {
+		if after.wal.present && after.wal.size > 0 {
+			return false, true, after, nil
+		}
+		return false, false, operationEvidenceState{}, errors.New("database changed during operation evidence probe")
+	}
+	return inFile, false, after, nil
+}
+
+// RecordedOperationEvidence is the pair of facts a reader needs before it may
+// answer "no operation recorded": whether the database file names the table, and
+// whether a journal beside it may still hold the transaction that creates it.
+// Baseline and post-read file + sidecar identities (including ChangeStamp) are
+// checked so a concurrent WAL write during the immutable probe routes to a
+// private snapshot or fails closed rather than returning a stale negative answer.
+func RecordedOperationEvidence(ctx context.Context, databasePath string) (inFile bool, journalPending bool, err error) {
+	inFile, journalPending, _, err = recordedOperationEvidenceWithBaseline(ctx, databasePath)
+	return inFile, journalPending, err
+}
+
+// auditAdmissionSidecars enforces the single-link regular-file policy across
+// every journal member beside databasePath and fails closed on a non-empty
+// rollback journal, which a read-only admission check cannot safely roll back.
+func auditAdmissionSidecars(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		info, err := processlock.InspectSourceFile(databasePath + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if suffix == "-journal" && info.Size() > 0 {
+			return errors.New("database has a pending rollback journal")
+		}
+	}
+	return nil
+}
+
+// recordedTablePresent asks one open handle whether the operation table exists.
+func recordedTablePresent(ctx context.Context, db *sql.DB) (bool, error) {
+	var present int
+	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
+		return false, err
+	}
+	return present != 0, nil
+}
+
+// admissionDataSourceName is the read-only handle for the operation record.
+// `immutable` must be false only for a copy that carries its journal, because an
+// immutable handle ignores the journal; it must be true for any path inside the
+// source, because a plain read-only open of a WAL database still creates or
+// joins `-shm` beside it.
+func admissionDataSourceName(path string, immutable bool) string {
 	uriPath := filepath.ToSlash(path)
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath

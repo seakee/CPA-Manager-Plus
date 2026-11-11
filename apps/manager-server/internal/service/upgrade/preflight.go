@@ -693,15 +693,20 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 	if err != nil {
 		return err
 	}
-	return VerifyAdminSource(ctx, filepath.Join(root, databaseFileName), key)
+	return VerifyAdminSource(ctx, PreservedSource{
+		Database: filepath.Join(root, databaseFileName),
+		DataKey:  filepath.Join(root, dataKeyFileName),
+	}, key)
 }
 
-// VerifyAdminSource is VerifyAdmin against an explicit source database file.
-// The Upgrade surface resolves one credential source, and that source may be the
-// Manager's own store rather than a 1.x data directory: the copied-in store
-// carries the same administrator credential, and it is the only file left when
-// the operator did not mount the source. Naming the file directly keeps the
-// verified file and the resolved file the same one.
+// VerifyAdminSource is VerifyAdmin against an explicit source. The Upgrade surface
+// resolves one credential source, and that source may be the Manager's own store
+// rather than a 1.x data directory: the copied-in store carries the same
+// administrator credential, and it is the only file left when the operator did not
+// mount the source. Naming the file directly keeps the verified file and the
+// resolved file the same one, and the data key travels with it because the private
+// copy must stay out of the key's directory even when a configuration places that
+// file outside the database's directory.
 //
 // It reads a 1.x source without ever opening it in place: the database and its
 // sidecars are copied into private scratch space by OpenSnapshot, the source is
@@ -716,25 +721,26 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 // (see credential_cache.go). A source is preserved, so identical bytes carry the
 // identical credential row; any change — a WAL that appears, a checkpoint, a
 // rewrite, a replaced file — produces a different identity and a fresh read.
-func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
-	return verifyPreservedCredential(ctx, databasePath, key)
+func VerifyAdminSource(ctx context.Context, source PreservedSource, key string, extraRoots ...ScratchRoot) error {
+	return verifyPreservedCredential(ctx, source, key, extraRoots...)
 }
 
 // verifyPreservedCredential is the read behind VerifyAdminSource and behind the
 // Manager-store fallback when its store is a copy-in target that was not
 // materialized completely. extraRoots names directories the private copy must
-// not land in besides the database's own directory: the Manager store's data
-// root always, and the configured 1.x source root when the caller knows it, so a
-// host whose temporary directory points into either tree cannot hide a full
-// database copy there.
-func verifyPreservedCredential(ctx context.Context, databasePath, key string, extraRoots ...string) error {
+// not land in besides the source database's and the data key's own directories:
+// the Manager store's data root always, and the configured 1.x source root when
+// the caller knows it, so a host whose temporary directory points into either
+// tree cannot hide a full database copy there.
+func verifyPreservedCredential(ctx context.Context, preserved PreservedSource, key string, extraRoots ...ScratchRoot) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
 	}
-	databasePath = strings.TrimSpace(databasePath)
+	databasePath := strings.TrimSpace(preserved.Database)
 	if databasePath == "" {
 		return ErrSourceDatabaseMissing
 	}
+	preserved.Database = databasePath
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
 	}
@@ -750,7 +756,11 @@ func verifyPreservedCredential(ctx context.Context, databasePath, key string, ex
 		return err
 	}
 	cacheKey := credentialCacheKey(key, canonicalPath(databasePath), identity)
-	return sourceCredentialCache.verify(ctx, cacheKey, func() error {
+	stableIdentity := func() bool {
+		current, checkErr := identifySourceCredential(databasePath)
+		return checkErr == nil && !current.uncacheable && current == identity
+	}
+	return sourceCredentialCache.verifySource(ctx, cacheKey, !identity.uncacheable, stableIdentity, func() error {
 		// The first read of a source state pays for the copy and its digests, so
 		// its budget scales with every byte that read must carry — the database
 		// and a WAL that still holds committed rows, not the database file alone —
@@ -758,7 +768,7 @@ func verifyPreservedCredential(ctx context.Context, databasePath, key string, ex
 		// that cost.
 		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.readBytes()))
 		defer cancel()
-		source, openErr := openCredentialSource(ctx, databasePath, extraRoots...)
+		source, openErr := openCredentialSource(ctx, preserved, extraRoots...)
 		if openErr != nil {
 			// The bound is placed before and during the snapshot, so a read that
 			// outlives it fails here instead of in the query. That is a deadline,
@@ -769,7 +779,17 @@ func verifyPreservedCredential(ctx context.Context, databasePath, key string, ex
 			return openErr
 		}
 		defer func() { _ = source.close() }()
-		return verifyAdminCredential(ctx, source, key)
+		if err := verifyAdminCredential(ctx, source, key); err != nil {
+			return err
+		}
+		after, afterErr := identifySourceCredential(databasePath)
+		if afterErr != nil {
+			return afterErr
+		}
+		if after != identity {
+			return ErrSourceDatabaseChanged
+		}
+		return nil
 	})
 }
 
@@ -904,6 +924,16 @@ type CredentialSnapshotRoots struct {
 	// ErrSnapshotRootTimedOut instead of touching the root again. It is ignored
 	// when SourceKnown is false: an unnamed root already fails closed.
 	SourceTimedOut bool
+	// PreserveTarget treats databasePath as an unadmitted or protected source
+	// (for example a 1.x volume mounted at /data during read-only discovery) so
+	// authentication uses a private scratch snapshot instead of opening the file
+	// in place and creating or rewriting WAL coordination sidecars.
+	PreserveTarget bool
+	// DataKey is the Manager data key the preserved source's secrets are sealed
+	// with. A configuration may place it outside the database's directory, and a
+	// private copy must stay out of the key's directory exactly as it stays out of
+	// the source's, so the resolved key travels with the read.
+	DataKey string
 }
 
 // VerifyManagerCredential is VerifyAdminSource against the Manager's own store
@@ -917,25 +947,30 @@ type CredentialSnapshotRoots struct {
 // snapshot of it would copy a database that changes under it and answer 503 on
 // the copy race, which is the wrong verdict for a poll.
 //
-// The one exception is a target that an unfinished copy-in has not materialized
-// completely. The marker is read before any open: in the `materializing` phase
+// The exceptions are the states in which this path is not this process's live
+// store at all. An unfinished copy-in that has not materialized completely is
+// one: the marker is read before any open, because in the `materializing` phase
 // the target still holds the members the resumed move compares with its backup,
 // and a read-only open of a store holding a copied WAL joins that WAL and
-// rewrites `-shm`. This route authenticates every status poll, so it is the
-// first reader to reach the target; it must leave it exactly as it found it and
-// still prove the administrator key. The key is therefore verified against a
-// private snapshot outside both the target's data root and the configured 1.x
-// source root; CredentialSnapshotRoots names both, and a caller that could not
-// resolve the second root does not get a snapshot at all.
+// rewrites `-shm`. The other is a caller that reports the target as unadmitted or
+// preserved (CredentialSnapshotRoots.PreserveTarget): the read-only Upgrade entry
+// reaches /data before startup admission, so a 1.x volume mounted there with a
+// WAL of its own is somebody else's source, not this process's store. This route
+// authenticates every status poll, so it is the first reader to reach the target;
+// it must leave it exactly as it found it and still prove the administrator key.
+// The key is therefore verified against a private snapshot outside both the
+// target's data root and the configured 1.x source root;
+// CredentialSnapshotRoots names both, and a caller that could not resolve the
+// second root does not get a snapshot at all.
 //
 // The Manager store's credential is not cached either. It is the live database:
 // ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
 // verdict would either miss on almost every poll or, on a filesystem with a
 // coarse modification time, answer with a credential row that was already
 // rotated. The read itself is one indexed row in the process's own open store,
-// not the whole-file copy that makes a preserved source expensive. Only the
-// materializing target is read as a preserved source, and only it may be
-// answered from that state's remembered verdict.
+// not the whole-file copy that makes a preserved source expensive. Only a target
+// that is read as a preserved source may be answered from that state's
+// remembered verdict.
 func VerifyManagerCredential(ctx context.Context, databasePath string, roots CredentialSnapshotRoots, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
@@ -951,7 +986,7 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 	if err != nil {
 		return err
 	}
-	if materializing {
+	if materializing || roots.PreserveTarget {
 		if !roots.SourceKnown {
 			// A snapshot under a root this process cannot name could land inside
 			// the tree the copy-in is preserving. Refusing before the read is the
@@ -967,7 +1002,10 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 			// operator's next move is a retry once the mount responds.
 			return fmt.Errorf("%w: the configured source root did not answer within its bound", ErrSnapshotRootTimedOut)
 		}
-		return verifyPreservedCredential(ctx, databasePath, key, strings.TrimSpace(roots.Target), strings.TrimSpace(roots.Source))
+		return verifyPreservedCredential(ctx, PreservedSource{Database: databasePath, DataKey: roots.DataKey},
+			key,
+			ScratchRoot{Label: "the target root", Dir: strings.TrimSpace(roots.Target)},
+			ScratchRoot{Label: "the configured source root", Dir: strings.TrimSpace(roots.Source)})
 	}
 	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
 	defer cancel()

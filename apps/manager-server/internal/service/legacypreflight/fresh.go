@@ -15,14 +15,13 @@ func validatePendingSource(ctx context.Context, paths sqlite.InspectionPaths, op
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for _, path := range []string{paths.Database, paths.Database + "-wal", paths.Database + "-shm", paths.DataKey} {
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil || !info.Mode().IsRegular() {
+	for _, path := range []string{paths.Database, paths.Database + "-wal", paths.Database + "-shm"} {
+		if _, err := processlock.InspectSourceFile(path); err != nil && !os.IsNotExist(err) {
 			return errors.New("Fresh recovery inventory unavailable")
 		}
+	}
+	if info, err := os.Lstat(paths.DataKey); err != nil && !os.IsNotExist(err) || (err == nil && !info.Mode().IsRegular()) {
+		return errors.New("Fresh recovery inventory unavailable")
 	}
 	for _, path := range []string{paths.Archives, paths.Database + "-journal"} {
 		if path == "" {
