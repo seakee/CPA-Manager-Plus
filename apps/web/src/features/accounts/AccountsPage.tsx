@@ -9164,15 +9164,17 @@ export function AccountsPage() {
                           >
                             {ctx.subscriptionPresentation.planPresentation.shortLabel}
                             {remainingDays !== null ? (
-                              <span className={styles.accountPlanBadgeSep}>
-                                ·{' '}
+                              <>
+                                <span className={styles.accountPlanBadgeSep} aria-hidden="true">
+                                  ·{' '}
+                                </span>
                                 <span className={remainingDaysClass}>
                                   {t('accounts.list_plan_remaining_days', {
                                     days: remainingDays,
                                     defaultValue: `${remainingDays} 天`,
                                   })}
                                 </span>
-                              </span>
+                              </>
                             ) : null}
                           </span>
                         ) : remainingDays !== null ? (

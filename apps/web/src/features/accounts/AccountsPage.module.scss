@@ -480,6 +480,20 @@
     border-color: color-mix(in srgb, var(--border-color) 70%, transparent);
     box-shadow: none;
 
+    /* Selection still has to read on a disabled card, so the selected and
+       bulk-selected feedback is restated at a specificity above both this
+       block and the later single-class `.accountCardSelected` rules. */
+    &.accountCardSelected {
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 1px var(--primary-color);
+    }
+
+    &.accountCardBulkSelected {
+      border-color: var(--primary-color);
+      background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+      box-shadow: inset 3px 0 0 var(--primary-color);
+    }
+
     .accountProviderLogo,
     .accountGridCardNoteIcon,
     .accountGridCardRecentStatusIcon,
@@ -724,7 +738,9 @@
 }
 
 .accountPlanBadgeSep {
-  opacity: 0.85;
+  /* Decorative dot only (the remaining-days copy is a sibling): it takes the
+     recessive glyph tier, so the label next to it stays un-dimmed. */
+  color: var(--text-tertiary);
   margin: 0 1px;
 }
 
@@ -926,8 +942,10 @@
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 25%, transparent);
 
   &::placeholder {
-    color: var(--text-secondary);
-    opacity: 0.6;
+    /* Placeholder text is readable copy: a 0.6 alpha put it at 2.86:1 light
+       and 4.0:1 dark, so it takes an opaque tier on the input surface. */
+    color: var(--text-tertiary);
+    opacity: 1;
   }
 }
 
