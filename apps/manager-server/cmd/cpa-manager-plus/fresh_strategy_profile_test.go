@@ -22,6 +22,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
@@ -3572,4 +3573,715 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("reconciler did not retire immediately via externalCommitted signal")
 	}
+}
+
+// TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecoversOnRetry
+// verifies via real HTTP entry points, real SQLite persistence, and a fake HTTP
+// Supervisor that when persisting the write-ahead embedded start ledger fails,
+// Start (both wizard and runtime operations API), Restart, and ActivateUpdate
+// fail closed with an HTTP error and zero start/restart/activate RPCs reaching
+// the Supervisor, and succeed once SQLite recovers.
+func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecoversOnRetry(t *testing.T) {
+	const productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+
+	installLedgerWriteFailure := func(t *testing.T, app *freshApplication) (recoverStore func()) {
+		t.Helper()
+		db := app.runtimeJournal.db
+		if _, err := db.ExecContext(t.Context(), `
+			CREATE TRIGGER test_fail_start_ledger_insert
+			BEFORE INSERT ON settings
+			WHEN NEW.key = 'fresh_embedded_start_ledger_v1'
+			BEGIN
+				SELECT RAISE(ABORT, 'simulated start ledger write failure');
+			END;
+		`); err != nil {
+			t.Fatalf("install insert trigger: %v", err)
+		}
+		if _, err := db.ExecContext(t.Context(), `
+			CREATE TRIGGER test_fail_start_ledger_update
+			BEFORE UPDATE ON settings
+			WHEN NEW.key = 'fresh_embedded_start_ledger_v1'
+			BEGIN
+				SELECT RAISE(ABORT, 'simulated start ledger write failure');
+			END;
+		`); err != nil {
+			t.Fatalf("install update trigger: %v", err)
+		}
+		return func() {
+			if _, err := db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS test_fail_start_ledger_insert; DROP TRIGGER IF EXISTS test_fail_start_ledger_update;`); err != nil {
+				t.Fatalf("drop start ledger failure triggers: %v", err)
+			}
+		}
+	}
+
+	t.Run("wizard_new_managed_start", func(t *testing.T) {
+		var (
+			startHits    atomic.Int32
+			restartHits  atomic.Int32
+			stopHits     atomic.Int32
+			activateHits atomic.Int32
+			prepareHits  atomic.Int32
+			startedReady atomic.Bool
+			stagedKeyMu  sync.Mutex
+			stagedKey    string
+		)
+
+		destinationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			stagedKeyMu.Lock()
+			expectedKey := stagedKey
+			stagedKeyMu.Unlock()
+			if r.URL.Path != "/v8/management/config" || expectedKey == "" || r.Header.Get("Authorization") != "Bearer "+expectedKey {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":[]}}`))
+		}))
+		t.Cleanup(destinationServer.Close)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				state := "offline"
+				if startedReady.Load() {
+					state = "ready"
+				}
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + state + `","cpaObservedVersion":"v8.0.55","capabilities":["start","stop","stage_destination"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/stage-destination":
+				var payload struct {
+					OperationID   string `json:"operationId"`
+					ManagementKey string `json:"managementKey"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				stagedKeyMu.Lock()
+				stagedKey = payload.ManagementKey
+				stagedKeyMu.Unlock()
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"stage_destination","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			case "/v1/runtime/operations/start":
+				startHits.Add(1)
+				var payload struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				startedReady.Store(true)
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			case "/v1/runtime/operations/restart":
+				restartHits.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/v1/runtime/operations/stop":
+				stopHits.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/v1/runtime/operations/prepare-update":
+				prepareHits.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/v1/runtime/operations/activate-update":
+				activateHits.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("ledger-wizard-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   destinationServer.URL,
+		}, nil)
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		postNewManaged := func(attemptID string) *httptest.ResponseRecorder {
+			cur, loadErr := app.store.Load(t.Context())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			body, marshalErr := json.Marshal(struct {
+				Identity         bootstrap.FreshIdentity `json:"identity"`
+				ExpectedRevision uint64                  `json:"expectedRevision"`
+				AttemptID        string                  `json:"attemptId"`
+				freshstrategy.Request
+			}{
+				Identity:         cur.Operation.Identity,
+				ExpectedRevision: cur.Operation.Revision,
+				AttemptID:        attemptID,
+				Request: freshstrategy.Request{
+					Strategy:                  bootstrap.NewManaged,
+					ExpectedRuntimeIdentity:   "runtime-01",
+					ExpectedRuntimeGeneration: 1,
+					ExpectedArtifactID:        productionArtifactID,
+				},
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.ServeHTTP(out, req)
+			return out
+		}
+
+		// Step 1 of wizard new_managed prepares the durable "staged" checkpoint before execution.
+		stageRes := postNewManaged(strings.Repeat("1", 32))
+		if stageRes.Code != http.StatusOK {
+			t.Fatalf("initial new_managed stage = %d %s, want 200", stageRes.Code, stageRes.Body.String())
+		}
+
+		// Inject real SQLite write failure on fresh_embedded_start_ledger_v1 before the Start step.
+		recoverStore := installLedgerWriteFailure(t, app)
+		failRes := postNewManaged(strings.Repeat("2", 32))
+		if failRes.Code < 400 {
+			t.Fatalf("wizard new_managed with failing start ledger write = %d %s, want HTTP error", failRes.Code, failRes.Body.String())
+		}
+		if got := startHits.Load() + restartHits.Load() + stopHits.Load() + prepareHits.Load() + activateHits.Load(); got != 0 {
+			t.Fatalf("Supervisor lifecycle mutating RPCs on failing ledger write = %d (start=%d), want 0", got, startHits.Load())
+		}
+		afterFail, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterFail.Operation.Strategy.Stage == "committed" {
+			t.Fatalf("strategy stage committed despite failing ledger write: %+v", afterFail.Operation.Strategy)
+		}
+
+		// Recover SQLite and verify retry succeeds via HTTP.
+		recoverStore()
+		retryRes := postNewManaged(strings.Repeat("3", 32))
+		if retryRes.Code != http.StatusOK {
+			t.Fatalf("wizard new_managed retry after store recovery = %d %s, want 200", retryRes.Code, retryRes.Body.String())
+		}
+		if got := startHits.Load(); got != 1 {
+			t.Fatalf("Supervisor Start RPCs after store recovery = %d, want 1", got)
+		}
+		afterRetry, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterRetry.Operation.Strategy.Strategy != bootstrap.NewManaged || afterRetry.Operation.Strategy.Stage != "committed" {
+			t.Fatalf("committed strategy after retry = %+v, want committed new_managed", afterRetry.Operation.Strategy)
+		}
+	})
+
+	for _, tc := range []struct {
+		name         string
+		initialState string
+		action       string
+	}{
+		{name: "runtime_operations_start", initialState: "offline", action: "start"},
+		{name: "runtime_operations_restart", initialState: "ready", action: "restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mutatingHits atomic.Int32
+				startHits    atomic.Int32
+				restartHits  atomic.Int32
+				curState     atomic.Value
+			)
+			curState.Store(tc.initialState)
+
+			supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					mutatingHits.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/runtime/status":
+					st := curState.Load().(string)
+					_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + st + `","cpaObservedVersion":"v8.0.55","capabilities":["start","stop","restart"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+				case "/v1/runtime/operations/start":
+					startHits.Add(1)
+					var payload struct {
+						OperationID string `json:"operationId"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&payload)
+					curState.Store("ready")
+					_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+				case "/v1/runtime/operations/restart":
+					restartHits.Add(1)
+					var payload struct {
+						OperationID string `json:"operationId"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&payload)
+					curState.Store("ready")
+					_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"restart","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+				default:
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			}))
+			t.Cleanup(supervisor.Close)
+
+			tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+			if err := os.WriteFile(tokenPath, []byte("ledger-ops-token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+			paths.Config = filepath.Join(dir, "config.json")
+			opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = opened.Close() })
+
+			app := newFreshApplication(opened, config.Config{
+				RuntimeURL:       supervisor.URL,
+				RuntimeTokenFile: tokenPath,
+				CPAUpstreamURL:   "http://127.0.0.1:8317",
+			}, nil)
+			protected, err := opened.Protector.ProtectString(strings.Repeat("e", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := app.store.Load(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+					OperationID: r.Operation.Identity.OperationID, Revision: 1,
+					Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+				}
+				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+					Strategy:                      bootstrap.NewManaged,
+					Stage:                         "committed",
+					TargetIdentity:                "runtime-01",
+					TargetGeneration:              1,
+					TargetArtifactID:              productionArtifactID,
+					DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+				}
+				r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+				r.Operation.ProductComplete = true
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			postRuntimeOp := func(requestID string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/control/api/v2/runtime/operations",
+					strings.NewReader(`{"action":"`+tc.action+`","requestId":"`+requestID+`"}`),
+				)
+				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				req.Header.Set("Content-Type", "application/json")
+				out := httptest.NewRecorder()
+				app.ServeHTTP(out, req)
+				return out
+			}
+
+			recoverStore := installLedgerWriteFailure(t, app)
+			failRes := postRuntimeOp("44444444-4444-4444-8444-111111111111")
+			if failRes.Code < 400 {
+				t.Fatalf("%s with failing start ledger write = %d %s, want HTTP error", tc.action, failRes.Code, failRes.Body.String())
+			}
+			if got := mutatingHits.Load(); got != 0 {
+				t.Fatalf("Supervisor mutating RPCs during failing %s ledger write = %d, want 0", tc.action, got)
+			}
+			if desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+				t.Fatalf("desired lifecycle persisted despite failing %s ledger write: (%+v, %v, %v)", tc.action, desired, found, err)
+			}
+
+			recoverStore()
+			retryRes := postRuntimeOp("44444444-4444-4444-8444-222222222222")
+			if retryRes.Code != http.StatusOK || !strings.Contains(retryRes.Body.String(), `"state":"succeeded"`) {
+				t.Fatalf("%s retry after store recovery = %d %s, want 200 succeeded", tc.action, retryRes.Code, retryRes.Body.String())
+			}
+			if tc.action == "start" && startHits.Load() != 1 {
+				t.Fatalf("Supervisor Start RPCs after store recovery = %d, want 1", startHits.Load())
+			}
+			if tc.action == "restart" && restartHits.Load() != 1 {
+				t.Fatalf("Supervisor Restart RPCs after store recovery = %d, want 1", restartHits.Load())
+			}
+		})
+	}
+
+	t.Run("cpa_update_activate", func(t *testing.T) {
+		var (
+			mutatingHits atomic.Int32
+			activateHits atomic.Int32
+		)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				mutatingHits.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"ready","cpaObservedVersion":"8.0.55","capabilities":["prepare_update","activate_update"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"8.0.55"},"recovery":{"state":"armed","attemptsRemaining":3}}`))
+			case "/v1/runtime/operations/activate-update":
+				activateHits.Add(1)
+				var payload struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"activate_update","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			default:
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("ledger-activate-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		protected, err := opened.Protector.ProtectString(strings.Repeat("e", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              productionArtifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		checkedAt := time.Now().UTC()
+		discoveryBytes, err := json.Marshal(cpaupdateservice.DiscoveryState{
+			SchemaVersion: 1,
+			LastAttemptAt: checkedAt,
+			LastSuccessAt: checkedAt,
+			TargetVersion: "8.0.56",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := setting.SaveCPAUpdateCheck(t.Context(), app.runtimeJournal.db, discoveryBytes); err != nil {
+			t.Fatalf("seed CPA update discovery state: %v", err)
+		}
+
+		postActivate := func(requestID string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/control/api/v2/cpamp/usage-service/runtime/updates/activate",
+				strings.NewReader(`{"request_id":"`+requestID+`","target_version":"8.0.56","expected_active_artifact_id":"`+productionArtifactID+`"}`),
+			)
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.ServeHTTP(out, req)
+			return out
+		}
+
+		recoverStore := installLedgerWriteFailure(t, app)
+		failRes := postActivate("55555555-5555-4555-8555-111111111111")
+		if failRes.Code != http.StatusServiceUnavailable {
+			t.Fatalf("CPA update activate with failing start ledger write = %d %s, want 503", failRes.Code, failRes.Body.String())
+		}
+		if got := mutatingHits.Load(); got != 0 {
+			t.Fatalf("Supervisor mutating RPCs during failing activate_update ledger write = %d, want 0", got)
+		}
+
+		recoverStore()
+		retryRes := postActivate("55555555-5555-4555-8555-222222222222")
+		if retryRes.Code != http.StatusOK || !strings.Contains(retryRes.Body.String(), `"state":"succeeded"`) {
+			t.Fatalf("CPA update activate retry after store recovery = %d %s, want 200 succeeded", retryRes.Code, retryRes.Body.String())
+		}
+		if got := activateHits.Load(); got != 1 {
+			t.Fatalf("Supervisor ActivateUpdate RPCs after store recovery = %d, want 1", got)
+		}
+	})
+}
+
+// TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart verifies
+// persistent backward compatibility with rows written by commit a6ee4b71
+// (containing top-level "everDispatched" alongside "unresolved" entries):
+// rebuilding freshApplication over that SQLite row fences Connect External with
+// 409 embedded_runtime_start_unresolved until a new Supervisor generation is
+// observed, and allows Connect External when "unresolved" is empty and the
+// Supervisor reports offline with disarmed recovery.
+func TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart(t *testing.T) {
+	const (
+		management           = externalAuthorityManagement
+		productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+	)
+
+	newExternalServer := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+management {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v8/management/config":
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/data/auth"},"access":{"api-keys":["ext-key-1"]}}`))
+			default:
+				_, _ = w.Write([]byte(`{}`))
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	postConnectExternalViaHTTP := func(t *testing.T, app *freshApplication, externalURL, attemptID string) *httptest.ResponseRecorder {
+		t.Helper()
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         cur.Operation.Identity,
+			ExpectedRevision: cur.Operation.Revision,
+			AttemptID:        attemptID,
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalURL,
+				ManagementKey: management,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		req.Header.Set("Content-Type", "application/json")
+		out := httptest.NewRecorder()
+		app.ServeHTTP(out, req)
+		return out
+	}
+
+	t.Run("legacy_ever_dispatched_with_unresolved_start_blocks_until_new_supervisor_generation", func(t *testing.T) {
+		externalServer := newExternalServer(t)
+		var supervisorGen atomic.Uint64
+		supervisorGen.Store(1)
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/runtime/status" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			gen := strconv.FormatUint(supervisorGen.Load(), 10)
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("legacy-ledger-token-1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app1 := newFreshApplication(opened1, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		rec, err := app1.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Insert exact legacy JSON shape written by a6ee4b71 (top-level everDispatched + unresolved map).
+		const legacyUnresolvedJSON = `{"everDispatched":true,"unresolved":{"start:legacy-start-01:runtime-01:1":{"key":"start:legacy-start-01:runtime-01:1","operationId":"legacy-start-01","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"createdAt":"2026-11-10T12:00:00Z"}}}`
+		if _, err := app1.runtimeJournal.db.ExecContext(
+			t.Context(),
+			`INSERT INTO settings(key, value, updated_at_ms) VALUES(?, ?, ?)`,
+			freshEmbeddedStartLedgerKey,
+			legacyUnresolvedJSON,
+			time.Now().UnixMilli(),
+		); err != nil {
+			t.Fatalf("insert legacy start ledger row: %v", err)
+		}
+		if err := opened1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Rebuild freshApplication over the same SQLite database.
+		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened2.Close() })
+		app2 := newFreshApplication(opened2, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+
+		blockedRes := postConnectExternalViaHTTP(t, app2, externalServer.URL, strings.Repeat("a", 32))
+		var blocker freshStrategyActionBlocker
+		if blockedRes.Code != http.StatusConflict || json.Unmarshal(blockedRes.Body.Bytes(), &blocker) != nil ||
+			blocker.Code != "embedded_runtime_start_unresolved" || blocker.Action == "" {
+			t.Fatalf("ConnectExternal with legacy unresolved Start = %d %s, want 409 embedded_runtime_start_unresolved", blockedRes.Code, blockedRes.Body.String())
+		}
+
+		// Advancing Supervisor to a new generation releases the legacy unresolved entry.
+		supervisorGen.Store(2)
+		okRes := postConnectExternalViaHTTP(t, app2, externalServer.URL, strings.Repeat("b", 32))
+		if okRes.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal after Supervisor generation 2 = %d %s, want 200", okRes.Code, okRes.Body.String())
+		}
+		after, err := app2.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Operation.Strategy.Strategy != bootstrap.ConnectExternal || after.Operation.Strategy.Stage != "committed" {
+			t.Fatalf("committed strategy = %+v, want committed connect_external", after.Operation.Strategy)
+		}
+	})
+
+	t.Run("legacy_ever_dispatched_with_empty_unresolved_commits_when_supervisor_offline_and_disarmed", func(t *testing.T) {
+		externalServer := newExternalServer(t)
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/runtime/status" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("legacy-ledger-token-2"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app1 := newFreshApplication(opened1, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		rec, err := app1.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		const legacySettledJSON = `{"everDispatched":true,"unresolved":{}}`
+		if _, err := app1.runtimeJournal.db.ExecContext(
+			t.Context(),
+			`INSERT INTO settings(key, value, updated_at_ms) VALUES(?, ?, ?)`,
+			freshEmbeddedStartLedgerKey,
+			legacySettledJSON,
+			time.Now().UnixMilli(),
+		); err != nil {
+			t.Fatalf("insert legacy settled start ledger row: %v", err)
+		}
+		if err := opened1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened2.Close() })
+		app2 := newFreshApplication(opened2, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+
+		okRes := postConnectExternalViaHTTP(t, app2, externalServer.URL, strings.Repeat("c", 32))
+		if okRes.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal with legacy everDispatched:true + empty unresolved = %d %s, want 200", okRes.Code, okRes.Body.String())
+		}
+		after, err := app2.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Operation.Strategy.Strategy != bootstrap.ConnectExternal || after.Operation.Strategy.Stage != "committed" {
+			t.Fatalf("committed strategy = %+v, want committed connect_external", after.Operation.Strategy)
+		}
+	})
 }

@@ -266,6 +266,7 @@ func freshRuntimeResolveOperation(
 }
 
 var errEmbeddedRuntimeDisabled = errors.New("CPA runtime client is not configured")
+var errEmbeddedStartLedgerUnavailable = errors.New("embedded start ledger is unavailable")
 
 type freshEmbeddedStartIntent struct {
 	Key               string                     `json:"key"`
@@ -616,7 +617,7 @@ func (a *freshApplication) beginEmbeddedStartIntent(
 	defer gate.ledgerMu.Unlock()
 	data, err := a.loadEmbeddedStartLedgerLocked(writeCtx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errEmbeddedStartLedgerUnavailable, err)
 	}
 	data.Unresolved[key] = freshEmbeddedStartIntent{
 		Key:               key,
@@ -628,7 +629,7 @@ func (a *freshApplication) beginEmbeddedStartIntent(
 		CreatedAt:         time.Now().UTC(),
 	}
 	if err := a.saveEmbeddedStartLedgerLocked(writeCtx, data); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errEmbeddedStartLedgerUnavailable, err)
 	}
 	return key, nil
 }
@@ -1674,7 +1675,19 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	outcome := reserved
 	outcome.UpdatedAt = time.Now().UTC()
 	conflictCode := runtimeMutationConflictCode(mutationErr)
+	preDispatchUnsupported := errors.Is(mutationErr, errEmbeddedRuntimeDisabled)
+	preDispatchUnavailable := errors.Is(mutationErr, errEmbeddedStartLedgerUnavailable)
 	switch {
+	case preDispatchUnsupported:
+		outcome.State = freshRuntimeStateFailed
+		outcome.FailureCode = "runtime_mutation_unsupported"
+	case preDispatchUnavailable:
+		// Persisting the write-ahead start ledger failed locally before any
+		// Supervisor RPC was dispatched. Mark the reserved journal row failed
+		// without adopting the desired lifecycle so the reconciler never starts
+		// an unrecorded runtime and a retry after store recovery is not blocked.
+		outcome.State = freshRuntimeStateFailed
+		outcome.FailureCode = "operation_journal_unavailable"
 	case conflictCode != "":
 		// The Supervisor rejected the mutation before any side effect. The entry
 		// becomes terminal and the desired lifecycle is never written, so the
@@ -1714,6 +1727,14 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	}
 	if desiredWriteFailed {
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "desired_lifecycle_unavailable")
+		return
+	}
+	if preDispatchUnsupported {
+		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
+		return
+	}
+	if preDispatchUnavailable {
+		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
 		return
 	}
 	if conflictCode != "" {
