@@ -241,6 +241,8 @@ input {
 
 .legacy-ownership-steps .code-block {
   margin-top: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .badge {

@@ -1127,6 +1127,92 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(traditional.desc).not.toBe(simplified.desc);
   });
 
+  const isTestInstance = (node: ReactTestInstance | string): node is ReactTestInstance =>
+    typeof node !== 'string';
+
+  const elementChildren = (node: ReactTestInstance): ReactTestInstance[] =>
+    node.children.filter(isTestInstance);
+
+  // Finds the 1.x ownership guidance card purely by landmarks, live role,
+  // heading/paragraph/button elements, and structural position rather than CSS
+  // class names so renaming styling classes cannot break or hide assertions.
+  const locateOwnershipGuidanceCard = (root: ReactTestInstance) => {
+    const statusRegion: ReactTestInstance[] = [];
+    const walkRole = (node: ReactTestInstance) => {
+      if (typeof node.type === 'string' && node.props?.role === 'status') {
+        statusRegion.push(node);
+        return;
+      }
+      elementChildren(node).forEach(walkRole);
+    };
+    walkRole(root);
+    expect(statusRegion).toHaveLength(1);
+    const [status] = statusRegion;
+    const [statusBody] = elementChildren(status);
+    const [statusTitle, statusDetail] = elementChildren(statusBody);
+
+    const [card] = root.findAll((node) => node.type === 'section');
+    expect(card.props['data-testid']).toBe('bootstrap-no-handoff');
+    const [header] = elementChildren(card);
+    const [stepTag] = elementChildren(header);
+    const [heading] = card.findAll((node) => node.type === 'h1');
+    const [intro] = card.findAll((node) => node.type === 'p');
+
+    const statusParent = status.parent;
+    if (!statusParent) {
+      throw new Error('status region missing parent container');
+    }
+    const bodyChildren = elementChildren(statusParent);
+    const options = bodyChildren[1];
+    const optionBlocks = elementChildren(options).map((option) => {
+      const [content] = elementChildren(option);
+      return elementChildren(content);
+    });
+    expect(optionBlocks).toHaveLength(2);
+    const [[upgradeTitle, upgradeDetail], [ownershipTitle, ownershipDetail]] = optionBlocks;
+
+    const recheck = bodyChildren.find((child) => child.type === 'button');
+    if (!recheck) {
+      throw new Error('recheck button missing from ownership card body');
+    }
+
+    const snapshot = (language: Language) => {
+      const blocks = {
+        tag: textOf(stepTag),
+        heading: textOf(heading),
+        intro: textOf(intro),
+        title: textOf(statusTitle),
+        detail: textOf(statusDetail),
+        upgradeTitle: textOf(upgradeTitle),
+        upgradeDetail: textOf(upgradeDetail),
+        ownershipTitle: textOf(ownershipTitle),
+        ownershipDetail: textOf(ownershipDetail),
+        recheck: textOf(recheck),
+      };
+      assertLabelIn(language, blocks.tag);
+      for (const block of [
+        blocks.heading,
+        blocks.intro,
+        blocks.title,
+        blocks.detail,
+        blocks.upgradeTitle,
+        blocks.upgradeDetail,
+        blocks.ownershipTitle,
+        blocks.ownershipDetail,
+        blocks.recheck,
+      ]) {
+        assertCopyIn(language, block);
+      }
+      expect(blocks.heading).not.toBe(blocks.intro);
+      expect(blocks.title).not.toBe(blocks.detail);
+      expect(blocks.upgradeTitle).not.toBe(blocks.ownershipTitle);
+      expect(blocks.upgradeDetail).not.toBe(blocks.ownershipDetail);
+      return blocks;
+    };
+
+    return { options, recheck, snapshot };
+  };
+
   it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
     'renders root-owned 1.x volume guidance in %s and transitions to Upgrade entry after recheck',
     async (locale) => {
@@ -1161,28 +1247,8 @@ describe('FreshBootstrapPage product preview workflow', () => {
         );
       });
 
-      const gate = findByTestId(renderer.root, 'bootstrap-no-handoff');
-      assertCardHeaderReads(locale, gate);
-
-      const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
-      expect(guidance.props['role']).toBe('status');
-      const [guidanceTitle] = blocksOf(guidance, 'alert-title');
-      const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
-      assertCopyIn(locale, guidanceTitle);
-      assertCopyIn(locale, guidanceDesc);
-      expect(guidanceDesc).not.toBe(guidanceTitle);
-
-      const instructions = findByTestId(renderer.root, 'legacy-ownership-instructions');
-      const stepTitles = blocksOf(instructions, 'alert-title');
-      const stepDescs = blocksOf(instructions, 'alert-desc');
-      expect(stepTitles).toHaveLength(2);
-      expect(stepDescs).toHaveLength(2);
-      for (const block of [...stepTitles, ...stepDescs]) {
-        assertCopyIn(locale, block);
-      }
-      expect(stepTitles[0]).not.toBe(stepTitles[1]);
-      expect(stepDescs[0]).not.toBe(stepDescs[1]);
-
+      const cardView = locateOwnershipGuidanceCard(renderer.root);
+      cardView.snapshot(locale);
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         '--entrypoint cpa-manager-plus'
       );
@@ -1201,17 +1267,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         `seakee/cpa-manager-plus:${__APP_VERSION__}`
       );
-      expect(textOf(instructions)).toContain('/data/runtime');
+      expect(textOf(cardView.options)).toContain('/data/runtime');
       expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
         0
       );
-      assertCopyIn(locale, textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery')));
       // The read-only card offers no Fresh write control in any language.
       expect(renderer.root.findAllByProps({ 'data-testid': 'admin-init-form' })).toHaveLength(0);
 
-      await act(async () =>
-        findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick()
-      );
+      await act(async () => cardView.recheck.props.onClick());
       expect(discovery).toHaveBeenCalledTimes(2);
       expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-auth-entry' })).toHaveLength(1);
       await act(async () => renderer.unmount());
@@ -1238,85 +1301,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
 
-    // The card is found the way a reader finds it: the page landmark, the one
-    // live status region, the card's heading and intro, the two numbered host
-    // options and the action that re-asks discovery. No style class is part of
-    // the contract, so renaming one cannot fail this test or hide a card.
-    const live = (role: string) => {
-      const out: ReactTestInstance[] = [];
-      const walk = (node: ReactTestInstance) => {
-        if (typeof node.type === 'string' && node.props?.role === role) {
-          out.push(node);
-          return;
-        }
-        node.children.forEach((child) => {
-          if (typeof child !== 'string') walk(child as ReactTestInstance);
-        });
-      };
-      walk(renderer.root);
-      return out;
-    };
-    const statusRegion = live('status');
-    expect(statusRegion).toHaveLength(1);
-    const [status] = statusRegion;
-    // A status region carries its own name and value as its first two blocks.
-    const statusBody = status.children[0] as ReactTestInstance;
-    const [statusTitle, statusDetail] = statusBody.children as ReactTestInstance[];
-
-    const [card] = renderer.root.findAll((node) => node.type === 'section');
-    expect(card.props['data-testid']).toBe('bootstrap-no-handoff');
-    const [heading] = card.findAll((node) => node.type === 'h1');
-    const [intro] = card.findAll((node) => node.type === 'p');
-
-    // The two numbered options are the next region in the card body; each names
-    // its option in one block and explains it in the next, both in the reader's
-    // language, so the assertions never depend on how the blocks are styled.
-    const options = (status.parent as ReactTestInstance).children[1] as ReactTestInstance;
-    const optionBlocks = options.children.map(
-      (option) =>
-        ((option as ReactTestInstance).children[0] as ReactTestInstance)
-          .children as ReactTestInstance[]
-    );
-    expect(optionBlocks).toHaveLength(2);
-    const [[upgradeTitle, upgradeDetail], [ownershipTitle, ownershipDetail]] = optionBlocks;
-
-    // The one action that re-asks discovery, taken from the card body.
-    const recheck = (status.parent as ReactTestInstance).children.find(
-      (child) => typeof child !== 'string' && (child as ReactTestInstance).type === 'button'
-    ) as ReactTestInstance;
-
-    // Each pass reads the same nodes again: a card that kept the strings it was
-    // fetched with re-renders nothing on a switch and fails the script check.
-    const snapshot = (language: Language) => {
-      const blocks = {
-        heading: textOf(heading),
-        intro: textOf(intro),
-        title: textOf(statusTitle),
-        detail: textOf(statusDetail),
-        upgradeTitle: textOf(upgradeTitle),
-        upgradeDetail: textOf(upgradeDetail),
-        ownershipTitle: textOf(ownershipTitle),
-        ownershipDetail: textOf(ownershipDetail),
-        recheck: textOf(recheck),
-      };
-      for (const block of [
-        blocks.heading,
-        blocks.intro,
-        blocks.title,
-        blocks.detail,
-        blocks.upgradeTitle,
-        blocks.upgradeDetail,
-        blocks.ownershipTitle,
-        blocks.ownershipDetail,
-        blocks.recheck,
-      ]) {
-        assertCopyIn(language, block);
-      }
-      expect(blocks.title).not.toBe(blocks.detail);
-      expect(blocks.upgradeTitle).not.toBe(blocks.ownershipTitle);
-      expect(blocks.upgradeDetail).not.toBe(blocks.ownershipDetail);
-      return blocks;
-    };
+    const { snapshot } = locateOwnershipGuidanceCard(renderer.root);
 
     const switcher = findByTestId(renderer.root, 'bootstrap-language');
     const switchTo = async (language: Language) => {

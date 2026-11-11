@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -192,6 +193,9 @@ var (
 // snapshot and before SQL classification finishes and returns. Production never
 // calls it.
 func SetAfterUnfenceableSnapshotOpenForTest(hook func(databasePath string)) func() {
+	if !testing.Testing() {
+		panic("SetAfterUnfenceableSnapshotOpenForTest called outside go test")
+	}
 	previous := afterUnfenceableSnapshotOpen
 	afterUnfenceableSnapshotOpen = hook
 	return func() {
