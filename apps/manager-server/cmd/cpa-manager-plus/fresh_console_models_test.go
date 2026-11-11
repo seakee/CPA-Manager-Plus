@@ -514,23 +514,6 @@ func (c *waitNotifyContext) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
-// rebindAfterGateLoadStore replaces the stored External management credential
-// immediately after externalConsoleModelList performs its in-gate store.Load,
-// exposing any mismatch if grant and outbound credential came from separate loads.
-type rebindAfterGateLoadStore struct {
-	freshstore.Store
-	loads  atomic.Int32
-	onLoad func(count int32)
-}
-
-func (s *rebindAfterGateLoadStore) Load(ctx context.Context) (freshstore.Record, error) {
-	record, err := s.Store.Load(context.WithoutCancel(ctx))
-	if err == nil && s.onLoad != nil {
-		s.onLoad(s.loads.Add(1))
-	}
-	return record, err
-}
-
 // TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate proves that
 // when an External CPA rejects the saved management credential (401 or 403),
 // externalConsoleModelList records the durable rejection while still holding
@@ -633,77 +616,164 @@ func TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate(t *testing.
 	}
 }
 
-// TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot proves that a
-// concurrent rebind occurring right after externalConsoleModelList loads the
-// Fresh record cannot split the grant digest from the credential sent upstream.
+// TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot proves without
+// internal Store.Load call-count assumptions that:
+//  1. A concurrent POST external/rebind occurring right as externalConsoleModelList
+//     resolves its in-gate target cannot split the grant digest from the
+//     credential sent upstream.
+//  2. A concurrent POST external/rebind occurring while the upstream CPA read
+//     is in flight leaves the newly rebound valid credential un-refused so the
+//     next model-list request succeeds with 200 OK.
 func TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot(t *testing.T) {
-	staleKey := strings.Repeat("1", 64)
-	reboundBadKey := strings.Repeat("2", 64)
-	var presented []string
-	var mu sync.Mutex
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Run("rebind right after gate snapshot resolution", func(t *testing.T) {
+		staleKey := strings.Repeat("1", 64)
+		reboundKey := strings.Repeat("2", 64)
+		rotatedAfterRebind := strings.Repeat("3", 64)
+		var activeKey atomic.Value
+		activeKey.Store(reboundKey)
+
+		var mu sync.Mutex
+		var modelConfigPresented []string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			switch r.URL.Path {
+			case "/v0/management/config":
+				if auth != "Bearer "+activeKey.Load().(string) {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("X-CPA-Version", "v8.0.13")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			case "/v8/management/config":
+				mu.Lock()
+				modelConfigPresented = append(modelConfigPresented, auth)
+				mu.Unlock()
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer upstream.Close()
+
+		app := newExternalApp(t, upstream.URL, staleKey)
+		baseSource := app.externalSource
+		var rebindOnce sync.Once
+		app.externalSource = func(ctx context.Context) (freshkeyapply.ExternalInstall, error) {
+			install, err := baseSource(ctx)
+			if err == nil {
+				rebindOnce.Do(func() {
+					rebindReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", strings.NewReader(rebindBody("", reboundKey)))
+					rebindReq.Header.Set("Content-Type", "application/json")
+					rebindReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+					rebindResp := httptest.NewRecorder()
+					app.canonicalAPI(rebindResp, rebindReq)
+					if rebindResp.Code != http.StatusOK {
+						t.Errorf("concurrent POST external/rebind = %d %s", rebindResp.Code, rebindResp.Body.String())
+					}
+					activeKey.Store(rotatedAfterRebind)
+				})
+			}
+			return install, err
+		}
+
+		resp := installationAPI(t, app, http.MethodGet, "cpamp/v1/models", strategyTestAdmin)
+		if resp.Code != http.StatusConflict || errorCode(t, resp) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("first model list = %d %s, want 409", resp.Code, resp.Body.String())
+		}
 		mu.Lock()
-		presented = append(presented, r.Header.Get("Authorization"))
+		gotPresented := append([]string(nil), modelConfigPresented...)
 		mu.Unlock()
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
-	}))
-	defer upstream.Close()
+		if len(gotPresented) != 1 || gotPresented[0] != "Bearer "+staleKey {
+			t.Fatalf("/v8/management/config Authorization = %v, want single [Bearer %s]", gotPresented, staleKey)
+		}
+		if app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("stale credential's 401 falsely marked the concurrently rebound credential refused")
+		}
+	})
 
-	app := newExternalApp(t, upstream.URL, staleKey)
-	baseStore := app.store
-	rebinder, ok := baseStore.(freshstore.ConnectionRebinder)
-	if !ok {
-		t.Fatal("fixture store does not implement ConnectionRebinder")
-	}
-	protectedRebound, err := app.protector.ProtectString(reboundBadKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Run("rebind while upstream config read is in flight", func(t *testing.T) {
+		staleKey := strings.Repeat("4", 64)
+		reboundKey := strings.Repeat("5", 64)
+		inFlight := make(chan struct{})
+		releaseInFlight := make(chan struct{})
+		var inFlightOnce sync.Once
 
-	// Load #1 is canonicalAPI's auth/completion check; Load #2 is
-	// consoleModelList's strategy dispatch; Load #3 is
-	// externalConsoleModelList's in-gate snapshot. Advancing the stored
-	// connection right after Load #3 simulates a concurrent rebind before any
-	// separate externalSource Load could run.
-	wrapper := &rebindAfterGateLoadStore{
-		Store: baseStore,
-		onLoad: func(count int32) {
-			if count != 3 {
-				return
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			switch r.URL.Path {
+			case "/v0/management/config":
+				if auth != "Bearer "+reboundKey {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("X-CPA-Version", "v8.0.13")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			case "/v8/management/config":
+				if auth == "Bearer "+staleKey {
+					inFlightOnce.Do(func() {
+						close(inFlight)
+						<-releaseInFlight
+					})
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+					return
+				}
+				if auth != "Bearer "+reboundKey {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"access":{"api-keys":["` + consoleModelsClientKey + `"]},"providers":{}}`))
+			case "/v1/models":
+				if auth != "Bearer "+consoleModelsClientKey {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"rebound-model","object":"model"}]}`))
+			default:
+				http.NotFound(w, r)
 			}
-			rec, loadErr := baseStore.Load(context.Background())
-			if loadErr != nil {
-				t.Errorf("load for rebind: %v", loadErr)
-				return
-			}
-			if _, rebindErr := rebinder.RebindConnection(
-				context.Background(),
-				rec.Operation.Identity,
-				rec.Operation.Revision,
-				model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protectedRebound},
-			); rebindErr != nil {
-				t.Errorf("rebind connection: %v", rebindErr)
-			}
-		},
-	}
-	app.store = wrapper
-	app.externalSource = externalInstallSource(app.store, app.protector)
+		}))
+		defer upstream.Close()
 
-	resp := installationAPI(t, app, http.MethodGet, "cpamp/v1/models", strategyTestAdmin)
-	if resp.Code != http.StatusConflict || errorCode(t, resp) != freshconfig.ReasonManagementRejected {
-		t.Fatalf("first model list = %d %s, want 409", resp.Code, resp.Body.String())
-	}
+		app := newExternalApp(t, upstream.URL, staleKey)
+		firstResp := httptest.NewRecorder()
+		firstDone := make(chan struct{})
+		go func() {
+			defer close(firstDone)
+			req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil)
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			app.canonicalAPI(firstResp, req)
+		}()
 
-	mu.Lock()
-	gotPresented := append([]string(nil), presented...)
-	mu.Unlock()
-	if len(gotPresented) != 1 || gotPresented[0] != "Bearer "+staleKey {
-		t.Fatalf("presented headers = %v, want single [Bearer %s]", gotPresented, staleKey)
-	}
-	// Because staleKey was presented and recorded (not reboundBadKey), the
-	// newly stored reboundBadKey has not been falsely pre-marked refused.
-	if app.externalReadGrant(t.Context()).Refused {
-		t.Fatal("stale credential's 401 falsely marked the concurrently rebound credential refused")
-	}
+		select {
+		case <-inFlight:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first model-list request never entered upstream /v8/management/config")
+		}
+
+		rebindReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", strings.NewReader(rebindBody("", reboundKey)))
+		rebindReq.Header.Set("Content-Type", "application/json")
+		rebindReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		rebindResp := httptest.NewRecorder()
+		app.canonicalAPI(rebindResp, rebindReq)
+		if rebindResp.Code != http.StatusOK {
+			t.Fatalf("POST external/rebind = %d %s", rebindResp.Code, rebindResp.Body.String())
+		}
+
+		close(releaseInFlight)
+		<-firstDone
+		if firstResp.Code != http.StatusConflict || errorCode(t, firstResp) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("stale model list = %d %s, want 409", firstResp.Code, firstResp.Body.String())
+		}
+
+		nextResp := installationAPI(t, app, http.MethodGet, "cpamp/v1/models", strategyTestAdmin)
+		if nextResp.Code != http.StatusOK || !strings.Contains(nextResp.Body.String(), `"rebound-model"`) {
+			t.Fatalf("follow-up model list on rebound credential = %d %s, want 200 rebound-model", nextResp.Code, nextResp.Body.String())
+		}
+	})
 }

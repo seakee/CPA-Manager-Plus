@@ -221,21 +221,20 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		gate.release()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
-	rejectExternalCredential := func(rejectErr error) usageStartOutcome {
-		a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
-		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
-	}
 	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
 	defer hold.finish()
+	rejectExternalCredential := func(rejectErr error) usageStartOutcome {
+		a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
+		hold.finish()
+		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+	}
 	// Collection is only worth arming on a CPA this Manager can prove it manages:
 	// the version contract decides the enable write and every later write, so a
 	// CPA that does not serve it starts nothing. The refusal is the same typed
 	// code the write surfaces answer with, never an unexplained empty window.
 	switch report, err := cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey); {
 	case errors.Is(err, cpa.ErrManagementRejected):
-		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
-		hold.finish()
-		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
+		return rejectExternalCredential(err)
 	case err != nil:
 		hold.finish()
 		log.Printf("Fresh external usage version unavailable: %v", err)
@@ -244,13 +243,15 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		hold.finish()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonVersionUnsupported)
 	}
-	hold.finish()
-	// switch that decides whether anything has to be written at all.
-	enabled, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
+	// Every authenticated management request in the startup sequence stays inside
+	// the bounded credential hold and uses the same snapshot grant so a post-200
+	// rotation records its refusal before any queued caller can re-present the key.
+	enabled, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
 	switch {
 	case errors.Is(err, cpa.ErrManagementRejected):
 		return rejectExternalCredential(err)
 	case err != nil:
+		hold.finish()
 		log.Printf("Fresh external usage statistics unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	case !enabled:
@@ -260,29 +261,32 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		// is consumed before the write so a failed enable cannot silently keep
 		// an approval alive for the next replay.
 		if !a.externalUsageConfirmed.CompareAndSwap(true, false) {
+			hold.finish()
 			// Without the confirmation nothing is written to the user's CPA and
 			// nothing is collected, so the window stays unstarted on purpose.
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
-		if err = cpa.SetExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey, true); err != nil {
+		if err = cpa.SetExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey, true); err != nil {
 			if errors.Is(err, cpa.ErrManagementRejected) {
 				return rejectExternalCredential(err)
 			}
+			hold.finish()
 			log.Printf("Fresh external usage statistics enable unavailable: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 		}
 		// The write is proven, never assumed: an unproven switch would let the
 		// Collector run against a CPA that records nothing.
-		back, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
+		back, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
 		switch {
 		case errors.Is(err, cpa.ErrManagementRejected):
 			return rejectExternalCredential(err)
 		case err != nil || !back:
+			hold.finish()
 			log.Printf("Fresh external usage statistics enable was not observed: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
 	}
-	// Staged keys are attributed to the connection identity, never to a raw
+	hold.finish()
 	// address and never to the managed destination: another CPA is another
 	// identity, so a rebind can never inherit this history.
 	if _, err := a.keyRepo.BindFreshKeySources(ctx, install.Identity, time.Now().UnixMilli()); err != nil {
@@ -471,31 +475,16 @@ type externalUsageState struct {
 	BlockedReason     string              `json:"blockedReason,omitempty"`
 }
 
+var errExternalCredentialWaitCancelled = errors.New("external credential gate wait cancelled")
+
 func (a *freshApplication) externalUsageState(ctx context.Context) (externalUsageState, error) {
-	// The CPA has already refused this credential, so this read would be another
-	// failed authentication against an address CPA is about to ban. The typed
-	// blocker is answered locally until a rebind or a re-verify proves the key
-	// again. The grant resolves the committed source itself, so it runs first:
-	// resolving the install above it only to discard it would be work this read
-	// must not do once the credential is refused.
-	grant := a.externalReadGrant(ctx)
-	if grant.Refused {
-		return externalUsageState{}, externalReadRefusedError()
-	}
-	install, err := a.externalSource(ctx)
+	report, enabled, err := a.fetchExternalUsageUpstream(ctx)
 	if err != nil {
 		return externalUsageState{}, err
 	}
-	report, err := cpa.ObserveExternalVersion(ctx, install.BaseURL, install.ManagementKey)
-	if err != nil {
-		a.noteExternalRejection(ctx, grant, err)
-		return externalUsageState{}, err
-	}
-	enabled, err := cpa.FetchExternalUsageStatistics(ctx, install.BaseURL, install.ManagementKey)
-	if err != nil {
-		a.noteExternalRejection(ctx, grant, err)
-		return externalUsageState{}, err
-	}
+	// Assemble local Collector status strictly after legacyCredentialGate is
+	// released: usageCollectionStarted acquires usageStartMu, and startup paths
+	// lock usageStartMu -> legacyCredentialGate.
 	return externalUsageState{
 		StatisticsEnabled: enabled,
 		Collector:         string(a.collectionPhase()),
@@ -505,18 +494,74 @@ func (a *freshApplication) externalUsageState(ctx context.Context) (externalUsag
 	}, nil
 }
 
+func (a *freshApplication) fetchExternalUsageUpstream(ctx context.Context) (cpa.ExternalVersionReport, bool, error) {
+	if a == nil || a.externalSource == nil {
+		return cpa.ExternalVersionReport{}, false, freshkeyapply.ErrUnavailable
+	}
+	gate := &a.legacyCredentialGate
+	if !gate.acquire(ctx) {
+		return cpa.ExternalVersionReport{}, false, errExternalCredentialWaitCancelled
+	}
+	var (
+		grant   externalReadGrant
+		install freshkeyapply.ExternalInstall
+		err     error
+	)
+	if a.store != nil {
+		var record freshstore.Record
+		record, err = a.store.Load(ctx)
+		if err != nil {
+			gate.release()
+			return cpa.ExternalVersionReport{}, false, err
+		}
+		grant, install, err = a.externalReadTargetFor(ctx, record)
+	} else {
+		install, err = a.externalSource(ctx)
+	}
+	if err != nil {
+		gate.release()
+		return cpa.ExternalVersionReport{}, false, err
+	}
+	if grant.Refused {
+		gate.release()
+		return cpa.ExternalVersionReport{}, false, externalReadRefusedError()
+	}
+	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	defer hold.finish()
+	report, err := cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey)
+	if err != nil {
+		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		hold.finish()
+		return cpa.ExternalVersionReport{}, false, err
+	}
+	enabled, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
+	if err != nil {
+		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		hold.finish()
+		return cpa.ExternalVersionReport{}, false, err
+	}
+	hold.finish()
+	return report, enabled, nil
+}
+
 // writeExternalUsageError maps an External authority failure to its typed wire
 // answer. A refused credential is the rebind blocker, distinct from an
 // unavailable authority; neither carries any text from the CPA.
 func (a *freshApplication) writeExternalUsageError(w http.ResponseWriter, err error) {
-	code := usageStartReasonExternalUnavailable
-	status := http.StatusServiceUnavailable
-	if errors.Is(err, cpa.ErrManagementRejected) {
-		status, code = http.StatusConflict, freshconfig.ReasonManagementRejected
+	switch {
+	case errors.Is(err, errExternalCredentialWaitCancelled):
+		writeExternalCredentialWaitCancelled(w)
+		return
+	case errors.Is(err, cpa.ErrManagementClientForbidden):
+		writeExternalManagementForbidden(w)
+		return
+	case errors.Is(err, cpa.ErrManagementRejected):
+		writeExternalManagementRejected(w)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusServiceUnavailable)
 	writeFreshJSON(w, struct {
 		Code string `json:"code"`
-	}{code})
+	}{usageStartReasonExternalUnavailable})
 }

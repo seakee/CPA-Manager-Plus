@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1349,18 +1355,61 @@ func TestUsageMonitoringSwitchConcurrentStartAndDisableStopsCollector(t *testing
 	})
 }
 
-// TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut proves
-// that USAGE_RESP_TLS_SKIP_VERIFY=true (cfg.TLSSkipVerify=true) stays active on
-// Fresh-seeded skeleton manager_config_v1 rows (both before and across narrow
-// PATCH toggles, as well as on ConnectExternal) until a whole-document PUT
-// explicitly persists Collector transport settings.
-func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *testing.T) {
-	hostCtx, stopHost := context.WithCancel(t.Context())
-	defer stopHost()
+type bufferedTLSConn struct {
+	net.Conn
+	r *bufio.Reader
+}
 
-	key := strings.Repeat("d", 64)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+key {
+func (c *bufferedTLSConn) Read(p []byte) (int, error) {
+	return c.r.Read(p)
+}
+
+type channelListener struct {
+	addr  net.Addr
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (l *channelListener) Accept() (net.Conn, error) {
+	select {
+	case conn, ok := <-l.conns:
+		if !ok {
+			return nil, net.ErrClosed
+		}
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *channelListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *channelListener) Addr() net.Addr {
+	return l.addr
+}
+
+type selfSignedTLSCPAServer struct {
+	url                string
+	respAuthed         chan struct{}
+	handshakeRejected  chan string
+	respAuthCount      atomic.Int32
+	handshakeRejectCnt atomic.Int32
+}
+
+// startSelfSignedTLSCPAServer starts a single-port self-signed TLS endpoint
+// multiplexing CPA management HTTP and RESP queue polling (matching CPA's real
+// listener). HTTP management clients trust the cert via http.DefaultTransport
+// for this test, whereas resp.Dial constructs its own tls.Config with RootCAs:
+// nil and therefore succeeds iff RuntimeConfig.TLSSkipVerify is true.
+func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTLSCPAServer {
+	t.Helper()
+
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+expectedKey {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -1368,26 +1417,190 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 		case "/v0/management/config":
 			w.Header().Set("X-CPA-Version", "v8.0.13")
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true,"redis-usage-queue-retention-seconds":60}`))
 		case "/v0/management/usage-statistics-enabled":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case "/v0/management/usage-queue":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte("[]"))
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true,"status":"ok"}`))
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	defer server.Close()
+	})
 
-	normalizedURL, err := cpa.NormalizeV8BaseURL(server.URL)
+	certHelper := httptest.NewTLSServer(httpHandler)
+	tlsCerts := certHelper.TLS.Certificates
+	leafCert := certHelper.Certificate()
+	certHelper.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(leafCert)
+	defaultTransport := http.DefaultTransport.(*http.Transport)
+	prevTLSClientConfig := defaultTransport.TLSClientConfig
+	defaultTransport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	defaultTransport.CloseIdleConnections()
+	t.Cleanup(func() {
+		defaultTransport.TLSClientConfig = prevTLSClientConfig
+		defaultTransport.CloseIdleConnections()
+	})
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: tlsCerts})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := &selfSignedTLSCPAServer{
+		url:               "https://" + ln.Addr().String(),
+		respAuthed:        make(chan struct{}, 16),
+		handshakeRejected: make(chan string, 16),
+	}
+	httpLn := &channelListener{
+		addr:  ln.Addr(),
+		conns: make(chan net.Conn, 32),
+		done:  make(chan struct{}),
+	}
+	httpSrv := &http.Server{Handler: httpHandler}
+	go func() { _ = httpSrv.Serve(httpLn) }()
+
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = httpLn.Close()
+		_ = httpSrv.Close()
+	})
+
+	go func() {
+		for {
+			rawConn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				tlsConn := conn.(*tls.Conn)
+				_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+				if hsErr := tlsConn.Handshake(); hsErr != nil {
+					s.handshakeRejectCnt.Add(1)
+					select {
+					case s.handshakeRejected <- hsErr.Error():
+					default:
+					}
+					_ = tlsConn.Close()
+					return
+				}
+				_ = tlsConn.SetDeadline(time.Time{})
+				br := bufio.NewReader(tlsConn)
+				first, peekErr := br.Peek(1)
+				if peekErr != nil {
+					_ = tlsConn.Close()
+					return
+				}
+				wrapped := &bufferedTLSConn{Conn: tlsConn, r: br}
+				if first[0] == '*' {
+					serveTestTLSResp(wrapped, br, expectedKey, s)
+					return
+				}
+				select {
+				case httpLn.conns <- wrapped:
+				case <-httpLn.done:
+					_ = wrapped.Close()
+				}
+			}(rawConn)
+		}
+	}()
+	return s
+}
+
+func serveTestTLSResp(conn net.Conn, r *bufio.Reader, expectedKey string, s *selfSignedTLSCPAServer) {
+	defer conn.Close()
+	for {
+		args, err := readTestRespCommand(r)
+		if err != nil || len(args) == 0 {
+			return
+		}
+		switch strings.ToUpper(args[0]) {
+		case "AUTH":
+			keyArg := args[len(args)-1]
+			if keyArg != expectedKey {
+				_, _ = io.WriteString(conn, "-WRONGPASS invalid management key\r\n")
+				return
+			}
+			s.respAuthCount.Add(1)
+			select {
+			case s.respAuthed <- struct{}{}:
+			default:
+			}
+			_, _ = io.WriteString(conn, "+OK\r\n")
+		case "RPOP", "LPOP":
+			_, _ = io.WriteString(conn, "*-1\r\n")
+		default:
+			_, _ = io.WriteString(conn, "-ERR unsupported command\r\n")
+		}
+	}
+}
+
+func readTestRespCommand(r *bufio.Reader) ([]string, error) {
+	header, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	header = strings.TrimSuffix(strings.TrimSuffix(header, "\n"), "\r")
+	if !strings.HasPrefix(header, "*") {
+		return nil, fmt.Errorf("unexpected RESP header %q", header)
+	}
+	n, err := strconv.Atoi(header[1:])
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, n)
+	for range n {
+		sizeLine, err := r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		sizeLine = strings.TrimSuffix(strings.TrimSuffix(sizeLine, "\n"), "\r")
+		size, err := strconv.Atoi(strings.TrimPrefix(sizeLine, "$"))
+		if err != nil {
+			return nil, err
+		}
+		buf := make([]byte, size+2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		out = append(out, string(buf[:size]))
+	}
+	return out, nil
+}
+
+func drainChan[T any](ch chan T) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut proves
+// at the real TLS RESP transport boundary (not just config struct mirrors) that
+// USAGE_RESP_TLS_SKIP_VERIFY=true (cfg.TLSSkipVerify=true) allows the Collector
+// to complete TLS handshakes and authenticate against a self-signed TLS CPA on
+// Fresh-seeded skeleton manager_config_v1 rows (across startup, narrow PATCH
+// toggles, and ConnectExternal), whereas an explicit whole-document PUT setting
+// tlsSkipVerify=false reloads the Collector and causes TLS certificate
+// verification to reject the self-signed endpoint.
+func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	key := strings.Repeat("d", 64)
+	tlsCPA := startSelfSignedTLSCPAServer(t, key)
+
+	normalizedURL, err := cpa.NormalizeV8BaseURL(tlsCPA.url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{
 		CPAUpstreamURL: normalizedURL,
-		CollectorMode:  "http",
+		CollectorMode:  "resp",
+		PollInterval:   40 * time.Millisecond,
 		TLSSkipVerify:  true,
 	})
 	protectedKey, err := opened.Protector.ProtectString(key)
@@ -1426,61 +1639,88 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	}
 	app.managedSource = managedInstallSource(app.store, opened.Protector, normalizedURL)
 
-	// 1. Before any whole-document PUT, the freshstore-seeded skeleton row must
-	// not clobber cfg.TLSSkipVerify=true, even across narrow PATCH toggles.
-	app.startUsageCollection(completed.Operation)
-	activeCfg, active := app.legacyCollector.ActiveRuntimeConfig()
-	if !active || !activeCfg.TLSSkipVerify {
-		t.Fatalf("startup ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true from process config", activeCfg, active)
+	awaitTLSRespAccepted := func(step string) {
+		t.Helper()
+		select {
+		case <-tlsCPA.respAuthed:
+		case hsErr := <-tlsCPA.handshakeRejected:
+			t.Fatalf("%s rejected self-signed TLS certificate despite TLSSkipVerify=true: %s", step, hsErr)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not establish authenticated TLS RESP session (status=%+v)", step, app.legacyCollector.Status())
+		}
 	}
+
+	// 1. Startup on freshstore-seeded skeleton row establishes real TLS RESP
+	// session using process TLSSkipVerify=true, and narrow PATCH Off->On keeps it.
+	drainChan(tlsCPA.respAuthed)
+	drainChan(tlsCPA.handshakeRejected)
+	app.startUsageCollection(completed.Operation)
+	awaitTLSRespAccepted("startup on skeleton row")
+
 	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PATCH false = %d %s", resp.Code, resp.Body.String())
 	}
+	drainChan(tlsCPA.respAuthed)
+	drainChan(tlsCPA.handshakeRejected)
 	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PATCH true = %d %s", resp.Code, resp.Body.String())
 	}
-	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
-	if !active || !activeCfg.TLSSkipVerify {
-		t.Fatalf("after narrow PATCH toggle ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true", activeCfg, active)
-	}
+	awaitTLSRespAccepted("narrow PATCH re-enable")
 
-	// 2. Whole-document PUT preserving tlsSkipVerify=true keeps the Collector
-	// running without a restart.
+	// 2. Whole-document PUT preserving tlsSkipVerify=true keeps the live TLS RESP
+	// session without restarting the Collector.
 	startsBeforePut := app.legacyCollector.StartCount()
-	putTrueBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL)
+	putTrueBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"resp","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":40,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL)
 	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putTrueBody, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PUT tlsSkipVerify=true = %d %s", resp.Code, resp.Body.String())
 	}
 	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 0 {
 		t.Fatalf("PUT keeping tlsSkipVerify=true restarted Collector: StartCount delta = %d, want 0", got)
 	}
-	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
-	if !active || !activeCfg.TLSSkipVerify {
-		t.Fatalf("after PUT tlsSkipVerify=true ActiveRuntimeConfig = %+v (active=%v)", activeCfg, active)
-	}
 
-	// 3. Whole-document PUT setting tlsSkipVerify=false overrides the process
-	// default and reloads the running Collector with TLSSkipVerify=false.
-	putFalseBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"http","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":500,"queryLimit":25000,"tlsSkipVerify":false}}}`, normalizedURL)
+	// 3. Whole-document PUT setting tlsSkipVerify=false reloads the Collector,
+	// which now rejects the self-signed certificate during the real TLS handshake.
+	drainChan(tlsCPA.respAuthed)
+	drainChan(tlsCPA.handshakeRejected)
+	authsBeforePutFalse := tlsCPA.respAuthCount.Load()
+	putFalseBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"resp","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":40,"queryLimit":25000,"tlsSkipVerify":false}}}`, normalizedURL)
 	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putFalseBody, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PUT tlsSkipVerify=false = %d %s", resp.Code, resp.Body.String())
 	}
 	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 1 {
 		t.Fatalf("PUT setting tlsSkipVerify=false StartCount delta = %d, want 1", got)
 	}
-	activeCfg, active = app.legacyCollector.ActiveRuntimeConfig()
-	if !active || activeCfg.TLSSkipVerify {
-		t.Fatalf("after PUT tlsSkipVerify=false ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=false", activeCfg, active)
+	select {
+	case <-tlsCPA.handshakeRejected:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Collector did not reject self-signed TLS certificate after PUT tlsSkipVerify=false (status=%+v)", app.legacyCollector.Status())
+	}
+	if got := tlsCPA.respAuthCount.Load() - authsBeforePutFalse; got != 0 {
+		t.Fatalf("Collector authenticated %d RESP sessions despite tlsSkipVerify=false, want 0", got)
 	}
 
-	// 4. ConnectExternal (where whole-document PUT is blocked) also honours
-	// cfg.TLSSkipVerify=true on its freshstore-seeded skeleton row.
-	extHarness := newExternalUsageHarness(t)
-	extHarness.app.cfg.TLSSkipVerify = true
-	extHarness.cpa.enabled.Store(true)
-	extHarness.app.startUsageCollection(extHarness.operation(t))
-	extCfg, extActive := extHarness.app.legacyCollector.ActiveRuntimeConfig()
-	if !extActive || !extCfg.TLSSkipVerify {
-		t.Fatalf("ConnectExternal ActiveRuntimeConfig = %+v (active=%v), want TLSSkipVerify=true", extCfg, extActive)
+	// 4. Stop Managed collector and prove ConnectExternal on a freshstore-seeded
+	// skeleton row also establishes a real TLS RESP session when cfg.TLSSkipVerify=true.
+	_ = gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+	extApp := newExternalApp(t, normalizedURL, key)
+	extHostCtx, stopExtHost := context.WithCancel(t.Context())
+	defer stopExtHost()
+	extApp.runCtx = extHostCtx
+	extApp.cfg.CollectorMode = "resp"
+	extApp.cfg.PollInterval = 40 * time.Millisecond
+	extApp.cfg.TLSSkipVerify = true
+	drainChan(tlsCPA.respAuthed)
+	drainChan(tlsCPA.handshakeRejected)
+	extRecord, err := extApp.store.Load(extHostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extApp.startUsageCollection(extRecord.Operation)
+	select {
+	case <-tlsCPA.respAuthed:
+	case hsErr := <-tlsCPA.handshakeRejected:
+		t.Fatalf("ConnectExternal rejected self-signed TLS certificate despite TLSSkipVerify=true: %s", hsErr)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("ConnectExternal did not establish authenticated TLS RESP session (status=%+v)", extApp.legacyCollector.Status())
 	}
 }
