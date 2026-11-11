@@ -246,10 +246,17 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		if err != nil {
 			return LegacyDiscoveryNone
 		}
+		closed := false
+		defer func() {
+			if !closed {
+				_ = snapshot.Close()
+			}
+		}()
 		if afterUnfenceableSnapshotOpen != nil {
 			afterUnfenceableSnapshotOpen(databasePath)
 		}
 		verdict = classifyUnfenceableDatabase(ctx, snapshot.DB(), true)
+		closed = true
 		if closeErr := snapshot.Close(); closeErr != nil || ctx.Err() != nil {
 			return LegacyDiscoveryNone
 		}
