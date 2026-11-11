@@ -209,7 +209,9 @@
   margin-bottom: 2px;
 
   svg {
-    opacity: 0.5;
+    /* Glyph tier: 0.5 alpha of the primary text tone was 2.71:1; full strength
+       is 10.98:1 on white and still reads secondary next to the 15px label. */
+    color: var(--text-quaternary);
     flex-shrink: 0;
   }
 }

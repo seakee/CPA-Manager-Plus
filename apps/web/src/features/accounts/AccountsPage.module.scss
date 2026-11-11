@@ -33,7 +33,7 @@
 .accountDisplayButtonActive:global(.btn.btn-sm) {
   border-color: color-mix(in srgb, var(--primary-color) 48%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .metricsSection {
@@ -471,8 +471,85 @@
   }
 
   &.accountGridCardDisabled {
-    opacity: 0.76;
+    /* The card is still read for its state, so it is dimmed through opaque
+       surface/text tiers instead of an alpha on the whole card: 0.85 over the
+       card surface composited the muted note placeholder to 4.49:1 in the
+       light theme, below AA. Only non-text marks keep alpha, and they sit on
+       the composited card surface, so the maths stays flat. */
     background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
+    border-color: color-mix(in srgb, var(--border-color) 70%, transparent);
+    box-shadow: none;
+
+    /* Selection still has to read on a disabled card, so the selected and
+       bulk-selected feedback is restated at a specificity above both this
+       block and the later single-class `.accountCardSelected` rules. */
+    &.accountCardSelected {
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 1px var(--primary-color);
+    }
+
+    &.accountCardBulkSelected {
+      border-color: var(--primary-color);
+      background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+      box-shadow: inset 3px 0 0 var(--primary-color);
+    }
+
+    .accountProviderLogo,
+    .accountGridCardNoteIcon,
+    .accountGridCardRecentStatusIcon,
+    .metricDot {
+      opacity: 0.6;
+    }
+
+    .accountIdentityTitle,
+    .accountCardFile,
+    .accountGridCardNoteRow,
+    .accountGridCardNote,
+    .accountGridCardNotePlaceholder,
+    .accountGridCardNoteRow .accountGridCardNoteText,
+    .accountGridCardRecentStatusMessageText,
+    .quotaEmptyState,
+    .quotaWindowResetTime {
+      /* specificity 0,3,0 — the same as the enabled card's empty-row and
+         hover rules — so the later definitions below also win by order. */
+      color: var(--text-secondary);
+    }
+
+    .accountGridCardRecentStatusMessageLabel,
+    .quotaWindowLabel,
+    .quotaWindowPercentPrefix,
+    .accountGridCardNoteRowEmpty .accountGridCardNotePlaceholder,
+    .accountGridCardNoteRowEmpty .accountGridCardNoteText,
+    .accountGridCardNoteRowEmpty .accountGridCardNoteIcon {
+      color: var(--text-tertiary);
+    }
+
+    .accountGridCardNoteRowEmpty,
+    .accountGridCardNoteRow.accountGridCardNoteRowEmpty,
+    .accountGridCardNoteRow.accountGridCardNoteReadOnly.accountGridCardNoteRowEmpty {
+      /* the empty row is an interactive affordance: its copy stays a read tier */
+      color: var(--text-tertiary);
+    }
+
+    .accountGridCardNoteRow:hover,
+    .accountGridCardNoteRow:focus-visible,
+    .accountGridCardNoteRowEmpty:hover,
+    .accountGridCardNoteReadOnly:hover {
+      /* hovering the note never swaps its copy to the primary accent colour
+         on a dimmed card; the background tint alone carries the affordance */
+      color: var(--text-secondary);
+    }
+
+    .accountGridCardNoteRow:hover .accountGridCardNoteIcon,
+    .accountGridCardNoteReadOnly:hover .accountGridCardNoteIcon {
+      color: var(--text-secondary);
+      opacity: 0.6;
+    }
+
+    .accountGridCardNoteRow:hover .accountGridCardNotePlaceholder,
+    .accountGridCardNotePlaceholder {
+      color: var(--text-tertiary);
+    }
   }
 }
 
@@ -528,7 +605,7 @@
   &:hover,
   &:focus-visible {
     background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus-visible {
@@ -538,12 +615,12 @@
 }
 
 .accountPinButtonActive {
-  color: var(--primary-color);
+  color: var(--primary-text);
   opacity: 1;
 
   &:hover {
     background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -558,7 +635,7 @@
   .accountCard:focus-within,
   .accountGridCard:focus-within {
     .accountPinButton:not(.accountPinButtonActive) {
-      opacity: 0.55;
+      opacity: 0.75;
 
       &:hover {
         opacity: 1;
@@ -632,7 +709,7 @@
     &:hover:not(:disabled) {
       border-color: color-mix(in srgb, var(--primary-color) 40%, var(--border-color));
       background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
-      color: var(--primary-color);
+      color: var(--primary-text);
     }
   }
 
@@ -656,17 +733,19 @@
   line-height: 1;
   white-space: nowrap;
   background: color-mix(in srgb, var(--primary-color) 9%, var(--surface-subtle));
-  color: var(--primary-color);
+  color: var(--primary-text);
   border: 1px solid color-mix(in srgb, var(--primary-color) 18%, transparent);
 }
 
 .accountPlanBadgeSep {
-  opacity: 0.85;
+  /* Decorative dot only (the remaining-days copy is a sibling): it takes the
+     recessive glyph tier, so the label next to it stays un-dimmed. */
+  color: var(--text-tertiary);
   margin: 0 1px;
 }
 
 .accountPlanBadgeDaysNormal {
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .accountPlanBadgeDaysWarning {
@@ -692,7 +771,7 @@
   white-space: nowrap;
   border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
   cursor: pointer;
   user-select: none;
   transition:
@@ -736,7 +815,7 @@
   .accountResetCreditsLabel {
     font-size: 10.5px;
     font-weight: 600;
-    opacity: 0.88;
+    color: var(--text-secondary);
     line-height: 1;
   }
 }
@@ -764,22 +843,24 @@
 
   &:hover {
     background: color-mix(in srgb, var(--primary-color) 8%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
 
     .accountGridCardNoteIcon {
-      color: var(--primary-color);
-      opacity: 1;
+      color: var(--primary-text);
     }
 
     .accountGridCardNotePlaceholder {
-      color: var(--primary-color);
-      opacity: 0.85;
+      color: var(--primary-text);
     }
   }
   &.accountGridCardNoteRowEmpty {
-    opacity: 0.6;
+    /* The empty row is an interactive affordance, so its copy stays a measured
+       text tier (muted 6.44:1 on white); alpha dimming put it at 2.88:1. It is
+       set after the shared icon/placeholder opacity so it wins on specificity. */
+    color: var(--text-tertiary);
 
-    &:hover {
+    .accountGridCardNoteIcon,
+    .accountGridCardNotePlaceholder {
       opacity: 1;
     }
   }
@@ -793,27 +874,22 @@
 
       .accountGridCardNoteIcon {
         color: var(--text-secondary);
-        opacity: 0.65;
+        opacity: 1;
       }
 
       .accountGridCardNotePlaceholder {
         color: var(--text-secondary);
-        opacity: 1;
       }
     }
 
     &.accountGridCardNoteRowEmpty {
-      opacity: 0.6;
-
-      &:hover {
-        opacity: 0.6;
-      }
+      color: var(--text-tertiary);
     }
   }
 
   .accountGridCardNoteIcon {
     flex-shrink: 0;
-    opacity: 0.65;
+    opacity: 0.75;
     color: var(--text-secondary);
     transition: opacity 0.14s ease, color 0.14s ease;
   }
@@ -828,9 +904,8 @@
 
   .accountGridCardNotePlaceholder {
     font-style: normal;
-    opacity: 0.7;
     user-select: none;
-    transition: color 0.14s ease, opacity 0.14s ease;
+    transition: color 0.14s ease;
   }
 }
 
@@ -848,7 +923,7 @@
   .accountGridCardNoteIcon {
     flex-shrink: 0;
     opacity: 0.85;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -867,8 +942,10 @@
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 25%, transparent);
 
   &::placeholder {
-    color: var(--text-secondary);
-    opacity: 0.6;
+    /* Placeholder text is readable copy: a 0.6 alpha put it at 2.86:1 light
+       and 4.0:1 dark, so it takes an opaque tier on the input surface. */
+    color: var(--text-tertiary);
+    opacity: 1;
   }
 }
 
@@ -889,7 +966,7 @@
     .accountGridCardRecentStatusTitleGroup {
       .accountGridCardRecentStatusIcon,
       .accountGridCardRecentStatusTitle {
-        color: var(--primary-color);
+        color: var(--primary-text);
       }
     }
   }
@@ -989,7 +1066,7 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--data-green-base);
+  color: var(--success-color);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1070,7 +1147,7 @@
   background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
 
   .accountGridCardRecentStatusMessageLabel {
-    color: var(--data-red-base);
+    color: var(--error-color);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.02em;
@@ -1369,7 +1446,7 @@
   &:hover {
     .accountIdentityTitle,
     .accountCardFile {
-      color: var(--primary-color);
+      color: var(--primary-text);
     }
   }
 
@@ -1391,7 +1468,7 @@
   border: 1px solid color-mix(in srgb, var(--data-green-base) 18%, transparent);
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--data-green-base) 10%, var(--bg-primary));
-  color: var(--data-green-base);
+  color: var(--success-color);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -1600,22 +1677,22 @@
 
 .accountHistoryMetricRequests .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
-  color: var(--data-blue-base);
+  color: var(--primary-text);
 }
 
 .accountHistoryMetricTokens .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-violet-base) 12%, transparent);
-  color: var(--data-violet-base);
+  color: var(--data-violet-dark-2);
 }
 
 .accountHistoryMetricCost .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .accountHistoryMetricSuccess .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
-  color: var(--data-green-base);
+  color: var(--success-color);
 }
 
 .accountHistoryFootnote {
@@ -1666,7 +1743,7 @@
 }
 
 .accountPriorityMetaDanger {
-  color: var(--data-red-base);
+  color: var(--error-color);
 }
 
 .accountPriorityButton {
@@ -1685,7 +1762,7 @@
   &:hover:not(:disabled) {
     background: color-mix(in srgb, var(--primary-color) 10%, transparent);
     border-color: color-mix(in srgb, var(--primary-color) 24%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus-visible {
@@ -1878,7 +1955,7 @@
 
 .accountIconButtonRefresh:global(.btn) {
   background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
-  color: var(--data-blue-base);
+  color: var(--primary-text);
 
   &:hover {
     border-color: color-mix(in srgb, var(--data-blue-base) 24%, transparent);
@@ -1888,7 +1965,7 @@
 
 .accountIconButtonModels:global(.btn) {
   background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
 
   &:hover {
     border-color: color-mix(in srgb, var(--primary-color) 24%, transparent);
@@ -1935,7 +2012,7 @@
   min-height: var(--control-height-xs);
   padding: 0 8px;
   background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
@@ -2099,7 +2176,7 @@
   display: inline-flex;
   align-items: center;
   gap: 2.5px;
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -2149,15 +2226,6 @@
   flex-shrink: 0;
 }
 
-.quotaForecastGroup {
-  opacity: 0.82;
-  transition: opacity 0.14s ease;
-
-  &:hover {
-    opacity: 1;
-  }
-}
-
 .quotaUsageIcon {
   display: inline-flex;
   align-items: center;
@@ -2166,7 +2234,7 @@
   height: 15px;
   border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
-  color: var(--data-blue-base);
+  color: var(--primary-text);
   line-height: 1;
   flex-shrink: 0;
   user-select: none;
@@ -2180,7 +2248,7 @@
   height: 15px;
   border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--data-violet-base) 14%, transparent);
-  color: var(--data-violet-base);
+  color: var(--data-violet-dark-2);
   line-height: 1;
   flex-shrink: 0;
   user-select: none;
@@ -2206,7 +2274,7 @@
 }
 
 .quotaWindowSlash {
-  color: color-mix(in srgb, var(--text-secondary) 65%, transparent);
+  color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 400;
   line-height: 1;
@@ -2281,7 +2349,7 @@
   border: 1px solid color-mix(in srgb, var(--data-blue-base) 18%, transparent);
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--data-blue-base) 8%, transparent);
-  color: var(--data-blue-base);
+  color: var(--primary-text);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -2433,7 +2501,7 @@
 
 .statusStack .inspectionHint,
 .inspectionHint {
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .statusBadgeRow {
@@ -2461,7 +2529,7 @@
 .statusBadgeButton {
   border-color: color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 8%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
   cursor: pointer;
 
   &:disabled {
@@ -2471,18 +2539,18 @@
 }
 
 .statusBadgedanger {
-  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
-  color: var(--data-red-base);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .statusBadgewarning {
-  background: color-mix(in srgb, var(--data-amber-base) 14%, transparent);
-  color: var(--data-amber-base);
+  background: var(--data-badge-warning-bg);
+  color: var(--warning-color);
 }
 
 .statusBadgeinfo {
   background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .quotaCell {
@@ -2550,8 +2618,8 @@
 }
 
 .priorityBad {
-  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
-  color: var(--data-red-base);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .accountsPagination {
@@ -2744,7 +2812,7 @@
     white-space: nowrap;
 
     &:hover {
-      color: var(--primary-color);
+      color: var(--primary-text);
       background: transparent;
     }
   }
@@ -2763,7 +2831,7 @@
 .drawerTabActive {
   border-color: transparent;
   background: transparent;
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-weight: 700;
 
   &::after {
@@ -2791,7 +2859,7 @@
   span {
     font-size: 12px;
     font-weight: 700;
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   p {
@@ -2958,7 +3026,7 @@
   border-color: color-mix(in srgb, var(--data-green-base) 26%, var(--border-color));
 
   strong {
-    color: var(--data-green-base);
+    color: var(--success-color);
   }
 }
 
@@ -2966,7 +3034,7 @@
   border-color: color-mix(in srgb, var(--data-red-base) 24%, var(--border-color));
 
   strong {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 }
 
@@ -3133,11 +3201,11 @@
 }
 
 .tooltipSuccess {
-  color: var(--data-green-base);
+  color: var(--success-color);
 }
 
 .tooltipFailure {
-  color: var(--data-red-base);
+  color: var(--error-color);
 }
 
 .tooltipRate {
@@ -3201,7 +3269,7 @@
   background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
 
   span {
-    color: var(--data-red-base);
+    color: var(--error-color);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.02em;
@@ -3271,7 +3339,7 @@
   height: 34px;
   border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .overviewDecisionCard .overviewSectionIcon {
@@ -3350,7 +3418,7 @@
   padding: 0 8px;
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--primary-color) 9%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
@@ -3413,13 +3481,13 @@
   gap: 5px;
   margin-top: auto;
   padding: 3px 1px;
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 
   &:hover {
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 
   &:focus-visible {
@@ -3431,7 +3499,7 @@
 
 .overviewScopePillFallback {
   background: color-mix(in srgb, var(--data-amber-base) 12%, transparent);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .overviewEmptyState {
@@ -3461,7 +3529,7 @@
 
     .overviewAttentionIcon {
       background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
-      color: var(--data-red-base);
+      color: var(--error-color);
     }
   }
 
@@ -3472,7 +3540,7 @@
 
 .overviewAttentionIcon {
   background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .overviewAttentionBody {
@@ -3549,7 +3617,7 @@
   padding: 0 8px;
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
@@ -3572,7 +3640,7 @@
   &:hover:not(:disabled) {
     border-color: var(--border-hover);
     background: var(--surface-subtle-hover);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -3739,15 +3807,15 @@
 }
 
 .accountModelsRuleChipCredential {
-  border-color: color-mix(in srgb, var(--data-amber-base) 32%, var(--border-color));
-  background: color-mix(in srgb, var(--data-amber-base) 8%, var(--app-surface-strong));
-  color: var(--data-amber-base);
+  border-color: var(--data-badge-warning-border);
+  background: var(--data-badge-warning-bg);
+  color: var(--warning-color);
 }
 
 .accountModelsRuleChipGlobal {
-  border-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
-  background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
-  color: var(--data-red-base);
+  border-color: var(--data-badge-danger-border);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .accountModelsList {
@@ -3833,8 +3901,8 @@
 }
 
 .accountModelScopeAvailable {
-  background: color-mix(in srgb, var(--data-green-base) 11%, transparent);
-  color: var(--data-green-base);
+  background: var(--data-badge-success-bg);
+  color: var(--success-color);
 }
 
 .accountModelScopeUnknown {
@@ -3843,18 +3911,18 @@
 }
 
 .accountModelScopeCredential {
-  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--data-amber-base);
+  background: var(--data-badge-warning-bg);
+  color: var(--warning-color);
 }
 
 .accountModelScopeGlobal {
-  background: color-mix(in srgb, var(--data-red-base) 11%, transparent);
-  color: var(--data-red-base);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .accountModelScopeBoth {
   background: color-mix(in srgb, var(--primary-color) 11%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .accountModelDisplayName,
@@ -3995,7 +4063,7 @@
 .configurationTextareaInvalid:global(.input),
 .configurationTextareaInvalid:global(.input):focus,
 .configurationTextareaInvalid {
-  border-color: var(--data-red-base);
+  border-color: var(--error-color);
 }
 
 .configurationRawDataDetails {
@@ -4036,7 +4104,7 @@
   padding: 0 7px;
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--primary-color) 9%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 10px;
   font-weight: 700;
   white-space: nowrap;
@@ -4129,7 +4197,7 @@
   gap: 8px;
 
   strong {
-    color: var(--data-red-base);
+    color: var(--error-color);
   }
 
   p {
@@ -4376,11 +4444,12 @@
   min-width: 140px;
   max-width: min(240px, calc(100vw - 32px));
   padding: $spacing-sm $spacing-md;
-  border: 1px solid color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
+  border: 1px solid color-mix(in srgb, var(--quota-summary-accent) 42%, var(--border-color));
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--quota-summary-accent) 92%, var(--text-primary));
-  color: var(--primary-contrast);
-  box-shadow: $shadow-md;
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-md);
   opacity: 0;
   pointer-events: none;
   transform: translate(-50%, 4px);
@@ -4397,9 +4466,9 @@
   width: 9px;
   height: 9px;
   border-right: 1px solid
-    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
+    color-mix(in srgb, var(--quota-summary-accent) 42%, var(--border-color));
   border-bottom: 1px solid
-    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
+    color-mix(in srgb, var(--quota-summary-accent) 42%, var(--border-color));
   background: inherit;
   transform: translateX(-50%) rotate(45deg);
 }
@@ -4411,7 +4480,7 @@
 }
 
 .quotaSummaryValueTooltipLabel {
-  color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
+  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
@@ -4419,7 +4488,7 @@
 }
 
 .quotaSummaryValueTooltipValue {
-  color: var(--primary-contrast);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -4549,7 +4618,7 @@
   height: 28px;
   border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .detailQuotaUsageRange {
@@ -4636,12 +4705,12 @@
 
 .metricIconBlue {
   background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
-  color: var(--data-blue-base);
+  color: var(--primary-text);
 }
 
 .metricIconGreen {
   background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
-  color: var(--data-green-base);
+  color: var(--success-color);
 }
 
 .metricIconTeal {
@@ -4651,7 +4720,7 @@
 
 .metricIconAmber {
   background: color-mix(in srgb, var(--data-amber-base) 12%, transparent);
-  color: var(--data-amber-base);
+  color: var(--warning-color);
 }
 
 .detailInlineNote {
@@ -4843,7 +4912,7 @@
   overflow: hidden;
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--primary-color) 9%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 11px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -4901,20 +4970,20 @@
 .quotaResetIcon {
   margin-right: 0;
   background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .quotaResetAction:global(.btn.btn-secondary) {
   min-height: var(--control-height-sm);
   border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 7%, var(--app-surface-strong));
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-weight: 700;
 
   &:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary-color) 58%, var(--border-color));
     background: color-mix(in srgb, var(--primary-color) 12%, var(--app-surface-strong));
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:disabled {
@@ -5062,7 +5131,7 @@
   margin-right: 6px;
   border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .quotaWindowFilters {
@@ -5107,7 +5176,7 @@
 .quotaWindowFilters button.quotaWindowFilterActive:hover,
 .quotaWindowFilterActive {
   background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .quotaWindowGroups {
@@ -5297,13 +5366,13 @@
 }
 
 .eventStatusSuccess {
-  background: color-mix(in srgb, var(--data-green-base) 13%, transparent);
-  color: var(--data-green-base);
+  background: var(--data-badge-success-bg);
+  color: var(--success-color);
 }
 
 .eventStatusFailed {
-  background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
-  color: var(--data-red-base);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .drawerActions {
@@ -5540,7 +5609,7 @@
 
   .previewStatus {
     background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
-    color: var(--primary-active);
+    color: var(--primary-text);
   }
 }
 
@@ -5611,7 +5680,7 @@
 
   span:last-child {
     flex-shrink: 0;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:hover {
@@ -5714,7 +5783,7 @@
   padding: 2px 6px;
   border-radius: var(--app-radius-pill);
   background: var(--data-badge-info-bg);
-  color: var(--data-badge-info-text);
+  color: var(--primary-text);
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -5781,8 +5850,8 @@
   height: 18px;
   padding: 0 5px;
   border-radius: var(--app-radius-pill);
-  background: var(--primary-color);
-  color: var(--bg-primary);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -5884,7 +5953,7 @@
   &:focus-visible:not(:disabled) {
     outline: 0;
     background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:disabled {
@@ -5936,7 +6005,7 @@
 }
 
 .accountSortDropdownItemSelected {
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -5946,7 +6015,7 @@
 }
 
 .accountSortDropdownItemSelected.accountSortDropdownItemHighlighted {
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 .accountSortDirectionIcon {
   display: inline-flex;
@@ -6018,7 +6087,7 @@
   &.viewModeButtonActive {
     border-left-color: transparent;
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-weight: 700;
     box-shadow: none;
   }
@@ -7154,7 +7223,7 @@
     flex: 0 0 auto;
     width: 16px;
     height: 16px;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -7171,18 +7240,18 @@
 }
 
 .diagnosticEvidenceStatusCurrent {
-  background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
-  color: var(--data-green-base);
+  background: var(--data-badge-success-bg);
+  color: var(--success-color);
 }
 
 .diagnosticEvidenceStatusOutdated {
-  background: color-mix(in srgb, var(--data-amber-base) 14%, transparent);
-  color: var(--data-amber-base);
+  background: var(--data-badge-warning-bg);
+  color: var(--warning-color);
 }
 
 .diagnosticEvidenceStatusConflict {
-  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
-  color: var(--data-red-base);
+  background: var(--data-badge-danger-bg);
+  color: var(--error-color);
 }
 
 .diagnosticConclusionMain {
@@ -7406,17 +7475,17 @@
 
 .diagnosticKpiIconBlue {
   background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .diagnosticKpiIconPurple {
   background: color-mix(in srgb, var(--data-violet-base) 10%, transparent);
-  color: var(--data-violet-base);
+  color: var(--data-violet-dark-2);
 }
 
 .diagnosticKpiIconGreen {
   background: color-mix(in srgb, var(--data-green-base) 10%, transparent);
-  color: var(--data-green-base);
+  color: var(--success-color);
 }
 
 .diagnosticRecentFailure {
@@ -7434,7 +7503,7 @@
   }
 
   strong {
-    color: var(--data-red-base);
+    color: var(--error-color);
     font-size: 12px;
     line-height: 1.45;
     overflow-wrap: anywhere;
@@ -7496,7 +7565,7 @@
 
   &:hover {
     background: transparent;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -7543,7 +7612,7 @@
 .diagnosticRequestRow .diagnosticRequestFailure,
 .diagnosticRequestFailure {
   margin: 6px 0 0;
-  color: var(--data-red-base);
+  color: var(--error-color);
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -7562,7 +7631,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-weight: 600;
     text-decoration: none;
 
@@ -7609,13 +7678,13 @@
     flex: 0 0 auto;
     width: 16px;
     height: 16px;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
 .diagnosticEvidenceCard > summary > small {
   margin-left: auto;
-  color: var(--data-red-base);
+  color: var(--error-color);
   font-size: 11px;
   font-weight: 700;
 }

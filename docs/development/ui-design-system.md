@@ -8,7 +8,9 @@ This specification defines the token contracts, layout conventions, and automate
 
 - **Solid primary fills**: Filled primary buttons, primary action pills, and checked switch tracks use `--primary-solid`, `--primary-solid-hover`, and `--primary-solid-active` paired with `--primary-contrast` text. This ramp is shared across light and dark themes so button text maintains `>= 4.5:1` contrast in every state.
 - **Solid danger fills**: Filled destructive buttons use `--danger-solid`, `--danger-solid-hover`, and `--danger-solid-active` with `--primary-contrast` text, shared across themes for the same reason. `--color-danger` / `--error-color` stay for status text, badges, and charts.
-- **Links, focus, and accents**: Text links, active indicators, focus rings, and non-filled accent highlights use `--primary-color` (with `--primary-hover`, `--primary-active`, `--primary-soft`, `--primary-subtle`, `--primary-ring`, and `--focus-*`), which adapts per theme.
+- **Borders, focus rings, and graphic accents**: Borders, focus rings, active indicators, decorative icon strokes, and non-filled accent highlights use `--primary-color` (with `--primary-hover`, `--primary-active`, `--primary-soft`, `--primary-subtle`, `--primary-ring`, and `--focus-*`), which adapts per theme. `--primary-color` never carries text.
+- **Primary as text**: Whenever the primary colour carries text — links, active tab labels, active segment labels, counts, and value text, including text on `--primary-soft` and darker primary tints — use `--primary-text` (light `#1d4ed8`, dark `#93c5fd`). `--focus-text` resolves to it. `--primary-color` alone is only 3.68:1 on white and 3.20:1 on a primary tint, so it must not be used for text.
+- **Full Web accents**: `apps/web/src/fullweb/carrier.css` exposes the same split as `--accent` (borders, `accent-color` for native checkboxes/radios, spinner edges — resolves to `--primary-color`) and `--accent-text` (text and icons — resolves to `--primary-text`). `consoleWorkspace.css` and `upgradeEntry.css` use the same two names; a `color:` declaration must never resolve to `var(--accent)`.
 - Do not pair `--primary-contrast` text with `--primary-color` fills on dark surfaces; use `--primary-solid*` for filled controls.
 
 ## 2. Surfaces, Text, Borders, and Elevation
@@ -19,17 +21,20 @@ This specification defines the token contracts, layout conventions, and automate
   - Opaque/elevated surface: `--app-surface-strong` (`--bg-elevated`, `--bg-code`).
   - Muted/nested surface: `--app-surface-muted` (`--bg-tertiary`) and `--surface-subtle` (`--surface-subtle-hover`, `--surface-subtle-strong`, `--bg-subtle`).
   - Form inputs: `--app-input-bg`, `--app-input-bg-focus`, `--app-input-border`, `--app-input-border-focus`.
-- **Text hierarchy**:
-  - Primary copy and headings: `--app-text-primary` / `--text-primary`.
-  - Secondary body and labels: `--app-text-regular` / `--text-secondary`.
-  - Muted metadata and captions: `--app-text-muted` / `--text-tertiary` / `--text-muted`.
-  - Disabled/placeholder copy: `--text-quaternary`.
+- **Text hierarchy** (values are the ones in `themes.scss`; ratios are the worst case over every surface the theme can produce — canvas, card, muted/nested surface, and 8–12% primary tints):
+  - Primary copy and headings: `--app-text-primary` / `--text-primary` (light `#2c3e50`, dark `#e5e5e5`; >= 6.6:1).
+  - Secondary body and labels: `--app-text-regular` / `--text-secondary` (light `#475569` — 5.91:1 worst case, 7.58:1 on white; dark `#bcbcbc` — 6.33:1 worst case). `--sidebar-text-color` resolves to it in both themes.
+  - Muted metadata and captions: `--app-text-muted` / `--text-tertiary` / `--text-muted` (light `#52606f` — 5.02:1 worst case, 6.44:1 on white, 5.74:1 on the canvas; dark `#a8a8a8` — 5.06:1 worst case).
+  - Recessive tier: `--text-quaternary` (light `#6f7889`, dark `#8f8f8f`) is a **graphic** tier — decorative glyphs, separators, icon strokes and other non-text marks, plus the label of a genuinely inactive control. It holds >= 3:1 (light 3.47:1, dark 3.72:1 worst case) but only 4.45:1 on white and 3.96:1 on the light canvas, so it must never carry copy that has to be read: placeholder and helper text of an enabled input (which is readable text under WCAG 1.4.3), captions, labels and values all stay on `--text-tertiary` or a stronger step.
+  - Do not dim text with `opacity` on any of these steps. Alpha composites compound (nested `0.6 x 0.7 = 0.42`) and drop a 4.5:1 token to about 2:1; move one step down the ramp instead, and reserve `opacity` for genuinely disabled controls and for glyphs that still measure >= 3:1 after compositing.
 - **Borders**:
   - Default container/row divider: `--app-border` / `--border-color` / `--border-subtle`.
   - Emphasized control/card border: `--app-border-strong` / `--border-primary` / `--border-strong`.
   - Dashed/hover borders: `--border-subtle-dashed`, `--border-hover`.
 - **Semantic status palettes**:
   - Status badges and feedback use `--data-badge-{success,warning,danger,info,neutral}-{text,bg,border}` (and their `--success-badge-*`, `--warning-*`, `--failure-badge-*`, `--info-*` aliases) or `--data-{blue,emerald,green,amber,red,violet,cyan,teal,slate}-*`.
+  - In the light theme the `-dark-2` step of each status ramp is the text tier and is measured against the ramp's own tint, not only against white: `--data-green-dark-2` `#166534` (5.32:1 on 12% green over the canvas), `--data-amber-dark-2` `#92400e` (5.29:1 on 12% amber), `--data-red-dark-2` `#b91c1c` (4.72:1 on 12% red), `--data-blue-dark-2` `#1d4ed8` (5.23:1 on 12% blue; also the light `--primary-text`). `--success-color` / `--warning-color` / `--error-color` / `--info-text` resolve to them, so `color: var(--success-color)` is text-safe wherever it lands.
+  - **Tint trigger rule**: any component that paints text on a 10%+ accent, blue, or status tint — including `--app-accent-soft`, `--bg-hover`, `--primary-soft`, and badge backgrounds — must be measured against that tint, not against the canvas or card. The light badge pairs and `--info-bg` (`#eff6ff`) are covered by the ramp above; the blue `-light-7`/`-light-8` tints (`#bfdbfe`, `#dbeafe`) are **not** safe as text backgrounds for anything lighter than `--primary-text` (5.49:1 on `#dbeafe`, 4.72:1 on `#bfdbfe`), so no component may paint text on them.
 - **Elevation and overlay scrims**:
   - Non-floating drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--shadow`, `--shadow-lg`) are `none`.
   - The only elevation cue on cards and panels is `--app-specular-highlight` (`box-shadow: var(--app-specular-highlight)`).
@@ -90,9 +95,11 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
   - To override a shared component (for example the `Select` trigger), qualify the selector with its parent or repeat the class (`.parent .trigger, .trigger.trigger`) so it outranks the shared rule, rather than adding `!important`.
   - When removing an existing `!important`, confirm in the browser that the computed value is unchanged in every state the declaration targeted (default, hover, active, focus-visible, expanded, disabled) in both themes.
 - **Page headers**: Top-level pages reached directly from the sidebar must not render a duplicate in-page `<h1>` or breadcrumb header (the shell top bar breadcrumb serves as the page title). Drill-down subpages keep a lightweight back navigation bar.
-- **Contrast**: Body copy, badge labels, and button text must maintain at least `4.5:1` contrast against their background fill in both light and dark themes.
+- **Contrast**: Body copy, badge labels, and button text must maintain at least `4.5:1` contrast against their background fill in both light and dark themes; glyph-only UI (icons, separators, chart pointers) must maintain `3:1`.
+  - Measure the **final composited** foreground and background, not the token hex: ancestor `opacity`, semi-transparent surfaces (`--app-surface`, `--glass-bg`, `--app-input-bg`), and tinted chips all change the result.
   - White text on a coloured fill uses the solid ramps (`--primary-solid*` / `--danger-solid*` with `--primary-contrast`), never the theme-adaptive `--primary-color`.
-  - Status text tinted with a badge text token can fall below `4.5:1` on light surfaces. Mix it with the primary text colour, for example `color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary))`; danger text typically needs about `75%`. Measure the result in both themes.
+  - Badge and inline status text uses the paired badge tokens. Do not mint a new tint with `color-mix(in srgb, <token> 8-14%, transparent)` and reuse that same token as its own text colour: a 12% self-tint caps its own contrast at about 3.8:1.
+  - The ratios in §2 are the contract, and they can only be checked against composited values — ancestor `opacity`, alpha surfaces and hover/focus states change the result. When you change a surface or text token, recompute the worst case over the theme's own surface set (canvas, card, muted surfaces, 8–12% primary tints) in the pull request and confirm the affected states in the browser.
 
 ## 7. Undefined Variables
 

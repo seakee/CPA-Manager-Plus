@@ -117,7 +117,7 @@
 .segmentButtonActive:hover {
   border-left-color: transparent;
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-weight: 700;
   box-shadow: none;
   transform: none;
@@ -160,7 +160,7 @@
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -217,7 +217,7 @@
 
   &:hover {
     background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -461,11 +461,12 @@
   min-width: min(160px, 100%);
   max-width: min(280px, calc(100vw - 32px));
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
+  border: 1px solid color-mix(in srgb, var(--summary-accent) 42%, var(--border-color));
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--summary-accent) 92%, var(--text-primary));
-  color: var(--primary-contrast);
-  box-shadow: 0 14px 30px color-mix(in srgb, var(--summary-accent) 28%, transparent);
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-md);
   opacity: 0;
   pointer-events: none;
   transform: translateY(4px);
@@ -481,8 +482,8 @@
   left: 16px;
   width: 9px;
   height: 9px;
-  border-right: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
-  border-bottom: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
+  border-right: 1px solid color-mix(in srgb, var(--summary-accent) 42%, var(--border-color));
+  border-bottom: 1px solid color-mix(in srgb, var(--summary-accent) 42%, var(--border-color));
   background: inherit;
   transform: rotate(45deg);
 }
@@ -494,7 +495,7 @@
 }
 
 .usageSummaryValueTooltipLabel {
-  color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
+  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
@@ -502,7 +503,7 @@
 }
 
 .usageSummaryValueTooltipValue {
-  color: var(--primary-contrast);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -620,7 +621,7 @@
   a {
     border: 0;
     background: transparent;
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
@@ -1063,7 +1064,7 @@
   .segmentButtonActive:hover {
     border-left-color: transparent;
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-weight: 700;
     box-shadow: none;
     transform: none;
@@ -1270,7 +1271,7 @@
 .linkButton {
   border: 0;
   background: transparent;
-  color: var(--primary-color);
+  color: var(--primary-text);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
@@ -1315,7 +1316,7 @@
 .entityCopyButton:hover {
   border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .entityCopyButton:focus-visible {
@@ -1577,7 +1578,7 @@
 }
 
 .insightinfo {
-  color: var(--data-blue-dark-2);
+  color: var(--primary-text);
 }
 
 .insightsuccess {
@@ -1822,7 +1823,7 @@
   .segmentButtonActive,
   .segmentButtonActive:hover {
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-weight: 700;
   }
 }
@@ -1884,7 +1885,7 @@
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--primary-color);
+    color: var(--primary-text);
     font-weight: 700;
     cursor: pointer;
   }
@@ -1900,7 +1901,8 @@
 }
 
 .heatmapDetailBodyRefreshing {
-  opacity: 0.78;
+  /* 0.78 alpha of the text ramp fell to 4.1:1 while stale results are shown. */
+  opacity: 0.9;
 }
 
 .heatmapDetailRefreshBadge {
@@ -2200,7 +2202,7 @@
 
   b,
   em {
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -2383,7 +2385,7 @@
 }
 
 .deltaUp {
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .deltaDown {

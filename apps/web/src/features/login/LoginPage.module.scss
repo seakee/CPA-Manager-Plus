@@ -105,13 +105,13 @@
 
   &:hover {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
 .languageOptionActive {
   background: var(--app-accent-soft);
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-weight: 600;
 }
 
@@ -311,7 +311,7 @@
 
 .stepItemActive,
 .stepItemDone {
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .stepItemActive .stepIndex {
@@ -323,7 +323,7 @@
 .stepItemDone {
   .stepIndex {
     border-color: var(--primary-color);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:not(:last-child)::after {
@@ -367,7 +367,7 @@
   padding: 3px 9px;
   border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-color);
+  color: var(--primary-text);
   font-size: 12px;
   font-weight: 700;
 }
@@ -461,7 +461,7 @@
     height: 32px;
     border-radius: 50%;
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   strong {

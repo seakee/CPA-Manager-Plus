@@ -190,7 +190,7 @@
 }
 
 .upgrade-login-recovery summary {
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
 }
 .upgrade-login-recovery p {
@@ -236,7 +236,7 @@
 .upgrade-steps li[data-state='current'] {
   border-color: var(--accent);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .upgrade-steps li[data-state='done'] {

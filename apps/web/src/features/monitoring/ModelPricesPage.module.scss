@@ -188,12 +188,12 @@
 .filterButtonActive:hover {
   border-left-color: transparent;
   background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
-  color: var(--data-blue-dark-2);
+  color: var(--primary-text);
 }
 
 .filterButtonActive strong {
   background: color-mix(in srgb, var(--data-blue-base) 22%, var(--bg-primary));
-  color: var(--data-blue-dark-2);
+  color: var(--primary-text);
 }
 
 .sourceResults {
@@ -220,7 +220,7 @@
 
 .sourceResults .sourceResultError {
   border-color: color-mix(in srgb, var(--data-red-base) 35%, var(--border-color));
-  color: var(--data-red-base);
+  color: var(--error-color);
 }
 
 .compactEditor {
@@ -324,7 +324,7 @@
 }
 
 .tierBadge strong {
-  color: var(--data-blue-dark-2);
+  color: var(--primary-text);
   font-family: var(--font-mono);
   font-size: 10px;
 }
@@ -415,7 +415,7 @@
   gap: 6px;
   border-color: color-mix(in srgb, var(--data-blue-base) 45%, var(--border-color));
   background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
-  color: var(--data-blue-dark-2);
+  color: var(--primary-text);
 }
 
 .emptyState,

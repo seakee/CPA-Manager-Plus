@@ -16,7 +16,7 @@
       "apps/web/src/features/config/ConfigPage.module.scss": 5,
       "apps/web/src/features/system/SystemPage.module.scss": 1,
       "apps/web/src/styles/layout.scss": 4,
-      "apps/web/src/styles/variables.scss": 18
+      "apps/web/src/styles/variables.scss": 17
     },
     "important": {
       "apps/web/src/components/ui/Drawer.module.scss": 1

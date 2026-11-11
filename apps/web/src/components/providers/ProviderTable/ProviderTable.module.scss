@@ -72,15 +72,26 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   }
 }
 
-// 停用行：仅信息单元格降透明度，开关与操作保持可交互的视觉权重
+// 停用行：用文字色阶降级表达不可用，可读文字不叠加透明度。
+// Alpha dimming composites the muted step down again: --text-tertiary (#52606f)
+// at 0.85 is 4.48:1 on the card and 4.36:1 on the hover tint (#f6faff), below
+// AA. Only the decorative kind icon keeps alpha; every text cell moves one step
+// down the opaque ramp instead (tertiary >= 6.14:1 on the hover tint).
 .rowDisabled {
-  .cellType,
-  .cellIdentity,
+  .kindIconFrame {
+    opacity: 0.6;
+  }
+
+  .identityLabel {
+    color: var(--text-secondary);
+  }
+
+  .kindLabel,
   .cellUrl,
-  .cellPriority,
   .cellModels,
-  .cellRecent {
-    opacity: 0.55;
+  .priorityValueButton,
+  .priorityInput {
+    color: var(--text-tertiary);
   }
 }
 
@@ -259,7 +270,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
 
   &:hover:not(:disabled) {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus {

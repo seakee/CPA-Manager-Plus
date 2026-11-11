@@ -70,12 +70,12 @@ button:disabled {
     &:hover {
       background: var(--app-accent-soft);
       border-color: var(--border-hover);
-      color: var(--primary-color);
+      color: var(--primary-text);
     }
 
     &:active {
       border-color: var(--primary-color);
-      color: var(--primary-active);
+      color: var(--primary-text);
     }
   }
 
@@ -85,12 +85,12 @@ button:disabled {
     color: var(--text-secondary);
 
     &:hover {
-      color: var(--primary-color);
+      color: var(--primary-text);
       background: var(--app-accent-soft);
     }
 
     &:active {
-      color: var(--primary-active);
+      color: var(--primary-text);
     }
   }
 

@@ -63,7 +63,7 @@
       overflow: hidden;
       font-size: 13px;
       font-weight: 500;
-      color: var(--color-primary);
+      color: var(--primary-text);
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -191,11 +191,6 @@
       &:hover {
         transform: none;
         box-shadow: none;
-
-        .bentoArrow {
-          transform: none;
-          opacity: 0.5;
-        }
       }
 
       .bentoIcon {
@@ -205,7 +200,7 @@
         align-items: center;
         justify-content: center;
         background: var(--app-accent-soft);
-        color: var(--color-primary);
+        color: var(--primary-text);
         border-radius: var(--app-radius-sm);
       }
 
@@ -228,10 +223,10 @@
         bottom: 16px;
         right: 18px;
         font-size: 14px;
-        color: var(--color-primary);
+        /* Hierarchy comes from size/weight, never from alpha on text: a 50%
+           primary on white is 2.38:1. */
+        color: var(--primary-text);
         font-weight: 600;
-        opacity: 0.5;
-        transition: all 0.2s;
       }
     }
   }
@@ -273,7 +268,7 @@
           overflow: hidden;
           font-family: v.$font-mono;
           font-size: 12px;
-          color: var(--color-primary);
+          color: var(--primary-text);
           text-overflow: ellipsis;
           white-space: nowrap;
         }
@@ -315,7 +310,7 @@
       margin-top: 14px;
       font-size: 14px;
       font-weight: 500;
-      color: var(--color-primary);
+      color: var(--primary-text);
       text-decoration: none;
       &:hover { text-decoration: underline; }
     }

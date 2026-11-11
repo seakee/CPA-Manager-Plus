@@ -99,7 +99,7 @@
 .copyButton:focus-visible {
   border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
   background: var(--failure-surface-hover);
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .status {

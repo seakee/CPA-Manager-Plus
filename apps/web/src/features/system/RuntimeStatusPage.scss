@@ -38,7 +38,7 @@
   padding: 4px 10px;
   border-radius: var(--app-radius-pill);
   background: var(--accent-soft, var(--app-accent-soft));
-  color: var(--accent, var(--primary-color));
+  color: var(--primary-text);
   font-size: 13px;
   font-weight: 600;
   text-transform: capitalize;
@@ -84,7 +84,7 @@
 }
 
 .runtime-status-links a {
-  color: var(--primary-color);
+  color: var(--primary-text);
 }
 
 .runtime-status-version {

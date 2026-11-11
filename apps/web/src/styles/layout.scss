@@ -100,7 +100,7 @@
 
   &:hover {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &:focus-visible {
@@ -160,7 +160,7 @@
 
   &:hover {
     background: transparent;
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -236,7 +236,7 @@
   &:hover,
   &.active {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 }
 
@@ -277,11 +277,11 @@
 
   &:hover {
     background: var(--app-accent-soft);
-    color: var(--primary-color);
+    color: var(--primary-text);
   }
 
   &.active {
-    background: var(--primary-color);
+    background: var(--primary-solid);
     color: var(--primary-contrast);
   }
 }
@@ -540,7 +540,7 @@
   background: linear-gradient(
     90deg,
     transparent,
-    color-mix(in srgb, var(--sidebar-text-color) 22%, transparent),
+    color-mix(in srgb, var(--text-tertiary) 22%, transparent),
     transparent
   );
   opacity: 0.45;

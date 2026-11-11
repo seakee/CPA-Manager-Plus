@@ -458,7 +458,7 @@
 .segmentButtonActive:hover {
   border-left-color: transparent;
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
   font-weight: 700;
   box-shadow: none;
   transform: none;
@@ -485,7 +485,7 @@
 
 .segmentButtonActive .segmentCount {
   background: color-mix(in srgb, var(--primary-color) 20%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .resultCardList {
@@ -599,12 +599,12 @@
 
 .providerBadgeCodex {
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .providerBadgeXai {
-  background: color-mix(in srgb, var(--warning-color) 13%, var(--bg-primary));
-  color: var(--warning-color);
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
 }
 
 .probeStateLine {
@@ -747,7 +747,7 @@
 }
 
 .primaryEvidence {
-  color: var(--primary-active);
+  color: var(--primary-text);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -762,7 +762,7 @@
   padding: 0 8px;
   border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -1056,7 +1056,7 @@
   flex: 0 0 30px;
   border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .settingsGrid {
@@ -1527,7 +1527,7 @@
 
 .configOverviewEdit:hover {
   border-color: color-mix(in srgb, var(--primary-color) 55%, var(--border-color));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .configOverviewGrid {
@@ -1623,7 +1623,7 @@
 
 .configOverviewCopy:hover,
 .configOverviewCopy:focus-visible {
-  color: var(--primary-active);
+  color: var(--primary-text);
   border-color: var(--primary-color);
 }
 
@@ -2198,7 +2198,7 @@
 .scheduleSegmentButtonActive,
 .scheduleSegmentButtonActive:hover {
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-active);
+  color: var(--primary-text);
 }
 
 .scheduleSegmentButton:disabled {
@@ -2319,23 +2319,23 @@
 }
 
 .runHistoryCardPillDelete {
-  background: color-mix(in srgb, var(--error-color) 14%, var(--bg-primary));
-  color: var(--error-color);
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
 }
 
 .runHistoryCardPillDisable {
-  background: color-mix(in srgb, var(--warning-color) 14%, var(--bg-primary));
-  color: var(--warning-color);
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
 }
 
 .runHistoryCardPillEnable {
-  background: color-mix(in srgb, var(--success-color) 14%, var(--bg-primary));
-  color: var(--success-color);
+  background: var(--data-badge-success-bg);
+  color: var(--data-badge-success-text);
 }
 
 .runHistoryCardPillReauth {
-  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
-  color: var(--primary-active);
+  background: var(--data-badge-info-bg);
+  color: var(--primary-text);
 }
 
 .runHistoryCardPillKeep {
@@ -2862,7 +2862,7 @@
   }
 
   &.credentialHealthTabActive {
-    color: var(--primary-active);
+    color: var(--primary-text);
     &::after {
       content: '';
       position: absolute;
