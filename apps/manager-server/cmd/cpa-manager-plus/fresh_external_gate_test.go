@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
@@ -1329,34 +1331,29 @@ func TestExternalFreshNativeSurfacesBindSingleSnapshotAcrossRebind(t *testing.T)
 	t.Run("runtime_updates_split_snapshot_during_status", func(t *testing.T) {
 		cpaSrv := newStatefulExternalCPA(t, rotatedAgainKey)
 		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
-		baseStore := app.store
-		rebinder := baseStore.(freshstore.ConnectionRebinder)
-		var loads atomic.Int32
-		hooked := &hookedLoadStore{
-			Store:              baseStore,
-			ConnectionRebinder: rebinder,
-		}
-		hooked.onLoad = func() {
-			// Load 1 is pre-gate legacy auth check; Load 2 is inside freshRuntimeClientAdapter.Status.
-			if loads.Add(1) == 2 {
-				protected, err := app.protector.ProtectString(reboundKey)
-				if err != nil {
-					t.Errorf("protect reboundKey: %v", err)
+		rebinder := app.store.(freshstore.ConnectionRebinder)
+		baseSource := app.externalSource
+		var rebindOnce sync.Once
+		app.externalSource = func(ctx context.Context) (freshkeyapply.ExternalInstall, error) {
+			install, err := baseSource(ctx)
+			rebindOnce.Do(func() {
+				protected, protectErr := app.protector.ProtectString(reboundKey)
+				if protectErr != nil {
+					t.Errorf("protect reboundKey: %v", protectErr)
 					return
 				}
-				rec, err := baseStore.Load(context.Background())
-				if err != nil {
-					t.Errorf("load baseStore: %v", err)
+				rec, loadErr := app.store.Load(context.Background())
+				if loadErr != nil {
+					t.Errorf("load store: %v", loadErr)
 					return
 				}
-				if _, err := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
-					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); err != nil {
-					t.Errorf("rebind in hook: %v", err)
+				if _, rebindErr := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
+					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); rebindErr != nil {
+					t.Errorf("rebind at source-resolution boundary: %v", rebindErr)
 				}
-			}
+			})
+			return install, err
 		}
-		app.store = hooked
-		app.externalSource = externalInstallSource(app.store, app.protector)
 
 		res := gateRequest(t, app, http.MethodGet, "/usage-service/runtime/updates", gateAdmin)
 		if res.Code != http.StatusServiceUnavailable && res.Code != http.StatusConflict {
@@ -1369,25 +1366,18 @@ func TestExternalFreshNativeSurfacesBindSingleSnapshotAcrossRebind(t *testing.T)
 			t.Fatalf("runtime/updates sent credential different from in-gate grant snapshot: %v", seen)
 		}
 		if app.externalReadGrant(t.Context()).Refused {
-			t.Fatal("refusal of pre-rebind snapshot poisoned reboundKey")
+			t.Fatal("refusal of pre-rebind snapshot marked reboundKey refused")
+		}
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = reboundKey
+		cpaSrv.mu.Unlock()
+		followUp := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+		var statusBody freshRuntimeStatusResponse
+		if followUp.Code != http.StatusOK || json.Unmarshal(followUp.Body.Bytes(), &statusBody) != nil || statusBody.ErrorCode != "" {
+			t.Fatalf("follow-up runtime/status on reboundKey = %d %s", followUp.Code, followUp.Body.String())
 		}
 	})
 }
-
-type hookedLoadStore struct {
-	freshstore.Store
-	freshstore.ConnectionRebinder
-	onLoad func()
-}
-
-func (s *hookedLoadStore) Load(ctx context.Context) (freshstore.Record, error) {
-	rec, err := s.Store.Load(ctx)
-	if s.onLoad != nil {
-		s.onLoad()
-	}
-	return rec, err
-}
-
 // TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind proves that
 // guardFreshExternalLegacy re-reads freshstore.Record inside
 // legacyCredentialGate and forces the downstream legacy proxy to send the
@@ -1482,42 +1472,35 @@ func TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind(t *testing.T) {
 		}
 	})
 
-	t.Run("rebind between in-gate store load and proxy setup resolution", func(t *testing.T) {
+	t.Run("rebind after in-gate source resolution before proxy setup resolution", func(t *testing.T) {
 		const reboundKey = "split-rebound-0000111122223333444455556666777788889999aaaabbbbcc"
 		const rotatedAgain = "split-rotated-9999888877776666555544443333222211110000ffffeeeedd"
 
 		cpaSrv := newStatefulExternalCPA(t, rotatedAgain)
 		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
-		baseStore := app.store
-		rebinder := baseStore.(freshstore.ConnectionRebinder)
-		var loads atomic.Int32
-		hooked := &hookedLoadStore{
-			Store:              baseStore,
-			ConnectionRebinder: rebinder,
-		}
-		hooked.onLoad = func() {
-			// Load 1 is pre-gate externalLegacyDecision; Load 2 is inside legacyCredentialGate.
-			// Trigger rebind immediately after the in-gate Load so proxy.Service.resolveSetup
-			// sees reboundKey in SQLite unless bound to the in-gate snapshot.
-			if loads.Add(1) == 2 {
-				protected, err := app.protector.ProtectString(reboundKey)
-				if err != nil {
-					t.Errorf("protect reboundKey: %v", err)
+		rebinder := app.store.(freshstore.ConnectionRebinder)
+		baseSource := app.externalSource
+		var rebindOnce sync.Once
+		app.externalSource = func(ctx context.Context) (freshkeyapply.ExternalInstall, error) {
+			install, err := baseSource(ctx)
+			rebindOnce.Do(func() {
+				protected, protectErr := app.protector.ProtectString(reboundKey)
+				if protectErr != nil {
+					t.Errorf("protect reboundKey: %v", protectErr)
 					return
 				}
-				rec, err := baseStore.Load(context.Background())
-				if err != nil {
-					t.Errorf("load baseStore: %v", err)
+				rec, loadErr := app.store.Load(context.Background())
+				if loadErr != nil {
+					t.Errorf("load store: %v", loadErr)
 					return
 				}
-				if _, err := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
-					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); err != nil {
-					t.Errorf("rebind in hook: %v", err)
+				if _, rebindErr := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
+					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); rebindErr != nil {
+					t.Errorf("rebind at source-resolution boundary: %v", rebindErr)
 				}
-			}
+			})
+			return install, err
 		}
-		app.store = hooked
-		app.externalSource = externalInstallSource(app.store, app.protector)
 
 		res := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
 		if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
@@ -1530,7 +1513,14 @@ func TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind(t *testing.T) {
 			t.Fatalf("proxy sent credential different from in-gate grant snapshot: %v", seen)
 		}
 		if app.externalReadGrant(t.Context()).Refused {
-			t.Fatal("refusal of pre-rebind snapshot poisoned reboundKey")
+			t.Fatal("refusal of pre-rebind snapshot marked reboundKey refused")
+		}
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = reboundKey
+		cpaSrv.mu.Unlock()
+		followUp := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		if followUp.Code != http.StatusOK {
+			t.Fatalf("follow-up legacy read on reboundKey = %d %s", followUp.Code, followUp.Body.String())
 		}
 	})
 }
@@ -1723,7 +1713,11 @@ func TestExternalBridgedManagementServicesSerializeAndRecordRejection(t *testing
 				select {
 				case <-allWaitersParked:
 				case <-secondEntered:
+					close(releaseFirst)
+					t.Fatalf("follower reached CPA while %s held legacyCredentialGate", leader)
 				case <-time.After(5 * time.Second):
+					close(releaseFirst)
+					t.Fatalf("timed out waiting for %d followers to park on legacyCredentialGate behind %s", followerCount, leader)
 				}
 				close(releaseFirst)
 
@@ -2023,5 +2017,392 @@ func TestExternalFreshNativeHeaderReceiptReleasesGateBeforeSlowBody(t *testing.T
 	slow := <-slowDone
 	if slow.Code != http.StatusOK {
 		t.Fatalf("slow gateway/config = %d %s", slow.Code, slow.Body.String())
+	}
+}
+
+func writeTruncatedHTTPStatus(w http.ResponseWriter, status int, extraHeaderKey, extraHeaderVal string) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		w.WriteHeader(status)
+		return
+	}
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		w.WriteHeader(status)
+		return
+	}
+	extra := ""
+	if extraHeaderKey != "" {
+		extra = fmt.Sprintf("%s: %s\r\n", extraHeaderKey, extraHeaderVal)
+	}
+	_, _ = fmt.Fprintf(
+		rw,
+		"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n%sContent-Length: 512\r\nConnection: close\r\n\r\n{\"err",
+		status,
+		http.StatusText(status),
+		extra,
+	)
+	_ = rw.Flush()
+	_ = conn.Close()
+}
+
+// TestExternalTruncatedAuthRefusalPersistsAndReturnsTypedBlocker proves that
+// 401/403 responses with truncated or unexpectedly encoded bodies still persist
+// durable External credential refusal and return external_management_key_rejected
+// (409) to the first caller across Collector startup (stats GET, enable PUT,
+// readback) and Fresh-native config/key endpoints.
+func TestExternalTruncatedAuthRefusalPersistsAndReturnsTypedBlocker(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run("collector_startup_stats_get_truncated_"+strconv.Itoa(status), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				switch r.URL.Path {
+				case "/v0/management/config":
+					w.Header().Set("X-CPA-Version", "v8.0.55")
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+				case "/v0/management/usage-statistics-enabled":
+					writeTruncatedHTTPStatus(w, status, "", "")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			app := newExternalApp(t, server.URL, externalAuthorityManagement)
+
+			outcome := app.startExternalUsageCollector(t.Context())
+			if outcome.Started || outcome.Reason != freshconfig.ReasonManagementRejected {
+				t.Fatalf("startExternalUsageCollector outcome = %+v, want Reason=%s", outcome, freshconfig.ReasonManagementRejected)
+			}
+			if !app.externalReadGrant(t.Context()).Refused {
+				t.Fatalf("truncated %d on usage-statistics GET did not persist durable refusal", status)
+			}
+			beforeFollowUp := requests.Load()
+			followUp := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+			if followUp.Code != http.StatusConflict || errorCode(t, followUp) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("follow-up external/usage = %d %s", followUp.Code, followUp.Body.String())
+			}
+			if legacy := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); legacy.Code != http.StatusConflict {
+				t.Fatalf("follow-up legacy api-keys = %d %s", legacy.Code, legacy.Body.String())
+			}
+			if sent := requests.Load() - beforeFollowUp; sent != 0 {
+				t.Fatalf("sent %d saved-key requests after truncated %d refusal, want 0", sent, status)
+			}
+		})
+
+		t.Run("collector_confirm_put_and_readback_truncated_"+strconv.Itoa(status), func(t *testing.T) {
+			for _, failStep := range []string{"put", "readback"} {
+				t.Run(failStep, func(t *testing.T) {
+					var requests atomic.Int32
+					var statsGets atomic.Int32
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						requests.Add(1)
+						switch {
+						case r.URL.Path == "/v0/management/config":
+							w.Header().Set("X-CPA-Version", "v8.0.55")
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{"usage-statistics-enabled":false}`))
+						case r.URL.Path == "/v0/management/usage-statistics-enabled" && r.Method == http.MethodGet:
+							if statsGets.Add(1) == 1 {
+								w.Header().Set("Content-Type", "application/json")
+								_, _ = w.Write([]byte(`{"usage-statistics-enabled":false}`))
+								return
+							}
+							writeTruncatedHTTPStatus(w, status, "", "")
+						case r.URL.Path == "/v0/management/usage-statistics-enabled" && r.Method == http.MethodPut:
+							if failStep == "put" {
+								writeTruncatedHTTPStatus(w, status, "", "")
+								return
+							}
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{"status":"ok"}`))
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(server.Close)
+
+					app := newExternalApp(t, server.URL, externalAuthorityManagement)
+					hostCtx, stopHost := context.WithCancel(t.Context())
+					defer stopHost()
+					app.runCtx = hostCtx
+
+					confirm := gatewayRequest(t, app, http.MethodPost, "external/usage",
+						`{"requestId":"`+strings.Repeat("c", 32)+`","confirmEnableStatistics":true}`, "application/json")
+					if confirm.Code != http.StatusConflict || errorCode(t, confirm) != freshconfig.ReasonManagementRejected {
+						t.Fatalf("confirm external/usage (%s truncated %d) = %d %s, want 409 %s",
+							failStep, status, confirm.Code, confirm.Body.String(), freshconfig.ReasonManagementRejected)
+					}
+					if !app.externalReadGrant(t.Context()).Refused {
+						t.Fatalf("truncated %d on %s did not persist durable refusal", status, failStep)
+					}
+					beforeFollowUp := requests.Load()
+					if followUp := gatewayRequest(t, app, http.MethodGet, "external/usage", "", ""); followUp.Code != http.StatusConflict {
+						t.Fatalf("follow-up external/usage = %d %s", followUp.Code, followUp.Body.String())
+					}
+					if sent := requests.Load() - beforeFollowUp; sent != 0 {
+						t.Fatalf("sent %d saved-key requests after %s truncated %d refusal, want 0", sent, failStep, status)
+					}
+				})
+			}
+		})
+
+		t.Run("native_config_and_keys_truncated_and_encoded_"+strconv.Itoa(status), func(t *testing.T) {
+			cases := []struct {
+				name      string
+				extraHdrK string
+				extraHdrV string
+				oversized bool
+				call      func(t *testing.T, app *freshApplication, keyID string) *httptest.ResponseRecorder
+			}{
+				{
+					name: "gateway_config_get_truncated",
+					call: func(t *testing.T, app *freshApplication, _ string) *httptest.ResponseRecorder {
+						return gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+					},
+				},
+				{
+					name:      "gateway_config_get_unexpected_encoding",
+					extraHdrK: "Content-Encoding",
+					extraHdrV: "gzip",
+					call: func(t *testing.T, app *freshApplication, _ string) *httptest.ResponseRecorder {
+						return gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+					},
+				},
+				{
+					name:      "gateway_config_get_oversized",
+					oversized: true,
+					call: func(t *testing.T, app *freshApplication, _ string) *httptest.ResponseRecorder {
+						return gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+					},
+				},
+				{
+					name: "api_keys_list_truncated",
+					call: func(t *testing.T, app *freshApplication, _ string) *httptest.ResponseRecorder {
+						return gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+					},
+				},
+				{
+					name: "api_keys_apply_truncated",
+					call: func(t *testing.T, app *freshApplication, keyID string) *httptest.ResponseRecorder {
+						return gatewayRequest(t, app, http.MethodPost, "api-keys/"+keyID+"/initial-install", `{}`, "application/json")
+					},
+				},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var requests atomic.Int32
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						requests.Add(1)
+						if r.URL.Path == "/v0/management/config" {
+							w.Header().Set("X-CPA-Version", "v8.0.55")
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{}`))
+							return
+						}
+						if tc.oversized {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(status)
+							_, _ = w.Write([]byte(strings.Repeat("x", 2<<20)))
+							return
+						}
+						writeTruncatedHTTPStatus(w, status, tc.extraHdrK, tc.extraHdrV)
+					}))
+					t.Cleanup(server.Close)
+
+					app := newExternalApp(t, server.URL, externalAuthorityManagement)
+					app.gatewayConfig = gatewayFor(app)
+					stagedKey := stageExternalKeyForGateTest(t, app, "3", false)
+
+					first := tc.call(t, app, stagedKey)
+					if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+						t.Fatalf("%s first response = %d %s, want 409 %s",
+							tc.name, first.Code, first.Body.String(), freshconfig.ReasonManagementRejected)
+					}
+					if !app.externalReadGrant(t.Context()).Refused {
+						t.Fatalf("%s did not persist durable refusal", tc.name)
+					}
+					beforeFollowUp := requests.Load()
+					followUp := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+					if followUp.Code != http.StatusConflict || errorCode(t, followUp) != freshconfig.ReasonManagementRejected {
+						t.Fatalf("%s follow-up = %d %s", tc.name, followUp.Code, followUp.Body.String())
+					}
+					if sent := requests.Load() - beforeFollowUp; sent != 0 {
+						t.Fatalf("%s sent %d saved-key requests after refusal, want 0", tc.name, sent)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestExternalHeaderClaimBlocksBudgetExpiryFromReleasingGateBeforeRefusalPersists
+// pauses refusal persistence immediately after upstream 401/403 response headers
+// are observed, lets the credential hold's tenure budget expire deterministically,
+// and proves a queued saved-key request cannot acquire legacyCredentialGate or
+// reach CPA before the refusal is durably visible.
+func TestExternalHeaderClaimBlocksBudgetExpiryFromReleasingGateBeforeRefusalPersists(t *testing.T) {
+	surfaces := []struct {
+		name string
+		run  func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder
+		ok   func(t *testing.T, res *httptest.ResponseRecorder)
+	}{
+		{
+			name: "legacy_proxy",
+			run: func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder {
+				return gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+			},
+			ok: func(t *testing.T, res *httptest.ResponseRecorder) {
+				if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("legacy_proxy = %d %s", res.Code, res.Body.String())
+				}
+			},
+		},
+		{
+			name: "fresh_gateway_config",
+			run: func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder {
+				return gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+			},
+			ok: func(t *testing.T, res *httptest.ResponseRecorder) {
+				if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("fresh_gateway_config = %d %s", res.Code, res.Body.String())
+				}
+			},
+		},
+		{
+			name: "fresh_runtime_status",
+			run: func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder {
+				return gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+			},
+			ok: func(t *testing.T, res *httptest.ResponseRecorder) {
+				var body freshRuntimeStatusResponse
+				if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &body) != nil || body.ErrorCode != freshconfig.ReasonManagementRejected {
+					t.Fatalf("fresh_runtime_status = %d %s", res.Code, res.Body.String())
+				}
+			},
+		},
+		{
+			name: "fresh_console_models",
+			run: func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder {
+				return gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", "")
+			},
+			ok: func(t *testing.T, res *httptest.ResponseRecorder) {
+				if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("fresh_console_models = %d %s", res.Code, res.Body.String())
+				}
+			},
+		},
+		{
+			name: "fresh_external_usage",
+			run: func(t *testing.T, app *freshApplication) *httptest.ResponseRecorder {
+				return gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+			},
+			ok: func(t *testing.T, res *httptest.ResponseRecorder) {
+				if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("fresh_external_usage = %d %s", res.Code, res.Body.String())
+				}
+			},
+		},
+	}
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		for _, surface := range surfaces {
+			t.Run(http.StatusText(status)+"/"+surface.name, func(t *testing.T) {
+				var upstreamHits atomic.Int32
+				secondReachedCPA := make(chan struct{})
+				var secondOnce sync.Once
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if upstreamHits.Add(1) >= 2 {
+						secondOnce.Do(func() { close(secondReachedCPA) })
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"error":"refused"}`))
+				}))
+				t.Cleanup(server.Close)
+
+				app := newExternalApp(t, server.URL, externalAuthorityManagement)
+				app.gatewayConfig = gatewayFor(app)
+				app.credentialHeaderBudget = 80 * time.Millisecond
+
+				atBeforeRecord := make(chan struct{})
+				allowRecord := make(chan struct{})
+				var recordOnce sync.Once
+				app.rejection.beforeRecord = func() {
+					recordOnce.Do(func() {
+						close(atBeforeRecord)
+						<-allowRecord
+					})
+				}
+
+				budgetExpired := make(chan struct{})
+				var expiryOnce sync.Once
+				app.afterCredentialHoldBudgetExpiry = func() {
+					expiryOnce.Do(func() { close(budgetExpired) })
+				}
+
+				firstDone := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					firstDone <- surface.run(t, app)
+				}()
+
+				select {
+				case <-atBeforeRecord:
+				case <-time.After(5 * time.Second):
+					t.Fatal("leader never reached refusal recording")
+				}
+
+				select {
+				case <-budgetExpired:
+				case <-time.After(5 * time.Second):
+					close(allowRecord)
+					t.Fatal("credential hold budget timer did not fire while recording was paused")
+				}
+
+				// After the budget timer has fired while refusal persistence is paused,
+				// a subsequent saved-key request must still park on legacyCredentialGate
+				// rather than acquiring the gate and hitting CPA with the unrecorded key.
+				secondParked := make(chan struct{})
+				var parkedOnce sync.Once
+				app.legacyCredentialGate.onWait = func() {
+					parkedOnce.Do(func() { close(secondParked) })
+				}
+				defer func() { app.legacyCredentialGate.onWait = nil }()
+
+				secondDone := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					secondDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+				}()
+
+				select {
+				case <-secondParked:
+				case <-secondReachedCPA:
+					close(allowRecord)
+					t.Fatal("tenure budget expiry released legacyCredentialGate before refusal recording finished, allowing queued request to hit CPA")
+				case <-time.After(5 * time.Second):
+					close(allowRecord)
+					t.Fatal("subsequent request neither parked on legacyCredentialGate nor reached CPA")
+				}
+				close(allowRecord)
+
+				first := <-firstDone
+				surface.ok(t, first)
+
+				second := <-secondDone
+				if second.Code != http.StatusConflict || errorCode(t, second) != freshconfig.ReasonManagementRejected {
+					t.Fatalf("queued request after refusal = %d %s, want 409 %s",
+						second.Code, second.Body.String(), freshconfig.ReasonManagementRejected)
+				}
+				if !app.externalReadGrant(t.Context()).Refused {
+					t.Fatal("durable refusal was not persisted")
+				}
+				if got := upstreamHits.Load(); got != 1 {
+					t.Fatalf("External CPA received %d saved-key requests across budget-expiry race, want 1", got)
+				}
+			})
+		}
 	}
 }

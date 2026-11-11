@@ -1337,7 +1337,7 @@ func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, cli
 		if !gate.acquire(ctx) {
 			return model.RuntimeObservedStatus{}, false, errExternalCredentialWaitCancelled
 		}
-		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+		hold, requestCtx = a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
 		defer hold.finish()
 	}
 	if a.store == nil || a.externalSource == nil {
@@ -1372,22 +1372,12 @@ func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, cli
 		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
 	}
 	var recorded atomic.Bool
+	activeHold := hold
+	if activeHold == nil {
+		activeHold = externalCredentialHoldFromContext(requestCtx, gate)
+	}
 	statusCtx := withFreshRecordSnapshot(requestCtx, record)
-	statusCtx = cpa.WithExternalHeaderObserver(statusCtx, func(statusCode int, releaseGate bool) {
-		switch statusCode {
-		case http.StatusUnauthorized:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementRejected)
-			}
-		case http.StatusForbidden:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementClientForbidden)
-			}
-		}
-		if releaseGate && hold != nil {
-			hold.release()
-		}
-	})
+	statusCtx = a.observeExternalHoldHeaders(statusCtx, requestCtx, activeHold, !alreadyHeld, grant, &recorded)
 	observed, err := client.Status(statusCtx)
 	if err != nil {
 		if !recorded.Load() {

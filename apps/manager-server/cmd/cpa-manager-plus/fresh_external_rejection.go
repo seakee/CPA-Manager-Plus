@@ -267,6 +267,48 @@ func (a *freshApplication) clearExternalRejection(ctx context.Context) {
 	a.rejection.clear(ctx)
 }
 
+// observeExternalHoldHeaders installs a response-header observer that claims
+// hold before recording any 401/403 refusal so concurrent tenure-budget expiry
+// cannot release legacyCredentialGate ahead of durable refusal persistence.
+func (a *freshApplication) observeExternalHoldHeaders(
+	ctx context.Context,
+	recordCtx context.Context,
+	hold *externalCredentialHold,
+	releaseOnHeader bool,
+	grant externalReadGrant,
+	recorded *atomic.Bool,
+) context.Context {
+	return cpa.WithExternalHeaderObserver(ctx, func(statusCode int, releaseGate bool) {
+		switch statusCode {
+		case http.StatusUnauthorized:
+			if hold != nil {
+				hold.claimHeader()
+			}
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(recordCtx), grant, cpa.ErrManagementRejected)
+			}
+			if releaseOnHeader && hold != nil {
+				hold.release()
+			}
+			return
+		case http.StatusForbidden:
+			if hold != nil {
+				hold.claimHeader()
+			}
+			if recorded.CompareAndSwap(false, true) {
+				a.noteExternalRejection(context.WithoutCancel(recordCtx), grant, cpa.ErrManagementClientForbidden)
+			}
+			if releaseOnHeader && hold != nil {
+				hold.release()
+			}
+			return
+		}
+		if releaseGate && releaseOnHeader && hold != nil {
+			hold.release()
+		}
+	})
+}
+
 // withExternalSavedCredentialGate binds outbound External CPA wire calls on ctx
 // to legacyCredentialGate so each network call resolves grant + credential
 // from one post-gate record snapshot and records 401/403 before releasing the
@@ -293,7 +335,7 @@ func (a *freshApplication) runExternalSavedCredentialCall(
 		if !gate.acquire(ctx) {
 			return errExternalCredentialWaitCancelled
 		}
-		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+		hold, requestCtx = a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
 		defer hold.finish()
 	}
 	var (
@@ -321,22 +363,12 @@ func (a *freshApplication) runExternalSavedCredentialCall(
 		return externalReadRefusedError()
 	}
 	var recorded atomic.Bool
+	activeHold := hold
+	if activeHold == nil {
+		activeHold = externalCredentialHoldFromContext(requestCtx, gate)
+	}
 	snapshotCtx := withFreshRecordSnapshot(requestCtx, record)
-	snapshotCtx = cpa.WithExternalHeaderObserver(snapshotCtx, func(statusCode int, releaseGate bool) {
-		switch statusCode {
-		case http.StatusUnauthorized:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementRejected)
-			}
-		case http.StatusForbidden:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, cpa.ErrManagementClientForbidden)
-			}
-		}
-		if releaseGate && hold != nil {
-			hold.release()
-		}
-	})
+	snapshotCtx = a.observeExternalHoldHeaders(snapshotCtx, requestCtx, activeHold, !alreadyHeld, grant, &recorded)
 	err = call(snapshotCtx, cpa.ExternalSavedCredentialTarget{
 		BaseURL:       install.BaseURL,
 		ManagementKey: install.ManagementKey,

@@ -223,10 +223,15 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		gate.release()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
-	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	hold, probeCtx := a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
 	defer hold.finish()
+	var recorded atomic.Bool
+	observedCtx := a.observeExternalHoldHeaders(probeCtx, ctx, hold, true, grant, &recorded)
+	retainCtx := cpa.WithoutExternalHeaderRelease(observedCtx)
 	rejectExternalCredential := func(rejectErr error) usageStartOutcome {
-		a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
+		if !recorded.Load() {
+			a.noteExternalRejection(context.WithoutCancel(ctx), grant, rejectErr)
+		}
 		hold.finish()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonManagementRejected)
 	}
@@ -234,7 +239,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	// the version contract decides the enable write and every later write, so a
 	// CPA that does not serve it starts nothing. The refusal is the same typed
 	// code the write surfaces answer with, never an unexplained empty window.
-	switch report, err := cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey); {
+	switch report, err := cpa.ObserveExternalVersion(retainCtx, install.BaseURL, install.ManagementKey); {
 	case errors.Is(err, cpa.ErrManagementRejected):
 		return rejectExternalCredential(err)
 	case err != nil:
@@ -248,7 +253,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	// Every authenticated management request in the startup sequence stays inside
 	// the bounded credential hold and uses the same snapshot grant so a post-200
 	// rotation records its refusal before any queued caller can re-present the key.
-	enabled, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
+	enabled, err := cpa.FetchExternalUsageStatistics(retainCtx, install.BaseURL, install.ManagementKey)
 	switch {
 	case errors.Is(err, cpa.ErrManagementRejected):
 		return rejectExternalCredential(err)
@@ -268,7 +273,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 			// nothing is collected, so the window stays unstarted on purpose.
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
-		if err = cpa.SetExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey, true); err != nil {
+		if err = cpa.SetExternalUsageStatistics(retainCtx, install.BaseURL, install.ManagementKey, true); err != nil {
 			if errors.Is(err, cpa.ErrManagementRejected) {
 				return rejectExternalCredential(err)
 			}
@@ -278,7 +283,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		}
 		// The write is proven, never assumed: an unproven switch would let the
 		// Collector run against a CPA that records nothing.
-		back, err := cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
+		back, err := cpa.FetchExternalUsageStatistics(observedCtx, install.BaseURL, install.ManagementKey)
 		switch {
 		case errors.Is(err, cpa.ErrManagementRejected):
 			return rejectExternalCredential(err)
@@ -529,31 +534,19 @@ func (a *freshApplication) fetchExternalUsageUpstream(ctx context.Context) (cpa.
 		gate.release()
 		return cpa.ExternalVersionReport{}, false, externalReadRefusedError()
 	}
-	hold, probeCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	hold, probeCtx := a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
 	defer hold.finish()
-	report, err := cpa.ObserveExternalVersion(cpa.WithoutExternalHeaderRelease(probeCtx), install.BaseURL, install.ManagementKey)
+	var recorded atomic.Bool
+	observedCtx := a.observeExternalHoldHeaders(probeCtx, ctx, hold, true, grant, &recorded)
+	report, err := cpa.ObserveExternalVersion(cpa.WithoutExternalHeaderRelease(observedCtx), install.BaseURL, install.ManagementKey)
 	if err != nil {
-		a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		if !recorded.Load() {
+			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)
+		}
 		hold.finish()
 		return cpa.ExternalVersionReport{}, false, err
 	}
-	var recorded atomic.Bool
-	secondCtx := cpa.WithExternalHeaderObserver(probeCtx, func(statusCode int, releaseGate bool) {
-		switch statusCode {
-		case http.StatusUnauthorized:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementRejected)
-			}
-		case http.StatusForbidden:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementClientForbidden)
-			}
-		}
-		if releaseGate {
-			hold.release()
-		}
-	})
-	enabled, err := cpa.FetchExternalUsageStatistics(secondCtx, install.BaseURL, install.ManagementKey)
+	enabled, err := cpa.FetchExternalUsageStatistics(observedCtx, install.BaseURL, install.ManagementKey)
 	if err != nil {
 		if !recorded.Load() {
 			a.noteExternalRejection(context.WithoutCancel(ctx), grant, err)

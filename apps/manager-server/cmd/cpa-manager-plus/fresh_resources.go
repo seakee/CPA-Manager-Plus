@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -368,7 +367,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// read. A request that waits on an upstream provider takes no budget at all
 		// and keeps the tenure until its status arrives, exactly as the proxy
 		// itself bounds it.
-		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHoldBudget(r.URL.Path))
+		hold, requestCtx := app.beginCredentialHold(markContext, app.externalCredentialHoldBudget(r.URL.Path))
 		recorder := &externalLegacyRecorder{
 			ResponseWriter: w,
 			// The refusal is recorded against a context the caller cannot cancel: a
@@ -493,24 +492,46 @@ func writeExternalCredentialWaitCancelled(w http.ResponseWriter) {
 // budget releases it and ends the request when the CPA never produces one, so a
 // hung CPA cannot hold every other console read behind it. A provider-bound request
 // takes no budget: its own status or its caller's cancellation ends the tenure.
+type externalCredentialHoldState uint8
+
+const (
+	holdStateWaitingHeaders externalCredentialHoldState = iota
+	holdStateClaimed
+	holdStateReleased
+)
+
 type externalCredentialHold struct {
-	gate *externalCredentialGate
-	// timer is stored atomically because the budget callback can fire while the
-	// handle is still being built: the callback must never read a field the
-	// constructor has not published yet.
-	timer  atomic.Pointer[time.Timer]
-	cancel context.CancelFunc
-	once   sync.Once
+	mu          sync.Mutex
+	state       externalCredentialHoldState
+	gate        *externalCredentialGate
+	timer       *time.Timer
+	cancel      context.CancelFunc
+	afterExpiry func()
 }
 
 type externalCredentialHoldContextKey struct{}
 
-func hasExternalCredentialHold(ctx context.Context, gate *externalCredentialGate) bool {
+func externalCredentialHoldFromContext(ctx context.Context, gate *externalCredentialGate) *externalCredentialHold {
 	if ctx == nil || gate == nil {
-		return false
+		return nil
 	}
-	held, _ := ctx.Value(externalCredentialHoldContextKey{}).(*externalCredentialGate)
-	return held == gate
+	held, _ := ctx.Value(externalCredentialHoldContextKey{}).(*externalCredentialHold)
+	if held == nil || held.gate != gate {
+		return nil
+	}
+	return held
+}
+
+func hasExternalCredentialHold(ctx context.Context, gate *externalCredentialGate) bool {
+	return externalCredentialHoldFromContext(ctx, gate) != nil
+}
+
+// beginCredentialHold takes the tenure of an already-acquired gate for app.
+func (a *freshApplication) beginCredentialHold(
+	ctx context.Context,
+	budget time.Duration,
+) (*externalCredentialHold, context.Context) {
+	return beginExternalCredentialHold(ctx, &a.legacyCredentialGate, budget, a.afterCredentialHoldBudgetExpiry)
 }
 
 // beginExternalCredentialHold takes the tenure of an already-acquired gate and
@@ -521,32 +542,101 @@ func beginExternalCredentialHold(
 	ctx context.Context,
 	gate *externalCredentialGate,
 	budget time.Duration,
+	onBudgetExpiry ...func(),
 ) (*externalCredentialHold, context.Context) {
-	requestCtx, cancel := context.WithCancel(context.WithValue(ctx, externalCredentialHoldContextKey{}, gate))
-	hold := &externalCredentialHold{gate: gate, cancel: cancel}
+	var afterExpiry func()
+	if len(onBudgetExpiry) > 0 {
+		afterExpiry = onBudgetExpiry[0]
+	}
+	hold := &externalCredentialHold{
+		state:       holdStateWaitingHeaders,
+		gate:        gate,
+		afterExpiry: afterExpiry,
+	}
+	requestCtx, cancel := context.WithCancel(context.WithValue(ctx, externalCredentialHoldContextKey{}, hold))
+	hold.cancel = cancel
 	if budget > 0 {
-		hold.timer.Store(time.AfterFunc(budget, func() {
-			hold.release()
-			cancel()
-		}))
+		hold.mu.Lock()
+		hold.timer = time.AfterFunc(budget, hold.expireBudget)
+		hold.mu.Unlock()
 	}
 	return hold, requestCtx
+}
+
+// claimHeader transitions the hold from waiting-for-headers to claimed so a
+// concurrent tenure-budget expiry cannot release the gate before status
+// classification and durable refusal persistence complete.
+func (h *externalCredentialHold) claimHeader() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state == holdStateReleased {
+		return false
+	}
+	h.state = holdStateClaimed
+	return true
+}
+
+func (h *externalCredentialHold) expireBudget() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.state != holdStateWaitingHeaders {
+		afterExpiry := h.afterExpiry
+		h.mu.Unlock()
+		if afterExpiry != nil {
+			afterExpiry()
+		}
+		return
+	}
+	h.state = holdStateReleased
+	gate := h.gate
+	cancel := h.cancel
+	afterExpiry := h.afterExpiry
+	h.mu.Unlock()
+	if gate != nil {
+		gate.release()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if afterExpiry != nil {
+		afterExpiry()
+	}
 }
 
 // release frees the gate and stops the budget. It is safe to call more than once:
 // the recorder releases on the status, on a hijack and on every other exit.
 func (h *externalCredentialHold) release() {
-	h.once.Do(func() {
-		if timer := h.timer.Load(); timer != nil {
-			timer.Stop()
-		}
-		h.gate.release()
-	})
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.state == holdStateReleased {
+		h.mu.Unlock()
+		return
+	}
+	h.state = holdStateReleased
+	timer := h.timer
+	gate := h.gate
+	h.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	if gate != nil {
+		gate.release()
+	}
 }
 
 // finish ends the tenure once ServeHTTP returned. The request context is cancelled
 // only here: a streamed body whose status was already known keeps its own context.
 func (h *externalCredentialHold) finish() {
+	if h == nil {
+		return
+	}
 	h.release()
 	if h.cancel != nil {
 		h.cancel()
@@ -584,6 +674,9 @@ func (w *externalLegacyRecorder) WriteHeader(status int) {
 		return
 	}
 	w.decided = true
+	if w.hold != nil {
+		w.hold.claimHeader()
+	}
 	// Only a refusal of the saved key is this gate's business. The caller-auth
 	// entry points forward the caller's own header, and a 401 from one of those
 	// says nothing about the stored key: recording it would block a healthy

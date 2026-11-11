@@ -192,6 +192,7 @@ type freshApplication struct {
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
 	credentialHeaderBudget time.Duration
+	afterCredentialHoldBudgetExpiry func()
 	legacyCollector        *collectorservice.Service
 	collectorWorker        *worker.CollectorWorker
 	identityWorker         *identityreconcile.Worker

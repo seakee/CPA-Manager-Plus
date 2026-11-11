@@ -124,24 +124,10 @@ func (a *freshApplication) externalConsoleModelList(w http.ResponseWriter, r *ht
 		writeConsoleModelListUnavailable(w)
 		return
 	}
-	hold, requestCtx := beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+	hold, requestCtx := a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
 	defer hold.finish()
 	var recorded atomic.Bool
-	docCtx := cpa.WithExternalHeaderObserver(requestCtx, func(statusCode int, releaseGate bool) {
-		switch statusCode {
-		case http.StatusUnauthorized:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementRejected)
-			}
-		case http.StatusForbidden:
-			if recorded.CompareAndSwap(false, true) {
-				a.noteExternalRejection(context.WithoutCancel(ctx), grant, cpa.ErrManagementClientForbidden)
-			}
-		}
-		if releaseGate {
-			hold.release()
-		}
-	})
+	docCtx := a.observeExternalHoldHeaders(requestCtx, ctx, hold, true, grant, &recorded)
 	document, err := cpa.NewTransportForEndpoint(install.BaseURL).ExternalReadConfigDocument(docCtx, install.ManagementKey)
 	if err != nil {
 		switch {

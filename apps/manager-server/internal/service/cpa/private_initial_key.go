@@ -132,6 +132,10 @@ func (t *Transport) request(ctx context.Context, method, path, managementKey str
 	}
 	ObserveExternalResponseStatus(ctx, resp.StatusCode)
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return resp.StatusCode, nil, nil
+	}
 	if resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity" {
 		return 0, nil, ErrProofUnavailable
 	}

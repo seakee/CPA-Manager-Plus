@@ -101,8 +101,19 @@ func externalUsageRequest(ctx context.Context, method, baseURL, key string, payl
 	}
 	ObserveExternalResponseStatus(ctx, res.StatusCode)
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
-	if err != nil {
+	switch res.StatusCode {
+	case http.StatusUnauthorized:
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return res.StatusCode, nil, ErrManagementRejected
+	case http.StatusForbidden:
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return res.StatusCode, nil, ErrManagementClientForbidden
+	}
+	if res.Header.Get("Content-Encoding") != "" && res.Header.Get("Content-Encoding") != "identity" {
+		return 0, nil, ErrProofUnavailable
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, (64<<10)+1))
+	if err != nil || len(body) > 64<<10 {
 		return 0, nil, ErrProofUnavailable
 	}
 	return res.StatusCode, body, nil
