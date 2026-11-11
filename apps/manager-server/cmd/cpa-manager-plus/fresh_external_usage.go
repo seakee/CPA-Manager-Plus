@@ -130,6 +130,7 @@ type activeCollectorGrant struct {
 }
 
 func (a *freshApplication) stopUsageCollectionLocked(ctx context.Context) {
+	a.cancelManagedUsageRuntimeWaiterLocked()
 	if a.legacyCollector != nil {
 		_ = a.legacyCollector.Stop(ctx)
 	}

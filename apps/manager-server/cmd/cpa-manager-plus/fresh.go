@@ -210,6 +210,8 @@ type freshApplication struct {
 	usageStarted                     bool
 	usageWorkersStarted              bool
 	usageCollectorStarted            bool
+	usageAwaitCancel                 context.CancelFunc
+	usageAwaitID                     uint64
 	// usageStartReason is the stable code of the last refused Collector start.
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.

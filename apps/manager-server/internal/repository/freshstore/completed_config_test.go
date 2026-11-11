@@ -298,3 +298,129 @@ func TestCompletionEnablesRequestMonitoring(t *testing.T) {
 		t.Fatal("a completed installation's Collector choice was overwritten")
 	}
 }
+
+// Legacy start-only NewManaged installations already have ProductComplete=true
+// with Connection=nil when prepareCompletedStartup migrates their destination
+// connection. Committing that connection on an already-completed installation
+// must enable request monitoring by default while preserving any explicit
+// operator choice stored in a connectionless manager_config_v1 row beforehand.
+func TestCompletedConnectionMigrationEnablesDefaultMonitoringAndPreservesOperatorChoice(t *testing.T) {
+	t.Run("default_unconfigured_enables_monitoring", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "manager.sqlite")
+		db, err := sqlite.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		st := New(db)
+		id := bootstrap.FreshIdentity{AdmissionID: "admission", InstallationID: "installation", Generation: "generation", OperationID: "operation", DatabasePath: path}
+		admin, err := security.NewAdminCredential("Cpamp_Collector_Admin_Secret_839216", "host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := st.Create(t.Context(), id, &admin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protector, err := security.NewProtector([]byte("completion collector test data key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secret, err := protector.ProtectString("migrated-management-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Legacy completed start-only NewManaged store: ProductComplete=true, Connection=nil.
+		record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection := &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: secret}
+		digest := sha256.Sum256([]byte(connection.CPABaseURL))
+		if _, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
+			r.Operation.Strategy.DestinationConnectionIdentity = "managed:sha256:" + hex.EncodeToString(digest[:])
+			r.Connection = connection
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		migrated := managerConfigRow(t, db)
+		if migrated.Collector.Enabled == nil || !*migrated.Collector.Enabled {
+			t.Fatalf("completed destination migration left request monitoring off: %+v", migrated.Collector)
+		}
+		if migrated.CPAConnection != *connection {
+			t.Fatalf("completed destination migration connection = %+v, want %+v", migrated.CPAConnection, *connection)
+		}
+	})
+
+	t.Run("preserves_operator_disabled_switch_and_collector_fields", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "manager.sqlite")
+		db, err := sqlite.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		st := New(db)
+		id := bootstrap.FreshIdentity{AdmissionID: "admission", InstallationID: "installation", Generation: "generation", OperationID: "operation", DatabasePath: path}
+		admin, err := security.NewAdminCredential("Cpamp_Collector_Admin_Secret_839216", "host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := st.Create(t.Context(), id, &admin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protector, err := security.NewProtector([]byte("completion collector test data key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secret, err := protector.ProtectString("migrated-management-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Operator explicitly disabled monitoring and tuned pollIntervalMs before destination migration ran.
+		settingsRepo := setting.New(db, protector)
+		if err := settingsRepo.SaveManagerConfig(t.Context(), model.ManagerConfig{
+			Collector: model.ManagerCollectorConfig{Enabled: configTestBool(false), PollIntervalMS: 1500},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		loadedBefore, err := st.Load(t.Context())
+		if err != nil || loadedBefore.Connection != nil {
+			t.Fatalf("connectionless completed config must keep Connection=nil before migration, got %+v err=%v", loadedBefore.Connection, err)
+		}
+		connection := &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: secret}
+		digest := sha256.Sum256([]byte(connection.CPABaseURL))
+		if _, err = st.Update(t.Context(), id, loadedBefore.Operation.Revision, func(r *Record) error {
+			r.Operation.Strategy.DestinationConnectionIdentity = "managed:sha256:" + hex.EncodeToString(digest[:])
+			r.Connection = connection
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		migrated := managerConfigRow(t, db)
+		if migrated.Collector.Enabled == nil || *migrated.Collector.Enabled {
+			t.Fatalf("completed destination migration overwrote operator disabled switch: %+v", migrated.Collector)
+		}
+		if migrated.Collector.PollIntervalMS != 1500 {
+			t.Fatalf("completed destination migration lost existing collector PollIntervalMS=%d, want 1500", migrated.Collector.PollIntervalMS)
+		}
+		if migrated.CPAConnection != *connection {
+			t.Fatalf("completed destination migration connection = %+v, want %+v", migrated.CPAConnection, *connection)
+		}
+	})
+}

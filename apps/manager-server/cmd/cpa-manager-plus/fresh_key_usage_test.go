@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +38,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -1722,5 +1724,195 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 		t.Fatalf("ConnectExternal rejected self-signed TLS certificate despite TLSSkipVerify=true: %s", hsErr)
 	case <-time.After(5 * time.Second):
 		t.Fatalf("ConnectExternal did not establish authenticated TLS RESP session (status=%+v)", extApp.legacyCollector.Status())
+	}
+}
+
+type delayedReadyUsageRuntime struct {
+	mu      sync.Mutex
+	status  model.RuntimeObservedStatus
+	onStart func()
+}
+
+func (r *delayedReadyUsageRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status, nil
+}
+
+func (r *delayedReadyUsageRuntime) setState(state model.RuntimeState) {
+	r.mu.Lock()
+	r.status.State = state
+	r.mu.Unlock()
+}
+
+func (r *delayedReadyUsageRuntime) Start(_ context.Context, req model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	r.mu.Lock()
+	r.status.State = model.RuntimeStateStarting
+	status := r.status
+	hook := r.onStart
+	r.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return model.RuntimeOperationResult{
+		OperationID:       req.OperationID,
+		OperationType:     model.RuntimeOperationStart,
+		RuntimeIdentity:   status.Identity,
+		RuntimeGeneration: status.Generation,
+		State:             model.RuntimeOperationSucceeded,
+	}, nil
+}
+
+func (r *delayedReadyUsageRuntime) Stop(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, errors.New("unexpected Stop")
+}
+func (r *delayedReadyUsageRuntime) Restart(context.Context, model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, errors.New("unexpected Restart")
+}
+func (r *delayedReadyUsageRuntime) PrepareUpdate(context.Context, model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, errors.New("unexpected PrepareUpdate")
+}
+func (r *delayedReadyUsageRuntime) ActivateUpdate(context.Context, model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, errors.New("unexpected ActivateUpdate")
+}
+func (r *delayedReadyUsageRuntime) ObserveUpdateOperation(context.Context, model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	return model.RuntimeUpdateOperationObservation{}, errors.New("unexpected ObserveUpdateOperation")
+}
+func (r *delayedReadyUsageRuntime) StageDestination(context.Context, model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, errors.New("unexpected StageDestination")
+}
+
+// After a container restart, the Supervisor begins Offline while the embedded
+// Reconciler auto-starts CPA (#1182) and Supervisor Start returns before CPA
+// answers its readiness probe. Usage collection started at serveExistingFresh
+// must arm once the embedded Runtime reaches Ready when monitoring is enabled,
+// and must stay stopped when the stored monitoring switch is Off (#1173).
+func TestRestartAutoStartArmsManagedUsageCollectionWhenRuntimeBecomesReady(t *testing.T) {
+	disabled := false
+	for _, tc := range []struct {
+		name                 string
+		enabled              *bool
+		disableWhileStarting bool
+		wantStart            bool
+	}{
+		{name: "monitoring_default_on_starts_once_ready", enabled: nil, wantStart: true},
+		{name: "monitoring_stored_off_stays_stopped_after_ready", enabled: &disabled, wantStart: false},
+		{name: "monitoring_switched_off_while_starting_cancels_waiter", enabled: nil, disableWhileStarting: true, wantStart: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostCtx, stopHost := context.WithCancel(t.Context())
+			defer stopHost()
+
+			var cpaReady atomic.Bool
+			cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !cpaReady.Load() {
+					hj, ok := w.(http.Hijacker)
+					if ok {
+						conn, _, err := hj.Hijack()
+						if err == nil {
+							_ = conn.Close()
+							return
+						}
+					}
+					w.WriteHeader(http.StatusBadGateway)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("a", 64) {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"usage":{}}`))
+			}))
+			t.Cleanup(cpaServer.Close)
+
+			_, app := newUsageCompletionApplication(t, hostCtx, config.Config{CollectorMode: "http"})
+			installManagedCheckpoint(t, app, "committed")
+			record, err := app.store.Load(hostCtx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encKey, err := app.protector.ProtectString(strings.Repeat("a", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseURL, err := cpa.NormalizeV8BaseURL(cpaServer.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifactID := model.RuntimeArtifactID(record.Operation.Strategy.TargetArtifactID)
+			record, err = app.store.Update(hostCtx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+				r.Operation.Strategy.DestinationConnectionIdentity = freshstrategy.ManagedDestinationIdentity(baseURL)
+				r.Connection = &store.ManagerCPAConnectionConfig{CPABaseURL: baseURL, ManagementKey: encKey}
+				r.Operation.ProductComplete = true
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.enabled != nil {
+				if _, err := app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, *tc.enabled); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			baseStatus := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+			baseStatus.Identity = model.RuntimeIdentity(record.Operation.Strategy.TargetIdentity)
+			baseStatus.Generation = 99
+			baseStatus.State = model.RuntimeStateOffline
+			baseStatus.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: artifactID}
+			baseStatus.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive, AttemptsRemaining: 0}
+			rt := &delayedReadyUsageRuntime{status: baseStatus}
+			app.runtime = rt
+			app.managedSource = managedInstallSource(app.store, app.protector, cpaServer.URL)
+			beforeStarts := app.legacyCollector.StartCount()
+
+			// Exact serveExistingFresh startup sequence on container restart:
+			// prepareCompletedStartup seeds desired=running while Supervisor is Offline,
+			// startUsageCollection runs before CPA finishes starting, and Reconciler
+			// auto-starts Supervisor -> Starting -> Ready.
+			op := app.prepareCompletedStartup(hostCtx, record.Operation)
+			app.startUsageCollection(op)
+			if app.usageCollectionStarted() {
+				t.Fatal("usage collection claimed started while embedded Runtime was still Offline")
+			}
+
+			reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+			if err := reconciler.ReconcileOnce(hostCtx); err != nil {
+				t.Fatalf("ReconcileOnce auto-start = %v", err)
+			}
+			if tc.disableWhileStarting {
+				if _, err := app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, false); err != nil {
+					t.Fatal(err)
+				}
+				app.applyUsageMonitoringSwitch(hostCtx, op)
+			}
+			// Supervisor Start spawns the OS process (State=Starting); readiness arrives shortly after.
+			cpaReady.Store(true)
+			rt.setState(model.RuntimeStateReady)
+
+			if tc.wantStart {
+				deadline := time.Now().Add(3 * time.Second)
+				for !app.usageCollectionStarted() && time.Now().Before(deadline) {
+					time.Sleep(20 * time.Millisecond)
+				}
+				starts := app.legacyCollector.StartCount() - beforeStarts
+				if !app.usageCollectionStarted() {
+					t.Fatalf("usage collection remained stopped after embedded Runtime auto-started to Ready (reason=%q starts=%d)", app.usageStartBlock(), starts)
+				}
+				if starts != 1 {
+					t.Fatalf("Collector StartCount delta = %d, want 1", starts)
+				}
+			} else {
+				time.Sleep(300 * time.Millisecond)
+				starts := app.legacyCollector.StartCount() - beforeStarts
+				if app.usageCollectionStarted() || starts != 0 {
+					t.Fatalf("stored Off monitoring switch started Collector after Ready: started=%v starts=%d", app.usageCollectionStarted(), starts)
+				}
+				if got := app.usageStartBlock(); got != usageStartReasonMonitoringDisabled {
+					t.Fatalf("usageStartBlock = %q, want %q", got, usageStartReasonMonitoringDisabled)
+				}
+			}
+		})
 	}
 }

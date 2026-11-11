@@ -12,6 +12,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
@@ -135,6 +136,7 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 	}
 	if a.attemptUsageStart(a.runCtx, op) {
 		a.usageStarted = true
+		a.cancelManagedUsageRuntimeWaiterLocked()
 	}
 }
 
@@ -225,6 +227,7 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 	}
 	if a.attemptUsageStart(runCtx, op) {
 		a.usageStarted = true
+		a.cancelManagedUsageRuntimeWaiterLocked()
 	}
 }
 
@@ -305,6 +308,18 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false
 			}
+			// After a restart, the embedded Supervisor begins Offline and Start
+			// returns on spawn before CPA answers its readiness probe. Deferring
+			// the Collector sample until the Supervisor observes Ready avoids a
+			// doomed probe at startup and arms collection once auto-start settles.
+			if a.runtime != nil {
+				status, statusErr := a.observeInstallationRuntime(ctx)
+				if statusErr != nil || status.State != model.RuntimeStateReady {
+					a.setUsageStartReason(usageStartReasonCollectorFailed)
+					a.armManagedUsageRuntimeWaiterLocked(ctx)
+					return false
+				}
+			}
 			a.activeExternalGrant.Store(activeCollectorGrant{})
 			if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
 				log.Printf("Fresh usage collection unavailable: %v", err)
@@ -342,6 +357,79 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		return false
 	}
 	return true
+}
+func (a *freshApplication) cancelManagedUsageRuntimeWaiterLocked() {
+	a.usageAwaitID++
+	if a.usageAwaitCancel != nil {
+		a.usageAwaitCancel()
+		a.usageAwaitCancel = nil
+	}
+}
+
+func (a *freshApplication) armManagedUsageRuntimeWaiterLocked(ctx context.Context) {
+	if a.runtime == nil || a.store == nil || a.usageAwaitCancel != nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	a.usageAwaitID++
+	waiterID := a.usageAwaitID
+	a.usageAwaitCancel = cancel
+	go a.awaitManagedRuntimeForUsage(waitCtx, cancel, waiterID)
+}
+
+func (a *freshApplication) claimManagedUsageRuntimeWaiter(waiterID uint64) bool {
+	a.usageStartMu.Lock()
+	defer a.usageStartMu.Unlock()
+	if a.usageAwaitID != waiterID || a.usageStarted {
+		return false
+	}
+	if a.usageAwaitCancel != nil {
+		a.usageAwaitCancel()
+		a.usageAwaitCancel = nil
+	}
+	a.usageAwaitID++
+	return true
+}
+
+func (a *freshApplication) releaseManagedUsageRuntimeWaiter(waiterID uint64) {
+	a.usageStartMu.Lock()
+	defer a.usageStartMu.Unlock()
+	if a.usageAwaitID == waiterID && a.usageAwaitCancel != nil {
+		a.usageAwaitCancel()
+		a.usageAwaitCancel = nil
+	}
+}
+
+func (a *freshApplication) awaitManagedRuntimeForUsage(ctx context.Context, selfCancel context.CancelFunc, waiterID uint64) {
+	defer func() {
+		selfCancel()
+		a.releaseManagedUsageRuntimeWaiter(waiterID)
+	}()
+	ticker := time.NewTicker(freshRuntimeReadinessInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		status, err := a.observeInstallationRuntime(ctx)
+		if err != nil || status.State != model.RuntimeStateReady {
+			continue
+		}
+		record, err := a.store.Load(ctx)
+		if err != nil {
+			continue
+		}
+		if !record.Operation.ProductComplete || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(record.Operation.Strategy) {
+			return
+		}
+		if !a.claimManagedUsageRuntimeWaiter(waiterID) {
+			return
+		}
+		a.startUsageCollection(record.Operation)
+		return
+	}
 }
 
 // usageWindow parses the optional bounded window of one key's usage read. The
