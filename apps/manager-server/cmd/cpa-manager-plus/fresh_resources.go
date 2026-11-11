@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -195,7 +197,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		decision, record := app.externalLegacyDecision(r)
+		decision, _ := app.externalLegacyDecision(r)
 		switch decision {
 		case legacyDecisionReplacedWrite:
 			writeLegacyRefusal(w, externalLegacyWriteReplaced)
@@ -217,29 +219,48 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			writeExternalCredentialWaitCancelled(w)
 			return
 		}
-		// One at a time, and the refusal is re-read under the lock: a page fires
-		// several of these in parallel, and the CPA bans an address after five
-		// failed authentications. Without this, one page load is enough to trip
-		// the ban and the blocker could never be cleared.
-		//
-		// The grant is taken here, before the request leaves. It is the credential
-		// this request is about to send, so a refusal is filed against that and not
-		// against whatever a concurrent rebind stored while it was in flight.
-		grant := app.externalReadGrantFor(ctx, record)
+		// Re-load the Fresh record inside legacyCredentialGate so both the
+		// refusal check/grant and the credential forwarded by the downstream
+		// proxy come from one post-wait snapshot even across a concurrent rebind.
+		record, err := app.store.Load(ctx)
+		if err != nil {
+			gate.release()
+			writeExternalAuthorityUnavailable(w)
+			return
+		}
+		if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal || !freshAdminAuthenticated(record, r) {
+			gate.release()
+			next.ServeHTTP(w, r)
+			return
+		}
+		var grant externalReadGrant
+		snapshotCtx := withFreshRecordSnapshot(ctx, record)
+		if app.externalSource != nil {
+			resolvedGrant, install, targetErr := app.externalReadTargetFor(snapshotCtx, record)
+			if targetErr != nil {
+				gate.release()
+				if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					writeFreshJSON(w, struct {
+						Code string `json:"code"`
+					}{freshconfig.ReasonTargetMoved})
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			grant = resolvedGrant
+			snapshotCtx = proxysvc.WithSavedSetupOverride(snapshotCtx, install.BaseURL, install.ManagementKey)
+		} else {
+			grant = app.externalReadGrantFor(snapshotCtx, record)
+		}
 		if grant.Refused {
 			gate.release()
-			// The refused credential is the rebind blocker for every method: a read
-			// the CPA would refuse again, and a write whose effect cannot be read
-			// back.
 			writeExternalManagementRejected(w)
 			return
 		}
-		// A stale credential is refused by the CPA with 401, and the browser reads
-		// a 401 from this namespace as its own Admin session having expired: it
-		// clears the session and returns to the login form before any page can
-		// name the cause. The refusal is the same fact the typed reads block on, so
-		// it is recorded and answered as that blocker instead.
-		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
+		markContext, mark := proxysvc.WithSavedKeyMark(snapshotCtx)
 		// A console read's tenure is bounded in both directions: the recorder frees
 		// the gate the moment the status exists, and the budget frees it and ends
 		// the request when the CPA never sends one. Without the budget a CPA that
@@ -267,8 +288,9 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 // up when its own request is cancelled: holding a console page behind a caller that
 // is already gone would stall every other CPA read for no answer.
 type externalCredentialGate struct {
-	once sync.Once
-	slot chan struct{}
+	once   sync.Once
+	slot   chan struct{}
+	onWait func()
 }
 
 func (g *externalCredentialGate) acquire(ctx context.Context) bool {
@@ -277,6 +299,9 @@ func (g *externalCredentialGate) acquire(ctx context.Context) bool {
 	case g.slot <- struct{}{}:
 		return true
 	default:
+	}
+	if g.onWait != nil {
+		g.onWait()
 	}
 	select {
 	case g.slot <- struct{}{}:

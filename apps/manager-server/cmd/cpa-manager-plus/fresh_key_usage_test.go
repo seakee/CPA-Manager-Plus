@@ -1396,6 +1396,7 @@ func (l *channelListener) Addr() net.Addr {
 
 type selfSignedTLSCPAServer struct {
 	url                string
+	certPool           *x509.CertPool
 	respAuthed         chan struct{}
 	handshakeRejected  chan string
 	respAuthCount      atomic.Int32
@@ -1404,9 +1405,10 @@ type selfSignedTLSCPAServer struct {
 
 // startSelfSignedTLSCPAServer starts a single-port self-signed TLS endpoint
 // multiplexing CPA management HTTP and RESP queue polling (matching CPA's real
-// listener). HTTP management clients trust the cert via http.DefaultTransport
-// for this test, whereas resp.Dial constructs its own tls.Config with RootCAs:
-// nil and therefore succeeds iff RuntimeConfig.TLSSkipVerify is true.
+// listener). HTTP management clients trust the cert only via context-scoped
+// cpa.WithTrustedCARoots (never mutating http.DefaultTransport), whereas
+// resp.Dial constructs its own tls.Config with RootCAs: nil and therefore
+// succeeds iff RuntimeConfig.TLSSkipVerify is true.
 func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTLSCPAServer {
 	t.Helper()
 
@@ -1435,14 +1437,6 @@ func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTL
 
 	pool := x509.NewCertPool()
 	pool.AddCert(leafCert)
-	defaultTransport := http.DefaultTransport.(*http.Transport)
-	prevTLSClientConfig := defaultTransport.TLSClientConfig
-	defaultTransport.TLSClientConfig = &tls.Config{RootCAs: pool}
-	defaultTransport.CloseIdleConnections()
-	t.Cleanup(func() {
-		defaultTransport.TLSClientConfig = prevTLSClientConfig
-		defaultTransport.CloseIdleConnections()
-	})
 
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: tlsCerts})
 	if err != nil {
@@ -1451,6 +1445,7 @@ func startSelfSignedTLSCPAServer(t *testing.T, expectedKey string) *selfSignedTL
 
 	s := &selfSignedTLSCPAServer{
 		url:               "https://" + ln.Addr().String(),
+		certPool:          pool,
 		respAuthed:        make(chan struct{}, 16),
 		handshakeRejected: make(chan string, 16),
 	}
@@ -1589,12 +1584,38 @@ func drainChan[T any](ch chan T) {
 // tlsSkipVerify=false reloads the Collector and causes TLS certificate
 // verification to reject the self-signed endpoint.
 func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *testing.T) {
-	hostCtx, stopHost := context.WithCancel(t.Context())
-	defer stopHost()
-
 	key := strings.Repeat("d", 64)
 	tlsCPA := startSelfSignedTLSCPAServer(t, key)
 
+	// Prove http.DefaultTransport remains untouched: an unscoped default HTTP
+	// client must reject the self-signed certificate.
+	unscopedClient := &http.Client{Timeout: 2 * time.Second}
+	if unscopedRes, unscopedErr := unscopedClient.Get(tlsCPA.url + "/v0/management/config"); unscopedErr == nil {
+		_ = unscopedRes.Body.Close()
+		t.Fatal("default HTTP transport trusted self-signed certificate without scoped roots")
+	}
+
+	hostCtx, stopHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.certPool))
+	defer stopHost()
+
+	gatewayRequestWithRoots := func(targetApp *freshApplication, method, resource, body, contentType string) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader *bytes.Reader
+		if body == "" {
+			reader = bytes.NewReader(nil)
+		} else {
+			reader = bytes.NewReader([]byte(body))
+		}
+		req := httptest.NewRequest(method, "/control/api/v2/"+resource, reader)
+		req = req.WithContext(cpa.WithTrustedCARoots(req.Context(), tlsCPA.certPool))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		rec := httptest.NewRecorder()
+		targetApp.canonicalAPI(rec, req)
+		return rec
+	}
 	normalizedURL, err := cpa.NormalizeV8BaseURL(tlsCPA.url)
 	if err != nil {
 		t.Fatal(err)
@@ -1659,12 +1680,12 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	app.startUsageCollection(completed.Operation)
 	awaitTLSRespAccepted("startup on skeleton row")
 
-	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
+	if resp := gatewayRequestWithRoots(app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PATCH false = %d %s", resp.Code, resp.Body.String())
 	}
 	drainChan(tlsCPA.respAuthed)
 	drainChan(tlsCPA.handshakeRejected)
-	if resp := gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+	if resp := gatewayRequestWithRoots(app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PATCH true = %d %s", resp.Code, resp.Body.String())
 	}
 	awaitTLSRespAccepted("narrow PATCH re-enable")
@@ -1673,7 +1694,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	// session without restarting the Collector.
 	startsBeforePut := app.legacyCollector.StartCount()
 	putTrueBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"resp","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":40,"queryLimit":25000,"tlsSkipVerify":true}}}`, normalizedURL)
-	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putTrueBody, "application/json"); resp.Code != http.StatusOK {
+	if resp := gatewayRequestWithRoots(app, http.MethodPut, "cpamp/usage-service/config", putTrueBody, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PUT tlsSkipVerify=true = %d %s", resp.Code, resp.Body.String())
 	}
 	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 0 {
@@ -1686,7 +1707,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 	drainChan(tlsCPA.handshakeRejected)
 	authsBeforePutFalse := tlsCPA.respAuthCount.Load()
 	putFalseBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":true,"collectorMode":"resp","queue":"usage","popSide":"right","batchSize":100,"pollIntervalMs":40,"queryLimit":25000,"tlsSkipVerify":false}}}`, normalizedURL)
-	if resp := gatewayRequest(t, app, http.MethodPut, "cpamp/usage-service/config", putFalseBody, "application/json"); resp.Code != http.StatusOK {
+	if resp := gatewayRequestWithRoots(app, http.MethodPut, "cpamp/usage-service/config", putFalseBody, "application/json"); resp.Code != http.StatusOK {
 		t.Fatalf("PUT tlsSkipVerify=false = %d %s", resp.Code, resp.Body.String())
 	}
 	if got := app.legacyCollector.StartCount() - startsBeforePut; got != 1 {
@@ -1703,9 +1724,9 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 
 	// 4. Stop Managed collector and prove ConnectExternal on a freshstore-seeded
 	// skeleton row also establishes a real TLS RESP session when cfg.TLSSkipVerify=true.
-	_ = gatewayRequest(t, app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+	_ = gatewayRequestWithRoots(app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
 	extApp := newExternalApp(t, normalizedURL, key)
-	extHostCtx, stopExtHost := context.WithCancel(t.Context())
+	extHostCtx, stopExtHost := context.WithCancel(cpa.WithTrustedCARoots(t.Context(), tlsCPA.certPool))
 	defer stopExtHost()
 	extApp.runCtx = extHostCtx
 	extApp.cfg.CollectorMode = "resp"

@@ -76,7 +76,20 @@ func ObserveExternalVersion(ctx context.Context, baseURL string, managementKey s
 	if err != nil {
 		return ExternalVersionReport{}, ErrProofUnavailable
 	}
-	return NewTransportForEndpoint(endpoint).ObserveVersion(ctx, managementKey)
+	tr := NewTransportForEndpoint(endpoint)
+	if gate := externalSavedCredentialGateFromContext(ctx); gate != nil {
+		var report ExternalVersionReport
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if verifyErr := tr.verifyExternalTarget(target); verifyErr != nil {
+				return verifyErr
+			}
+			var probeErr error
+			report, probeErr = tr.ObserveVersion(requestCtx, target.ManagementKey)
+			return probeErr
+		})
+		return report, err
+	}
+	return tr.ObserveVersion(ctx, managementKey)
 }
 
 // ObserveVersion is the version probe of one resolved External target, on the
@@ -102,7 +115,7 @@ func (t *Transport) observeVersion(ctx context.Context, managementKey string) (s
 	request.Header.Set("Authorization", "Bearer "+managementKey)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Cache-Control", "no-store")
-	response, err := t.client.Do(request)
+	response, err := t.httpClient(ctx).Do(request)
 	if err != nil {
 		return "", ErrProofUnavailable
 	}

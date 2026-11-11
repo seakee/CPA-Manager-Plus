@@ -126,7 +126,7 @@ func (t *Transport) request(ctx context.Context, method, path, managementKey str
 	if len(payload) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := t.client.Do(req)
+	resp, err := t.httpClient(ctx).Do(req)
 	if err != nil {
 		return 0, nil, ErrProofUnavailable
 	}

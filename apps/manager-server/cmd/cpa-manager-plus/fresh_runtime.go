@@ -1219,32 +1219,6 @@ func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
 	return a.runtimeStatusClientFor(a.effectiveRuntimeMode(context.Background()))
 }
 
-func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, client runtimeservice.RuntimeClient) (model.RuntimeObservedStatus, bool, error) {
-	if a == nil || client == nil {
-		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
-	}
-	gate := &a.legacyCredentialGate
-	requestCtx := ctx
-	if !hasExternalCredentialHold(ctx, gate) {
-		if !gate.acquire(ctx) {
-			return model.RuntimeObservedStatus{}, false, ctx.Err()
-		}
-		var hold *externalCredentialHold
-		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
-		defer hold.finish()
-	}
-	grant := a.externalReadGrant(requestCtx)
-	if grant.Refused {
-		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
-	}
-	observed, err := client.Status(requestCtx)
-	if err != nil {
-		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
-		return model.RuntimeObservedStatus{}, errors.Is(err, cpa.ErrManagementRejected), err
-	}
-	return observed, false, nil
-}
-
 // freshDatabaseStatusProvider reports the Manager database files and the WAL
 // checkpoint state observed for them. The legacy service starts SQLite WAL
 // maintenance before it builds its AppContext
@@ -1348,6 +1322,60 @@ func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObs
 		return observed, err
 	}
 	return client.Status(ctx)
+}
+
+func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, client runtimeservice.RuntimeClient) (model.RuntimeObservedStatus, bool, error) {
+	if a == nil || client == nil {
+		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
+	}
+	gate := &a.legacyCredentialGate
+	alreadyHeld := hasExternalCredentialHold(ctx, gate)
+	requestCtx := ctx
+	if !alreadyHeld {
+		if !gate.acquire(ctx) {
+			return model.RuntimeObservedStatus{}, false, ctx.Err()
+		}
+		var hold *externalCredentialHold
+		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+		defer hold.finish()
+	}
+	if a.store == nil || a.externalSource == nil {
+		observed, err := client.Status(requestCtx)
+		return observed, false, err
+	}
+	var (
+		record freshstore.Record
+		ok     bool
+	)
+	if alreadyHeld {
+		record, ok = freshRecordSnapshotFromContext(requestCtx)
+	}
+	if !ok {
+		var loadErr error
+		record, loadErr = a.store.Load(requestCtx)
+		if loadErr != nil {
+			if requestCtx.Err() != nil {
+				return model.RuntimeObservedStatus{}, false, requestCtx.Err()
+			}
+			return model.RuntimeObservedStatus{}, false, loadErr
+		}
+	}
+	if !isCommittedExternalStrategy(record.Operation.Strategy) {
+		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
+	}
+	grant, _, targetErr := a.externalReadTargetFor(requestCtx, record)
+	if targetErr != nil {
+		return model.RuntimeObservedStatus{}, false, targetErr
+	}
+	if grant.Refused {
+		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
+	}
+	observed, err := client.Status(withFreshRecordSnapshot(requestCtx, record))
+	if err != nil {
+		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+		return model.RuntimeObservedStatus{}, errors.Is(err, cpa.ErrManagementRejected), err
+	}
+	return observed, false, nil
 }
 
 func (c freshRuntimeClientAdapter) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
@@ -1531,6 +1559,10 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unavailable", a.runtimeJournal))
 		return
 	}
+	// An External CPA that already refused the stored credential is not asked
+	// again: CPA bans the address after five failed authentications, and this
+	// page polls. The status is the typed blocker, with whatever was last
+	// observed, until a rebind or a re-verify proves the key.
 	now := time.Now().UTC()
 	var (
 		observed model.RuntimeObservedStatus

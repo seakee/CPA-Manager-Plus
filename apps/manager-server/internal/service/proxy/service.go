@@ -1768,5 +1768,8 @@ func cleanRequestPath(requestPath string) string {
 }
 
 func (s *Service) resolveSetup(ctx context.Context) (store.Setup, bool, error) {
+	if override, ok := savedSetupOverride(ctx); ok {
+		return override, true, nil
+	}
 	return s.managerConfigService.ResolveSetup(ctx)
 }

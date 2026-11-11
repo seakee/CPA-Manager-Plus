@@ -806,3 +806,721 @@ func TestExternalRuntimeUpdatesSerializesAndRecordsRejection(t *testing.T) {
 		})
 	}
 }
+
+// newStatefulExternalCPA models a real External CPA v8/v0 management surface
+// with live client-key and configuration state so multi-step key operations,
+// gateway saves/reconciles, runtime status, and model/usage reads can be
+// exercised end-to-end across credential rotations and rebinds.
+type statefulExternalCPA struct {
+	mu           sync.Mutex
+	activeKey    string
+	refuseStatus int
+	clientKeys   []string
+	authSeen     []string
+	requests     atomic.Int32
+	onRequest    func(r *http.Request) bool
+	server       *httptest.Server
+}
+
+func newStatefulExternalCPA(t *testing.T, initialKey string) *statefulExternalCPA {
+	t.Helper()
+	s := &statefulExternalCPA{
+		activeKey:    initialKey,
+		refuseStatus: http.StatusUnauthorized,
+	}
+	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requests.Add(1)
+		authHeader := r.Header.Get("Authorization")
+		s.mu.Lock()
+		s.authSeen = append(s.authSeen, r.Method+" "+r.URL.Path+" "+authHeader)
+		expected := "Bearer " + s.activeKey
+		refuse := s.refuseStatus
+		keysSnapshot := append([]string(nil), s.clientKeys...)
+		hook := s.onRequest
+		s.mu.Unlock()
+		if hook != nil && hook(r) {
+			return
+		}
+		if authHeader != expected {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(refuse)
+			_, _ = w.Write([]byte(`{"error":"invalid management key"}`))
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.13")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/config":
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":false,"redis-usage-queue-retention-seconds":60}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-statistics-enabled":
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":false}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config":
+			rawKeys, _ := json.Marshal(keysSnapshot)
+			_, _ = w.Write([]byte(`{"routing":{"strategy":"round-robin","retry":{"request-retry":3}},"plugins":{"dir":"/var/lib/cpa/plugins"},"access":{"api-keys":` + string(rawKeys) + `}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config.yaml":
+			rawKeys, _ := json.Marshal(keysSnapshot)
+			_, _ = w.Write([]byte(`{"config-version":8,"access":{"api-keys":` + string(rawKeys) + `}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/access/api-keys":
+			rawKeys, _ := json.Marshal(keysSnapshot)
+			_, _ = w.Write(rawKeys)
+		case r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/access/api-keys":
+			var updated []string
+			if json.NewDecoder(r.Body).Decode(&updated) != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			s.mu.Lock()
+			s.clientKeys = updated
+			s.mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v8/management/config/"):
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(s.server.Close)
+	return s
+}
+
+func stageExternalKeyForGateTest(t *testing.T, app *freshApplication, reqChar string, installOnCPA bool) string {
+	t.Helper()
+	created := gatewayRequest(t, app, http.MethodPost, "api-keys",
+		`{"requestId":"`+strings.Repeat(reqChar, 32)+`"}`, "application/json")
+	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
+		t.Fatalf("create key = %d %s", created.Code, created.Body.String())
+	}
+	var decoded struct {
+		Key struct {
+			ID string `json:"id"`
+		} `json:"key"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &decoded); err != nil || decoded.Key.ID == "" {
+		t.Fatalf("decode created key %q: %v", created.Body.String(), err)
+	}
+	if installOnCPA {
+		installed := gatewayRequest(t, app, http.MethodPost, "api-keys/"+decoded.Key.ID+"/initial-install", `{}`, "application/json")
+		if installed.Code != http.StatusOK {
+			t.Fatalf("initial-install key %s = %d %s", decoded.Key.ID, installed.Code, installed.Body.String())
+		}
+	}
+	return decoded.Key.ID
+}
+
+// TestExternalFreshNativeSurfacesSerializeAndRecordFirstRejection proves that
+// every Fresh-native External CPA surface (gateway config read/save/reconcile,
+// client key list/observe/apply/revocation-prepare/check/continue, runtime
+// status, and plugin capability probing) serializes outbound stored-credential
+// requests on legacyCredentialGate and records the first 401/403 refusal before
+// releasing the gate, so a concurrent cross-surface burst sends only 1 request
+// to CPA instead of tripping CPA's five-strike address ban.
+func TestExternalFreshNativeSurfacesSerializeAndRecordFirstRejection(t *testing.T) {
+	const rotatedKey = "rotated-key-1111222233334444555566667777888899990000aaaabbbbcccc"
+	leaders := []string{
+		"gateway_config_read",
+		"gateway_config_save",
+		"gateway_config_reconcile",
+		"api_keys_list",
+		"api_keys_observe",
+		"api_keys_apply",
+		"api_keys_revocation_prepare",
+		"api_keys_operation_check",
+		"api_keys_operation_continue",
+		"runtime_status",
+		"plugin_capability_probe",
+	}
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		for _, leader := range leaders {
+			t.Run(http.StatusText(status)+"/"+leader, func(t *testing.T) {
+				cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+				app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+				app.gatewayConfig = gatewayFor(app)
+
+				installedA := stageExternalKeyForGateTest(t, app, "1", true)
+				installedB := stageExternalKeyForGateTest(t, app, "2", true)
+				unstagedApplyKey := stageExternalKeyForGateTest(t, app, "3", false)
+				generation, baseline := externalPageTarget(t, app, "routing")
+
+				var opID string
+				if leader == "api_keys_operation_check" || leader == "api_keys_operation_continue" {
+					opID = strings.Repeat("4", 32)
+					prep := gatewayRequest(t, app, http.MethodPost, "api-keys/"+installedA+"/revocation",
+						`{"requestId":"`+opID+`","keeperId":"`+installedB+`","mode":"revoke"}`, "application/json")
+					if prep.Code != http.StatusOK {
+						t.Fatalf("prepare revocation = %d %s", prep.Code, prep.Body.String())
+					}
+				}
+				reconcileID := strings.Repeat("5", 32)
+				if leader == "gateway_config_reconcile" {
+					rec, err := app.store.Load(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(v *freshstore.Record) error {
+						if v.ConfigGroups == nil {
+							v.ConfigGroups = map[string]*freshstore.ConfigGroupJournal{}
+						}
+						v.ConfigGroups["routing"] = &freshstore.ConfigGroupJournal{
+							Latest: reconcileID,
+							Operations: map[string]freshstore.ConfigGroupOperation{
+								reconcileID: {
+									SourceID:   rec.Operation.Identity.InstallationID,
+									Generation: generation,
+									RequestID:  reconcileID,
+									Group:      "routing",
+									Target:     "group",
+									Prefix:     "routing",
+									Baseline:   baseline,
+									Edits:      []freshstore.ConfigGroupEdit{{Path: "routing.strategy", Action: "set", Value: "fill-first"}},
+									State:      "unknown",
+								},
+							},
+						}
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				firstEntered := make(chan struct{})
+				secondEntered := make(chan struct{})
+				releaseFirst := make(chan struct{})
+				var enterCount atomic.Int32
+				cpaSrv.mu.Lock()
+				cpaSrv.activeKey = rotatedKey
+				cpaSrv.refuseStatus = status
+				cpaSrv.onRequest = func(_ *http.Request) bool {
+					n := enterCount.Add(1)
+					if n == 1 {
+						close(firstEntered)
+						<-releaseFirst
+					} else if n == 2 {
+						close(secondEntered)
+					}
+					return false
+				}
+				cpaSrv.mu.Unlock()
+
+				const followerCount = 5
+				var parkedWaiters atomic.Int32
+				allWaitersParked := make(chan struct{})
+				var parkedOnce sync.Once
+				app.legacyCredentialGate.onWait = func() {
+					if parkedWaiters.Add(1) >= followerCount {
+						parkedOnce.Do(func() { close(allWaitersParked) })
+					}
+				}
+				defer func() { app.legacyCredentialGate.onWait = nil }()
+
+				before := cpaSrv.requests.Load()
+				leaderErr := make(chan string, 1)
+				go func() {
+					switch leader {
+					case "gateway_config_read":
+						res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "gateway/config read = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "gateway_config_save":
+						body := `{"requestId":"` + strings.Repeat("6", 32) + `","expected":{"generation":"` + generation + `","baseline":"` + baseline + `"},"edits":[{"path":"routing.strategy","action":"set","value":"fill-first"}]}`
+						res := gatewayRequest(t, app, http.MethodPost, "gateway/config/groups/routing", body, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "gateway/config save = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "gateway_config_reconcile":
+						res := gatewayRequest(t, app, http.MethodPost, "gateway/config/operations/"+reconcileID+"/reconcile", `{}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "gateway/config reconcile = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_list":
+						res := gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys list = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_observe":
+						res := gatewayRequest(t, app, http.MethodGet, "api-keys/"+unstagedApplyKey+"/initial-install", "", "")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys observe = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_apply":
+						res := gatewayRequest(t, app, http.MethodPost, "api-keys/"+unstagedApplyKey+"/initial-install", `{}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys apply = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_revocation_prepare":
+						res := gatewayRequest(t, app, http.MethodPost, "api-keys/"+installedA+"/revocation",
+							`{"requestId":"`+strings.Repeat("7", 32)+`","keeperId":"`+installedB+`","mode":"revoke"}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys revocation prepare = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_operation_check":
+						res := gatewayRequest(t, app, http.MethodGet, "api-keys/operations/"+opID, "", "")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys operation check = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "api_keys_operation_continue":
+						res := gatewayRequest(t, app, http.MethodPost, "api-keys/operations/"+opID+"/continue", `{}`, "application/json")
+						if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+							leaderErr <- "api-keys operation continue = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "runtime_status":
+						res := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+						var body freshRuntimeStatusResponse
+						if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &body) != nil || body.ErrorCode != freshconfig.ReasonManagementRejected {
+							leaderErr <- "runtime/status = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+							return
+						}
+					case "plugin_capability_probe":
+						if app.v8PluginCapable(t.Context()) {
+							leaderErr <- "v8PluginCapable = true on rejected credential"
+							return
+						}
+					}
+					leaderErr <- ""
+				}()
+
+				select {
+				case <-firstEntered:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("leader %s never reached CPA", leader)
+				}
+
+				followerErrs := make(chan string, followerCount)
+				go func() {
+					res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower gateway/config = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower api-keys = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodPost, "api-keys/"+unstagedApplyKey+"/initial-install", `{}`, "application/json")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower initial-install = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+					var body freshRuntimeStatusResponse
+					if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &body) != nil || body.ErrorCode != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower runtime/status = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+				go func() {
+					res := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", "")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						followerErrs <- "follower cpamp/v1/models = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+					followerErrs <- ""
+				}()
+
+				select {
+				case <-allWaitersParked:
+				case <-secondEntered:
+				case <-time.After(5 * time.Second):
+				}
+				close(releaseFirst)
+
+				if msg := <-leaderErr; msg != "" {
+					t.Fatal(msg)
+				}
+				for range followerCount {
+					if msg := <-followerErrs; msg != "" {
+						t.Fatal(msg)
+					}
+				}
+				if !app.externalReadGrant(t.Context()).Refused {
+					t.Fatalf("leader %s did not record durable credential refusal", leader)
+				}
+				if got := cpaSrv.requests.Load() - before; got != 1 {
+					t.Fatalf("External CPA received %d management requests across leader %s + concurrent burst, want 1", got, leader)
+				}
+			})
+		}
+	}
+}
+
+// TestExternalFreshNativeSurfacesBindSingleSnapshotAcrossRebind proves that a
+// Fresh-native External caller queued behind legacyCredentialGate during a
+// concurrent rebind resolves both its refusal grant and outbound credential
+// from one post-gate snapshot (never mixing a pre-gate grant digest with a
+// post-rebind credential or overwriting a newer refusal with a stale outer
+// grant).
+func TestExternalFreshNativeSurfacesBindSingleSnapshotAcrossRebind(t *testing.T) {
+	const reboundKey = "rebound-key-aaaabbbbccccddddeeeeffff0000111122223333444455556666"
+	const rotatedAgainKey = "rotated-again-9999888877776666555544443333222211110000ffffeeee"
+	surfaces := []string{
+		"gateway_config_read",
+		"api_keys_list",
+		"api_keys_revocation_prepare",
+		"runtime_status",
+		"runtime_updates",
+	}
+	for _, surface := range surfaces {
+		t.Run(surface, func(t *testing.T) {
+			cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+			app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+			app.gatewayConfig = gatewayFor(app)
+
+			keyA := stageExternalKeyForGateTest(t, app, "a", true)
+			keyB := stageExternalKeyForGateTest(t, app, "b", true)
+
+			holderEntered := make(chan struct{})
+			releaseHolder := make(chan struct{})
+			var holderOnce sync.Once
+			cpaSrv.mu.Lock()
+			cpaSrv.onRequest = func(r *http.Request) bool {
+				if r.URL.Path == "/v0/management/api-keys" {
+					holderOnce.Do(func() {
+						close(holderEntered)
+						<-releaseHolder
+					})
+				}
+				return false
+			}
+			cpaSrv.mu.Unlock()
+
+			holderDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				holderDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+			}()
+			select {
+			case <-holderEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("gate holder never reached CPA")
+			}
+
+			waiterParked := make(chan struct{})
+			var waiterOnce sync.Once
+			app.legacyCredentialGate.onWait = func() {
+				waiterOnce.Do(func() { close(waiterParked) })
+			}
+			defer func() { app.legacyCredentialGate.onWait = nil }()
+
+			waiterDone := make(chan string, 1)
+			go func() {
+				switch surface {
+				case "gateway_config_read":
+					res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						waiterDone <- "gateway/config = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+				case "api_keys_list":
+					res := gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						waiterDone <- "api-keys = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+				case "api_keys_revocation_prepare":
+					res := gatewayRequest(t, app, http.MethodPost, "api-keys/"+keyA+"/revocation",
+						`{"requestId":"`+strings.Repeat("c", 32)+`","keeperId":"`+keyB+`","mode":"revoke"}`, "application/json")
+					if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+						waiterDone <- "revocation prepare = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+				case "runtime_status":
+					res := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+					var body freshRuntimeStatusResponse
+					if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &body) != nil || body.ErrorCode != freshconfig.ReasonManagementRejected {
+						waiterDone <- "runtime/status = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+				case "runtime_updates":
+					res := gateRequest(t, app, http.MethodGet, "/usage-service/runtime/updates", gateAdmin)
+					if res.Code != http.StatusServiceUnavailable && res.Code != http.StatusConflict {
+						waiterDone <- "runtime/updates = " + strconv.Itoa(res.Code) + " " + res.Body.String()
+						return
+					}
+				}
+				waiterDone <- ""
+			}()
+
+			select {
+			case <-waiterParked:
+			case msg := <-waiterDone:
+				close(releaseHolder)
+				<-holderDone
+				t.Fatalf("surface %s did not wait on legacyCredentialGate (%s)", surface, msg)
+			case <-time.After(5 * time.Second):
+				close(releaseHolder)
+				t.Fatalf("surface %s never reached legacyCredentialGate", surface)
+			}
+
+			// Rebind to reboundKey while waiter is parked on the gate, then rotate
+			// CPA again so reboundKey itself meets a 401 when waiter proceeds.
+			cpaSrv.mu.Lock()
+			cpaSrv.activeKey = reboundKey
+			cpaSrv.mu.Unlock()
+			rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind",
+				`{"requestId":"`+strings.Repeat("d", 32)+`","managementKey":"`+reboundKey+`"}`, "application/json")
+			if rebindRes.Code != http.StatusOK {
+				close(releaseHolder)
+				t.Fatalf("rebind = %d %s", rebindRes.Code, rebindRes.Body.String())
+			}
+
+			cpaSrv.mu.Lock()
+			cpaSrv.activeKey = rotatedAgainKey
+			cpaSrv.authSeen = nil
+			cpaSrv.mu.Unlock()
+
+			close(releaseHolder)
+			if holder := <-holderDone; holder.Code != http.StatusOK {
+				t.Fatalf("holder = %d %s", holder.Code, holder.Body.String())
+			}
+			if msg := <-waiterDone; msg != "" {
+				t.Fatal(msg)
+			}
+
+			cpaSrv.mu.Lock()
+			seen := append([]string(nil), cpaSrv.authSeen...)
+			cpaSrv.mu.Unlock()
+			for _, line := range seen {
+				if strings.Contains(line, externalAuthorityManagement) {
+					t.Fatalf("surface %s presented pre-rebind credential after rebind: %v", surface, seen)
+				}
+			}
+			if !app.externalReadGrant(t.Context()).Refused {
+				t.Fatalf("surface %s filed refusal against stale pre-gate grant instead of rebound credential (seen=%v)", surface, seen)
+			}
+			beforeFollowUp := cpaSrv.requests.Load()
+			followUp := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+			if followUp.Code != http.StatusConflict || errorCode(t, followUp) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("follow-up external/usage = %d %s", followUp.Code, followUp.Body.String())
+			}
+			if sent := cpaSrv.requests.Load() - beforeFollowUp; sent != 0 {
+				t.Fatalf("follow-up sent %d CPA requests after rebound credential was refused", sent)
+			}
+		})
+	}
+	t.Run("runtime_updates_split_snapshot_during_status", func(t *testing.T) {
+		cpaSrv := newStatefulExternalCPA(t, rotatedAgainKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		baseStore := app.store
+		rebinder := baseStore.(freshstore.ConnectionRebinder)
+		var loads atomic.Int32
+		hooked := &hookedLoadStore{
+			Store:              baseStore,
+			ConnectionRebinder: rebinder,
+		}
+		hooked.onLoad = func() {
+			// Load 1 is pre-gate legacy auth check; Load 2 is inside freshRuntimeClientAdapter.Status.
+			if loads.Add(1) == 2 {
+				protected, err := app.protector.ProtectString(reboundKey)
+				if err != nil {
+					t.Errorf("protect reboundKey: %v", err)
+					return
+				}
+				rec, err := baseStore.Load(context.Background())
+				if err != nil {
+					t.Errorf("load baseStore: %v", err)
+					return
+				}
+				if _, err := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
+					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); err != nil {
+					t.Errorf("rebind in hook: %v", err)
+				}
+			}
+		}
+		app.store = hooked
+		app.externalSource = externalInstallSource(app.store, app.protector)
+
+		res := gateRequest(t, app, http.MethodGet, "/usage-service/runtime/updates", gateAdmin)
+		if res.Code != http.StatusServiceUnavailable && res.Code != http.StatusConflict {
+			t.Fatalf("runtime/updates = %d %s", res.Code, res.Body.String())
+		}
+		cpaSrv.mu.Lock()
+		seen := append([]string(nil), cpaSrv.authSeen...)
+		cpaSrv.mu.Unlock()
+		if len(seen) != 1 || !strings.Contains(seen[0], "Bearer "+externalAuthorityManagement) {
+			t.Fatalf("runtime/updates sent credential different from in-gate grant snapshot: %v", seen)
+		}
+		if app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("refusal of pre-rebind snapshot poisoned reboundKey")
+		}
+	})
+}
+
+type hookedLoadStore struct {
+	freshstore.Store
+	freshstore.ConnectionRebinder
+	onLoad func()
+}
+
+func (s *hookedLoadStore) Load(ctx context.Context) (freshstore.Record, error) {
+	rec, err := s.Store.Load(ctx)
+	if s.onLoad != nil {
+		s.onLoad()
+	}
+	return rec, err
+}
+
+// TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind proves that
+// guardFreshExternalLegacy re-reads freshstore.Record inside
+// legacyCredentialGate and forces the downstream legacy proxy to send the
+// exact credential snapshot whose envelope digest is in recorder.grant, across
+// both pre-gate wait rebinds and post-load/pre-proxy rebinds.
+func TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind(t *testing.T) {
+	t.Run("rebind while queued on legacyCredentialGate", func(t *testing.T) {
+		const reboundKey = "legacy-rebound-0000111122223333444455556666777788889999aaaabbbb"
+		const rotatedAgain = "legacy-rotated-ffff111122223333444455556666777788889999aaaabbbb"
+
+		cpaSrv := newStatefulExternalCPA(t, externalAuthorityManagement)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+
+		firstEntered := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		var firstOnce sync.Once
+		cpaSrv.mu.Lock()
+		cpaSrv.onRequest = func(_ *http.Request) bool {
+			firstOnce.Do(func() {
+				close(firstEntered)
+				<-releaseFirst
+			})
+			return false
+		}
+		cpaSrv.mu.Unlock()
+
+		firstDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			firstDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		}()
+		select {
+		case <-firstEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first legacy read never reached CPA")
+		}
+
+		secondParked := make(chan struct{})
+		var parkedOnce sync.Once
+		app.legacyCredentialGate.onWait = func() {
+			parkedOnce.Do(func() { close(secondParked) })
+		}
+		defer func() { app.legacyCredentialGate.onWait = nil }()
+
+		secondDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			secondDone <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		}()
+		select {
+		case <-secondParked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("second legacy read never parked on legacyCredentialGate")
+		}
+
+		// Rebind while second request is parked inside gate.acquire(ctx), then
+		// rotate CPA again so reboundKey receives 401 when second proceeds.
+		protected, err := app.protector.ProtectString(reboundKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebinder := app.store.(freshstore.ConnectionRebinder)
+		record, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rebinder.RebindConnection(t.Context(), record.Operation.Identity, record.Operation.Revision,
+			model.ManagerCPAConnectionConfig{CPABaseURL: record.Connection.CPABaseURL, ManagementKey: protected}); err != nil {
+			t.Fatal(err)
+		}
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = rotatedAgain
+		cpaSrv.authSeen = nil
+		cpaSrv.mu.Unlock()
+
+		close(releaseFirst)
+		if first := <-firstDone; first.Code != http.StatusOK {
+			t.Fatalf("first legacy read = %d %s", first.Code, first.Body.String())
+		}
+		second := <-secondDone
+		if second.Code != http.StatusConflict || errorCode(t, second) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("second legacy read = %d %s", second.Code, second.Body.String())
+		}
+		if !app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("second legacy read filed 401 against pre-gate K1 grant instead of post-gate reboundKey")
+		}
+		beforeThird := cpaSrv.requests.Load()
+		third := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		if third.Code != http.StatusConflict || errorCode(t, third) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("third legacy read = %d %s", third.Code, third.Body.String())
+		}
+		if sent := cpaSrv.requests.Load() - beforeThird; sent != 0 {
+			t.Fatalf("third legacy read sent %d CPA requests after reboundKey refusal", sent)
+		}
+	})
+
+	t.Run("rebind between in-gate store load and proxy setup resolution", func(t *testing.T) {
+		const reboundKey = "split-rebound-0000111122223333444455556666777788889999aaaabbbbcc"
+		const rotatedAgain = "split-rotated-9999888877776666555544443333222211110000ffffeeeedd"
+
+		cpaSrv := newStatefulExternalCPA(t, rotatedAgain)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		baseStore := app.store
+		rebinder := baseStore.(freshstore.ConnectionRebinder)
+		var loads atomic.Int32
+		hooked := &hookedLoadStore{
+			Store:              baseStore,
+			ConnectionRebinder: rebinder,
+		}
+		hooked.onLoad = func() {
+			// Load 1 is pre-gate externalLegacyDecision; Load 2 is inside legacyCredentialGate.
+			// Trigger rebind immediately after the in-gate Load so proxy.Service.resolveSetup
+			// sees reboundKey in SQLite unless bound to the in-gate snapshot.
+			if loads.Add(1) == 2 {
+				protected, err := app.protector.ProtectString(reboundKey)
+				if err != nil {
+					t.Errorf("protect reboundKey: %v", err)
+					return
+				}
+				rec, err := baseStore.Load(context.Background())
+				if err != nil {
+					t.Errorf("load baseStore: %v", err)
+					return
+				}
+				if _, err := rebinder.RebindConnection(context.Background(), rec.Operation.Identity, rec.Operation.Revision,
+					model.ManagerCPAConnectionConfig{CPABaseURL: rec.Connection.CPABaseURL, ManagementKey: protected}); err != nil {
+					t.Errorf("rebind in hook: %v", err)
+				}
+			}
+		}
+		app.store = hooked
+		app.externalSource = externalInstallSource(app.store, app.protector)
+
+		res := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("legacy read = %d %s", res.Code, res.Body.String())
+		}
+		cpaSrv.mu.Lock()
+		seen := append([]string(nil), cpaSrv.authSeen...)
+		cpaSrv.mu.Unlock()
+		if len(seen) != 1 || !strings.Contains(seen[0], "Bearer "+externalAuthorityManagement) {
+			t.Fatalf("proxy sent credential different from in-gate grant snapshot: %v", seen)
+		}
+		if app.externalReadGrant(t.Context()).Refused {
+			t.Fatal("refusal of pre-rebind snapshot poisoned reboundKey")
+		}
+	})
+}

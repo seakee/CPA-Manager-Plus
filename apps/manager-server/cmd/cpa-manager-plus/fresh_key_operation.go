@@ -99,7 +99,11 @@ func (a *freshApplication) prepareClientKeyOperation(w http.ResponseWriter, r *h
 	if !decodeKeyOperation(w, r, &body) {
 		return
 	}
-	result, err := a.keyApply.Prepare(r.Context(), body.RequestID, target, body.KeeperID, body.Mode, op.Strategy.TargetGeneration)
+	if a.externalSavedCredentialRefused(r.Context()) {
+		writeExternalManagementRejected(w)
+		return
+	}
+	result, err := a.keyApply.Prepare(a.withExternalSavedCredentialGate(r.Context()), body.RequestID, target, body.KeeperID, body.Mode, op.Strategy.TargetGeneration)
 	keyOperationReply(w, result, err)
 }
 
@@ -155,17 +159,11 @@ func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Req
 		// A credential the user's CPA already refused is not presented again: this
 		// page polls a journaled step, and five failed authentications ban the
 		// address for thirty minutes.
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.externalSavedCredentialRefused(r.Context()) {
 			writeExternalManagementRejected(w)
 			return
 		}
-		result, err := a.keyApply.CheckOperation(r.Context(), id, op.Strategy.TargetGeneration)
-		if errors.Is(err, cpa.ErrManagementRejected) {
-			// The poll is where the refusal is first known, so it is recorded and
-			// the reads that follow answer it without contacting the CPA.
-			a.noteExternalRejection(r.Context(), grant, err)
-		}
+		result, err := a.keyApply.CheckOperation(a.withExternalSavedCredentialGate(r.Context()), id, op.Strategy.TargetGeneration)
 		keyOperationReply(w, result, err)
 		return
 	}
@@ -178,7 +176,11 @@ func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Req
 			w.WriteHeader(400)
 			return
 		}
-		result, err := a.keyApply.ContinueOperation(r.Context(), strings.TrimSuffix(id, "/continue"), op.Strategy.TargetGeneration)
+		if a.externalSavedCredentialRefused(r.Context()) {
+			writeExternalManagementRejected(w)
+			return
+		}
+		result, err := a.keyApply.ContinueOperation(a.withExternalSavedCredentialGate(r.Context()), strings.TrimSuffix(id, "/continue"), op.Strategy.TargetGeneration)
 		keyOperationReply(w, result, err)
 		return
 	}

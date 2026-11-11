@@ -423,7 +423,7 @@ func (a *freshApplication) confirmExternalUsageCollection(w http.ResponseWriter,
 	// endpoint re-runs the collection start, and that start samples the CPA before
 	// it may write anything: answering the recorded blocker here is the same answer
 	// the read gives, and it costs the CPA no request.
-	if a.externalReadGrant(r.Context()).Refused {
+	if a.externalSavedCredentialRefused(r.Context()) {
 		a.writeExternalUsageError(w, cpa.ErrManagementRejected)
 		return
 	}

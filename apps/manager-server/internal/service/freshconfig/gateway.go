@@ -538,7 +538,7 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 		if wire != nil {
 			transport = wire(endpoint)
 		} else {
-			transport = cpa.NewTransportForEndpoint(endpoint)
+			transport = cpa.NewExternalConfigTransport(endpoint)
 		}
 		return authority{
 			mode:     ModeExternal,
@@ -630,6 +630,9 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 	if auth.capable.Readable && auth.wire != nil {
 		document, err = auth.wire.ReadConfigDocument(ctx, auth.secret)
 		if err != nil {
+			if auth.mode == ModeExternal && errors.Is(err, cpa.ErrManagementRejected) {
+				return View{}, err
+			}
 			view.Capability.Readable = false
 			view.Capability.Writable = false
 			view.Capability.RulesWritable = false

@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"sync/atomic"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // savedKeyMarkKey is the request-context key of the one fact a gate above this
@@ -41,4 +43,28 @@ func NoteSavedManagementKey(ctx context.Context) {
 	if mark, ok := ctx.Value(savedKeyMarkKey{}).(*SavedKeyMark); ok {
 		mark.attached.Store(true)
 	}
+}
+
+type savedSetupOverrideKey struct{}
+
+// WithSavedSetupOverride binds proxy setup resolution on ctx to an explicit
+// (upstreamURL, managementKey) snapshot already resolved under an upstream
+// credential gate so the proxy Director presents the exact credential snapshot
+// that the gate validated and tracks for refusal recording.
+func WithSavedSetupOverride(ctx context.Context, upstreamURL, managementKey string) context.Context {
+	if upstreamURL == "" || managementKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, savedSetupOverrideKey{}, store.Setup{
+		CPAUpstreamURL: upstreamURL,
+		ManagementKey:  managementKey,
+	})
+}
+
+func savedSetupOverride(ctx context.Context) (store.Setup, bool) {
+	if ctx == nil {
+		return store.Setup{}, false
+	}
+	setup, ok := ctx.Value(savedSetupOverrideKey{}).(store.Setup)
+	return setup, ok && setup.CPAUpstreamURL != "" && setup.ManagementKey != ""
 }

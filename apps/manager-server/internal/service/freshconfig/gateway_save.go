@@ -421,6 +421,14 @@ func groupPatch(prefix string, edits []freshstore.ConfigGroupEdit) ([]byte, bool
 // has landed, so callers pass applied=true once an earlier write of this save was
 // acknowledged: that failure is unknown and resolved by reading back.
 func (s *Service) failGroupOperation(ctx context.Context, group string, operation freshstore.ConfigGroupOperation, cause error, applied bool) (freshstore.ConfigGroupOperation, error) {
+	if !applied && errors.Is(cause, cpa.ErrManagementRejected) {
+		next := operation
+		next.State, next.Code = "failed", ReasonManagementRejected
+		if err := s.updateGroupOperation(ctx, group, operation, next); err != nil {
+			return operation, err
+		}
+		return next, cause
+	}
 	var rejection cpa.ConfigWriteError
 	if applied || !errors.As(cause, &rejection) || !rejection.Definite() {
 		// A lost or unreadable response, or any failure after part of the save was
@@ -459,6 +467,9 @@ func (s *Service) resolveGroupOperation(ctx context.Context, group string, auth 
 	}
 	document, err := auth.wire.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
+		if auth.mode == ModeExternal && errors.Is(err, cpa.ErrManagementRejected) {
+			return operation, err
+		}
 		return operation, cpa.ErrApplyUnknown
 	}
 	if operationInPlace(document, operation) {

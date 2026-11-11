@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
@@ -263,4 +264,98 @@ func (a *freshApplication) clearExternalRejection(ctx context.Context) {
 		return
 	}
 	a.rejection.clear(ctx)
+}
+
+// withExternalSavedCredentialGate binds outbound External CPA wire calls on ctx
+// to legacyCredentialGate so each network call resolves grant + credential
+// from one post-gate record snapshot and records 401/403 before releasing the
+// gate.
+func (a *freshApplication) withExternalSavedCredentialGate(ctx context.Context) context.Context {
+	if a == nil {
+		return ctx
+	}
+	return cpa.WithExternalSavedCredentialGate(ctx, a.runExternalSavedCredentialCall)
+}
+
+func (a *freshApplication) runExternalSavedCredentialCall(
+	ctx context.Context,
+	call func(requestCtx context.Context, target cpa.ExternalSavedCredentialTarget) error,
+) error {
+	if a == nil || a.store == nil || a.externalSource == nil {
+		return freshkeyapply.ErrUnavailable
+	}
+	gate := &a.legacyCredentialGate
+	alreadyHeld := hasExternalCredentialHold(ctx, gate)
+	requestCtx := ctx
+	if !alreadyHeld {
+		if !gate.acquire(ctx) {
+			return ctx.Err()
+		}
+		var hold *externalCredentialHold
+		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+		defer hold.finish()
+	}
+	var (
+		record freshstore.Record
+		ok     bool
+	)
+	if alreadyHeld {
+		record, ok = freshRecordSnapshotFromContext(requestCtx)
+	}
+	if !ok {
+		var loadErr error
+		record, loadErr = a.store.Load(requestCtx)
+		if loadErr != nil {
+			if requestCtx.Err() != nil {
+				return requestCtx.Err()
+			}
+			return freshkeyapply.ErrUnavailable
+		}
+	}
+	grant, install, err := a.externalReadTargetFor(requestCtx, record)
+	if err != nil {
+		return err
+	}
+	if grant.Refused {
+		return externalReadRefusedError()
+	}
+	snapshotCtx := withFreshRecordSnapshot(requestCtx, record)
+	err = call(snapshotCtx, cpa.ExternalSavedCredentialTarget{
+		BaseURL:       install.BaseURL,
+		ManagementKey: install.ManagementKey,
+	})
+	if err != nil {
+		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+	}
+	return err
+}
+
+// externalSavedCredentialRefused checks under legacyCredentialGate whether the
+// committed External installation's currently stored credential is already
+// refused, releasing the gate immediately before any local service mutex is
+// acquired.
+func (a *freshApplication) externalSavedCredentialRefused(ctx context.Context) bool {
+	if a == nil || a.rejection == nil || a.externalSource == nil || a.store == nil {
+		return false
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+		return false
+	}
+	gate := &a.legacyCredentialGate
+	if !hasExternalCredentialHold(ctx, gate) {
+		if !gate.acquire(ctx) {
+			return false
+		}
+		defer gate.release()
+		record, err = a.store.Load(ctx)
+		if err != nil || record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+			return false
+		}
+	}
+	grant, _, targetErr := a.externalReadTargetFor(ctx, record)
+	if targetErr != nil {
+		return false
+	}
+	return grant.Refused
 }

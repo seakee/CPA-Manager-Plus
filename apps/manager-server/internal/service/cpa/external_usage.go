@@ -91,14 +91,7 @@ func externalUsageRequest(ctx context.Context, method, baseURL, key string, payl
 	if len(payload) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	direct := http.DefaultTransport.(*http.Transport).Clone()
-	direct.Proxy = nil
-	direct.DisableKeepAlives = true
-	direct.MaxResponseHeaderBytes = 32 << 10
-	client := &http.Client{
-		Transport: direct, Timeout: 10 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	client := managementHTTPClient(ctx, 10*time.Second, true)
 	res, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
