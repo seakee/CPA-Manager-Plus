@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { fullWebText as t } from '../i18n/fullweb';
 import { shellText as s } from '../i18n/consoleShell';
+import { externalSetupBlockerKey, externalWorkspaceText as x } from '../i18n/freshExternal';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
@@ -43,7 +45,15 @@ export function FreshExternalConnection({
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(false);
-  const [error, setError] = useState('');
+  // The message keeps the key that names it, not the rendered sentence, so a
+  // language switch re-renders an error that is already on screen. A guarded
+  // refusal is an `external` key; every other failure is a `fullweb` one.
+  const [error, setError] = useState<
+    | { from: 'external'; key: Parameters<typeof x>[0] }
+    | { from: 'fullweb'; key: Parameters<typeof t>[0] }
+    | null
+  >(null);
+  useFullWebLanguage();
   const inflight = useRef(false);
   const alive = useRef(true);
   const saved =
@@ -102,11 +112,11 @@ export function FreshExternalConnection({
       Array.from(managementKey).some((c) => (c.codePointAt(0) ?? 0) < 0x21 || c === '\x7f') ||
       /\s/u.test(managementKey)
     ) {
-      setError(t('externalInvalid'));
+      setError({ from: 'fullweb', key: 'externalInvalid' });
       return;
     }
     setBaseURL(url);
-    setError('');
+    setError(null);
     setStep(2);
   }
 
@@ -114,7 +124,7 @@ export function FreshExternalConnection({
     if (inflight.current) return;
     inflight.current = true;
     setBusy(true);
-    setError('');
+    setError(null);
     onPending(true);
     let dispatched = false;
     try {
@@ -183,14 +193,25 @@ export function FreshExternalConnection({
       }
       setUnknown((dispatched && !recovered) || action === 'refresh');
       setStep(1);
+      // A guarded refusal names its cause in the operator's own language. The
+      // Manager's English `Action` sentence is never rendered: the page maps the
+      // stable code onto the External message that explains the recovery.
+      const blocker =
+        err instanceof PublicApiError && err.status === 409
+          ? externalSetupBlockerKey(err.code)
+          : undefined;
       setError(
-        t(
-          err instanceof PublicApiError && err.code === 'management_authentication_rejected'
-            ? 'externalSourceAuthRejected'
-            : err instanceof PublicApiError && err.status === 409
-              ? 'externalConflict'
-              : 'externalUnavailable'
-        )
+        blocker
+          ? { from: 'external', key: blocker }
+          : {
+              from: 'fullweb',
+              key:
+                err instanceof PublicApiError && err.code === 'management_authentication_rejected'
+                  ? 'externalSourceAuthRejected'
+                  : err instanceof PublicApiError && err.status === 409
+                    ? 'externalConflict'
+                    : 'externalUnavailable',
+            }
       );
     } finally {
       inflight.current = false;
@@ -250,7 +271,7 @@ export function FreshExternalConnection({
           </div>
           {error && (
             <p role="alert" className="alert alert-warn">
-              {error}
+              {error.from === 'external' ? x(error.key) : t(error.key)}
             </p>
           )}
           {unknown && (

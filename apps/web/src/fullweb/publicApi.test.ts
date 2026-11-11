@@ -127,6 +127,42 @@ describe('canonical Full Web Public API transport', () => {
     expect(JSON.stringify(error)).not.toContain('hidden');
   });
 
+  // The guarded Connect External refusals are the Go blocker envelope, whose
+  // field names are exported: a bounded `Code` beside the English `Action` the
+  // page never renders. Only the code may reach the page.
+  it('retains a guarded Supervisor refusal code and never its Action text', async () => {
+    for (const code of [
+      'embedded_supervisor_status_unavailable',
+      'embedded_runtime_start_unresolved',
+      'embedded_runtime_not_stopped',
+      'embedded_runtime_recovery_unverified',
+    ]) {
+      browserOrigin();
+      const action =
+        'cpamp-runtime-supervisor is configured (CPAMP_RUNTIME_URL) but unreachable or reporting an unverified state.';
+      const transport = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(Response.json({ Code: code, Action: action }, { status: 409 }));
+      const error = (await createPublicApiClient(() => context, transport)
+        .post('strategy', {}, credential)
+        .catch((value: unknown) => value)) as Error & { code?: string; detail?: string };
+      expect(error).toMatchObject({ kind: 'http', status: 409, code });
+      expect(error.detail).toBeUndefined();
+      expect(JSON.stringify(error)).not.toContain('CPAMP_RUNTIME_URL');
+    }
+  });
+
+  it('keeps an unguarded strategy refusal uncoded', async () => {
+    browserOrigin();
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ Code: 'raw_upstream_failure' }, { status: 409 }));
+    const error = await createPublicApiClient(() => context, transport)
+      .post('strategy', {}, credential)
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ kind: 'http', status: 409, code: undefined });
+  });
+
   it('retains the Manager private-range refusal on its field', async () => {
     browserOrigin();
     const transport = vi.fn<typeof fetch>().mockResolvedValue(

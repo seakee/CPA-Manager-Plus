@@ -36,8 +36,9 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 	// destination this Manager staged itself. Every other strategy must be
 	// admitted by the installation authority: External answers through its own
 	// committed connection, and an incomplete checkpoint answers nothing.
+	authority := a.keyApply.ForOperation(op)
 	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy) &&
-		(a.keyApply == nil || !a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation)) {
+		(authority == nil || !authority.Targets(op, freshkeyapply.SurfaceKeyOperation)) {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
@@ -64,8 +65,8 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		// not the effect this Manager intended. Any other profile is unchanged, and
 		// a checkpoint the External discriminator refuses is never contacted.
 		unverified := false
-		if a.keyApply != nil && a.keyApply.Profile() == freshkeyapply.ProfileExternal &&
-			a.keyApply.Targets(op, freshkeyapply.SurfaceKeyOperation) {
+		if authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
+			authority.Targets(op, freshkeyapply.SurfaceKeyOperation) {
 			// A credential the user's CPA already refused is not presented again:
 			// five failed authentications ban the address for thirty minutes, and
 			// a page that refreshes is enough to reach that. The blocker is
@@ -101,7 +102,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			}
 		}
 		gatewayPending := true
-		if op.Routing.Committed {
+		if op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
 			admitCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
 			gatewayPending = !a.gatewayAdmissionProven(admitCtx)
 			cancel()
@@ -114,7 +115,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			// for: the keys are the Manager's own records, and none of them
 			// claims an observed effect.
 			PresenceUnverified bool `json:"presenceUnverified"`
-		}{keys, gatewayPending, a.keyApply.KeyOperationsEnabled(), unverified})
+		}{keys, gatewayPending, authority.KeyOperationsEnabled(), unverified})
 	case strings.HasPrefix(resource, "api-keys/requests/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(resource, "api-keys/requests/")
 		key, err := a.keys.Lookup(r.Context(), id)

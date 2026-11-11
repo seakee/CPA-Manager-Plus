@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -65,6 +66,49 @@ type Service struct {
 	profile                string
 	keyOperations          bool
 	startedAtMS            int64
+	selectFor              func(bootstrap.FreshOperation) *Service
+	loadOp                 func() (bootstrap.FreshOperation, bool)
+}
+
+// NewStrategySelector delegates installation-authority calls to the profile
+// selected from the durable Fresh strategy checkpoint, failing closed when the
+// checkpoint cannot be read.
+func NewStrategySelector(
+	selectFor func(bootstrap.FreshOperation) *Service,
+	loadOp func() (bootstrap.FreshOperation, bool),
+) *Service {
+	return &Service{
+		selectFor: selectFor,
+		loadOp:    loadOp,
+	}
+}
+
+func (s *Service) active() *Service {
+	if s == nil || s.selectFor == nil {
+		return s
+	}
+	if s.loadOp == nil {
+		return nil
+	}
+	op, ok := s.loadOp()
+	if !ok {
+		return nil
+	}
+	return s.selectFor(op)
+}
+
+func (s *Service) activeFor(op bootstrap.FreshOperation) *Service {
+	if s == nil || s.selectFor == nil {
+		return s
+	}
+	return s.selectFor(op)
+}
+
+// ForOperation returns the concrete authority for an already-loaded Fresh
+// operation snapshot so a request can bind all authority checks to one
+// consistent decision.
+func (s *Service) ForOperation(op bootstrap.FreshOperation) *Service {
+	return s.activeFor(op)
 }
 
 func New(r *repo.Repository, keys *freshkeys.Service, runtime runtimeservice.RuntimeClient) *Service {
@@ -78,9 +122,9 @@ func New(r *repo.Repository, keys *freshkeys.Service, runtime runtimeservice.Run
 	return s
 }
 
-// Profile names the installation profile this authority was constructed for. It
-// is read-only: the profile is fixed at construction and never switched.
+// Profile names the active installation profile for this authority.
 func (s *Service) Profile() string {
+	s = s.active()
 	if s == nil {
 		return ""
 	}
@@ -141,6 +185,10 @@ func (s *Service) target(ctx context.Context, p Permit) (model.RuntimeObservedSt
 // Apply consumes one durable attempt for the entire disposable installation,
 // including cancelled/unknown writes. A new HTTP call/process cannot retry it.
 func (s *Service) Apply(ctx context.Context, id string, generation uint64) (State, error) {
+	s = s.active()
+	if s == nil {
+		return State{KeyID: id, RuntimeState: "effect_unknown"}, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.profile == ProfileExternal {
@@ -204,6 +252,10 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 // describes a bounded window, expires in five seconds and is never persisted as
 // effective. Every read rechecks the host lease and authenticated generation.
 func (s *Service) Observe(ctx context.Context, id string, generation uint64) (State, error) {
+	s = s.active()
+	if s == nil {
+		return State{KeyID: id, RuntimeState: "effect_unknown"}, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.profile == ProfileExternal {
@@ -223,9 +275,13 @@ func ManagedRunID(operationID string) string { return "managed:" + operationID }
 // both replayed, so a resume never mints a second key and the existing install
 // route sees the key as already installed.
 func (s *Service) EnsureInitialInstall(ctx context.Context, runID string, generation uint64) (freshkeys.InitialKey, error) {
+	s = s.active()
+	if s == nil {
+		return freshkeys.InitialKey{}, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.keys == nil || s.repo == nil || runID == "" || generation == 0 {
+	if s.keys == nil || s.repo == nil || runID == "" || generation == 0 {
 		return freshkeys.InitialKey{}, ErrUnavailable
 	}
 	key, err := s.keys.EnsureInitialKey(ctx)

@@ -118,6 +118,7 @@ func (s *Service) SetTrustedSupervisorRoots(roots []string) {
 // ManagedEndpoint is the normalized destination CPA address this authority
 // writes through. It is configuration, not a credential.
 func (s *Service) ManagedEndpoint() string {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged {
 		return ""
 	}
@@ -152,6 +153,7 @@ const (
 // checkpoint facts, never from an environment variable or a request. An unknown
 // surface is answered by the strictest rule, never by the loosest.
 func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
+	s = s.activeFor(op)
 	if s == nil || op.Strategy.Stage != "committed" {
 		return false
 	}
@@ -249,6 +251,7 @@ func (s *Service) managedKeyGrant(ctx context.Context, operationID, step string)
 // installed is still the CPA it holds" is a fact it observed rather than one it
 // asserted from the checkpoint.
 func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey string) ([]string, error) {
+	s = s.active()
 	if s == nil || s.profile != ProfileManaged || len(managementKey) != 64 {
 		return nil, ErrUnavailable
 	}

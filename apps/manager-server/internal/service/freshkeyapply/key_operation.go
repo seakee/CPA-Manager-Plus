@@ -55,6 +55,7 @@ type OperationResult struct {
 }
 
 func (s *Service) KeyOperationsEnabled() bool {
+	s = s.active()
 	if s == nil || !s.keyOperations {
 		return false
 	}
@@ -112,9 +113,13 @@ func (s *Service) installedKey(ctx context.Context) (string, error) {
 // Prepare persists an immutable selection before any upstream write. Missing
 // step authority never causes an attempted mutation or a new operation retry.
 func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
+	s = s.active()
+	if s == nil {
+		return result, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := OperationResult{RuntimeState: "effect_unknown"}
 	if !s.KeyOperationsEnabled() {
 		return result, ErrUnavailable
 	}
@@ -259,6 +264,10 @@ func sameKeys(a, b []string) bool {
 }
 
 func (s *Service) CheckOperation(ctx context.Context, id string, generation uint64) (OperationResult, error) {
+	s = s.active()
+	if s == nil {
+		return OperationResult{}, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.KeyOperationsEnabled() {
@@ -436,9 +445,13 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 }
 
 func (s *Service) ContinueOperation(ctx context.Context, id string, generation uint64) (OperationResult, error) {
+	r := OperationResult{RuntimeState: "effect_unknown"}
+	s = s.active()
+	if s == nil {
+		return r, ErrUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r := OperationResult{RuntimeState: "effect_unknown"}
 	if !s.KeyOperationsEnabled() || !freshkeys.ValidRequestID(id) {
 		return r, ErrUnavailable
 	}

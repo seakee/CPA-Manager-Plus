@@ -523,20 +523,17 @@ func TestLegacyManagedInstallWithoutInstallKeyStaysClosedUntilAKeyIsInstalled(t 
 }
 
 // Every surface that accepted the private attested identity still refuses a
-// checkpoint this installation does not own: incomplete, External and unowned.
+// checkpoint this installation does not own: incomplete and unowned.
 func TestKeySurfaceRefusesCheckpointsTheAuthorityDoesNotOwn(t *testing.T) {
 	committedRouting := func(r *freshstore.Record) {
 		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID,
 			Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
 	}
 	for _, scenario := range []struct {
-		name string
-		// staging marks an installation whose key list is still reachable, so the
-		// install route can be asked directly.
-		staging bool
+		name    string
 		install managedInstallSetup
 	}{
-		{"incomplete", true, func(r *freshstore.Record, env managedInstallEnv) {
+		{"incomplete", func(r *freshstore.Record, env managedInstallEnv) {
 			committedRouting(r)
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy: bootstrap.NewManaged, Stage: "staged",
@@ -544,16 +541,7 @@ func TestKeySurfaceRefusesCheckpointsTheAuthorityDoesNotOwn(t *testing.T) {
 				TargetArtifactID: string(env.status.ActiveGatewayArtifact.ArtifactID),
 			}
 		}},
-		{"external", false, func(r *freshstore.Record, env managedInstallEnv) {
-			committedRouting(r)
-			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
-				Strategy: bootstrap.ConnectExternal, Stage: "committed",
-				TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
-			}
-			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: env.endpoint, ManagementKey: env.protected}
-			r.Operation.ProductComplete = true
-		}},
-		{"unowned", true, func(r *freshstore.Record, _ managedInstallEnv) {
+		{"unowned", func(r *freshstore.Record, _ managedInstallEnv) {
 			committedRouting(r)
 		}},
 	} {
@@ -569,14 +557,10 @@ func TestKeySurfaceRefusesCheckpointsTheAuthorityDoesNotOwn(t *testing.T) {
 			if harness.app.keyOperationTarget(op) {
 				t.Fatal("key operations authorised for a foreign checkpoint")
 			}
-			if scenario.staging {
-				installed := harness.createKey(t, strings.Repeat("6", 32))
-				install := harness.call(t, http.MethodPost, "api-keys/"+string(installed.Key.ID)+"/initial-install", `{}`)
-				if install.Code != http.StatusConflict || install.Body.Len() != 0 {
-					t.Fatalf("initial install = %d %s", install.Code, install.Body.String())
-				}
-			} else if created := harness.call(t, http.MethodPost, "api-keys", `{"requestId":"`+strings.Repeat("6", 32)+`"}`); created.Code != http.StatusConflict {
-				t.Fatalf("foreign checkpoint reached the key list: %d %s", created.Code, created.Body.String())
+			installed := harness.createKey(t, strings.Repeat("6", 32))
+			install := harness.call(t, http.MethodPost, "api-keys/"+string(installed.Key.ID)+"/initial-install", `{}`)
+			if install.Code != http.StatusConflict || install.Body.Len() != 0 {
+				t.Fatalf("initial install = %d %s", install.Code, install.Body.String())
 			}
 			if got := harness.destination.installed(); len(got) != 0 {
 				t.Fatalf("refused checkpoint wrote %v", got)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -136,7 +137,18 @@ func (a *freshApplication) installInitialClientKey(ctx context.Context, op boots
 	if a == nil || a.keyApply == nil {
 		return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
 	}
-	key, err := a.keyApply.EnsureInitialInstall(ctx, freshkeyapply.ManagedRunID(string(op.Identity.OperationID)), generation)
+	if a.store != nil {
+		if _, err := a.current(ctx); err != nil {
+			return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
+		}
+	}
+	managedOp := op
+	managedOp.Strategy.Strategy = bootstrap.NewManaged
+	authority := a.keyApply.ForOperation(managedOp)
+	if authority == nil {
+		return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
+	}
+	key, err := authority.EnsureInitialInstall(ctx, freshkeyapply.ManagedRunID(string(op.Identity.OperationID)), generation)
 	if err != nil {
 		return freshstrategy.InitialClientKey{}, err
 	}
@@ -172,7 +184,11 @@ func (a *freshApplication) prepareCompletedStartup(ctx context.Context, op boots
 // Adopt) is committed and complete, preserving any existing runtime_desired_v1
 // row and refusing unmigrated or operator-managed checkpoints.
 func (a *freshApplication) ensureManagedRuntimeDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (bool, error) {
-	if a == nil || a.runtime == nil || a.runtimeSettings == nil || !op.ProductComplete || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+	if a == nil || a.embeddedRuntimeClient() == nil || a.runtimeSettings == nil || !op.ProductComplete ||
+		a.runtimeModeFor(op) != model.RuntimeModeEmbedded || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+		return false, nil
+	}
+	if a.store != nil && a.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
 		return false, nil
 	}
 	return a.runtimeSettings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx, model.EmbeddedRuntimeDesiredRunning)
@@ -302,18 +318,21 @@ func (s freshDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context
 // this decision and the ownership decision are made over the same bytes.
 func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (model.EmbeddedRuntimeDesiredState, bool, error) {
 	var zero model.EmbeddedRuntimeDesiredState
-	if a == nil || a.runtime == nil || a.managedSource == nil {
+	if a == nil || a.embeddedRuntimeClient() == nil || a.managedSource == nil {
 		return zero, false, nil
 	}
-	if op.ProductComplete {
+	if op.ProductComplete || a.runtimeModeFor(op) != model.RuntimeModeEmbedded || a.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
 		return zero, false, nil
 	}
 	if _, err := a.managedSource(ctx); err != nil {
 		return zero, false, fmt.Errorf("resolve incomplete managed destination authority: %w", err)
 	}
 	if a.artifact != nil {
-		artifactStatus, artifactErr := a.artifact.Status(ctx)
+		artifactStatus, artifactErr := gatedEmbeddedArtifactRuntime{app: a}.Status(ctx)
 		if artifactErr != nil {
+			if errors.Is(artifactErr, errEmbeddedRuntimeDisabled) {
+				return zero, false, nil
+			}
 			return zero, false, artifactErr
 		}
 		if !artifactStatus.Ready() || artifactStatus.Active.ArtifactID != op.Strategy.TargetArtifactID {
@@ -322,6 +341,9 @@ func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context, 
 	}
 	status, err := a.observeInstallationRuntime(ctx)
 	if err != nil {
+		if errors.Is(err, errEmbeddedRuntimeDisabled) {
+			return zero, false, nil
+		}
 		return zero, false, err
 	}
 	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil ||

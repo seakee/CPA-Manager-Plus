@@ -8,7 +8,14 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
-func (s *Service) EnableH1(h *cpa.H1Coordinator) { s.h1 = h; s.wire.(*cpa.Transport).UseH1(h) }
+func (s *Service) EnableH1(h *cpa.H1Coordinator) {
+	s = s.active()
+	if s == nil {
+		return
+	}
+	s.h1 = h
+	s.wire.(*cpa.Transport).UseH1(h)
+}
 func (s *Service) finishH1(ctx context.Context, o *repo.Operation) error {
 	if o.Outcome != "committed" || o.ParentID == "" {
 		return cpa.ErrApplyUnknown

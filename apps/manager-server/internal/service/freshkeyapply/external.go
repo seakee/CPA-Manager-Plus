@@ -179,6 +179,7 @@ func (s *Service) externalAuthority(ctx context.Context) (ExternalInstall, error
 // generation the caller holds. It is the gateway configuration page's entry
 // point: the address and the credential of the CPA this installation owns.
 func (s *Service) ExternalTarget(ctx context.Context, generation uint64) (string, string, error) {
+	s = s.active()
 	install, err := s.externalAuthority(ctx)
 	if err != nil {
 		return "", "", err
@@ -243,6 +244,7 @@ func (s *Service) externalWriteGate(ctx context.Context, install ExternalInstall
 // It is the read-back behind the key list: a Manager record alone never claims an
 // effect the CPA does not show.
 func (s *Service) ExternalKeyPresence(ctx context.Context, ids []identity.APIKeyID) (map[identity.APIKeyID]bool, error) {
+	s = s.active()
 	install, err := s.externalAuthority(ctx)
 	if err != nil {
 		return nil, err
@@ -281,7 +283,14 @@ func (s *Service) ExternalKeyPresence(ctx context.Context, ids []identity.APIKey
 // are blockers: no read can settle them, and only a rebind resolves them. The list
 // of another profile is returned unchanged.
 func (s *Service) ExternalKeyList(ctx context.Context, keys []freshkeys.Key) ([]freshkeys.Key, bool, error) {
-	if s == nil || s.profile != ProfileExternal {
+	if s == nil {
+		return keys, false, nil
+	}
+	s = s.active()
+	if s == nil {
+		return nil, true, ErrExternalUnavailable
+	}
+	if s.profile != ProfileExternal {
 		return keys, false, nil
 	}
 	ids := make([]identity.APIKeyID, 0, len(keys))
@@ -310,6 +319,7 @@ func (s *Service) ExternalKeyList(ctx context.Context, keys []freshkeys.Key) ([]
 // ExternalKeyPresenceOf is ExternalKeyPresence for one key, for the routes that
 // answer about exactly one record.
 func (s *Service) ExternalKeyPresenceOf(ctx context.Context, id identity.APIKeyID) (bool, error) {
+	s = s.active()
 	present, err := s.ExternalKeyPresence(ctx, []identity.APIKeyID{id})
 	if err != nil {
 		return false, err

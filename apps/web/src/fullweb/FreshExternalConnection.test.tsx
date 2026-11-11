@@ -5,8 +5,9 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import type { FreshOperation } from './bootstrapTransport';
-import { PublicApiError, type createPublicApiClient } from './publicApi';
-import { setFullWebLanguage } from '../i18n/fullweb';
+import { PublicApiError, createPublicApiClient, type FullWebCredential } from './publicApi';
+import { fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
 const initial: FreshOperation = {
   identity: {
@@ -274,5 +275,82 @@ describe('Fresh External initialization', () => {
     await ui.click('external-review');
     expect(ui.has('external-connect')).toBe(false);
     expect(ui.post).not.toHaveBeenCalled();
+  });
+
+  it('turns each guarded Supervisor refusal into its own recovery message', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example:18317') });
+    const cases = [
+      ['embedded_supervisor_status_unavailable', 'setupBlockerSupervisorUnavailable'],
+      ['embedded_runtime_start_unresolved', 'setupBlockerRuntimeStartUnresolved'],
+      ['embedded_runtime_not_stopped', 'setupBlockerRuntimeNotStopped'],
+      ['embedded_runtime_recovery_unverified', 'setupBlockerRuntimeRecoveryUnverified'],
+    ] as const;
+    const generic = new Set([
+      t('externalConflict'),
+      t('externalUnavailable'),
+      t('externalSourceAuthRejected'),
+    ]);
+    for (const [code, key] of cases) {
+      const actionSentinel = `RAW_SUPERVISOR_ACTION_SENTINEL_${code}_9f4c2e`;
+      const transport = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/strategy')) {
+          return Response.json({ Code: code, Action: actionSentinel }, { status: 409 });
+        }
+        return Response.json(initial, { status: 200 });
+      });
+      const realClient = createPublicApiClient(
+        () => ({ basePath: '/console', apiBase: '/console/api/v2', revision: 4 }),
+        transport
+      );
+      const ui = await mount(
+        vi.fn((resource: string, credential?: FullWebCredential) =>
+          realClient.get(resource, credential)
+        ),
+        vi.fn((resource: string, body: unknown, credential: FullWebCredential) =>
+          realClient.post(resource, body, credential)
+        )
+      );
+      await ui.prepare();
+      await ui.click('external-connect');
+      expect(transport).toHaveBeenCalledWith(
+        'https://manager.example:18317/console/api/v2/strategy',
+        expect.objectContaining({ method: 'POST' })
+      );
+      const alert = ui.renderer.root.findByProps({ role: 'alert' }).props.children;
+      expect(code + ': ' + String(alert)).toBe(code + ': ' + x(key));
+      expect(alert).not.toBe(t('externalConflict'));
+      for (const other of generic) expect(alert).not.toBe(other);
+      const shown = JSON.stringify(ui.renderer.toJSON());
+      expect(shown).not.toContain(actionSentinel);
+    }
+  });
+
+  it('keeps the generic conflict for a refusal it cannot name', async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValue(new PublicApiError('http', 409, undefined, 'embedded_runtime_unknown'));
+    const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+    await ui.prepare();
+    await ui.click('external-connect');
+    expect(ui.renderer.root.findByProps({ role: 'alert' }).props.children).toBe(
+      t('externalConflict')
+    );
+  });
+
+  it('re-reads the recovery message in the operator language after a switch', async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValue(
+        new PublicApiError('http', 409, undefined, 'embedded_supervisor_status_unavailable')
+      );
+    const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+    await ui.prepare();
+    await ui.click('external-connect');
+    await act(async () => setFullWebLanguage('ru'));
+    expect(ui.renderer.root.findByProps({ role: 'alert' }).props.children).toBe(
+      x('setupBlockerSupervisorUnavailable')
+    );
+    expect(String(x('setupBlockerSupervisorUnavailable'))).toContain('cpamp-runtime-supervisor');
   });
 });

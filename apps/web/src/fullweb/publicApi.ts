@@ -71,6 +71,16 @@ const isExternalResource = (resource: string) =>
   resource === 'external/rebind' ||
   resource.startsWith('external/rebind/');
 
+// The guarded Connect External refusals: the Manager could not prove the embedded
+// CPA runtime was stopped with recovery disarmed, or could not read the runtime
+// supervisor. Each is answered on `strategy` as `{"Code": "…", "Action": "…"}`.
+const GUARDED_RUNTIME_ERROR_CODES: Record<string, true> = {
+  embedded_supervisor_status_unavailable: true,
+  embedded_runtime_start_unresolved: true,
+  embedded_runtime_not_stopped: true,
+  embedded_runtime_recovery_unverified: true,
+};
+
 // A gateway resource is the Manager's own document, but on an External install the
 // save is written through the committed CPA credential: the same conflict can
 // carry any External code. The page merges both sets, so the blocker renders
@@ -306,6 +316,15 @@ export function createPublicApiClient(
                     (entry): entry is string =>
                       typeof entry === 'string' && !!entry && entry.length <= 64
                   );
+              } else if (
+                typeof payload.Code === 'string' &&
+                GUARDED_RUNTIME_ERROR_CODES[payload.Code] === true
+              ) {
+                // The guarded Connect External refusals arrive as the Go envelope
+                // `{"Code": "…", "Action": "…"}`. The page names the recovery
+                // itself from the code, so only the identifier is kept and no
+                // English `Action` text ever reaches the page.
+                code = payload.Code;
               }
             } else if (completeResource) {
               // An adoption completion answers with a lowercase code and, for a

@@ -233,6 +233,35 @@ const messages = {
     '無法安全保存管理金鑰。請檢查管理程式的加密金鑰與儲存後重試。',
     'Не удалось безопасно сохранить ключ управления. Проверьте ключ шифрования и хранилище Manager и повторите попытку.',
   ],
+  // The Manager refuses Connect External while it cannot prove the embedded CPA
+  // runtime is stopped with crash recovery disarmed; the four sentences below
+  // name the runtime state that refused and the recovery the operator performs.
+  // The Manager's own `Action` sentence is English only, so the browser states
+  // the cause in the operator's language instead of rendering that text.
+  setupBlockerSupervisorUnavailable: [
+    "The Manager cannot reach cpamp-runtime-supervisor, so it cannot prove the embedded CPA runtime is stopped and nothing is recorded. In the official image, check or restart cpamp-runtime-supervisor or the container so it reports offline with recovery disarmed, then retry. On a standalone deployment without an embedded supervisor, unset CPAMP_RUNTIME_URL and CPAMP_RUNTIME_TOKEN_FILE and restart the Manager.",
+    "安装程序无法连接 cpamp-runtime-supervisor，因此无法确认内置 CPA 运行时已停止，本次没有记录任何状态。使用官方镜像时，请检查或重启 cpamp-runtime-supervisor 或容器，使其报告离线且未启用自动恢复后重试。若部署中没有内置 Supervisor，请取消设置 CPAMP_RUNTIME_URL 与 CPAMP_RUNTIME_TOKEN_FILE 并重启安装程序。",
+    "安裝程式無法連線 cpamp-runtime-supervisor，因此無法確認內建 CPA 執行環境已停止，本次沒有記錄任何狀態。使用官方映像時，請檢查或重新啟動 cpamp-runtime-supervisor 或容器，使其回報離線且未啟用自動復原後重試。若部署中沒有內建 Supervisor，請取消設定 CPAMP_RUNTIME_URL 與 CPAMP_RUNTIME_TOKEN_FILE 並重新啟動安裝程式。",
+    "Manager не может связаться с cpamp-runtime-supervisor, поэтому не может подтвердить, что встроенная среда CPA остановлена, и ничего не записывает. В официальном образе проверьте или перезапустите cpamp-runtime-supervisor либо контейнер, чтобы он сообщал о состоянии «остановлено» с отключённым автозапуском, и повторите попытку. Если в развёртывании нет встроенного супервизора, снимите переменные CPAMP_RUNTIME_URL и CPAMP_RUNTIME_TOKEN_FILE и перезапустите Manager.",
+  ],
+  setupBlockerRuntimeStartUnresolved: [
+    "An embedded CPA start or update reported by the Manager was never confirmed finished, so Connect External stays blocked. Wait for it to finish, or restart cpamp-runtime-supervisor or the container to establish a fresh stopped runtime generation, then retry.",
+    "安装程序记录的某次内置 CPA 启动或更新尚未确认结束，因此暂时无法连接外部 CPA。请等待该操作完成，或重启 cpamp-runtime-supervisor 或容器以建立新的已停止运行环境后重试。",
+    "安裝程式記錄的某次內建 CPA 啟動或更新尚未確認結束，因此暫時無法連接外部 CPA。請等待該操作完成，或重新啟動 cpamp-runtime-supervisor 或容器以建立新的已停止執行環境後重試。",
+    "Manager зафиксировал незавершённый запуск или обновление встроенной среды CPA, поэтому подключение внешнего CPA заблокировано. Дождитесь завершения операции либо перезапустите cpamp-runtime-supervisor или контейнер, чтобы получить новое остановленное поколение среды, и повторите попытку.",
+  ],
+  setupBlockerRuntimeNotStopped: [
+    "The embedded CPA runtime is still running or has automatic crash recovery armed, so Connect External cannot be committed. Stop the embedded runtime, or restart cpamp-runtime-supervisor or the container, so it stays offline with recovery disarmed, then retry.",
+    "内置 CPA 运行时仍在运行，或已启用崩溃自动恢复，因此无法提交外部连接。请停止内置运行时，或重启 cpamp-runtime-supervisor 或容器，使其保持离线且未启用自动恢复后重试。",
+    "內建 CPA 執行環境仍在運行，或已啟用當機自動復原，因此無法提交外部連線。請停止內建執行環境，或重新啟動 cpamp-runtime-supervisor 或容器，使其保持離線且未啟用自動復原後重試。",
+    "Встроенная среда CPA всё ещё работает или для неё включён автоперезапуск после сбоя, поэтому подключение внешнего CPA нельзя зафиксировать. Остановите встроенную среду либо перезапустите cpamp-runtime-supervisor или контейнер, чтобы она оставалась остановленной без автозапуска, и повторите попытку.",
+  ],
+  setupBlockerRuntimeRecoveryUnverified: [
+    "cpamp-runtime-supervisor reports the embedded CPA runtime offline without its recovery state, so the Manager cannot prove no restart will be retried. Check or restart cpamp-runtime-supervisor so it reports recovery disarmed (inactive or manual_intervention), then retry.",
+    "cpamp-runtime-supervisor 报告内置 CPA 运行时已离线，但没有给出恢复状态，安装程序无法确认不会自动重启。请检查或重启 cpamp-runtime-supervisor，使其报告自动恢复已停用（inactive 或 manual_intervention）后重试。",
+    "cpamp-runtime-supervisor 回報內建 CPA 執行環境已離線，但沒有提供復原狀態，安裝程式無法確認不會自動重新啟動。請檢查或重新啟動 cpamp-runtime-supervisor，使其回報自動復原已停用（inactive 或 manual_intervention）後重試。",
+    "cpamp-runtime-supervisor сообщает, что встроенная среда CPA остановлена, но не передаёт состояние восстановления, поэтому Manager не может подтвердить, что перезапуск не произойдёт. Проверьте или перезапустите cpamp-runtime-supervisor, чтобы он сообщал об отключённом восстановлении (inactive или manual_intervention), и повторите попытку.",
+  ],
 } satisfies Record<string, readonly [string, string, string, string]>;
 
 export function externalWorkspaceText(key: keyof typeof messages): string {
@@ -288,6 +317,13 @@ const setupBlockers: Record<string, keyof typeof messages> = {
   required_v8_profile_qualification_required: 'setupBlockerQualification',
   fresh_strategy_owner_conflict: 'setupBlockerOwnerConflict',
   management_secret_storage_unavailable: 'setupBlockerStorage',
+  // The Manager's guarded Connect External refusals. Its JSON carries an English
+  // `Action` sentence beside each code; the browser keeps the code and names the
+  // recovery in the operator's own language instead of rendering that text.
+  embedded_supervisor_status_unavailable: 'setupBlockerSupervisorUnavailable',
+  embedded_runtime_start_unresolved: 'setupBlockerRuntimeStartUnresolved',
+  embedded_runtime_not_stopped: 'setupBlockerRuntimeNotStopped',
+  embedded_runtime_recovery_unverified: 'setupBlockerRuntimeRecoveryUnverified',
 };
 
 // externalSetupBlockerKey names the sentence for a code this module knows, and
