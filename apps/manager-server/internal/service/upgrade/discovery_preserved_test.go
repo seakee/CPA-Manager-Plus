@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // observeOnce runs one public observation of a source and reports the verdict.
@@ -279,4 +281,113 @@ func TestReadOnlyLegacyObservationUnreadableMarkerFailsClosedOnCorruptWAL(t *tes
 	if reusable {
 		t.Fatal("failed observation was marked reusable")
 	}
+}
+
+// TestReadRecordFromSnapshotFailsClosedOnZeroLengthDatabaseWithOrphanSidecars
+// enforces that a zero-length target database rejects any orphan -wal, -shm,
+// or -journal sidecar rather than reporting found=false, err=nil.
+func TestReadRecordFromSnapshotFailsClosedOnZeroLengthDatabaseWithOrphanSidecars(t *testing.T) {
+	// Positive control: a clean 0-byte single-link database with no sidecars reports found=false, err=nil.
+	cleanDB := filepath.Join(t.TempDir(), databaseFileName)
+	if err := os.WriteFile(cleanDB, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ReadRecordFromSnapshot(context.Background(), cleanDB, ""); err != nil || found {
+		t.Fatalf("clean zero-length database = (found=%v, err=%v), want (false, nil)", found, err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		suffix string
+		data   []byte
+	}{
+		{name: "orphan-32kib-shm", suffix: "-shm", data: make([]byte, 32*1024)},
+		{name: "orphan-empty-shm", suffix: "-shm", data: nil},
+		{name: "orphan-empty-wal", suffix: "-wal", data: nil},
+		{name: "orphan-empty-journal", suffix: "-journal", data: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), databaseFileName)
+			if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dbPath+tc.suffix, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, found, err := ReadRecordFromSnapshot(context.Background(), dbPath, "")
+			if err == nil || found || !strings.Contains(err.Error(), tc.suffix) {
+				t.Fatalf("%s ReadRecordFromSnapshot = (found=%v, err=%v), want sidecar error naming %s", tc.name, found, err, tc.suffix)
+			}
+		})
+	}
+}
+
+// TestUnfenceableDiscoveryEnforcesBaselineIdentityAndChangeStamp enforces that
+// classifyUnfenceableSource captures file + sidecar identity first, requires a
+// valid ChangeStamp, branches to snapshot validation when baseline has a WAL,
+// and fails closed if a WAL appears during the immutable read.
+func TestUnfenceableDiscoveryEnforcesBaselineIdentityAndChangeStamp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
+	}
+
+	t.Run("wal-created-before-baseline-capture", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		marker := fixture.dbPath + ".manager.lock"
+		if err := os.Chmod(marker, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+
+		origHook := afterUnfenceableSidecarAudit
+		afterUnfenceableSidecarAudit = func(dbPath string) {
+			_ = os.WriteFile(dbPath+"-wal", []byte(strings.Repeat("z", 64)), 0o644)
+		}
+		defer func() { afterUnfenceableSidecarAudit = origHook }()
+
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
+
+	t.Run("wal-created-during-immutable-read", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		marker := fixture.dbPath + ".manager.lock"
+		if err := os.Chmod(marker, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+
+		origHook := beforeUnfenceableImmutableRead
+		beforeUnfenceableImmutableRead = func(dbPath string) {
+			_ = os.WriteFile(dbPath+"-wal", []byte(strings.Repeat("w", 64)), 0o644)
+		}
+		defer func() { beforeUnfenceableImmutableRead = origHook }()
+
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
+
+	t.Run("change-stamp-unavailable-fails-closed", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		marker := fixture.dbPath + ".manager.lock"
+		if err := os.Chmod(marker, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+
+		origStamp := credentialChangeStamp
+		credentialChangeStamp = func(string) (string, error) {
+			return "", copyinmarker.ErrChangeStampUnavailable
+		}
+		defer func() { credentialChangeStamp = origStamp }()
+
+		verdict, reusable := observeOnce(t, PreservedSource{Database: fixture.dbPath})
+		if verdict != LegacyDiscoveryNone || reusable {
+			t.Fatalf("verdict with unavailable ChangeStamp = (%q, reusable=%v), want (%q, false)", verdict, reusable, LegacyDiscoveryNone)
+		}
+	})
 }

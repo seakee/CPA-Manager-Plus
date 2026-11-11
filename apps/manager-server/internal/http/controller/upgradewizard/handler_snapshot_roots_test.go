@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -539,4 +540,138 @@ func TestPreservedStatusFailsClosedWhenTargetDatabaseMissingWithOrphanSidecars(t
 			}
 		})
 	}
+}
+
+func TestPreservedWizardWALOnlyOperationHelperProcess(t *testing.T) {
+	dbPath := os.Getenv("CPAMP_WIZARD_WAL_ONLY_DB")
+	if dbPath == "" {
+		return
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA wal_autocheckpoint = 0`,
+		`CREATE TABLE upgrade_operations (
+			id INTEGER PRIMARY KEY,
+			stage TEXT NOT NULL,
+			domains_done TEXT NOT NULL DEFAULT '[]',
+			source_kind TEXT NOT NULL DEFAULT 'legacy-manager',
+			source_version TEXT NOT NULL DEFAULT 'v1.14.10',
+			reconciliation TEXT NOT NULL DEFAULT '{}',
+			manual_items TEXT NOT NULL DEFAULT '[]',
+			error_code TEXT NOT NULL DEFAULT '',
+			error_detail TEXT NOT NULL DEFAULT '',
+			created_at_ms INTEGER NOT NULL DEFAULT 1000,
+			updated_at_ms INTEGER NOT NULL DEFAULT 2000
+		)`,
+		`INSERT INTO upgrade_operations (id, stage, domains_done, source_kind, source_version, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		 VALUES (1, 'reconcile', '["source_copy"]', 'legacy-manager', 'v1.14.10', '{}', '[]', 1000, 2000)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+	os.Exit(0)
+}
+
+// TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath enforces
+// that readRecordedStatusPreserved re-verifies database and sidecar identity
+// after RecordedOperationEvidence so a concurrent WAL creation or in-place
+// rewrite routes to a private snapshot or fails closed instead of answering
+// 200 recorded:false.
+func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing.T) {
+	sourceRoot := legacySourceDir(t)
+	donorDir := t.TempDir()
+	donorDB := filepath.Join(donorDir, "usage.sqlite")
+	cleanBytes, err := os.ReadFile(filepath.Join(sourceRoot, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(donorDB, cleanBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPreservedWizardWALOnlyOperationHelperProcess$")
+	cmd.Env = append(os.Environ(), "CPAMP_WIZARD_WAL_ONLY_DB="+donorDB)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wizard WAL-only helper: %v %s", err, out)
+	}
+	walBytes, err := os.ReadFile(donorDB + "-wal")
+	if err != nil || len(walBytes) == 0 {
+		t.Fatalf("read WAL-only bytes (len=%d, err=%v)", len(walBytes), err)
+	}
+
+	makeHandler := func(t *testing.T) (string, *Handler) {
+		t.Helper()
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(dbPath, cleanBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "data.key"), []byte("key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dbPath, &Handler{
+			LegacyRoot:           func() string { return sourceRoot },
+			Database:             func() string { return dbPath },
+			DataKey:              func() string { return filepath.Join(dir, "data.key") },
+			Timeout:              5 * time.Second,
+			PreserveManagerStore: true,
+		}
+	}
+
+	t.Run("wal-only-recorded-operation-appears-routes-to-snapshot", func(t *testing.T) {
+		_, handler := makeHandler(t)
+		origHook := afterPreservedEvidenceProbe
+		afterPreservedEvidenceProbe = func(target string) {
+			_ = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+		defer func() { afterPreservedEvidenceProbe = origHook }()
+
+		status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+		if status != http.StatusOK || !strings.Contains(body, `"recorded":true`) || !strings.Contains(body, `"stage":"reconcile"`) {
+			t.Fatalf("status = %d (%s), want 200 recorded:true stage:reconcile", status, body)
+		}
+	})
+
+	t.Run("corrupt-wal-appears-fails-closed", func(t *testing.T) {
+		_, handler := makeHandler(t)
+		corruptWAL := append([]byte(nil), walBytes...)
+		corruptWAL[0] ^= 0xff
+		origHook := afterPreservedEvidenceProbe
+		afterPreservedEvidenceProbe = func(target string) {
+			_ = os.WriteFile(target+"-wal", corruptWAL, 0o600)
+		}
+		defer func() { afterPreservedEvidenceProbe = origHook }()
+
+		status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+		if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeOperationUnread) {
+			t.Fatalf("status = %d (%s), want 503 %s", status, body, CodeOperationUnread)
+		}
+	})
+
+	t.Run("database-rewritten-with-restored-mtime-fails-closed", func(t *testing.T) {
+		dbPath, handler := makeHandler(t)
+		origInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origHook := afterPreservedEvidenceProbe
+		afterPreservedEvidenceProbe = func(target string) {
+			if f, openErr := os.OpenFile(target, os.O_WRONLY, 0); openErr == nil {
+				_, _ = f.WriteAt(cleanBytes[:16], 0)
+				_ = f.Close()
+				_ = os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+			}
+		}
+		defer func() { afterPreservedEvidenceProbe = origHook }()
+
+		status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+		if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeOperationUnread) {
+			t.Fatalf("status = %d (%s), want 503 %s", status, body, CodeOperationUnread)
+		}
+	})
 }

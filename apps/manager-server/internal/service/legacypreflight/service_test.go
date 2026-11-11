@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
@@ -767,4 +768,187 @@ func TestPendingFreshAdmissionTightensMarkerOnlyAfterValidation(t *testing.T) {
 			t.Fatalf("resumed PendingFreshAdmission marker mode = %v (err=%v), want 0600", info.Mode().Perm(), err)
 		}
 	}
+}
+
+func TestDatabaseUpgradeAdmissionFailsClosedOnZeroLengthDatabaseWithOrphanSidecars(t *testing.T) {
+	cleanDB := filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := os.WriteFile(cleanDB, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: cleanDB}).Admitted(context.Background()); err != nil || stage != UpgradeStageNone {
+		t.Fatalf("clean zero-length database Admitted = (%q, %v), want (%q, nil)", stage, err, UpgradeStageNone)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		suffix string
+		data   []byte
+	}{
+		{name: "orphan-32kib-shm", suffix: "-shm", data: make([]byte, 32*1024)},
+		{name: "orphan-empty-shm", suffix: "-shm", data: nil},
+		{name: "orphan-empty-wal", suffix: "-wal", data: nil},
+		{name: "orphan-empty-journal", suffix: "-journal", data: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+			if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dbPath+tc.suffix, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background())
+			if err == nil {
+				t.Fatalf("%s Admitted succeeded with stage=%q, want error", tc.name, stage)
+			}
+		})
+	}
+}
+
+func TestWALOnlyRecordedOperationFixtureHelperProcess(t *testing.T) {
+	dbPath := os.Getenv("CPAMP_PREFLIGHT_WAL_ONLY_DB")
+	if dbPath == "" {
+		return
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA wal_autocheckpoint = 0`,
+		`CREATE TABLE upgrade_operations (
+			id INTEGER PRIMARY KEY,
+			stage TEXT NOT NULL,
+			source_kind TEXT NOT NULL DEFAULT '',
+			source_fingerprint_before TEXT NOT NULL DEFAULT '',
+			source_fingerprint_after TEXT NOT NULL DEFAULT '',
+			backup_manifest_sha256 TEXT NOT NULL DEFAULT '',
+			domains_done TEXT NOT NULL DEFAULT '[]',
+			verification TEXT NOT NULL DEFAULT '{}'
+		)`,
+		`INSERT INTO upgrade_operations (id, stage, source_kind, source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256)
+		 VALUES (1, 'reconcile', 'legacy-manager', 'fp-1', 'fp-1', 'manifest-1')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+	os.Exit(0)
+}
+
+func buildColdDBAndPendingUpgradeWAL(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	donorDir := t.TempDir()
+	donorDB := filepath.Join(donorDir, "usage.sqlite")
+	seed, err := sql.Open("sqlite", donorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		`PRAGMA journal_mode = WAL`,
+		`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+	} {
+		if _, err := seed.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coldBytes, err := os.ReadFile(donorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWALOnlyRecordedOperationFixtureHelperProcess$")
+	cmd.Env = append(os.Environ(), "CPAMP_PREFLIGHT_WAL_ONLY_DB="+donorDB)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper process: %v %s", err, out)
+	}
+	walBytes, err := os.ReadFile(donorDB + "-wal")
+	if err != nil || len(walBytes) == 0 {
+		t.Fatalf("read pending WAL (len=%d, err=%v)", len(walBytes), err)
+	}
+	return coldBytes, walBytes
+}
+
+func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing.T) {
+	coldBytes, walBytes := buildColdDBAndPendingUpgradeWAL(t)
+
+	t.Run("wal-only-operation-created-mid-probe", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		origHook := beforeOperationEvidenceProbe
+		beforeOperationEvidenceProbe = func(target string) {
+			_ = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+		defer func() { beforeOperationEvidenceProbe = origHook }()
+
+		inFile, journalPending, err := RecordedOperationEvidence(context.Background(), dbPath)
+		if err != nil || !journalPending || inFile {
+			t.Fatalf("RecordedOperationEvidence = (inFile=%v, journalPending=%v, err=%v), want (false, true, nil)", inFile, journalPending, err)
+		}
+
+		// Reset to cold DB and verify DatabaseUpgradeAdmission.Admitted replays the newly created WAL.
+		if err := os.Remove(dbPath + "-wal"); err != nil {
+			t.Fatal(err)
+		}
+		stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background())
+		if err != nil || stage != UpgradeStageInProgress {
+			t.Fatalf("Admitted with mid-probe WAL-only operation = (%q, %v), want (%q, nil)", stage, err, UpgradeStageInProgress)
+		}
+		_ = model.UpgradeStageReconcile
+	})
+
+	t.Run("corrupt-wal-created-mid-probe", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		corruptWAL := append([]byte(nil), walBytes...)
+		corruptWAL[0] ^= 0xff
+
+		origHook := beforeOperationEvidenceProbe
+		beforeOperationEvidenceProbe = func(target string) {
+			_ = os.WriteFile(target+"-wal", corruptWAL, 0o600)
+		}
+		defer func() { beforeOperationEvidenceProbe = origHook }()
+
+		if stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background()); err == nil {
+			t.Fatalf("Admitted succeeded on mid-probe corrupt WAL: stage=%q", stage)
+		}
+	})
+
+	t.Run("database-rewritten-with-restored-mtime-mid-probe", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		origInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		origHook := beforeOperationEvidenceProbe
+		beforeOperationEvidenceProbe = func(target string) {
+			if f, openErr := os.OpenFile(target, os.O_WRONLY, 0); openErr == nil {
+				_, _ = f.WriteAt(coldBytes[:16], 0)
+				_ = f.Close()
+				_ = os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+			}
+		}
+		defer func() { beforeOperationEvidenceProbe = origHook }()
+
+		if _, _, err := RecordedOperationEvidence(context.Background(), dbPath); err == nil {
+			t.Fatal("RecordedOperationEvidence succeeded when database changed mid-probe")
+		}
+	})
 }

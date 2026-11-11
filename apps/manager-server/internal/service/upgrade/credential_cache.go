@@ -150,6 +150,8 @@ func identifySourceCredential(databasePath string) (sourceCredentialIdentity, er
 // records its identity including its change stamp. A missing file is the absent
 // state; any link, special file, multi-link file or stat failure is reported
 // instead of guessed at.
+var credentialChangeStamp = copyinmarker.ChangeStamp
+
 func identifyCredentialFile(path string) (credentialFileIdentity, bool, error) {
 	info, err := inspectSnapshotSourceFile(path)
 	if os.IsNotExist(err) {
@@ -165,7 +167,7 @@ func identifyCredentialFile(path string) (credentialFileIdentity, bool, error) {
 		}
 		return credentialFileIdentity{}, false, credentialSourceError(err)
 	}
-	changeStamp, err := copyinmarker.ChangeStamp(path)
+	changeStamp, err := credentialChangeStamp(path)
 	if err != nil {
 		if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
 			return credentialFileIdentity{

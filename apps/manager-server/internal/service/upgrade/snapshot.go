@@ -209,7 +209,8 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 // rewrites the WAL index the resume compares by file identity. A missing
 // database is "no record", not a failure.
 func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBase string) (model.UpgradeOperation, bool, error) {
-	if _, err := os.Lstat(databasePath); err != nil {
+	info, err := os.Lstat(databasePath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
 				return model.UpgradeOperation{}, false, sideErr
@@ -217,6 +218,11 @@ func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBas
 			return model.UpgradeOperation{}, false, nil
 		}
 		return model.UpgradeOperation{}, false, err
+	}
+	if info.Mode().IsRegular() && info.Size() == 0 {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return model.UpgradeOperation{}, false, sideErr
+		}
 	}
 	snapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, databasePath, scratchBase)
 	if err != nil {

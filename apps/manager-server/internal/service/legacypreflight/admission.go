@@ -237,37 +237,23 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	if err := auditAdmissionSidecars(path); err != nil {
-		return upgradeRecord{}, false, err
-	}
-	walPending, err := pendingJournal(path)
-	if err != nil {
-		return upgradeRecord{}, false, err
-	}
 	if info.Size() == 0 {
-		if walPending {
-			return upgradeRecord{}, false, errors.New("empty database has a pending journal")
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(path); sideErr != nil {
+			return upgradeRecord{}, false, sideErr
 		}
 		return upgradeRecord{}, false, nil
 	}
-	// The operation table is looked up in the database file alone first. An
-	// immutable handle opens no journal and creates no -shm, so a source that
+	// The operation table is looked up in the database file alone first when no
+	// journal is pending, bracketed by before/after file and sidecar identity. An
+	// immutable handle opens no journal and creates no -shm, so a cold source that
 	// records no operations — every clean 1.x volume — is answered without writing
 	// anything beside the tree v2 must leave untouched.
 	//
-	// A pending journal makes that lookup non-conclusive, never negative. The
-	// table and the row that fills it become visible together, and SQLite keeps
-	// both in the journal until a checkpoint copies them into the file, so a v2
-	// store whose last transaction created the table and then lost its process
-	// names no table in the file at all. Concluding "no record" from the file
-	// alone would admit exactly that store — a native-v2 schema with an unfinished
-	// Upgrade — for writable startup. A pending journal therefore forces the read
-	// below, which is also the only read that can separate a crashed 1.x volume
-	// from a v2 store whose last transaction is still in its log. A crashed 1.x
-	// volume pays one private copy per read to learn that its journal holds no
-	// operation — a source that was not cleanly stopped — while a 1.x volume with no
-	// journal beside it is still answered without copying anything at all.
-	inFile, err := RecordedOperationTablePresent(ctx, path)
+	// A pending journal makes a file-only lookup non-conclusive, never negative:
+	// SQLite keeps both the table and its row in the journal until a checkpoint
+	// copies them into the file, so a pending journal (whether present at baseline
+	// or created during the immutable probe) forces the private copy below.
+	inFile, walPending, baseline, err := recordedOperationEvidenceWithBaseline(ctx, path)
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
@@ -335,6 +321,14 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	err = db.QueryRowContext(ctx, `select `+strings.Join(selected, ", ")+
 		` from upgrade_operations where id = 1`).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
+		if !walPending {
+			if after, stateErr := inspectOperationEvidenceState(path); stateErr != nil || after != baseline {
+				if stateErr != nil {
+					return upgradeRecord{}, false, stateErr
+				}
+				return upgradeRecord{}, false, errors.New("database changed during recorded operation read")
+			}
+		}
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {
@@ -369,6 +363,14 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 		// for it. Both are read here, before the row can unlock the product.
 		if err := requireManagedDestinationAuthority(ctx, db, a, record); err != nil {
 			return upgradeRecord{}, false, err
+		}
+	}
+	if !walPending {
+		if after, stateErr := inspectOperationEvidenceState(path); stateErr != nil || after != baseline {
+			if stateErr != nil {
+				return upgradeRecord{}, false, stateErr
+			}
+			return upgradeRecord{}, false, errors.New("database changed during recorded operation read")
 		}
 	}
 	return record, true, nil
@@ -995,45 +997,121 @@ func RecordedOperationTablePresent(ctx context.Context, databasePath string) (bo
 	return recordedTablePresent(ctx, db)
 }
 
+// beforeOperationEvidenceProbe is a package-private synchronous test seam for
+// exercising concurrent journal creation between baseline capture and the
+// immutable table probe. Production leaves it nil.
+var beforeOperationEvidenceProbe func(databasePath string)
+
+type evidenceMemberIdentity struct {
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	modifiedNS  int64
+	changeStamp string
+}
+
+type operationEvidenceState struct {
+	database evidenceMemberIdentity
+	wal      evidenceMemberIdentity
+	shm      evidenceMemberIdentity
+	journal  evidenceMemberIdentity
+}
+
+func inspectEvidenceMember(path string) (evidenceMemberIdentity, error) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
+		return evidenceMemberIdentity{}, nil
+	}
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	id, err := copyinmarker.Identity(path)
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	stamp, err := copyinmarker.ChangeStamp(path)
+	if err != nil {
+		return evidenceMemberIdentity{}, err
+	}
+	return evidenceMemberIdentity{
+		present:     true,
+		device:      id.Device,
+		inode:       id.Inode,
+		size:        info.Size(),
+		modifiedNS:  info.ModTime().UnixNano(),
+		changeStamp: stamp,
+	}, nil
+}
+
+func inspectOperationEvidenceState(databasePath string) (operationEvidenceState, error) {
+	if err := auditAdmissionSidecars(databasePath); err != nil {
+		return operationEvidenceState{}, err
+	}
+	dbID, err := inspectEvidenceMember(databasePath)
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	if !dbID.present {
+		return operationEvidenceState{}, os.ErrNotExist
+	}
+	walID, err := inspectEvidenceMember(databasePath + "-wal")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	shmID, err := inspectEvidenceMember(databasePath + "-shm")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	journalID, err := inspectEvidenceMember(databasePath + "-journal")
+	if err != nil {
+		return operationEvidenceState{}, err
+	}
+	return operationEvidenceState{
+		database: dbID,
+		wal:      walID,
+		shm:      shmID,
+		journal:  journalID,
+	}, nil
+}
+
+func recordedOperationEvidenceWithBaseline(ctx context.Context, databasePath string) (bool, bool, operationEvidenceState, error) {
+	before, err := inspectOperationEvidenceState(databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	if before.wal.present && before.wal.size > 0 {
+		return false, true, before, nil
+	}
+	if beforeOperationEvidenceProbe != nil {
+		beforeOperationEvidenceProbe(databasePath)
+	}
+	inFile, err := RecordedOperationTablePresent(ctx, databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	after, err := inspectOperationEvidenceState(databasePath)
+	if err != nil {
+		return false, false, operationEvidenceState{}, err
+	}
+	if after != before {
+		if after.wal.present && after.wal.size > 0 {
+			return false, true, after, nil
+		}
+		return false, false, operationEvidenceState{}, errors.New("database changed during operation evidence probe")
+	}
+	return inFile, false, after, nil
+}
+
 // RecordedOperationEvidence is the pair of facts a reader needs before it may
 // answer "no operation recorded": whether the database file names the table, and
 // whether a journal beside it may still hold the transaction that creates it.
-// The table and its row become visible together, and until a checkpoint copies
-// them into the file an immutable read of the file alone names neither — so only
-// `inFile == false && journalPending == false` proves that nothing was recorded.
+// Baseline and post-read file + sidecar identities (including ChangeStamp) are
+// checked so a concurrent WAL write during the immutable probe routes to a
+// private snapshot or fails closed rather than returning a stale negative answer.
 func RecordedOperationEvidence(ctx context.Context, databasePath string) (inFile bool, journalPending bool, err error) {
-	journalPending, err = pendingJournal(databasePath)
-	if err != nil {
-		return false, false, err
-	}
-	inFile, err = RecordedOperationTablePresent(ctx, databasePath)
-	if err != nil {
-		return false, false, err
-	}
-	return inFile, journalPending, nil
-}
-
-// pendingJournal reports whether a WAL or rollback journal beside the database
-// could hold a transaction the main file does not show yet, failing closed when
-// either sidecar entry cannot be inspected.
-//
-// An entry that is not a regular file counts as pending so no file-only fast
-// path can bypass the sidecar policy check. Nothing here follows a link.
-func pendingJournal(databasePath string) (bool, error) {
-	pending := false
-	for _, suffix := range []string{"-wal", "-journal"} {
-		info, err := os.Lstat(databasePath + suffix)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		if info.Size() > 0 || !info.Mode().IsRegular() {
-			pending = true
-		}
-	}
-	return pending, nil
+	inFile, journalPending, _, err = recordedOperationEvidenceWithBaseline(ctx, databasePath)
+	return inFile, journalPending, err
 }
 
 // auditAdmissionSidecars enforces the single-link regular-file policy across

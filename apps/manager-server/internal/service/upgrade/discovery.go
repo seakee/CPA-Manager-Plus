@@ -177,16 +177,25 @@ func InspectReadOnlyLegacySource(
 	return observation, true
 }
 
+// afterUnfenceableSidecarAudit and beforeUnfenceableImmutableRead are
+// package-private synchronous test seams exercising concurrent sidecar creation
+// across the unfenced immutable read path. Production leaves both nil.
+var (
+	afterUnfenceableSidecarAudit   func(databasePath string)
+	beforeUnfenceableImmutableRead func(databasePath string)
+)
+
 // classifyUnfenceableSource answers for a database whose ownership marker this
 // process may not open. No fence can be taken, so nothing beside the source is
-// created or modified: a cold database with no WAL is read through an immutable
-// handle verified against before/after file identity, while a database with a
-// non-empty WAL first validates the WAL header and then replays the WAL inside a
-// private snapshot outside every preserved root. A corrupt WAL header, an
-// unreadable WAL, a pending rollback journal, a store v2 has already opened (its
-// own tables in either the main file or the WAL), or the Fresh operation marker
-// is never presented as a 1.x source; only an intact 1.x store whose marker alone
-// is root-owned yields the host ownership recovery condition.
+// created or modified: baseline file + sidecar identity (requiring a valid
+// kernel ChangeStamp) is captured first; a non-empty WAL validates its header
+// and replays inside a private snapshot outside every preserved root, while a
+// cold database with no WAL is read through an immutable handle and re-verified
+// against that baseline afterward. A corrupt WAL header, an unreadable WAL, a
+// pending rollback journal, a store v2 has already opened (its own tables in
+// either the main file or the WAL), or the Fresh operation marker is never
+// presented as a 1.x source; only an intact 1.x store whose marker alone is
+// root-owned yields the host ownership recovery condition.
 func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extraExcludedRoot string, inspected os.FileInfo) LegacyDiscoveryObservation {
 	databasePath := strings.TrimSpace(source.Database)
 	if databasePath == "" || ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
@@ -199,11 +208,14 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 	if err := AuditSourceSidecars(databasePath); err != nil {
 		return LegacyDiscoveryNone
 	}
-	walInfo, walErr := os.Lstat(databasePath + "-wal")
-	if walErr != nil && !os.IsNotExist(walErr) {
+	if afterUnfenceableSidecarAudit != nil {
+		afterUnfenceableSidecarAudit(databasePath)
+	}
+	before, err := identifySourceCredential(databasePath)
+	if err != nil || before.uncacheable {
 		return LegacyDiscoveryNone
 	}
-	if walErr == nil && walInfo.Size() > 0 {
+	if before.wal.present && before.wal.size > 0 {
 		if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
 			return LegacyDiscoveryNone
 		}
@@ -220,9 +232,8 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		}
 		return verdict
 	}
-	before, err := identifySourceCredential(databasePath)
-	if err != nil {
-		return LegacyDiscoveryNone
+	if beforeUnfenceableImmutableRead != nil {
+		beforeUnfenceableImmutableRead(databasePath)
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, true))
 	if err != nil {
@@ -238,7 +249,7 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		return LegacyDiscoveryNone
 	}
 	after, err := identifySourceCredential(databasePath)
-	if err != nil || after != before {
+	if err != nil || after.uncacheable || after != before {
 		return LegacyDiscoveryNone
 	}
 	return verdict

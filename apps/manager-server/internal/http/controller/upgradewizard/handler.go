@@ -1256,6 +1256,84 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 	return readRecordedStatusFromDB(ctx, db, document)
 }
 
+// afterPreservedEvidenceProbe is a package-private synchronous test seam
+// exercising concurrent journal or database changes on the preserved status
+// fast path. Production leaves it nil.
+var afterPreservedEvidenceProbe func(databasePath string)
+
+type preservedMemberIdentity struct {
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	modifiedNS  int64
+	changeStamp string
+}
+
+type preservedDatabaseIdentity struct {
+	database preservedMemberIdentity
+	wal      preservedMemberIdentity
+	shm      preservedMemberIdentity
+	journal  preservedMemberIdentity
+}
+
+func inspectPreservedMember(path string) (preservedMemberIdentity, error) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
+		return preservedMemberIdentity{}, nil
+	}
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	id, err := copyinmarker.Identity(path)
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	stamp, err := copyinmarker.ChangeStamp(path)
+	if err != nil {
+		return preservedMemberIdentity{}, err
+	}
+	return preservedMemberIdentity{
+		present:     true,
+		device:      id.Device,
+		inode:       id.Inode,
+		size:        info.Size(),
+		modifiedNS:  info.ModTime().UnixNano(),
+		changeStamp: stamp,
+	}, nil
+}
+
+func inspectPreservedDatabaseIdentity(databasePath string) (preservedDatabaseIdentity, error) {
+	if err := upgradeservice.AuditSourceSidecars(databasePath); err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	dbID, err := inspectPreservedMember(databasePath)
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	if !dbID.present {
+		return preservedDatabaseIdentity{}, os.ErrNotExist
+	}
+	walID, err := inspectPreservedMember(databasePath + "-wal")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	shmID, err := inspectPreservedMember(databasePath + "-shm")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	journalID, err := inspectPreservedMember(databasePath + "-journal")
+	if err != nil {
+		return preservedDatabaseIdentity{}, err
+	}
+	return preservedDatabaseIdentity{
+		database: dbID,
+		wal:      walID,
+		shm:      shmID,
+		journal:  journalID,
+	}, nil
+}
+
 func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string, document statusDocument) (statusDocument, bool, error) {
 	databasePath := strings.TrimSpace(source.Database)
 	info, err := processlock.InspectSourceFile(databasePath)
@@ -1277,20 +1355,38 @@ func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.Pres
 		}
 		return document, false, nil
 	}
+	before, err := inspectPreservedDatabaseIdentity(databasePath)
+	if err != nil {
+		return statusDocument{}, false, err
+	}
 	// The table is looked up in the database file alone first: an immutable
 	// handle creates no -shm, so a clean 1.x volume — which never records an
 	// operation — is answered by the read-only status document instead of a full
 	// copy on every poll.
 	//
-	// A pending journal makes that lookup non-conclusive rather than negative. The
-	// table and its row become visible together and stay in the journal until a
-	// checkpoint copies them into the file, so a v2 store whose last transaction
-	// recorded the operation and then lost its process names no table in the file
-	// at all. Answering "nothing recorded" there would tell the operator to start
-	// a preflight for an operation that already exists.
+	// A pending journal makes that lookup non-conclusive rather than negative.
+	// Baseline and post-read file + sidecar identities are verified so any WAL
+	// created during the immutable probe routes to the private snapshot below or
+	// fails closed instead of answering "nothing recorded".
 	inFile, journalPending, probeErr := legacypreflight.RecordedOperationEvidence(ctx, databasePath)
 	if probeErr != nil {
 		return statusDocument{}, false, probeErr
+	}
+	if afterPreservedEvidenceProbe != nil {
+		afterPreservedEvidenceProbe(databasePath)
+	}
+	if !inFile && !journalPending {
+		after, afterErr := inspectPreservedDatabaseIdentity(databasePath)
+		if afterErr != nil {
+			return statusDocument{}, false, afterErr
+		}
+		if after != before {
+			if after.wal.present && after.wal.size > 0 {
+				journalPending = true
+			} else {
+				return statusDocument{}, false, errors.New("preserved database changed during operation probe")
+			}
+		}
 	}
 	if !inFile && !journalPending {
 		return document, false, nil
