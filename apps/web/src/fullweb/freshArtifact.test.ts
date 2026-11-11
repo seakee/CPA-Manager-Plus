@@ -329,3 +329,4 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
     expect(upload).toHaveBeenCalledTimes(1);
   });
 });
+

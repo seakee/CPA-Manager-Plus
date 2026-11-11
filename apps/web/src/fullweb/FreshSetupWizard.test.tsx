@@ -3,6 +3,9 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { FreshSetupWizard } from './FreshSetupWizard';
 import { BOOTSTRAP_UI, createBootstrapTransport, type FreshOperation } from './bootstrapTransport';
 import { setFullWebLanguage } from '../i18n/fullweb';
+import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
+import { shellText as s } from '../i18n/consoleShell';
 
 const identity = {
   admissionId: 'admission',
@@ -50,6 +53,11 @@ async function click(id: string) {
 async function input(id: string, value: string | boolean) {
   await act(async () => byID(id).props.onChange({ target: { value, checked: value } }));
 }
+async function switchLanguage(language: string) {
+  await act(async () => {
+    setFullWebLanguage(language);
+  });
+}
 async function setup(
   options: {
     external?: boolean;
@@ -64,8 +72,10 @@ async function setup(
     unresolved?: boolean;
     runtimePending?: boolean;
     rejectExternal?: boolean;
+    externalRefusal?: string;
     loseIdentity?: boolean;
     partialRoute?: boolean;
+    routeRefusal?: string;
     verifyPending?: boolean;
   } = {}
 ) {
@@ -82,6 +92,7 @@ async function setup(
   let recovered = false;
   let externalRejected = false;
   let verificationRefused = false;
+  let routeRefused = false;
   let artifactRequired = options.artifactRequired === true;
   let artifactRecheckFail = false;
   const transport = vi.fn<typeof fetch>(async (url, init) => {
@@ -182,6 +193,11 @@ async function setup(
         );
       }
       if (body.strategy === 'connect_external') {
+        if (options.externalRefusal) {
+          // The Manager's bounded blocker envelope: only the code travels, so
+          // the browser has to name the cause itself.
+          return Response.json({ Code: options.externalRefusal }, { status: 409 });
+        }
         if (options.rejectExternal && !externalRejected) {
           externalRejected = true;
           return new Response('', { status: 409 });
@@ -228,6 +244,12 @@ async function setup(
       };
     }
     if (resource === 'routing/activate') {
+      if (options.routeRefusal && !routeRefused) {
+        // The Manager names why the published address did not verify. Nothing
+        // was committed, so the same operation stays continuable.
+        routeRefused = true;
+        return Response.json({ Code: options.routeRefusal }, { status: 503 });
+      }
       if (options.partialRoute && !lost) {
         lost = true;
         operation = {
@@ -315,7 +337,7 @@ it.each([false, true])(
     await input('confirm-key-saved-checkbox', true);
     await click('setup-execute');
     expect(byID('enter-console').props.href).toBe('/private');
-    expect(JSON.stringify(renderer.toJSON())).toContain('安装已完成');
+    expect(JSON.stringify(renderer.toJSON())).toContain(s('ready'));
     expect(localStorage.setItem).not.toHaveBeenCalled();
     expect(sessionStorage.setItem).not.toHaveBeenCalled();
     const writes = transport.mock.calls
@@ -383,7 +405,15 @@ it('does not commit the route or finish while managed CPA is not ready', async (
       ([url]) => String(url).endsWith('/routing/activate') || String(url).endsWith('/complete')
     )
   ).toBe(false);
-  expect(JSON.stringify(renderer.toJSON())).toContain('CPA 正在启动');
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('waitingRuntime'));
+  // The waiting note is on screen and renders from the journey catalog, so the
+  // switch alone repaints it in each language instead of keeping the first one.
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(JSON.stringify(renderer.toJSON()), language).toContain(
+      j('waitingRuntime', language)
+    );
+  }
 });
 
 it('keeps an unverified CPA readiness refusal resumable instead of freezing the installation', async () => {
@@ -393,7 +423,7 @@ it('keeps an unverified CPA readiness refusal resumable instead of freezing the 
   await click('setup-execute');
   // The refusal recorded no checkpoint, so the same operation stays continuable.
   expect(byID('setup-resume').props.disabled).toBe(false);
-  expect(JSON.stringify(renderer.toJSON())).toContain('已保存的进度不会丢失');
+  expect(JSON.stringify(renderer.toJSON())).toContain(s('runtimeVerifyRequired'));
   expect(renderer.root.findAllByProps({ 'data-testid': 'enter-console' })).toHaveLength(0);
   const strategyBodies = () =>
     transport.mock.calls
@@ -428,19 +458,14 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'])(
   'explains the unverified readiness state in every locale (%s)',
   async (language) => {
     await setup({ verifyPending: true });
-    setFullWebLanguage(language);
+    await switchLanguage(language);
     await click('setup-review');
     await input('confirm-key-saved-checkbox', true);
     await click('setup-execute');
     expect(byID('setup-resume').props.disabled).toBe(false);
-    expect(JSON.stringify(renderer.toJSON())).toContain(
-      {
-        'zh-CN': '已保存的进度不会丢失',
-        'zh-TW': '已儲存的進度不會遺失',
-        en: 'could not be verified yet',
-        ru: 'пока нельзя проверить',
-      }[language]
-    );
+    // The sentence is read from the catalog for the selected language, so a
+    // rewording does not fail the test and a lost translation does.
+    expect(JSON.stringify(renderer.toJSON())).toContain(s('runtimeVerifyRequired'));
   }
 );
 
@@ -516,6 +541,33 @@ it('allows explicit same-operation route recovery only after reading the persist
   ).toHaveLength(1);
 });
 
+it('keeps a named routing verification refusal resumable and does not call it a lost reply', async () => {
+  const { transport } = await setup({
+    external: true,
+    routeRefusal: 'routing_verification_failed',
+  });
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  // The refusal names the cause and recorded no routing checkpoint, so the same
+  // operation stays continuable instead of reading as an unconfirmed write.
+  expect(byID('setup-resume').props.disabled).toBe(false);
+  const rendered = JSON.stringify(renderer.toJSON());
+  // The named refusal is reported as itself: the lost-reply sentence would tell
+  // the operator to treat a recorded answer as an unknown outcome.
+  const refusal = s('routingVerificationFailed');
+  const lostReply = s('unknownHelp');
+  expect(rendered).toContain(refusal);
+  expect(refusal).not.toBe(lostReply);
+  expect(rendered).not.toContain(lostReply);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'enter-console' })).toHaveLength(0);
+  await click('setup-resume');
+  expect(byID('enter-console').props.href).toBe('/private');
+  expect(
+    transport.mock.calls.filter(([url]) => String(url).endsWith('/routing/activate'))
+  ).toHaveLength(2);
+});
+
 it('validates key and path before confirmation and does not submit an unconfirmed plan', async () => {
   const { transport } = await setup();
   await input('admin-key-input', 'weak');
@@ -543,7 +595,7 @@ it('generates a key only on request and requires fresh confirmation after editin
   await act(async () =>
     renderer.root
       .findAllByType('button')
-      .find((node) => node.children.includes('上一步'))!
+      .find((node) => node.children.includes(s('back')))!
       .props.onClick()
   );
   await input('admin-key-input', admin + 'changed');
@@ -555,27 +607,15 @@ it('generates a key only on request and requires fresh confirmation after editin
   expect(transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))).toBe(false);
 });
 
-it.each(['zh-CN', 'zh-TW', 'en'])('keeps the unified journey localized (%s)', async (language) => {
+it.each(['zh-CN', 'zh-TW', 'en', 'ru'])('keeps the unified journey localized (%s)', async (language) => {
   await setup({ external: true });
-  setFullWebLanguage(language);
+  await switchLanguage(language);
   await click('setup-review');
-  expect(JSON.stringify(renderer.toJSON())).toContain(
-    language === 'en'
-      ? 'Review installation'
-      : language === 'zh-TW'
-        ? '確認安裝資訊'
-        : '确认安装信息'
-  );
+  expect(JSON.stringify(renderer.toJSON())).toContain(s('reviewTitle'));
   await input('confirm-key-saved-checkbox', true);
   await click('setup-execute');
   expect(byID('enter-console').props.href).toBe('/private');
-  expect(JSON.stringify(renderer.toJSON())).toContain(
-    language === 'en'
-      ? 'Sign in and enter CPAMP'
-      : language === 'zh-TW'
-        ? '登入並進入 CPAMP'
-        : '登录并进入 CPAMP'
-  );
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('finishLogin'));
 });
 
 it('uses the maintained shell and shared CSS classes across configuration, review and completion', async () => {
@@ -697,7 +737,10 @@ it('shows FreshArtifactStep and blocks execute when artifact is required, then c
 
   expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
   expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(0);
-  expect(byID('setup-execute').props.disabled).toBe(true);
+  // The gated confirmation step offers no install action at all: the only way
+  // forward is inside the engine step, and the footer says so.
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+  expect(byID('engine-gate-next')).toBeTruthy();
   expect(
     transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
   ).toBe(false);
@@ -746,7 +789,7 @@ it('never reads runtime/artifact for External and shows mapped error on unsuppor
     managedTransport.mock.calls.some(([url]) => String(url).endsWith('/runtime/artifact'))
   ).toBe(true);
   const alertNode = renderer.root.findByProps({ role: 'alert' });
-  expect(JSON.stringify(alertNode.children)).not.toContain('初始化尚未完成');
+  expect(JSON.stringify(alertNode.children)).not.toContain(j('setupError'));
   expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
 });
 
@@ -785,7 +828,8 @@ it.each([false, true])(
     });
     await click('setup-review');
     expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
-    expect(byID('setup-execute').props.disabled).toBe(true);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+    expect(byID('engine-gate-next')).toBeTruthy();
 
     // Acquisition succeeds, triggering onReady -> review() re-checks GET runtime/artifact -> 503
     await click('artifact-acquire-btn');
@@ -793,10 +837,9 @@ it.each([false, true])(
     expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
     expect(renderer.root.findAllByProps({ 'data-testid': 'confirm-key-saved-checkbox' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'adopt-source-url' })).toHaveLength(0);
-    expect(byID('setup-execute').props.disabled).toBe(true);
 
-    // Even if onClick is invoked directly on setup-execute, no admin/commit or strategy write goes out
-    await click('setup-execute');
+    // With no install action in the gate, no admin/commit or strategy write can go out
+    expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
     expect(
       transport.mock.calls.some(([url]) => String(url).endsWith('/admin/commit'))
     ).toBe(false);
@@ -814,7 +857,8 @@ it('keeps gate active and shows restart guidance when status reports recovery_re
   await click('setup-review');
 
   expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
-  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+  expect(byID('engine-gate-next')).toBeTruthy();
   expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
   expect(
     transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
@@ -829,9 +873,172 @@ it('keeps gate active and blocks execute when active.artifactId does not match p
   await click('setup-review');
 
   expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
-  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+  expect(byID('engine-gate-next')).toBeTruthy();
   expect(byID('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
   expect(
     transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
   ).toBe(false);
+});
+
+it('retranslates a message that is already on screen when the language changes', async () => {
+  setFullWebLanguage('en');
+  const englishText = j('invalidSetup');
+  await setup();
+  await input('admin-key-input', 'short');
+  await click('setup-review');
+  expect(JSON.stringify(renderer.toJSON())).toContain(englishText);
+
+  // The journey keeps the key, not the sentence, and the wizard subscribes to
+  // the language it renders with: the switch alone re-renders the message that
+  // is already on screen. No prop or state change is staged in between.
+  let previous = englishText;
+  for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+    await switchLanguage(language);
+    const text = j('invalidSetup');
+    expect(text).not.toBe(previous);
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain(text);
+    expect(rendered).not.toContain(previous);
+    previous = text;
+  }
+  // The Russian wizard does not fall back to English for the journey messages.
+  await switchLanguage('ru');
+  expect(j('invalidSetup')).toBe(previous);
+  expect(previous).not.toBe(englishText);
+});
+
+it('renders the copy feedback in the operator language, including the failure', async () => {
+  // The journey keeps the key in state, so the sentence on screen follows the
+  // switch. Driven through the Copy button an operator presses and compared
+  // with the catalog per language; a language that has no sentence leaves the
+  // node empty instead of showing the English one.
+  await setup();
+  await input('admin-key-input', admin);
+  const writeText = vi.fn(async () => {});
+  vi.stubGlobal('navigator', { clipboard: { writeText } });
+
+  await act(async () => {
+    await renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(j('copy')))!
+      .props.onClick();
+  });
+  expect(writeText).toHaveBeenCalledWith(admin);
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(String(renderer.root.findAllByProps({ role: 'status' })[0].props.children)).toBe(
+      j('copied', language)
+    );
+  }
+
+  // A denied clipboard is the failure path: the next attempt clears the success
+  // note, and the failure sentence is what stays on screen.
+  writeText.mockImplementation(async () => {
+    throw new Error('clipboard denied');
+  });
+  await act(async () => {
+    await renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(j('copy')))!
+      .props.onClick();
+  });
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru'] as const) {
+    await switchLanguage(language);
+    expect(renderer.root.findAllByProps({ role: 'status' }), language).toHaveLength(0);
+    expect(String(renderer.root.findAllByProps({ role: 'alert' })[0].props.children)).toBe(
+      j('copyFailed', language)
+    );
+  }
+});
+
+it('localizes the review plugin row and marks the recommended installation option', async () => {
+  await setup();
+  await click('setup-review');
+  const row = byID('review-plugins');
+  const label = row.findAll((node) => node.type === 'dt')[0].props.children;
+  // The row names the plugin decision in the operator's language: the wire key
+  // `plugins` is never the label of a user-visible summary row.
+  expect(String(label)).toBe(j('plugins'));
+  expect(String(label)).not.toBe('plugins');
+
+  await act(async () => {
+    renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(s('back')))!
+      .props.onClick();
+  });
+  await act(async () => {
+    renderer.root
+      .findAllByType('button')
+      .find((node) => node.children.includes(s('back')))!
+      .props.onClick();
+  });
+  // Only the first option is recommended, and it says so with the existing word.
+  expect(
+    byID('choose-new_managed').findAll((node) => node.props.className === 'badge badge-indigo')
+  ).toHaveLength(1);
+  expect(
+    renderer.root
+      .findAll((node) => node.props.className === 'badge badge-indigo')
+      .map((node) => node.props.children)
+  ).toEqual([j('recommended')]);
+  for (const other of ['choose-adopt_existing', 'choose-connect_external'])
+    expect(
+      byID(other).findAll((node) => node.props.className === 'badge badge-indigo')
+    ).toHaveLength(0);
+});
+
+it('refuses an unusable External address and key with their own messages', async () => {
+  const { transport } = await setup({ external: true });
+  await input('external-base-url', 'not-a-valid-url');
+  await click('setup-review');
+  expect(renderer.root.findByProps({ role: 'alert' }).props.children).toBe(
+    x('setupAddressInvalid')
+  );
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
+
+  await input('external-base-url', 'http://cpa:8317');
+  await input('external-management-key', 'key with a space');
+  await click('setup-review');
+  expect(renderer.root.findByProps({ role: 'alert' }).props.children).toBe(x('setupKeyInvalid'));
+  // Nothing left the browser: both refusals are the form's own.
+  expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
+});
+
+it('names the recorded External refusal instead of the generic setup error', async () => {
+  await setup({ external: true, externalRefusal: 'management_safe_read_unavailable' });
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  const alert = renderer.root.findByProps({ role: 'alert' }).props.children;
+  expect(alert).toBe(x('setupBlockerUnreachable'));
+  expect(alert).not.toBe(j('setupError'));
+});
+
+it('states what the review does not migrate for each installation method', async () => {
+  await setup({ external: true });
+  await click('setup-review');
+  const externalReview = JSON.stringify(renderer.toJSON());
+  expect(externalReview).toContain(x('setupExternalNoMigration'));
+  expect(externalReview).not.toContain(j('noMigration'));
+
+  await setup();
+  await click('setup-review');
+  const managedReview = JSON.stringify(renderer.toJSON());
+  expect(managedReview).toContain(j('noMigration'));
+  expect(managedReview).not.toContain(x('setupExternalNoMigration'));
+});
+
+it('names the engine step, not the confirmation step, while the engine is not ready', async () => {
+  await setup({ adopt: true, artifactRequired: true });
+  await click('setup-review');
+
+  // The heading, the description and the footer all describe the engine step:
+  // there is no summary to confirm yet, and the install button is not offered.
+  const title = renderer.root.findAllByType('h1')[0].children.join('');
+  expect(title).toBe(s('engineGateTitle'));
+  expect(JSON.stringify(renderer.toJSON())).toContain(s('engineGateHelp'));
+  expect(byID('engine-gate-next')).toBeTruthy();
+  expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
 });

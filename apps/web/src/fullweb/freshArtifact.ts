@@ -251,6 +251,8 @@ export interface MappedArtifactError {
   code: ArtifactErrorCode | 'pinned_mismatch' | 'unknown';
   messageKey: FreshArtifactTextKey;
   remedyKey: FreshArtifactTextKey;
+  /** Interpolation values the two keys expect, so a re-render can translate again. */
+  vars: Record<string, string | number>;
   message: string;
   remedy: string;
   text: string;
@@ -267,6 +269,7 @@ export function formatArtifactPinnedMismatch(
     code: 'pinned_mismatch',
     messageKey: 'error_pinned_mismatch',
     remedyKey: 'remedy_pinned_mismatch',
+    vars,
     message,
     remedy,
     text: `${message} ${remedy}`,
@@ -276,17 +279,23 @@ export function formatArtifactPinnedMismatch(
 export function mapArtifactErrorCode(
   code: string | undefined,
   version = '<version>',
-  language?: string
+  language?: string,
+  source?: ArtifactSource
 ): MappedArtifactError {
   const vars = { version: version.trim() || '<version>' };
   if (isArtifactErrorCode(code)) {
     const entry = ARTIFACT_ERROR_MAP[code];
+    // A CDN prefix and the official release fail for different reasons, so the
+    // remedy named is the one the source that actually failed can act on.
+    const remedyKey =
+      entry.remedyKey === 'remedy_network' && source === 'cdn' ? 'remedy_cdn' : entry.remedyKey;
     const message = artifactText(entry.messageKey, vars, language);
-    const remedy = artifactText(entry.remedyKey, vars, language);
+    const remedy = artifactText(remedyKey, vars, language);
     return {
       code,
       messageKey: entry.messageKey,
-      remedyKey: entry.remedyKey,
+      remedyKey,
+      vars,
       message,
       remedy,
       text: `${message} ${remedy}`,
@@ -298,6 +307,7 @@ export function mapArtifactErrorCode(
     code: 'unknown',
     messageKey: 'error_unknown',
     remedyKey: 'remedy_runtime_unavailable',
+    vars,
     message,
     remedy,
     text: `${message} ${remedy}`,
@@ -345,9 +355,10 @@ export function isNonTransientArtifactReadError(error: unknown): boolean {
 export function formatArtifactError(
   error: unknown,
   version = '<version>',
-  language?: string
+  language?: string,
+  source?: ArtifactSource
 ): MappedArtifactError {
-  return mapArtifactErrorCode(extractArtifactErrorCode(error), version, language);
+  return mapArtifactErrorCode(extractArtifactErrorCode(error), version, language, source);
 }
 export function validCDNPrefix(prefix: string): boolean {
   const trimmed = prefix.trim();

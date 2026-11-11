@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { artifactText } from '../i18n/freshArtifact';
+import { artifactText, type FreshArtifactTextKey } from '../i18n/freshArtifact';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
 import {
   ARTIFACT_MAX_UPLOAD_BYTES,
@@ -80,6 +81,9 @@ export function FreshArtifactStep({
   credential,
   initialStatus,
 }: FreshArtifactStepProps) {
+  // Every sentence on this step is produced from a key at render time, so the
+  // step itself follows a language switch even when its host keeps its state.
+  useFullWebLanguage();
   const validatedInitial = (() => {
     if (!initialStatus) return null;
     try {
@@ -124,14 +128,20 @@ export function FreshArtifactStep({
       return formatArtifactPinnedMismatch(validatedInitial?.pinned.version);
     }
     if (validatedInitial?.operation?.phase === 'failed') {
+      // A failure that survived a reload keeps the source that produced it, so
+      // the remedy still names something that source can act on.
       return mapArtifactErrorCode(
         validatedInitial.operation.code,
-        validatedInitial.pinned.version
+        validatedInitial.pinned.version,
+        undefined,
+        validatedInitial.operation.source
       );
     }
     return null;
   });
-  const [validationMessage, setValidationMessage] = useState<string>('');
+  // The failing input keeps its key, so the sentence is produced at render and
+  // follows a language switch like every other message on this step.
+  const [validationMessage, setValidationMessage] = useState<FreshArtifactTextKey | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const aliveRef = useRef(true);
@@ -190,7 +200,14 @@ export function FreshArtifactStep({
         return;
       }
       if (next.operation?.phase === 'failed') {
-        setError(mapArtifactErrorCode(next.operation.code, next.pinned.version));
+        setError(
+          mapArtifactErrorCode(
+            next.operation.code,
+            next.pinned.version,
+            undefined,
+            next.operation.source
+          )
+        );
       } else if (isRunningPhase(next.operation?.phase)) {
         setPolling(true);
         setPollRun((c) => c + 1);
@@ -263,7 +280,14 @@ export function FreshArtifactStep({
         }
         if (next.operation?.phase === 'failed') {
           setPolling(false);
-          setError(mapArtifactErrorCode(next.operation.code, next.pinned.version));
+          setError(
+            mapArtifactErrorCode(
+              next.operation.code,
+              next.pinned.version,
+              undefined,
+              next.operation.source
+            )
+          );
           return;
         }
         if (!isRunningPhase(next.operation?.phase)) {
@@ -315,10 +339,10 @@ export function FreshArtifactStep({
 
   const handleAcquire = async () => {
     if (busy || !status || preparationBlocked) return;
-    setValidationMessage('');
+    setValidationMessage(null);
     setError(null);
     if (source === 'cdn' && !validCDNPrefix(effectiveCDNPrefix)) {
-      setValidationMessage(artifactText('cdnInvalidPrefix'));
+      setValidationMessage('cdnInvalidPrefix');
       return;
     }
     readyCalledRef.current = false;
@@ -338,14 +362,14 @@ export function FreshArtifactStep({
         return;
       }
       if (nextOp.phase === 'failed') {
-        setError(mapArtifactErrorCode(nextOp.code, version));
+        setError(mapArtifactErrorCode(nextOp.code, version, undefined, nextOp.source));
         return;
       }
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
       if (!aliveRef.current || isAbortedArtifactError(err)) return;
-      const mapped = formatArtifactError(err, version);
+      const mapped = formatArtifactError(err, version, undefined, source);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();
         return;
@@ -362,7 +386,7 @@ export function FreshArtifactStep({
       event.target.value = '';
     }
     if (!file || busy || !status || preparationBlocked) return;
-    setValidationMessage('');
+    setValidationMessage(null);
     setError(null);
     if (file.size > ARTIFACT_MAX_UPLOAD_BYTES) {
       setError(mapArtifactErrorCode('archive_too_large', version));
@@ -379,14 +403,14 @@ export function FreshArtifactStep({
         return;
       }
       if (nextOp.phase === 'failed') {
-        setError(mapArtifactErrorCode(nextOp.code, version));
+        setError(mapArtifactErrorCode(nextOp.code, version, undefined, nextOp.source));
         return;
       }
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
       if (!aliveRef.current || isAbortedArtifactError(err)) return;
-      const mapped = formatArtifactError(err, version);
+      const mapped = formatArtifactError(err, version, undefined, source);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();
         return;
@@ -418,12 +442,14 @@ export function FreshArtifactStep({
 
       {statusPhase === 'unavailable' && (
         <div
-          className="alert alert-warn"
+          className="alert alert-warn artifact-alert"
           role="alert"
           data-testid="artifact-status-unavailable"
         >
-          <p>{error ? error.message : artifactText('statusUnavailable')}</p>
-          {error && <p className="artifact-error-remedy">{error.remedy}</p>}
+          <p>{error ? artifactText(error.messageKey, error.vars) : artifactText('statusUnavailable')}</p>
+          {error && (
+            <p className="artifact-error-remedy">{artifactText(error.remedyKey, error.vars)}</p>
+          )}
           <div className="artifact-actions">
             <button
               type="button"
@@ -479,21 +505,21 @@ export function FreshArtifactStep({
           )}
           {error && (
             <div
-              className="alert alert-warn"
+              className="alert alert-warn artifact-alert"
               role="alert"
               data-testid="artifact-error"
               data-error-code={error.code}
             >
-              <p data-testid="artifact-error-message">{error.message}</p>
+              <p data-testid="artifact-error-message">{artifactText(error.messageKey, error.vars)}</p>
               <p className="artifact-error-remedy" data-testid="artifact-error-remedy">
-                {error.remedy}
+                {artifactText(error.remedyKey, error.vars)}
               </p>
             </div>
           )}
 
           {validationMessage && (
             <p className="alert alert-warn" role="alert" data-testid="artifact-validation-error">
-              {validationMessage}
+              {artifactText(validationMessage)}
             </p>
           )}
 
@@ -559,7 +585,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('github');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />
@@ -577,7 +603,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('cdn');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />
@@ -629,7 +655,7 @@ export function FreshArtifactStep({
                           spellCheck={false}
                           onChange={(e) => {
                             setCustomPrefix(e.target.value);
-                            setValidationMessage('');
+                            setValidationMessage(null);
                           }}
                         />
                       </div>
@@ -652,7 +678,7 @@ export function FreshArtifactStep({
                   disabled={busy}
                   onClick={() => {
                     setSource('upload');
-                    setValidationMessage('');
+                    setValidationMessage(null);
                   }}
                 >
                   <span className="journey-radio" aria-hidden="true" />

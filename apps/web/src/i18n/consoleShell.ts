@@ -55,7 +55,8 @@ const en = {
   newTitle: 'Set up CPAMP',
   newHelp: 'Create a new managed CPA instance on this host.',
   newManaged: 'New embedded installation',
-  newDetail: 'Use the official CPA packaged with this deployment. Linux/amd64 Embedded only.',
+  newDetail:
+    'Use the official CPA this deployment provides, or download/upload the official release when the image ships without it. Linux/amd64 embedded only.',
   adopt: 'Adopt existing CPA',
   adoptHelp:
     'Copy the credentials, gateway configuration and client keys of another CPA v8 into the CPA this Manager runs. The source is only read.',
@@ -69,6 +70,13 @@ const en = {
   reviewTitle: 'Review installation',
   reviewHelp:
     'Check the destination before installing. The existing operation will be used throughout.',
+  engineGateTitle: 'Prepare the CPA engine',
+  engineGateHelp:
+    'This image does not carry the embedded CPA, so the engine is prepared first. Finish the engine step below and the installation summary appears.',
+  engineGateNext:
+    'Continue with the engine step above; the install button returns once the engine is ready.',
+  routingVerificationFailed:
+    'The console address did not answer as required, so the route could not be verified. Check that the public address in use is reachable from inside the container, then retry.',
   destination: 'Destination',
   host: 'This deployment',
   version: 'Official packaged CPA 8.0.55',
@@ -163,7 +171,8 @@ const zh: typeof en = {
   newTitle: '设置 CPAMP',
   newHelp: '在当前宿主机创建全新的托管 CPA 实例。',
   newManaged: '全新内置安装',
-  newDetail: '使用随部署提供的官方 CPA，仅支持 Linux/amd64 Embedded。',
+  newDetail:
+    '使用本部署提供的官方 CPA；镜像未附带引擎时可先下载或上传官方发布包。仅支持 Linux/amd64 内嵌模式。',
   adopt: '接管现有 CPA',
   adoptHelp:
     '把另一个 CPA v8 的凭证、网关配置与客户端密钥迁移到本管理程序运行的 CPA。源 CPA 只会被读取。',
@@ -174,6 +183,12 @@ const zh: typeof en = {
   back: '上一步',
   reviewTitle: '确认安装信息',
   reviewHelp: '请确认目标；提交后会沿用同一个安装操作执行和恢复。',
+  engineGateTitle: '准备 CPA 引擎',
+  engineGateHelp:
+    '本镜像未自带内嵌 CPA，需要先准备引擎。完成下面的引擎步骤后，会出现安装信息确认。',
+  engineGateNext: '请先完成上面的引擎步骤；引擎就绪后即可继续安装。',
+  routingVerificationFailed:
+    '控制台地址没有按预期响应，无法完成路由校验。请确认当前公开地址在容器内可以访问，然后重试。',
   destination: '安装目标',
   host: '当前部署',
   version: '官方随附 CPA 8.0.55',
@@ -248,7 +263,8 @@ const tw: typeof en = {
   newTitle: '設定 CPAMP',
   newHelp: '在目前主機建立全新的受管 CPA 執行個體。',
   newManaged: '全新內嵌安裝',
-  newDetail: '使用隨部署提供的官方 CPA，僅支援 Linux/amd64 Embedded。',
+  newDetail:
+    '使用本部署提供的官方 CPA；映像未附帶引擎時可先下載或上傳官方發佈包。僅支援 Linux/amd64 內嵌模式。',
   adopt: '接管現有 CPA',
   adoptHelp:
     '把另一個 CPA v8 的憑證、閘道設定與用戶端金鑰遷移到本管理程式執行的 CPA。來源 CPA 只會被讀取。',
@@ -259,6 +275,12 @@ const tw: typeof en = {
   back: '上一步',
   reviewTitle: '確認安裝資訊',
   reviewHelp: '請確認目標；提交後會沿用同一個安裝操作執行和復原。',
+  engineGateTitle: '準備 CPA 引擎',
+  engineGateHelp:
+    '本映像未自帶內嵌 CPA，需要先準備引擎。完成下方的引擎步驟後，會出現安裝資訊確認。',
+  engineGateNext: '請先完成上方的引擎步驟；引擎就緒後即可繼續安裝。',
+  routingVerificationFailed:
+    '控制台位址沒有按預期回應，無法完成路由驗證。請確認目前公開位址在容器內可以存取，然後重試。',
   destination: '安裝目標',
   host: '目前部署',
   version: '官方隨附 CPA 8.0.55',
@@ -335,7 +357,7 @@ const ru: typeof en = {
   newHelp: 'Создать новый управляемый экземпляр CPA на этом хосте.',
   newManaged: 'Новая встроенная установка',
   newDetail:
-    'Используется официальный CPA из комплекта развёртывания. Поддерживается только Linux/amd64 Embedded.',
+    'Используется официальный CPA из этого развёртывания; если образ поставляется без движка, скачайте или загрузите официальный пакет. Только встроенный режим Linux/amd64.',
   adopt: 'Подключить существующий CPA',
   adoptHelp:
     'Скопируйте учётные данные, конфигурацию шлюза и клиентские ключи другого CPA v8 в CPA этого Manager. Источник только читается.',
@@ -348,6 +370,13 @@ const ru: typeof en = {
   back: 'Назад',
   reviewTitle: 'Проверка установки',
   reviewHelp: 'Проверьте место установки. Выполнение и восстановление продолжат ту же операцию.',
+  engineGateTitle: 'Подготовка движка CPA',
+  engineGateHelp:
+    'Этот образ поставляется без встроенного CPA, поэтому сначала готовится движок. Завершите шаг движка ниже — затем появится сводка установки.',
+  engineGateNext:
+    'Сначала завершите шаг движка выше; кнопка установки вернётся, когда движок будет готов.',
+  routingVerificationFailed:
+    'Адрес консоли не ответил должным образом, поэтому маршрут не удалось проверить. Убедитесь, что публичный адрес доступен изнутри контейнера, и повторите попытку.',
   destination: 'Место установки',
   host: 'Текущее развёртывание',
   version: 'Официальный CPA 8.0.55 из комплекта',

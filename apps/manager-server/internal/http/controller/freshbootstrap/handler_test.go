@@ -163,10 +163,31 @@ func TestFixedTransportClaimSessionMethodsAliasesAndOversizedBodies(t *testing.T
 	if w = request("POST", bootstrap.FixedBootstrapAPIPath+"routing/activate", "Fresh "+session.Token, string(activateBody)); w.Code != 503 {
 		t.Fatal("failed public verification misclassified", w.Code)
 	}
+	var verificationRefusal struct {
+		Code string `json:"Code"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &verificationRefusal) != nil ||
+		verificationRefusal.Code != "routing_verification_failed" {
+		t.Fatal("failed public verification was not named by a stable code", w.Body.String())
+	}
 	record, _ := st.Load(t.Context())
 	if record.Operation.Routing.Committed {
 		t.Fatal("unverified route committed")
 	}
+	// A blocked transport or a target that never matched says nothing about the
+	// published identity, so it keeps the bare 503 rather than borrowing the
+	// verification code.
+	driver.verifyErr = freshrouting.ErrBlocked
+	if w = request("POST", bootstrap.FixedBootstrapAPIPath+"routing/activate", "Fresh "+session.Token, string(activateBody)); w.Code != 503 {
+		t.Fatal("blocked activation misclassified", w.Code)
+	}
+	var blockedRefusal struct {
+		Code string `json:"Code"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &blockedRefusal) == nil && blockedRefusal.Code != "" {
+		t.Fatalf("blocked activation carried %q", blockedRefusal.Code)
+	}
+	driver.verifyErr = nil
 	driver.state.Generation = "foreign"
 	if w = request("POST", bootstrap.FixedBootstrapAPIPath+"routing/activate", "Fresh "+session.Token, string(activateBody)); w.Code != 409 {
 		t.Fatal("foreign owner status", w.Code)

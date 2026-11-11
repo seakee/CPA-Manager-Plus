@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { shellText as s } from '../i18n/consoleShell';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
@@ -16,9 +17,11 @@ import {
   adoptionCompletionState,
   needsCredentialFileNote,
   normalizeCPAAddress,
+  validManagementKey,
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
+import { externalSetupBlockerKey, externalWorkspaceText as x } from '../i18n/freshExternal';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 import { FreshArtifactStep } from './FreshArtifactStep';
@@ -31,7 +34,9 @@ import {
   mapArtifactErrorCode,
   readArtifactStatus,
   type ArtifactStatus,
+  type MappedArtifactError,
 } from './freshArtifact';
+import { artifactText } from '../i18n/freshArtifact';
 
 type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
 type Target = {
@@ -61,14 +66,53 @@ type Pending = {
   previous?: string;
 };
 class WizardArtifactError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(readonly mapped: MappedArtifactError) {
+    super(mapped.code);
     this.name = 'WizardArtifactError';
   }
 }
 function attemptID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+// A message keeps the key (and its interpolation values) rather than the
+// rendered sentence, so switching language re-renders what is already on screen
+// in the newly selected language.
+type WizardMessage =
+  | { from: 'journey'; key: Parameters<typeof j>[0] }
+  | { from: 'shell'; key: Parameters<typeof s>[0] }
+  | { from: 'external'; key: Parameters<typeof x>[0] }
+  | { from: 'artifact'; mapped: MappedArtifactError };
+function wizardMessageText(message: WizardMessage): string {
+  switch (message.from) {
+    case 'journey':
+      return j(message.key);
+    case 'shell':
+      return s(message.key);
+    case 'external':
+      return x(message.key);
+    case 'artifact': {
+      const { messageKey, remedyKey, vars } = message.mapped;
+      return `${artifactText(messageKey, vars)} ${artifactText(remedyKey, vars)}`;
+    }
+  }
+}
+// One message for every failed step. A typed refusal from the Manager names the
+// cause it recorded; only when nothing names it does the journey fall back to
+// the sentence that covers any unfinished setup.
+function setupErrorMessage(err: unknown): WizardMessage {
+  if (err instanceof WizardArtifactError) return { from: 'artifact', mapped: err.mapped };
+  if (err instanceof BootstrapTransportError) {
+    if (err.code === 'managed_destination_verification_required')
+      return { from: 'shell', key: 'runtimeVerifyRequired' };
+    // The routing layer refuses with this code when the published address did not
+    // answer as required; that cause is actionable, unlike a bare 503.
+    if (err.code === 'routing_verification_failed')
+      return { from: 'shell', key: 'routingVerificationFailed' };
+    const blocker = externalSetupBlockerKey(err.code);
+    if (blocker) return { from: 'external', key: blocker };
+  }
+  return { from: 'journey', key: 'setupError' };
 }
 function confirmed(op: FreshOperation, pending: Pending) {
   if (op.revision <= pending.revision) return false;
@@ -97,6 +141,10 @@ export function FreshSetupWizard({
   transport: BootstrapTransportClient;
   onOperation?: (operation: FreshOperation) => void;
 }) {
+  // Messages on this surface are keys rendered through the Full Web text
+  // helpers, so the language switch itself must re-render the wizard: otherwise
+  // an error or note that is already on screen keeps the old language.
+  useFullWebLanguage();
   const [operation, setOperation] = useState(initialOperation);
   // A resumed installation keeps the strategy it recorded, including an
   // adoption whose flow owns the rest of the journey.
@@ -126,8 +174,8 @@ export function FreshSetupWizard({
   // browser storage, and never in the summary or the URL.
   const [installKey, setInstallKey] = useState('');
   const [installKeyFeedback, setInstallKeyFeedback] = useState<'copied' | 'failed' | ''>('');
-  const [error, setError] = useState('');
-  const [note, setNote] = useState('');
+  const [error, setError] = useState<WizardMessage | null>(null);
+  const [note, setNote] = useState<WizardMessage | null>(null);
   const [unknown, setUnknown] = useState(false);
   // The adoption's own step inside this wizard's four-step chrome: the confirm
   // step is the inventory and the execute step is the migration.
@@ -230,20 +278,13 @@ export function FreshSetupWizard({
     if (inflight.current) return;
     inflight.current = true;
     setBusy(true);
-    setError('');
-    setNote('');
+    setError(null);
+    setNote(null);
     try {
       await action();
     } catch (err) {
       if (alive.current) {
-        setError(
-          err instanceof WizardArtifactError
-            ? err.message
-            : err instanceof BootstrapTransportError &&
-                err.code === 'managed_destination_verification_required'
-              ? s('runtimeVerifyRequired')
-              : j('setupError')
-        );
+        setError(setupErrorMessage(err));
         setUnknown(pending.current !== null);
       }
     } finally {
@@ -256,8 +297,24 @@ export function FreshSetupWizard({
       (!operation.adminInitialized && !validateFreshAdminKey(key).valid) ||
       !validControlBasePath(path)
     ) {
-      setError(j('invalidSetup'));
+      setError({ from: 'journey', key: 'invalidSetup' });
       return;
+    }
+    // The External form is refused here, in the operator's words: nothing has
+    // been sent yet, so an unusable address or key never becomes the generic
+    // "setup did not finish" sentence.
+    let address = '';
+    if (strategy === 'connect_external') {
+      try {
+        address = externalURL(baseURL);
+      } catch {
+        setError({ from: 'external', key: 'setupAddressInvalid' });
+        return;
+      }
+      if (!validManagementKey(cpaKey)) {
+        setError({ from: 'external', key: 'setupKeyInvalid' });
+        return;
+      }
     }
     await task(async () => {
       if (strategy === 'new_managed' || strategy === 'adopt_existing') {
@@ -265,18 +322,22 @@ export function FreshSetupWizard({
         try {
           artifactStatus = await readArtifactStatus(transport);
         } catch (err) {
-          throw new WizardArtifactError(formatArtifactError(err).text);
+          throw new WizardArtifactError(formatArtifactError(err));
         }
         if (!isArtifactReady(artifactStatus)) {
           setArtifactGate(artifactStatus);
           setSavedKey(false);
           setStep(2);
           if (isArtifactRecoveryRequired(artifactStatus)) {
-            setError(
-              mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version).text
-            );
+            setError({
+              from: 'artifact',
+              mapped: mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version),
+            });
           } else if (isArtifactPinnedMismatch(artifactStatus)) {
-            setError(formatArtifactPinnedMismatch(artifactStatus.pinned.version).text);
+            setError({
+              from: 'artifact',
+              mapped: formatArtifactPinnedMismatch(artifactStatus.pinned.version),
+            });
           }
           return;
         }
@@ -299,11 +360,7 @@ export function FreshSetupWizard({
       }
       if (strategy === 'new_managed')
         setTarget(managedTarget(await transport.request('installation/runtime')));
-      else {
-        setBaseURL(externalURL(baseURL));
-        if (!cpaKey || cpaKey.length > 4096 || /[\s\p{Cc}]/u.test(cpaKey))
-          throw new Error('Invalid CPA key');
-      }
+      else setBaseURL(address);
       setSavedKey(false);
       setStep(2);
     });
@@ -355,7 +412,7 @@ export function FreshSetupWizard({
         if (delivered) setInstallKey(delivered);
         setCPAKey('');
         if (current.strategy?.stage === 'starting') {
-          setNote(j('waitingRuntime'));
+          setNote({ from: 'journey', key: 'waitingRuntime' });
           return;
         }
       }
@@ -369,14 +426,28 @@ export function FreshSetupWizard({
         )
           throw new Error('CPA identity changed');
         if (status.state !== 'ready') {
-          setNote(j('waitingRuntime'));
+          setNote({ from: 'journey', key: 'waitingRuntime' });
           return;
         }
       }
       if (!current.routing.target) current = accept(await transport.prepareRouting(path));
       if (!current.routing.committed) {
         pending.current = { revision: current.revision, stage: 'route' };
-        await transport.activateRouting();
+        try {
+          await transport.activateRouting();
+        } catch (err) {
+          // A named routing refusal is a recorded answer, not a lost reply. The
+          // checkpoint is untouched, so the same operation stays continuable and
+          // the journey must not claim the write is unconfirmed.
+          if (
+            err instanceof BootstrapTransportError &&
+            err.code === 'routing_verification_failed'
+          ) {
+            pending.current = null;
+            setUnknown(false);
+          }
+          throw err;
+        }
         current = await read();
       } else {
         // Also install the canonical carrier when resuming a lost activation reply.
@@ -471,9 +542,13 @@ export function FreshSetupWizard({
     [s('consoleAddress'), path],
     ...(strategy === 'connect_external' && baseURL ? [[t('externalBaseURL'), baseURL]] : []),
     ...(strategy === 'new_managed'
-      ? [['plugins', plugins ? j('enabled') : j('disabled'), 'review-plugins']]
+      ? [[j('plugins'), plugins ? j('enabled') : j('disabled'), 'review-plugins']]
       : []),
   ];
+  // The engine step is the confirmation step's content whenever the image ships
+  // without the CPA: there is no summary to confirm yet, and the only action that
+  // moves forward lives inside that step.
+  const engineGate = step === 2 && !complete && !!artifactGate;
   return (
     <section className="cpamp-installation" data-testid="fresh-setup-wizard" aria-busy={busy}>
       <div className="wizard-card">
@@ -509,7 +584,9 @@ export function FreshSetupWizard({
                     : step === 1
                       ? j('configureHeading')
                       : step === 2
-                        ? s('reviewTitle')
+                        ? engineGate
+                          ? s('engineGateTitle')
+                          : s('reviewTitle')
                         : note
                           ? j('waitingRuntime')
                           : s(busy ? 'installing' : unknown ? 'unknown' : 'failure')}
@@ -527,19 +604,21 @@ export function FreshSetupWizard({
                     : step === 1
                       ? j('draftHelp')
                       : step === 2
-                        ? s('reviewHelp')
+                        ? engineGate
+                          ? s('engineGateHelp')
+                          : s('reviewHelp')
                         : j('progressHelp')}
               </p>
             </div>
           </div>
           {error && (
             <p role="alert" className="alert alert-warn">
-              {error}
+              {wizardMessageText(error)}
             </p>
           )}
           {note && (
             <p role="status" className="alert alert-info">
-              {note}
+              {wizardMessageText(note)}
             </p>
           )}
           {unknown && (
@@ -584,6 +663,9 @@ export function FreshSetupWizard({
                           : value === 'adopt_existing'
                             ? 'adopt'
                             : 'external'
+                      )}
+                      {value === 'new_managed' && (
+                        <span className="badge badge-indigo">{j('recommended')}</span>
                       )}
                     </h2>
                     <p>
@@ -656,10 +738,10 @@ export function FreshSetupWizard({
                         void task(async () => {
                           try {
                             await navigator.clipboard.writeText(key);
-                            setNote(j('copied'));
+                            setNote({ from: 'journey', key: 'copied' });
                           } catch {
                             setVisible(true);
-                            setError(j('copyFailed'));
+                            setError({ from: 'journey', key: 'copyFailed' });
                           }
                         })
                       }
@@ -785,7 +867,11 @@ export function FreshSetupWizard({
               )}
               {!complete && (
                 <>
-                  <p className="alert alert-info">{j('noMigration')}</p>
+                  <p className="alert alert-info">
+                    {strategy === 'connect_external'
+                      ? x('setupExternalNoMigration')
+                      : j('noMigration')}
+                  </p>
                   <label className="journey-checkline">
                     <input
                       type="checkbox"
@@ -899,7 +985,7 @@ export function FreshSetupWizard({
                     setStep(step - 1);
                     setSavedKey(false);
                     setArtifactGate(null);
-                    setError('');
+                    setError(null);
                   }}
                 >
                   {s('back')}
@@ -926,16 +1012,21 @@ export function FreshSetupWizard({
                   {s('next')}
                 </button>
               )}
-              {step === 2 && (
+              {step === 2 && !engineGate && (
                 <button
                   type="button"
                   className="btn btn-primary"
                   data-testid="setup-execute"
-                  disabled={busy || !savedKey || !!artifactGate}
+                  disabled={busy || !savedKey}
                   onClick={() => void execute()}
                 >
                   {s('submit')}
                 </button>
+              )}
+              {engineGate && (
+                <p className="journey-quiet" role="status" data-testid="engine-gate-next">
+                  {s('engineGateNext')}
+                </p>
               )}
               {step === 3 && (
                 <>

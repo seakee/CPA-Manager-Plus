@@ -1368,6 +1368,20 @@ input {
   color: var(--text-secondary);
 }
 
+/* The artifact step puts an explanation, its remedy and an action inside one
+   alert. The shared .alert lays its children out in a row, which squeezes the
+   text to a few characters on a narrow panel, so this step's alerts stack their
+   rows instead of sharing the width. */
+.artifact-alert {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.artifact-alert > p {
+  margin: 0;
+}
+
 .artifact-actions {
   display: flex;
   align-items: center;
