@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync/atomic"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -55,7 +56,10 @@ type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-type Repository struct{ db *sql.DB }
+type Repository struct {
+	db                            *sql.DB
+	verifyAfterInitialInstallHook atomic.Pointer[func()]
+}
 
 func New(db *sql.DB) *Repository { return &Repository{db: db} }
 

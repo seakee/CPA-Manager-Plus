@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -208,5 +209,79 @@ func TestCommittedOperationClosesTheSupersededAttributionWindow(t *testing.T) {
 	keeperRows := bindingRows(t, db, usageKeeper)
 	if len(keeperRows) != 1 || keeperRows[0].retiredAtMS.Valid {
 		t.Fatalf("keeper binding = %+v", keeperRows)
+	}
+}
+
+// VerifyAdoptionRegistration must read the initial-install journal and
+// adoption-registration record inside one SQLite snapshot so a concurrent
+// RegisterAdoption committing between the two reads never synthesizes
+// ErrJournalConflict.
+func TestVerifyAdoptionRegistrationUsesConsistentReadSnapshotAcrossConcurrentCommit(t *testing.T) {
+	for _, preloadLegacyJournal := range []bool{false, true} {
+		name := "no_prior_journal"
+		if preloadLegacyJournal {
+			name = "legacy_non_adoption_journal"
+		}
+		t.Run(name, func(t *testing.T) {
+			db := openTestDB(t)
+			readerRepo := New(db)
+			writerRepo := New(db)
+			ctx := t.Context()
+
+			const (
+				runID = "managed:op-snapshot"
+				gen   = "3"
+				seed  = "seed-sha256"
+			)
+			if preloadLegacyJournal {
+				workspaceRec := stagedRecord(t, strings.Repeat("7", 32), usageOtherID, "cpamp_sk_workspace_0001")
+				workspaceRec.Origin = OriginWorkspace
+				if _, err := writerRepo.Create(ctx, workspaceRec, usageRuntime); err != nil {
+					t.Fatal(err)
+				}
+				if err := writerRepo.ClaimInitialInstall(ctx, InitialInstall{
+					KeyID:              usageOtherID,
+					RunID:              runID,
+					Generation:         gen,
+					AttemptedAtMS:      1,
+					ProviderSeedSHA256: seed,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			candidates := []Record{
+				stagedRecord(t, strings.Repeat("8", 32), usageKeyID, "cpamp_sk_adopted_0001"),
+				stagedRecord(t, strings.Repeat("9", 32), usageKeeper, "cpamp_sk_adopted_0002"),
+			}
+			var hookFired sync.Once
+			readerRepo.SetVerifyAfterInitialInstallHookForTest(func() {
+				hookFired.Do(func() {
+					if _, err := writerRepo.RegisterAdoption(ctx, candidates, usageRuntime, InitialInstall{
+						RunID:              runID,
+						Generation:         gen,
+						AttemptedAtMS:      2,
+						ProviderSeedSHA256: seed,
+					}); err != nil {
+						t.Errorf("concurrent RegisterAdoption inside hook: %v", err)
+					}
+				})
+			})
+			t.Cleanup(func() { readerRepo.SetVerifyAfterInitialInstallHookForTest(nil) })
+
+			ready, err := readerRepo.VerifyAdoptionRegistration(ctx, runID, gen, seed, usageRuntime)
+			if err != nil {
+				t.Fatalf("VerifyAdoptionRegistration across concurrent commit returned error = %v, want nil", err)
+			}
+			if ready {
+				t.Fatal("pre-commit read snapshot observed post-commit readiness")
+			}
+
+			readerRepo.SetVerifyAfterInitialInstallHookForTest(nil)
+			readyAfter, err := readerRepo.VerifyAdoptionRegistration(ctx, runID, gen, seed, usageRuntime)
+			if err != nil || !readyAfter {
+				t.Fatalf("VerifyAdoptionRegistration after commit = (%v, %v), want (true, nil)", readyAfter, err)
+			}
+		})
 	}
 }

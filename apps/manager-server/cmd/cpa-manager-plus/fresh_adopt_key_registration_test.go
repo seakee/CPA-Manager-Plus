@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
@@ -16,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	freshkeyssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1080,6 +1082,76 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		assertFreshAuthorityAdmission(t, appA, preUpgrade.Operation, true)
 		assertFreshAuthorityAdmission(t, appB, preUpgrade.Operation, true)
 	})
+
+	t.Run("interleaved completion commit between VerifyAdoptionRegistration reads does not report 409 conflict and completes backfill", func(t *testing.T) {
+		for _, preloadLegacyJournal := range []bool{false, true} {
+			mode := "unjournaled"
+			if preloadLegacyJournal {
+				mode = "legacy_non_adoption_journal"
+			}
+			t.Run(mode, func(t *testing.T) {
+				fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+				ctx := t.Context()
+				loaded := fixture.reload(t)
+				preUpgrade, err := fixture.app.store.Update(ctx, loaded.Operation.Identity, loaded.Operation.Revision, func(r *freshstore.Record) error {
+					r.Operation.ProductComplete = true
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				appA := newFreshApplication(fixture.opened, config.Config{}, nil)
+				wireAdoptManagedAuthority(appA, fixture.runtime, fixture.destination.URL())
+				appB := newFreshApplication(fixture.opened, config.Config{}, nil)
+				wireAdoptManagedAuthority(appB, fixture.runtime, fixture.destination.URL())
+
+				wantKeyCount := len(adoptedClientKeys)
+				if preloadLegacyJournal {
+					staged, _, createErr := appA.keys.Create(ctx, strings.Repeat("c", 32))
+					if createErr != nil {
+						t.Fatal(createErr)
+					}
+					if claimErr := appA.keyRepo.ClaimInitialInstall(ctx, freshkeys.InitialInstall{
+						KeyID:              string(staged.Key.ID),
+						RunID:              freshkeyapply.ManagedRunID(string(preUpgrade.Operation.Identity.OperationID)),
+						Generation:         "3",
+						AttemptedAtMS:      1,
+						ProviderSeedSHA256: freshkeyapply.Permit{}.S2B.Binding(),
+					}); claimErr != nil {
+						t.Fatal(claimErr)
+					}
+					wantKeyCount++
+				}
+
+				var interleaved sync.Once
+				appA.keyRepo.SetVerifyAfterInitialInstallHookForTest(func() {
+					interleaved.Do(func() {
+						peerRec := serveHTTPRequest(t, appB, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+						if peerRec.Code != http.StatusOK {
+							t.Errorf("interleaved peer POST complete = %d %s, want 200", peerRec.Code, peerRec.Body.String())
+						}
+					})
+				})
+				t.Cleanup(func() { appA.keyRepo.SetVerifyAfterInitialInstallHookForTest(nil) })
+
+				replayRec := serveHTTPRequest(t, appA, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+				if replayRec.Code != http.StatusOK {
+					t.Fatalf("interleaved POST complete (%s) = %d %s, want 200", mode, replayRec.Code, replayRec.Body.String())
+				}
+				appA.keyRepo.SetVerifyAfterInitialInstallHookForTest(nil)
+				if completion := appA.reconcileCompletedAdoption(ctx); completion.status != 0 {
+					t.Fatalf("reconcileCompletedAdoption after interleaved commit (%s) = %d %s", mode, completion.status, completion.code)
+				}
+				listed, err := appA.keys.List(ctx)
+				if err != nil || len(listed) != wantKeyCount {
+					t.Fatalf("keys after interleaved backfill (%s) = %#v (%v), want %d", mode, listed, err, wantKeyCount)
+				}
+				assertFreshAuthorityAdmission(t, appA, preUpgrade.Operation, true)
+				assertFreshAuthorityAdmission(t, appB, preUpgrade.Operation, true)
+			})
+		}
+	})
 }
 
 func assertFreshAuthorityAdmission(t *testing.T, app *freshApplication, op bootstrap.FreshOperation, wantAdmitted bool) {
@@ -1089,41 +1161,98 @@ func assertFreshAuthorityAdmission(t *testing.T, app *freshApplication, op boots
 	if authResp.Code != http.StatusOK {
 		t.Fatalf("GET /internal/routing/fresh-authority = %d %s, want 200", authResp.Code, authResp.Body.String())
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(authResp.Body.Bytes(), &raw); err != nil {
-		t.Fatalf("decode fresh-authority raw JSON: %v (%s)", err, authResp.Body.String())
+	if err := validateFreshAuthorityBody(authResp.Body.Bytes(), op, wantAdmitted); err != nil {
+		t.Fatalf("%v (body=%s)", err, authResp.Body.String())
 	}
-	rawAdmission, present := raw["gatewayAdmission"]
-	if !present || len(bytes.TrimSpace(rawAdmission)) == 0 || string(bytes.TrimSpace(rawAdmission)) == "null" {
-		t.Fatalf("fresh-authority missing gatewayAdmission object: %s", authResp.Body.String())
+}
+
+func validateFreshAuthorityBody(body []byte, op bootstrap.FreshOperation, wantAdmitted bool) error {
+	type strictGatewayAdmission struct {
+		InstallationID *string `json:"installationId"`
+		Generation     *string `json:"generation"`
+		Admitted       *bool   `json:"admitted"`
 	}
-	var admissionFields map[string]json.RawMessage
-	if err := json.Unmarshal(rawAdmission, &admissionFields); err != nil {
-		t.Fatalf("decode gatewayAdmission map: %v (%s)", err, string(rawAdmission))
+	type strictFreshAuthorityReply struct {
+		freshrouting.State
+		GatewayAdmission *strictGatewayAdmission `json:"gatewayAdmission"`
 	}
-	for _, requiredField := range []string{"installationId", "generation", "admitted"} {
-		if _, ok := admissionFields[requiredField]; !ok {
-			t.Fatalf("gatewayAdmission missing %q field: %s", requiredField, string(rawAdmission))
-		}
-	}
-	dec := json.NewDecoder(bytes.NewReader(authResp.Body.Bytes()))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	var reply freshAuthorityReply
+	var reply strictFreshAuthorityReply
 	if err := dec.Decode(&reply); err != nil {
-		t.Fatalf("decode freshAuthorityReply: %v (%s)", err, authResp.Body.String())
+		return fmt.Errorf("decode freshAuthorityReply: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("unexpected trailing JSON in fresh-authority response: %v", err)
+	}
+	if reply.GatewayAdmission == nil {
+		return errors.New("fresh-authority missing or null gatewayAdmission object")
+	}
+	if reply.GatewayAdmission.InstallationID == nil {
+		return errors.New("gatewayAdmission missing or null installationId")
+	}
+	if reply.GatewayAdmission.Generation == nil {
+		return errors.New("gatewayAdmission missing or null generation")
+	}
+	if reply.GatewayAdmission.Admitted == nil {
+		return errors.New("gatewayAdmission missing or null admitted boolean")
+	}
+	var prodReply freshAuthorityReply
+	if err := json.Unmarshal(body, &prodReply); err != nil {
+		return fmt.Errorf("unmarshal production freshAuthorityReply: %w", err)
 	}
 	wantInstallID := string(op.Identity.InstallationID)
 	wantGen := string(op.Identity.Generation)
 	if wantInstallID == "" || wantGen == "" {
-		t.Fatalf("expected operation identity to carry non-empty installationId/generation: %+v", op.Identity)
+		return fmt.Errorf("expected operation identity to carry non-empty installationId/generation: %+v", op.Identity)
 	}
 	if reply.InstallationID != wantInstallID || reply.Generation != wantGen {
-		t.Fatalf("freshAuthorityReply routing identity = (%q, %q), want (%q, %q)", reply.InstallationID, reply.Generation, wantInstallID, wantGen)
+		return fmt.Errorf("freshAuthorityReply routing identity = (%q, %q), want (%q, %q)", reply.InstallationID, reply.Generation, wantInstallID, wantGen)
 	}
-	if reply.GatewayAdmission.InstallationID != wantInstallID || reply.GatewayAdmission.Generation != wantGen {
-		t.Fatalf("gatewayAdmission identity = (%q, %q), want (%q, %q)", reply.GatewayAdmission.InstallationID, reply.GatewayAdmission.Generation, wantInstallID, wantGen)
+	if *reply.GatewayAdmission.InstallationID != wantInstallID || *reply.GatewayAdmission.Generation != wantGen {
+		return fmt.Errorf("gatewayAdmission identity = (%q, %q), want (%q, %q)", *reply.GatewayAdmission.InstallationID, *reply.GatewayAdmission.Generation, wantInstallID, wantGen)
 	}
-	if reply.GatewayAdmission.Admitted != wantAdmitted {
-		t.Fatalf("gatewayAdmission.Admitted = %v, want %v (body=%s)", reply.GatewayAdmission.Admitted, wantAdmitted, authResp.Body.String())
+	if *reply.GatewayAdmission.Admitted != wantAdmitted {
+		return fmt.Errorf("gatewayAdmission.Admitted = %v, want %v", *reply.GatewayAdmission.Admitted, wantAdmitted)
+	}
+	return nil
+}
+
+func TestValidateFreshAuthorityBodyRejectsNullAndMissingAdmissionFields(t *testing.T) {
+	op := bootstrap.FreshOperation{
+		Identity: bootstrap.FreshIdentity{
+			InstallationID: "install-01",
+			Generation:     "gen-01",
+			OperationID:    "fresh-op-01",
+		},
+	}
+	base := `{"installationId":"install-01","generation":"gen-01","operationId":"fresh-op-01","revision":1,"target":"/control","committed":true`
+	for _, tc := range []struct {
+		name         string
+		body         string
+		wantAdmitted bool
+	}{
+		{name: "missing gatewayAdmission", body: base + `}`, wantAdmitted: false},
+		{name: "null gatewayAdmission", body: base + `,"gatewayAdmission":null}`, wantAdmitted: false},
+		{name: "missing admitted boolean", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01"}}`, wantAdmitted: false},
+		{name: "null admitted boolean when expecting false", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":null}}`, wantAdmitted: false},
+		{name: "null admitted boolean when expecting true", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":null}}`, wantAdmitted: true},
+		{name: "null installationId", body: base + `,"gatewayAdmission":{"installationId":null,"generation":"gen-01","admitted":false}}`, wantAdmitted: false},
+		{name: "null generation", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":null,"admitted":false}}`, wantAdmitted: false},
+		{name: "admitted mismatch false vs true", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":false}}`, wantAdmitted: true},
+		{name: "admitted mismatch true vs false", body: base + `,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":true}}`, wantAdmitted: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateFreshAuthorityBody([]byte(tc.body), op, tc.wantAdmitted); err == nil {
+				t.Fatalf("validateFreshAuthorityBody(%s) succeeded unexpectedly for %s", tc.name, tc.body)
+			}
+		})
+	}
+	if err := validateFreshAuthorityBody([]byte(base+`,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":false}}`), op, false); err != nil {
+		t.Fatalf("valid admitted=false rejected: %v", err)
+	}
+	if err := validateFreshAuthorityBody([]byte(base+`,"gatewayAdmission":{"installationId":"install-01","generation":"gen-01","admitted":true}}`), op, true); err != nil {
+		t.Fatalf("valid admitted=true rejected: %v", err)
 	}
 }

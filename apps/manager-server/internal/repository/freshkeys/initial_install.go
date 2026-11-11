@@ -9,6 +9,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -198,7 +199,7 @@ func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candida
 	if !slices.Contains(keyIDs, existing.KeyID) {
 		return nil, ErrJournalConflict
 	}
-	ready, err := verifyAdoptionRegistration(ctx, tx, journal.RunID, journal.Generation, journal.ProviderSeedSHA256, runtimeIdentity)
+	ready, err := verifyAdoptionRegistration(ctx, tx, journal.RunID, journal.Generation, journal.ProviderSeedSHA256, runtimeIdentity, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -216,13 +217,46 @@ func (r *Repository) RegisterAdoptionTx(ctx context.Context, tx *sql.Tx, candida
 // same run/generation/seed), and returns `ErrJournalConflict` when a foreign or
 // inconsistent journal is present.
 func (r *Repository) VerifyAdoptionRegistration(ctx context.Context, runID, generation, providerSeedSHA256, runtimeIdentity string) (bool, error) {
-	return verifyAdoptionRegistration(ctx, r.db, runID, generation, providerSeedSHA256, runtimeIdentity)
+	// Read the initial-install journal, adoption-registration record, canonical
+	// keys, and source bindings in one read-only SQLite snapshot so a concurrent
+	// completion/backfill commit cannot mix pre-commit and post-commit rows into
+	// a spurious ErrJournalConflict.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var afterInitialRead func()
+	if testing.Testing() {
+		if hook := r.verifyAfterInitialInstallHook.Load(); hook != nil {
+			afterInitialRead = *hook
+		}
+	}
+	return verifyAdoptionRegistration(ctx, tx, runID, generation, providerSeedSHA256, runtimeIdentity, afterInitialRead)
 }
 
-func verifyAdoptionRegistration(ctx context.Context, q queryer, runID, generation, providerSeedSHA256, runtimeIdentity string) (bool, error) {
+// SetVerifyAfterInitialInstallHookForTest installs a deterministic test seam
+// invoked inside VerifyAdoptionRegistration immediately after reading the
+// initial-install journal row and before reading the adoption-registration
+// record. It panics if called outside `go test`.
+func (r *Repository) SetVerifyAfterInitialInstallHookForTest(hook func()) {
+	if !testing.Testing() {
+		panic("SetVerifyAfterInitialInstallHookForTest called outside tests")
+	}
+	if hook == nil {
+		r.verifyAfterInitialInstallHook.Store(nil)
+		return
+	}
+	r.verifyAfterInitialInstallHook.Store(&hook)
+}
+
+func verifyAdoptionRegistration(ctx context.Context, q queryer, runID, generation, providerSeedSHA256, runtimeIdentity string, afterInitialRead func()) (bool, error) {
 	inst, err := initialInstall(ctx, q)
 	if err != nil {
 		return false, err
+	}
+	if afterInitialRead != nil {
+		afterInitialRead()
 	}
 	var rawReg string
 	regErr := q.QueryRowContext(ctx, `select value from settings where key=?`, adoptionRegistrationSetting).Scan(&rawReg)
