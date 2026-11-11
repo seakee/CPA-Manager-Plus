@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -53,26 +54,152 @@ type externalReadGrant struct {
 	Refused bool
 }
 
-// externalRejection is the durable refusal of the stored External credential.
-// Every browser-driven read of the user's CPA consults it before it sends
-// anything, so a refused key is answered as the typed blocker instead of being
-// presented once more. Only a rebind, or a re-verify that proves the stored key
-// works again, clears it.
+// externalRejectionPersistBudgetDefault bounds how long refusal persistence may
+// wait on SQLite lock acquisition or I/O before falling back to the process-local
+// fail-closed blocker and releasing legacyCredentialGate.
+const externalRejectionPersistBudgetDefault = 5 * time.Second
+
+type externalRejectionGrantKey struct {
+	identity   string
+	credential string
+}
+
+// externalRejection is the durable refusal of the stored External credential,
+// backed by an in-memory fail-closed fallback when SQLite persistence fails or
+// exceeds its bounded deadline. Every saved-key External path consults refused()
+// before sending anything, so a refused key is answered as the typed blocker
+// instead of being presented once more. Only a rebind, or a re-verify that
+// proves the stored key works again, clears it.
 type externalRejection struct {
-	db           *sql.DB
-	mu           sync.Mutex
-	beforeRecord func()
+	db              *sql.DB
+	slotInit        sync.Once
+	dbSlot          chan struct{}
+	persistBudget   time.Duration
+	newPersistTimer func(time.Duration) (<-chan time.Time, func())
+	beforeRecord    func()
+
+	memMu        sync.Mutex
+	epoch        uint64
+	pendingClear bool
+	localBlocked map[externalRejectionGrantKey]struct{}
 }
 
 func newExternalRejection(db *sql.DB) *externalRejection {
 	return &externalRejection{db: db}
 }
 
+func (r *externalRejection) slot() chan struct{} {
+	r.slotInit.Do(func() {
+		r.dbSlot = make(chan struct{}, 1)
+	})
+	return r.dbSlot
+}
+
+func (r *externalRejection) withPersistDeadline(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	budget := externalRejectionPersistBudgetDefault
+	if r != nil && r.persistBudget > 0 {
+		budget = r.persistBudget
+	}
+	if r != nil && r.newPersistTimer != nil {
+		ctx, cancel := context.WithCancel(parent)
+		ch, stop := r.newPersistTimer(budget)
+		done := make(chan struct{})
+		var stopOnce sync.Once
+		go func() {
+			select {
+			case <-ch:
+				cancel()
+			case <-ctx.Done():
+			case <-done:
+			}
+		}()
+		return ctx, func() {
+			stopOnce.Do(func() {
+				close(done)
+				if stop != nil {
+					stop()
+				}
+				cancel()
+			})
+		}
+	}
+	return context.WithTimeout(parent, budget)
+}
+
+func (r *externalRejection) currentEpoch() uint64 {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	return r.epoch
+}
+
+func (r *externalRejection) hasPendingClear() bool {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	return r.pendingClear
+}
+
+func (r *externalRejection) installLocalBlocker(identity, credential string, epoch uint64) {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	if r.epoch != epoch {
+		return
+	}
+	if r.localBlocked == nil {
+		r.localBlocked = make(map[externalRejectionGrantKey]struct{})
+	}
+	r.localBlocked[externalRejectionGrantKey{identity: identity, credential: credential}] = struct{}{}
+}
+
+func (r *externalRejection) clearLocalBlockerIfMatching(identity, credential string, epoch uint64) {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	if r.epoch != epoch {
+		return
+	}
+	delete(r.localBlocked, externalRejectionGrantKey{identity: identity, credential: credential})
+}
+
+func (r *externalRejection) isLocallyBlocked(identity, credential string) bool {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	_, ok := r.localBlocked[externalRejectionGrantKey{identity: identity, credential: credential}]
+	return ok
+}
+
+func (r *externalRejection) flushPendingClearUnderSlot() {
+	if r == nil || r.db == nil {
+		return
+	}
+	r.memMu.Lock()
+	if !r.pendingClear {
+		r.memMu.Unlock()
+		return
+	}
+	r.pendingClear = false
+	r.memMu.Unlock()
+	cleanCtx, cancel := context.WithTimeout(context.Background(), externalRejectionPersistBudgetDefault)
+	defer cancel()
+	if _, err := r.db.ExecContext(cleanCtx, `delete from settings where key = ?`, externalRejectionKey); err != nil {
+		r.memMu.Lock()
+		r.pendingClear = true
+		r.memMu.Unlock()
+	}
+}
+
 // refused reports whether the CPA has refused the credential of exactly this
-// connection and this envelope. An unreadable row is not a refusal: this Manager
-// failing to read its own note must not hide the user's data, which is what the
-// read is for.
+// connection and this envelope, consulting the process-local fail-closed blocker
+// first before reading SQLite. An unreadable SQLite row when no local blocker
+// exists is not a refusal: failing to read the database must not hide healthy data.
 func (r *externalRejection) refused(ctx context.Context, identity, credential string) bool {
+	if r == nil || identity == "" || credential == "" {
+		return false
+	}
+	if r.isLocallyBlocked(identity, credential) {
+		return true
+	}
 	record, ok := r.load(ctx)
 	return ok && record.Identity == identity && record.Credential == credential
 }
@@ -81,10 +208,29 @@ func (r *externalRejection) load(ctx context.Context) (externalRejectionRecord, 
 	if r == nil || r.db == nil {
 		return externalRejectionRecord{}, false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if r.hasPendingClear() {
+		return externalRejectionRecord{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	loadCtx, cancel := r.withPersistDeadline(ctx)
+	defer cancel()
+	slot := r.slot()
+	select {
+	case slot <- struct{}{}:
+	case <-loadCtx.Done():
+		return externalRejectionRecord{}, false
+	}
+	defer func() {
+		r.flushPendingClearUnderSlot()
+		<-slot
+	}()
+	if r.hasPendingClear() {
+		return externalRejectionRecord{}, false
+	}
 	var raw string
-	if err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, externalRejectionKey).Scan(&raw); err != nil {
+	if err := r.db.QueryRowContext(loadCtx, `select value from settings where key = ?`, externalRejectionKey).Scan(&raw); err != nil {
 		return externalRejectionRecord{}, false
 	}
 	var record externalRejectionRecord
@@ -94,36 +240,108 @@ func (r *externalRejection) load(ctx context.Context) (externalRejectionRecord, 
 	return record, true
 }
 
-// record marks this connection refused. Failing to write the row is not a blocker
-// of the read that met the refusal: that read still answers with the typed code,
-// and the next one simply pays one more request.
-func (r *externalRejection) record(ctx context.Context, identity, credential string) {
-	if r == nil || r.db == nil || identity == "" || credential == "" {
-		return
+// record marks this connection and credential envelope refused. Both the SQLite
+// serialization wait and the statement execution are bounded by persistBudget;
+// if SQLite persistence fails or times out, a process-local fail-closed blocker
+// for (identity, credential) is installed before returning so no subsequent
+// request in this process can re-present the refused credential.
+func (r *externalRejection) record(ctx context.Context, identity, credential string) error {
+	if r == nil || identity == "" || credential == "" {
+		return nil
+	}
+	epoch := r.currentEpoch()
+	if r.db == nil {
+		r.installLocalBlocker(identity, credential, epoch)
+		return errors.New("external rejection store has no database")
 	}
 	raw, err := json.Marshal(externalRejectionRecord{Identity: identity, Credential: credential, AtMS: time.Now().UnixMilli()})
 	if err != nil {
-		return
+		r.installLocalBlocker(identity, credential, epoch)
+		return err
 	}
-	if r.beforeRecord != nil {
-		r.beforeRecord()
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, _ = r.db.ExecContext(ctx,
-		`insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do update set value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
-		externalRejectionKey, string(raw), time.Now().UnixMilli())
+	persistCtx, cancel := r.withPersistDeadline(context.WithoutCancel(ctx))
+	defer cancel()
+	slot := r.slot()
+	select {
+	case slot <- struct{}{}:
+	case <-persistCtx.Done():
+		r.installLocalBlocker(identity, credential, epoch)
+		return persistCtx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			r.flushPendingClearUnderSlot()
+			<-slot
+		}()
+		if r.beforeRecord != nil {
+			r.beforeRecord()
+		}
+		if persistCtx.Err() != nil {
+			done <- persistCtx.Err()
+			return
+		}
+		r.memMu.Lock()
+		if r.epoch != epoch {
+			r.memMu.Unlock()
+			done <- nil
+			return
+		}
+		r.pendingClear = false
+		r.memMu.Unlock()
+		_, execErr := r.db.ExecContext(
+			persistCtx,
+			`insert into settings(key,value,updated_at_ms) values(?,?,?) on conflict(key) do update set value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
+			externalRejectionKey,
+			string(raw),
+			time.Now().UnixMilli(),
+		)
+		done <- execErr
+	}()
+	select {
+	case execErr := <-done:
+		if execErr != nil {
+			r.installLocalBlocker(identity, credential, epoch)
+			return execErr
+		}
+		r.clearLocalBlockerIfMatching(identity, credential, epoch)
+		return nil
+	case <-persistCtx.Done():
+		r.installLocalBlocker(identity, credential, epoch)
+		return persistCtx.Err()
+	}
 }
 
 // clear forgets the refusal. It runs only behind proof that the stored credential
 // authenticates again: the successful read of a rebind or of a same-key re-verify.
 func (r *externalRejection) clear(ctx context.Context) {
-	if r == nil || r.db == nil {
+	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, _ = r.db.ExecContext(ctx, `delete from settings where key = ?`, externalRejectionKey)
+	r.memMu.Lock()
+	r.epoch++
+	clear(r.localBlocked)
+	r.pendingClear = r.db != nil
+	r.memMu.Unlock()
+	if r.db == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	clearCtx, cancel := r.withPersistDeadline(context.WithoutCancel(ctx))
+	defer cancel()
+	slot := r.slot()
+	select {
+	case slot <- struct{}{}:
+	case <-clearCtx.Done():
+		return
+	}
+	defer func() { <-slot }()
+	r.flushPendingClearUnderSlot()
 }
 
 // externalReadGrant captures the credential a browser-driven read is about to
@@ -255,7 +473,9 @@ func (a *freshApplication) noteExternalRejection(ctx context.Context, grant exte
 	if a == nil || a.rejection == nil || err == nil || !errors.Is(err, cpa.ErrManagementRejected) {
 		return
 	}
-	a.rejection.record(ctx, grant.Identity, grant.Credential)
+	if recErr := a.rejection.record(ctx, grant.Identity, grant.Credential); recErr != nil {
+		log.Printf("Fresh external rejection durable write failed (enforced in-memory fail-closed blocker): %v", recErr)
+	}
 }
 
 // clearExternalRejection forgets a recorded refusal after a read proved that the

@@ -745,18 +745,82 @@ func TestExternalProviderCallOutlivesTheHeaderBudget(t *testing.T) {
 	}
 }
 
-// TestExternalProviderWaitSet names the paths whose status belongs to an upstream
-// provider: they take no header budget, and a trailing slash does not hide them.
-func TestExternalProviderWaitSet(t *testing.T) {
-	for _, path := range []string{"/v0/management/api-call", "/v0/management/api-call/", "/v0/management/oauth-callback"} {
-		if !externalLegacyWaitsOnProvider(path) {
-			t.Fatalf("%s waits on a provider but takes the console-read budget", path)
+// TestExternalProviderBoundPathsOutliveHeaderBudgetWhileConsoleReadsExpire
+// verifies through real HTTP proxy requests (with zero sleeps) that provider-bound
+// paths (/v0/management/api-call/ with trailing slash and /v0/management/oauth-callback)
+// survive past two full console-read header-budget expirations, while CPA console
+// reads (/v0/management/config.yaml) expire with 502 and /v1/models forwards
+// without saved-key budget gating.
+func TestExternalProviderBoundPathsOutliveHeaderBudgetWhileConsoleReadsExpire(t *testing.T) {
+	const budget = 50 * time.Millisecond
+
+	releaseHungReads := make(chan struct{})
+	defer close(releaseHungReads)
+	providerReady := make(chan struct{})
+
+	upstream := newGateUpstream(t, externalAuthorityManagement)
+	upstream.handle.Store(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/api-call/", "/v0/management/oauth-callback":
+			<-providerReady
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v0/management/config.yaml":
+			<-releaseHungReads
+		case "/v1/models":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.WriteHeader(http.StatusOK)
 		}
+	})
+
+	app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	app.credentialHeaderBudget = budget
+
+	refAppA := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	refAppA.credentialHeaderBudget = budget
+	refAppB := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+	refAppB.credentialHeaderBudget = budget
+
+	for _, providerPath := range []string{"/v0/management/api-call/", "/v0/management/oauth-callback"} {
+		t.Run(strings.Trim(providerPath, "/"), func(t *testing.T) {
+			providerReady = make(chan struct{})
+			providerDone := make(chan int, 1)
+			go func() {
+				providerDone <- gateRequest(t, app, http.MethodPost, providerPath, gateAdmin).Code
+			}()
+
+			// Drive two real sequential console-read header-budget expirations (>= 2*budget
+			// elapsed wall-clock time) before allowing the provider-bound response headers.
+			if code := gateRequest(t, refAppA, http.MethodGet, "/v0/management/config.yaml", gateAdmin).Code; code != http.StatusBadGateway {
+				close(providerReady)
+				t.Fatalf("first hung config.yaml read = %d, want 502", code)
+			}
+			if code := gateRequest(t, refAppB, http.MethodGet, "/v0/management/config.yaml", gateAdmin).Code; code != http.StatusBadGateway {
+				close(providerReady)
+				t.Fatalf("second hung config.yaml read = %d, want 502", code)
+			}
+			close(providerReady)
+
+			select {
+			case code := <-providerDone:
+				if code != http.StatusOK {
+					t.Fatalf("%s cut by header budget: status = %d, want 200", providerPath, code)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not complete after provider answered", providerPath)
+			}
+		})
 	}
-	for _, path := range []string{"/v0/management/api-keys", "/v0/management/config.yaml", "/v1/models"} {
-		if externalLegacyWaitsOnProvider(path) {
-			t.Fatalf("%s is a CPA read but is exempt from the budget", path)
-		}
+
+	if code := gateRequest(t, app, http.MethodGet, "/v0/management/config.yaml", gateAdmin).Code; code != http.StatusBadGateway {
+		t.Fatalf("console config.yaml read past %s budget = %d, want 502", budget, code)
+	}
+	if code := gateRequest(t, app, http.MethodGet, "/v1/models", "").Code; code != http.StatusUnauthorized {
+		t.Fatalf("/v1/models without client key = %d, want 401", code)
+	}
+	if app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("/v1/models 401 or timed-out console read falsely marked saved management key refused")
 	}
 }
 
@@ -2405,4 +2469,348 @@ func TestExternalHeaderClaimBlocksBudgetExpiryFromReleasingGateBeforeRefusalPers
 			})
 		}
 	}
+}
+
+// TestExternalRefusalSQLiteWriteFailureFailsClosedAcrossFamiliesAndRecoversOnRebind
+// verifies that when SQLite refuses to persist the fresh_external_rejection_v1
+// row, the first 401/403 still installs a process-local fail-closed blocker for
+// that (identity, credential) grant so subsequent calls across gateway config,
+// console models, keys, and codex inspection make zero additional CPA requests,
+// and that rebind clears the blocker and restores service.
+func TestExternalRefusalSQLiteWriteFailureFailsClosedAcrossFamiliesAndRecoversOnRebind(t *testing.T) {
+	const rotatedKey = "sqlite-fault-rotated-0000111122223333444455556666777788889999aa"
+	const rotatedSecondKey = "sqlite-fault-second-aaaabbbbccccddddeeeeffff000011112222333344"
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+			cpaSrv.refuseStatus = status
+			app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+			app.gatewayConfig = gatewayFor(app)
+			stagedKey := stageExternalKeyForGateTest(t, app, "5", false)
+
+			// Configure SQLite triggers so any INSERT or UPDATE of fresh_external_rejection_v1
+			// fails inside SQLite while all other tables and DELETE recovery work normally.
+			for _, ddl := range []string{
+				`CREATE TRIGGER fail_external_refusal_insert BEFORE INSERT ON settings
+				 WHEN NEW.key = 'fresh_external_rejection_v1'
+				 BEGIN SELECT RAISE(ABORT, 'simulated sqlite write failure'); END;`,
+				`CREATE TRIGGER fail_external_refusal_update BEFORE UPDATE ON settings
+				 WHEN NEW.key = 'fresh_external_rejection_v1'
+				 BEGIN SELECT RAISE(ABORT, 'simulated sqlite write failure'); END;`,
+			} {
+				if _, err := app.rejection.db.ExecContext(t.Context(), ddl); err != nil {
+					t.Fatalf("install sqlite trigger: %v", err)
+				}
+			}
+
+			// First saved-key request observes 401/403; SQLite write fails.
+			first := gatewayRequest(t, app, http.MethodGet, "runtime/status", "", "")
+			var statusBody freshRuntimeStatusResponse
+			if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &statusBody) != nil || statusBody.ErrorCode != freshconfig.ReasonManagementRejected {
+				t.Fatalf("first runtime/status = %d %s", first.Code, first.Body.String())
+			}
+
+			var durableCount int
+			if err := app.rejection.db.QueryRowContext(
+				t.Context(),
+				`SELECT count(*) FROM settings WHERE key = ?`,
+				externalRejectionKey,
+			).Scan(&durableCount); err != nil {
+				t.Fatalf("query settings count: %v", err)
+			}
+			if durableCount != 0 {
+				t.Fatalf("expected 0 durable refusal rows under write fault, got %d", durableCount)
+			}
+			if got := cpaSrv.requests.Load(); got != 1 {
+				t.Fatalf("initial refusal made %d CPA requests, want 1", got)
+			}
+
+			// Subsequent calls across gateway config, console models, keys, and
+			// codex inspection must fail closed locally without hitting CPA.
+			if cfgRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgRes.Code != http.StatusConflict || errorCode(t, cfgRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("gateway/config after SQLite write failure = %d %s", cfgRes.Code, cfgRes.Body.String())
+			}
+			if modelsRes := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsRes.Code != http.StatusConflict || errorCode(t, modelsRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("cpamp/v1/models after SQLite write failure = %d %s", modelsRes.Code, modelsRes.Body.String())
+			}
+			if keysRes := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysRes.Code != http.StatusConflict || errorCode(t, keysRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("api-keys list after SQLite write failure = %d %s", keysRes.Code, keysRes.Body.String())
+			}
+			if applyRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json"); applyRes.Code != http.StatusConflict || errorCode(t, applyRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("api-keys initial-install after SQLite write failure = %d %s", applyRes.Code, applyRes.Body.String())
+			}
+			inspectReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectReq.Header.Set("Content-Type", "application/json")
+			inspectReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			inspectRes := httptest.NewRecorder()
+			app.canonicalAPI(inspectRes, inspectReq)
+			if inspectRes.Code != http.StatusConflict || errorCode(t, inspectRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("codex-inspection/run after SQLite write failure = %d %s", inspectRes.Code, inspectRes.Body.String())
+			}
+
+			if got := cpaSrv.requests.Load(); got != 1 {
+				t.Fatalf("CPA received %d rejected-auth requests across all families, want 1", got)
+			}
+
+			// Rebind via canonical HTTP endpoint must clear the process-local blocker and recover.
+			rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+				cpaSrv.server.URL, rotatedKey, strings.Repeat("d", 32))
+			rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+			if rebindRes.Code != http.StatusOK {
+				t.Fatalf("external/rebind = %d %s", rebindRes.Code, rebindRes.Body.String())
+			}
+
+			if cfgAfter := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); cfgAfter.Code != http.StatusOK {
+				t.Fatalf("gateway/config after rebind = %d %s", cfgAfter.Code, cfgAfter.Body.String())
+			}
+			if modelsAfter := gatewayRequest(t, app, http.MethodGet, "cpamp/v1/models", "", ""); modelsAfter.Code != http.StatusOK {
+				t.Fatalf("cpamp/v1/models after rebind = %d %s", modelsAfter.Code, modelsAfter.Body.String())
+			}
+			if keysAfter := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysAfter.Code != http.StatusOK {
+				t.Fatalf("api-keys after rebind = %d %s", keysAfter.Code, keysAfter.Body.String())
+			}
+			inspectAfterReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectAfterReq.Header.Set("Content-Type", "application/json")
+			inspectAfterReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			inspectAfterRes := httptest.NewRecorder()
+			app.canonicalAPI(inspectAfterRes, inspectAfterReq)
+			if inspectAfterRes.Code != http.StatusOK {
+				t.Fatalf("codex-inspection/run after rebind = %d %s", inspectAfterRes.Code, inspectAfterRes.Body.String())
+			}
+
+			// Once SQLite recovers (triggers dropped), a new refusal persists durably as usual.
+			for _, ddl := range []string{
+				`DROP TRIGGER fail_external_refusal_insert;`,
+				`DROP TRIGGER fail_external_refusal_update;`,
+			} {
+				if _, err := app.rejection.db.ExecContext(t.Context(), ddl); err != nil {
+					t.Fatalf("drop sqlite trigger: %v", err)
+				}
+			}
+			cpaSrv.mu.Lock()
+			cpaSrv.activeKey = rotatedSecondKey
+			cpaSrv.mu.Unlock()
+			if afterDrop := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); afterDrop.Code != http.StatusConflict {
+				t.Fatalf("gateway/config after second rotation = %d %s", afterDrop.Code, afterDrop.Body.String())
+			}
+			if err := app.rejection.db.QueryRowContext(
+				t.Context(),
+				`SELECT count(*) FROM settings WHERE key = ?`,
+				externalRejectionKey,
+			).Scan(&durableCount); err != nil || durableCount != 1 {
+				t.Fatalf("expected durable refusal row after SQLite recovery, count=%d err=%v", durableCount, err)
+			}
+		})
+	}
+}
+
+// TestExternalWedgedRefusalPersistenceFailsClosedWithinBoundAndFreesGate proves
+// that when refusal persistence hangs indefinitely (either inside SQLite I/O or
+// waiting on an already-wedged persistence lock) after response headers claimed
+// the credential hold, a bounded persistence deadline installs the process-local
+// fail-closed blocker and frees legacyCredentialGate so waiters receive local
+// 409 external_management_key_rejected within bounded time and CPA sees only 1
+// rejected-auth request.
+func TestExternalWedgedRefusalPersistenceFailsClosedWithinBoundAndFreesGate(t *testing.T) {
+	t.Run("controlled_clock_channel", func(t *testing.T) {
+		for _, surface := range []string{"legacy_proxy", "fresh_gateway_config"} {
+			t.Run(surface, func(t *testing.T) {
+				var upstreamHits atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					upstreamHits.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error":"refused"}`))
+				}))
+				t.Cleanup(server.Close)
+
+				app := newExternalApp(t, server.URL, externalAuthorityManagement)
+				app.gatewayConfig = gatewayFor(app)
+				app.credentialHeaderBudget = 30 * time.Millisecond
+
+				releaseOnCleanup := make(chan struct{})
+				t.Cleanup(func() { close(releaseOnCleanup) })
+
+				atBeforeRecord := make(chan struct{})
+				var recordOnce sync.Once
+				app.rejection.beforeRecord = func() {
+					recordOnce.Do(func() { close(atBeforeRecord) })
+					<-releaseOnCleanup
+				}
+
+				persistClockCh := make(chan time.Time, 1)
+				app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+					return persistClockCh, func() {}
+				}
+
+				budgetExpired := make(chan struct{})
+				var expiryOnce sync.Once
+				app.afterCredentialHoldBudgetExpiry = func() {
+					expiryOnce.Do(func() { close(budgetExpired) })
+				}
+
+				leaderCtx, cancelLeader := context.WithCancel(t.Context())
+				defer cancelLeader()
+				leaderDone := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					res := httptest.NewRecorder()
+					switch surface {
+					case "legacy_proxy":
+						req := gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin).WithContext(leaderCtx)
+						app.legacy.ServeHTTP(res, req)
+					case "fresh_gateway_config":
+						req := httptest.NewRequest(http.MethodGet, "/control/api/v2/gateway/config", nil).WithContext(leaderCtx)
+						req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+						app.canonicalAPI(res, req)
+					}
+					leaderDone <- res
+				}()
+
+				select {
+				case <-atBeforeRecord:
+				case <-time.After(5 * time.Second):
+					t.Fatal("leader never entered refusal persistence")
+				}
+
+				waiterParked := make(chan struct{})
+				var parkedOnce sync.Once
+				app.legacyCredentialGate.onWait = func() {
+					parkedOnce.Do(func() { close(waiterParked) })
+				}
+				defer func() { app.legacyCredentialGate.onWait = nil }()
+
+				waiterDone := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					waiterDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+				}()
+
+				select {
+				case <-waiterParked:
+				case <-time.After(5 * time.Second):
+					t.Fatal("waiter never queued on legacyCredentialGate")
+				}
+
+				// Cancel caller context and let tenure header budget expire while
+				// persistence remains blocked forever; gate must stay held until
+				// the persistence deadline triggers local fail-closed installation.
+				cancelLeader()
+				select {
+				case <-budgetExpired:
+				case <-time.After(5 * time.Second):
+					t.Fatal("tenure header budget did not expire")
+				}
+
+				// Expire the controlled persistence clock: local fail-closed blocker
+				// installs and releases legacyCredentialGate without waiting for SQLite.
+				persistClockCh <- time.Now()
+
+				select {
+				case waiterRes := <-waiterDone:
+					if waiterRes.Code != http.StatusConflict || errorCode(t, waiterRes) != freshconfig.ReasonManagementRejected {
+						t.Fatalf("waiter response = %d %s, want 409 %s",
+							waiterRes.Code, waiterRes.Body.String(), freshconfig.ReasonManagementRejected)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("waiter remained wedged on legacyCredentialGate after persistence deadline expired")
+				}
+
+				select {
+				case <-leaderDone:
+				case <-time.After(2 * time.Second):
+					t.Fatal("leader handler remained wedged after persistence deadline expired")
+				}
+
+				if got := upstreamHits.Load(); got != 1 {
+					t.Fatalf("CPA received %d requests under wedged persistence, want 1", got)
+				}
+			})
+		}
+	})
+
+	t.Run("small_persist_budget_and_mutex_wait_contention", func(t *testing.T) {
+		const secondKey = "wedged-second-key-0000111122223333444455556666777788889999aaaabb"
+		const thirdKey = "wedged-third-key-aaaabbbbccccddddeeeeffff0000111122223333444455"
+
+		cpaSrv := newStatefulExternalCPA(t, secondKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+		app.rejection.persistBudget = 25 * time.Millisecond
+
+		releaseOnCleanup := make(chan struct{})
+		t.Cleanup(func() { close(releaseOnCleanup) })
+
+		atBeforeRecord := make(chan struct{})
+		var recordOnce sync.Once
+		app.rejection.beforeRecord = func() {
+			recordOnce.Do(func() { close(atBeforeRecord) })
+			<-releaseOnCleanup
+		}
+
+		// Wave 1: first refusal wedges inside persistence forever; small persistBudget
+		// installs local blocker and unblocks waiter within bounded time.
+		wave1Leader := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			wave1Leader <- gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+		}()
+		select {
+		case <-atBeforeRecord:
+		case <-time.After(5 * time.Second):
+			t.Fatal("wave 1 leader never entered persistence")
+		}
+
+		wave1Waiter := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			wave1Waiter <- gatewayRequest(t, app, http.MethodGet, "api-keys", "", "")
+		}()
+		select {
+		case res := <-wave1Waiter:
+			if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("wave 1 waiter = %d %s, want 409 %s", res.Code, res.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("wave 1 waiter hung when persistence wedged")
+		}
+		<-wave1Leader
+		if got := cpaSrv.requests.Load(); got != 1 {
+			t.Fatalf("wave 1 CPA requests = %d, want 1", got)
+		}
+
+		// Wave 2: while the persistence slot is STILL held forever by Wave 1,
+		// rebind to secondKey recovers service, and a subsequent rotation to
+		// thirdKey hits semaphore-wait contention on record() yet still bounds
+		// the wait, installs local fail-closed state for secondKey, and frees the gate.
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, secondKey, strings.Repeat("e", 32))
+		if rebindRes := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json"); rebindRes.Code != http.StatusOK {
+			t.Fatalf("rebind while persistence slot wedged = %d %s", rebindRes.Code, rebindRes.Body.String())
+		}
+		if okRes := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); okRes.Code != http.StatusOK {
+			t.Fatalf("gateway/config on rebound secondKey = %d %s", okRes.Code, okRes.Body.String())
+		}
+
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = thirdKey
+		cpaSrv.mu.Unlock()
+		beforeWave2Refusal := cpaSrv.requests.Load()
+
+		wave2Leader := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			wave2Leader <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+		select {
+		case res := <-wave2Leader:
+			if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("wave 2 leader under persistence-lock contention = %d %s", res.Code, res.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("wave 2 leader hung waiting on wedged persistence lock")
+		}
+		if followUp := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); followUp.Code != http.StatusConflict || errorCode(t, followUp) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("wave 2 follow-up = %d %s", followUp.Code, followUp.Body.String())
+		}
+		if sent := cpaSrv.requests.Load() - beforeWave2Refusal; sent != 1 {
+			t.Fatalf("wave 2 sent %d refused secondKey requests to CPA, want 1", sent)
+		}
+	})
 }
