@@ -596,7 +596,8 @@ input {
   border-color: var(--border-subtle);
 }
 
-/* The wrapper paints the focus ring via :focus-within; the field must not add a second one. */
+/* The wrapper paints the keyboard ring via :has(> .form-input:focus-visible); the field
+   must not add a second one. */
 .input-wrap .form-input:focus-visible {
   outline: none;
 }
