@@ -3747,3 +3747,155 @@ func TestExternalPostPrecheckRejectionReadFailureFailsClosedAcrossWireSurfaces(t
 		}
 	})
 }
+
+// TestExternalKeyOperationPreflightAndPrepareEnforceGateAndRejectionUnavailability
+// verifies #1183 x #1173 integration on GET api-keys/{target}/revocation/{keeper}/{mode}
+// and POST api-keys/{target}/revocation:
+//  1. Concurrent External preflight calls serialize behind legacyCredentialGate so
+//     a newly rejected management key is presented to CPA once and answered locally
+//     for the waiter.
+//  2. Cold-start precheck and post-precheck wire-phase refusal-read unavailability
+//     answer HTTP 503 external_cpa_authority_unavailable on both preflight and
+//     prepare with zero additional CPA requests.
+func TestExternalKeyOperationPreflightAndPrepareEnforceGateAndRejectionUnavailability(t *testing.T) {
+	const wantUnavailable = "external_cpa_authority_unavailable"
+
+	t.Run("concurrent_preflight_serializes_and_records_rejection_once", func(t *testing.T) {
+		var upstreamCalls atomic.Int32
+		entered := make(chan struct{})
+		var enterOnce sync.Once
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstreamCalls.Add(1)
+			enterOnce.Do(func() { close(entered) })
+			<-release
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		t.Cleanup(cpaServer.Close)
+
+		app := newExternalApp(t, cpaServer.URL, externalAuthorityManagement)
+		targetKey := stageExternalKeyForGateTest(t, app, "a", false)
+		keeperKey := stageExternalKeyForGateTest(t, app, "b", false)
+		path := "api-keys/" + targetKey + "/revocation/" + keeperKey + "/replace"
+
+		waiterParked := make(chan struct{})
+		var waiterOnce sync.Once
+		app.legacyCredentialGate.onWait = func() {
+			waiterOnce.Do(func() { close(waiterParked) })
+		}
+		defer func() { app.legacyCredentialGate.onWait = nil }()
+
+		firstDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			firstDone <- gatewayRequest(t, app, http.MethodGet, path, "", "")
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first preflight never reached CPA")
+		}
+
+		secondDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			secondDone <- gatewayRequest(t, app, http.MethodGet, path, "", "")
+		}()
+		select {
+		case <-waiterParked:
+		case <-time.After(500 * time.Millisecond):
+			t.Errorf("second preflight did not park behind legacyCredentialGate")
+		}
+
+		releaseOnce.Do(func() { close(release) })
+		for i, ch := range []chan *httptest.ResponseRecorder{firstDone, secondDone} {
+			res := <-ch
+			if res.Code != http.StatusOK {
+				t.Fatalf("preflight #%d = %d %s, want 200", i+1, res.Code, res.Body.String())
+			}
+			var reply struct {
+				Ready  bool   `json:"ready"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(res.Body.Bytes(), &reply); err != nil || reply.Ready || reply.Reason != freshconfig.ReasonManagementRejected {
+				t.Errorf("preflight #%d = %s, want ready=false reason=%s", i+1, res.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+		}
+		if !app.externalReadGrant(t.Context()).Refused {
+			t.Errorf("preflight rejection did not record durable refusal")
+		}
+		if got := upstreamCalls.Load(); got != 1 {
+			t.Errorf("concurrent preflights sent %d CPA requests, want 1", got)
+		}
+	})
+
+	t.Run("preflight_and_prepare_fail_closed_with_503_on_rejection_read_failure", func(t *testing.T) {
+		const rotatedKey = "preflight-fault-rotated-00001111222233334444555566667777888899"
+		cpaSrv := newStatefulExternalCPA(t, rotatedKey)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+		targetKey := stageExternalKeyForGateTest(t, app, "c", false)
+		keeperKey := stageExternalKeyForGateTest(t, app, "d", false)
+		preflightPath := "api-keys/" + targetKey + "/revocation/" + keeperKey + "/replace"
+
+		// Persist durable refusal row first.
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
+			t.Fatalf("initial refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+		cpaBefore := cpaSrv.requests.Load()
+
+		// 1. Cold-start precheck SELECT failure: preflight must answer 503 with 0 CPA hits.
+		ctrl := &rejectionSQLController{
+			onSelect: func() error {
+				return errors.New("simulated cold-start preflight select error")
+			},
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		preRes := gatewayRequest(t, app, http.MethodGet, preflightPath, "", "")
+		if preRes.Code != http.StatusServiceUnavailable || errorCode(t, preRes) != wantUnavailable {
+			t.Errorf("cold-start preflight on SELECT error = %d %s, want 503 %s", preRes.Code, preRes.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load() - cpaBefore; got != 0 {
+			t.Errorf("cold-start preflight contacted CPA %d times, want 0", got)
+		}
+
+		// 2. Rebind to rotatedKey, then fail on SELECT #2 (wire phase after precheck passes)
+		// for both preflight and prepare.
+		ctrl.mu.Lock()
+		ctrl.onSelect = nil
+		ctrl.mu.Unlock()
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, rotatedKey, strings.Repeat("9", 32))
+		if rb := gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json"); rb.Code != http.StatusOK {
+			t.Fatalf("rebind = %d %s, want 200", rb.Code, rb.Body.String())
+		}
+		cpaBefore = cpaSrv.requests.Load()
+
+		var seq atomic.Int32
+		ctrl.mu.Lock()
+		ctrl.onSelect = func() error {
+			if seq.Add(1) >= 2 {
+				return errors.New("simulated wire-phase preflight/prepare select error")
+			}
+			return nil
+		}
+		ctrl.mu.Unlock()
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+
+		wirePreRes := gatewayRequest(t, app, http.MethodGet, preflightPath, "", "")
+		if wirePreRes.Code != http.StatusServiceUnavailable || errorCode(t, wirePreRes) != wantUnavailable {
+			t.Errorf("wire-phase preflight on SELECT error = %d %s, want 503 %s", wirePreRes.Code, wirePreRes.Body.String(), wantUnavailable)
+		}
+
+		seq.Store(0)
+		prepBody := `{"requestId":"` + strings.Repeat("e", 32) + `","keeperId":"` + keeperKey + `","mode":"replace"}`
+		prepRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+targetKey+"/revocation", prepBody, "application/json")
+		if prepRes.Code != http.StatusServiceUnavailable || errorCode(t, prepRes) != wantUnavailable {
+			t.Errorf("wire-phase prepare on SELECT error = %d %s, want 503 %s", prepRes.Code, prepRes.Body.String(), wantUnavailable)
+		}
+		if got := cpaSrv.requests.Load() - cpaBefore; got != 0 {
+			t.Errorf("wire-phase preflight/prepare contacted CPA %d times, want 0", got)
+		}
+	})
+}

@@ -78,6 +78,10 @@ func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResu
 		writeExternalCredentialWaitCancelled(w)
 		return
 	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	status, code := keyOperationCode(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -126,16 +130,20 @@ func (a *freshApplication) preflightClientKeyOperation(w http.ResponseWriter, r 
 	// poll. A credential the user's CPA already refused is never presented by it:
 	// five failed authentications ban the address for thirty minutes, and the
 	// answer is the same blocker the submit would give, written locally.
-	grant := a.externalReadGrant(r.Context())
-	if grant.Refused {
+	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 		keyOperationPreflightReply(w, false, freshconfig.ReasonManagementRejected)
+	}) {
 		return
 	}
-	err := a.keyApply.Preflight(r.Context(), target, keeper, mode, op.Strategy.TargetGeneration)
-	// The first 401 a preflight meets is the refusal of the credential it
-	// presented, so it is filed against this request's grant like every other
-	// browser-driven read of the user's CPA.
-	a.noteExternalRejection(r.Context(), grant, err)
+	err := a.keyApply.Preflight(a.withExternalSavedCredentialGate(r.Context()), target, keeper, mode, op.Strategy.TargetGeneration)
+	if errors.Is(err, errExternalCredentialWaitCancelled) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	reason := ""
 	if err != nil {
 		_, reason = keyOperationCode(err)
