@@ -39,6 +39,7 @@ import type {
   KimiQuotaState,
   XaiQuotaState,
 } from '@/types';
+import { isRecord } from '@/utils/helpers';
 import type { ModelInfo } from '@/utils/models';
 import { getXaiProbeIssueKey } from '@/utils/quota/xaiPresentation';
 import { buildQuotaCredentialIdentity } from '@/utils/quota/credentialScope';
@@ -295,6 +296,27 @@ const buildNestedModelRow = (
   };
 };
 
+// Demo plugin documents follow the optional host theme protocol documented in
+// apps/docs/manual/plugins.md: the console posts `cpamp:plugin-theme` and the
+// plugin document applies the variables itself. Without it the embedded page
+// keeps a hard-coded light canvas and glares in the dark theme.
+const demoPluginThemeScript = [
+  '<script>',
+  '(function () {',
+  '  var root = document.documentElement;',
+  '  window.addEventListener("message", function (event) {',
+  '    var data = event.data;',
+  '    if (!data || data.type !== "cpamp:plugin-theme" || data.version !== 1) return;',
+  '    root.setAttribute(data.hostAttribute, "");',
+  '    root.setAttribute("data-theme", data.themeAttribute);',
+  '    Object.keys(data.variables || {}).forEach(function (name) {',
+  '      root.style.setProperty(name, data.variables[name]);',
+  '    });',
+  '  });',
+  '})();',
+  '</script>',
+].join('');
+
 const buildDemoPluginPage = (title: string, body: string): string =>
   `data:text/html;charset=utf-8,${encodeURIComponent(
     [
@@ -303,14 +325,17 @@ const buildDemoPluginPage = (title: string, body: string): string =>
       '<head>',
       '<meta charset="utf-8" />',
       '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+      demoPluginThemeScript,
       '<style>',
       ':root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;}',
-      'body{margin:0;padding:24px;background:Canvas;color:CanvasText;}',
+      ':root[data-theme="white"]{color-scheme:light;}',
+      ':root[data-theme="dark"]{color-scheme:dark;}',
+      'body{margin:0;padding:24px;background:var(--app-bg,Canvas);color:var(--app-text-primary,CanvasText);}',
       'main{max-width:960px;margin:0 auto;}',
       'h1{font-size:20px;margin:0 0 12px;}',
-      'p{margin:0 0 16px;color:color-mix(in srgb,CanvasText 72%,transparent);}',
+      'p{margin:0 0 16px;color:var(--app-text-regular,color-mix(in srgb,CanvasText 72%,transparent));}',
       '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;}',
-      '.card{border:1px solid color-mix(in srgb,CanvasText 14%,transparent);border-radius:8px;padding:14px;}',
+      '.card{background:var(--app-surface,Canvas);border:1px solid var(--app-border,color-mix(in srgb,CanvasText 14%,transparent));border-radius:8px;padding:14px;}',
       '.metric{font-size:24px;font-weight:700;}',
       '</style>',
       '</head>',
@@ -1046,7 +1071,9 @@ const demoPlugins: PluginListResponse = {
       enabled: true,
       effectiveEnabled: true,
       supportsOAuth: true,
-      oauthProvider: 'codex',
+      // The plugin runs its own OAuth provider (`account-auditor`): binding a
+      // built-in provider here would dedupe the card away on the OAuth page.
+      oauthProvider: 'account-auditor',
       logo: '',
       configFields: [],
       menus: [
@@ -6968,13 +6995,103 @@ export const getDemoAccountActionCandidates = () => ({
 
 export const getDemoApiKeyAliases = () => ({ items: clone(demoApiAliases) });
 
+// CPA renders its file log lines as
+// `[2026-11-09 10:12:33] [3f8a91c2] [info ] [gin_logger.go:97] 200 | 12.4ms | 127.0.0.1 | GET "/v1/models"`.
+// Only AI API paths carry a short request id; management paths log dashes.
+const buildDemoLogLine = (input: {
+  secondsAgo: number;
+  level: 'info' | 'warn' | 'error';
+  requestId?: string;
+  source?: string;
+  access?: { status: number; latency: string; method: string; path: string };
+  message?: string;
+}) => {
+  const value = new Date(now() - input.secondsAgo * 1000);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  const timestamp = `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(
+    value.getDate()
+  )} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+  const head = `[${timestamp}] [${input.requestId ?? '--------'}] [${input.level.padEnd(
+    5,
+    ' '
+  )}] [${input.source ?? 'gin_logger.go:97'}]`;
+  if (!input.access) {
+    return `${head} ${input.message ?? ''}`;
+  }
+  const access = `${String(input.access.status).padStart(3, ' ')} | ${input.access.latency.padStart(
+    12,
+    ' '
+  )} |     127.0.0.1 | ${input.access.method.padEnd(7, ' ')} "${input.access.path}"`;
+  return `${head} ${access}${input.message ? ` | ${input.message}` : ''}`;
+};
+
 export const getDemoLogsResponse = () => {
   const lines = [
-    '[INFO] manager server demo started at http://demo.local',
-    '[INFO] usage collector consumed 100 events from usage-events',
-    '[WARN] codex-fallback-02 reached quota threshold and entered cooldown',
-    '[INFO] plugin request-insights rendered embedded resource',
-    '[INFO] model price sync completed with 6 models',
+    buildDemoLogLine({
+      secondsAgo: 420,
+      level: 'info',
+      requestId: '3f8a91c2',
+      access: { status: 200, latency: '12.4ms', method: 'GET', path: '/v1/models' },
+    }),
+    buildDemoLogLine({
+      secondsAgo: 380,
+      level: 'info',
+      requestId: '8c41d0a7',
+      access: { status: 200, latency: '842.7ms', method: 'POST', path: '/v1/chat/completions' },
+    }),
+    buildDemoLogLine({
+      secondsAgo: 330,
+      level: 'info',
+      access: { status: 200, latency: '4.6ms', method: 'GET', path: '/v0/management/config.yaml' },
+    }),
+    buildDemoLogLine({
+      secondsAgo: 300,
+      level: 'info',
+      source: 'collector.go:118',
+      message: 'usage collector consumed 100 events from usage-events',
+    }),
+    buildDemoLogLine({
+      secondsAgo: 210,
+      level: 'warn',
+      requestId: 'b7e2f190',
+      access: { status: 429, latency: '3.2ms', method: 'POST', path: '/v1/chat/completions' },
+      message: 'upstream rate limited, retrying with codex-fallback-02',
+    }),
+    buildDemoLogLine({
+      secondsAgo: 200,
+      level: 'warn',
+      source: 'scheduler.go:264',
+      message: 'codex-fallback-02 reached quota threshold and entered cooldown',
+    }),
+    buildDemoLogLine({
+      secondsAgo: 150,
+      level: 'info',
+      access: {
+        status: 200,
+        latency: '1.9ms',
+        method: 'GET',
+        path: '/v0/management/api-key-usage',
+      },
+    }),
+    buildDemoLogLine({
+      secondsAgo: 120,
+      level: 'info',
+      source: 'plugins.go:86',
+      message: 'plugin request-insights rendered embedded resource',
+    }),
+    buildDemoLogLine({
+      secondsAgo: 90,
+      level: 'error',
+      requestId: 'd5a3c8e4',
+      access: { status: 502, latency: '1.4s', method: 'POST', path: '/v1/chat/completions' },
+      message: 'upstream connection reset by peer',
+    }),
+    buildDemoLogLine({
+      secondsAgo: 60,
+      level: 'info',
+      source: 'modelprice.go:142',
+      message: 'model price sync completed with 6 models',
+    }),
   ];
   return {
     lines,
@@ -7000,6 +7117,84 @@ export const getDemoErrorLogsResponse = () => ({
     },
   ],
 });
+
+// `/v0/management/api-key-usage` is grouped as provider -> `<baseUrl>|<apiKey>`
+// -> totals plus 20 ten-minute buckets; the provider table reads it through
+// `useProviderRecentRequests`. Keys are derived from the live demo config so
+// the response always matches the rows the table renders.
+const demoUsageProviderFields = [
+  { field: 'gemini-api-key', provider: 'gemini' },
+  { field: 'interactions-api-key', provider: 'interactions' },
+  { field: 'codex-api-key', provider: 'codex' },
+  { field: 'xai-api-key', provider: 'xai' },
+  { field: 'claude-api-key', provider: 'claude' },
+  { field: 'vertex-api-key', provider: 'vertex' },
+] as const;
+
+export const getDemoApiKeyUsage = (rawConfig: Record<string, unknown>) => {
+  const usage: Record<
+    string,
+    Record<string, { success: number; failed: number; recent_requests: unknown[] }>
+  > = {};
+  const recordUsage = (
+    provider: unknown,
+    baseUrl: unknown,
+    apiKey: unknown,
+    seed: number,
+    failureEvery: number
+  ) => {
+    const providerKey = String(provider ?? '').trim();
+    const key = String(apiKey ?? '').trim();
+    if (!providerKey || !key) return;
+    const recentRequests = demoRecentRequests(seed, { failureEvery });
+    const group = (usage[providerKey] ??= {});
+    // `success` / `failed` are the key's lifetime counters in CPA, so they stay
+    // larger than the sum of the 20 recent ten-minute buckets.
+    const recentSuccess = recentRequests.reduce((total, entry) => total + entry.success, 0);
+    const recentFailure = recentRequests.reduce((total, entry) => total + entry.failed, 0);
+    group[`${String(baseUrl ?? '').trim()}|${key}`] = {
+      success: recentSuccess * 6,
+      failed: recentFailure * 6,
+      recent_requests: recentRequests,
+    };
+  };
+
+  demoUsageProviderFields.forEach(({ field, provider }, fieldIndex) => {
+    const entries = rawConfig[field];
+    if (!Array.isArray(entries)) return;
+    entries.forEach((entry, index) => {
+      if (!isRecord(entry)) return;
+      recordUsage(
+        provider,
+        entry['base-url'],
+        entry['api-key'],
+        26 + fieldIndex * 5 + index * 7,
+        9 + fieldIndex + index * 2
+      );
+    });
+  });
+
+  const openaiProviders = rawConfig['openai-compatibility'];
+  if (Array.isArray(openaiProviders)) {
+    openaiProviders.forEach((provider, index) => {
+      if (!isRecord(provider)) return;
+      const entries = provider['api-key-entries'];
+      if (!Array.isArray(entries)) return;
+      entries.forEach((entry, entryIndex) => {
+        if (!isRecord(entry)) return;
+        recordUsage(
+          provider.name,
+          provider['base-url'],
+          entry['api-key'],
+          18 + index * 6 + entryIndex * 4,
+          11 + index + entryIndex * 3
+        );
+      });
+    });
+  }
+
+  return usage;
+};
 
 export const getDemoLatestVersion = () => ({
   latest: 'v7.1.18',

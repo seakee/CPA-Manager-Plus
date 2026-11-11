@@ -73,7 +73,11 @@
 
 .backLink,
 .metaPill,
-.filterButton,
+.filterButton {
+  min-height: var(--control-height-sm);
+  padding: 0 9px;
+}
+
 .confirmButton {
   min-height: var(--control-height-xs);
   padding: 0 9px;
@@ -149,25 +153,35 @@
   min-height: var(--control-height-sm);
   flex-wrap: nowrap;
   gap: 0;
-  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
   border-radius: var(--app-radius-md);
   background: var(--pricing-surface-elevated);
-  overflow: hidden;
 }
 
+/* Segments carry the group border so every control in the toolbar row measures
+   the same height token instead of the group's inner box. */
 .filterButton {
   gap: 7px;
-  height: calc(var(--control-height-sm) - 2px);
-  min-height: calc(var(--control-height-sm) - 2px);
-  border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-left: 0;
   border-radius: 0;
   background: transparent;
   color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
 }
 
 .filterButton:first-child {
-  border-left: 0;
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
+}
+
+.filterButton:last-child {
+  border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
+}
+
+.filterButton:focus-visible {
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: -2px;
 }
 
 .filterButton strong {
@@ -186,7 +200,6 @@
 
 .filterButtonActive,
 .filterButtonActive:hover {
-  border-left-color: transparent;
   background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
   color: var(--primary-text);
 }

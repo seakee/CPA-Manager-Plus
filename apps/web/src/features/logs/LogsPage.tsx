@@ -970,11 +970,17 @@ function LogsPageContent() {
             <div className="stack">
               <div className="hint">{t('logs.error_logs_description')}</div>
 
-              {requestLogEnabled && (
+              {/* The banner explains an empty listing, so a stale empty result must not keep it
+                  visible while a refresh is in flight or after that refresh failed. */}
+              {requestLogEnabled &&
+              errorLogsLoaded &&
+              !loadingErrors &&
+              !errorLogsError &&
+              errorLogs.length === 0 ? (
                 <div>
                   <div className="status-badge warning">{t('logs.error_logs_request_log_enabled')}</div>
                 </div>
-              )}
+              ) : null}
 
               {errorLogsError && <div className="error-box">{errorLogsError}</div>}
 

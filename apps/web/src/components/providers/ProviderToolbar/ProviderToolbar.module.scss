@@ -66,9 +66,10 @@ $toolbar-control-height: var(--control-height-sm);
     color: var(--text-primary);
   }
 
+  /* The tab strip clips on overflow, so the ring is drawn inside the tab. */
   &:focus-visible {
-    outline: 0;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 26%, transparent);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -164,10 +165,32 @@ $toolbar-control-height: var(--control-height-sm);
     background-color $transition-fast,
     border-color $transition-fast;
 
-  &:hover,
-  &:focus-within {
+  &:hover {
     border-color: var(--primary-color);
     background: var(--surface-subtle-hover);
+  }
+
+  &:focus-within {
+    background: var(--surface-subtle-hover);
+  }
+
+  /* The container keeps a neutral border while the field is keyboard-focused: the ring
+     belongs to the focused control, so no second frame sits under it. */
+  &:has(> .searchInput:focus-visible) {
+    border-color: var(--border-subtle);
+  }
+
+  /* One ring per Tab stop: with a value the box holds two (field, clear), and each
+     marks itself so the focused action is identifiable. */
+  &:has(> .searchInput:focus-visible) .searchInput:focus-visible,
+  .searchClear:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+
+  .searchClear:focus-visible {
+    background: var(--focus-bg);
+    color: var(--focus-text);
   }
 }
 
@@ -259,6 +282,14 @@ $toolbar-control-height: var(--control-height-sm);
   }
 }
 
+/* The group can hold two Tab stops (open the list, clear the selection), so it never
+   draws a shared ring: the focused control marks itself instead, and the group border
+   stays neutral underneath it. Declared after the state rules so an applied filter does
+   not keep an accent border under the ring. */
+.modelFilterControl:has(> :focus-visible) {
+  border-color: var(--border-subtle);
+}
+
 .modelFilterTrigger {
   display: flex;
   align-items: center;
@@ -272,6 +303,19 @@ $toolbar-control-height: var(--control-height-sm);
   color: var(--text-primary);
   cursor: pointer;
   text-align: left;
+
+  /* Drawn inside the button, at the group's rounding, so the clipped group cannot cut
+     it and it still identifies which of the two controls holds focus. */
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
+    border-radius: var(--app-radius-sm) 0 0 var(--app-radius-sm);
+  }
+
+  /* Without an active filter the trigger is the group's only control. */
+  &:only-child:focus-visible {
+    border-radius: var(--app-radius-sm);
+  }
 
   &:disabled {
     cursor: not-allowed;
@@ -326,6 +370,14 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   flex-shrink: 0;
 
+  /* Its own Tab stop, so it draws its own ring — rounded on the right to match the
+     group, inward so the clipped group cannot cut it. */
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
+    border-radius: 0 var(--app-radius-sm) var(--app-radius-sm) 0;
+  }
+
   &:hover {
     background: var(--surface-subtle-hover);
     color: var(--text-primary);
@@ -346,7 +398,7 @@ $toolbar-control-height: var(--control-height-sm);
   max-height: 300px;
   overflow: hidden;
   background: var(--bg-primary);
-  border: 1px solid var(--border-primary);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
   border-radius: var(--app-radius-md);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
@@ -419,10 +471,19 @@ $toolbar-control-height: var(--control-height-sm);
     border-color $transition-fast,
     background-color $transition-fast;
 
-  &:hover,
-  &:focus-within {
+  &:hover {
     border-color: var(--primary-color);
     background: var(--surface-subtle-hover);
+  }
+
+  &:focus-within {
+    background: var(--surface-subtle-hover);
+  }
+
+  /* The focused button draws the 2px ring; an accent border on the group would be a
+     second focus line right next to it. */
+  &:has(:focus-visible) {
+    border-color: var(--border-subtle);
   }
 }
 
@@ -438,7 +499,8 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
 
   &:focus-visible {
-    outline: 0;
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -476,9 +538,10 @@ $toolbar-control-height: var(--control-height-sm);
     color: var(--primary-text);
   }
 
+  /* Inside the segmented group, so the ring is drawn inside the button. */
   &:focus-visible {
-    outline: 0;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 26%, transparent);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {
@@ -496,11 +559,17 @@ $toolbar-control-height: var(--control-height-sm);
   gap: 4px;
   min-width: 100%;
   padding: 4px;
-  border: 1px solid var(--border-primary);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
+}
+
+// Same accent border as `DropdownMenu`, including its dark-theme emphasis.
+:global([data-theme='dark']) .modelDropdownList,
+:global([data-theme='dark']) .sortDropdownList {
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
 }
 
 .sortDropdownItem {
@@ -518,9 +587,15 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   text-align: left;
 
-  &:hover,
+  &:hover {
+    background: var(--surface-subtle-hover);
+    color: var(--text-primary);
+  }
+
+  /* Menu rows sit inside a padded floating layer, so the ring is drawn inside the row. */
   &:focus-visible {
-    outline: 0;
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: -2px;
     background: var(--surface-subtle-hover);
     color: var(--text-primary);
   }
@@ -594,7 +669,7 @@ $toolbar-control-height: var(--control-height-sm);
     border-color: var(--primary-solid);
     background: var(--primary-solid);
     color: var(--primary-contrast);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-contrast) 42%, transparent);
+    box-shadow: none;
   }
 
   @include mobile {

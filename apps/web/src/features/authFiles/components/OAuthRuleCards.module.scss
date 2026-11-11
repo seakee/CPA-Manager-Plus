@@ -306,19 +306,18 @@
   gap: 0;
   min-width: 0;
   max-width: 100%;
+  height: var(--control-height-sm);
   padding: 0;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
 
   :global(.btn.btn-sm) {
     min-width: 0;
-    min-height: 34px;
-    height: auto;
+    min-height: var(--control-height-sm);
+    height: var(--control-height-sm);
     padding: 0 14px;
-    border: 0;
-    border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-left: 0;
     border-radius: 0;
     background: transparent;
     color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
@@ -326,7 +325,16 @@
   }
 
   :global(.btn.btn-sm:first-child) {
-    border-left: 0;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
+  }
+
+  :global(.btn.btn-sm:last-child) {
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
+  }
+
+  :global(.btn.btn-sm:focus-visible) {
+    outline-offset: -2px;
   }
 
   :global(.btn.btn-sm:hover:not(:disabled)) {
@@ -336,14 +344,9 @@
 
   :global(.btn.btn-sm.btn-secondary),
   :global(.btn.btn-sm.btn-secondary:hover:not(:disabled)) {
-    border-left-color: transparent;
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
     color: var(--primary-text);
     font-weight: 700;
-  }
-
-  :global(.btn.btn-sm.btn-secondary + .btn.btn-sm) {
-    border-left-color: transparent;
   }
 }
 

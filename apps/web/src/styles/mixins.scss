@@ -81,9 +81,12 @@
     outline: none;
   }
 
+  /* One ring only: the inset shadow used to sit next to this outline and read as a
+     double frame. Containers that clip the outline narrow `outline-offset` instead. */
   &:focus-visible {
     background: var(--focus-bg);
     color: var(--focus-text);
-    box-shadow: inset 0 0 0 1px var(--focus-inset);
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 2px;
   }
 }

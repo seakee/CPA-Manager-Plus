@@ -64,6 +64,7 @@ export const getDemoLogsResponse = () => ({
   cursorReset: false,
 });
 export const getDemoErrorLogsResponse = () => ({ files: [] });
+export const getDemoApiKeyUsage = () => ({}) as Record<string, Record<string, unknown>>;
 export const getDemoLatestVersion = () => ({
   latest: '',
   current: '',

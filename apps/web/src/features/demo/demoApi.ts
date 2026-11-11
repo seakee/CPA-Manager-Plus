@@ -3,6 +3,7 @@ import { parse as parseYaml, parseDocument } from 'yaml';
 import {
   advanceDemoCredentialRefresh,
   getDemoApiCallResult,
+  getDemoApiKeyUsage,
   getDemoAuthFiles,
   getDemoConfigYaml,
   getDemoErrorLogsResponse,
@@ -658,14 +659,7 @@ export async function handleDemoApiRequest<T = unknown>(
   }
 
   if (pathname === '/api-call') return getDemoApiCallResult(data as never) as T;
-  if (pathname === '/api-key-usage') {
-    return {
-      items: [
-        { apiKeyHash: 'hash_openai_primary', count: 4200, success: 4168, failed: 32 },
-        { apiKeyHash: 'hash_codex_team', count: 5200, success: 5120, failed: 80 },
-      ],
-    } as T;
-  }
+  if (pathname === '/api-key-usage') return getDemoApiKeyUsage(rawConfig) as T;
 
   if (pathname.endsWith('-auth-url')) {
     return { url: '#/demo/oauth?provider=demo', state: 'demo-oauth-state' } as T;

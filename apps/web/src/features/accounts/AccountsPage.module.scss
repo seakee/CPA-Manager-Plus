@@ -1124,7 +1124,9 @@
 
   .statusBlock {
     height: 6px;
-    border-radius: var(--app-radius-pill);
+    // Request-status blocks are data visualisation, so they share the 2px data
+    // radius with the AI provider page instead of a status pill.
+    border-radius: var(--radius-data-sm);
   }
 
   .statusRate {
@@ -3109,7 +3111,7 @@
 .statusBlock {
   width: 100%;
   height: 6px;
-  border-radius: var(--app-radius-pill);
+  border-radius: var(--radius-data-sm);
   transition:
     transform 0.15s ease,
     opacity 0.15s ease;
@@ -3975,7 +3977,10 @@
     line-height: 1.45;
   }
 
+  /* Drawer forms use the md control height so inputs match the Select trigger
+     and the section's action buttons. */
   :global(.input) {
+    min-height: var(--control-height-md);
     padding: 6px 8px;
     font-size: 12px;
     line-height: 1.35;

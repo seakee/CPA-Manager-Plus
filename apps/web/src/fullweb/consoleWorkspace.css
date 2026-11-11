@@ -803,9 +803,13 @@
   color: var(--text-secondary);
 }
 
+/* The search field shares the row's dense control height so it lines up with the
+   buttons beside it instead of standing 6px taller. */
 .workspace-toolbar .search input {
   min-width: 240px;
-  padding: 8px 10px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 10px;
   font-size: 13px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-sm);

@@ -166,7 +166,6 @@ export function AccountConfigurationTab({
         <div className={styles.configurationToolbarActions}>
           <Button
             variant="secondary"
-            size="sm"
             className={styles.configurationToolbarButton}
             onClick={editor.reset}
             disabled={!dirty || state.saving}
@@ -174,7 +173,6 @@ export function AccountConfigurationTab({
             {t('common.reset')}
           </Button>
           <Button
-            size="sm"
             className={styles.configurationToolbarButton}
             onClick={() => void editor.save()}
             loading={state.saving}

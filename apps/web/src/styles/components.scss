@@ -34,12 +34,10 @@ button:disabled {
     outline: none;
   }
 
-  &:focus:not(:focus-visible) {
-    outline: none;
-  }
-
+  /* Keyboard focus keeps one solid ring; a second inset ring reads as a double frame. */
   &:focus-visible {
-    outline: none;
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 2px;
   }
 
   &.btn-primary {
@@ -110,19 +108,10 @@ button:disabled {
     }
   }
 
-  &:focus-visible:not(:disabled) {
-    border-color: var(--focus-border);
-    box-shadow: inset 0 0 0 1px var(--focus-inset);
-  }
-
+  /* Solid variants keep their own border so a focused danger button stays red. */
   &:not(.btn-primary):not(.btn-danger):focus-visible:not(:disabled) {
     background: var(--focus-bg);
     color: var(--focus-text);
-  }
-
-  &.btn-primary:focus-visible:not(:disabled),
-  &.btn-danger:focus-visible:not(:disabled) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-contrast) 42%, transparent);
   }
 
   &.btn-full {
@@ -215,6 +204,15 @@ textarea {
     background-color: var(--app-input-bg-focus);
     border-color: var(--app-input-border-focus);
     box-shadow: 0 0 0 1px var(--app-input-border-focus) inset;
+  }
+
+  /* The outline is the only keyboard ring; the accent border and inset ring stack a
+     second frame around it, so keyboard focus falls back to the resting border. */
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+    border-color: var(--app-input-border);
+    box-shadow: none;
   }
 }
 

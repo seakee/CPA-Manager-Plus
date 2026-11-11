@@ -48,6 +48,16 @@
   padding: 14px 16px;
   margin-bottom: 16px;
 }
+/* One filter row shares the dense control height so the native select, the
+   search field and the two buttons line up. */
+.key-filter-panel select.input,
+.key-filter-panel .key-search .input,
+.key-filter-panel .btn {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+}
 .key-filter-tabs,
 .key-view-toggle {
   display: inline-flex;
@@ -117,7 +127,15 @@
 }
 .key-summary-value.is-unavailable {
   max-width: 100%;
+  min-width: 0;
   font-size: 12px;
+}
+/* Status text in a summary card can be a full sentence in some locales; let it
+   wrap inside the card instead of pushing the card past the viewport. */
+.key-summary-card .key-state-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 .key-resource-icon {
   display: inline-grid;

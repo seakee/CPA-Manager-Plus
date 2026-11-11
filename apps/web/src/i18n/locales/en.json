@@ -353,6 +353,7 @@
     "rc": "RC",
     "beta": "Beta",
     "unavailable": "Update checks require a Manager Server. Use the version link to view releases.",
+    "demo": "Updates are not checked in the demo; the version shown is demo data.",
     "failed": "Update check failed. Previously cached information may be outdated.",
     "loading": "Loading update status…",
     "stale": "Update information is out of date.",
