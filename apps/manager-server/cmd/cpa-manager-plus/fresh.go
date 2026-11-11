@@ -87,6 +87,10 @@ func freshPaths(cfg config.Config) (sqliterepo.InspectionPaths, error) {
 
 var errFreshExternalPermitRevoked = errors.New("fresh external host permit revoked")
 
+func isCommittedExternalStrategy(c bootstrap.FreshStrategyCheckpoint) bool {
+	return c.Strategy == bootstrap.ConnectExternal && c.Stage == "committed"
+}
+
 // runtimeLifecycleMutex is a context-cancellable 1-slot semaphore shared
 // between explicit operator lifecycle mutations and automatic reconcile cycles.
 type runtimeLifecycleMutex struct {
@@ -294,7 +298,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		}
 		return managerCfg.CPAConnection.CPABaseURL, managerCfg.CPAConnection.ManagementKey, nil
 	}
-	alreadyExternal := opened.Record.Operation.Strategy.Strategy == bootstrap.ConnectExternal
+	alreadyExternal := isCommittedExternalStrategy(opened.Record.Operation.Strategy)
 	a.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(externalConnection)
 	if cfg.EmbeddedRuntimeConfigured() && !alreadyExternal {
 		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
@@ -338,7 +342,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			return false, loadErr
 		}
 		switch {
-		case op.Strategy.Strategy == bootstrap.ConnectExternal:
+		case isCommittedExternalStrategy(op.Strategy):
 			return false, nil
 		case freshkeyapply.ManagerOwnedStrategy(op.Strategy):
 			return true, nil
@@ -408,7 +412,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		a.keyApply = freshkeyapply.NewStrategySelector(
 			func(op bootstrap.FreshOperation) *freshkeyapply.Service {
 				switch {
-				case op.Strategy.Strategy == bootstrap.ConnectExternal:
+				case isCommittedExternalStrategy(op.Strategy):
 					return externalAuthority
 				case freshkeyapply.ManagerOwnedStrategy(op.Strategy):
 					return managedAuthority

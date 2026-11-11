@@ -2,20 +2,28 @@ package main
 
 import (
 	"context"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
@@ -1036,114 +1044,335 @@ func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWai
 	})
 }
 
-func TestEmbeddedReconcilerWrapperForwardsLifecycleLockAndRecordsStartLedger(t *testing.T) {
-	t.Run("freshEmbeddedDesiredStateStore forwards LifecycleLocker to serialize operator Stop against Reconciler", func(t *testing.T) {
-		app, op := completedRuntimeTestApplication(t)
-		client := &freshRuntimeTestClient{
-			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
-		}
-		app.runtime = client
-		app.runtimeExternal = nil
-		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
-			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
-		}
+func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
+	const (
+		productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		management           = externalAuthorityManagement
+	)
 
-		hooked := &hookedDesiredStateStore{
-			DesiredStateStore: freshEmbeddedDesiredStateStore{app: app, inner: app.embeddedDesiredStateInner()},
-		}
-		hooked.onLoad = func(call int, desired model.EmbeddedRuntimeDesiredState, found bool, err error) {
-			if call != 1 || err != nil || !found {
+	t.Run("accepted_auto_start_fences_external_strategy_across_restart_until_supervisor_generation_changes", func(t *testing.T) {
+		externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+management {
+				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			stopRecorder := httptest.NewRecorder()
-			client.onStop = func() {
-				client.mu.Lock()
-				offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
-				offline.State = model.RuntimeStateOffline
-				offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
-				client.status = offline
-				client.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v8/management/config":
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/data/auth"},"access":{"api-keys":["ext-key-1"]}}`))
+			default:
+				_, _ = w.Write([]byte(`{}`))
 			}
-			app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-through-wrapper"), op, "runtime/operations")
-			if stopRecorder.Code != http.StatusOK {
-				t.Errorf("operator Stop status = %d body=%s", stopRecorder.Code, stopRecorder.Body.String())
-			}
-		}
-
-		reconciler := runtimeservice.NewReconciler(app.embeddedRuntimeClient(), hooked, runtimeservice.DefaultReconcileInterval, nil)
-		if err := reconciler.ReconcileOnce(t.Context()); err != nil {
-			t.Fatalf("ReconcileOnce() error = %v", err)
-		}
-		if client.starts != 0 {
-			t.Fatalf("Supervisor starts after operator Stop through freshEmbeddedDesiredStateStore = %d, want 0", client.starts)
-		}
-	})
-
-	t.Run("auto-start through embeddedRuntimeClient records write-ahead start intent in ledger", func(t *testing.T) {
-		app, op := completedRuntimeTestApplication(t)
-		offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
-		offline.Generation = 777
-		offline.State = model.RuntimeStateOffline
-		offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
-		client := &freshRuntimeTestClient{
-			status:   offline,
-			startErr: errors.New("connection reset after Supervisor accepted start"),
-		}
-		app.runtime = client
-		app.runtimeExternal = nil
-		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
-			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
-		}
-
-		reconciler := runtimeservice.NewReconciler(
-			app.embeddedRuntimeClient(),
-			freshEmbeddedDesiredStateStore{app: app, inner: app.embeddedDesiredStateInner()},
-			runtimeservice.DefaultReconcileInterval,
-			nil,
-		)
-		if err := reconciler.ReconcileOnce(t.Context()); err == nil {
-			t.Fatal("ReconcileOnce with lost Start response = nil, want error")
-		}
-		if client.starts != 1 {
-			t.Fatalf("Supervisor starts = %d, want 1", client.starts)
-		}
-		app.embeddedExecution.ledgerMu.Lock()
-		ledger, err := app.loadEmbeddedStartLedgerLocked(t.Context())
-		app.embeddedExecution.ledgerMu.Unlock()
-		if err != nil {
-			t.Fatalf("loadEmbeddedStartLedgerLocked = %v", err)
-		}
-		if len(ledger.Unresolved) != 1 {
-			t.Fatalf("unresolved start ledger entries = %d (%+v), want 1", len(ledger.Unresolved), ledger.Unresolved)
-		}
-	})
-
-	t.Run("incompleteManagedDesiredRunning gates artifact Status probe on embedded execution gate", func(t *testing.T) {
-		incompleteManaged := func(r *freshstore.Record, env managedInstallEnv) {
-			completedManagedInstall(r, env)
-			r.Operation.ProductComplete = false
-		}
-		harness := newManagedInstallHarnessWith(t, incompleteManaged, true)
-		app := harness.app
-		var artifactCalls atomic.Int32
-		artifactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			artifactCalls.Add(1)
-			w.WriteHeader(http.StatusOK)
 		}))
-		defer artifactServer.Close()
-		app.artifact = runtimeservice.NewArtifactClient(artifactServer.URL, "artifact-token")
-		app.markEmbeddedExecutionClosed()
+		t.Cleanup(externalServer.Close)
 
+		var supervisorGen atomic.Uint64
+		supervisorGen.Store(1)
+		startAccepted := make(chan struct{})
+		var acceptedOnce sync.Once
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			gen := strconv.FormatUint(supervisorGen.Load(), 10)
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/start":
+				var payload struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"accepted"}`))
+				acceptedOnce.Do(func() { close(startAccepted) })
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("reconcile-autostart-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened1, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		app1 := newFreshApplication(opened1, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		if app1.pluginCapability != nil {
+			app1.pluginCapability.launch = func(refresh func()) { refresh() }
+		}
+		rec, err := app1.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		app1.desiredState = staticDesiredRunningStore{}
+
+		reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
+		reconcilerDone := make(chan struct{})
+		go func() {
+			defer close(reconcilerDone)
+			app1.runFreshEmbeddedReconciler(reconcilerCtx, 10*time.Hour)
+		}()
+		select {
+		case <-startAccepted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reconciler auto-Start did not reach Supervisor")
+		}
+		cancelReconciler()
+		<-reconcilerDone
+
+		postExternal := func(app *freshApplication, attemptID string) *httptest.ResponseRecorder {
+			cur, loadErr := app.store.Load(t.Context())
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			body, marshalErr := json.Marshal(struct {
+				Identity         bootstrap.FreshIdentity `json:"identity"`
+				ExpectedRevision uint64                  `json:"expectedRevision"`
+				AttemptID        string                  `json:"attemptId"`
+				freshstrategy.Request
+			}{
+				Identity:         cur.Operation.Identity,
+				ExpectedRevision: cur.Operation.Revision,
+				AttemptID:        attemptID,
+				Request: freshstrategy.Request{
+					Strategy:      bootstrap.ConnectExternal,
+					BaseURL:       externalServer.URL,
+					ManagementKey: management,
+				},
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.ServeHTTP(out, req)
+			return out
+		}
+
+		// 1. Before restart: ConnectExternal is fenced with 409 embedded_runtime_start_unresolved.
+		res1 := postExternal(app1, strings.Repeat("1", 32))
+		var blocker freshStrategyActionBlocker
+		if res1.Code != http.StatusConflict || json.Unmarshal(res1.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_runtime_start_unresolved" {
+			t.Fatalf("ConnectExternal after accepted auto-Start = %d %s, want 409 embedded_runtime_start_unresolved", res1.Code, res1.Body.String())
+		}
+		if err := opened1.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// 2. After Manager restart: still fenced with 409 embedded_runtime_start_unresolved.
+		opened2, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened2.Close() })
+		app2 := newFreshApplication(opened2, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+
+		res2 := postExternal(app2, strings.Repeat("2", 32))
+		blocker = freshStrategyActionBlocker{}
+		if res2.Code != http.StatusConflict || json.Unmarshal(res2.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_runtime_start_unresolved" {
+			t.Fatalf("ConnectExternal after Manager restart = %d %s, want 409 embedded_runtime_start_unresolved", res2.Code, res2.Body.String())
+		}
+
+		// 3. After Supervisor restarts onto a new generation (offline + disarmed): ConnectExternal succeeds.
+		supervisorGen.Store(2)
+		res3 := postExternal(app2, strings.Repeat("3", 32))
+		if res3.Code != http.StatusOK {
+			t.Fatalf("ConnectExternal after Supervisor generation change = %d %s, want 200", res3.Code, res3.Body.String())
+		}
+	})
+
+	t.Run("concurrent_operator_stop_prevents_subsequent_start_at_supervisor", func(t *testing.T) {
+		var (
+			curState          atomic.Value
+			stopCompleted     atomic.Bool
+			startsAfterStop   atomic.Int32
+			postStopStatuses  atomic.Int32
+			firstCycleStatus  = make(chan struct{})
+			releaseFirstCycle = make(chan struct{})
+			twoPostStopCycles = make(chan struct{})
+			firstOnce         sync.Once
+			releaseFirstOnce  sync.Once
+			postStopOnce      sync.Once
+		)
+		curState.Store("offline")
+
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				firstOnce.Do(func() {
+					close(firstCycleStatus)
+					<-releaseFirstCycle
+				})
+				st := curState.Load().(string)
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + st + `","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+				if stopCompleted.Load() && postStopStatuses.Add(1) >= 2 {
+					postStopOnce.Do(func() { close(twoPostStopCycles) })
+				}
+			case "/v1/runtime/operations/start":
+				if stopCompleted.Load() {
+					startsAfterStop.Add(1)
+				}
+				var payload struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				curState.Store("ready")
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			case "/v1/runtime/operations/stop":
+				var payload struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				curState.Store("offline")
+				_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"stop","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+		t.Cleanup(func() { releaseFirstOnce.Do(func() { close(releaseFirstCycle) }) })
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("reconcile-stop-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = opened.Close() })
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		protected, err := opened.Protector.ProtectString(strings.Repeat("e", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
 		rec, err := app.store.Load(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
-		desired, found, err := app.incompleteManagedDesiredRunning(t.Context(), rec.Operation)
-		if err != nil || found || desired != (model.EmbeddedRuntimeDesiredState{}) {
-			t.Fatalf("incompleteManagedDesiredRunning after gate closed = (%+v, %v, %v), want (zero, false, nil)", desired, found, err)
+		updated, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              productionArtifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if got := artifactCalls.Load(); got != 0 {
-			t.Fatalf("artifact server calls after embedded gate closed = %d, want 0", got)
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), updated.Operation); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
+		reconcilerDone := make(chan struct{})
+		go func() {
+			defer close(reconcilerDone)
+			app.runFreshEmbeddedReconciler(reconcilerCtx, 15*time.Millisecond)
+		}()
+		select {
+		case <-firstCycleStatus:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reconciler did not enter initial Supervisor /v1/runtime/status")
+		}
+
+		opContended := make(chan struct{})
+		var contendOnce sync.Once
+		app.runtimeLifecycleMu.onWait = func() {
+			contendOnce.Do(func() { close(opContended) })
+		}
+		stopDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/control/api/v2/runtime/operations",
+				strings.NewReader(`{"action":"stop","requestId":"66666666-6666-4666-8666-666666666666"}`),
+			)
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			out := httptest.NewRecorder()
+			app.ServeHTTP(out, req)
+			stopCompleted.Store(true)
+			stopDone <- out
+		}()
+
+		// Wait either for Stop to contend on the forwarded lifecycle lock (expected)
+		// or for Stop to finish unserialized if lock forwarding were absent.
+		var stopRes *httptest.ResponseRecorder
+		select {
+		case <-opContended:
+			releaseFirstOnce.Do(func() { close(releaseFirstCycle) })
+			stopRes = <-stopDone
+		case stopRes = <-stopDone:
+			releaseFirstOnce.Do(func() { close(releaseFirstCycle) })
+		case <-time.After(2 * time.Second):
+			t.Fatal("operator Stop neither contended on lifecycle lock nor completed")
+		}
+		if stopRes.Code != http.StatusOK {
+			t.Fatalf("POST runtime/operations (stop) = %d %s, want 200", stopRes.Code, stopRes.Body.String())
+		}
+
+		select {
+		case <-twoPostStopCycles:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reconciler did not complete post-Stop observation cycles")
+		}
+		cancelReconciler()
+		<-reconcilerDone
+
+		if got := startsAfterStop.Load(); got != 0 {
+			t.Fatalf("Supervisor Start RPCs after operator Stop completed = %d, want 0", got)
+		}
+		statusReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		statusReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		statusRes := httptest.NewRecorder()
+		app.ServeHTTP(statusRes, statusReq)
+		if statusRes.Code != http.StatusOK || !strings.Contains(statusRes.Body.String(), `"status":"offline"`) {
+			t.Fatalf("GET runtime/status after concurrent Stop = %d %s, want 200 offline", statusRes.Code, statusRes.Body.String())
 		}
 	})
 }

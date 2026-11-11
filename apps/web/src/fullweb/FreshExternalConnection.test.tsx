@@ -5,7 +5,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import type { FreshOperation } from './bootstrapTransport';
-import { PublicApiError, type createPublicApiClient } from './publicApi';
+import { PublicApiError, createPublicApiClient, type FullWebCredential } from './publicApi';
 import { fullWebText as t, setFullWebLanguage } from '../i18n/fullweb';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
@@ -278,6 +278,7 @@ describe('Fresh External initialization', () => {
   });
 
   it('turns each guarded Supervisor refusal into its own recovery message', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example:18317') });
     const cases = [
       ['embedded_supervisor_status_unavailable', 'setupBlockerSupervisorUnavailable'],
       ['embedded_runtime_start_unresolved', 'setupBlockerRuntimeStartUnresolved'],
@@ -290,32 +291,38 @@ describe('Fresh External initialization', () => {
       t('externalSourceAuthRejected'),
     ]);
     for (const [code, key] of cases) {
-      // The wire shape the Manager writes: a bounded code beside its English
-      // Action sentence, which no localized surface may render.
-      const post = vi
-        .fn()
-        .mockRejectedValue(
-          new PublicApiError(
-            'http',
-            409,
-            undefined,
-            code,
-            undefined,
-            'cpamp-runtime-supervisor is configured (CPAMP_RUNTIME_URL) but unreachable.'
-          )
-        );
-      const ui = await mount(vi.fn().mockResolvedValue(initial), post);
+      const actionSentinel = `RAW_SUPERVISOR_ACTION_SENTINEL_${code}_9f4c2e`;
+      const transport = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/strategy')) {
+          return Response.json({ Code: code, Action: actionSentinel }, { status: 409 });
+        }
+        return Response.json(initial, { status: 200 });
+      });
+      const realClient = createPublicApiClient(
+        () => ({ basePath: '/console', apiBase: '/console/api/v2', revision: 4 }),
+        transport
+      );
+      const ui = await mount(
+        vi.fn((resource: string, credential?: FullWebCredential) =>
+          realClient.get(resource, credential)
+        ),
+        vi.fn((resource: string, body: unknown, credential: FullWebCredential) =>
+          realClient.post(resource, body, credential)
+        )
+      );
       await ui.prepare();
       await ui.click('external-connect');
+      expect(transport).toHaveBeenCalledWith(
+        'https://manager.example:18317/console/api/v2/strategy',
+        expect.objectContaining({ method: 'POST' })
+      );
       const alert = ui.renderer.root.findByProps({ role: 'alert' }).props.children;
       expect(code + ': ' + String(alert)).toBe(code + ': ' + x(key));
       expect(alert).not.toBe(t('externalConflict'));
       for (const other of generic) expect(alert).not.toBe(other);
       const shown = JSON.stringify(ui.renderer.toJSON());
-      expect(shown).not.toContain('CPAMP_RUNTIME_URL) but unreachable');
-      expect(shown).not.toContain(
-        'restart cpamp-runtime-supervisor or the container, then retry Connect External'
-      );
+      expect(shown).not.toContain(actionSentinel);
     }
   });
 

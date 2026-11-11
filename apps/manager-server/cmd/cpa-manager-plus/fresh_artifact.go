@@ -106,7 +106,7 @@ func (g gatedEmbeddedArtifactRuntime) Upload(ctx context.Context, body io.Reader
 }
 
 func (a *freshApplication) artifactRuntime(op bootstrap.FreshOperation) artifactproxy.ArtifactRuntime {
-	if a == nil || a.artifact == nil || op.Strategy.Strategy == bootstrap.ConnectExternal {
+	if a == nil || a.artifact == nil || isCommittedExternalStrategy(op.Strategy) {
 		return nil
 	}
 	return gatedEmbeddedArtifactRuntime{app: a}

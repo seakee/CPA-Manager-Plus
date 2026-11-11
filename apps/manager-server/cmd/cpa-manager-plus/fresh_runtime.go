@@ -54,6 +54,7 @@ const (
 // Journal states mirror the Runtime Protocol operation vocabulary plus the
 // Manager-local `unknown` result of a mutation whose response was lost.
 const (
+	freshRuntimeStateReserved  = "reserved"
 	freshRuntimeStateAccepted  = string(model.RuntimeOperationAccepted)
 	freshRuntimeStateSucceeded = string(model.RuntimeOperationSucceeded)
 	freshRuntimeStateFailed    = string(model.RuntimeOperationFailed)
@@ -150,7 +151,7 @@ func freshRuntimeOperationTerminal(operation freshRuntimeOperation) bool {
 
 func freshRuntimeOperationsPending(data freshRuntimeJournalData) bool {
 	for _, operation := range data.Operations {
-		if !freshRuntimeOperationTerminal(operation) {
+		if !freshRuntimeOperationTerminal(operation) && operation.State != freshRuntimeStateReserved {
 			return true
 		}
 	}
@@ -191,7 +192,7 @@ func freshRuntimeBoundOperations(data freshRuntimeJournalData) freshRuntimeJourn
 // different action out forever.
 func freshRuntimeOperationBlocks(data freshRuntimeJournalData, candidate freshRuntimeOperation) bool {
 	for _, existing := range data.Operations {
-		if freshRuntimeOperationTerminal(existing) || existing.Action == candidate.Action {
+		if freshRuntimeOperationTerminal(existing) || existing.State == freshRuntimeStateReserved || existing.Action == candidate.Action {
 			continue
 		}
 		if candidate.CreatedAt.Sub(existing.UpdatedAt) >= freshRuntimeOperationUnknownBound {
@@ -211,7 +212,7 @@ func freshRuntimeResolveOperation(
 	observedOK bool,
 	now time.Time,
 ) (freshRuntimeOperation, bool) {
-	if freshRuntimeOperationTerminal(operation) {
+	if freshRuntimeOperationTerminal(operation) || operation.State == freshRuntimeStateReserved {
 		return operation, false
 	}
 	age := now.Sub(operation.UpdatedAt)
@@ -267,6 +268,7 @@ func freshRuntimeResolveOperation(
 
 var errEmbeddedRuntimeDisabled = errors.New("CPA runtime client is not configured")
 var errEmbeddedStartLedgerUnavailable = errors.New("embedded start ledger is unavailable")
+var errRuntimeJournalUnavailable = errors.New("runtime operation journal is unavailable")
 
 type freshEmbeddedStartIntent struct {
 	Key               string                     `json:"key"`
@@ -412,7 +414,7 @@ func (a *freshApplication) enterEmbeddedRead(ctx context.Context) (context.Conte
 				release()
 				return nil, nil, a.wrapEmbeddedReadErr(ctx, err)
 			}
-			if op.Strategy.Strategy == bootstrap.ConnectExternal {
+			if isCommittedExternalStrategy(op.Strategy) {
 				a.markEmbeddedExecutionClosed()
 				release()
 				return nil, nil, errEmbeddedRuntimeDisabled
@@ -465,7 +467,7 @@ func (a *freshApplication) enterEmbeddedMutation(ctx context.Context) (func(), e
 				release()
 				return nil, err
 			}
-			if op.Strategy.Strategy == bootstrap.ConnectExternal {
+			if isCommittedExternalStrategy(op.Strategy) {
 				a.markEmbeddedExecutionClosed()
 				release()
 				return nil, errEmbeddedRuntimeDisabled
@@ -816,7 +818,7 @@ func (a *freshApplication) checkUnresolvedEmbeddedStarts(
 }
 
 func freshRuntimeProvenSettledForExternalCommit(op freshRuntimeOperation) bool {
-	if op.State == freshRuntimeStateSucceeded {
+	if op.State == freshRuntimeStateReserved || op.State == freshRuntimeStateSucceeded {
 		return true
 	}
 	if op.State == freshRuntimeStateFailed && op.FailureCode != "unknown_expired" {
@@ -1017,68 +1019,104 @@ func (c gatedEmbeddedRuntimeClient) Status(ctx context.Context) (model.RuntimeOb
 	return out, c.app.wrapEmbeddedReadErr(ctx, callErr)
 }
 
-func (c gatedEmbeddedRuntimeClient) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	if err := request.Validate(); err != nil {
-		return model.RuntimeOperationResult{}, err
+func (a *freshApplication) deleteEmbeddedStartIntent(intentKey string) {
+	if a == nil || intentKey == "" {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gate := &a.embeddedExecution
+	gate.ledgerMu.Lock()
+	defer gate.ledgerMu.Unlock()
+	data, err := a.loadEmbeddedStartLedgerLocked(writeCtx)
+	if err != nil {
+		return
+	}
+	if _, exists := data.Unresolved[intentKey]; !exists {
+		return
+	}
+	delete(data.Unresolved, intentKey)
+	_ = a.saveEmbeddedStartLedgerLocked(writeCtx, data)
+}
+
+func (c gatedEmbeddedRuntimeClient) dispatchLifecycleMutation(
+	ctx context.Context,
+	operationType model.RuntimeOperationType,
+	request model.RuntimeMutationRequest,
+	onReadyToSend func() error,
+) (model.RuntimeOperationResult, error) {
+	switch operationType {
+	case model.RuntimeOperationStart:
+		if err := request.Validate(); err != nil {
+			return model.RuntimeOperationResult{}, err
+		}
+	case model.RuntimeOperationRestart:
+		if request.ExpectedActiveArtifactID != "" {
+			return model.RuntimeOperationResult{}, errors.New("restart request must not carry expectedActiveArtifactId")
+		}
+		if err := request.Validate(); err != nil {
+			return model.RuntimeOperationResult{}, err
+		}
+	case model.RuntimeOperationStop:
+	default:
+		return model.RuntimeOperationResult{}, errors.New("unsupported runtime lifecycle operation")
 	}
 	client, release, err := c.enterMutation(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	intentKey, err := c.app.beginEmbeddedStartIntent(
-		ctx,
-		model.RuntimeOperationStart,
-		request.OperationID,
-		request.ExpectedRuntimeIdentity,
-		uint64(request.ExpectedRuntimeGeneration),
-		"",
-	)
-	if err != nil {
-		release()
-		return model.RuntimeOperationResult{}, err
+	var intentKey string
+	if operationType == model.RuntimeOperationStart || operationType == model.RuntimeOperationRestart {
+		intentKey, err = c.app.beginEmbeddedStartIntent(
+			ctx,
+			operationType,
+			request.OperationID,
+			request.ExpectedRuntimeIdentity,
+			uint64(request.ExpectedRuntimeGeneration),
+			"",
+		)
+		if err != nil {
+			release()
+			return model.RuntimeOperationResult{}, err
+		}
 	}
-	out, callErr := client.Start(ctx, request)
-	c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
+	if onReadyToSend != nil {
+		if err := onReadyToSend(); err != nil {
+			c.app.deleteEmbeddedStartIntent(intentKey)
+			release()
+			return model.RuntimeOperationResult{}, err
+		}
+	}
+	var (
+		out     model.RuntimeOperationResult
+		callErr error
+	)
+	switch operationType {
+	case model.RuntimeOperationStart:
+		out, callErr = client.Start(ctx, request)
+	case model.RuntimeOperationStop:
+		out, callErr = client.Stop(ctx, request)
+	case model.RuntimeOperationRestart:
+		out, callErr = client.Restart(ctx, request)
+	}
+	if intentKey != "" {
+		c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
+	}
 	release()
 	return out, callErr
+}
+
+func (c gatedEmbeddedRuntimeClient) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	return c.dispatchLifecycleMutation(ctx, model.RuntimeOperationStart, request, nil)
 }
 
 func (c gatedEmbeddedRuntimeClient) Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	client, release, err := c.enterMutation(ctx)
-	if err != nil {
-		return model.RuntimeOperationResult{}, err
-	}
-	defer release()
-	return client.Stop(ctx, request)
+	return c.dispatchLifecycleMutation(ctx, model.RuntimeOperationStop, request, nil)
 }
 
 func (c gatedEmbeddedRuntimeClient) Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
-	if request.ExpectedActiveArtifactID != "" {
-		return model.RuntimeOperationResult{}, errors.New("restart request must not carry expectedActiveArtifactId")
-	}
-	if err := request.Validate(); err != nil {
-		return model.RuntimeOperationResult{}, err
-	}
-	client, release, err := c.enterMutation(ctx)
-	if err != nil {
-		return model.RuntimeOperationResult{}, err
-	}
-	intentKey, err := c.app.beginEmbeddedStartIntent(
-		ctx,
-		model.RuntimeOperationRestart,
-		request.OperationID,
-		request.ExpectedRuntimeIdentity,
-		uint64(request.ExpectedRuntimeGeneration),
-		"",
-	)
-	if err != nil {
-		release()
-		return model.RuntimeOperationResult{}, err
-	}
-	out, callErr := client.Restart(ctx, request)
-	c.app.finishEmbeddedStartIntent(intentKey, out, callErr)
-	release()
-	return out, callErr
+	return c.dispatchLifecycleMutation(ctx, model.RuntimeOperationRestart, request, nil)
 }
 
 func (c gatedEmbeddedRuntimeClient) PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
@@ -1143,7 +1181,7 @@ func (a *freshApplication) runtimeModeFor(op bootstrap.FreshOperation) model.Run
 	if a == nil {
 		return ""
 	}
-	if op.Strategy.Strategy == bootstrap.ConnectExternal {
+	if isCommittedExternalStrategy(op.Strategy) {
 		return model.RuntimeModeExternal
 	}
 	return model.RuntimeModeEmbedded
@@ -1551,7 +1589,7 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-	if !found {
+	if !found || operation.State == freshRuntimeStateReserved {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -1635,7 +1673,7 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	reserved := freshRuntimeOperation{
 		RequestID: request.RequestID, Action: request.Action,
 		OperationID:     "runtime-ui/v1:" + request.RequestID,
-		State:           freshRuntimeStateAccepted,
+		State:           freshRuntimeStateReserved,
 		RuntimeIdentity: string(observed.Identity), RuntimeGeneration: uint64(observed.Generation),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -1668,26 +1706,40 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		context.WithoutCancel(r.Context()), freshRuntimeMutationBudget,
 	)
 	defer cancelMutation()
-	result, mutationErr := a.submitRuntimeMutation(mutationContext, operationType, model.RuntimeMutationRequest{
-		OperationID: reserved.OperationID, ExpectedRuntimeIdentity: observed.Identity,
-		ExpectedRuntimeGeneration: observed.Generation, ExpectedActiveArtifactID: expectedArtifact,
-	})
+	result, mutationErr := a.submitRuntimeMutation(
+		mutationContext,
+		operationType,
+		model.RuntimeMutationRequest{
+			OperationID:               reserved.OperationID,
+			ExpectedRuntimeIdentity:   observed.Identity,
+			ExpectedRuntimeGeneration: observed.Generation,
+			ExpectedActiveArtifactID:  expectedArtifact,
+		},
+		func() error {
+			return a.promoteRuntimeOperationAccepted(mutationContext, reserved)
+		},
+	)
+	preDispatchUnsupported := errors.Is(mutationErr, errEmbeddedRuntimeDisabled)
+	preDispatchUnavailable := errors.Is(mutationErr, errEmbeddedStartLedgerUnavailable) ||
+		errors.Is(mutationErr, errRuntimeJournalUnavailable)
+	if preDispatchUnavailable {
+		// Either the write-ahead start ledger or the pre-dispatch promotion to
+		// `accepted` failed locally before any Supervisor RPC was sent. Best-effort
+		// remove the `reserved` placeholder; even if that write also fails, the
+		// durable state remains `reserved` rather than `accepted`, so a same-ID
+		// retry after store recovery re-executes instead of replaying a phantom
+		// accepted operation.
+		_ = a.abortReservedRuntimeOperation(mutationContext, reserved.RequestID)
+		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
+		return
+	}
 	outcome := reserved
 	outcome.UpdatedAt = time.Now().UTC()
 	conflictCode := runtimeMutationConflictCode(mutationErr)
-	preDispatchUnsupported := errors.Is(mutationErr, errEmbeddedRuntimeDisabled)
-	preDispatchUnavailable := errors.Is(mutationErr, errEmbeddedStartLedgerUnavailable)
 	switch {
 	case preDispatchUnsupported:
 		outcome.State = freshRuntimeStateFailed
 		outcome.FailureCode = "runtime_mutation_unsupported"
-	case preDispatchUnavailable:
-		// Persisting the write-ahead start ledger failed locally before any
-		// Supervisor RPC was dispatched. Mark the reserved journal row failed
-		// without adopting the desired lifecycle so the reconciler never starts
-		// an unrecorded runtime and a retry after store recovery is not blocked.
-		outcome.State = freshRuntimeStateFailed
-		outcome.FailureCode = "operation_journal_unavailable"
 	case conflictCode != "":
 		// The Supervisor rejected the mutation before any side effect. The entry
 		// becomes terminal and the desired lifecycle is never written, so the
@@ -1733,10 +1785,7 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
 		return
 	}
-	if preDispatchUnavailable {
-		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
-		return
-	}
+	// preDispatchUnavailable returned early above before touching DesiredLifecycle.
 	if conflictCode != "" {
 		// Preserve the 409 contract for a Supervisor rejection while the durable
 		// entry already records the terminal outcome.
@@ -1763,8 +1812,10 @@ func (a *freshApplication) reserveRuntimeOperation(ctx context.Context, operatio
 		if existing.Action != operation.Action {
 			return nil, "operation_id_conflict"
 		}
-		previous := existing
-		return &previous, ""
+		if existing.State != freshRuntimeStateReserved {
+			previous := existing
+			return &previous, ""
+		}
 	}
 	if freshRuntimeOperationBlocks(data, operation) {
 		return nil, "operation_conflict"
@@ -1792,14 +1843,57 @@ func (a *freshApplication) finalizeRuntimeOperation(ctx context.Context, operati
 	return a.runtimeJournal.save(ctx, data)
 }
 
+func (a *freshApplication) promoteRuntimeOperationAccepted(ctx context.Context, operation freshRuntimeOperation) error {
+	a.runtimeJournal.mu.Lock()
+	defer a.runtimeJournal.mu.Unlock()
+	data, err := a.runtimeJournal.load(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errRuntimeJournalUnavailable, err)
+	}
+	if stored, found := data.Operations[operation.RequestID]; found && freshRuntimeOperationTerminal(stored) {
+		return nil
+	}
+	operation.State = freshRuntimeStateAccepted
+	operation.UpdatedAt = time.Now().UTC()
+	data.Operations[operation.RequestID] = operation
+	if err := a.runtimeJournal.save(ctx, data); err != nil {
+		return fmt.Errorf("%w: %w", errRuntimeJournalUnavailable, err)
+	}
+	return nil
+}
+
+func (a *freshApplication) abortReservedRuntimeOperation(ctx context.Context, requestID string) error {
+	a.runtimeJournal.mu.Lock()
+	defer a.runtimeJournal.mu.Unlock()
+	data, err := a.runtimeJournal.load(ctx)
+	if err != nil {
+		return err
+	}
+	stored, found := data.Operations[requestID]
+	if !found || stored.State != freshRuntimeStateReserved {
+		return nil
+	}
+	delete(data.Operations, requestID)
+	return a.runtimeJournal.save(ctx, data)
+}
+
 func (a *freshApplication) submitRuntimeMutation(
 	ctx context.Context,
 	operationType model.RuntimeOperationType,
 	request model.RuntimeMutationRequest,
+	onReadyToSend func() error,
 ) (model.RuntimeOperationResult, error) {
 	client := a.embeddedRuntimeClient()
 	if client == nil {
 		return model.RuntimeOperationResult{}, errEmbeddedRuntimeDisabled
+	}
+	if gated, ok := client.(gatedEmbeddedRuntimeClient); ok {
+		return gated.dispatchLifecycleMutation(ctx, operationType, request, onReadyToSend)
+	}
+	if onReadyToSend != nil {
+		if err := onReadyToSend(); err != nil {
+			return model.RuntimeOperationResult{}, err
+		}
 	}
 	switch operationType {
 	case model.RuntimeOperationStart:
@@ -1921,7 +2015,7 @@ func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx cont
 		if err != nil {
 			return model.EmbeddedRuntimeDesiredState{}, false, err
 		}
-		if op.Strategy.Strategy == bootstrap.ConnectExternal {
+		if isCommittedExternalStrategy(op.Strategy) {
 			s.app.markEmbeddedExecutionClosed()
 			return model.EmbeddedRuntimeDesiredState{}, false, nil
 		}
@@ -1938,7 +2032,7 @@ func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx
 		if err != nil {
 			return "", false, err
 		}
-		if op.Strategy.Strategy == bootstrap.ConnectExternal {
+		if isCommittedExternalStrategy(op.Strategy) {
 			s.app.markEmbeddedExecutionClosed()
 			return "", false, nil
 		}
@@ -1961,7 +2055,7 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	if a == nil || client == nil || desired == nil {
 		return
 	}
-	if op, err := a.current(ctx); err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
+	if op, err := a.current(ctx); err == nil && isCommittedExternalStrategy(op.Strategy) {
 		a.markEmbeddedExecutionClosed()
 		return
 	}
@@ -2017,7 +2111,7 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 			return
 		case <-ticker.C:
 			op, err := a.current(ctx)
-			if err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
+			if err == nil && isCommittedExternalStrategy(op.Strategy) {
 				a.markEmbeddedExecutionClosed()
 				<-done
 				return

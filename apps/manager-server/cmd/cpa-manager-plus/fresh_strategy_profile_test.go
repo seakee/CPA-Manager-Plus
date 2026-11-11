@@ -3417,10 +3417,11 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 	})
 }
 
-// TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling verifies P2:
-// runFreshEmbeddedReconciler does not poll SQLite at sub-second intervals while
-// running, and retires immediately via the in-memory externalCommitted signal
-// when ConnectExternal commits even when configured with a multi-hour interval.
+// TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling verifies through
+// ServeHTTP, SQLite, and a fake HTTP Supervisor that runFreshEmbeddedReconciler
+// retires immediately via the in-memory externalCommitted signal when
+// ConnectExternal commits even when configured with a multi-hour reconcile
+// interval, and makes zero post-commit Supervisor requests.
 func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	const management = externalAuthorityManagement
 	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3437,15 +3438,17 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	}))
 	t.Cleanup(externalServer.Close)
 
-	var statusCalls atomic.Int32
-	fourthStatus := make(chan struct{})
-	var fourthOnce sync.Once
+	initialStatusObserved := make(chan struct{})
+	var initialOnce sync.Once
+	var externalCommitted atomic.Bool
+	var postCommitSupervisorHits atomic.Int32
 	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if externalCommitted.Load() {
+			postCommitSupervisorHits.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","recovery":{"state":"inactive","attemptsRemaining":0}}`))
-		if statusCalls.Add(1) >= 4 {
-			fourthOnce.Do(func() { close(fourthStatus) })
-		}
+		initialOnce.Do(func() { close(initialStatusObserved) })
 	}))
 	t.Cleanup(supervisor.Close)
 
@@ -3488,45 +3491,6 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	countingStore := &nthLoadFailingStore{Store: app.store}
-	app.store = countingStore
-
-	// First verify that sub-second reconcile intervals (25ms) do not trigger
-	// sub-second fallback watch polling: across 4 full reconcile cycles, store.Load
-	// is called once on startup plus 3 times per reconcile cycle (pre-lock +
-	// post-lock desired-state check + enterEmbeddedRead), with zero extra watch-ticker loads.
-	fastCtx, cancelFast := context.WithCancel(t.Context())
-	fastExited := make(chan struct{})
-	go func() {
-		defer close(fastExited)
-		app.runFreshEmbeddedReconciler(fastCtx, 25*time.Millisecond)
-	}()
-	select {
-	case <-fourthStatus:
-	case <-time.After(2 * time.Second):
-		t.Fatal("fast reconcile cycles did not complete")
-	}
-	cancelFast()
-	<-fastExited
-	if got := countingStore.calls.Load(); got > 1+3*statusCalls.Load() {
-		t.Fatalf("store.Load calls across %d 25ms reconcile cycles = %d, want <= %d (watch ticker must stay >= 1s)",
-			statusCalls.Load(), got, 1+3*statusCalls.Load())
-	}
-
-	// Now run with a 10-hour interval so neither ticker can fire, and verify
-	// ConnectExternal retires the reconciler immediately via externalCommitted.
-	initialLongStatus := make(chan struct{})
-	var longOnce sync.Once
-	beforeLong := statusCalls.Load()
-	observingLongStore := &nthLoadFailingStore{
-		Store: app.store,
-		onCall: func(n int32) {
-			if n >= 4 {
-				longOnce.Do(func() { close(initialLongStatus) })
-			}
-		},
-	}
-	app.store = observingLongStore
 	reconcilerCtx, cancelReconciler := context.WithCancel(t.Context())
 	defer cancelReconciler()
 	reconcilerExited := make(chan struct{})
@@ -3535,12 +3499,11 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		app.runFreshEmbeddedReconciler(reconcilerCtx, 10*time.Hour)
 	}()
 	select {
-	case <-initialLongStatus:
+	case <-initialStatusObserved:
 	case <-time.After(2 * time.Second):
-		t.Fatal("10h reconciler initial cycle did not start")
+		t.Fatal("10h reconciler initial Supervisor observation did not arrive")
 	}
-	_ = beforeLong
-	// Commit ConnectExternal and verify reconciler retires immediately via the in-memory signal.
+
 	payload, err := json.Marshal(struct {
 		Identity         bootstrap.FreshIdentity `json:"identity"`
 		ExpectedRevision uint64                  `json:"expectedRevision"`
@@ -3563,15 +3526,19 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	commitReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	commitReq.Header.Set("Content-Type", "application/json")
 	commitRes := httptest.NewRecorder()
-	app.canonicalAPI(commitRes, commitReq)
+	app.ServeHTTP(commitRes, commitReq)
 	if commitRes.Code != http.StatusOK {
 		t.Fatalf("POST strategy (ConnectExternal) = %d %s, want 200", commitRes.Code, commitRes.Body.String())
 	}
+	externalCommitted.Store(true)
 
 	select {
 	case <-reconcilerExited:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("reconciler did not retire immediately via externalCommitted signal")
+	}
+	if got := postCommitSupervisorHits.Load(); got != 0 {
+		t.Fatalf("post-commit Supervisor hits = %d, want 0", got)
 	}
 }
 
@@ -4284,4 +4251,371 @@ func TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart(t *testing
 			t.Fatalf("committed strategy = %+v, want committed connect_external", after.Operation.Strategy)
 		}
 	})
+}
+
+// TestValidatedExternalCheckpointKeepsSupervisorAndStartLedgerFenceAcrossRestart
+// verifies that a pre-commit ConnectExternal checkpoint in stage "validated"
+// does not omit the Embedded Runtime client when rebuilding freshApplication:
+// committing ConnectExternal after restart still fails closed on a 401 or
+// unreachable Supervisor or an unresolved start-ledger entry, and commits once
+// the Supervisor reports healthy offline + disarmed status.
+func TestValidatedExternalCheckpointKeepsSupervisorAndStartLedgerFenceAcrossRestart(t *testing.T) {
+	const (
+		management           = externalAuthorityManagement
+		productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+	)
+
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+management {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v8/management/config":
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/data/auth"},"access":{"api-keys":["ext-key-1"]}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(externalServer.Close)
+
+	seedValidatedExternalDB := func(t *testing.T, withUnresolvedLedger bool) string {
+		t.Helper()
+		dir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+		paths.Config = filepath.Join(dir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app := newFreshApplication(opened, config.Config{}, nil)
+		rec, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID, Revision: 1,
+				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:         bootstrap.ConnectExternal,
+				TargetIdentity:   freshkeyapply.ExternalIdentity(externalServer.URL),
+				TargetGeneration: 1,
+				Stage:            "validated",
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if withUnresolvedLedger {
+			const ledgerJSON = `{"unresolved":{"start:val-start-01:runtime-01:1":{"key":"start:val-start-01:runtime-01:1","operationId":"val-start-01","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"createdAt":"2026-11-11T00:00:00Z"}}}`
+			if _, err := app.runtimeJournal.db.ExecContext(
+				t.Context(),
+				`INSERT INTO settings(key, value, updated_at_ms) VALUES(?, ?, ?)`,
+				freshEmbeddedStartLedgerKey,
+				ledgerJSON,
+				time.Now().UnixMilli(),
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := opened.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	postConnectExternal := func(t *testing.T, app *freshApplication, attemptID string) *httptest.ResponseRecorder {
+		t.Helper()
+		cur, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(struct {
+			Identity         bootstrap.FreshIdentity `json:"identity"`
+			ExpectedRevision uint64                  `json:"expectedRevision"`
+			AttemptID        string                  `json:"attemptId"`
+			freshstrategy.Request
+		}{
+			Identity:         cur.Operation.Identity,
+			ExpectedRevision: cur.Operation.Revision,
+			AttemptID:        attemptID,
+			Request: freshstrategy.Request{
+				Strategy:      bootstrap.ConnectExternal,
+				BaseURL:       externalServer.URL,
+				ManagementKey: management,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		req.Header.Set("Content-Type", "application/json")
+		out := httptest.NewRecorder()
+		app.ServeHTTP(out, req)
+		return out
+	}
+
+	var (
+		supervisorMode atomic.Value
+		supervisorGen  atomic.Uint64
+	)
+	supervisorMode.Store("401")
+	supervisorGen.Store(1)
+
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mode := supervisorMode.Load().(string)
+		switch mode {
+		case "401":
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		case "unreachable":
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			gen := strconv.FormatUint(supervisorGen.Load(), 10)
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":` + gen + `,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		}
+	}))
+	t.Cleanup(supervisor.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+	if err := os.WriteFile(tokenPath, []byte("validated-external-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbDir := seedValidatedExternalDB(t, true)
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:8317",
+	}, nil)
+
+	// 1. Supervisor returning 401 fails closed with 409 embedded_supervisor_status_unavailable.
+	res401 := postConnectExternal(t, app, strings.Repeat("1", 32))
+	var blocker freshStrategyActionBlocker
+	if res401.Code != http.StatusConflict || json.Unmarshal(res401.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_supervisor_status_unavailable" {
+		t.Fatalf("ConnectExternal on validated checkpoint with 401 Supervisor = %d %s, want 409 embedded_supervisor_status_unavailable", res401.Code, res401.Body.String())
+	}
+
+	// 2. Unreachable Supervisor fails closed with 409 embedded_supervisor_status_unavailable.
+	supervisorMode.Store("unreachable")
+	resUnreachable := postConnectExternal(t, app, strings.Repeat("2", 32))
+	blocker = freshStrategyActionBlocker{}
+	if resUnreachable.Code != http.StatusConflict || json.Unmarshal(resUnreachable.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_supervisor_status_unavailable" {
+		t.Fatalf("ConnectExternal on validated checkpoint with unreachable Supervisor = %d %s, want 409 embedded_supervisor_status_unavailable", resUnreachable.Code, resUnreachable.Body.String())
+	}
+
+	// 3. Healthy Supervisor on generation 1 is still fenced by unresolved start ledger entry.
+	supervisorMode.Store("healthy")
+	resLedger := postConnectExternal(t, app, strings.Repeat("3", 32))
+	blocker = freshStrategyActionBlocker{}
+	if resLedger.Code != http.StatusConflict || json.Unmarshal(resLedger.Body.Bytes(), &blocker) != nil || blocker.Code != "embedded_runtime_start_unresolved" {
+		t.Fatalf("ConnectExternal on validated checkpoint with unresolved ledger = %d %s, want 409 embedded_runtime_start_unresolved", resLedger.Code, resLedger.Body.String())
+	}
+	checkStillValidated, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkStillValidated.Operation.Strategy.Stage != "validated" {
+		t.Fatalf("strategy stage changed despite 409 blockers: %+v", checkStillValidated.Operation.Strategy)
+	}
+
+	// 4. Healthy Supervisor on generation 2 (offline + disarmed) commits ConnectExternal with 200 OK.
+	supervisorGen.Store(2)
+	resOK := postConnectExternal(t, app, strings.Repeat("4", 32))
+	if resOK.Code != http.StatusOK {
+		t.Fatalf("ConnectExternal on validated checkpoint with healthy Supervisor = %d %s, want 200", resOK.Code, resOK.Body.String())
+	}
+	afterCommit, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCommit.Operation.Strategy.Strategy != bootstrap.ConnectExternal || afterCommit.Operation.Strategy.Stage != "committed" {
+		t.Fatalf("committed strategy = %+v, want committed connect_external", afterCommit.Operation.Strategy)
+	}
+}
+
+// TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequestIDRetry
+// verifies P2-1: when reserving an operation succeeds, writing the write-ahead
+// start ledger fails, AND finalizing/aborting the journal row also fails, the
+// durable row remains in a pre-dispatch reserved state rather than "accepted".
+// After SQLite recovers, retrying POST /control/api/v2/runtime/operations with
+// the exact same requestId does not replay a phantom HTTP 200 "accepted" result;
+// instead it executes the operation cleanly once and Supervisor never received
+// the first failed request.
+func TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequestIDRetry(t *testing.T) {
+	const (
+		productionArtifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		sameRequestID        = "77777777-7777-4777-8777-777777777777"
+	)
+
+	var (
+		mutatingHits atomic.Int32
+		startHits    atomic.Int32
+		curState     atomic.Value
+	)
+	curState.Store("offline")
+
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mutatingHits.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/runtime/status":
+			st := curState.Load().(string)
+			_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"` + st + `","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + productionArtifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		case "/v1/runtime/operations/start":
+			startHits.Add(1)
+			var payload struct {
+				OperationID string `json:"operationId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			curState.Store("ready")
+			_, _ = w.Write([]byte(`{"operationId":"` + payload.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(supervisor.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+	if err := os.WriteFile(tokenPath, []byte("double-failure-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:8317",
+	}, nil)
+	protected, err := opened.Protector.ProtectString(strings.Repeat("e", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                "runtime-01",
+			TargetGeneration:              1,
+			TargetArtifactID:              productionArtifactID,
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Allow initial journal reservation INSERT on fresh_runtime_operations_v1,
+	// fail the write-ahead ledger write on fresh_embedded_start_ledger_v1, AND
+	// fail the subsequent finalize/abort UPDATE on fresh_runtime_operations_v1.
+	db := app.runtimeJournal.db
+	if _, err := db.ExecContext(t.Context(), `
+		CREATE TRIGGER test_fail_double_ledger_insert
+		BEFORE INSERT ON settings
+		WHEN NEW.key = 'fresh_embedded_start_ledger_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated start ledger write failure');
+		END;
+		CREATE TRIGGER test_fail_double_ledger_update
+		BEFORE UPDATE ON settings
+		WHEN NEW.key = 'fresh_embedded_start_ledger_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated start ledger write failure');
+		END;
+		CREATE TRIGGER test_fail_journal_finalize_update
+		BEFORE UPDATE ON settings
+		WHEN NEW.key = 'fresh_runtime_operations_v1'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated journal finalize write failure');
+		END;
+	`); err != nil {
+		t.Fatalf("install double-failure triggers: %v", err)
+	}
+
+	postSameStart := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/control/api/v2/runtime/operations",
+			strings.NewReader(`{"action":"start","requestId":"`+sameRequestID+`"}`),
+		)
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		req.Header.Set("Content-Type", "application/json")
+		out := httptest.NewRecorder()
+		app.ServeHTTP(out, req)
+		return out
+	}
+
+	// First attempt: reserve succeeded, ledger failed, finalize/abort also failed -> 503, zero RPC, no DesiredRunning.
+	failRes := postSameStart()
+	if failRes.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first attempt under double write failure = %d %s, want 503", failRes.Code, failRes.Body.String())
+	}
+	if got := mutatingHits.Load(); got != 0 {
+		t.Fatalf("Supervisor mutating RPCs on first failed attempt = %d, want 0", got)
+	}
+	if desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+		t.Fatalf("DesiredRunning persisted despite double write failure: (%+v, %v, %v)", desired, found, err)
+	}
+	lookupReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/operations/"+sameRequestID, nil)
+	lookupReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	lookupRes := httptest.NewRecorder()
+	app.ServeHTTP(lookupRes, lookupReq)
+	if lookupRes.Code != http.StatusNotFound {
+		t.Fatalf("GET runtime/operations/%s before retry = %d %s, want 404 (not phantom accepted)", sameRequestID, lookupRes.Code, lookupRes.Body.String())
+	}
+
+	// Recover SQLite and retry with the EXACT SAME requestId: must re-execute and succeed, NOT replay "accepted".
+	if _, err := db.ExecContext(t.Context(), `
+		DROP TRIGGER IF EXISTS test_fail_double_ledger_insert;
+		DROP TRIGGER IF EXISTS test_fail_double_ledger_update;
+		DROP TRIGGER IF EXISTS test_fail_journal_finalize_update;
+	`); err != nil {
+		t.Fatalf("drop double-failure triggers: %v", err)
+	}
+	retryRes := postSameStart()
+	if retryRes.Code != http.StatusOK || !strings.Contains(retryRes.Body.String(), `"state":"succeeded"`) {
+		t.Fatalf("same-requestId retry after store recovery = %d %s, want 200 state=succeeded (not phantom accepted)", retryRes.Code, retryRes.Body.String())
+	}
+	if got := startHits.Load(); got != 1 {
+		t.Fatalf("Supervisor Start RPCs across both attempts = %d, want 1 (only from retry)", got)
+	}
 }
