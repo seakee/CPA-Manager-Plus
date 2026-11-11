@@ -104,8 +104,10 @@
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
   --text-tertiary: var(--app-text-muted);
-  /* Recessive tier for decorative glyphs and placeholder copy: >= 3:1 on every
-     light surface, 4.45:1 on white. Never use it for copy that carries meaning. */
+  /* Recessive graphic tier: decorative glyphs, separators and other non-text
+     marks. >= 3:1 on every light surface (4.45:1 on white, 3.96:1 on the
+     canvas), so it must never carry placeholder, helper or any other copy a
+     user has to read. */
   --text-quaternary: #6f7889;
   --text-muted: var(--app-text-muted);
 
@@ -390,7 +392,8 @@
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
   --text-tertiary: var(--app-text-muted);
-  /* Recessive tier: >= 3:1 on every dark surface (measured 3.72:1 worst case). */
+  /* Recessive graphic tier (never readable copy): >= 3:1 on every dark surface
+     (measured 3.72:1 worst case). */
   --text-quaternary: #8f8f8f;
   --text-muted: var(--app-text-muted);
 

@@ -25,7 +25,7 @@ This specification defines the token contracts, layout conventions, and automate
   - Primary copy and headings: `--app-text-primary` / `--text-primary` (light `#2c3e50`, dark `#e5e5e5`; >= 6.6:1).
   - Secondary body and labels: `--app-text-regular` / `--text-secondary` (light `#475569` — 5.91:1 worst case, 7.58:1 on white; dark `#bcbcbc` — 6.33:1 worst case). `--sidebar-text-color` resolves to it in both themes.
   - Muted metadata and captions: `--app-text-muted` / `--text-tertiary` / `--text-muted` (light `#52606f` — 5.02:1 worst case, 6.44:1 on white, 5.74:1 on the canvas; dark `#a8a8a8` — 5.06:1 worst case).
-  - Recessive tier: `--text-quaternary` (light `#6f7889`, dark `#8f8f8f`) is a **graphic** tier — decorative glyphs, separators and disabled/placeholder copy. It holds >= 3:1 (light 3.47:1, dark 3.72:1 worst case) but not 4.5:1, so it must never carry copy that has to be read.
+  - Recessive tier: `--text-quaternary` (light `#6f7889`, dark `#8f8f8f`) is a **graphic** tier — decorative glyphs, separators, icon strokes and other non-text marks, plus the label of a genuinely inactive control. It holds >= 3:1 (light 3.47:1, dark 3.72:1 worst case) but only 4.45:1 on white and 3.96:1 on the light canvas, so it must never carry copy that has to be read: placeholder and helper text of an enabled input (which is readable text under WCAG 1.4.3), captions, labels and values all stay on `--text-tertiary` or a stronger step.
   - Do not dim text with `opacity` on any of these steps. Alpha composites compound (nested `0.6 x 0.7 = 0.42`) and drop a 4.5:1 token to about 2:1; move one step down the ramp instead, and reserve `opacity` for genuinely disabled controls and for glyphs that still measure >= 3:1 after compositing.
 - **Borders**:
   - Default container/row divider: `--app-border` / `--border-color` / `--border-subtle`.
@@ -99,7 +99,7 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
   - Measure the **final composited** foreground and background, not the token hex: ancestor `opacity`, semi-transparent surfaces (`--app-surface`, `--glass-bg`, `--app-input-bg`), and tinted chips all change the result.
   - White text on a coloured fill uses the solid ramps (`--primary-solid*` / `--danger-solid*` with `--primary-contrast`), never the theme-adaptive `--primary-color`.
   - Badge and inline status text uses the paired badge tokens. Do not mint a new tint with `color-mix(in srgb, <token> 8-14%, transparent)` and reuse that same token as its own text colour: a 12% self-tint caps its own contrast at about 3.8:1.
-  - `apps/web/src/styles/themes.contrast.test.ts` pins this contract in CI. It parses `themes.scss`, rebuilds each theme's surface set from its own tokens (canvas, card, muted surfaces, 8–12% primary tints), and asserts that every text-role token clears `4.5:1`, the quaternary tier clears `3:1`, and every badge pair clears `4.5:1` on its own background. When you change a surface or text token, this test is what reports the regression — update the tokens rather than the expectations.
+  - The ratios in §2 are the contract, and they can only be checked against composited values — ancestor `opacity`, alpha surfaces and hover/focus states change the result. When you change a surface or text token, recompute the worst case over the theme's own surface set (canvas, card, muted surfaces, 8–12% primary tints) in the pull request and confirm the affected states in the browser.
 
 ## 7. Undefined Variables
 
