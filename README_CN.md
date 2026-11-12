@@ -107,6 +107,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 - 在浏览器本地或 Manager Server 定时巡检 Codex 和 xAI 账号。
 - 在 Provider 可提供信息时展示配额窗口、reset 证据、凭证状态、工作区状态和健康信号。
+- 点击账号表格的「额度」表头，切换 Codex 5 小时/周窗口显示顺序。默认短窗口优先，周窗口优先偏好保存在当前浏览器中，不改变窗口选择。
 - 对明确额度耗尽执行受控冷却，并将认证故障汇总到账号处理队列，支持复核与恢复。
 - 打开统一的 [凭证管理演示](https://cpamp-demo.seakee.dev/#/demo/accounts)。
 

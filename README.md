@@ -109,6 +109,7 @@ See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/en/guide/choosing-a-pan
 
 - Inspect Codex and xAI accounts locally or on a Manager Server schedule.
 - Read quota windows, reset evidence, credential state, workspace state, and provider-specific health signals when available.
+- Click the Accounts table's Quota header to switch Codex 5-hour/weekly display order. Shortest-first is the default; weekly-first is remembered in your browser without changing which windows are selected.
 - Apply controlled quota cooldowns and route credential failures into an account action queue for review and recovery.
 - Open the unified [Accounts Demo](https://cpamp-demo.seakee.dev/#/demo/accounts).
 

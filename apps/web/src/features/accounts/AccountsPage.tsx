@@ -1685,6 +1685,9 @@ export function AccountsPage() {
   const [layoutMode, setLayoutMode] = useState<AccountsLayoutMode>(
     () => initialWorkspaceUrlState.current.layoutMode
   );
+  const [quotaWindowOrder, setQuotaWindowOrder] = useState(
+    () => initialWorkspaceUiState.current.quotaWindowOrder
+  );
   const isCompactScreen = useMediaQuery('(max-width: 1024px)');
   const effectiveLayoutMode = isCompactScreen ? 'grid' : layoutMode;
   const [copiedIdentityKey, setCopiedIdentityKey] = useState<string | null>(null);
@@ -4947,7 +4950,8 @@ export function AccountsPage() {
       const mainListWindows = selectAccountQuotaMainListWindows(
         row,
         quotaWindows,
-        getMainListQuotaWindowLimit(effectiveLayoutMode, row)
+        getMainListQuotaWindowLimit(effectiveLayoutMode, row),
+        quotaWindowOrder
       );
       const existingDefinitions = quotaWindowDefinitionsByRowKey.get(row.selectionKey);
       let definitions: AccountQuotaWindowDefinition[];
@@ -4968,6 +4972,7 @@ export function AccountsPage() {
     quotaDisplayWindowsByRowKey,
     quotaWindowDefinitionsByRowKey,
     effectiveLayoutMode,
+    quotaWindowOrder,
   ]);
   // The auth index can stay unchanged while the credential account changes.
   // Only reuse a window-usage snapshot for the exact identity it queried.
@@ -5143,11 +5148,13 @@ export function AccountsPage() {
       pageSize,
       accountDisplayMode,
       layoutMode,
+      quotaWindowOrder,
     });
   }, [
     accountDisplayMode,
     accountSort,
     layoutMode,
+    quotaWindowOrder,
     operationalFilter,
     pageSize,
     planFilter,
@@ -5169,6 +5176,7 @@ export function AccountsPage() {
       pageSize,
       accountDisplayMode,
       layoutMode,
+      quotaWindowOrder,
       view: activeView,
       healthMode,
       account: selectedRowKey,
@@ -5188,6 +5196,7 @@ export function AccountsPage() {
       detailTab,
       healthMode,
       layoutMode,
+      quotaWindowOrder,
       oauthExcludedEditorProvider,
       oauthModelAliasEditorProvider,
       operationalFilter,
@@ -8969,7 +8978,8 @@ export function AccountsPage() {
     const mainListWindows = selectAccountQuotaMainListWindows(
       row,
       quotaWindows,
-      getMainListQuotaWindowLimit(effectiveLayoutMode, row)
+      getMainListQuotaWindowLimit(effectiveLayoutMode, row),
+      quotaWindowOrder
     );
     const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
     const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
@@ -9689,7 +9699,27 @@ export function AccountsPage() {
                 <span>{t('accounts.list_header_availability')}</span>
                 <span>{t('accounts.list_header_recent_requests')}</span>
                 <span>{t('accounts.list_header_historical_usage')}</span>
-                <span>{t('accounts.list_header_quota')}</span>
+                <span>
+                  <button
+                    type="button"
+                    className={styles.quotaWindowOrderButton}
+                    aria-pressed={quotaWindowOrder === 'weekly-first'}
+                    title={t(quotaWindowOrder === 'weekly-first'
+                      ? 'accounts.quota_window_order_weekly_first_hint'
+                      : 'accounts.quota_window_order_shortest_first_hint')}
+                    aria-label={`${t('accounts.list_header_quota')}. ${t(
+                      quotaWindowOrder === 'weekly-first'
+                        ? 'accounts.quota_window_order_weekly_first_hint'
+                        : 'accounts.quota_window_order_shortest_first_hint'
+                    )}`}
+                    onClick={() => setQuotaWindowOrder((order) =>
+                      order === 'weekly-first' ? 'shortest-first' : 'weekly-first'
+                    )}
+                  >
+                    {t('accounts.list_header_quota')}
+                    <small aria-hidden="true">{quotaWindowOrder === 'weekly-first' ? '7d → 5h' : '5h → 7d'}</small>
+                  </button>
+                </span>
                 <span>{t('accounts.list_header_actions')}</span>
               </div>
             {rowsToRender.map((row) => {

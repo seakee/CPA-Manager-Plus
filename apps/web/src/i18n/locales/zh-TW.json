@@ -1530,6 +1530,8 @@
     "list_header_recent_requests": "最近請求",
     "list_header_historical_usage": "歷史用量",
     "list_header_quota": "額度",
+    "quota_window_order_shortest_first_hint": "Codex：5 小時視窗在前，週視窗在後。點擊切換為週視窗優先，偏好儲存在目前瀏覽器中。",
+    "quota_window_order_weekly_first_hint": "Codex：週視窗在前，5 小時視窗在後。點擊切換為短視窗優先，偏好儲存在目前瀏覽器中。",
     "list_header_actions": "操作",
     "list_plan_remaining_days": "{{days}} 天",
     "list_plan_remaining_days_tooltip": "剩餘 {{days}} 天",
