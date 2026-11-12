@@ -676,16 +676,23 @@ describe('GitHub Actions workflow integrity', () => {
   it('keeps bundle and Windows preflight validation as conditional required gates', () => {
     const workflow = readWorkflow('pr-check.yml');
     const scopeJob = jobBlock(workflow, 'changes');
-    const managerJob = jobBlock(workflow, 'manager-server');
+    const bundleJob = jobBlock(workflow, 'manager-bundle-race');
     const windowsJob = jobBlock(workflow, 'manager-server-windows-sqlite');
 
     for (const output of ['windows_preflight', 'bundle_boundary', 'manager_runtime', 'runtime_lifecycle']) {
       expect(scopeJob).toContain(`${output}: \${{ steps.classify.outputs.${output} }}`);
     }
 
-    expect(managerJob).toContain("if: needs.changes.outputs.bundle_boundary == 'true'");
-    expect(managerJob).toContain(
-      'go test -race -count=1 -timeout 20m -json ./internal/service/maintenancebundle ./internal/command/managerdatabundle ./internal/processlock'
+    // The maintenancebundle race gate is sharded; the planner assigns its
+    // tests, and the small companion packages stay in a separate invocation so
+    // the shard's `-run` filter cannot silence them.
+    expect(bundleJob).toContain("needs.changes.outputs.bundle_boundary == 'true'");
+    expect(bundleJob).toContain('go test -race -count=1 -timeout 20m -json -run');
+    expect(bundleJob).toContain('--pkg ./internal/service/maintenancebundle');
+    expect(bundleJob).toContain('--race');
+    expect(bundleJob).toContain('--shards 4');
+    expect(bundleJob).toContain(
+      'go test -race -count=1 -timeout 20m -json ./internal/command/managerdatabundle ./internal/processlock'
     );
     expect(windowsJob).toContain("needs.changes.outputs.windows_preflight == 'true'");
     expect(windowsJob).toContain("needs.changes.outputs.bundle_boundary == 'true'");
@@ -705,6 +712,8 @@ describe('GitHub Actions workflow integrity', () => {
       ['RUNTIME_SUPERVISOR_RESULT', 'Runtime Supervisor'],
       ['RUNTIME_SUPERVISOR_WINDOWS_RESULT', 'Runtime Supervisor (Windows)'],
       ['DOCKER_BUILD_RESULT', 'Docker Build'],
+      ['MANAGER_FRESH_RACE_RESULT', 'Manager Server Fresh race'],
+      ['MANAGER_BUNDLE_RACE_RESULT', 'Manager Server bundle race'],
     ]) {
       for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
         const execution = spawnSync('bash', ['-c', script], {

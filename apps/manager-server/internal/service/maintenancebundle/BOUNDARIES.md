@@ -91,9 +91,16 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o <task-temp>/manager-windows.
 git diff --check
 ```
 
-CI `PR Check / Manager Server` uploads `manager-bundle-linux-<run>-<attempt>`:
-`environment.json` and `boundary.jsonl` (race-enabled runtime). `Manager Server
-SQLite (Windows)` uploads `manager-preflight-windows-<run>-<attempt>`:
+CI `PR Check / Manager Server bundle race (k/4)` shards the race gate across
+four runners and uploads `manager-bundle-linux-shard<k>-<run>-<attempt>` per
+shard: `environment.json` (which includes `shard`), `boundary.jsonl` (that
+shard's `maintenancebundle` test events) and, on shard 0,
+`boundary-other.jsonl` (the `managerdatabundle` and `processlock` events, run in
+their own invocation because a shard's `-run` filter would otherwise silence
+them). Each shard's `verify` step proves the executed tests are exactly that
+shard's assignment, so the four `boundary.jsonl` files together cover the whole
+race-enabled catalog. `Manager Server SQLite (Windows)` uploads
+`manager-preflight-windows-<run>-<attempt>`:
 `environment.json` and `bundle-boundary.jsonl`, alongside pre-existing evidence.
 Environment records bind requested source head, actual tested commit, OS/arch,
 Go and SQLite driver. Review the runtime test events and failures/skips; artifact

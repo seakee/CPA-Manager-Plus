@@ -21,8 +21,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A PR run is superseded by the next push to that PR; a branch push cancels
+  # nothing so every commit on main/dev/v2 still finishes its gates.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}@{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   security:
@@ -179,18 +181,16 @@ jobs:
 
       - name: Test
         working-directory: apps/manager-server
+        env:
+          # Temporary: makes the Go test cache report its decisions in verbose
+          # output so a cache miss on an unchanged tree is visible in CI logs.
+          # Remove once the diagnosis is complete.
+          GODEBUG: gocachetest=1
         run: go test ./...
 
       - name: Race test Bootstrap contract
         working-directory: apps/manager-server
         run: go test -race ./internal/domain/bootstrap
-
-      # The cmd package alone runs close to Go's 10-minute default under -race on
-      # hosted runners; an explicit ceiling keeps a slow runner from reading as a
-      # hang while still stopping a real one.
-      - name: Race test Fresh admission and authentication cutover
-        working-directory: apps/manager-server
-        run: go test -race -timeout 20m ./cmd/cpa-manager-plus ./internal/processlock ./internal/repository/freshstore ./internal/repository/freshkeys ./internal/service/fresh ./internal/service/freshrouting ./internal/service/freshstrategy ./internal/service/cpa ./internal/service/freshkeyapply ./internal/service/freshconfig ./internal/http/controller/freshbootstrap
 
       - name: Race test Runtime ownership paths
         if: needs.changes.outputs.manager_runtime == 'true'
@@ -462,12 +462,118 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The Fresh race gate used to run the whole `cmd/cpa-manager-plus` package
+  # serially; that single package is most of the wall clock, so it is sharded
+  # across four runners instead. `go-test-shard.mjs plan` enumerates the catalog
+  # with `go test -race -list` (the same build tags CI executes with) and hands
+  # each shard a disjoint `-run` value; `verify` then proves the executed tests
+  # are exactly that shard's assignment, so sharding cannot shrink coverage.
+  manager-fresh-race:
+    name: Manager Server Fresh race (${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.manager_server == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+          cache-dependency-path: apps/manager-server/go.sum
+
+      - name: Plan Fresh race shard
+        id: plan
+        working-directory: apps/manager-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/manager-fresh-race"
+          mkdir -p "${evidence}"
+          run="$(node ../../bin/ci/go-test-shard.mjs plan \
+            --pkg ./cmd/cpa-manager-plus \
+            --race \
+            --shards 4 \
+            --index "${{ matrix.shard }}" \
+            --manifest "${evidence}/manifest.json")"
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+          echo "This shard runs: ${run}"
+
+      # The cmd package alone runs close to Go's 10-minute default under -race on
+      # hosted runners; an explicit ceiling keeps a slow runner from reading as a
+      # hang while still stopping a real one.
+      - name: Race test Fresh admission and authentication cutover
+        working-directory: apps/manager-server
+        shell: bash
+        env:
+          RUN_PATTERN: ${{ steps.plan.outputs.run }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/manager-fresh-race"
+          go test -race -timeout 20m -json -run "${RUN_PATTERN}" ./cmd/cpa-manager-plus |
+            tee "${evidence}/cmd.jsonl"
+          node ../../bin/ci/go-test-shard.mjs verify \
+            --manifest "${evidence}/manifest.json" --results "${evidence}/cmd.jsonl"
+
+      # The remaining packages of the original command are small, so they run on
+      # one shard as a separate `go test` invocation. A `-run` filter is global
+      # to every package named on the command line, which would silently select
+      # no tests here, so they must never be appended to the sharded command.
+      - name: Race test Fresh support packages
+        if: matrix.shard == 0
+        working-directory: apps/manager-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/manager-fresh-race"
+          go test -race -timeout 20m -json ./internal/processlock ./internal/repository/freshstore ./internal/repository/freshkeys ./internal/service/fresh ./internal/service/freshrouting ./internal/service/freshstrategy ./internal/service/cpa ./internal/service/freshkeyapply ./internal/service/freshconfig ./internal/http/controller/freshbootstrap |
+            tee "${evidence}/other.jsonl"
+
+      - name: Upload Fresh race evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: manager-fresh-race-shard${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manager-fresh-race/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Same split for the bundle boundary: `maintenancebundle` dominates the run
+  # time, so it is sharded with the same planner, and the two small companion
+  # packages run on shard 0 in a separate `go test` invocation.
+  manager-bundle-race:
+    name: Manager Server bundle race (${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.manager_server == 'true' && needs.changes.outputs.bundle_boundary == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+          cache-dependency-path: apps/manager-server/go.sum
+
       - name: Record Linux bundle boundary environment
-        if: needs.changes.outputs.bundle_boundary == 'true'
         working-directory: apps/manager-server
         shell: bash
         env:
           SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: '4'
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/manager-bundle-linux"
@@ -479,23 +585,58 @@ jobs:
               json.dump(dict(sourceHead=os.environ['SOURCE_HEAD'], testedCommit=output('git','rev-parse','HEAD'),
                              runnerOS=os.environ['RUNNER_OS'], runnerArch=os.environ['RUNNER_ARCH'],
                              kernel=platform.release(), goVersion=output('go','version'),
-                             sqliteDriver=output('go','list','-m','modernc.org/sqlite')), f, indent=2)
+                             sqliteDriver=output('go','list','-m','modernc.org/sqlite'),
+                             shard=int(os.environ['SHARD']), shards=int(os.environ['SHARDS'])), f, indent=2)
           PY
 
-      - name: Test bundle recovery and publication boundaries with race
-        if: needs.changes.outputs.bundle_boundary == 'true'
+      - name: Plan bundle race shard
+        id: plan
         working-directory: apps/manager-server
         shell: bash
         run: |
           set -euo pipefail
-          go test -race -count=1 -timeout 20m -json ./internal/service/maintenancebundle ./internal/command/managerdatabundle ./internal/processlock |
-            tee "${RUNNER_TEMP}/manager-bundle-linux/boundary.jsonl"
+          evidence="${RUNNER_TEMP}/manager-bundle-linux"
+          run="$(node ../../bin/ci/go-test-shard.mjs plan \
+            --pkg ./internal/service/maintenancebundle \
+            --race \
+            --shards 4 \
+            --index "${{ matrix.shard }}" \
+            --manifest "${evidence}/manifest.json")"
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+          echo "This shard runs: ${run}"
+
+      # These packages contain `//go:build race` test files, so the enumeration
+      # ran under -race and execution must use the same flag.
+      - name: Test bundle recovery and publication boundaries with race
+        working-directory: apps/manager-server
+        shell: bash
+        env:
+          RUN_PATTERN: ${{ steps.plan.outputs.run }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/manager-bundle-linux"
+          go test -race -count=1 -timeout 20m -json -run "${RUN_PATTERN}" ./internal/service/maintenancebundle |
+            tee "${evidence}/boundary.jsonl"
+          node ../../bin/ci/go-test-shard.mjs verify \
+            --manifest "${evidence}/manifest.json" --results "${evidence}/boundary.jsonl"
+
+      # Separate invocation for the non-sharded companions: a `-run` filter
+      # applies to every named package and would select nothing here.
+      - name: Test bundle command and lock boundaries with race
+        if: matrix.shard == 0
+        working-directory: apps/manager-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/manager-bundle-linux"
+          go test -race -count=1 -timeout 20m -json ./internal/command/managerdatabundle ./internal/processlock |
+            tee "${evidence}/boundary-other.jsonl"
 
       - name: Upload Linux bundle boundary evidence
-        if: always() && needs.changes.outputs.bundle_boundary == 'true'
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: manager-bundle-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          name: manager-bundle-linux-shard${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/manager-bundle-linux/
           if-no-files-found: error
           retention-days: 14
@@ -761,22 +902,16 @@ jobs:
         shell: bash
         run: bash -n bin/native/cpa-manager-plus-launcher bin/native/cpa-manager-plusctl.sh bin/release/package-native.sh
 
+  # The image only consumes the worktree, so it starts as soon as scope is known
+  # instead of waiting out the Manager Server and Runtime gates at the end of
+  # the critical path. The gates still run in parallel and still gate the PR
+  # through Required checks.
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     needs:
       - changes
-      - frontend
-      - manager-server
-      - runtime-supervisor
-      - ingress
-    if: >-
-      always() &&
-      needs.changes.outputs.docker == 'true' &&
-      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
-      (needs['manager-server'].result == 'success' || needs['manager-server'].result == 'skipped') &&
-      (needs['runtime-supervisor'].result == 'success' || needs['runtime-supervisor'].result == 'skipped') &&
-      (needs.ingress.result == 'success' || needs.ingress.result == 'skipped')
+    if: needs.changes.outputs.docker == 'true'
 
     steps:
       - name: Checkout code
@@ -958,6 +1093,8 @@ jobs:
       - changes
       - frontend
       - manager-server
+      - manager-fresh-race
+      - manager-bundle-race
       - runtime-supervisor
       - runtime-supervisor-windows
       - ingress
@@ -975,6 +1112,8 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
+          MANAGER_FRESH_RACE_RESULT: ${{ needs['manager-fresh-race'].result }}
+          MANAGER_BUNDLE_RACE_RESULT: ${{ needs['manager-bundle-race'].result }}
           RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}
           RUNTIME_SUPERVISOR_WINDOWS_RESULT: ${{ needs['runtime-supervisor-windows'].result }}
           INGRESS_RESULT: ${{ needs.ingress.result }}
@@ -996,6 +1135,8 @@ jobs:
             "Scope:${CHANGES_RESULT}"
             "Frontend:${FRONTEND_RESULT}"
             "Manager Server:${MANAGER_SERVER_RESULT}"
+            "Manager Server Fresh race:${MANAGER_FRESH_RACE_RESULT}"
+            "Manager Server bundle race:${MANAGER_BUNDLE_RACE_RESULT}"
             "Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"
             "Runtime Supervisor (Windows):${RUNTIME_SUPERVISOR_WINDOWS_RESULT}"
             "Ingress:${INGRESS_RESULT}"

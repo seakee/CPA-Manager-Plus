@@ -552,6 +552,29 @@ describe('PR check classifier', () => {
     }
   });
 
+  // The Go test shard planner is what every sharded race gate relies on to keep
+  // its coverage whole, so a PR that changes only one of its files must still
+  // schedule every check.
+  it('runs every check when only a Go test shard planner file changes', () => {
+    for (const filePath of ['bin/ci/go-test-shard.mjs', 'tests/goTestShard.test.mjs']) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        frontend: true,
+        manager_server: true,
+        runtime_supervisor: true,
+        ingress: true,
+        windows_sqlite: true,
+        windows_preflight: true,
+        bundle_boundary: true,
+        manager_runtime: true,
+        runtime_lifecycle: true,
+        docker_all_images: true,
+        native_control: true,
+        docker: true,
+        release_content: true,
+      });
+    }
+  });
+
   it('runs workflow integrity without expanding unrelated product gates', () => {
     for (const filePath of [
       '.github/workflows/release.yml',
