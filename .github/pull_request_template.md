@@ -74,13 +74,14 @@ Commands / evidence:
 
 ## Docs
 
+User documentation lives in [cpamp-hq/docs](https://github.com/cpamp-hq/docs) (1.x on `main`, v2 on `next`); this repository no longer builds a docs site.
+
 - [ ] README / README_CN updated for user-visible capabilities
-- [ ] Matching docs manual and navigation updated
-- [ ] Demo fixtures, screenshots, and deep links reviewed
+- [ ] Linked the `cpamp-hq/docs` PR (1.x → `main`, v2 → `next`), or state why it is not needed
 - [ ] Release notes needed
 - [ ] Not needed — explanation included below
 
-Docs decision:
+Docs decision / `cpamp-hq/docs` PR:
 
 ## Related
 

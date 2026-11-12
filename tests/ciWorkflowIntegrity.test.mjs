@@ -108,17 +108,15 @@ describe('GitHub Actions workflow integrity', () => {
     expect(trigger).toContain('- edited');
   });
 
-  it('keeps Docs inside the stable required-check aggregate', () => {
-    const workflow = readWorkflow('pr-check.yml');
-    const docsJob = jobBlock(workflow, 'docs');
-    const requiredJob = jobBlock(workflow, 'required');
+  it('keeps Required checks free of the removed Docs job', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const workflowText = readWorkflow('pr-check.yml');
 
-    expect(docsJob).toContain('name: Docs');
-    expect(docsJob).toContain('run: npm run docs:build');
-    expect(docsJob).not.toContain('ci-demo');
-    expect(requiredJob).toContain('- docs');
-    expect(requiredJob).toContain('DOCS_RESULT: ${{ needs.docs.result }}');
-    expect(requiredJob).toContain('"Docs:${DOCS_RESULT}"');
+    // Docs moved to cpamp-hq/docs: this repository no longer builds them, so
+    // neither the workflow nor the classification may schedule a Docs job.
+    expect(workflow.jobs.docs).toBeUndefined();
+    expect(workflowText).not.toContain('npm run docs:build');
+    expect(workflowText).not.toContain('needs.docs.result');
   });
 
   it('always calls the security workflow and waits for it in Required checks', () => {
@@ -392,14 +390,11 @@ describe('GitHub Actions workflow integrity', () => {
     atLeast('vitest', '4.1.12');
 
     // Advisories published after v1.14.10: follow-redirects inbound-header leak
-    // (GHSA-mrwp-f3q8-3g9p, patched 1.16.2) and the VitePress build Vite copy
-    // (GHSA-8g5g-mxqh-grgj, patched 6.4.5).
+    // (GHSA-mrwp-f3q8-3g9p, patched 1.16.2). The docs site that carried the
+    // VitePress build Vite copy (GHSA-8g5g-mxqh-grgj) moved to cpamp-hq/docs,
+    // so it is no longer part of this workspace lock.
     atLeast('follow-redirects', '1.16.2');
-    expectAtLeast(
-      lock.packages['node_modules/vitepress/node_modules/vite']?.version,
-      '6.4.5',
-      'VitePress build vite'
-    );
+    expect(locked('vitepress')).toBeUndefined();
 
     // GHSA-g3hv-75wg-m249 (minimatch < 11.0.1) is closed only inside the
     // typescript-eslint path; eslint's own minimatch 3 line, which filelist,
@@ -412,10 +407,6 @@ describe('GitHub Actions workflow integrity', () => {
     );
     expect(locked('minimatch')).toMatch(/^3\./);
 
-    // The scoped VitePress overrides keep the docs build on React 19 compatible
-    // DocSearch packages instead of the advisories in its default resolution.
-    expect(locked('@docsearch/css')).toBe('3.9.0');
-    expect(locked('@docsearch/js')).toBe('3.9.0');
   });
 
   it('runs Supervisor verification through classification and the required-check aggregate', () => {
@@ -1046,6 +1037,38 @@ describe('GitHub Actions workflow integrity', () => {
 
   it('does not retain the main-only standalone Demo and Docs workflow', () => {
     expect(existsSync(path.join(workflowDir, 'demo-docs-check.yml'))).toBe(false);
+  });
+
+  // The demo and docs moved to cpamp-demo.seakee.dev / cpamp-docs.seakee.dev;
+  // the legacy Pages origin keeps working only through the static redirect site.
+  it('publishes the legacy Pages redirect site from main alone', () => {
+    const workflow = parseYaml(readWorkflow('demo-pages.yml'));
+    const build = workflow.jobs.build;
+    const upload = build.steps.find((step) => step.uses?.startsWith('actions/upload-pages-artifact'));
+    const checkout = build.steps.find((step) => step.uses?.startsWith('actions/checkout'));
+
+    expect(workflow.on.push.branches).toEqual(['main']);
+    expect(Object.keys(workflow.on)).not.toContain('pull_request');
+    expect(workflow.concurrency).toEqual({ group: 'pages', 'cancel-in-progress': false });
+    expect(workflow.permissions).toEqual({
+      contents: 'read',
+      pages: 'write',
+      'id-token': 'write',
+    });
+    expect(upload.with.path).toBe('dist/pages');
+    expect(checkout.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
+    expect(upload.uses).toMatch(/^actions\/upload-pages-artifact@[0-9a-f]{40}$/);
+    expect(build.steps.map((step) => step.run ?? '').join('\n')).toContain(
+      'cp -R bin/pages-redirect/. dist/pages/'
+    );
+    for (const step of build.steps.filter((entry) => entry.run)) {
+      expect(step.run).not.toContain('npm ci');
+      expect(step.run).not.toContain('docs');
+      expect(step.run).not.toContain('build:demo');
+    }
+    for (const file of ['index.html', '404.html', '.nojekyll']) {
+      expect(existsSync(path.join(repoRoot, 'bin', 'pages-redirect', file)), file).toBe(true);
+    }
   });
 
   it('keeps GitHub Actions dependency updates on the integration branch', () => {

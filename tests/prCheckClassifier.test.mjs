@@ -23,7 +23,6 @@ const noChecks = {
   native_control: false,
   docker: false,
   docker_all_images: false,
-  docs: false,
   release_content: false,
 };
 
@@ -139,7 +138,6 @@ describe('PR check classifier', () => {
       docker_all_images: true,
       native_control: true,
       docker: true,
-      docs: true,
       release_content: true,
     });
   });
@@ -192,26 +190,25 @@ describe('PR check classifier', () => {
     });
   });
 
-  it('runs frontend checks for docs-site and README changes', () => {
-    expect(classifyChangedFiles(['apps/docs/index.md', 'README.md'])).toEqual({
-      ...noChecks,
-      frontend: true,
-      docs: true,
-    });
+  it('runs frontend checks for README changes', () => {
+    expect(classifyChangedFiles(['README.md'])).toEqual({ ...noChecks, frontend: true });
   });
 
-  it('runs Docs checks for docs-site changes alongside web changes', () => {
-    expect(classifyChangedFiles(['apps/docs/index.md', 'apps/web/src/App.tsx'])).toEqual({
-      ...noChecks,
-      frontend: true,
-      docker: true,
-      docs: true,
-    });
-    expect(classifyChangedFiles(['apps/docs/index.md'])).toEqual({
-      ...noChecks,
-      frontend: true,
-      docs: true,
-    });
+  it('runs frontend checks for the legacy Pages redirect site', () => {
+    for (const filePath of [
+      'bin/pages-redirect/redirect.mjs',
+      'bin/pages-redirect/index.html',
+      'bin/pages-redirect/404.html',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+  });
+
+  // Docs moved to cpamp-hq/docs; this repository no longer builds them, so the
+  // classifier has no docs category to schedule.
+  it('schedules no docs check', () => {
+    expect(classifyChangedFiles(['README.md', 'apps/web/src/App.tsx'])).not.toHaveProperty('docs');
+    expect(Object.keys(classifyChangedFiles([]))).not.toContain('docs');
   });
 
   it('runs release validation for release content and its validator', () => {
@@ -528,7 +525,6 @@ describe('PR check classifier', () => {
       frontend: true,
       native_control: true,
       docker: true,
-      docs: true,
     });
   });
 
@@ -551,7 +547,6 @@ describe('PR check classifier', () => {
         docker_all_images: true,
         native_control: true,
         docker: true,
-        docs: true,
         release_content: true,
       });
     }

@@ -46,7 +46,6 @@ jobs:
       native_control: ${{ steps.classify.outputs.native_control }}
       docker: ${{ steps.classify.outputs.docker }}
       docker_all_images: ${{ steps.classify.outputs.docker_all_images }}
-      docs: ${{ steps.classify.outputs.docs }}
       release_content: ${{ steps.classify.outputs.release_content }}
 
     steps:
@@ -912,28 +911,6 @@ jobs:
           CPAMP_RUNTIME19_SKIP_BUILD: 'true'
         run: bin/ci/runtime19-phase1-exit-e2e.sh
 
-  docs:
-    name: Docs
-    needs: changes
-    if: needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.22.1'
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build docs site
-        run: npm run docs:build
-
   release-content:
     name: Release Content
     needs: changes
@@ -987,7 +964,6 @@ jobs:
       - manager-server-windows-sqlite
       - native-control
       - docker-build
-      - docs
       - release-content
     if: always()
     runs-on: ubuntu-latest
@@ -1005,7 +981,6 @@ jobs:
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
           DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
-          DOCS_RESULT: ${{ needs.docs.result }}
           RELEASE_CONTENT_RESULT: ${{ needs['release-content'].result }}
         shell: bash
         run: |
@@ -1027,7 +1002,6 @@ jobs:
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"
             "Docker Build:${DOCKER_BUILD_RESULT}"
-            "Docs:${DOCS_RESULT}"
             "Release Content:${RELEASE_CONTENT_RESULT}"
           )
 
