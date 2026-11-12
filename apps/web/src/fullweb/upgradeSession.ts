@@ -76,7 +76,13 @@ export function rememberUpgradeCredential(credential: string, remember: boolean)
 
 export class UpgradeAuthenticationError extends Error {
   constructor(
-    public readonly reason: 'invalid' | 'unavailable' | 'changed' | 'network' | 'origin_rejected',
+    public readonly reason:
+      | 'invalid'
+      | 'unavailable'
+      | 'changed'
+      | 'network'
+      | 'origin_rejected'
+      | 'source_ownership_unavailable',
     public readonly expectedOrigin?: string
   ) {
     super(reason);
@@ -155,6 +161,28 @@ export async function verifyUpgradeCredential(
           'origin_rejected',
           normalizeExpectedOrigin(err.expected_origin)
         );
+      }
+    }
+    throw new UpgradeAuthenticationError('unavailable');
+  }
+  if (response.status === 503) {
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      /* Non-JSON 503 falls back to generic unavailability below. */
+    }
+    if (payload && typeof payload === 'object') {
+      const envelope = payload as Record<string, unknown>;
+      const err =
+        envelope.error && typeof envelope.error === 'object'
+          ? (envelope.error as Record<string, unknown>)
+          : null;
+      if (
+        envelope.contract_version === UPGRADE_AUTH_CONTRACT &&
+        err?.code === 'source_ownership_unavailable'
+      ) {
+        throw new UpgradeAuthenticationError('source_ownership_unavailable');
       }
     }
     throw new UpgradeAuthenticationError('unavailable');
