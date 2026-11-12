@@ -5,7 +5,6 @@ import {
   usageServiceApi,
   type ManagerConfig,
 } from '@/services/api/usageService';
-import { DEMO_API_BASE, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore } from '@/stores';
 import { useUsageServiceStore } from '@/stores/useUsageServiceStore';
 import { detectApiBaseFromLocation } from '@/utils/connection';
@@ -170,21 +169,6 @@ const initialAvailability: PanelFeatureAvailability = {
   reason: 'checking',
 };
 
-const demoAvailability: PanelFeatureAvailability = {
-  checking: false,
-  panelHostConfirmed: true,
-  panelHostMode: 'manager_embedded',
-  panelBase: DEMO_API_BASE,
-  managerServiceBase: DEMO_API_BASE,
-  managerServiceAvailable: true,
-  requestMonitoringAvailable: true,
-  modelPricesAvailable: true,
-  serverCodexInspectionAvailable: true,
-  dockerSetupAvailable: true,
-  externalManagerConfigAvailable: false,
-  reason: '',
-};
-
 let cachedAvailabilityKey = '';
 let cachedAvailability: PanelFeatureAvailability | null = null;
 let inFlightAvailabilityRequest: PanelFeatureAvailabilityRequest | null = null;
@@ -338,7 +322,6 @@ function requestPanelFeatureAvailability(input: PanelFeatureAvailabilityRequestI
 }
 
 export function usePanelFeatureAvailability(): PanelFeatureAvailability {
-  const demoMode = __DEMO_SITE__ && isDemoMode();
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const usageServiceRevision = useUsageServiceStore((state) => state.revision);
@@ -368,21 +351,14 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     availability: PanelFeatureAvailability;
   }>(() => ({
     requestKey,
-    availability: demoMode
-      ? demoAvailability
-      : cachedAvailabilityKey === requestKey && cachedAvailability
+    availability:
+      cachedAvailabilityKey === requestKey && cachedAvailability
         ? cachedAvailability
         : initialAvailability,
   }));
 
   useEffect(() => {
     let cancelled = false;
-    if (demoMode) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
     const request = requestPanelFeatureAvailability(requestInput);
     request.promise.then((availability) => {
       if (cancelled || request.key !== requestKey) return;
@@ -392,9 +368,8 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     return () => {
       cancelled = true;
     };
-  }, [panelBase, demoMode, requestInput, requestKey]);
+  }, [panelBase, requestInput, requestKey]);
 
-  if (demoMode) return demoAvailability;
   if (state.requestKey === requestKey) return state.availability;
 
   return {

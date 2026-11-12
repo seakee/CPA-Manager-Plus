@@ -32,7 +32,7 @@ describe('accountModelRules', () => {
     ['v8.0.32-3-gabc1234', 'unknown'],
     ['v8.0.33-0-gabc1234', 'override'],
     ['v8.0.33-1-gabc1234-dirty', 'override'],
-    ['v7.1.18-demo', 'merge'],
+    ['v7.1.18-demo', 'unknown'],
     ['v8.0.40-dev', 'unknown'],
     [null, 'unknown'],
   ] as const)('maps CPA %s to %s exclusion precedence', (version, expected) => {

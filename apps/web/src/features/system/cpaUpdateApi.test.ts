@@ -14,11 +14,6 @@ import {
   updateStatus,
 } from './cpaUpdateTestFixtures';
 
-const mocks = vi.hoisted(() => ({ demo: false }));
-vi.mock('@/features/demo/demoMode', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/features/demo/demoMode')>()),
-  isDemoMode: () => mocks.demo,
-}));
 const connection = { base: 'https://manager.test/v0/management/', key: 'test-key' };
 const response = (data: unknown) => ({ data }) as AxiosResponse;
 const httpError = (status: number, data: unknown) =>
@@ -28,7 +23,6 @@ const httpError = (status: number, data: unknown) =>
   } as AxiosResponse);
 const request = vi.spyOn(axios, 'request');
 beforeEach(() => {
-  mocks.demo = false;
   request.mockReset();
 });
 afterEach(() => {
@@ -243,17 +237,22 @@ describe('accepted CPA update HTTP contract', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it('performs zero real requests in demo mode, including direct transport calls', async () => {
-    mocks.demo = true;
-    const intent = updateIntent();
-    for (const call of [
-      () => cpaUpdateApi.status(connection),
-      () => cpaUpdateApi.check(connection),
-      () => cpaUpdateApi.mutate(connection, 'prepare', intent),
-      () => cpaUpdateApi.mutate(connection, 'activate', intent),
-      () => cpaUpdateApi.observe(connection, 'prepare', intent),
-    ])
-      await expect(call()).rejects.toMatchObject({ kind: 'unavailable' });
-    expect(request).not.toHaveBeenCalled();
-  });
+  it.each([
+    { base: '', key: 'test-key' },
+    { base: connection.base, key: '' },
+  ])(
+    'performs zero real requests when connection is incomplete (%o), including direct transport calls',
+    async (incomplete) => {
+      const intent = updateIntent();
+      for (const call of [
+        () => cpaUpdateApi.status(incomplete),
+        () => cpaUpdateApi.check(incomplete),
+        () => cpaUpdateApi.mutate(incomplete, 'prepare', intent),
+        () => cpaUpdateApi.mutate(incomplete, 'activate', intent),
+        () => cpaUpdateApi.observe(incomplete, 'prepare', intent),
+      ])
+        await expect(call()).rejects.toMatchObject({ kind: 'unavailable' });
+      expect(request).not.toHaveBeenCalled();
+    }
+  );
 });

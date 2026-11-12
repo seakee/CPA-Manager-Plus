@@ -328,28 +328,6 @@ describe('RuntimeStatusPage state wording', () => {
     expect(operationText()).not.toMatch(/\brunning\b/);
   });
 
-  it('serves the demo fixture instead of the unavailable observation on the demo site', async () => {
-    (window as unknown as { location: { hash: string } }).location.hash = '#/demo/system/runtime';
-    const client = { get: vi.fn(), post: vi.fn(), put: vi.fn() };
-
-    await mount(client as unknown as PublicApiClient);
-
-    // Nothing is requested: the demo has no Manager to answer.
-    expect(client.get).not.toHaveBeenCalled();
-    expect(stateNode('runtime-status-state')).toBe(
-      i18n.t('runtime_status.state_ready', { lng: 'zh-CN' })
-    );
-    expect(stateNode('runtime-status-gateway-state')).toBe(
-      i18n.t('runtime_status.state_ready', { lng: 'zh-CN' })
-    );
-    // The demo fixture is rendered like any other observation: the engine
-    // origin names itself through the console catalog, not as a literal.
-    expect(
-      renderer!.root.findByProps({ 'data-testid': 'runtime-status-engine-source-value' }).props
-        .children
-    ).toBe(i18n.t('runtime_status.engine_source_bundled', { lng: 'zh-CN' }));
-  });
-
   it.each(['zh-CN', 'zh-TW', 'en', 'ru'])(
     'renders every Manager, gateway and operation state in %s',
     async (language) => {

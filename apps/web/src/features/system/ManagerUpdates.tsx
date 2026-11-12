@@ -12,7 +12,6 @@ import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/stores';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { isDemoMode } from '@/features/demo/demoMode';
 import { Button } from '@/components/ui/Button';
 import { IconArrowUpFromLine, IconChevronRight, IconX } from '@/components/ui/icons';
 import {
@@ -55,8 +54,7 @@ export function ManagerUpdates({ children }: { children: ReactNode }) {
   const key = useAuthStore((s) => s.managementKey);
   const availability = usePanelFeatureAvailability();
   const base = availability.managerServiceBase;
-  const available =
-    auth && availability.managerServiceAvailable && !!base && !(__DEMO_SITE__ && isDemoMode());
+  const available = auth && availability.managerServiceAvailable && !!base;
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [notification, setNotification] = useState<ReleaseInfo | null>(null);
   const [busy, setBusy] = useState(false);

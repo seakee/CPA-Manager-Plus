@@ -14,7 +14,6 @@ import {
   IconRefreshCw,
 } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import { DEMO_SERVER_VERSION, isDemoMode } from '@/features/demo/demoMode';
 import { buildDashboardVersionReleaseURL } from '@/features/dashboard/versionReleaseLinks';
 import { copyToClipboard } from '@/utils/clipboard';
 import { formatDateTime } from '@/utils/format';
@@ -186,32 +185,25 @@ export function ManagerUpdatePage() {
     titleRef.current?.focus({ preventScroll: true });
   }, []);
 
-  // The demo build has no Manager Server behind it, so it reports its own state
-  // and version instead of the "needs a Manager Server" copy and the dev
-  // `git describe` string baked into the panel bundle.
-  const demo = __DEMO_SITE__ && isDemoMode();
   const failed = error || !!status?.last_error;
   const stale = !!status?.stale;
   const upgradeAllowed = !failed && !stale;
   const info = available && status?.state === 'update_available' ? status.target : undefined;
-  const state = demo
-    ? 'demo'
-    : !available
-      ? 'unavailable'
-      : failed
-        ? 'failed'
-        : !status
-          ? 'loading'
-          : stale
-            ? 'stale'
-            : status.state;
+  const state = !available
+    ? 'unavailable'
+    : failed
+      ? 'failed'
+      : !status
+        ? 'loading'
+        : stale
+          ? 'stale'
+          : status.state;
   const channel =
     status && ['stable', 'rc', 'beta'].includes(status.channel) ? status.channel : 'auto';
   const currentVersion = status?.current_version || t('dashboard.version_unknown');
   const currentRelease = buildDashboardVersionReleaseURL('manager', status?.current_version);
-  const panelVersion =
-    (demo ? DEMO_SERVER_VERSION : __APP_VERSION__) || t('dashboard.version_unknown');
-  const panelRelease = demo ? '' : buildDashboardVersionReleaseURL('manager', __APP_VERSION__);
+  const panelVersion = __APP_VERSION__ || t('dashboard.version_unknown');
+  const panelRelease = buildDashboardVersionReleaseURL('manager', __APP_VERSION__);
   const checkedAt = status?.last_success_at && new Date(status.last_success_at);
   const checkedTime =
     checkedAt && Number.isFinite(checkedAt.getTime()) && checkedAt.getUTCFullYear() > 1

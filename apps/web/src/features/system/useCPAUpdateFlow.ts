@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuthStore } from '@/stores';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { isDemoMode } from '@/features/demo/demoMode';
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 import {
   canPrepareCPAUpdate,
@@ -110,9 +109,7 @@ export function useCPAUpdateFlow() {
   const key = useAuthStore((state) => state.managementKey);
   const availability = usePanelFeatureAvailability();
   const base = normalizeUsageServiceBase(availability.managerServiceBase);
-  const demo = __DEMO_SITE__ && isDemoMode();
-  const available =
-    authenticated && !!key && !!base && availability.managerServiceAvailable && !demo;
+  const available = authenticated && !!key && !!base && availability.managerServiceAvailable;
   const context = useMemo(
     () => ({ base, key, available, scope: cpaUpdateStorageKey(base, key) }),
     [base, key, available]
@@ -522,7 +519,6 @@ export function useCPAUpdateFlow() {
   return {
     ...view,
     available,
-    demo,
     scope: context.scope,
     unresolved: unresolved(view),
     canCheck: available && canCheck(view),

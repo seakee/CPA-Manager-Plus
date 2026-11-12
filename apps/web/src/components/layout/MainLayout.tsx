@@ -53,7 +53,6 @@ import {
 } from '@/features/plugins/pluginResources';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { getDemoLogoutPath } from '@/features/demo/demoMode';
 import { prefixRouteBase, stripRouteBase } from '@/router/routeBase';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER, STORAGE_KEY_SIDEBAR } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
@@ -238,7 +237,6 @@ type NavSection = {
 interface MainLayoutProps {
   routeBase?: string;
   navigationBase?: string;
-  demoMode?: boolean;
   onLogout?: () => void;
   logoutDisabled?: boolean;
   hasUnsavedChanges?: boolean;
@@ -257,7 +255,6 @@ interface MainLayoutProps {
 function MainLayoutContent({
   routeBase = '',
   navigationBase = '',
-  demoMode = false,
   renderRoute,
   onLogout,
   logoutDisabled = false,
@@ -783,10 +780,6 @@ function MainLayoutContent({
   };
   const handleLogout = () => {
     if (logoutDisabled) return;
-    if (demoMode) {
-      navigate(getDemoLogoutPath(routeBase), { replace: true });
-      return;
-    }
     const finishLogout = () => {
       if (logoutBlockedRef.current) return;
       if (onLogout) onLogout();

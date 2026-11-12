@@ -67,7 +67,6 @@ const flowState = (patch: Partial<CPAUpdateFlow> = {}): CPAUpdateFlow => ({
   busy: false,
   storageError: null,
   available: true,
-  demo: false,
   scope: 'scope-a',
   unresolved: false,
   canCheck: true,

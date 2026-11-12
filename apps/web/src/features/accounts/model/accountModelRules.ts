@@ -12,8 +12,6 @@ export type AccountModelExclusionPriority = 'merge' | 'override' | 'unknown';
 // exclusions, and an empty credential list inherits them. Custom builds stay unknown.
 const CPA_RELEASE_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)$/i;
 const CPA_GIT_DESCRIBE_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)-(\d+)-g([0-9a-f]+)(-dirty)?$/i;
-// The CPAMP demo reports `<release>-demo` and emulates that release.
-const CPAMP_DEMO_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)-demo$/i;
 const FIRST_VERIFIED_MERGE_VERSION = [6, 10, 8] as const;
 const LAST_MERGE_VERSION = [8, 0, 32] as const;
 
@@ -30,10 +28,7 @@ export const getAccountModelExclusionPriority = (
 ): AccountModelExclusionPriority => {
   const normalizedVersion = serverVersion?.trim() ?? '';
   const describeMatch = normalizedVersion.match(CPA_GIT_DESCRIBE_VERSION_PATTERN);
-  const match =
-    describeMatch ??
-    normalizedVersion.match(CPA_RELEASE_VERSION_PATTERN) ??
-    normalizedVersion.match(CPAMP_DEMO_VERSION_PATTERN);
+  const match = describeMatch ?? normalizedVersion.match(CPA_RELEASE_VERSION_PATTERN);
   if (!match) return 'unknown';
   const version = match.slice(1, 4).map((segment) => Number.parseInt(segment, 10));
   if (compareVersion(version, FIRST_VERIFIED_MERGE_VERSION) < 0) return 'unknown';

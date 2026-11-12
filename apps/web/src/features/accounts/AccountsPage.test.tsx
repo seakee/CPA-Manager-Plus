@@ -29,7 +29,6 @@ import type {
   QuotaCooldownInfo,
   UsageHeaderSnapshot,
 } from '@/services/api/usageService';
-import { getDemoQuotaStoreState } from '@/features/demo/demoFixtures';
 import { copyToClipboard } from '@/utils/clipboard';
 import {
   buildQuotaCredentialIdentity,
@@ -14994,12 +14993,39 @@ describe('AccountsPage replacement flows', () => {
   });
 
   it('retranslates an open quota panel when the language switches in place', async () => {
-    const demoEntry = Object.values(getDemoQuotaStoreState().codexQuota)[0];
-    const demoWindows = demoEntry.windows ?? [];
-    expect(demoWindows.length).toBeGreaterThan(0);
-    expect(demoWindows.every((window) => Boolean(window.labelKey))).toBe(true);
+    const quotaEntry: CodexQuotaState = {
+      status: 'success',
+      planType: 'team',
+      authFileKey: 'codex.json::auth-1',
+      authFileName: 'codex.json',
+      authIndex: 'auth-1',
+      fetchedAtMs: Date.parse('2026-08-04T11:55:00Z'),
+      windows: [
+        {
+          id: 'five-hour',
+          label: '5-hour limit',
+          labelKey: 'codex_quota.primary_window',
+          usedPercent: 55,
+          resetLabel: '2026-08-04 14:18',
+          resetAtMs: Date.parse('2026-08-04T14:18:00Z'),
+          limitWindowSeconds: 18_000,
+        },
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          labelKey: 'codex_quota.secondary_window',
+          usedPercent: 9,
+          resetLabel: '2026-08-07 20:00',
+          resetAtMs: Date.parse('2026-08-07T20:00:00Z'),
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+    const quotaWindows = quotaEntry.windows;
+    expect(quotaWindows.length).toBeGreaterThan(0);
+    expect(quotaWindows.every((window) => Boolean(window.labelKey))).toBe(true);
     mocks.quotaState.codexQuota = {
-      'codex.json': { ...demoEntry, authFileKey: 'codex.json::auth-1' },
+      'codex.json': quotaEntry,
     };
 
     await switchAppLanguage('en');
@@ -15029,17 +15055,17 @@ describe('AccountsPage replacement flows', () => {
     // The expectation is the catalog entry of the window's own label key, not a
     // literal translation, and it is read with the language under test.
     const expectedTitle = (windowKey: string, language: 'en' | 'ru') => {
-      const demoWindow = demoWindows.find((window) => window.id === windowKey);
-      expect(demoWindow?.labelKey).toBeTruthy();
-      return mocks.translate!(demoWindow!.labelKey!, undefined, language);
+      const quotaWindow = quotaWindows.find((window) => window.id === windowKey);
+      expect(quotaWindow?.labelKey).toBeTruthy();
+      return mocks.translate!(quotaWindow!.labelKey!, undefined, language);
     };
 
-    for (const window of demoWindows) {
+    for (const window of quotaWindows) {
       expect(visibleTitle(window.id)).toBe(expectedTitle(window.id, 'en'));
     }
 
     // Keep the panel mounted and switch the language the way the app does.
-    const switchWindowId = demoWindows[0].id;
+    const switchWindowId = quotaWindows[0].id;
     const renderedTitle = titleElement(switchWindowId);
 
     await switchAppLanguage('ru');
@@ -15048,11 +15074,11 @@ describe('AccountsPage replacement flows', () => {
     // The element captured before the switch is the one showing the new title,
     // so the panel re-translated instead of being rebuilt in the new language.
     expect(readText(renderedTitle.props.children)).toBe(expectedTitle(switchWindowId, 'ru'));
-    for (const window of demoWindows) {
+    for (const window of quotaWindows) {
       expect(visibleTitle(window.id)).toBe(expectedTitle(window.id, 'ru'));
     }
     const russianPanelText = readText(quotaPanel);
-    for (const window of demoWindows) {
+    for (const window of quotaWindows) {
       // No window keeps the English title or a raw label key after the switch.
       expect(russianPanelText).not.toContain(expectedTitle(window.id, 'en'));
       expect(visibleTitle(window.id)).not.toContain('codex_quota.');
