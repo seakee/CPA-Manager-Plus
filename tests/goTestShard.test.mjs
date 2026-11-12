@@ -361,7 +361,8 @@ describe('go test shard planner', () => {
       ]);
       expect(raceManifest.importPath).toBe('example.com/sharded/sharded');
       expect(raceManifest.race).toBe(true);
-    });
+      // `-race -list` builds the race runtime, which is slow on a cold runner.
+    }, 120_000);
 
     it('plans, executes and verifies two shards of a real package', () => {
       const catalog = ['TestAlpha', 'TestBeta', 'TestGamma'];
