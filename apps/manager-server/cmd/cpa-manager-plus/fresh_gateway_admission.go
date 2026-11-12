@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -46,6 +47,10 @@ func (a *freshApplication) freshAuthority(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if op.Routing.Target == "" || op.Routing.OperationID == "" {
+		if !op.Routing.Committed && bootstrapShellServing(r.Context(), a.fixed) {
+			writePreCommitBootstrapAuthority(w)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -82,4 +87,49 @@ func freshAuthorityReplyFor(op bootstrap.FreshOperation, admitted bool) freshAut
 			Admitted:       admitted && op.Routing.Committed,
 		},
 	}
+}
+
+func writePreCommitBootstrapAuthority(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = io.WriteString(w, "{\"bootstrapUI\":true}\n")
+}
+
+type statusProbeWriter struct {
+	header http.Header
+	code   int
+}
+
+func (w *statusProbeWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header, 4)
+	}
+	return w.header
+}
+
+func (w *statusProbeWriter) WriteHeader(code int) {
+	if w.code == 0 {
+		w.code = code
+	}
+}
+
+func (w *statusProbeWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return len(b), nil
+}
+
+func bootstrapShellServing(ctx context.Context, handler http.Handler) bool {
+	if handler == nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, bootstrap.FixedBootstrapUIPath, nil)
+	if err != nil {
+		return false
+	}
+	var probe statusProbeWriter
+	handler.ServeHTTP(&probe, req)
+	return probe.code == http.StatusOK
 }

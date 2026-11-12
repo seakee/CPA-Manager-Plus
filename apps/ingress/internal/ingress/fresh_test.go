@@ -139,10 +139,33 @@ func TestOnlyExplicitLegacyManagerAllowsGatewayWithoutFreshProjection(t *testing
 }
 
 func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
-	var managerHits, gatewayHits int
-	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		managerHits++
-		w.WriteHeader(http.StatusNotFound)
+	var managerProxyHits, gatewayHits int
+	bootstrapUI := FixedBootstrapDiscoveryPath + "/ui"
+	uiAvailable := false
+	authorityStatus := http.StatusNotFound
+	authorityBody := ""
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case FreshRoutingAuthorityPath:
+			if authorityBody != "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
+			w.WriteHeader(authorityStatus)
+			if authorityBody != "" {
+				_, _ = io.WriteString(w, authorityBody)
+			}
+		case bootstrapUI:
+			if !uiAvailable {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "<!doctype html><div id=\"root\"></div>")
+		default:
+			managerProxyHits++
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer manager.Close()
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -155,7 +178,6 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 	routes := &FreshRoutes{}
 	legacy := false
 	h := NewFreshHandler(routes, m, g, log.New(io.Discard, "", 0), func(context.Context) bool { return legacy })
-	bootstrapUI := FixedBootstrapDiscoveryPath + "/ui"
 
 	do := func(method, target string, headers map[string]string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -172,6 +194,43 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 	}
 
 	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+	// Constructor default without EnablePreFreshPosture fails closed (503, no Location).
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("default posture without EnablePreFreshPosture = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Wire posture reading Manager's private authority over HTTP; bare 404 keeps 503.
+	h.EnablePreFreshPosture(func(ctx context.Context) PreFreshPosture {
+		if legacy {
+			return PreFreshLegacyGateway
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, manager.URL+FreshRoutingAuthorityPath, nil)
+		if err != nil {
+			return PreFreshPendingClosed
+		}
+		res, err := manager.Client().Do(req)
+		if err != nil {
+			return PreFreshPendingClosed
+		}
+		defer res.Body.Close()
+		if res.StatusCode == http.StatusNotFound && recContentTypeJSON(res.Header.Get("Content-Type")) {
+			var sig struct {
+				BootstrapUI bool `json:"bootstrapUI"`
+			}
+			if json.NewDecoder(res.Body).Decode(&sig) == nil && sig.BootstrapUI {
+				return PreFreshBootstrap
+			}
+		}
+		return PreFreshPendingClosed
+	})
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("bare 404 authority navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Enable positive Bootstrap UI availability on Manager so 303 correlates with a 200 UI target.
+	uiAvailable = true
+	authorityBody = `{"bootstrapUI":true}`
 	for _, tc := range []struct {
 		name    string
 		method  string
@@ -241,6 +300,10 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 			if tc.method == http.MethodHead && rec.Body.Len() != 0 {
 				t.Fatalf("HEAD body len = %d, want 0", rec.Body.Len())
 			}
+			landing := do(http.MethodGet, rec.Header().Get("Location"), map[string]string{"Accept": browserAccept})
+			if landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
+				t.Fatalf("303 target %q returned status=%d owner=%q, want 200 manager", rec.Header().Get("Location"), landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+			}
 		})
 	}
 
@@ -283,19 +346,12 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 		})
 	}
 
-	if managerHits != 0 || gatewayHits != 0 {
-		t.Fatalf("unexpected upstream traffic before projection: manager=%d gateway=%d", managerHits, gatewayHits)
+	if managerProxyHits != 0 || gatewayHits != 0 {
+		t.Fatalf("unexpected non-Bootstrap upstream traffic before projection: manager=%d gateway=%d", managerProxyHits, gatewayHits)
 	}
 
 	// Uncommitted Fresh projection on another candidate path redirects /console
-	// browser navigations only while Manager's durable posture confirms pre-commit.
-	posture := PreFreshBootstrap
-	h.EnablePreFreshPosture(func(context.Context) PreFreshPosture {
-		if legacy {
-			return PreFreshLegacyGateway
-		}
-		return posture
-	})
+	// browser navigations only while Manager's durable authority confirms pre-commit.
 	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: false}
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != bootstrapUI {
 		t.Fatalf("uncommitted projection navigation = %d Location=%q", rec.Code, rec.Header().Get("Location"))
@@ -303,26 +359,33 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": "*/*"}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
 		t.Fatalf("uncommitted projection non-HTML = %d Location=%q", rec.Code, rec.Header().Get("Location"))
 	}
-	// Durable commit succeeded in Manager (or Manager posture is unknown) while
+	// Durable commit succeeded in Manager (or Manager posture is unknown/503) while
 	// the post-commit projection publish to Ingress failed: keep 503, never 303 to 404.
-	posture = PreFreshPendingClosed
+	uiAvailable = false
+	authorityStatus = http.StatusServiceUnavailable
+	authorityBody = ""
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
-		t.Fatalf("durable-committed but projection-uncommitted navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+		t.Fatalf("durable-committed or unavailable posture with uncommitted projection = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
 	}
-	posture = PreFreshBootstrap
+	uiAvailable = true
+	authorityStatus = http.StatusNotFound
+	authorityBody = `{"bootstrapUI":true}`
 	// Once Fresh routing is committed, unadmitted non-Control browser navigations keep 503 unchanged.
 	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: true}
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
 		t.Fatalf("committed projection navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
 	}
-	if managerHits != 0 || gatewayHits != 0 {
-		t.Fatalf("unexpected upstream traffic on unadmitted routes: manager=%d gateway=%d", managerHits, gatewayHits)
+	if managerProxyHits != 0 || gatewayHits != 0 {
+		t.Fatalf("unexpected non-Bootstrap upstream traffic on unadmitted routes: manager=%d gateway=%d", managerProxyHits, gatewayHits)
 	}
-
 	// Explicit legacy Manager mode still forwards to Gateway unchanged.
 	routes.state = FreshRouteState{}
 	legacy = true
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusOK || gatewayHits != 1 {
 		t.Fatalf("legacy passthrough = %d gatewayHits=%d", rec.Code, gatewayHits)
 	}
+}
+
+func recContentTypeJSON(ct string) bool {
+	return ct == "application/json" || len(ct) > len("application/json;") && ct[:len("application/json;")] == "application/json;"
 }

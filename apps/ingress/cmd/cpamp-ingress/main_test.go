@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -106,74 +107,163 @@ func TestLegacyGatewayRequiresExplicitManagerAuthority(t *testing.T) {
 	}
 }
 
-func TestPreFreshPostureDistinguishesBootstrapCommittedLegacyAndOutage(t *testing.T) {
+func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *testing.T) {
 	var status atomic.Int32
+	var contentType atomic.Value
 	var body atomic.Value
+	var uiServing atomic.Bool
+	contentType.Store("")
 	body.Store("")
+
 	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != ingress.FreshRoutingAuthorityPath || r.Method != http.MethodGet {
-			t.Errorf("unexpected authority request: %s %s", r.Method, r.URL.Path)
-		}
-		code := int(status.Load())
-		w.WriteHeader(code)
-		if code == http.StatusOK {
-			_, _ = io.WriteString(w, body.Load().(string))
+		switch r.URL.Path {
+		case ingress.FreshRoutingAuthorityPath:
+			if r.Method != http.MethodGet {
+				t.Errorf("unexpected authority method: %s", r.Method)
+			}
+			if ct := contentType.Load().(string); ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			code := int(status.Load())
+			w.WriteHeader(code)
+			if payload := body.Load().(string); payload != "" {
+				_, _ = io.WriteString(w, payload)
+			}
+		case ingress.FixedBootstrapUIPath:
+			if !uiServing.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "<!doctype html><div id=\"root\"></div>")
+		default:
+			http.NotFound(w, r)
 		}
 	}))
 	defer manager.Close()
-	u, err := url.Parse(manager.URL)
+
+	var gatewayHits atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gatewayHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+
+	mURL, err := url.Parse(manager.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	posture := managerPreFreshPosture(managerFreshAuthority(u))
-
-	// 404 (pristine Fresh, pre-prepare Fresh, or read-only startup inspection) -> PreFreshBootstrap.
-	status.Store(http.StatusNotFound)
-	if got := posture(t.Context()); got != ingress.PreFreshBootstrap {
-		t.Fatalf("404 posture = %v, want PreFreshBootstrap", got)
+	gURL, err := url.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Valid uncommitted Fresh projection -> PreFreshBootstrap.
+	newHandler := func() http.Handler {
+		fresh := &ingress.FreshRoutes{}
+		posture := managerPreFreshPosture(managerFreshAuthority(mURL))
+		h := ingress.NewFreshHandler(fresh, mURL, gURL, log.New(io.Discard, "", 0), func(ctx context.Context) bool {
+			return posture(ctx) == ingress.PreFreshLegacyGateway
+		})
+		h.EnablePreFreshPosture(posture)
+		return h
+	}
+	handler := newHandler()
+	navigate := func(h http.Handler, target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Generic/bare 404 (plain NotFound, false flag, unknown field, or trailing data) stays closed (503, no Location).
+	for _, tc := range []struct {
+		name string
+		ct   string
+		body string
+	}{
+		{name: "bare-404", ct: "text/plain; charset=utf-8", body: "404 page not found\n"},
+		{name: "empty-404", ct: "", body: ""},
+		{name: "json-false", ct: "application/json", body: `{"bootstrapUI":false}`},
+		{name: "json-unknown-field", ct: "application/json", body: `{"bootstrapUI":true,"extra":1}`},
+		{name: "json-trailing-data", ct: "application/json", body: `{"bootstrapUI":true}{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uiServing.Store(false)
+			status.Store(http.StatusNotFound)
+			contentType.Store(tc.ct)
+			body.Store(tc.body)
+			rec := navigate(handler, "/console")
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+				t.Fatalf("status=%d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+			}
+		})
+	}
+
+	// Positive pre-commit 404 JSON with Bootstrap UI serving -> 303 whose Location returns 200.
+	uiServing.Store(true)
+	status.Store(http.StatusNotFound)
+	contentType.Store("application/json; charset=utf-8")
+	body.Store(`{"bootstrapUI":true}`)
+	rec := navigate(handler, "/console")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
+		t.Fatalf("explicit bootstrap 404 = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
+		t.Fatalf("landing = %d owner=%q", landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+	}
+
+	// Valid uncommitted 200 Fresh projection -> 303 whose Location returns 200.
 	uncommitted := ingress.FreshRouteState{InstallationID: "install-one", Generation: "gen-one", OperationID: "op-one", Revision: 1, Target: "/console", Committed: false}
 	status.Store(http.StatusOK)
+	contentType.Store("application/json")
 	body.Store(freshAuthorityJSON(uncommitted, ""))
-	if got := posture(t.Context()); got != ingress.PreFreshBootstrap {
-		t.Fatalf("uncommitted 200 posture = %v, want PreFreshBootstrap", got)
+	rec = navigate(handler, "/console")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
+		t.Fatalf("uncommitted 200 = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK {
+		t.Fatalf("uncommitted landing = %d", landing.Code)
 	}
 
-	// Committed Fresh projection awaiting Restore after Ingress restart -> PreFreshPendingClosed.
+	// Committed Fresh projection awaiting Restore, empty 200 JSON, and 503 stay closed (503, no Location).
+	uiServing.Store(false)
 	committed := uncommitted
 	committed.Committed = true
-	body.Store(freshAuthorityJSON(committed, ""))
-	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
-		t.Fatalf("committed 200 posture = %v, want PreFreshPendingClosed", got)
+	for _, tc := range []struct {
+		name string
+		code int32
+		body string
+	}{
+		{name: "committed-200", code: http.StatusOK, body: freshAuthorityJSON(committed, "")},
+		{name: "empty-200", code: http.StatusOK, body: "{}"},
+		{name: "unavailable-503", code: http.StatusServiceUnavailable, body: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status.Store(tc.code)
+			body.Store(tc.body)
+			if got := navigate(handler, "/console"); got.Code != http.StatusServiceUnavailable || got.Header().Get("Location") != "" {
+				t.Fatalf("status=%d Location=%q, want 503 without redirect", got.Code, got.Header().Get("Location"))
+			}
+		})
 	}
 
-	// Empty/incomplete 200 JSON -> fail closed to PreFreshPendingClosed.
-	body.Store("{}")
-	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
-		t.Fatalf("empty 200 posture = %v, want PreFreshPendingClosed", got)
-	}
-
-	// 503 unavailable -> PreFreshPendingClosed.
-	status.Store(http.StatusServiceUnavailable)
-	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
-		t.Fatalf("503 posture = %v, want PreFreshPendingClosed", got)
-	}
-
-	// Explicit 204 legacy Manager -> PreFreshLegacyGateway and retained across outage.
+	// Explicit 204 legacy Manager forwards to Gateway and retains confirmation across outage.
 	status.Store(http.StatusNoContent)
-	if got := posture(t.Context()); got != ingress.PreFreshLegacyGateway {
-		t.Fatalf("204 posture = %v, want PreFreshLegacyGateway", got)
+	body.Store("")
+	if got := navigate(handler, "/console"); got.Code != http.StatusOK || gatewayHits.Load() != 1 {
+		t.Fatalf("legacy 204 = %d gatewayHits=%d", got.Code, gatewayHits.Load())
 	}
 	manager.Close()
-	if got := posture(t.Context()); got != ingress.PreFreshLegacyGateway {
-		t.Fatalf("post-outage legacy posture = %v, want PreFreshLegacyGateway", got)
+	if got := navigate(handler, "/console"); got.Code != http.StatusOK || gatewayHits.Load() != 2 {
+		t.Fatalf("post-outage legacy = %d gatewayHits=%d", got.Code, gatewayHits.Load())
 	}
 
-	// Fresh Ingress process with Manager unreachable -> PreFreshPendingClosed.
-	if got := managerPreFreshPosture(managerFreshAuthority(u))(t.Context()); got != ingress.PreFreshPendingClosed {
-		t.Fatalf("unreachable Manager posture = %v, want PreFreshPendingClosed", got)
+	// Fresh Ingress instance with Manager unreachable stays closed (503, no Location).
+	if got := navigate(newHandler(), "/console"); got.Code != http.StatusServiceUnavailable || got.Header().Get("Location") != "" {
+		t.Fatalf("unreachable Manager = %d Location=%q, want 503 without redirect", got.Code, got.Header().Get("Location"))
 	}
 }
 

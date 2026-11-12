@@ -126,6 +126,13 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 				return
 			}
 			if op.Routing.Target == "" || op.Routing.OperationID == "" {
+				if !op.Routing.Committed && fixed.Shell != nil {
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, "{\"bootstrapUI\":true}\n")
+					return
+				}
 				http.NotFound(w, r)
 				return
 			}
@@ -246,6 +253,12 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 		t.Fatalf("pre-prepare unreadable-store browser /console = %d Location=%q", code, header.Get("Location"))
 	}
 	failCurrentRead.Store(false)
+	savedShell := fixed.Shell
+	fixed.Shell = nil
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare bare-404 without shell browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	fixed.Shell = savedShell
 	for _, auth := range []string{"Bearer cpamp_RoutingIntegration0123456789!", "Bearer cpa-management-key", "", "Fresh wrong-session"} {
 		code, body, _ := request("GET", base+"operation", auth, nil)
 		if code != 401 || strings.Contains(body, "secret") {

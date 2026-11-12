@@ -21,17 +21,16 @@ const proxyBufferSize = 32 << 10
 type PreFreshPosture uint8
 
 const (
-	// PreFreshBootstrap indicates Manager confirms routing is not committed and
-	// the fixed Bootstrap UI is active for browser navigations.
-	PreFreshBootstrap PreFreshPosture = iota
+	// PreFreshPendingClosed is the fail-closed zero value: all non-Control
+	// traffic stays 503 without redirecting browser navigations unless Manager
+	// positively confirms pre-commit Bootstrap UI availability.
+	PreFreshPendingClosed PreFreshPosture = iota
+	// PreFreshBootstrap indicates Manager positively confirmed routing is not
+	// committed and the fixed Bootstrap UI is actively serving.
+	PreFreshBootstrap
 	// PreFreshLegacyGateway preserves the explicit 204 legacy Manager
 	// passthrough to the model Gateway.
 	PreFreshLegacyGateway
-	// PreFreshPendingClosed keeps all non-Control traffic closed with 503
-	// without redirecting browser navigations (for example when Manager already
-	// durably committed Fresh routing while projection publish lagged/failed, or
-	// when Manager posture is unknown/unreachable).
-	PreFreshPendingClosed
 )
 
 type Handler struct {
@@ -137,7 +136,7 @@ func (h *Handler) resolvePreFreshPosture(ctx context.Context) PreFreshPosture {
 	if h.legacyGateway != nil && h.legacyGateway(ctx) {
 		return PreFreshLegacyGateway
 	}
-	return PreFreshBootstrap
+	return PreFreshPendingClosed
 }
 
 func redirectToBootstrapUI(w http.ResponseWriter, r *http.Request) {

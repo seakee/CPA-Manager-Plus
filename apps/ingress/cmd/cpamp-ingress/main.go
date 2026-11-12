@@ -9,6 +9,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/ingress/internal/ingress"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -342,7 +343,10 @@ func managerFreshAuthority(managerURL *url.URL) func(context.Context) (ingress.F
 			return reply, errLegacyManager
 		}
 		if res.StatusCode == http.StatusNotFound {
-			return reply, errPreCommitAuthority
+			if decodesPreCommitBootstrapSignal(res) {
+				return reply, errPreCommitAuthority
+			}
+			return reply, errors.New("Manager routing authority not found")
 		}
 		if res.StatusCode != http.StatusOK {
 			return reply, fmt.Errorf("Manager routing authority unavailable: status %d", res.StatusCode)
@@ -358,6 +362,23 @@ func managerFreshAuthority(managerURL *url.URL) func(context.Context) (ingress.F
 		}
 		return reply, nil
 	}
+}
+
+func decodesPreCommitBootstrapSignal(res *http.Response) bool {
+	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return false
+	}
+	var signal struct {
+		BootstrapUI bool `json:"bootstrapUI"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(res.Body, 256))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&signal); err != nil || !signal.BootstrapUI {
+		return false
+	}
+	var trailing any
+	return errors.Is(decoder.Decode(&trailing), io.EOF)
 }
 
 func parseUpstream(name, value, fallback string) (*url.URL, error) {
