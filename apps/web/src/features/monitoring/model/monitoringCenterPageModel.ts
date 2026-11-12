@@ -505,6 +505,11 @@ export const buildAccountOverviewColumns = (t: TFunction): AccountOverviewColumn
     sortKey: 'totalTokens',
   },
   {
+    key: 'average-output-tps',
+    label: t('monitoring.average_output_tps'),
+    fullLabel: t('monitoring.average_output_tps_hint'),
+  },
+  {
     key: 'estimated-cost',
     label: shortLabel(
       t,

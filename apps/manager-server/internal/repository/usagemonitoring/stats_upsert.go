@@ -84,6 +84,7 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 			cache_creation_tokens, long_input_tokens, long_output_tokens,
 			long_cached_tokens, long_cache_read_tokens, long_cache_creation_tokens,
 			total_tokens, zero_token_calls, latency_sum_ms, latency_samples,
+			output_tps_sum, output_tps_samples,
 			last_seen_ms, updated_at_ms
 	)
 	select
@@ -122,6 +123,8 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 			coalesce(sum(case when total_tokens = 0 and failed = 0 then 1 else 0 end), 0),
 			coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
 		count(nullif(latency_ms, 0)),
+		coalesce(sum(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then output_tokens * 1000.0 / latency_ms else 0 end), 0),
+		count(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then 1 end),
 		max(timestamp_ms),
 		?
 	from banded_events
@@ -148,6 +151,8 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 			zero_token_calls = usage_monitoring_account_daily_rollups_v1.zero_token_calls + excluded.zero_token_calls,
 			latency_sum_ms = usage_monitoring_account_daily_rollups_v1.latency_sum_ms + excluded.latency_sum_ms,
 		latency_samples = usage_monitoring_account_daily_rollups_v1.latency_samples + excluded.latency_samples,
+		output_tps_sum = usage_monitoring_account_daily_rollups_v1.output_tps_sum + excluded.output_tps_sum,
+		output_tps_samples = usage_monitoring_account_daily_rollups_v1.output_tps_samples + excluded.output_tps_samples,
 		last_seen_ms = max(usage_monitoring_account_daily_rollups_v1.last_seen_ms, excluded.last_seen_ms),
 		updated_at_ms = excluded.updated_at_ms`,
 		dayMS,

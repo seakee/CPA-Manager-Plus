@@ -3344,6 +3344,8 @@
     "account_overview_health_hint": "Based on request statistics in the current filter scope.",
     "account_overview_status_hint": "Current account enabled state summarized from linked login files.",
     "account_overview_success_rate_hint": "Successful calls divided by total calls in the current filter scope.",
+    "average_output_tps": "Average TPS",
+    "average_output_tps_hint": "Arithmetic mean of output tokens / total duration (seconds) for successful requests, including time to first token. Only valid samples with positive, finite output tokens and duration are included.",
     "account_overview_scope_current_filters": "Scope: current filters",
     "account_overview_scope_range": "Scope: {{range}}",
     "account_overview_tokens_title": "Tokens Usage",

@@ -1666,6 +1666,7 @@ export interface MonitoringAnalyticsAccountModelStatRow {
   cache_hit_rate?: number;
   total_tokens: number;
   cost: number;
+  average_output_tps?: number | null;
   last_seen_ms: number;
 }
 
@@ -1689,6 +1690,7 @@ export interface MonitoringAnalyticsAccountStatRow {
   total_tokens: number;
   cost: number;
   average_latency_ms: number | null;
+  average_output_tps?: number | null;
   last_seen_ms: number;
   models?: MonitoringAnalyticsAccountModelStatRow[];
 }

@@ -1412,6 +1412,16 @@
     width: 20%;
   }
 
+  .accountModelTableWithTps th:nth-child(9),
+  .accountModelTableWithTps td:nth-child(9) {
+    width: 9%;
+  }
+
+  .accountModelTableWithTps th:last-child,
+  .accountModelTableWithTps td:last-child {
+    width: 20%;
+  }
+
   .accountModelTable tr:last-child td {
     border-bottom: 0;
   }

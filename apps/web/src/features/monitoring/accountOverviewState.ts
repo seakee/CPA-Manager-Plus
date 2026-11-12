@@ -41,6 +41,7 @@ export const ACCOUNT_OVERVIEW_CARD_METRIC_KEYS = [
   'input-tokens',
   'output-tokens',
   'cached-tokens',
+  'average-output-tps',
 ] as const;
 const DEFAULT_ACCOUNT_OVERVIEW_CARD_PAGINATION = {
   page: 1,
