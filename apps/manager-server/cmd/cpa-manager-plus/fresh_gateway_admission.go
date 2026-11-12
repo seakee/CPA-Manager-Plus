@@ -41,7 +41,11 @@ func (a *freshApplication) freshAuthority(w http.ResponseWriter, r *http.Request
 		return
 	}
 	op, err := a.current(r.Context())
-	if err != nil || op.Routing.Target == "" || op.Routing.OperationID == "" {
+	if err != nil || op.Validate() != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if op.Routing.Target == "" || op.Routing.OperationID == "" {
 		http.NotFound(w, r)
 		return
 	}

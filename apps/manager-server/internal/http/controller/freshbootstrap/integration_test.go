@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -79,7 +80,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if _, e = st.Create(t.Context(), id, &credential); e != nil {
 		t.Fatal(e)
 	}
+	var failCurrentRead atomic.Bool
 	current := func(ctx context.Context) (bootstrap.FreshOperation, error) {
+		if failCurrentRead.Load() {
+			return bootstrap.FreshOperation{}, errors.New("simulated Fresh store read failure")
+		}
 		r, e := st.Load(ctx)
 		return r.Operation, e
 	}
@@ -116,7 +121,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 				return
 			}
 			op, e := current(r.Context())
-			if e != nil || op.Routing.Target == "" || op.Routing.OperationID == "" {
+			if e != nil || op.Validate() != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if op.Routing.Target == "" || op.Routing.OperationID == "" {
 				http.NotFound(w, r)
 				return
 			}
@@ -232,6 +241,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, header := rawRequest("POST", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
 		t.Fatalf("pre-prepare POST /console = %d Location=%q", code, header.Get("Location"))
 	}
+	failCurrentRead.Store(true)
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare unreadable-store browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(false)
 	for _, auth := range []string{"Bearer cpamp_RoutingIntegration0123456789!", "Bearer cpa-management-key", "", "Fresh wrong-session"} {
 		code, body, _ := request("GET", base+"operation", auth, nil)
 		if code != 401 || strings.Contains(body, "secret") {
@@ -281,6 +295,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
 		t.Fatalf("post-commit stale-projection browser /console = %d Location=%q", code, header.Get("Location"))
 	}
+	failCurrentRead.Store(true)
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit stale-projection unreadable-store browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(false)
 	if e = fixed.Routing.Restore(t.Context()); e != nil {
 		t.Fatal(e)
 	}
