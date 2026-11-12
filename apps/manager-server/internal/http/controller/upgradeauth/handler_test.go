@@ -3,6 +3,7 @@ package upgradeauth
 import (
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
@@ -15,14 +16,15 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 	// does.
 	paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "missing.sqlite"))
 	for _, tc := range []struct {
-		configured, origin, forwarded string
-		want                          int
+		configured, origin, forwarded, wantOrigin string
+		want                                      int
 	}{
-		{"", "http://manager.test", "", 503},
-		{"", "https://manager.test", "https", 403},
-		{"https://public-manager.test/", "https://public-manager.test", "", 503},
-		{"https://public-manager.test", "http://manager.test", "", 403},
-		{"https://public-manager.test", "https://attacker.test", "https", 403},
+		{"", "http://manager.test", "", "", 503},
+		{"", "https://manager.test", "https", "", 403},
+		{"https://public-manager.test/", "https://public-manager.test", "", "", 503},
+		{"https://public-manager.test/", "http://127.0.0.1:38491", "", "https://public-manager.test", 403},
+		{"https://public-manager.test", "http://manager.test", "", "https://public-manager.test", 403},
+		{"https://public-manager.test", "https://attacker.test", "https", "https://public-manager.test", 403},
 	} {
 		h, err := New(paths, tc.configured, false, "")
 		if err != nil {
@@ -37,6 +39,9 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 		h.ServeHTTP(w, r)
 		if w.Code != tc.want || w.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Fatalf("%+v: %d", tc, w.Code)
+		}
+		if tc.want == 403 && tc.wantOrigin != "" && !strings.Contains(w.Body.String(), `"expected_origin":"`+tc.wantOrigin+`"`) {
+			t.Fatalf("%+v missing expected_origin in %s", tc, w.Body.String())
 		}
 	}
 	for _, invalid := range []string{"null", "file:///tmp/source", "https://user:pass@manager.test", "https://manager.test/path", "https://manager.test?key=test"} {

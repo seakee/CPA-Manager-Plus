@@ -143,7 +143,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cookies; CLI callers without Origin still need the original Manager key.
 	// The wizard reads apply the same rule, through the same helper.
 	if upgradesurface.CrossSite(r, h.publicOrigin) {
-		write(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
+		writeOriginRejected(w, h.publicOrigin)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), legacypreflight.DiscoveryInspectionTimeout)
@@ -253,4 +253,14 @@ func write(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"contract_version": Contract, "error": map[string]string{"code": code}})
+}
+
+func writeOriginRejected(w http.ResponseWriter, expectedOrigin string) {
+	errBody := map[string]string{"code": upgradesurface.CodeOriginRejected}
+	if expectedOrigin != "" {
+		errBody["expected_origin"] = expectedOrigin
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{"contract_version": Contract, "error": errBody})
 }

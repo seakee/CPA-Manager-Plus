@@ -75,8 +75,31 @@ export function rememberUpgradeCredential(credential: string, remember: boolean)
 }
 
 export class UpgradeAuthenticationError extends Error {
-  constructor(public readonly reason: 'invalid' | 'unavailable' | 'changed' | 'network') {
+  constructor(
+    public readonly reason: 'invalid' | 'unavailable' | 'changed' | 'network' | 'origin_rejected',
+    public readonly expectedOrigin?: string
+  ) {
     super(reason);
+  }
+}
+
+function normalizeExpectedOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      url.pathname !== '/' ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      return undefined;
+    }
+    return url.origin;
+  } catch {
+    return undefined;
   }
 }
 
@@ -111,6 +134,31 @@ export async function verifyUpgradeCredential(
     headers,
     signal,
   });
+  if (response.status === 403) {
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      /* Non-JSON 403 falls back to generic unavailability below. */
+    }
+    if (payload && typeof payload === 'object') {
+      const envelope = payload as Record<string, unknown>;
+      const err =
+        envelope.error && typeof envelope.error === 'object'
+          ? (envelope.error as Record<string, unknown>)
+          : null;
+      if (
+        envelope.contract_version === UPGRADE_AUTH_CONTRACT &&
+        err?.code === 'origin_rejected'
+      ) {
+        throw new UpgradeAuthenticationError(
+          'origin_rejected',
+          normalizeExpectedOrigin(err.expected_origin)
+        );
+      }
+    }
+    throw new UpgradeAuthenticationError('unavailable');
+  }
   if (response.status !== 200) {
     throw new UpgradeAuthenticationError(
       response.status === 401 ? 'invalid' : response.status === 409 ? 'changed' : 'unavailable'

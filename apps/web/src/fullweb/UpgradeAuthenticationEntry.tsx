@@ -4,6 +4,7 @@ import { FullWebLoginPage, FullWebUpgradeHeader } from './FullWebLoginPage';
 import { FullWebIcon } from './FullWebIcon';
 import { createUpgradeWizardRead, createUpgradeWizardVerify, FreshUpgradeFlow } from './FreshUpgradeFlow';
 import { upgradeEntryText as text } from '../i18n/upgradeEntry';
+import { BOOTSTRAP_UI } from './bootstrapTransport';
 import './upgradeEntry.css';
 import { createUpgradeArtifactTransport } from './upgradeArtifactTransport';
 import {
@@ -23,7 +24,10 @@ export function UpgradeAuthenticationEntry() {
   // that and never present it as an upgrade-ready source.
   const [observation, setObservation] =
     useState<UpgradeEntryObservation>('unsupported_upgrade');
-  const [error, setError] = useState<UpgradeAuthenticationError['reason'] | 'expired' | ''>('');
+  const [error, setError] = useState<{
+    reason: UpgradeAuthenticationError['reason'] | 'expired';
+    expectedOrigin?: string;
+  } | null>(null);
   const [checking, setChecking] = useState(false);
   // Whether the wizard below found a recorded operation. The entry's own copy
   // describes a source with no public observation; once an operation is recorded
@@ -39,7 +43,10 @@ export function UpgradeAuthenticationEntry() {
   const expiresAt = useRef(0);
 
   const revoke = useCallback(
-    (message: UpgradeAuthenticationError['reason'] | 'expired' | '' = '') => {
+    (
+      message: UpgradeAuthenticationError['reason'] | 'expired' | '' = '',
+      expectedOrigin?: string
+    ) => {
       ++sequence.current;
       request.current?.abort();
       session.current?.abort();
@@ -48,7 +55,7 @@ export function UpgradeAuthenticationEntry() {
       expiresAt.current = 0;
       setRevision('');
       setChecking(false);
-      setError(message);
+      setError(message ? { reason: message, expectedOrigin } : null);
     },
     []
   );
@@ -67,7 +74,7 @@ export function UpgradeAuthenticationEntry() {
         setRevision('');
       }
       setChecking(true);
-      setError('');
+      setError(null);
       const timeout = window.setTimeout(() => controller.abort(), 10_000);
       try {
         const verified = await verifyUpgradeCredential(key, controller.signal, source);
@@ -82,8 +89,13 @@ export function UpgradeAuthenticationEntry() {
         setRevision(verified.revision);
         return true;
       } catch (err) {
-        if (sequence.current === current)
-          revoke(err instanceof UpgradeAuthenticationError ? err.reason : 'network');
+        if (sequence.current === current) {
+          if (err instanceof UpgradeAuthenticationError) {
+            revoke(err.reason, err.expectedOrigin);
+          } else {
+            revoke('network');
+          }
+        }
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -103,7 +115,13 @@ export function UpgradeAuthenticationEntry() {
   const adapter = useMemo(
     () => ({
       address: window.location.origin,
-      error: error ? text(error, language) : '',
+      error: error
+        ? error.reason === 'origin_rejected' && error.expectedOrigin
+          ? text('origin_rejected_url', language)
+              .replace('{origin}', error.expectedOrigin)
+              .replace('{url}', `${error.expectedOrigin}${BOOTSTRAP_UI}`)
+          : text(error.reason, language)
+        : '',
       status: checking ? text('checking', language) : undefined,
       connectionHint: text('loginHint', language),
       credentialPlaceholder: text('placeholder', language),

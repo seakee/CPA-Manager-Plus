@@ -146,5 +146,21 @@ describe('existing Manager credential provenance', () => {
     await expect(verifyUpgradeCredential('old-key', signal, 'a'.repeat(64))).rejects.toMatchObject({
       reason: 'changed',
     });
+    fetcher.mockResolvedValue(
+      Response.json(
+        {
+          contract_version: 'cpamp.upgrade-auth.v1',
+          error: {
+            code: 'origin_rejected',
+            expected_origin: 'https://public-manager.test',
+          },
+        },
+        { status: 403 }
+      )
+    );
+    await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+      reason: 'origin_rejected',
+      expectedOrigin: 'https://public-manager.test',
+    });
   });
 });

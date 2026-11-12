@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UpgradeAuthenticationEntry } from './UpgradeAuthenticationEntry';
 import { FullWebLoginPage } from './FullWebLoginPage';
+import { UpgradeAuthenticationError } from './upgradeSession';
 import type { ConsoleLoginAdapter } from '../features/login/LoginPage';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import loginI18n from '../i18n';
@@ -526,4 +527,34 @@ describe('upgrade authentication lifecycle', () => {
       ).toHaveLength(1);
     }
   );
+
+  it('names the canonical console URL across locales when upgrade authentication fails with origin_rejected', async () => {
+    mocks.verify.mockRejectedValueOnce(
+      new UpgradeAuthenticationError('origin_rejected', 'https://public-manager.test')
+    );
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      expect(adapter().error).toContain(
+        'https://public-manager.test/.well-known/cpamp-bootstrap/ui'
+      );
+      expect(adapter().error).not.toContain('cannot be verified safely');
+      expect(adapter().error).not.toContain('当前来源无法安全验证');
+    }
+
+    mocks.verify.mockRejectedValueOnce(new UpgradeAuthenticationError('origin_rejected'));
+    await act(async () => {
+      await loginI18n.changeLanguage('en');
+      await adapter().authenticate('old-key', false);
+    });
+    expect(adapter().error).toContain('CPAMP_PUBLIC_ORIGIN');
+    expect(adapter().error).not.toContain('cannot be verified safely');
+  });
 });
