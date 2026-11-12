@@ -104,3 +104,50 @@ describe('normalizeConfigResponse Claude fingerprint profile', () => {
     expect(config.claudeApiKeys?.[0]).not.toHaveProperty('fingerprintProfile');
   });
 });
+
+describe('normalizeConfigResponse observability logs and pprof fields', () => {
+  it('normalizes flat management config fields for logs retention and pprof', () => {
+    const config = normalizeConfigResponse({
+      debug: true,
+      'request-log': true,
+      'logging-to-file': false,
+      'logs-max-total-size-mb': 128,
+      'error-logs-max-files': 25,
+      pprof: { enable: false, addr: '127.0.0.1:8316' },
+    });
+
+    expect(config.debug).toBe(true);
+    expect(config.requestLog).toBe(true);
+    expect(config.loggingToFile).toBe(false);
+    expect(config.logsMaxTotalSizeMb).toBe(128);
+    expect(config.errorLogsMaxFiles).toBe(25);
+    expect(config.pprofEnable).toBe(false);
+    expect(config.pprofAddr).toBe('127.0.0.1:8316');
+  });
+
+  it('falls back to nested v8 observability.logs and observability.pprof fields', () => {
+    const config = normalizeConfigResponse({
+      observability: {
+        logs: {
+          debug: false,
+          'logging-to-file': true,
+          'request-log': false,
+          'logs-max-total-size-mb': 64,
+          'error-logs-max-files': 0,
+        },
+        pprof: {
+          enable: true,
+          addr: '127.0.0.1:9000',
+        },
+      },
+    });
+
+    expect(config.debug).toBe(false);
+    expect(config.loggingToFile).toBe(true);
+    expect(config.requestLog).toBe(false);
+    expect(config.logsMaxTotalSizeMb).toBe(64);
+    expect(config.errorLogsMaxFiles).toBe(0);
+    expect(config.pprofEnable).toBe(true);
+    expect(config.pprofAddr).toBe('127.0.0.1:9000');
+  });
+});

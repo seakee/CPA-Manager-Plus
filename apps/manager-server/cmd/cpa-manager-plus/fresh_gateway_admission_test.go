@@ -222,6 +222,25 @@ func TestFreshAuthorityAdmissionRemainsProvenAcrossConsoleFileLoggingToggle(t *t
 				t.Fatalf("PUT cpamp/v0/management/logging-to-file false = %d %s", disableRes.Code, disableRes.Body.String())
 			}
 			assertAdmission("after disabling file logging")
+
+			for _, write := range []struct {
+				resource string
+				body     string
+				step     string
+			}{
+				{resource: "cpamp/v0/management/debug", body: `{"value":true}`, step: "after enabling debug logging"},
+				{resource: "cpamp/v0/management/request-log", body: `{"value":true}`, step: "after enabling request logging"},
+				{resource: "cpamp/v0/management/logs-max-total-size-mb", body: `{"value":128}`, step: "after setting logs max total size"},
+				{resource: "cpamp/v0/management/error-logs-max-files", body: `{"value":20}`, step: "after setting error logs max files"},
+				{resource: "cpamp/v0/management/debug", body: `{"value":false}`, step: "after disabling debug logging"},
+				{resource: "cpamp/v0/management/request-log", body: `{"value":false}`, step: "after disabling request logging"},
+			} {
+				res := harness.call(t, http.MethodPut, write.resource, write.body)
+				if res.Code != http.StatusOK {
+					t.Fatalf("PUT %s %s = %d %s", write.resource, write.body, res.Code, res.Body.String())
+				}
+				assertAdmission(write.step)
+			}
 		})
 	}
 }

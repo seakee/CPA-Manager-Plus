@@ -982,6 +982,28 @@ describe('FreshGatewayWorkspace', () => {
     }
   });
 
+  it('delegates observability.logs.* to /logs while keeping observability.pprof.* non-routed', async () => {
+    const fake = fakeClient(buildView());
+    await mount(fake.client);
+    await openTab('owners');
+
+    const logsCards = renderer.root.findAllByProps({
+      'data-testid': 'gateway-owner-observability.logs.*',
+    });
+    expect(logsCards).toHaveLength(1);
+    expect(
+      logsCards[0].findAll((node) => node.props['data-testid'] === 'gateway-owner-link-/logs')
+    ).toHaveLength(1);
+
+    const pprofCards = renderer.root.findAllByProps({
+      'data-testid': 'gateway-owner-observability.pprof.*',
+    });
+    expect(pprofCards).toHaveLength(1);
+    expect(
+      pprofCards[0].findAll((node) => typeof node.props['data-testid'] === 'string' && node.props['data-testid'].startsWith('gateway-owner-link-'))
+    ).toHaveLength(0);
+  });
+
   it('offers reconcile for a legacy field operation surfaced as the group operation', async () => {
     // A managed install blocks a group whose pre-cutover field write is still
     // unresolved. The group must carry that operation, or the page says
