@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>CPA Manager Plus has moved</title>
+    <link rel="canonical" href="https://cpamp-demo.seakee.dev/" />
+    <noscript>
+      <meta http-equiv="refresh" content="0; url=https://cpamp-demo.seakee.dev/" />
+    </noscript>
+    <script>
+// BEGIN INLINE
+function legacyRedirectTarget(pathname, search, hash) {
+  var DEMO = 'https://cpamp-demo.seakee.dev';
+  var DOCS = 'https://cpamp-docs.seakee.dev';
+  var BASE = '/CPA-Manager-Plus';
+  var suffix = (search || '') + (hash || '');
+  var normalized = (pathname || '/').replace(/[\\/]+/g, '/');
+  var rest;
+
+  if (normalized.indexOf(BASE + '/') === 0) {
+    rest = normalized.slice(BASE.length);
+  } else if (normalized === BASE) {
+    rest = '/';
+  } else {
+    rest = normalized;
+  }
+
+  if (rest === '/' || rest === '/index.html') {
+    return DEMO + '/' + suffix;
+  }
+
+  if (rest.indexOf('/docs/') === 0) {
+    return DOCS + '/' + rest.slice('/docs/'.length) + suffix;
+  }
+
+  // `/docs` without a trailing slash is the docs root.
+  if (rest === '/docs') {
+    return DOCS + '/' + suffix;
+  }
+
+  return DEMO + '/' + suffix;
+}
+// END INLINE
+(function () {
+  var target = legacyRedirectTarget(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash
+  );
+  window.location.replace(target);
+})();
+    </script>
+  </head>
+  <body>
+    <p>
+      The CPA Manager Plus demo moved to
+      <a href="https://cpamp-demo.seakee.dev/">https://cpamp-demo.seakee.dev/</a>.
+      Documentation moved to
+      <a href="https://cpamp-docs.seakee.dev/">https://cpamp-docs.seakee.dev/</a>.
+    </p>
+  </body>
+</html>

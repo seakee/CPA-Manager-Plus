@@ -37,7 +37,7 @@ jobs:
       windows_sqlite: ${{ steps.classify.outputs.windows_sqlite }}
       native_control: ${{ steps.classify.outputs.native_control }}
       docker: ${{ steps.classify.outputs.docker }}
-      demo_docs: ${{ steps.classify.outputs.demo_docs }}
+      demo: ${{ steps.classify.outputs.demo }}
       release_content: ${{ steps.classify.outputs.release_content }}
 
     steps:
@@ -220,10 +220,10 @@ jobs:
           build-args: |
             VERSION=ci
 
-  demo-docs:
-    name: Demo and Docs
+  demo:
+    name: Demo
     needs: changes
-    if: needs.changes.outputs.demo_docs == 'true'
+    if: needs.changes.outputs.demo == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -243,9 +243,6 @@ jobs:
         run: npm --workspace apps/web run build:demo:bundle
         env:
           VERSION: ci-demo
-
-      - name: Build docs site
-        run: npm run docs:build
 
   release-content:
     name: Release Content
@@ -316,7 +313,7 @@ jobs:
       - manager-server-windows-sqlite
       - native-control
       - docker-build
-      - demo-docs
+      - demo
       - release-content
     if: always()
     runs-on: ubuntu-latest
@@ -331,7 +328,7 @@ jobs:
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
           DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
-          DEMO_DOCS_RESULT: ${{ needs['demo-docs'].result }}
+          DEMO_RESULT: ${{ needs['demo'].result }}
           RELEASE_CONTENT_RESULT: ${{ needs['release-content'].result }}
         shell: bash
         run: |
@@ -350,7 +347,7 @@ jobs:
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"
             "Docker Build:${DOCKER_BUILD_RESULT}"
-            "Demo and Docs:${DEMO_DOCS_RESULT}"
+            "Demo:${DEMO_RESULT}"
             "Release Content:${RELEASE_CONTENT_RESULT}"
           )
 

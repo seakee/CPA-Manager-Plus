@@ -345,7 +345,7 @@ function SystemPageContent() {
             </a>
 
             <a
-              href="https://seakee.github.io/CPA-Manager-Plus/docs/"
+              href="https://cpamp-docs.seakee.dev/"
               target="_blank"
               rel="noopener noreferrer"
               className={styles.linkCard}
