@@ -35,7 +35,7 @@ Compose deployment; it is not a public-host or TLS qualification.
 Before initialization the service waits for Host admission. Discovery is
 read-only and does not authorize initialization or create an administrator.
 Before Host admission, the bounded Bootstrap UI may show read-only source guidance if the startup inspection listener is active. This UI never grants a Fresh claim, Upgrade/Adopt permission or writer; unknown/blocked sources remain fail-closed.
-Before Fresh routing is committed, Ingress answers browser HTML `GET`/`HEAD` navigations on unowned non-model paths (such as `/console`) with an uncached `303 See Other` redirect to `/.well-known/cpamp-bootstrap/ui` while keeping `X-CPAMP-Route-Owner: gateway` and leaving non-HTML, write-method, and model-API `503 gateway pending configuration` responses unchanged. Once Fresh routing commits, this redirect ceases and the fixed Bootstrap UI retires to `404`.
+While neither Ingress's routing projection nor Manager's private `/internal/routing/fresh-authority` posture is committed (and Manager confirms pre-commit discovery rather than committed or unknown posture), Ingress answers browser HTML `GET`/`HEAD` navigations on unowned non-model paths (such as `/console`) with an uncached `303 See Other` redirect to `/.well-known/cpamp-bootstrap/ui` while keeping `X-CPAMP-Route-Owner: gateway` and leaving non-HTML, write-method, and model-API `503 gateway pending configuration` responses unchanged. Once Manager durably commits Fresh routing (even if publishing the committed projection to Ingress fails or lags) or when Manager posture is unknown, Ingress keeps `503 gateway pending configuration` without redirecting, and the fixed Bootstrap UI retires to `404`.
 
 ```sh
 docker compose stop cpamp-manager

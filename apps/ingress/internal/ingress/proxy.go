@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,20 +16,21 @@ import (
 
 const proxyBufferSize = 32 << 10
 
-// PreFreshPosture describes Manager's routing posture while Ingress holds no
-// active Fresh routing projection.
+// PreFreshPosture describes Manager's durable routing posture before Ingress
+// holds a committed Fresh routing projection.
 type PreFreshPosture uint8
 
 const (
-	// PreFreshBootstrap indicates routing is not committed and the fixed
-	// Bootstrap UI is the entry point for browser navigations.
+	// PreFreshBootstrap indicates Manager confirms routing is not committed and
+	// the fixed Bootstrap UI is active for browser navigations.
 	PreFreshBootstrap PreFreshPosture = iota
 	// PreFreshLegacyGateway preserves the explicit 204 legacy Manager
 	// passthrough to the model Gateway.
 	PreFreshLegacyGateway
 	// PreFreshPendingClosed keeps all non-Control traffic closed with 503
 	// without redirecting browser navigations (for example when Manager already
-	// has a committed Fresh route awaiting Restore, or Manager is unreachable).
+	// durably committed Fresh routing while projection publish lagged/failed, or
+	// when Manager posture is unknown/unreachable).
 	PreFreshPendingClosed
 )
 
@@ -68,8 +70,8 @@ func (h *Handler) EnableFreshGatewayAdmission(admitted func(context.Context) boo
 	h.gatewayAdmission = admitted
 }
 
-// EnablePreFreshPosture supplies the single private Manager authority posture
-// used while no Fresh routing projection is active in Ingress.
+// EnablePreFreshPosture supplies Manager's current private authority posture
+// used whenever Ingress has not yet observed a committed Fresh projection.
 func (h *Handler) EnablePreFreshPosture(posture func(context.Context) PreFreshPosture) {
 	h.preFreshPosture = posture
 }
@@ -97,7 +99,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// committed projection. Absence, error, expiry-without-reconfirmation
 			// and mismatch all stay closed.
 			if h.gatewayAdmission == nil || !h.gatewayAdmission(r.Context()) {
-				if !h.fresh.State().Committed && isPreCommitBrowserNavigation(r) {
+				if !h.fresh.State().Committed && isPreCommitBrowserNavigation(r) && h.resolvePreFreshPosture(r.Context()) == PreFreshBootstrap {
 					redirectToBootstrapUI(w, r)
 					return
 				}
@@ -197,57 +199,43 @@ func gatewayDataPlaneCandidate(r *http.Request) bool {
 }
 
 func acceptPrefersHTML(header http.Header) bool {
-	values := header.Values("Accept")
-	if len(values) == 0 {
-		return false
-	}
-	pos := 0
 	htmlQ := -1
 	htmlPos := -1
 	maxOtherQ := -1
-	maxCompetingTextQ := -1
+	maxCompetingQ := -1
 	maxSpecificOtherQ := -1
 	maxSpecificOtherPos := -1
+	pos := 0
 
-	for _, raw := range values {
-		for rest := raw; rest != ""; {
-			var item string
-			item, rest, _ = strings.Cut(rest, ",")
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-			mediaRange, params, _ := strings.Cut(item, ";")
-			mediaRange = strings.TrimSpace(mediaRange)
-			slash := strings.IndexByte(mediaRange, '/')
-			if slash <= 0 || slash == len(mediaRange)-1 || strings.IndexAny(mediaRange, " \t") >= 0 {
+	for _, raw := range header.Values("Accept") {
+		ok := forEachAcceptRange(raw, func(item string) {
+			mediaType, params, err := mime.ParseMediaType(item)
+			if err != nil {
 				pos++
-				continue
+				return
 			}
-			q, ok := parseAcceptQuality(params)
-			if !ok {
+			q, valid := acceptWeight(params)
+			if !valid {
 				pos++
-				continue
+				return
 			}
-			switch {
-			case strings.EqualFold(mediaRange, "text/html"):
+			switch mediaType {
+			case "text/html":
 				if q > htmlQ {
 					htmlQ = q
 					htmlPos = pos
 				}
-			case strings.EqualFold(mediaRange, "application/xhtml+xml"):
+			case "application/xhtml+xml":
 			default:
 				if q > maxOtherQ {
 					maxOtherQ = q
 				}
-				if strings.EqualFold(mediaRange, "text/plain") ||
-					strings.EqualFold(mediaRange, "application/json") ||
-					strings.EqualFold(mediaRange, "text/event-stream") {
-					if q > maxCompetingTextQ {
-						maxCompetingTextQ = q
+				if mediaType == "text/plain" || mediaType == "application/json" || mediaType == "text/event-stream" {
+					if q > maxCompetingQ {
+						maxCompetingQ = q
 					}
 				}
-				if mediaRange != "*/*" && !strings.HasSuffix(mediaRange, "/*") {
+				if mediaType != "*/*" && !strings.HasSuffix(mediaType, "/*") {
 					if q > maxSpecificOtherQ {
 						maxSpecificOtherQ = q
 						maxSpecificOtherPos = pos
@@ -255,12 +243,12 @@ func acceptPrefersHTML(header http.Header) bool {
 				}
 			}
 			pos++
+		})
+		if !ok {
+			return false
 		}
 	}
-	if htmlQ <= 0 {
-		return false
-	}
-	if maxOtherQ > htmlQ || maxCompetingTextQ >= htmlQ {
+	if htmlQ <= 0 || maxOtherQ > htmlQ || maxCompetingQ >= htmlQ {
 		return false
 	}
 	if maxSpecificOtherQ == htmlQ && maxSpecificOtherPos < htmlPos {
@@ -269,65 +257,72 @@ func acceptPrefersHTML(header http.Header) bool {
 	return true
 }
 
-func parseAcceptQuality(params string) (int, bool) {
-	for rest := params; rest != ""; {
-		var param string
-		param, rest, _ = strings.Cut(rest, ";")
-		param = strings.TrimSpace(param)
-		if param == "" {
+func forEachAcceptRange(raw string, fn func(string)) bool {
+	start := 0
+	inQuotes := false
+	escaped := false
+	for i := range len(raw) {
+		c := raw[i]
+		if escaped {
+			escaped = false
 			continue
 		}
-		key, val, ok := strings.Cut(param, "=")
-		if !ok {
+		if inQuotes {
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inQuotes = false
+			}
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(key), "q") {
-			continue
+		switch c {
+		case '"':
+			inQuotes = true
+		case ',':
+			if item := strings.TrimSpace(raw[start:i]); item != "" {
+				fn(item)
+			}
+			start = i + 1
 		}
-		return parseQValue(strings.TrimSpace(val))
 	}
-	return 1000, true
+	if inQuotes {
+		return false
+	}
+	if item := strings.TrimSpace(raw[start:]); item != "" {
+		fn(item)
+	}
+	return true
 }
 
-func parseQValue(val string) (int, bool) {
-	if val == "" {
-		return 0, false
-	}
-	switch val[0] {
-	case '1':
-		if len(val) == 1 {
-			return 1000, true
-		}
-		if val[1] != '.' || len(val) > 5 {
-			return 0, false
-		}
-		for i := 2; i < len(val); i++ {
-			if val[i] != '0' {
-				return 0, false
-			}
-		}
+func acceptWeight(params map[string]string) (int, bool) {
+	raw, ok := params["q"]
+	if !ok {
 		return 1000, true
-	case '0':
-		if len(val) == 1 {
-			return 0, true
-		}
-		if val[1] != '.' || len(val) > 5 {
-			return 0, false
-		}
-		q := 0
-		scale := 100
-		for i := 2; i < len(val); i++ {
-			c := val[i]
-			if c < '0' || c > '9' {
-				return 0, false
-			}
-			q += int(c-'0') * scale
-			scale /= 10
-		}
-		return q, true
-	default:
+	}
+	if len(raw) == 0 || len(raw) > 5 {
 		return 0, false
 	}
+	if raw == "1" || raw == "1." || raw == "1.0" || raw == "1.00" || raw == "1.000" {
+		return 1000, true
+	}
+	if raw[0] != '0' {
+		return 0, false
+	}
+	if len(raw) == 1 || raw == "0." {
+		return 0, true
+	}
+	if raw[1] != '.' {
+		return 0, false
+	}
+	q, scale := 0, 100
+	for i := 2; i < len(raw); i++ {
+		if raw[i] < '0' || raw[i] > '9' {
+			return 0, false
+		}
+		q += int(raw[i]-'0') * scale
+		scale /= 10
+	}
+	return q, true
 }
 
 func newReverseProxy(target *url.URL, logger *log.Logger) *httputil.ReverseProxy {

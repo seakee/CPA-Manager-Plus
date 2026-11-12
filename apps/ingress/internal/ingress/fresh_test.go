@@ -217,6 +217,12 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 				"Forwarded":        "host=other.example;proto=https",
 			},
 		},
+		{
+			name:    "quoted-param-containing-q-zero-with-positive-html-weight",
+			method:  http.MethodGet,
+			target:  "/console",
+			headers: map[string]string{"Accept": `text/html;profile="a;q=0,b";q=0.9, application/json;q=0.5`},
+		},
 	} {
 		t.Run("pre-projection/"+tc.name, func(t *testing.T) {
 			rec := do(tc.method, tc.target, tc.headers)
@@ -251,6 +257,9 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 		{name: "plain-tied-with-html", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "text/plain, text/html"}},
 		{name: "html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "text/html;q=0"}},
 		{name: "wildcard-preferred-over-html", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "*/*, text/html;q=0.8"}},
+		{name: "quoted-param-with-semicolon-and-html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="a;q=1;b";q=0, application/json;q=0.9`}},
+		{name: "quoted-param-with-escaped-quote-and-html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="a,\"q=1\",b";q=0, application/json;q=0.9`}},
+		{name: "unterminated-quoted-accept-param", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="unterminated`}},
 		{name: "post-console-with-html-accept", method: http.MethodPost, target: "/console", headers: map[string]string{"Accept": browserAccept}},
 		{name: "put-console-with-html-accept", method: http.MethodPut, target: "/console", headers: map[string]string{"Accept": browserAccept}},
 		{name: "cors-fetch-mode", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": browserAccept, "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}},
@@ -278,7 +287,15 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 		t.Fatalf("unexpected upstream traffic before projection: manager=%d gateway=%d", managerHits, gatewayHits)
 	}
 
-	// Uncommitted Fresh projection on another candidate path still redirects /console browser navigations.
+	// Uncommitted Fresh projection on another candidate path redirects /console
+	// browser navigations only while Manager's durable posture confirms pre-commit.
+	posture := PreFreshBootstrap
+	h.EnablePreFreshPosture(func(context.Context) PreFreshPosture {
+		if legacy {
+			return PreFreshLegacyGateway
+		}
+		return posture
+	})
 	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: false}
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != bootstrapUI {
 		t.Fatalf("uncommitted projection navigation = %d Location=%q", rec.Code, rec.Header().Get("Location"))
@@ -286,7 +303,13 @@ func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": "*/*"}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
 		t.Fatalf("uncommitted projection non-HTML = %d Location=%q", rec.Code, rec.Header().Get("Location"))
 	}
-
+	// Durable commit succeeded in Manager (or Manager posture is unknown) while
+	// the post-commit projection publish to Ingress failed: keep 503, never 303 to 404.
+	posture = PreFreshPendingClosed
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("durable-committed but projection-uncommitted navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+	posture = PreFreshBootstrap
 	// Once Fresh routing is committed, unadmitted non-Control browser navigations keep 503 unchanged.
 	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: true}
 	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {

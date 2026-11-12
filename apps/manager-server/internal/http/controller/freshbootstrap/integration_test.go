@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -37,6 +38,18 @@ func freeAddr(t *testing.T) string {
 	address := l.Addr().String()
 	l.Close()
 	return address
+}
+
+type selectiveCommitDriver struct {
+	freshrouting.Driver
+	rejectCommittedApply bool
+}
+
+func (d *selectiveCommitDriver) Apply(ctx context.Context, s freshrouting.State) error {
+	if s.Committed && d.rejectCommittedApply {
+		return errors.New("simulated post-commit projection publish failure")
+	}
+	return d.Driver.Apply(ctx, s)
 }
 
 // This test builds and runs the actual stdlib-only Ingress process against
@@ -157,10 +170,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	}
 	defer stop()
 	start()
-	driver, e := freshrouting.NewHTTPDriver(freshrouting.HTTPConfig{IngressControlURL: "http://" + controlAddr, PublicOrigin: origin})
+	rawDriver, e := freshrouting.NewHTTPDriver(freshrouting.HTTPConfig{IngressControlURL: "http://" + controlAddr, PublicOrigin: origin})
 	if e != nil {
 		t.Fatal(e)
 	}
+	driver := &selectiveCommitDriver{Driver: rawDriver}
 	fixed.Routing = freshrouting.New(st, driver)
 	request := func(method, path, auth string, body any) (int, string, http.Header) {
 		var data []byte
@@ -242,18 +256,33 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusSeeOther || header.Get("Location") != bootstrap.FixedBootstrapUIPath {
 		t.Fatalf("prepared uncommitted browser /console = %d Location=%q", code, header.Get("Location"))
 	}
+	// Simulate durable SQLite commit succeeding while the post-commit
+	// Committed=true projection publish to Ingress fails: Bootstrap UI retires
+	// immediately to 404, so Ingress must consult Manager's durable authority
+	// and keep /console on 503 rather than redirecting to a retired 404 page.
+	driver.rejectCommittedApply = true
 	if code, body, _ := request("POST", base+"routing/activate", "Fresh "+payload.Token, map[string]any{"identity": id}); code != 200 {
 		t.Fatal("activate real Ingress", code, body)
 	}
+	driver.rejectCommittedApply = false
 	op, e := current(t.Context())
 	if e != nil || !op.Routing.Committed || op.Routing.OperationID != id.OperationID {
 		t.Fatal(op, e)
+	}
+	if projected, inspectErr := rawDriver.Inspect(t.Context()); inspectErr != nil || projected.Committed {
+		t.Fatalf("expected uncommitted Ingress projection before Restore: state=%+v err=%v", projected, inspectErr)
 	}
 	for _, suffix := range []string{"", "/ui", "/assets/index-AbCd1234.js", "/api/v2/operation", "/unknown", "%2fui", "/api/v2/claim/exchange"} {
 		code, body, header := request("GET", bootstrap.FixedBootstrapDiscoveryPath+suffix, "Fresh "+payload.Token, nil)
 		if code != 404 || header.Get("Location") != "" || strings.Contains(body, "private-control") {
 			t.Fatal("fixed namespace did not retire", suffix, code, body)
 		}
+	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit stale-projection browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	if e = fixed.Routing.Restore(t.Context()); e != nil {
+		t.Fatal(e)
 	}
 	if code, _, _ := request("GET", "/private-control", "", nil); code != 200 {
 		t.Fatal("canonical route unavailable")
