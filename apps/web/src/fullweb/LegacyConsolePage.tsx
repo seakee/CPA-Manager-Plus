@@ -25,6 +25,7 @@ import { NotificationContainer } from '../components/common/NotificationContaine
 import { ManagerUpdates } from '../features/system/ManagerUpdates';
 import { SystemPage } from '../features/system/SystemPage';
 import { RuntimeStatusPage } from '@/features/system/RuntimeStatusPage';
+import { LogsAuthorityClientContext } from '@/features/logs/LogsAuthorityContext';
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
 import { useAuthStore } from '../stores';
 import { FreshManagedResources } from './FreshManagedResources';
@@ -145,6 +146,7 @@ export function LegacyConsolePage({
          * keeps its active item, breadcrumbs and
          * MainRoutes in the same coordinate system as the mounted router.
          */}
+        <LogsAuthorityClientContext.Provider value={client ?? null}>
         <MainLayout
           routeBase={context.basePath}
           navigationBase={context.basePath}
@@ -193,6 +195,7 @@ export function LegacyConsolePage({
             return undefined;
           }}
         />
+        </LogsAuthorityClientContext.Provider>
       </ManagerUpdates>
     </div>
   );

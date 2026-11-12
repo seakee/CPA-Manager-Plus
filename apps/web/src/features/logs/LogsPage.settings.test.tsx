@@ -7,6 +7,7 @@ import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { LogsPage } from './LogsPage';
 import { useLogsConfigAuthority } from './useLogsConfigAuthority';
+import { LogsAuthorityClientContext } from './LogsAuthorityContext';
 
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -601,5 +602,34 @@ describe('LogsPage settings and empty-state file logging control', () => {
     expect(
       byTestId(mounted.root, 'logs-setting-row-logging-to-file').findByType('input').props.disabled
     ).toBe(true);
+  });
+
+  it('uses LogsAuthorityClientContext in Full Web and stays standalone in Panel when no provider is mounted', async () => {
+    const refusedClient = buildAuthorityClient({
+      mode: 'external',
+      writable: false,
+      reason: 'external_cpa_version_unsupported',
+    });
+
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/logs']}>
+          <LogsAuthorityClientContext.Provider value={refusedClient}>
+            <LogsPage />
+          </LogsAuthorityClientContext.Provider>
+        </MemoryRouter>
+      );
+    });
+    expect(byTestId(renderer!.root, 'logs-empty-enable-button').props.disabled).toBe(true);
+
+    await act(async () => {
+      renderer!.unmount();
+      renderer = create(
+        <MemoryRouter initialEntries={['/logs']}>
+          <LogsPage />
+        </MemoryRouter>
+      );
+    });
+    expect(byTestId(renderer!.root, 'logs-empty-enable-button').props.disabled).toBe(false);
   });
 });

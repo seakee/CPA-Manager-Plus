@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { readRoutingContext } from '@/fullweb/routingContext';
-import {
-  createPublicApiClient,
-  PublicApiError,
-  type PublicApiClient,
-} from '@/fullweb/publicApi';
+import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
 import { configurationText } from '@/i18n/configurationWorkspace';
+import { useLogsAuthorityClient } from './LogsAuthorityContext';
 
 export type LogsAuthorityMode = 'managed' | 'external' | 'private' | 'none' | 'standalone';
 
@@ -29,8 +25,6 @@ export interface LogsConfigAuthority {
 }
 
 type WorkspaceTextKey = Parameters<typeof configurationText>[0];
-
-const defaultClient = createPublicApiClient();
 
 export function mapAuthorityReasonKey(reason: string | undefined): WorkspaceTextKey {
   switch (reason) {
@@ -176,10 +170,8 @@ export function useLogsConfigAuthority({
   managementKey: string;
   authorityClient?: PublicApiClient;
 }): LogsConfigAuthority {
-  const inFullWeb =
-    Boolean(authorityClient) ||
-    Boolean(typeof document !== 'undefined' && readRoutingContext(document));
-  const client = authorityClient ?? (inFullWeb ? defaultClient : null);
+  const contextClient = useLogsAuthorityClient();
+  const client = authorityClient ?? contextClient;
   const scopeKey = client ? `${apiBase}::${managementKey}` : '';
 
   const [resolved, setResolved] = useState<ResolvedAuthorityState>({
