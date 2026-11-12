@@ -1,9 +1,11 @@
 package legacypreflight
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 func sourceState(t *testing.T, root string) map[string]string {
@@ -936,19 +939,74 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
+		origID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The rewrite must change bytes, not merely re-write the ones already
+		// there. A same-content write is not a rewrite: NTFS need not advance a
+		// file's ChangeTime for it, so the detector could not see it and the
+		// subtest would pass or fail on the OS's bookkeeping rather than on the
+		// invariant it claims to prove. Mutate the header's user-version field,
+		// which SQLite tolerates on read, so the probe still answers normally and
+		// only the before/after identity comparison can reject the change.
+		const userVersionOffset = 60
+		rewritten := append([]byte(nil), coldBytes...)
+		rewrittenVersion := binary.BigEndian.Uint32(coldBytes[userVersionOffset:]) ^ 0xa5a5a5a5
+		if rewrittenVersion == binary.BigEndian.Uint32(coldBytes[userVersionOffset:]) {
+			rewrittenVersion++
+		}
+		binary.BigEndian.PutUint32(rewritten[userVersionOffset:], rewrittenVersion)
 
+		var hookErr error
 		origHook := beforeOperationEvidenceProbe
 		beforeOperationEvidenceProbe = func(target string) {
-			if f, openErr := os.OpenFile(target, os.O_WRONLY, 0); openErr == nil {
-				_, _ = f.WriteAt(coldBytes[:16], 0)
-				_ = f.Close()
-				_ = os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
-			}
+			hookErr = func() error {
+				f, err := os.OpenFile(target, os.O_WRONLY, 0)
+				if err != nil {
+					return err
+				}
+				if _, err := f.WriteAt(rewritten[userVersionOffset:userVersionOffset+4], userVersionOffset); err != nil {
+					_ = f.Close()
+					return err
+				}
+				if err := f.Close(); err != nil {
+					return err
+				}
+				return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+			}()
 		}
 		defer func() { beforeOperationEvidenceProbe = origHook }()
 
-		if _, _, err := RecordedOperationEvidence(context.Background(), dbPath); err == nil {
+		_, _, err = RecordedOperationEvidence(context.Background(), dbPath)
+		if hookErr != nil {
+			t.Fatalf("apply mid-probe rewrite: %v", hookErr)
+		}
+		if err == nil {
 			t.Fatal("RecordedOperationEvidence succeeded when database changed mid-probe")
+		}
+
+		// Prove the fixture exercised the invariant instead of assuming it: the
+		// file keeps its identity, size and restored mtime, and only its content
+		// and kernel change stamp moved.
+		afterInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterID != origID || afterInfo.Size() != origInfo.Size() || afterInfo.ModTime().UnixNano() != origInfo.ModTime().UnixNano() {
+			t.Fatalf("fixture did not preserve inode/size/mtime: id %+v->%+v size %d->%d mtime %d->%d",
+				origID, afterID, origInfo.Size(), afterInfo.Size(), origInfo.ModTime().UnixNano(), afterInfo.ModTime().UnixNano())
+		}
+		current, err := os.ReadFile(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(current[userVersionOffset:userVersionOffset+4], coldBytes[userVersionOffset:userVersionOffset+4]) {
+			t.Fatal("fixture rewrite left the user-version field unchanged; the mutation never reached the file")
 		}
 	})
 }
