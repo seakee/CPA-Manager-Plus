@@ -1,4 +1,12 @@
-name: Demo Site
+name: Legacy Pages Redirect
+
+# The demo and the docs moved out of this repository: the frozen 1.x demo is at
+# https://cpamp-demo.seakee.dev/, the docs at https://cpamp-docs.seakee.dev/.
+# This workflow keeps the old project Pages URLs working by publishing the small
+# static redirect site committed in bin/pages-redirect/.
+#
+# The job name is "build" on purpose: branch protection on main records it, and
+# renaming it would leave an inherited required check waiting forever.
 
 on:
   push:
@@ -12,12 +20,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: demo-pages-${{ github.ref }}
-  cancel-in-progress: true
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build Demo Site
+    name: Build Legacy Redirect Site
     runs-on: ubuntu-latest
 
     steps:
@@ -28,37 +36,20 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.22.1'
-          cache: npm
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build demo site
-        run: npm run build:demo
-        env:
-          VERSION: demo-${{ github.sha }}
-
-      - name: Build docs site
-        run: npm run docs:build
-
-      - name: Prepare Pages artifact
+      - name: Verify committed redirect site
         run: |
           set -euo pipefail
-          rm -rf dist/pages
-          mkdir -p dist/pages/docs
-          cp -R apps/web/dist-demo/. dist/pages/
-          cp -R apps/docs/.vitepress/dist/. dist/pages/docs/
+          node bin/pages-redirect/build.mjs
+          git diff --exit-code -- bin/pages-redirect
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: dist/pages
+          path: bin/pages-redirect
 
   deploy:
-    name: Deploy Demo Site
+    name: Deploy Legacy Redirect Site
     runs-on: ubuntu-latest
     needs: build
 

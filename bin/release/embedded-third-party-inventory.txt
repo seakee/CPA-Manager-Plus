@@ -114,7 +114,7 @@
     "apps/runtime-supervisor/go.mod": "sha256:05ddebf81d0e395d7629c0dc2ae61368065f1c8427dd845aca9f50152ff06589",
     "apps/runtime-supervisor/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
     "apps/web/package.json": "sha256:481f5e4e89cd5bcdfc5ac68f06d2cd64d0659babbb69dcbb356469ad05cd6542",
-    "package-lock.json": "sha256:3ebf352d75bafa70ff10935d000094668c4fecfe72434dc85744f1efe3e41a45"
+    "package-lock.json": "sha256:a5c36ede978ce19dc43e88ca4a76f7c9b6243f31de3c2faf4955d08ea1220ab4"
   },
   "schemaVersion": 1,
   "status": "SOURCE_MANIFESTS_VERIFIED",

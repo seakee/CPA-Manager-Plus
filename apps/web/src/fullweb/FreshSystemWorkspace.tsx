@@ -161,7 +161,7 @@ export function FreshSystemWorkspace({ basePath }: { basePath: string }) {
           <p>
             <a
               href={
-                'https://seakee.github.io/CPA-Manager-Plus/docs/' +
+                'https://cpamp-docs.seakee.dev/next/' +
                 docsLanguage +
                 'operations/reset-admin-key.html'
               }

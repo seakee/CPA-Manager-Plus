@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>CPA Manager Plus moved</title>
+    <script>
+      (function () {
+        var LEGACY_BASE_PATH = '/CPA-Manager-Plus';
+        var DEMO_ORIGIN = 'https://cpamp-demo.seakee.dev';
+        var DOCS_ORIGIN = 'https://cpamp-docs.seakee.dev';
+        var DOCS_PREFIX = LEGACY_BASE_PATH + '/docs';
+        
+        var resolveRedirect = function (location) {
+          var pathname = (location && location.pathname) || '/';
+          var search = (location && location.search) || '';
+          var hash = (location && location.hash) || '';
+          // A static host answers an unknown path with 404.html, which keeps the
+          // requested path in `location`; GitHub Pages additionally reaches it with the
+          // real 404 status. Both resolve the same way.
+          if (location && location.href) {
+            var target = new URL(location.href);
+            if (pathname === '/') pathname = target.pathname;
+            if (!search) search = target.search;
+            if (!hash) hash = target.hash;
+          }
+          var suffix = search === '?' ? '' : search;
+        
+          if (pathname === DOCS_PREFIX || pathname === DOCS_PREFIX + '/') {
+            return { kind: 'docs', url: DOCS_ORIGIN + '/next/' + suffix + hash, status: '301' };
+          }
+          if (pathname.indexOf(DOCS_PREFIX + '/') === 0) {
+            return {
+              kind: 'docs',
+              url: DOCS_ORIGIN + '/next/' + pathname.slice(DOCS_PREFIX.length + 1) + suffix + hash,
+              status: '301',
+            };
+          }
+        
+          // The legacy Pages site had no home page of its own: only the demo was served
+          // at the origin root, so the root and every unmatched path land on the demo.
+          return { kind: 'demo', url: DEMO_ORIGIN + '/' + suffix + hash, status: '302' };
+        };
+        var target = resolveRedirect(window.location);
+        // meta refresh and canonical stay in place for non-scripting clients.
+        location.replace(target.url);
+      })();
+    </script>
+    <noscript><meta http-equiv="refresh" content="0; url=https://cpamp-demo.seakee.dev/" /></noscript>
+    <link rel="canonical" href="https://cpamp-demo.seakee.dev/" />
+  </head>
+  <body>
+    <p data-status="200">
+      CPA Manager Plus moved. The demo is at
+      <a href="https://cpamp-demo.seakee.dev/">cpamp-demo.seakee.dev</a> and the
+      documentation is at
+      <a href="https://cpamp-docs.seakee.dev/next/">cpamp-docs.seakee.dev</a>.
+    </p>
+  </body>
+</html>

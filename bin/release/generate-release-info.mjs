@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   repository,
+  assertUpgradeGuide,
   parseVersion,
   nativeAssets,
   validateInfo,
@@ -44,10 +45,7 @@ const validateV2NotesMetadata = (metadata) => {
     if (typeof summary !== 'string' || !summary.trim() || Buffer.byteLength(summary, 'utf8') > 4096)
       throw new Error('Invalid v2 release content');
   }
-  const guide = new URL(metadata.update?.upgrade_guide_url);
-  if (guide.origin !== 'https://github.com' || guide.username || guide.password ||
-      !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/'))
-    throw new Error('Invalid v2 upgrade guide');
+  assertUpgradeGuide(metadata.update?.upgrade_guide_url, 'Invalid v2 upgrade guide');
   if (typeof metadata.update?.breaking !== 'boolean')
     throw new Error('Explicit update flags required');
   if (metadata.update.migration_required !== true)

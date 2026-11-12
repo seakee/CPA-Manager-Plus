@@ -1202,40 +1202,6 @@ test('a built panel that references assets/ fails the run', async (t) => {
   assert.match(JSON.parse(run.streams.out).error, /sibling resources/);
 });
 
-test('the user documentation states the v2 Beta Lite contract in both languages', () => {
-  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
-  for (const [file, prerelease] of [
-    ['apps/docs/deployment/cpa-panel.md', '预发布'],
-    ['apps/docs/en/deployment/cpa-panel.md', 'prerelease'],
-  ]) {
-    const doc = read(file);
-    for (const needle of [
-      prerelease,
-      'releases/latest',
-      '`management.html`',
-      '/v0/management',
-      '/v8/management',
-      'disable-auto-update-panel: true',
-      'static/management.html',
-      'panel-github-repository',
-      'CPA v8',
-    ]) {
-      assert(doc.includes(needle), `${file} must mention ${needle}`);
-    }
-    assert(!doc.includes('remote-management.panel-repo'), file);
-  }
-  // P3-1/P3-2: the cache lives next to config.yaml, and only the api.github.com
-  // URL form gets the /releases/latest suffix; the browser form stays 1.x.
-  for (const [file, needles] of [
-    ['apps/docs/deployment/cpa-panel.md', ['`config.yaml` 同级的 `static/`', 'cpamc.router-for.me', '`api.github.com` 形式', 'github.com/<owner>/<repo>/releases/tag/<tag>']],
-    ['apps/docs/en/deployment/cpa-panel.md', ["next to CPA's `config.yaml`", 'cpamc.router-for.me', '`api.github.com` URL', 'github.com/<owner>/<repo>/releases/tag/<tag>']],
-  ]) {
-    const doc = read(file);
-    for (const needle of needles) assert(doc.includes(needle), `${file} must mention ${needle}`);
-    assert(!doc.includes('working directory') && !doc.includes('工作目录'), `${file} must not say working directory`);
-  }
-});
-
 // ---------------------------------------------------------------- image identity
 
 const PIN = loadCpaV8Pin();

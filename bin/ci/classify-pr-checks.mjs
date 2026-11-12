@@ -15,7 +15,6 @@ const CHECK_NAMES = [
   'native_control',
   'docker',
   'docker_all_images',
-  'docs',
   'release_content',
 ];
 
@@ -46,7 +45,6 @@ const triggersAllChecks = (filePath) =>
 const triggersFrontend = (filePath) =>
   startsWithPath(filePath, '.github/workflows') ||
   startsWithPath(filePath, 'apps/web') ||
-  startsWithPath(filePath, 'apps/docs') ||
   startsWithPath(filePath, 'tests') ||
   filePath === 'README.md' ||
   filePath === 'README_CN.md' ||
@@ -218,11 +216,6 @@ const triggersDockerAllImages = (filePath) =>
   startsWithPath(filePath, 'docker') ||
   filePath === '.dockerignore';
 
-const triggersDocs = (filePath) =>
-  startsWithPath(filePath, 'apps/docs') ||
-  filePath === 'package.json' ||
-  filePath === 'package-lock.json';
-
 const triggersReleaseContent = (filePath) =>
   startsWithPath(filePath, 'docs/release-notes') ||
   startsWithPath(filePath, 'docs/release-posts') ||
@@ -248,7 +241,6 @@ export const classifyChangedFiles = (changedFiles) => {
     native_control: files.some(triggersNativeControl),
     docker: files.some(triggersDocker),
     docker_all_images: files.some(triggersDockerAllImages),
-    docs: files.some(triggersDocs),
     release_content: files.some(triggersReleaseContent),
   };
 };
