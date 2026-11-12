@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshRebindDialog } from './FreshRebindDialog';
 import { FreshExternalUsage } from './FreshExternalUsage';
@@ -559,15 +559,26 @@ describe('External usage confirmation', () => {
   // Ordering 4: the reload reports an authority failure while an older
   // confirmation is still pending. Its late success must not clear that newer
   // blocker, while it still releases the button it held.
-  it('keeps the re-read blocker when an older confirmation settles afterwards', async () => {
+  // Ordering 4: an older confirmation settles after the panel has moved on.
+  // Its late success must not clear the blocker the newer state named, and the
+  // claim it held must be released so a confirmation can be offered again.
+  it('keeps the newer blocker when an older confirmation settles afterwards', async () => {
     let postResolve: ((value: unknown) => void) | undefined;
     const blockers: (string | null | undefined)[] = [];
     let reads = 0;
+    // The reload succeeds and names the refusal itself, so the panel keeps both
+    // its facts and an enable action for the operator to retry.
+    const refusedState = {
+      ...usageState,
+      statisticsEnabled: true,
+      collector: 'stopped',
+      collectionStarted: false,
+      blockedReason: 'external_cpa_authority_unavailable',
+    };
     const client = {
       get: vi.fn(async () => {
         reads += 1;
-        if (reads === 1) return usageState;
-        throw new PublicApiError('http', 503, undefined, 'external_cpa_authority_unavailable');
+        return reads === 1 ? usageState : refusedState;
       }),
       post: vi.fn(
         async () =>
@@ -597,17 +608,205 @@ describe('External usage confirmation', () => {
     await act(async () => {
       renderer.update(panel(1));
     });
-    expect(blockers).toContain('external_cpa_authority_unavailable');
+    // The reload named the refusal, and the panel offers the way to retry it.
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'external-usage-blocked' })
+    ).toBeDefined();
     const blockerCount = blockers.length;
 
-    await act(async () => postResolve?.({ ...usageState, statisticsEnabled: true, collector: 'running', collectionStarted: true }));
+    await act(async () =>
+      postResolve?.({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+      })
+    );
 
-    // The stale success publishes nothing: the page keeps the newer blocker.
+    // The stale success publishes nothing: the newer facts and blocker stand.
     expect(blockers).toHaveLength(blockerCount);
-    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(1);
-    // The button the superseded confirmation held is still released.
-    const enableAgain = renderer.root.findAllByProps({ 'data-testid': 'external-usage-enable' });
-    expect(enableAgain.every((node) => node.props.disabled === false)).toBe(true);
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorStopped'));
+
+    // The claim the superseded confirmation held is released: a new confirmation
+    // is accepted instead of being refused by an owner that no longer exists.
+    const enableAgain = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    expect(enableAgain.props.disabled).toBe(false);
+    await act(async () => enableAgain.props.onClick());
+    const confirmAgain = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmAgain.props.onClick());
+    expect(client.post).toHaveBeenCalledTimes(2);
+  });
+
+  // A double click lands twice before React commits the first `setBusy`: both
+  // entries read the old state, so only a synchronous claim can stop the second
+  // POST. The later real outcome must be the one the panel reports.
+  it('sends one confirmation for two entries in the same React batch', async () => {
+    const blockers: (string | null | undefined)[] = [];
+    let settleConfirm: (value: unknown) => void = () => undefined;
+    const running = {
+      ...usageState,
+      statisticsEnabled: true,
+      collector: 'running',
+      collectionStarted: true,
+    };
+    const client = {
+      get: vi.fn(async () => usageState),
+      post: vi.fn(
+        async () =>
+          new Promise<unknown>((resolve) => {
+            settleConfirm = resolve;
+          })
+      ),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={() => undefined}
+          onBlocker={(code) => blockers.push(code)}
+        />
+      );
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    // Both clicks are dispatched before either answer, in one act().
+    await act(async () => {
+      void confirm.props.onClick();
+      void confirm.props.onClick();
+    });
+    expect(client.post).toHaveBeenCalledTimes(1);
+
+    await act(async () => settleConfirm(running));
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    // The sole POST is what produced the running facts: the second entry sent
+    // nothing, so nothing could be dropped in its favour.
+    expect(new Set(blockers)).toEqual(new Set([null]));
+  });
+
+  // StrictMode replays mount effects. The panel must issue its own read once per
+  // replay without publishing anything from the discarded pass, and must not keep
+  // a confirmation claim from it.
+  it('stays correct when React replays its mount effects', async () => {
+    const blockers: (string | null | undefined)[] = [];
+    const client = {
+      get: vi.fn(async () => ({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+      })),
+      post: vi.fn(async () => usageState),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <StrictMode>
+          <FreshExternalUsage
+            client={client}
+            credential="admin"
+            onUnauthorized={() => undefined}
+            onBlocker={(code) => blockers.push(code)}
+          />
+        </StrictMode>
+      );
+    });
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    // Every statement the caller heard is the settled one, never a discarded pass.
+    expect(new Set(blockers)).toEqual(new Set([null]));
+    // The replay left no claim: a confirmation is still accepted, and it is the
+    // only POST this panel has sent.
+    // The replay left no claim: the panel still refuses nothing but sends nothing
+    // until asked, and the settled facts are the ones it reports.
+    expect(client.post).not.toHaveBeenCalled();
+    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(0);
+  });
+
+  // A panel that unmounts while its read is pending publishes nothing when the
+  // answer arrives: no state, no blocker, no session callback.
+  it('publishes nothing from a read that answers after unmount', async () => {
+    let settleRead: (value: unknown) => void = () => undefined;
+    const blockers: (string | null | undefined)[] = [];
+    const unauthorized = vi.fn();
+    const client = {
+      get: vi.fn(
+        async () =>
+          new Promise<unknown>((resolve) => {
+            settleRead = resolve;
+          })
+      ),
+      post: vi.fn(),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={unauthorized}
+          onBlocker={(code) => blockers.push(code)}
+        />
+      );
+    });
+    await act(async () => renderer.unmount());
+    await act(async () => settleRead(usageState));
+    expect(blockers).toEqual([]);
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+
+  // The ownership rule suppresses only *retired* failures. A failure that still
+  // owns the panel must end the session, or the suppression would hide a real
+  // expiry behind a dead panel.
+  it('ends the session for an authentication failure of the current read', async () => {
+    const unauthorized = vi.fn();
+    const client = {
+      get: vi.fn(async () => {
+        throw new PublicApiError('authentication', 401);
+      }),
+      post: vi.fn(),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    await act(async () => {
+      create(
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={unauthorized}
+        />
+      );
+    });
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends the session for an authentication failure of the current confirmation', async () => {
+    const unauthorized = vi.fn();
+    const client = {
+      get: vi.fn(async () => usageState),
+      post: vi.fn(async () => {
+        throw new PublicApiError('authentication', 401);
+      }),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={unauthorized}
+        />
+      );
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirm.props.onClick());
+    expect(unauthorized).toHaveBeenCalledTimes(1);
   });
 
   it('names the collector state in the page language instead of the wire value', async () => {

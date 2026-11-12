@@ -1164,6 +1164,148 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(x('usageCollectorRunning'));
   });
 
+  // The page's own read chain carries the same ownership rule as the usage panel.
+  // A rebind re-reads it, and the answer the previous read is still waiting on
+  // describes the installation before the fix: publishing it would repaint the
+  // blocker the rebind resolved.
+  it('does not repaint a key-list blocker from an api-keys read issued before the rebind', async () => {
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(keyReads).toBe(1);
+
+    // The rebind succeeded and the shell re-reads the page.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // The retired read now answers with the typed key refusal.
+    await act(async () => {
+      settleStaleRead(
+        Response.json(
+          { code: 'external_management_key_rejected', detail: '401' },
+          { status: 409 }
+        )
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('blockerKeyRejectedTitle'));
+    expect(view()).toContain(key.id);
+  });
+
+  // An expired session reported by the retired read is not a fact about the
+  // current one: the rebind already proved the connection works.
+  it('does not end the session for an authentication failure of a retired page read', async () => {
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    await act(async () => {
+      settleStaleRead(Response.json({ code: 'unauthorized' }, { status: 401 }));
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(view()).toContain(key.id);
+  });
+
   // Regression: a rebind resolves the blocker, and the shell re-reads the page by
   // bumping `reloadToken`. The usage panel must not repaint the blocker with an
   // answer that belongs to the request it issued *before* the rebind: the page

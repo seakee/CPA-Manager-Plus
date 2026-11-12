@@ -79,6 +79,11 @@ export function FreshApiKeys({
   const operationPendingRef = useRef(false);
   const alive = useRef(true);
   const inFlight = useRef(false);
+  // One ownership rule for the page's whole read chain. A rebind bumps
+  // `reloadToken`, and the answer `refresh()` is still waiting on describes the
+  // installation before that fix: publishing it would repaint the blocker the
+  // rebind resolved, or end a session the rebind already proved works.
+  const reloadEpoch = useRef(0);
   const copyAttempt = useRef(0);
   const secretPendingRef = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
@@ -87,6 +92,9 @@ export function FreshApiKeys({
     alive.current = true;
     return () => {
       alive.current = false;
+      // A read that outlives the page can answer nothing, and the in-flight guard
+      // it held would otherwise refuse the next mount's first read.
+      inFlight.current = false;
     };
   }, []);
 
@@ -117,9 +125,14 @@ export function FreshApiKeys({
     }
   }
 
-  async function refresh() {
-    if (inFlight.current || selected || detailPendingRef.current) return;
+  async function refresh(forced = false) {
+    // A rebind reload forces a new read even when one is in flight: the older
+    // answer is the state before the rebind and retires below, so skipping the
+    // read would leave the page without any current statement of the
+    // installation. An ordinary refresh still shares one request.
+    if ((inFlight.current && !forced) || selected || detailPendingRef.current) return;
     inFlight.current = true;
+    const epoch = ++reloadEpoch.current;
     setBusy(true);
     setError('');
     setUsage(null);
@@ -129,7 +142,7 @@ export function FreshApiKeys({
         gatewayPending: boolean;
         revocationAvailable: boolean;
       }>('api-keys', auth);
-      if (!alive.current) return;
+      if (!alive.current || reloadEpoch.current !== epoch) return;
       if (
         !Array.isArray(result.keys) ||
         !result.keys.every(validKey) ||
@@ -141,18 +154,19 @@ export function FreshApiKeys({
       setKeys(result.keys);
       setGatewayPending(result.gatewayPending);
       setRevocationAvailable(result.revocationAvailable);
-      if (alive.current) setBlocker(null);
+      setBlocker(null);
       try {
         const parsed = parseUsageSummary(await client.get<unknown>('api-keys/usage-summary', auth));
         if (!parsed) throw new Error('Invalid usage summary response');
-        if (alive.current) setUsage(parsed);
+        if (alive.current && reloadEpoch.current === epoch) setUsage(parsed);
       } catch (usageErr) {
+        if (!alive.current || reloadEpoch.current !== epoch) return;
         if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') onUnauthorized();
-        if (alive.current) setUsage(null);
+        setUsage(null);
       }
       // Usage is intentionally best-effort; a failed read leaves the key list usable.
     } catch (err) {
-      if (alive.current) failure(err);
+      if (alive.current && reloadEpoch.current === epoch) failure(err);
     } finally {
       inFlight.current = false;
       if (alive.current) setBusy(false);
@@ -164,7 +178,7 @@ export function FreshApiKeys({
   // showing is re-read instead of outliving the fix that resolved it.
   useEffect(() => {
     setUsageBlocker(null);
-    void refresh();
+    void refresh(true);
   }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function copyCreatedSecret() {

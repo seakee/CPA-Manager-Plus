@@ -63,6 +63,11 @@ export function FreshExternalUsage({
   // confirmation that succeeds takes the panel too, because the state it returns
   // is newer than any read still waiting on the pre-confirmation CPA.
   const generation = useRef(0);
+  // One confirmation at a time. `busy` is state, so two entries in the same React
+  // batch both read the old value and would both send a POST that writes to the
+  // user's CPA: the first to answer would then claim the generation and the other
+  // real outcome would be dropped. The claim is synchronous, before any await.
+  const confirmingNow = useRef(false);
   // The publication rule above must cover `busy` as well, but a confirmation the
   // operator can no longer see settled the panel once already: it still has to
   // release the button, so the release is counted instead of claimed by a ticket.
@@ -72,6 +77,10 @@ export function FreshExternalUsage({
     alive.current = true;
     return () => {
       alive.current = false;
+      // A confirmation still in flight when the panel unmounts can never release
+      // the claim it took: a remounted panel has to be able to confirm again.
+      confirmingNow.current = false;
+      pendingConfirm.current = 0;
     };
   }, []);
 
@@ -114,7 +123,8 @@ export function FreshExternalUsage({
   }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function confirmEnable() {
-    if (busy) return;
+    if (confirmingNow.current) return;
+    confirmingNow.current = true;
     const startOnly = startOnlyRef.current;
     // A confirmation outlives a read request: it writes to the CPA, so the state
     // it returns is the newest fact this panel holds. The `busy` release is
@@ -171,6 +181,7 @@ export function FreshExternalUsage({
       // CPA receives another PUT depends on whether statistics still read back off.
       setConfirmFailed(true);
     } finally {
+      confirmingNow.current = false;
       pendingConfirm.current -= 1;
       if (alive.current && pendingConfirm.current === 0) setBusy(false);
     }
