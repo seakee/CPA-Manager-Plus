@@ -4,7 +4,7 @@ import { Link, useInRouterContext } from 'react-router-dom';
 import { Modal } from '../components/ui/Modal';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import { referenceText as r } from '../i18n/configurationReference';
-import { prefixRouteBase } from '../features/demo/demoMode';
+import { prefixRouteBase } from '../router/routeBase';
 import { readRoutingContext } from './routingContext';
 import type { PublicApiClient } from './publicApi';
 import { PublicApiError } from './publicApi';

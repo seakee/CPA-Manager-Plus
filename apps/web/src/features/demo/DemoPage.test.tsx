@@ -24,13 +24,10 @@ import {
 import {
   DEMO_ROUTE_BASE,
   getDemoServerBuildDate,
-  ensureRouteBasePathname,
   getDemoLogoutHash,
   getDemoLogoutPath,
   isDemoMode,
-  prefixRouteBase,
   setDemoMode,
-  stripRouteBase,
 } from './demoMode';
 import { installDemoInspectionState } from './DemoPage';
 
@@ -53,24 +50,6 @@ describe('DemoPage', () => {
     setDemoMode(false);
     vi.useRealTimers();
     vi.unstubAllGlobals();
-  });
-
-  it('keeps demo routes under the demo prefix while matching real routes internally', () => {
-    expect(stripRouteBase('/demo', DEMO_ROUTE_BASE)).toBe('/');
-    expect(stripRouteBase('/demo/config', DEMO_ROUTE_BASE)).toBe('/config');
-    expect(stripRouteBase('/demo/monitoring?tab=events', DEMO_ROUTE_BASE)).toBe(
-      '/monitoring?tab=events'
-    );
-
-    expect(prefixRouteBase('/', DEMO_ROUTE_BASE)).toBe('/demo');
-    expect(prefixRouteBase('/config', DEMO_ROUTE_BASE)).toBe('/demo/config');
-    expect(prefixRouteBase('/monitoring/account-actions', DEMO_ROUTE_BASE)).toBe(
-      '/demo/monitoring/account-actions'
-    );
-
-    expect(ensureRouteBasePathname('/', DEMO_ROUTE_BASE)).toBe('/demo');
-    expect(ensureRouteBasePathname('/config', DEMO_ROUTE_BASE)).toBe('/demo/config');
-    expect(ensureRouteBasePathname('/demo/config', DEMO_ROUTE_BASE)).toBe('/demo/config');
   });
 
   it('keeps demo site routing isolated from the real login panel', () => {

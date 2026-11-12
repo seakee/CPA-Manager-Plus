@@ -1,3 +1,5 @@
+import { prefixRouteBase } from '@/router/routeBase';
+
 export const DEMO_ROUTE_BASE = '/demo';
 export const DEMO_API_BASE = 'http://demo.local';
 export const DEMO_MANAGEMENT_KEY = 'demo-management-key';
@@ -25,27 +27,6 @@ const normalizePathname = (pathname: string): string => {
     ? normalized.replace(/\/+$/g, '') || '/'
     : normalized;
 };
-
-export const stripRouteBase = (pathname: string, routeBase = DEMO_ROUTE_BASE): string => {
-  const path = normalizePathname(pathname || '/');
-  const base = normalizePathname(routeBase || '');
-  if (!base || base === '/') return path;
-  if (path === base) return '/';
-  if (path.startsWith(`${base}/`)) {
-    return normalizePathname(path.slice(base.length) || '/');
-  }
-  return path;
-};
-
-export const prefixRouteBase = (path: string, routeBase = DEMO_ROUTE_BASE): string => {
-  const base = normalizePathname(routeBase || '');
-  const target = normalizePathname(path || '/');
-  if (!base || base === '/') return target;
-  return target === '/' ? base : `${base}${target}`;
-};
-
-export const ensureRouteBasePathname = (pathname: string, routeBase = DEMO_ROUTE_BASE): string =>
-  prefixRouteBase(stripRouteBase(pathname || '/', routeBase), routeBase);
 
 export const getDemoLogoutPath = (routeBase = DEMO_ROUTE_BASE): string =>
   prefixRouteBase('/', routeBase || DEMO_ROUTE_BASE);

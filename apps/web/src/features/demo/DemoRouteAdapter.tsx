@@ -6,7 +6,7 @@ import {
   type Navigator,
   type To,
 } from 'react-router-dom';
-import { prefixRouteBase } from './demoMode';
+import { prefixRouteBase } from '@/router/routeBase';
 
 interface DemoRouteAdapterProps {
   children: ReactNode;

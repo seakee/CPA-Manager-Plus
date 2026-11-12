@@ -141,8 +141,8 @@ export function LegacyConsolePage({
       <ManagerUpdates>
         {/*
          * The Full Web router is mounted below the embedded `/console` base.
-         * MainLayout already supports an explicit route base (used by the demo
-         * shell); passing it here keeps its active item, breadcrumbs and
+         * MainLayout already supports an explicit route base; passing it here
+         * keeps its active item, breadcrumbs and
          * MainRoutes in the same coordinate system as the mounted router.
          */}
         <MainLayout

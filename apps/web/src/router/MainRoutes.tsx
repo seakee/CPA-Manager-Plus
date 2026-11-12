@@ -34,7 +34,8 @@ import { ManagerUpdatePage } from '@/pages/ManagerUpdatePage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
+import { isDemoMode } from '@/features/demo/demoMode';
+import { ensureRouteBasePathname } from '@/router/routeBase';
 import { useAuthStore, useConfigStore } from '@/stores';
 
 type FeatureKey = 'requestMonitoring' | 'modelPrices';
