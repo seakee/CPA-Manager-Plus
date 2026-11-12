@@ -4117,3 +4117,217 @@ func TestExternalSameKeyReverifyPropagatesDeleteFailureAcrossRestartAndRecoversO
 		}
 	})
 }
+
+// TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409 verifies
+// that when a rebind's durable refusal DELETE is still in flight after exceeding
+// its persistence deadline (returning 503 external_rebind_unavailable), and CPA
+// subsequently refuses the newly rebound key before that earlier DELETE finishes:
+//  1. Both when the new refusal write queues behind the in-flight DELETE and
+//     persists right after it completes, and when the new refusal write's own
+//     persistence deadline expires before the earlier DELETE completes, the new
+//     key remains refused locally (409 external_management_key_rejected).
+//  2. Zero additional CPA authentication attempts are sent after the single
+//     refused probe on the newly rotated key.
+func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *testing.T) {
+	t.Run("new_refusal_queued_behind_in_flight_delete_persists_and_stays_409", func(t *testing.T) {
+		const (
+			keyK2 = "interleave-queued-k2-0000111122223333444455556666777788889999aa"
+			keyK3 = "interleave-queued-k3-111122223333444455556666777788889999aaaabb"
+		)
+		cpaSrv := newStatefulExternalCPA(t, keyK2)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+
+		var (
+			pauseDelete   atomic.Bool
+			deleteEntered = make(chan struct{}, 1)
+			releaseDelete = make(chan struct{})
+			insertDone    = make(chan struct{}, 4)
+		)
+		ctrl := &rejectionSQLController{
+			onDelete: func() error {
+				if pauseDelete.Load() {
+					select {
+					case deleteEntered <- struct{}{}:
+					default:
+					}
+					<-releaseDelete
+				}
+				return nil
+			},
+			afterInsert: func(error) {
+				if !pauseDelete.Load() {
+					select {
+					case insertDone <- struct{}{}:
+					default:
+					}
+				}
+			},
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		persistClockCh := make(chan time.Time, 4)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return persistClockCh, func() {}
+		}
+
+		// 1. Persist initial refusal for K1.
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("initial K1 refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+		<-insertDone
+
+		// 2. Rebind to K2 while pausing clear's DELETE in flight; fire persist deadline so rebind returns 503.
+		pauseDelete.Store(true)
+		rebindDone := make(chan *httptest.ResponseRecorder, 1)
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, keyK2, strings.Repeat("7", 32))
+		go func() {
+			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		}()
+		select {
+		case <-deleteEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("rebind clear did not enter SQLite DELETE")
+		}
+		persistClockCh <- time.Now()
+		select {
+		case rb := <-rebindDone:
+			if rb.Code != http.StatusServiceUnavailable || errorCode(t, rb) != "external_rebind_unavailable" {
+				t.Fatalf("rebind with DELETE in flight = %d %s, want 503 external_rebind_unavailable", rb.Code, rb.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("rebind did not return after clear deadline expired")
+		}
+
+		// 3. CPA rotates to K3 so K2 is now refused while earlier clear DELETE is still in flight.
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = keyK3
+		cpaSrv.mu.Unlock()
+		cpaBeforeK2Probe := cpaSrv.requests.Load()
+
+		probeEnteredSlotWait := make(chan struct{}, 1)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			select {
+			case probeEnteredSlotWait <- struct{}{}:
+			default:
+			}
+			return make(chan time.Time), func() {}
+		}
+		k2ProbeDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			k2ProbeDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+		select {
+		case <-probeEnteredSlotWait:
+		case <-time.After(5 * time.Second):
+			t.Fatal("K2 refusal record did not enter dbSlot wait while DELETE was in flight")
+		}
+
+		// 4. Let the earlier clear DELETE complete so the queued K2 refusal write persists.
+		pauseDelete.Store(false)
+		close(releaseDelete)
+		select {
+		case res := <-k2ProbeDone:
+			if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("K2 refused probe = %d %s, want 409 %s", res.Code, res.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("K2 refused probe did not finish after earlier DELETE completed")
+		}
+
+		// 5. Assert K2 stays locally 409 across surfaces and cold SQLite reload with 0 more CPA attempts.
+		cpaAfterFirstRefusal := cpaSrv.requests.Load()
+		if sent := cpaAfterFirstRefusal - cpaBeforeK2Probe; sent != 1 {
+			t.Fatalf("K2 probe sent %d CPA requests, want 1", sent)
+		}
+		for _, route := range []string{"gateway/config", "cpamp/v1/models", "api-keys"} {
+			if res := gatewayRequest(t, app, http.MethodGet, route, "", ""); res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("follow-up %s after earlier clear completed = %d %s, want 409 %s", route, res.Code, res.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, &rejectionSQLController{}))
+		if res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("cold-start gateway/config after interleaved clear+refusal = %d %s, want 409 %s", res.Code, res.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if got := cpaSrv.requests.Load() - cpaAfterFirstRefusal; got != 0 {
+			t.Fatalf("follow-up reads sent %d CPA requests after K2 refusal, want 0", got)
+		}
+	})
+
+	t.Run("earlier_delete_completing_after_new_refusal_deadline_keeps_local_409", func(t *testing.T) {
+		const (
+			keyK2 = "interleave-timeout-k2-0000111122223333444455556666777788889999aa"
+			keyK3 = "interleave-timeout-k3-111122223333444455556666777788889999aaaabb"
+		)
+		cpaSrv := newStatefulExternalCPA(t, keyK2)
+		app := newExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
+		app.gatewayConfig = gatewayFor(app)
+
+		var (
+			pauseDelete   atomic.Bool
+			deleteEntered = make(chan struct{}, 1)
+			releaseDelete = make(chan struct{})
+		)
+		ctrl := &rejectionSQLController{
+			afterDelete: func(error) {
+				if pauseDelete.Load() {
+					select {
+					case deleteEntered <- struct{}{}:
+					default:
+					}
+					<-releaseDelete
+				}
+			},
+		}
+		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
+		persistClockCh := make(chan time.Time, 4)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return persistClockCh, func() {}
+		}
+
+		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
+			t.Fatalf("initial K1 refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+
+		pauseDelete.Store(true)
+		rebindDone := make(chan *httptest.ResponseRecorder, 1)
+		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
+			cpaSrv.server.URL, keyK2, strings.Repeat("8", 32))
+		go func() {
+			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
+		}()
+		<-deleteEntered
+		persistClockCh <- time.Now()
+		if rb := <-rebindDone; rb.Code != http.StatusServiceUnavailable {
+			t.Fatalf("rebind = %d %s, want 503", rb.Code, rb.Body.String())
+		}
+
+		// K2 is refused while DELETE still holds dbSlot, and K2's record() also hits its persist deadline.
+		cpaSrv.mu.Lock()
+		cpaSrv.activeKey = keyK3
+		cpaSrv.mu.Unlock()
+		cpaBefore := cpaSrv.requests.Load()
+		persistClockCh <- time.Now()
+		if k2Res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); k2Res.Code != http.StatusConflict || errorCode(t, k2Res) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("K2 refusal = %d %s, want 409", k2Res.Code, k2Res.Body.String())
+		}
+
+		pauseDelete.Store(false)
+		close(releaseDelete)
+		slot := app.rejection.slot()
+		slot <- struct{}{}
+		<-slot
+		cpaAfterRefusal := cpaSrv.requests.Load()
+		if sent := cpaAfterRefusal - cpaBefore; sent != 1 {
+			t.Fatalf("K2 probe sent %d CPA requests, want 1", sent)
+		}
+		for _, route := range []string{"gateway/config", "cpamp/v1/models", "api-keys"} {
+			if res := gatewayRequest(t, app, http.MethodGet, route, "", ""); res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("follow-up %s after late DELETE completed = %d %s, want 409 %s", route, res.Code, res.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+		}
+		if got := cpaSrv.requests.Load() - cpaAfterRefusal; got != 0 {
+			t.Fatalf("follow-up reads sent %d CPA requests after late DELETE completed, want 0", got)
+		}
+	})
+}

@@ -269,8 +269,9 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		enabled, err := a.usageMonitoringEnabled(ctx)
 		if err != nil {
 			// An unreadable switch proves neither state, so the Collector stays
-			// closed and a later trigger retries the attempt.
+			// closed with a visible blocker and a later trigger retries the attempt.
 			log.Printf("Fresh request monitoring switch unavailable: %v", err)
+			a.setUsageStartReason(usageStartReasonCollectorFailed)
 			return false
 		}
 		if !enabled {

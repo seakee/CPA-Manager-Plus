@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -43,18 +45,25 @@ type externalUsageCPA struct {
 	// requests counts every request that reached the CPA, so a test can prove a
 	// stopped Collector issues no further traffic at all.
 	requests atomic.Int32
-	version  atomic.Value
-	server   *httptest.Server
+	version     atomic.Value
+	alsoAccept  atomic.Value
+	onQueueRead atomic.Value
+	server      *httptest.Server
 }
 
 func newExternalUsageCPA(t *testing.T, management string) *externalUsageCPA {
 	t.Helper()
 	f := &externalUsageCPA{}
 	f.management.Store(management)
+	f.alsoAccept.Store("")
 	f.version.Store("v8.0.13")
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
-		if f.rejects.Load() || r.Header.Get("Authorization") != "Bearer "+f.management.Load().(string) {
+		auth := r.Header.Get("Authorization")
+		primary := "Bearer " + f.management.Load().(string)
+		secondaryKey, _ := f.alsoAccept.Load().(string)
+		accepted := auth == primary || (secondaryKey != "" && auth == "Bearer "+secondaryKey)
+		if f.rejects.Load() || !accepted {
 			f.refusals.Add(1)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -75,6 +84,9 @@ func newExternalUsageCPA(t *testing.T, management string) *externalUsageCPA {
 			_, _ = w.Write([]byte(`{"config-version":8}`))
 		case "/v0/management/usage-queue":
 			f.queueReads.Add(1)
+			if fn, _ := f.onQueueRead.Load().(func(string)); fn != nil {
+				fn(auth)
+			}
 			_, _ = w.Write([]byte("[]"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -1368,4 +1380,419 @@ func TestExternalCollectorStartHoldsGateAcrossUsageStatisticsReads(t *testing.T)
 	if got := badKeyHits.Load(); got != 1 {
 		t.Fatalf("External CPA received %d post-rotation rejected requests across start + concurrent models, want 1", got)
 	}
+}
+
+// TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle exercises
+// a real host-bound External Collector across POST external/rebind when the
+// durable refusal DELETE fails (returning HTTP 503 external_rebind_unavailable)
+// and when a subsequent retry commits the DELETE (returning HTTP 200):
+//  1. With monitoring On (collector.enabled=true), a Collector started before
+//     the fault is stopped on the old credential and restarted on the newly
+//     verified credential even when DELETE returns 503, then remains started
+//     after the DELETE fault clears and retry returns 200; a subsequent CPA
+//     refusal on that restarted run still stops collection and records the
+//     refusal blocker without repeating bad-key requests.
+//  2. On same-key re-verify under a DELETE fault, collection resumes in the
+//     current process (503) while a cold restart on the same SQLite file sees
+//     the un-deleted refusal row, keeps collection stopped with
+//     blockedReason=external_management_key_rejected (0 CPA auth attempts),
+//     and recovers to 200 + started once retry deletes the row.
+//  3. With monitoring Off (collector.enabled=false), collection is never
+//     started on either the 503 DELETE-fault path or the 200 retry path.
+func TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle(t *testing.T) {
+	awaitBearer := func(t *testing.T, ch <-chan string, wantKey, label string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		want := "Bearer " + wantKey
+		for {
+			select {
+			case got := <-ch:
+				if got == want {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("%s: timed out waiting for Collector usage-queue poll with %q", label, wantKey)
+			}
+		}
+	}
+
+	t.Run("monitoring_on_restarts_collector_across_delete_fault_and_retry_without_old_credential", func(t *testing.T) {
+		const (
+			keyK2 = "collector-r7-k2-0000111122223333444455556666777788889999aaaabbcc"
+			keyK3 = "collector-r7-k3-111122223333444455556666777788889999aaaabbbbccdd"
+			keyK4 = "collector-r7-k4-22223333444455556666777788889999aaaabbbbccccddee"
+		)
+		h := newExternalUsageHarness(t)
+		h.cpa.enabled.Store(true)
+		queueAuthCh := make(chan string, 64)
+		h.cpa.onQueueRead.Store(func(auth string) {
+			select {
+			case queueAuthCh <- auth:
+			default:
+			}
+		})
+		rejectedCh := make(chan uint64, 8)
+		h.app.afterCollectorAuthRejection = func(runID uint64) {
+			select {
+			case rejectedCh <- runID:
+			default:
+			}
+		}
+
+		// 1. Start the real External Collector on K1 before any fault.
+		h.app.startUsageCollection(h.operation(t))
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "initial K1 collector")
+		initialGet := h.call(t, http.MethodGet, "external/usage", "")
+		if initialGet.Code != http.StatusOK {
+			t.Fatalf("initial GET external/usage = %d %s, want 200", initialGet.Code, initialGet.Body.String())
+		}
+		initialState := decodeExternalUsageState(t, initialGet.Body.Bytes())
+		if !initialState.CollectionStarted || initialState.Collector == string(usageapp.PhaseStopped) || initialState.BlockedReason != "" {
+			t.Fatalf("initial usage state = %+v, want started & unblocked", initialState)
+		}
+
+		// 2. Rotate CPA to K2 so the running K1 Collector stops itself and persists the refusal row.
+		h.cpa.management.Store(keyK2)
+		select {
+		case <-rejectedCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("K1 Collector did not report auth rejection after rotation to K2")
+		}
+		if refusedGet := h.call(t, http.MethodGet, "external/usage", ""); refusedGet.Code != http.StatusConflict || errorCode(t, refusedGet) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("GET external/usage while K1 refused = %d %s, want 409 %s", refusedGet.Code, refusedGet.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+
+		// 3. Fault durable DELETE on fresh_external_rejection_v1 and rebind to K2:
+		// HTTP must report retryable 503 external_rebind_unavailable, while the
+		// real Collector restarts on verified K2 without leaving a monitoring gap.
+		if _, err := h.db.ExecContext(
+			t.Context(),
+			`CREATE TRIGGER block_r7_collector_delete BEFORE DELETE ON settings WHEN OLD.key = 'fresh_external_rejection_v1' BEGIN SELECT RAISE(ABORT, 'simulated r7 collector delete fault'); END;`,
+		); err != nil {
+			t.Fatalf("install delete trigger: %v", err)
+		}
+		rebindK2Body := fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("a", 32), keyK2)
+		refusalsBeforeK2 := h.cpa.refusals.Load()
+		rebindFault := h.call(t, http.MethodPost, "external/rebind", rebindK2Body)
+		if rebindFault.Code != http.StatusServiceUnavailable || errorCode(t, rebindFault) != "external_rebind_unavailable" {
+			t.Fatalf("POST external/rebind under DELETE fault = %d %s, want 503 external_rebind_unavailable", rebindFault.Code, rebindFault.Body.String())
+		}
+
+		faultGet := h.call(t, http.MethodGet, "external/usage", "")
+		if faultGet.Code != http.StatusOK {
+			t.Fatalf("GET external/usage after 503 rebind = %d %s, want 200", faultGet.Code, faultGet.Body.String())
+		}
+		faultState := decodeExternalUsageState(t, faultGet.Body.Bytes())
+		if !faultState.CollectionStarted || faultState.Collector == string(usageapp.PhaseStopped) || faultState.BlockedReason != "" {
+			t.Fatalf("usage state after 503 rebind = %+v, want collectionStarted=true, collector!=stopped, blockedReason empty", faultState)
+		}
+		awaitBearer(t, queueAuthCh, keyK2, "Collector restarted on K2 after 503 rebind")
+		if got := h.cpa.refusals.Load() - refusalsBeforeK2; got != 0 {
+			t.Fatalf("restarted K2 Collector caused %d refused CPA requests, want 0", got)
+		}
+
+		// 4. Remove the DELETE fault and retry the exact same K2 rebind request:
+		// returns 200 reverified, deletes the refusal row, and keeps collection started.
+		if _, err := h.db.ExecContext(t.Context(), `DROP TRIGGER block_r7_collector_delete;`); err != nil {
+			t.Fatalf("drop delete trigger: %v", err)
+		}
+		rebindRetry := h.call(t, http.MethodPost, "external/rebind", rebindK2Body)
+		if rebindRetry.Code != http.StatusOK || !strings.Contains(rebindRetry.Body.String(), `"status":"reverified"`) {
+			t.Fatalf("retry K2 rebind = %d %s, want 200 reverified", rebindRetry.Code, rebindRetry.Body.String())
+		}
+		var durableRows int
+		if err := h.db.QueryRowContext(t.Context(), `SELECT count(*) FROM settings WHERE key = ?`, externalRejectionKey).Scan(&durableRows); err != nil || durableRows != 0 {
+			t.Fatalf("durable refusal rows after retry = %d (err=%v), want 0", durableRows, err)
+		}
+		retryGet := h.call(t, http.MethodGet, "external/usage", "")
+		if retryGet.Code != http.StatusOK {
+			t.Fatalf("GET external/usage after 200 retry = %d %s, want 200", retryGet.Code, retryGet.Body.String())
+		}
+		retryState := decodeExternalUsageState(t, retryGet.Body.Bytes())
+		if !retryState.CollectionStarted || retryState.Collector == string(usageapp.PhaseStopped) || retryState.BlockedReason != "" {
+			t.Fatalf("usage state after 200 retry = %+v, want collectionStarted=true, collector!=stopped, blockedReason empty", retryState)
+		}
+		awaitBearer(t, queueAuthCh, keyK2, "Collector polling K2 after 200 retry")
+
+		// 5. While K2 Collector is actively running (usageStarted=true), rotate
+		// proactively to K3 under a driver-level DELETE fault while CPA accepts
+		// both K2 and K3 during the handoff, then revoke K2: stopUsageCollection
+		// must have stopped the K2 run so polling switches to K3 with 0 refusals.
+		ctrl := &rejectionSQLController{
+			onDelete: func() error {
+				return errors.New("simulated driver delete failure")
+			},
+		}
+		h.app.rejection = newExternalRejection(openControlledRejectionDB(t, h.app, ctrl))
+		h.cpa.alsoAccept.Store(keyK2)
+		h.cpa.management.Store(keyK3)
+		rebindK3Body := fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("b", 32), keyK3)
+		rebindK3Fault := h.call(t, http.MethodPost, "external/rebind", rebindK3Body)
+		if rebindK3Fault.Code != http.StatusServiceUnavailable || errorCode(t, rebindK3Fault) != "external_rebind_unavailable" {
+			t.Fatalf("proactive K3 rebind under driver DELETE fault = %d %s, want 503 external_rebind_unavailable", rebindK3Fault.Code, rebindK3Fault.Body.String())
+		}
+		// Revoke K2 immediately after rebind returns and drain buffered pre-handoff notifications.
+		h.cpa.alsoAccept.Store("")
+		for len(queueAuthCh) > 0 {
+			<-queueAuthCh
+		}
+		refusalsAfterHandoff := h.cpa.refusals.Load()
+		awaitBearer(t, queueAuthCh, keyK3, "Collector switched from K2 to K3 on 503 rebind")
+		if got := h.cpa.refusals.Load() - refusalsAfterHandoff; got != 0 {
+			t.Fatalf("old K2 Collector run was not stopped before K3 handoff: %d refused CPA requests", got)
+		}
+
+		// 6. Confirm grant/refusal recorder still applies to the newly started K3
+		// Collector run: rotating CPA to K4 stops collection and blocks K3 locally.
+		ctrl.mu.Lock()
+		ctrl.onDelete = nil
+		ctrl.mu.Unlock()
+		h.cpa.management.Store(keyK4)
+		select {
+		case <-rejectedCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("restarted K3 Collector did not stop and report rejection when CPA rotated to K4")
+		}
+		if h.app.usageCollectionStarted() || h.app.usageStartBlock() != freshconfig.ReasonManagementRejected {
+			t.Fatalf("after K3 refusal: started=%v blockedReason=%q, want false / %q",
+				h.app.usageCollectionStarted(), h.app.usageStartBlock(), freshconfig.ReasonManagementRejected)
+		}
+		cpaBeforeBlockedReads := h.cpa.requests.Load()
+		if uRes := h.call(t, http.MethodGet, "external/usage", ""); uRes.Code != http.StatusConflict || errorCode(t, uRes) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("GET external/usage after K3 refusal = %d %s, want 409 %s", uRes.Code, uRes.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if got := h.cpa.requests.Load() - cpaBeforeBlockedReads; got != 0 {
+			t.Fatalf("refused K3 contacted CPA %d times on follow-up read, want 0", got)
+		}
+	})
+
+	t.Run("same_key_reverify_delete_fault_restarts_in_process_and_exposes_rejected_blocker_after_restart_until_retry", func(t *testing.T) {
+		fake := newExternalUsageCPA(t, externalAuthorityManagement)
+		fake.enabled.Store(true)
+		queueAuthCh := make(chan string, 64)
+		fake.onQueueRead.Store(func(auth string) {
+			select {
+			case queueAuthCh <- auth:
+			default:
+			}
+		})
+
+		paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "manager.sqlite"))
+		paths.Config = filepath.Join(filepath.Dir(paths.Database), "config.json")
+
+		var (
+			closeMu     sync.Mutex
+			closeActive func()
+		)
+		stopCurrent := func() {
+			closeMu.Lock()
+			fn := closeActive
+			closeActive = nil
+			closeMu.Unlock()
+			if fn != nil {
+				fn()
+			}
+		}
+		t.Cleanup(stopCurrent)
+
+		openInstance := func(initialize bool) (*externalUsageHarness, chan uint64) {
+			stopCurrent()
+			hostCtx, stopHost := context.WithCancel(t.Context())
+			opts := fresh.OpenOptions{}
+			if initialize {
+				opts = fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin}
+			}
+			opened, err := fresh.Open(hostCtx, paths, opts)
+			if err != nil {
+				stopHost()
+				t.Fatalf("open sqlite instance (init=%v): %v", initialize, err)
+			}
+			closeMu.Lock()
+			closeActive = func() {
+				stopHost()
+				_ = opened.Close()
+			}
+			closeMu.Unlock()
+
+			app := newFreshApplication(opened, config.Config{CollectorMode: "http"}, nil)
+			app.runCtx = hostCtx
+			quietProjection(app)
+			rejectedCh := make(chan uint64, 8)
+			app.afterCollectorAuthRejection = func(runID uint64) {
+				select {
+				case rejectedCh <- runID:
+				default:
+				}
+			}
+			if initialize {
+				normalized, normErr := cpa.NormalizeV8BaseURL(fake.server.URL)
+				if normErr != nil {
+					t.Fatal(normErr)
+				}
+				protected, protErr := opened.Protector.ProtectString(externalAuthorityManagement)
+				if protErr != nil {
+					t.Fatal(protErr)
+				}
+				op := opened.Record.Operation
+				if _, err = app.store.Update(hostCtx, op.Identity, op.Revision, func(r *freshstore.Record) error {
+					r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+						OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+					}
+					r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+						Strategy: bootstrap.ConnectExternal, Stage: "committed",
+						TargetIdentity: freshkeyapply.ExternalIdentity(normalized), TargetGeneration: 1,
+					}
+					r.Operation.ProductComplete = true
+					r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: normalized, ManagementKey: protected}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			app.externalSource = externalInstallSource(app.store, opened.Protector)
+			app.keyApply = freshkeyapply.NewExternal(app.keyRepo, app.keys, app.externalSource)
+			return &externalUsageHarness{app: app, cpa: fake, db: opened.DB}, rejectedCh
+		}
+
+		h1, rejectedCh1 := openInstance(true)
+		h1.app.startUsageCollection(h1.operation(t))
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "initial K1 collector before ban")
+
+		// Temporary refusal stops Collector and writes durable refusal row.
+		fake.rejects.Store(true)
+		select {
+		case <-rejectedCh1:
+		case <-time.After(5 * time.Second):
+			t.Fatal("K1 Collector did not stop on temporary refusal")
+		}
+
+		// Ban expires; install DELETE fault and re-verify same K1 -> 503, Collector resumes in-process.
+		fake.rejects.Store(false)
+		if _, err := h1.db.ExecContext(
+			t.Context(),
+			`CREATE TRIGGER block_r7_same_k1_delete BEFORE DELETE ON settings WHEN OLD.key = 'fresh_external_rejection_v1' BEGIN SELECT RAISE(ABORT, 'simulated same-k1 delete fault'); END;`,
+		); err != nil {
+			t.Fatalf("install same-k1 delete trigger: %v", err)
+		}
+		for len(queueAuthCh) > 0 {
+			<-queueAuthCh
+		}
+		reverifyBody := fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("c", 32), externalAuthorityManagement)
+		reverifyFault := h1.call(t, http.MethodPost, "external/rebind", reverifyBody)
+		if reverifyFault.Code != http.StatusServiceUnavailable || errorCode(t, reverifyFault) != "external_rebind_unavailable" {
+			t.Fatalf("same-K1 re-verify under DELETE fault = %d %s, want 503 external_rebind_unavailable", reverifyFault.Code, reverifyFault.Body.String())
+		}
+		inProcState := decodeExternalUsageState(t, h1.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+		if !inProcState.CollectionStarted || inProcState.BlockedReason != "" {
+			t.Fatalf("in-process usage state after 503 same-K1 re-verify = %+v, want collectionStarted=true, blockedReason empty", inProcState)
+		}
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "in-process K1 collector after 503 re-verify")
+
+		// Cold restart on the exact same SQLite file: durable refusal row remains, so
+		// startup refuses collection with external_management_key_rejected and 0 CPA hits.
+		h2, _ := openInstance(false)
+		cpaBeforeRestart := fake.requests.Load()
+		h2.app.startUsageCollection(h2.operation(t))
+		if h2.app.usageCollectionStarted() || h2.app.usageStartBlock() != freshconfig.ReasonManagementRejected {
+			t.Fatalf("restarted Collector before durable clear: started=%v blockedReason=%q, want false / %q",
+				h2.app.usageCollectionStarted(), h2.app.usageStartBlock(), freshconfig.ReasonManagementRejected)
+		}
+		if uRes := h2.call(t, http.MethodGet, "external/usage", ""); uRes.Code != http.StatusConflict || errorCode(t, uRes) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("restarted GET external/usage before durable clear = %d %s, want 409 %s", uRes.Code, uRes.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+		if got := fake.requests.Load() - cpaBeforeRestart; got != 0 {
+			t.Fatalf("restarted instance sent %d CPA requests while durable refusal row remained, want 0", got)
+		}
+
+		// Clear trigger and retry same-K1 re-verify: returns 200 and starts Collector durably across restart.
+		if _, err := h2.db.ExecContext(t.Context(), `DROP TRIGGER block_r7_same_k1_delete;`); err != nil {
+			t.Fatalf("drop same-k1 delete trigger: %v", err)
+		}
+		for len(queueAuthCh) > 0 {
+			<-queueAuthCh
+		}
+		reverifyOK := h2.call(t, http.MethodPost, "external/rebind", reverifyBody)
+		if reverifyOK.Code != http.StatusOK {
+			t.Fatalf("retry same-K1 re-verify = %d %s, want 200", reverifyOK.Code, reverifyOK.Body.String())
+		}
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "K1 collector after 200 retry")
+
+		h3, _ := openInstance(false)
+		for len(queueAuthCh) > 0 {
+			<-queueAuthCh
+		}
+		h3.app.startUsageCollection(h3.operation(t))
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "K1 collector after durable clear + restart")
+		afterClearState := decodeExternalUsageState(t, h3.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+		if !afterClearState.CollectionStarted || afterClearState.BlockedReason != "" {
+			t.Fatalf("usage state after durable clear + restart = %+v, want collectionStarted=true, blockedReason empty", afterClearState)
+		}
+	})
+
+	t.Run("monitoring_off_never_starts_collector_on_delete_fault_or_retry", func(t *testing.T) {
+		const rotatedKey = "collector-r7-off-0000111122223333444455556666777788889999aaaabb"
+		h := newExternalUsageHarness(t)
+		h.cpa.enabled.Store(true)
+		queueAuthCh := make(chan string, 32)
+		h.cpa.onQueueRead.Store(func(auth string) {
+			select {
+			case queueAuthCh <- auth:
+			default:
+			}
+		})
+
+		// Start Collector first, then explicitly switch monitoring Off via console API.
+		h.app.startUsageCollection(h.operation(t))
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "initial collector before switching Off")
+
+		patchReq := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
+		patchReq.Header.Set("Content-Type", "application/json")
+		patchReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		patchRes := httptest.NewRecorder()
+		h.app.canonicalAPI(patchRes, patchReq)
+		if patchRes.Code != http.StatusOK {
+			t.Fatalf("PATCH enabled=false = %d %s, want 200", patchRes.Code, patchRes.Body.String())
+		}
+
+		// Rotate CPA and trigger durable refusal on K1.
+		h.cpa.management.Store(rotatedKey)
+		if refused := h.call(t, http.MethodGet, "external/usage", ""); refused.Code != http.StatusConflict || errorCode(t, refused) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("GET external/usage on rotated K1 = %d %s, want 409 %s", refused.Code, refused.Body.String(), freshconfig.ReasonManagementRejected)
+		}
+
+		if _, err := h.db.ExecContext(
+			t.Context(),
+			`CREATE TRIGGER block_r7_off_delete BEFORE DELETE ON settings WHEN OLD.key = 'fresh_external_rejection_v1' BEGIN SELECT RAISE(ABORT, 'simulated off delete fault'); END;`,
+		); err != nil {
+			t.Fatalf("install off delete trigger: %v", err)
+		}
+		queueBeforeFaultRebind := h.cpa.queueReads.Load()
+		rebindBody := fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("d", 32), rotatedKey)
+		rebindFault := h.call(t, http.MethodPost, "external/rebind", rebindBody)
+		if rebindFault.Code != http.StatusServiceUnavailable || errorCode(t, rebindFault) != "external_rebind_unavailable" {
+			t.Fatalf("rebind with monitoring Off under DELETE fault = %d %s, want 503 external_rebind_unavailable", rebindFault.Code, rebindFault.Body.String())
+		}
+		offFaultState := decodeExternalUsageState(t, h.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+		if offFaultState.CollectionStarted || offFaultState.Collector != string(usageapp.PhaseStopped) || offFaultState.BlockedReason != usageStartReasonMonitoringDisabled {
+			t.Fatalf("monitoring Off state after 503 rebind = %+v, want stopped, collectionStarted=false, blockedReason=%q", offFaultState, usageStartReasonMonitoringDisabled)
+		}
+		if got := h.cpa.queueReads.Load() - queueBeforeFaultRebind; got != 0 {
+			t.Fatalf("monitoring Off polled usage-queue %d times after 503 rebind, want 0", got)
+		}
+
+		if _, err := h.db.ExecContext(t.Context(), `DROP TRIGGER block_r7_off_delete;`); err != nil {
+			t.Fatalf("drop off delete trigger: %v", err)
+		}
+		rebindOK := h.call(t, http.MethodPost, "external/rebind", rebindBody)
+		if rebindOK.Code != http.StatusOK {
+			t.Fatalf("retry rebind with monitoring Off = %d %s, want 200", rebindOK.Code, rebindOK.Body.String())
+		}
+		offOKState := decodeExternalUsageState(t, h.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+		if offOKState.CollectionStarted || offOKState.Collector != string(usageapp.PhaseStopped) || offOKState.BlockedReason != usageStartReasonMonitoringDisabled {
+			t.Fatalf("monitoring Off state after 200 retry = %+v, want stopped, collectionStarted=false, blockedReason=%q", offOKState, usageStartReasonMonitoringDisabled)
+		}
+		if got := h.cpa.queueReads.Load() - queueBeforeFaultRebind; got != 0 {
+			t.Fatalf("monitoring Off polled usage-queue %d times after 200 retry, want 0", got)
+		}
+	})
 }

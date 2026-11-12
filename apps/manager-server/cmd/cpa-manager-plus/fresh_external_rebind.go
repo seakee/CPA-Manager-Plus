@@ -88,16 +88,19 @@ func (a *freshApplication) externalRebindRoute(w http.ResponseWriter, r *http.Re
 	if !rebound.Reverified {
 		a.pluginCapability.forget()
 	}
-	// Either outcome is the resolution of a refused credential, so the old
-	// Collector is stopped explicitly: it may still be retrying the refused key.
-	// Starting the replacement run waits until durable refusal clear commits so a
-	// failed DELETE returns retryable 503 instead of reporting durable completion.
+	// Either outcome is the resolution of a refused credential, and the current
+	// process already treats the proven credential as unblocked (pendingClear),
+	// so the old Collector is stopped and collection is reconciled on the proven
+	// credential under the existing monitoring/version/statistics gates even if
+	// durable refusal DELETE has not committed yet. When clearErr != nil, HTTP
+	// 503 external_rebind_unavailable still prompts retry so durable SQLite state
+	// converges across restarts without leaving a live monitoring gap.
 	a.stopUsageCollection(r.Context())
+	a.startUsageCollection(op)
 	if clearErr != nil {
 		a.writeExternalRebindError(w, clearErr)
 		return
 	}
-	a.startUsageCollection(op)
 	status := "rebound"
 	if rebound.Reverified {
 		status = "reverified"
