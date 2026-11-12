@@ -979,7 +979,7 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodPut)
 	case "v0/management/proxy-url":
 		return allowed(http.MethodPut, http.MethodDelete)
-	case "v0/management/logs-max-total-size-mb", "v0/management/force-model-prefix", "v0/management/routing/strategy":
+	case "v0/management/logs-max-total-size-mb", "v0/management/error-logs-max-files", "v0/management/force-model-prefix", "v0/management/routing/strategy":
 		return allowed(http.MethodGet, http.MethodPut)
 	case "v0/management/api-key-usage":
 		return allowed(http.MethodGet)

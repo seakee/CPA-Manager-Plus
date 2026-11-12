@@ -15,6 +15,7 @@
 
 .tabBar {
   display: flex;
+  flex-wrap: wrap;
   gap: $spacing-xs;
   margin-bottom: $spacing-md;
   border-bottom: 1px solid var(--border-color);
@@ -121,6 +122,12 @@
   flex: 1;
   min-width: 220px;
   max-width: 380px;
+
+  @include mobile {
+    min-width: 0;
+    max-width: 100%;
+    flex-basis: 100%;
+  }
 }
 
 .filterPanelHeader {
@@ -632,6 +639,206 @@
   @include mobile {
     flex-basis: 100%;
   }
+}
+
+.emptyStateActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: $spacing-sm;
+  max-width: 100%;
+
+  @include mobile {
+    align-items: stretch;
+    width: 100%;
+  }
+}
+
+.emptyStateButtons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: $spacing-sm;
+
+  @include mobile {
+    justify-content: flex-start;
+  }
+}
+
+.emptyStateNotice,
+.settingsAuthorityNotice {
+  padding: 8px 12px;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.settingsStack {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  min-width: 0;
+}
+
+.settingsBody {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  min-width: 0;
+}
+
+.settingsList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  min-width: 0;
+}
+
+.settingsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  min-width: 0;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: $spacing-sm;
+    padding: 10px 12px;
+  }
+}
+
+.settingsNumberRow {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  min-width: 0;
+
+  @include mobile {
+    padding: 10px 12px;
+  }
+}
+
+.settingsMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.settingsTitleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settingsTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.settingsPath {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--app-surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm);
+  padding: 2px 6px;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.settingsDescription {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.settingsControl {
+  flex: 0 0 auto;
+}
+
+.settingsNumberControls {
+  display: flex;
+  align-items: flex-start;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+  min-width: 0;
+
+  :global(.form-group) {
+    margin: 0;
+  }
+}
+
+.settingsNumberInput {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 360px;
+
+  @include mobile {
+    flex-basis: 100%;
+    max-width: 100%;
+  }
+}
+
+.readonlyBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--app-radius-pill);
+  background: var(--app-surface-muted);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.readonlyGrid {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  min-width: 0;
+}
+
+.readonlyItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  min-width: 0;
+}
+
+.readonlyValue {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
 @media (max-height: 960px) {

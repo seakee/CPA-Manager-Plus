@@ -40,6 +40,9 @@ export interface Config {
   requestLog?: boolean;
   loggingToFile?: boolean;
   logsMaxTotalSizeMb?: number;
+  errorLogsMaxFiles?: number;
+  pprofEnable?: boolean;
+  pprofAddr?: string;
   pluginsEnabled?: boolean;
   wsAuth?: boolean;
   forceModelPrefix?: boolean;
@@ -66,6 +69,7 @@ export type RawConfigSection =
   | 'request-log'
   | 'logging-to-file'
   | 'logs-max-total-size-mb'
+  | 'error-logs-max-files'
   | 'plugins'
   | 'ws-auth'
   | 'force-model-prefix'

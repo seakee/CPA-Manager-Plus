@@ -335,15 +335,17 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       'credentials.concurrency',
       'credentials.in-flight',
     ]),
-    owner('observability.logs.* / observability.pprof.*', 'logs', 'ownerDetailLogs', [
+    owner('observability.logs.*', 'logs', 'ownerDetailLogs', [
       'observability.logs.debug',
       'observability.logs.logging-to-file',
       'observability.logs.logs-max-total-size-mb',
       'observability.logs.error-logs-max-files',
       'observability.logs.request-log',
+    ], '/logs'),
+    owner('observability.pprof.*', 'deployment', 'ownerDetailPprof', [
       'observability.pprof.enable',
       'observability.pprof.addr',
-    ], '/logs'),
+    ]),
     owner('observability.usage.*', 'usage', 'ownerDetailUsage', [
       'observability.usage.usage-statistics-enabled',
       'observability.usage.redis-usage-queue-retention-seconds',

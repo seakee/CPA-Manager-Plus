@@ -3695,7 +3695,22 @@
     "lines": "行",
     "removed": "已篩選",
     "upgrade_required_title": "需要升級 CLI Proxy API",
-    "upgrade_required_desc": "目前伺服器版本不支援記錄檢視功能，請升級到最新版本的 CLI Proxy API 以使用此功能。"
+    "upgrade_required_desc": "目前伺服器版本不支援記錄檢視功能，請升級到最新版本的 CLI Proxy API 以使用此功能。",
+    "settings_tab": "記錄設定",
+    "enable_file_logging": "啟用寫入記錄檔案",
+    "enabled_empty_desc": "已啟用寫入記錄檔案，新產生的記錄將顯示在這裡",
+    "settings_title": "記錄設定",
+    "settings_desc": "管理目前閘道的記錄寫入、除錯等級、請求記錄與保留策略（observability.logs.*）。",
+    "settings_logging_to_file_desc": "啟用後，CPA 會將執行與請求記錄寫入記錄檔案，供本頁檢視、篩選與下載。",
+    "settings_logs_max_size_hint": "設為 0 表示不限制總大小；超出上限時自動清理最舊記錄。",
+    "settings_error_logs_max_files_hint": "未開啟請求記錄時生效，預設保留 10 個檔案，設為 0 表示不自動清理。",
+    "settings_non_negative_integer": "請輸入大於或等於 0 的整數",
+    "settings_saved": "記錄設定已儲存",
+    "settings_save_failed": "儲存記錄設定失敗",
+    "readonly_badge": "唯讀",
+    "pprof_readonly_title": "效能分析監聽（pprof）",
+    "pprof_managed_posture_reason": "受管與接管安裝基線要求保持 pprof 關閉（observability.pprof.enable = false），避免暴露未認證的除錯監聽連接埠，因此此項僅作唯讀展示。",
+    "pprof_deployment_reason": "pprof 監聽屬於宿主機部署設定，CPA 管理介面不提供執行階段修改端點；如需調整請在宿主機設定檔中修改並重新啟動執行個體。"
   },
   "config_management": {
     "title": "設定面板",

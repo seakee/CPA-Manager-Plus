@@ -24,8 +24,11 @@ import {
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
+import { configApi } from '@/services/api/config';
 import { logsApi } from '@/services/api/logs';
 import type { LogsQuery, LogsResponse } from '@/services/api/logs';
+import type { PublicApiClient } from '@/fullweb/publicApi';
+import { configurationText } from '@/i18n/configurationWorkspace';
 import { copyToClipboard } from '@/utils/clipboard';
 import { downloadBlob } from '@/utils/download';
 import { MANAGEMENT_API_PREFIX } from '@/utils/constants';
@@ -40,6 +43,12 @@ import { parseLogLine } from './hooks/logParsing';
 import { useLogFilters } from './hooks/useLogFilters';
 import { isNearBottom, useLogScroller } from './hooks/useLogScroller';
 import { isFileLogsAvailable } from './logFeatureAvailability';
+import { LogsSettingsPanel, type LogsSettingField } from './LogsSettingsPanel';
+import {
+  extractWriteRefusalCode,
+  mapAuthorityReasonKey,
+  useLogsConfigAuthority,
+} from './useLogsConfigAuthority';
 import styles from './LogsPage.module.scss';
 
 interface ErrorLogItem {
@@ -64,9 +73,17 @@ const getErrorMessage = (err: unknown): string => {
   return typeof message === 'string' ? message : '';
 };
 
-type TabType = 'logs' | 'errors';
+type TabType = 'logs' | 'errors' | 'settings';
 type LogPosition = Pick<LogsQuery, 'after' | 'cursor'>;
 
+const resolveTab = (raw: string | null): TabType => {
+  if (raw === 'errors' || raw === 'settings') return raw;
+  return 'logs';
+};
+
+export interface LogsPageProps {
+  authorityClient?: PublicApiClient;
+}
 const buildLogsQuery = (incremental: boolean, position: LogPosition): LogsQuery => {
   if (!incremental) return { limit: MAX_BUFFER_LINES };
 
@@ -80,24 +97,33 @@ const buildLogsQuery = (incremental: boolean, position: LogPosition): LogsQuery 
   return params;
 };
 
-export function LogsPage() {
+export function LogsPage({ authorityClient }: LogsPageProps = {}) {
   const connectionScope = useAuthStore((state) =>
     JSON.stringify([state.apiBase, state.managementKey])
   );
-  return <LogsPageContent key={connectionScope} />;
+  return <LogsPageContent key={connectionScope} authorityClient={authorityClient} />;
 }
 
-function LogsPageContent() {
+function LogsPageContent({ authorityClient }: LogsPageProps) {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { showNotification, showConfirmation } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const apiBase = useAuthStore((state) => state.apiBase);
+  const managementKey = useAuthStore((state) => state.managementKey);
   const config = useConfigStore((state) => state.config);
+  const fetchConfig = useConfigStore((state) => state.fetchConfig);
+  const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
+  const clearCache = useConfigStore((state) => state.clearCache);
   const fileLogsAvailable = isFileLogsAvailable(config);
+  const authority = useLogsConfigAuthority({
+    connectionStatus,
+    apiBase,
+    managementKey,
+    authorityClient,
+  });
 
-  const [activeTab, setActiveTab] = useState<TabType>(() =>
-    searchParams.get('tab') === 'errors' ? 'errors' : 'logs'
-  );
+  const [activeTab, setActiveTab] = useState<TabType>(() => resolveTab(searchParams.get('tab')));
   const requestLogEnabled = config?.requestLog ?? false;
   const [logState, setLogState] = useState<LogState>({ buffer: [], visibleFrom: 0 });
   const [loading, setLoading] = useState(true);
@@ -121,6 +147,10 @@ function LogsPageContent() {
   const [errorLogsError, setErrorLogsError] = useState('');
   const [requestLogId, setRequestLogId] = useState<string | null>(null);
   const [requestLogDownloading, setRequestLogDownloading] = useState(false);
+  const [savingField, setSavingField] = useState<LogsSettingField | null>(null);
+  const [settingsSaveError, setSettingsSaveError] = useState('');
+  const [refreshingSettings, setRefreshingSettings] = useState(false);
+  const settingWriteInFlightRef = useRef(false);
 
   const logScrollerRef = useRef<ReturnType<typeof useLogScroller> | null>(null);
   const longPressRef = useRef<{
@@ -172,17 +202,119 @@ function LogsPageContent() {
   };
 
   const disableControls = connectionStatus !== 'connected';
+  const disableLogFileControls = disableControls || !fileLogsAvailable;
   const canLoadFileLogs = activeTab === 'logs' && fileLogsAvailable;
 
   const handleTabChange = (tab: TabType) => {
+    setSettingsSaveError('');
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
-    if (tab === 'errors') {
-      nextParams.set('tab', 'errors');
+    if (tab === 'errors' || tab === 'settings') {
+      nextParams.set('tab', tab);
     } else {
       nextParams.delete('tab');
     }
     setSearchParams(nextParams, { replace: true });
+  };
+
+  const formatSettingsWriteError = (err: unknown): string => {
+    const refusalCode = extractWriteRefusalCode(err);
+    if (refusalCode) {
+      return configurationText(mapAuthorityReasonKey(refusalCode));
+    }
+    const detail = getErrorMessage(err);
+    return detail
+      ? `${t('logs.settings_save_failed')}: ${detail}`
+      : t('logs.settings_save_failed');
+  };
+
+  const handleRefreshSettings = async () => {
+    if (settingWriteInFlightRef.current) return;
+    setRefreshingSettings(true);
+    setSettingsSaveError('');
+    try {
+      await Promise.all([
+        fetchConfig ? fetchConfig(undefined, true) : Promise.resolve(null),
+        authority.refresh(),
+      ]);
+    } catch (err: unknown) {
+      if (!scopeActiveRef.current) return;
+      setSettingsSaveError(formatSettingsWriteError(err));
+    } finally {
+      if (scopeActiveRef.current) setRefreshingSettings(false);
+    }
+  };
+
+  const handleToggleSettingField = async (
+    field: 'logging-to-file' | 'debug' | 'request-log',
+    next: boolean
+  ) => {
+    if (!authority.canEditLogs || settingWriteInFlightRef.current) return;
+    settingWriteInFlightRef.current = true;
+    setSavingField(field);
+    setSettingsSaveError('');
+    try {
+      if (field === 'logging-to-file') {
+        await configApi.updateLoggingToFile(next);
+      } else if (field === 'debug') {
+        await configApi.updateDebug(next);
+      } else {
+        await configApi.updateRequestLog(next);
+      }
+      if (!scopeActiveRef.current) return;
+      updateConfigValue?.(field, next);
+      clearCache?.(field);
+      if (field === 'logging-to-file' && !next) {
+        logGenerationRef.current += 1;
+        logRequestInFlightRef.current = false;
+        pendingFullReloadRef.current = false;
+        resetLogPosition();
+        setLogState({ buffer: [], visibleFrom: 0 });
+        setLogsLoaded(false);
+        setError('');
+        setAutoRefresh(false);
+      }
+      showNotification(t('logs.settings_saved'), 'success');
+    } catch (err: unknown) {
+      if (!scopeActiveRef.current) return;
+      const message = formatSettingsWriteError(err);
+      setSettingsSaveError(message);
+      showNotification(message, 'error');
+    } finally {
+      settingWriteInFlightRef.current = false;
+      if (scopeActiveRef.current) setSavingField(null);
+    }
+  };
+
+  const handleSaveNumberSettingField = async (
+    field: 'logs-max-total-size-mb' | 'error-logs-max-files',
+    next: number
+  ): Promise<boolean> => {
+    if (!authority.canEditLogs || settingWriteInFlightRef.current) return false;
+    settingWriteInFlightRef.current = true;
+    setSavingField(field);
+    setSettingsSaveError('');
+    try {
+      if (field === 'logs-max-total-size-mb') {
+        await configApi.updateLogsMaxTotalSizeMb(next);
+      } else {
+        await configApi.updateErrorLogsMaxFiles(next);
+      }
+      if (!scopeActiveRef.current) return false;
+      updateConfigValue?.(field, next);
+      clearCache?.(field);
+      showNotification(t('logs.settings_saved'), 'success');
+      return true;
+    } catch (err: unknown) {
+      if (!scopeActiveRef.current) return false;
+      const message = formatSettingsWriteError(err);
+      setSettingsSaveError(message);
+      showNotification(message, 'error');
+      return false;
+    } finally {
+      settingWriteInFlightRef.current = false;
+      if (scopeActiveRef.current) setSavingField(null);
+    }
   };
 
   const loadLogs = async (incremental = false) => {
@@ -342,6 +474,9 @@ function LogsPageContent() {
   };
 
   useHeaderRefresh(() => {
+    if (activeTab === 'settings') {
+      return handleRefreshSettings();
+    }
     if (activeTab === 'errors') {
       return loadErrorLogs();
     }
@@ -363,7 +498,7 @@ function LogsPageContent() {
   };
 
   useEffect(() => {
-    const tab = searchParams.get('tab') === 'errors' ? 'errors' : 'logs';
+    const tab = resolveTab(searchParams.get('tab'));
     setActiveTab((current) => (current === tab ? current : tab));
   }, [searchParams]);
 
@@ -573,9 +708,12 @@ function LogsPageContent() {
 
   return (
     <div className={styles.container}>
-      <div className={styles.tabBar}>
+      <div className={styles.tabBar} role="tablist">
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'logs'}
+          data-testid="logs-tab-logs"
           className={`${styles.tabItem} ${activeTab === 'logs' ? styles.tabActive : ''}`}
           onClick={() => handleTabChange('logs')}
         >
@@ -583,10 +721,23 @@ function LogsPageContent() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'errors'}
+          data-testid="logs-tab-errors"
           className={`${styles.tabItem} ${activeTab === 'errors' ? styles.tabActive : ''}`}
           onClick={() => handleTabChange('errors')}
         >
           {t('logs.error_logs_modal_title')}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'settings'}
+          data-testid="logs-tab-settings"
+          className={`${styles.tabItem} ${activeTab === 'settings' ? styles.tabActive : ''}`}
+          onClick={() => handleTabChange('settings')}
+        >
+          {t('logs.settings_tab')}
         </button>
       </div>
 
@@ -766,7 +917,7 @@ function LogsPageContent() {
                   variant="secondary"
                   size="sm"
                   onClick={() => loadLogs(false)}
-                  disabled={disableControls || loading}
+                  disabled={disableLogFileControls || loading}
                   className={styles.actionButton}
                 >
                   <span className={styles.buttonContent}>
@@ -777,7 +928,7 @@ function LogsPageContent() {
                 <ToggleSwitch
                   checked={autoRefresh}
                   onChange={(value) => setAutoRefresh(value)}
-                  disabled={disableControls}
+                  disabled={disableLogFileControls}
                   label={
                     <span className={styles.switchLabel}>
                       <IconTimer size={16} />
@@ -801,7 +952,7 @@ function LogsPageContent() {
                   variant="danger"
                   size="sm"
                   onClick={clearLogs}
-                  disabled={disableControls}
+                  disabled={disableLogFileControls}
                   className={styles.actionButton}
                 >
                   <span className={styles.buttonContent}>
@@ -812,7 +963,51 @@ function LogsPageContent() {
               </div>
             </div>
 
-            {loading && !logsLoaded ? (
+            {!fileLogsAvailable ? (
+              <EmptyState
+                title={t('logs.empty_title')}
+                description={t('logs.empty_desc')}
+                action={
+                  <div className={styles.emptyStateActions}>
+                    {!authority.loading && !authority.canEditLogs && authority.reasonText ? (
+                      <div
+                        className={styles.emptyStateNotice}
+                        role="status"
+                        data-testid="logs-empty-authority-notice"
+                      >
+                        {authority.reasonText}
+                      </div>
+                    ) : null}
+                    {settingsSaveError ? (
+                      <div className="error-box" role="alert" data-testid="logs-empty-save-error">
+                        {settingsSaveError}
+                      </div>
+                    ) : null}
+                    <div className={styles.emptyStateButtons}>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          void handleToggleSettingField('logging-to-file', true);
+                        }}
+                        loading={savingField === 'logging-to-file'}
+                        disabled={!authority.canEditLogs || savingField !== null}
+                        data-testid="logs-empty-enable-button"
+                      >
+                        {t('logs.enable_file_logging')}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleTabChange('settings')}
+                        data-testid="logs-empty-open-settings"
+                      >
+                        {t('logs.settings_tab')}
+                      </Button>
+                    </div>
+                  </div>
+                }
+              />
+            ) : loading && !logsLoaded ? (
               <div className="hint">{t('logs.loading')}</div>
             ) : error && !logsLoaded ? null : logState.buffer.length > 0 && filteredLines.length > 0 ? (
               <div
@@ -948,7 +1143,19 @@ function LogsPageContent() {
                 description={t('logs.search_empty_desc')}
               />
             ) : (
-              <EmptyState title={t('logs.empty_title')} description={t('logs.empty_desc')} />
+              <EmptyState
+                title={t('logs.empty_title')}
+                description={t('logs.enabled_empty_desc')}
+                action={
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleTabChange('settings')}
+                  >
+                    {t('logs.settings_tab')}
+                  </Button>
+                }
+              />
             )}
           </Card>
         )}
@@ -1017,6 +1224,21 @@ function LogsPageContent() {
               </div>
             </div>
           </Card>
+        )}
+
+        {activeTab === 'settings' && (
+          <LogsSettingsPanel
+            config={config}
+            authority={authority}
+            savingField={savingField}
+            saveError={settingsSaveError}
+            refreshing={refreshingSettings}
+            onRefresh={() => {
+              void handleRefreshSettings();
+            }}
+            onToggleField={handleToggleSettingField}
+            onSaveNumberField={handleSaveNumberSettingField}
+          />
         )}
       </div>
 
