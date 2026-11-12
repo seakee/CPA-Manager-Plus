@@ -21,7 +21,7 @@ independent acceptance without treating submission as acceptance.
 | Process crash / restart | Real subprocess Kill + Wait before/after rename; unpublished roots fail Verify; recovery distinguishes absent-target abort from matching complete target commit; retry uses same target; sync failures after rename are explicitly uncertain | Fault injection verifies process/flush ordering. True physical power-loss/storage-stack qualification remains **Phase4A**, including Windows directory-metadata durability limits |
 | Rollback journal | Real SQLite interrupted write with spilled uncommitted pages; restricted format/checksum gate, recovery only on copy, all committed rows restored, integrity/foreign-key and matching gates, resealed manifest with pre/post revisions, source unchanged | Unsupported/partial journal formats and super-journals fail closed. Historical exact-source fixtures remain **Phase4A-07**, not synthetic test PASS |
 | Restore safety | New absent root only; full manifest/matching validation; no target replacement, source-root overlap or active-root adoption; active source reader/writer continue unchanged; failure/restart tests | This is an offline restore primitive. Live quiesce, reader/writer drain, owned handle lifecycle, target-generation fencing, activation, failure rollback and service restart belong to **Phase4-04 backend** |
-| Linux runtime | Bundle/CLI runtime plus race JSON and environment are uploaded by the Manager Server job | Only the actual successful run, tested SHA and artifact count as evidence; no inference from workflow text |
+| Linux runtime | Bundle/CLI runtime plus race JSON and environment are uploaded by the Manager Server bundle race job | Only the actual successful run, tested SHA and artifact count as evidence; no inference from workflow text |
 | Windows runtime | Bundle/CLI runtime; real WAL/journal; Windows no-delete-sharing handles block rename/delete/replacement until released; existing destination never replaced; URI paths include spaces, percent, hash and Unicode | Requires successful Windows runtime job. MoveFileEx WRITE_THROUGH is not universal power-loss proof; no portable Windows directory fsync is claimed |
 | Source mutation after reap | Mutation subprocesses are waited/reaped before stale-source revalidation; matching bytes and revision are required again before publication | Does not qualify the exact v1.14.4 hop writer, trusted receipt consumer or Manager authority bootstrap. Those remain **03B-2 / Lane B/E** |
 
@@ -93,7 +93,8 @@ git diff --check
 
 CI `PR Check / Manager Server bundle race (k/4)` shards the race gate across
 four runners and uploads `manager-bundle-linux-shard<k>-<run>-<attempt>` per
-shard: `environment.json` (which includes `shard`), `boundary.jsonl` (that
+shard: `manifest.json` (the planner's catalog and this shard's assignment),
+`environment.json` (which includes `shard`), `boundary.jsonl` (that
 shard's `maintenancebundle` test events) and, on shard 0,
 `boundary-other.jsonl` (the `managerdatabundle` and `processlock` events, run in
 their own invocation because a shard's `-run` filter would otherwise silence

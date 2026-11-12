@@ -181,11 +181,6 @@ jobs:
 
       - name: Test
         working-directory: apps/manager-server
-        env:
-          # Temporary: makes the Go test cache report its decisions in verbose
-          # output so a cache miss on an unchanged tree is visible in CI logs.
-          # Remove once the diagnosis is complete.
-          GODEBUG: gocachetest=1
         run: go test ./...
 
       - name: Race test Bootstrap contract
