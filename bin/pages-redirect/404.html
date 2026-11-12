@@ -6,13 +6,54 @@
     <meta name="robots" content="noindex" />
     <title>CPA Manager Plus has moved</title>
     <link rel="canonical" href="https://cpamp-demo.seakee.dev/" />
-    <meta http-equiv="refresh" content="0; url=https://cpamp-demo.seakee.dev/" />
-    <script type="module">
-      import { applyRedirect } from './redirect.mjs';
+    <noscript>
+      <meta http-equiv="refresh" content="0; url=https://cpamp-demo.seakee.dev/" />
+    </noscript>
+    <script>
+      // GitHub Pages serves this page for every unknown path, so a relative
+      // module request would resolve under the original nested URL and 404.
+      // The mapping is inlined instead; keep it in sync with redirect.mjs.
+// BEGIN INLINE
+function legacyRedirectTarget(pathname, search, hash) {
+  var DEMO = 'https://cpamp-demo.seakee.dev';
+  var DOCS = 'https://cpamp-docs.seakee.dev';
+  var BASE = '/CPA-Manager-Plus';
+  var suffix = (search || '') + (hash || '');
+  var normalized = (pathname || '/').replace(/[\\/]+/g, '/');
+  var rest;
 
-      // GitHub Pages serves this page for every unknown path, including the
-      // legacy `/docs/<rest>` documentation deep links.
-      applyRedirect(window.location, (target) => window.location.replace(target));
+  if (normalized.indexOf(BASE + '/') === 0) {
+    rest = normalized.slice(BASE.length);
+  } else if (normalized === BASE) {
+    rest = '/';
+  } else {
+    rest = normalized;
+  }
+
+  if (rest === '/' || rest === '/index.html') {
+    return DEMO + '/' + suffix;
+  }
+
+  if (rest.indexOf('/docs/') === 0) {
+    return DOCS + '/' + rest.slice('/docs/'.length) + suffix;
+  }
+
+  // `/docs` without a trailing slash is the docs root.
+  if (rest === '/docs') {
+    return DOCS + '/' + suffix;
+  }
+
+  return DEMO + '/' + suffix;
+}
+// END INLINE
+(function () {
+  var target = legacyRedirectTarget(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash
+  );
+  window.location.replace(target);
+})();
     </script>
   </head>
   <body>
