@@ -676,22 +676,92 @@ describe('GitHub Actions workflow integrity', () => {
   it('keeps bundle and Windows preflight validation as conditional required gates', () => {
     const workflow = readWorkflow('pr-check.yml');
     const scopeJob = jobBlock(workflow, 'changes');
-    const managerJob = jobBlock(workflow, 'manager-server');
+    const bundleJob = jobBlock(workflow, 'manager-bundle-race');
     const windowsJob = jobBlock(workflow, 'manager-server-windows-sqlite');
 
     for (const output of ['windows_preflight', 'bundle_boundary', 'manager_runtime', 'runtime_lifecycle']) {
       expect(scopeJob).toContain(`${output}: \${{ steps.classify.outputs.${output} }}`);
     }
 
-    expect(managerJob).toContain("if: needs.changes.outputs.bundle_boundary == 'true'");
-    expect(managerJob).toContain(
-      'go test -race -count=1 -timeout 20m -json ./internal/service/maintenancebundle ./internal/command/managerdatabundle ./internal/processlock'
+    // The maintenancebundle race gate is sharded; the planner assigns its
+    // tests, and the small companion packages stay in a separate invocation so
+    // the shard's `-run` filter cannot silence them.
+    expect(bundleJob).toContain("needs.changes.outputs.bundle_boundary == 'true'");
+    expect(bundleJob).toContain('go test -race -count=1 -timeout 20m -json -run');
+    expect(bundleJob).toContain('--pkg ./internal/service/maintenancebundle');
+    expect(bundleJob).toContain('--race');
+    expect(bundleJob).toContain('--shards 4');
+    expect(bundleJob).toContain(
+      'go test -race -count=1 -timeout 20m -json ./internal/command/managerdatabundle ./internal/processlock'
     );
     expect(windowsJob).toContain("needs.changes.outputs.windows_preflight == 'true'");
     expect(windowsJob).toContain("needs.changes.outputs.bundle_boundary == 'true'");
     expect(windowsJob).toContain(
       'go test -count=1 -timeout 20m -json ./internal/service/maintenancebundle ./internal/command/managerdatabundle'
     );
+  });
+
+  it('shards the Manager Server race gates without dropping coverage', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const freshJob = workflow.jobs['manager-fresh-race'];
+    const bundleJob = workflow.jobs['manager-bundle-race'];
+
+    // Both race gates fan out over the same four shards their planner is told
+    // about; a mismatch would leave tests unassigned.
+    for (const [jobName, job] of [
+      ['manager-fresh-race', freshJob],
+      ['manager-bundle-race', bundleJob],
+    ]) {
+      expect(job, jobName).toBeDefined();
+      expect(job.needs, jobName).toEqual('changes');
+      expect(job.strategy, jobName).toEqual({
+        'fail-fast': false,
+        matrix: { shard: [0, 1, 2, 3] },
+      });
+      const plan = job.steps.find((step) => /plan/i.test(step.name));
+      expect(plan.run, jobName).toContain('--shards 4');
+      expect(plan.run, jobName).toContain('${{ matrix.shard }}');
+      const run = job.steps.find((step) => /json -run/.test(step.run ?? ''));
+      expect(run.run, jobName).toContain('bin/ci/go-test-shard.mjs verify');
+      expect(job.steps.some((step) => step.if === 'always()'), jobName).toBe(true);
+    }
+
+    expect(freshJob.if).toBe("needs.changes.outputs.manager_server == 'true'");
+    expect(bundleJob.if).toBe(
+      "needs.changes.outputs.manager_server == 'true' && needs.changes.outputs.bundle_boundary == 'true'"
+    );
+
+    // The packages outside the sharded command must run on exactly one shard,
+    // in an invocation without `-run`: that filter is global to every named
+    // package, so mixing them in would select nothing.
+    for (const [jobName, job, marker] of [
+      ['manager-fresh-race', freshJob, './cmd/cpa-manager-plus'],
+      ['manager-bundle-race', bundleJob, './internal/service/maintenancebundle'],
+    ]) {
+      const support = job.steps.filter(
+        (step) => step.if === 'matrix.shard == 0' && /go test/.test(step.run ?? '')
+      );
+      expect(support.length, jobName).toBe(1);
+      expect(support[0].run, jobName).not.toContain('-run');
+      expect(support[0].run, jobName).not.toContain(marker);
+      // Only the sharded step may carry a `-run` value.
+      expect(
+        job.steps.filter((step) => /-json -run/.test(step.run ?? '')).length,
+        jobName
+      ).toBe(1);
+    }
+  });
+
+  // The aggregate is what branch protection reads, so every job in the file
+  // must be one of its needs; adding a gate without wiring it here would let a
+  // failure pass the PR.
+  it('requires every workflow job in the required-check aggregate', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const requiredNeeds = workflow.jobs.required.needs;
+    for (const jobName of Object.keys(workflow.jobs)) {
+      if (jobName === 'required') continue;
+      expect(requiredNeeds, jobName).toContain(jobName);
+    }
   });
 
   it('fails Required checks when required Runtime validation fails or is cancelled', () => {
@@ -705,6 +775,8 @@ describe('GitHub Actions workflow integrity', () => {
       ['RUNTIME_SUPERVISOR_RESULT', 'Runtime Supervisor'],
       ['RUNTIME_SUPERVISOR_WINDOWS_RESULT', 'Runtime Supervisor (Windows)'],
       ['DOCKER_BUILD_RESULT', 'Docker Build'],
+      ['MANAGER_FRESH_RACE_RESULT', 'Manager Server Fresh race'],
+      ['MANAGER_BUNDLE_RACE_RESULT', 'Manager Server bundle race'],
     ]) {
       for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
         const execution = spawnSync('bash', ['-c', script], {

@@ -40,6 +40,10 @@ const allChecks = (enabled) =>
 const triggersAllChecks = (filePath) =>
   filePath === '.github/workflows/pr-check.yml' ||
   filePath === 'bin/ci/classify-pr-checks.mjs' ||
+  // The shard planner decides which Go tests each race shard runs, so a change
+  // there can affect any sharded gate and must schedule every check.
+  filePath === 'bin/ci/go-test-shard.mjs' ||
+  filePath === 'tests/goTestShard.test.mjs' ||
   filePath === 'tests/prCheckClassifier.test.mjs';
 
 const triggersFrontend = (filePath) =>
