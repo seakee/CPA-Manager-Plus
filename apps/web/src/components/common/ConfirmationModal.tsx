@@ -26,16 +26,28 @@ export function ConfirmationModal() {
       return;
     }
 
+    // Tie every write below to the confirmation this click belongs to.
+    // `onConfirm` may still be running when the prompt is replaced — the page
+    // that asked can unmount and another action can ask its own question — so
+    // dismissing or re-enabling that new prompt would drop its decision.
+    const owned = options;
+    const stillOurs = () => useNotificationStore.getState().confirmation.options === owned;
+    // Checked before the first write, not only after the await: a handler
+    // captured before the replacement can start once the new prompt is already
+    // on screen, and marking it loading would lock its buttons behind a
+    // decision it never asked for.
+    if (!stillOurs()) return;
     try {
       setConfirmationLoading(true);
       await options.onConfirm();
+      if (!stillOurs()) return;
       hideConfirmation();
     } catch (error) {
       console.error('Confirmation action failed:', error);
       // Optional: show error notification here if needed,
       // but usually the calling component handles specific errors.
     } finally {
-      setConfirmationLoading(false);
+      if (stillOurs()) setConfirmationLoading(false);
     }
   };
 

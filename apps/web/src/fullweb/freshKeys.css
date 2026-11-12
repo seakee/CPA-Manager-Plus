@@ -58,6 +58,28 @@
   padding-top: 0;
   padding-bottom: 0;
 }
+/* The lifecycle filter keeps its label width and the row wraps around it: at a
+   narrow width a long label used to clip the select to a couple of characters
+   while the fixed-width buttons kept their full text. */
+.key-filter-panel .key-filter-bar {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.key-filter-panel .key-filter-bar select.input {
+  width: 100%;
+  /* A native select is intrinsically as wide as its widest option, so a long
+     localized label plus a count can push the row past the container whatever
+     the wrapper allows. Bound the control itself instead of its parent: the
+     selected value ellipsizes and the row still fits. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-filter-panel .btn {
+  flex: 0 0 auto;
+}
 .key-filter-tabs,
 .key-view-toggle {
   display: inline-flex;
@@ -660,8 +682,11 @@
   .key-filter-panel {
     padding: 12px;
   }
+  /* Full width on its own line, but sized by its content so the select never
+     gets squeezed below its label; the buttons may then share a line. */
   .key-filter-bar {
-    flex: 1;
+    flex: 0 1 auto;
+    max-width: 100%;
   }
   .key-filter-tabs {
     flex-wrap: wrap;

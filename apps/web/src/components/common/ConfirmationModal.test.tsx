@@ -38,6 +38,46 @@ const clickButton = async (renderer: ReactTestRenderer, label: string) => {
   });
 };
 
+const findButton = (renderer: ReactTestRenderer, label: string) => {
+  const button = renderer.root
+    .findAllByType(Button)
+    .find((candidate) => candidate.props.children === label);
+  if (!button) throw new Error(`Button not found: ${label}`);
+  return button;
+};
+
+/** A promise the test settles by hand, so "still awaiting" is observable. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * Shows a prompt that replaces whatever is on screen. A loading prompt refuses
+ * to be replaced, so the caller takes it down first — which is what a guard's
+ * own cancel path does — and then the next action asks its question.
+ */
+function replaceWithAnotherPrompt() {
+  const nextConfirm = vi.fn();
+  const nextCancel = vi.fn();
+  act(() => {
+    useNotificationStore.getState().showConfirmation({
+      title: 'Delete key?',
+      message: 'Another action is waiting.',
+      confirmText: 'Delete',
+      cancelText: 'Cancel',
+      onConfirm: nextConfirm,
+      onCancel: nextCancel,
+    });
+  });
+  return { options: useNotificationStore.getState().confirmation.options, nextConfirm, nextCancel };
+}
+
 beforeEach(() => {
   useNotificationStore.setState({
     confirmation: {
@@ -46,6 +86,107 @@ beforeEach(() => {
       step: 1,
       options: null,
     },
+  });
+});
+
+/**
+ * The modal's handlers outlive the prompt that created them: a page that asked
+ * can unmount, and another action can put its own question on screen while the
+ * first `onConfirm` is still running. Whatever the first one settles to, it
+ * must not touch the prompt that replaced it.
+ */
+describe('a confirmation whose prompt was replaced', () => {
+  it.each([
+    ['resolves', (pending: ReturnType<typeof deferred<void>>) => pending.resolve()],
+    [
+      'rejects',
+      (pending: ReturnType<typeof deferred<void>>) => pending.reject(new Error('discard failed')),
+    ],
+    [
+      'throws',
+      (pending: ReturnType<typeof deferred<void>>) => pending.reject(new Error('threw')),
+    ],
+  ])('leaves the replacement usable when the first one %s', async (_label, settle) => {
+    const pending = deferred<void>();
+    const firstConfirm = vi.fn(() => pending.promise);
+    useNotificationStore.getState().showConfirmation({
+      title: 'Unsaved',
+      message: 'Leave?',
+      confirmText: 'Leave',
+      cancelText: 'Stay',
+      onConfirm: firstConfirm,
+    });
+    const renderer = renderModal();
+
+    // Click without awaiting: the handler is deliberately still in flight.
+    const button = findButton(renderer, 'Leave');
+    await act(async () => {
+      void button.props.onClick();
+      await Promise.resolve();
+    });
+    expect(firstConfirm).toHaveBeenCalledTimes(1);
+    expect(useNotificationStore.getState().confirmation.isLoading).toBe(true);
+
+    // The loading prompt cannot be replaced, so it is taken down first.
+    act(() => {
+      useNotificationStore.getState().hideConfirmation();
+    });
+    const replacement = replaceWithAnotherPrompt();
+    expect(useNotificationStore.getState().confirmation.isLoading).toBe(false);
+
+    // Put the replacement into its own in-flight state, so the replaced
+    // handler's cleanup is visible if it touches a prompt it no longer owns:
+    // clearing that flag would re-enable buttons whose action is still running.
+    act(() => {
+      useNotificationStore.getState().setConfirmationLoading(true);
+    });
+
+    await act(async () => {
+      settle(pending);
+      await pending.promise.catch(() => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const shown = useNotificationStore.getState().confirmation;
+    expect(shown.isOpen).toBe(true);
+    expect(shown.options).toBe(replacement.options);
+    expect(shown.isLoading).toBe(true);
+    expect(replacement.nextConfirm).not.toHaveBeenCalled();
+    expect(replacement.nextCancel).not.toHaveBeenCalled();
+  });
+
+  it('does not run a stale handler or mark the replacement loading', async () => {
+    const firstConfirm = vi.fn();
+    useNotificationStore.getState().showConfirmation({
+      title: 'Unsaved',
+      message: 'Leave?',
+      confirmText: 'Leave',
+      cancelText: 'Stay',
+      onConfirm: firstConfirm,
+    });
+    const renderer = renderModal();
+    // The click handler this prompt handed to its button, kept past its life.
+    const staleClick = findButton(renderer, 'Leave').props.onClick as () => Promise<void>;
+
+    act(() => {
+      useNotificationStore.getState().hideConfirmation();
+    });
+    const replacement = replaceWithAnotherPrompt();
+
+    await act(async () => {
+      void staleClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const shown = useNotificationStore.getState().confirmation;
+    expect(firstConfirm).not.toHaveBeenCalled();
+    expect(shown.isOpen).toBe(true);
+    expect(shown.options).toBe(replacement.options);
+    expect(shown.isLoading).toBe(false);
+    expect(replacement.nextConfirm).not.toHaveBeenCalled();
+    expect(replacement.nextCancel).not.toHaveBeenCalled();
   });
 });
 
