@@ -50,6 +50,9 @@ const triggersFrontend = (filePath) =>
   filePath === 'README_CN.md' ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json' ||
+  // The legacy Pages redirect site is covered by tests/pagesRedirect.test.mjs,
+  // which the Frontend job runs: a redirect edit must schedule it.
+  startsWithPath(filePath, 'bin/pages-redirect') ||
   // The toolchain baseline assertions live in tests/ciWorkflowIntegrity.test.mjs,
   // which the Frontend job runs: the Node baseline, every image base and every
   // Go module manifest that carries the Go directive.

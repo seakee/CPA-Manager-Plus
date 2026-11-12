@@ -18,7 +18,6 @@
   "scripts": {
     "dev": "npm --workspace apps/web run dev",
     "build": "npm --workspace apps/web run build",
-    "pages-redirect:build": "node bin/pages-redirect/build.mjs",
     "check:design-tokens": "node bin/ci/check-design-tokens.mjs",
     "evidence:phase2": "node bin/ci/validate-phase2-evidence.mjs",
     "preview": "npm --workspace apps/web run preview",

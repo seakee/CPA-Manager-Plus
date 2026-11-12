@@ -1,83 +1,63 @@
-/**
- * Redirect mapping for the legacy GitHub Pages origin.
- *
- * `https://seakee.github.io/CPA-Manager-Plus/**` used to serve the embedded demo
- * and the VitePress docs. Both moved out of this repository: the demo is a
- * frozen 1.x deployment at https://cpamp-demo.seakee.dev/ and the docs live at
- * https://cpamp-docs.seakee.dev/. This module is the single source of the
- * mapping; `build.mjs` renders it into the static files in this directory and
- * `tests/pagesRedirect.test.mjs` asserts the mapping table.
- *
- * The published site is static, so every entry point (`index.html`, `404.html`)
- * inlines the same logic. Keep the source below self-contained: no imports, no
- * I/O, and only `location`-shaped data as input, because the generator copies
- * this text verbatim into the page.
- */
+// Pure redirect mapping for the legacy `seakee.github.io/CPA-Manager-Plus/**`
+// GitHub Pages site. Kept dependency-free so both the browser pages
+// (`index.html`, `404.html`) and `tests/pagesRedirect.test.mjs` share one
+// implementation.
+//
+// Mapping:
+//   /CPA-Manager-Plus/                    -> https://cpamp-demo.seakee.dev/ + hash
+//   /CPA-Manager-Plus/index.html          -> https://cpamp-demo.seakee.dev/ + hash
+//   /CPA-Manager-Plus/docs/<rest>         -> https://cpamp-docs.seakee.dev/<rest>
+//   any other path                        -> https://cpamp-demo.seakee.dev/
+//
+// Query strings and hashes are preserved on every target.
 
-export const LEGACY_BASE_PATH = '/CPA-Manager-Plus';
 export const DEMO_ORIGIN = 'https://cpamp-demo.seakee.dev';
 export const DOCS_ORIGIN = 'https://cpamp-docs.seakee.dev';
-
-export const REDIRECT_SOURCE = `
-var LEGACY_BASE_PATH = '${LEGACY_BASE_PATH}';
-var DEMO_ORIGIN = '${DEMO_ORIGIN}';
-var DOCS_ORIGIN = '${DOCS_ORIGIN}';
-var DOCS_PREFIX = LEGACY_BASE_PATH + '/docs';
-
-var resolveRedirect = function (location) {
-  var pathname = (location && location.pathname) || '/';
-  var search = (location && location.search) || '';
-  var hash = (location && location.hash) || '';
-  // A static host answers an unknown path with 404.html, which keeps the
-  // requested path in \`location\`; GitHub Pages additionally reaches it with the
-  // real 404 status. Both resolve the same way.
-  if (location && location.href) {
-    var target = new URL(location.href);
-    if (pathname === '/') pathname = target.pathname;
-    if (!search) search = target.search;
-    if (!hash) hash = target.hash;
-  }
-  var suffix = search === '?' ? '' : search;
-
-  if (pathname === DOCS_PREFIX || pathname === DOCS_PREFIX + '/') {
-    return { kind: 'docs', url: DOCS_ORIGIN + '/next/' + suffix + hash, status: '301' };
-  }
-  if (pathname.indexOf(DOCS_PREFIX + '/') === 0) {
-    return {
-      kind: 'docs',
-      url: DOCS_ORIGIN + '/next/' + pathname.slice(DOCS_PREFIX.length + 1) + suffix + hash,
-      status: '301',
-    };
-  }
-
-  // The legacy Pages site had no home page of its own: only the demo was served
-  // at the origin root, so the root and every unmatched path land on the demo.
-  return { kind: 'demo', url: DEMO_ORIGIN + '/' + suffix + hash, status: '302' };
-};
-`;
+export const LEGACY_BASE_PATH = '/CPA-Manager-Plus';
 
 /**
- * Reference implementation of the same mapping, used by the tests and kept in
- * sync with `REDIRECT_SOURCE` by the in-page assertions.
+ * Resolve the new-site URL for a legacy GitHub Pages request.
  *
- * @param {object} location `location`-shaped object: `pathname`, `search`, `hash`, `href`
- * @returns {{ kind: 'demo' | 'docs', url: string, status: '301' | '302' }}
+ * @param {string} pathname Request path, e.g. `/CPA-Manager-Plus/docs/en/`.
+ * @param {string} [search] Query string including `?` when present.
+ * @param {string} [hash] Fragment including `#` when present.
+ * @returns {string} Absolute URL on the new site.
  */
-export const resolveRedirect = ({ pathname = '/', search = '', hash = '', href = '' } = {}) => {
-  if (href) {
-    const target = new URL(href);
-    if (pathname === '/') pathname = target.pathname;
-    if (!search) search = target.search;
-    if (!hash) hash = target.hash;
-  }
-  const suffix = search === '?' ? '' : search;
+export const resolveRedirectTarget = (pathname, search = '', hash = '') => {
+  const suffix = `${search}${hash}`;
+  const normalized = (pathname || '/').replace(/\/{2,}/g, '/');
+  const withoutBase = normalized.startsWith(`${LEGACY_BASE_PATH}/`)
+    ? normalized.slice(LEGACY_BASE_PATH.length)
+    : normalized === LEGACY_BASE_PATH
+      ? '/'
+      : normalized;
 
-  if (pathname === `${LEGACY_BASE_PATH}/docs` || pathname === `${LEGACY_BASE_PATH}/docs/`) {
-    return { kind: 'docs', url: `${DOCS_ORIGIN}/next/${suffix}${hash}`, status: '301' };
+  if (withoutBase === '/' || withoutBase === '/index.html') {
+    return `${DEMO_ORIGIN}/${suffix}`;
   }
-  if (pathname.startsWith(`${LEGACY_BASE_PATH}/docs/`)) {
-    const rest = pathname.slice(LEGACY_BASE_PATH.length + '/docs/'.length);
-    return { kind: 'docs', url: `${DOCS_ORIGIN}/next/${rest}${suffix}${hash}`, status: '301' };
+
+  if (withoutBase.startsWith('/docs/')) {
+    return `${DOCS_ORIGIN}/${withoutBase.slice('/docs/'.length)}${suffix}`;
   }
-  return { kind: 'demo', url: `${DEMO_ORIGIN}/${suffix}${hash}`, status: '302' };
+
+  // `/docs` without a trailing slash is the docs root.
+  if (withoutBase === '/docs') {
+    return `${DOCS_ORIGIN}/${suffix}`;
+  }
+
+  return `${DEMO_ORIGIN}/${suffix}`;
+};
+
+/**
+ * Redirect the current browser location. Split out so the page bootstrap stays
+ * a one-liner and remains testable through `resolveRedirectTarget`.
+ *
+ * @param {{ pathname: string, search?: string, hash?: string }} location
+ * @param {(target: string) => void} [replace]
+ * @returns {string} The resolved target URL.
+ */
+export const applyRedirect = (location, replace) => {
+  const target = resolveRedirectTarget(location.pathname, location.search, location.hash);
+  if (typeof replace === 'function') replace(target);
+  return target;
 };

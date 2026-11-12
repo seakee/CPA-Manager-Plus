@@ -1055,12 +1055,16 @@ describe('GitHub Actions workflow integrity', () => {
       pages: 'write',
       'id-token': 'write',
     });
-    expect(upload.with.path).toBe('bin/pages-redirect');
+    expect(upload.with.path).toBe('dist/pages');
     expect(checkout.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
     expect(upload.uses).toMatch(/^actions\/upload-pages-artifact@[0-9a-f]{40}$/);
+    expect(build.steps.map((step) => step.run ?? '').join('\n')).toContain(
+      'cp -R bin/pages-redirect/. dist/pages/'
+    );
     for (const step of build.steps.filter((entry) => entry.run)) {
       expect(step.run).not.toContain('npm ci');
       expect(step.run).not.toContain('docs');
+      expect(step.run).not.toContain('build:demo');
     }
     for (const file of ['index.html', '404.html', '.nojekyll']) {
       expect(existsSync(path.join(repoRoot, 'bin', 'pages-redirect', file)), file).toBe(true);

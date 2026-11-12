@@ -194,6 +194,16 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['README.md'])).toEqual({ ...noChecks, frontend: true });
   });
 
+  it('runs frontend checks for the legacy Pages redirect site', () => {
+    for (const filePath of [
+      'bin/pages-redirect/redirect.mjs',
+      'bin/pages-redirect/index.html',
+      'bin/pages-redirect/404.html',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+  });
+
   // Docs moved to cpamp-hq/docs; this repository no longer builds them, so the
   // classifier has no docs category to schedule.
   it('schedules no docs check', () => {

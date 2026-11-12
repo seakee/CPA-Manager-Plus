@@ -1,9 +1,10 @@
-name: Legacy Pages Redirect
+name: Demo Site
 
-# The demo and the docs moved out of this repository: the frozen 1.x demo is at
-# https://cpamp-demo.seakee.dev/, the docs at https://cpamp-docs.seakee.dev/.
-# This workflow keeps the old project Pages URLs working by publishing the small
-# static redirect site committed in bin/pages-redirect/.
+# The demo and docs moved out of this repository: the frozen 1.x demo is at
+# https://cpamp-demo.seakee.dev/, the 1.x docs at https://cpamp-docs.seakee.dev/
+# and the v2 docs under https://cpamp-docs.seakee.dev/next/. This workflow keeps
+# the old project Pages URLs working by publishing the small static redirect
+# site committed in bin/pages-redirect/ (no build, no external assets).
 #
 # The job name is "build" on purpose: branch protection on main records it, and
 # renaming it would leave an inherited required check waiting forever.
@@ -32,21 +33,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.22.1'
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
-      - name: Verify committed redirect site
+      - name: Prepare Pages artifact
         run: |
           set -euo pipefail
-          node bin/pages-redirect/build.mjs
-          git diff --exit-code -- bin/pages-redirect
+          rm -rf dist/pages
+          mkdir -p dist/pages
+          cp -R bin/pages-redirect/. dist/pages/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: bin/pages-redirect
+          path: dist/pages
 
   deploy:
     name: Deploy Legacy Redirect Site
