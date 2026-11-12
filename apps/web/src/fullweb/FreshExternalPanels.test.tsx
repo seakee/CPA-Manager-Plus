@@ -329,6 +329,57 @@ describe('External usage confirmation', () => {
     expect(reads).toBe(2);
   });
 
+  // A rebind re-reads the panel. The read it replaced may still be in flight, and
+  // that one describes the installation before the fix: its answer must never
+  // repaint the blocker the rebind resolved.
+  it('ignores a read superseded by the rebind re-read', async () => {
+    let failStale: (error: Error) => void = () => undefined;
+    let reads = 0;
+    const blockers: (string | null | undefined)[] = [];
+    const client = {
+      get: vi.fn(async () => {
+        reads += 1;
+        if (reads === 1)
+          return new Promise<unknown>((_resolve, reject) => {
+            failStale = reject;
+          });
+        return {
+          ...usageState,
+          statisticsEnabled: true,
+          collector: 'running',
+          collectionStarted: true,
+        };
+      }),
+      post: vi.fn(),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        onBlocker={(code) => blockers.push(code)}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    expect(reads).toBe(1);
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    await act(async () => failStale(new TypeError('Failed to fetch')));
+    // The stale failure reached no blocker and no read-error state: the caller
+    // learns the installation is clean exactly once, from the read that replaced it.
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(
+      0
+    );
+    expect(blockers).toEqual([null]);
+  });
+
   it('names the collector state in the page language instead of the wire value', async () => {
     const { client } = stubClient(
       async () => usageState,

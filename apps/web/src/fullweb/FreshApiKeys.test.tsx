@@ -5,6 +5,7 @@ import { FreshApiKeys } from './FreshApiKeys';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { DropdownMenu } from '../components/ui/DropdownMenu';
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
@@ -1065,5 +1066,86 @@ describe('Fresh client key persistence UI', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
     ).toHaveLength(1);
+  });
+
+  // Regression: a rebind resolves the blocker, and the shell re-reads the page by
+  // bumping `reloadToken`. The usage panel must not repaint the blocker with a
+  // failure that belongs to the request it issued *before* the rebind: the page
+  // would show the fix and the refusal it resolved in the same frame.
+  it('does not repaint an External blocker from a usage read issued before the rebind', async () => {
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+    };
+    // The pre-rebind usage read is held open so the test chooses when it fails.
+    let rejectStaleRead: (error: Error) => void = () => undefined;
+    let usageGetCount = 0;
+    const health: unknown = {
+      ...usageBase,
+      statisticsEnabled: true,
+      collector: 'running',
+      collectionStarted: true,
+      blockedReason: '',
+    };
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        if (usageGetCount === 1)
+          return new Promise<Response>((_resolve, reject) => {
+            rejectStaleRead = reject;
+          });
+        return Promise.resolve(Response.json(health));
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(usageGetCount).toBe(1);
+
+    // The rebind succeeded: the shell re-reads the page and the usage panel.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    await act(async () => {
+      rejectStaleRead(new TypeError('Failed to fetch'));
+    });
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('rebindUnavailableHelp'));
+    // The read that replaced it is what the panel reports from.
+    expect(view()).toContain(x('usageCollectorRunning'));
   });
 });

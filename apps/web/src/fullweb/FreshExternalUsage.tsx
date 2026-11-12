@@ -55,6 +55,10 @@ export function FreshExternalUsage({
   const startOnlyRef = useRef(false);
   const requestId = useRef('');
   const alive = useRef(true);
+  // Every read this panel issues takes a ticket. A rebind re-reads here, and the
+  // read it replaced may still be in flight: that one describes the installation
+  // before the fix, so its failure must not repaint a blocker the rebind resolved.
+  const readTicket = useRef(0);
 
   useEffect(() => {
     alive.current = true;
@@ -64,11 +68,16 @@ export function FreshExternalUsage({
   }, []);
 
   async function read() {
+    // A newer read supersedes this one: a rebind bumping `reloadToken` issues a
+    // fresh read of the installation as it now stands, and the answer this call
+    // is still waiting on describes the state before that fix. Applying it would
+    // repaint the blocker the rebind just resolved.
+    const ticket = ++readTicket.current;
     try {
       const parsed = parseExternalUsageState(
         await client.get<unknown>('external/usage', { kind: 'admin', value: credential })
       );
-      if (!alive.current) return;
+      if (!alive.current || readTicket.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
       setReadError('');
@@ -80,7 +89,7 @@ export function FreshExternalUsage({
         onBlocker?.(null);
       }
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || readTicket.current !== ticket) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
