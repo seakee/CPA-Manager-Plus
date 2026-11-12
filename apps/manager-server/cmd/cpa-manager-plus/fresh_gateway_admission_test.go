@@ -5,12 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
 
@@ -127,5 +131,97 @@ func TestFreshAuthorityRequiresAPublishedRoutingProjection(t *testing.T) {
 	app.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/internal/routing/fresh-authority?legacy=true", nil))
 	if response.Code == http.StatusOK {
 		t.Fatal("authority accepted a query selector")
+	}
+}
+
+func TestFreshAuthorityAdmissionRemainsProvenAcrossConsoleFileLoggingToggle(t *testing.T) {
+	adoptInstall := func(r *freshstore.Record, env managedInstallEnv) {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.AdoptExisting,
+			SourceClass:                   bootstrap.AdoptNetworkExisting,
+			SourceIdentity:                "external:sha256:" + strings.Repeat("b", 64),
+			Stage:                         "committed",
+			TargetIdentity:                string(env.status.Identity),
+			TargetGeneration:              uint64(env.status.Generation),
+			TargetArtifactID:              string(env.status.ActiveGatewayArtifact.ArtifactID),
+			DestinationConnectionIdentity: freshstrategy.AdoptedDestinationIdentity(env.endpoint),
+			AdoptionResources:             []bootstrap.ResourceRef{bootstrap.AdoptionRefClientAPIKeys},
+			AdoptionDecisions: []bootstrap.AdoptionResourceDecision{
+				{
+					ResourceRef:       bootstrap.AdoptionRefClientAPIKeys,
+					Kind:              bootstrap.APIKeys,
+					Scope:             bootstrap.ClientAPIKeys,
+					ReadEvidenceRef:   "preflight:keys-read",
+					ReplayEvidenceRef: "preflight:keys-replay",
+					VerifyEvidenceRef: "preflight:keys-verify",
+					Qualification:     bootstrap.CapabilityQualified,
+					Disposition:       bootstrap.Migrate,
+				},
+			},
+		}
+		r.AdoptionCiphertext = env.protected
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: env.endpoint, ManagementKey: env.protected}
+		r.Operation.ProductComplete = true
+	}
+
+	for _, tc := range []struct {
+		name  string
+		setup managedInstallSetup
+	}{
+		{name: "new_managed", setup: completedManagedInstall},
+		{name: "adopt_existing", setup: adoptInstall},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newManagedInstallHarnessWith(t, tc.setup, true)
+			assertAdmission := func(step string) {
+				t.Helper()
+				authority := authorityResponse(t, harness.app)
+				if authority.Code != http.StatusOK {
+					t.Fatalf("%s: fresh-authority status = %d %s", step, authority.Code, authority.Body.String())
+				}
+				var reply struct {
+					GatewayAdmission struct {
+						Admitted bool `json:"admitted"`
+					} `json:"gatewayAdmission"`
+				}
+				if err := json.Unmarshal(authority.Body.Bytes(), &reply); err != nil {
+					t.Fatalf("%s: decode fresh-authority: %v", step, err)
+				}
+				if !reply.GatewayAdmission.Admitted {
+					t.Fatalf("%s: gatewayAdmission.admitted = false, want true", step)
+				}
+				keysRes := harness.call(t, http.MethodGet, "api-keys", "")
+				if keysRes.Code != http.StatusOK {
+					t.Fatalf("%s: GET api-keys = %d %s", step, keysRes.Code, keysRes.Body.String())
+				}
+				var keysView struct {
+					GatewayPending bool `json:"gatewayPending"`
+				}
+				if err := json.Unmarshal(keysRes.Body.Bytes(), &keysView); err != nil {
+					t.Fatalf("%s: decode api-keys: %v", step, err)
+				}
+				if keysView.GatewayPending {
+					t.Fatalf("%s: api-keys gatewayPending = true, want false", step)
+				}
+			}
+
+			assertAdmission("baseline")
+
+			enableRes := harness.call(t, http.MethodPut, "cpamp/v0/management/logging-to-file", `{"value":true}`)
+			if enableRes.Code != http.StatusOK {
+				t.Fatalf("PUT cpamp/v0/management/logging-to-file true = %d %s", enableRes.Code, enableRes.Body.String())
+			}
+			assertAdmission("after enabling file logging")
+
+			disableRes := harness.call(t, http.MethodPut, "cpamp/v0/management/logging-to-file", `{"value":false}`)
+			if disableRes.Code != http.StatusOK {
+				t.Fatalf("PUT cpamp/v0/management/logging-to-file false = %d %s", disableRes.Code, disableRes.Body.String())
+			}
+			assertAdmission("after disabling file logging")
+		})
 	}
 }

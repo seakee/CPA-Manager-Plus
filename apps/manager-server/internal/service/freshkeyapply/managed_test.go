@@ -31,17 +31,18 @@ func managedArtifact() string { return "sha256:" + strings.Repeat("b", 64) }
 // management credential gate and the client-key projection the install and key
 // operations read back.
 type managedCPA struct {
-	mu          sync.Mutex
-	management  string
-	keys        []string
-	v8Reads     int
-	keyWrites   int
-	dirtyConfig bool
-	authOpen    bool
-	extraRoots  map[string]any
-	pluginsOn   bool
-	authDir     string
-	pluginDir   string
+	mu            sync.Mutex
+	management    string
+	keys          []string
+	v8Reads       int
+	keyWrites     int
+	dirtyConfig   bool
+	authOpen      bool
+	extraRoots    map[string]any
+	pluginsOn     bool
+	fileLoggingOn bool
+	authDir       string
+	pluginDir     string
 }
 
 func (m *managedCPA) config() []byte {
@@ -75,7 +76,7 @@ func (m *managedCPA) config() []byte {
 		// installed plugin survives a re-stage, and only this exact closed shape
 		// is the managed posture.
 		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
-		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": usage}},
+		"observability": map[string]any{"logs": map[string]any{"logging-to-file": m.fileLoggingOn}, "usage": map[string]any{"usage-statistics-enabled": usage}},
 	}
 	if m.pluginsOn {
 		body["plugins"] = map[string]any{"enabled": true, "dir": pluginDir, "configs": map[string]any{"sample": map[string]any{"enabled": true}}}
@@ -445,9 +446,10 @@ func TestManagedAuthoritySurvivesSupervisorRestartUpdateAndOperatorEdits(t *test
 	if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
 		t.Fatal(err)
 	}
-	// Operator adds an AI provider, edits routing/requests, and enables plugins.
+	// Operator adds an AI provider, edits routing/requests, enables plugins, and enables file logging.
 	cpa.mu.Lock()
 	cpa.pluginsOn = true
+	cpa.fileLoggingOn = true
 	cpa.extraRoots = map[string]any{
 		"api-keys": map[string]any{
 			"openai-compatibility": []any{

@@ -100,6 +100,19 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			),
 		},
 		{
+			name: "logging to file enabled",
+			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true`, 1),
+		},
+		{
+			name: "logging to file enabled with size and error file retention limits",
+			body: strings.Replace(
+				managedDestinationConfig,
+				`"observability":{"logs":{"logging-to-file":false},"usage":{"usage-statistics-enabled":true}}`,
+				`"observability":{"logs":{"logging-to-file":true,"debug":true,"request-log":true,"logs-max-total-size-mb":256,"error-logs-max-files":20},"usage":{"usage-statistics-enabled":true,"redis-usage-queue-retention-seconds":120},"pprof":{"enable":false}}`,
+				1,
+			),
+		},
+		{
 			name: "optional models credentials and quota-exceeded sections",
 			body: strings.Replace(
 				managedDestinationConfig,
@@ -241,8 +254,24 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/supervisor//destination/auth"`, 1),
 		},
 		{
-			name: "logging to file enabled",
-			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true`, 1),
+			name: "logging to file non-boolean string",
+			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":"true"`, 1),
+		},
+		{
+			name: "logging to file null",
+			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":null`, 1),
+		},
+		{
+			name: "logging to file missing",
+			body: strings.Replace(managedDestinationConfig, `"logs":{"logging-to-file":false}`, `"logs":{"debug":true}`, 1),
+		},
+		{
+			name: "observability unexpected log key",
+			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true,"log-dir":"/tmp/logs"`, 1),
+		},
+		{
+			name: "observability unexpected usage key",
+			body: strings.Replace(managedDestinationConfig, `"usage-statistics-enabled":true`, `"usage-statistics-enabled":true,"custom-usage-key":1`, 1),
 		},
 		{
 			name: "usage statistics disabled",

@@ -34,13 +34,14 @@ const managedInstallBcrypt = "$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ
 // template, the management credential gate and the client-key projection the
 // initial install and every key operation read back.
 type managedKeyDestination struct {
-	mu         sync.Mutex
-	management string
-	keys       []string
-	writes     int
-	authDir    string
-	pluginDir  string
-	extraRoots map[string]any
+	mu            sync.Mutex
+	management    string
+	keys          []string
+	writes        int
+	authDir       string
+	pluginDir     string
+	extraRoots    map[string]any
+	loggingToFile bool
 }
 
 func (d *managedKeyDestination) document() []byte {
@@ -66,7 +67,7 @@ func (d *managedKeyDestination) document() []byte {
 		"access":        map[string]any{"api-keys": keys},
 		"oauth":         map[string]any{"auth-dir": authDir},
 		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
-		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": true}},
+		"observability": map[string]any{"logs": map[string]any{"logging-to-file": d.loggingToFile}, "usage": map[string]any{"usage-statistics-enabled": true}},
 	}
 	for k, v := range d.extraRoots {
 		doc[k] = v
@@ -92,7 +93,7 @@ func (d *managedKeyDestination) installed() []string {
 func (d *managedKeyDestination) serve(t *testing.T) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v8/") && r.Header.Get("Authorization") != "Bearer "+d.management {
+		if (strings.HasPrefix(r.URL.Path, "/v8/") || strings.HasPrefix(r.URL.Path, "/v0/management/")) && r.Header.Get("Authorization") != "Bearer "+d.management {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -116,6 +117,19 @@ func (d *managedKeyDestination) serve(t *testing.T) *httptest.Server {
 			d.keys = slices.Clone(keys)
 			d.mu.Unlock()
 			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v0/management/logging-to-file":
+			var body struct {
+				Value *bool `json:"value"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Value == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			d.mu.Lock()
+			d.loggingToFile = *body.Value
+			d.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 			auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			d.mu.Lock()

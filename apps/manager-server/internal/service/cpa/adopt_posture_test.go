@@ -38,6 +38,12 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 			t.Fatalf("adopted destination rejected the plugin switch %s", enabled)
 		}
 	}
+	for _, enabled := range []string{"true", "false"} {
+		document := strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"logging-to-file":`+enabled, 1)
+		if !adoptProofPosture().matches([]byte(document)) {
+			t.Fatalf("adopted destination rejected logging-to-file %s", enabled)
+		}
+	}
 	for name, host := range map[string]string{"ipv4": "127.0.0.1", "ipv6": "::1"} {
 		native := strings.NewReplacer(
 			`"host":"0.0.0.0"`, `"host":"`+host+`"`,
@@ -137,12 +143,14 @@ func TestAdoptPostureRefusesWhatTheManagerNeverStaged(t *testing.T) {
 			`"host":"0.0.0.0"`, `"host":"127.0.0.2"`,
 			`"allow-remote":true`, `"allow-remote":false`,
 		).Replace(adoptDestinationConfig),
-		"foreign plugin dir":  strings.Replace(adoptDestinationConfig, `"/runtime/supervisor/plugins"`, `"/tmp/plugins"`, 1),
-		"foreign auth dir":    strings.Replace(adoptDestinationConfig, `"/runtime/supervisor/destination/auth"`, `"/tmp/auth"`, 1),
-		"non-boolean switch":  strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":"false"`, 1),
-		"logging to file":     strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true`, 1),
-		"foreign version":     strings.Replace(adoptDestinationConfig, `"config-version":8`, `"config-version":7`, 1),
-		"non-object document": `[]`,
+		"foreign plugin dir":            strings.Replace(adoptDestinationConfig, `"/runtime/supervisor/plugins"`, `"/tmp/plugins"`, 1),
+		"foreign auth dir":              strings.Replace(adoptDestinationConfig, `"/runtime/supervisor/destination/auth"`, `"/tmp/auth"`, 1),
+		"non-boolean switch":            strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":"false"`, 1),
+		"non-boolean logging-to-file":   strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"logging-to-file":"true"`, 1),
+		"missing logging-to-file":       strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"debug":true`, 1),
+		"unknown observability log key": strings.Replace(adoptDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true,"log-dir":"/tmp/logs"`, 1),
+		"foreign version":               strings.Replace(adoptDestinationConfig, `"config-version":8`, `"config-version":7`, 1),
+		"non-object document":           `[]`,
 		// The plugin root is the Supervisor's: a store source, a per-plugin
 		// config or an auth revision is a plugin configuration this Manager never
 		// wrote, so it is refused even though the switch itself is free.
@@ -228,19 +236,25 @@ func TestProveAdoptedDestinationRunsTheProductionRules(t *testing.T) {
 	if got, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err != nil || len(got) != 2 {
 		t.Fatalf("the adopted destination did not prove: %v %v", got, err)
 	}
+	served.Store(strings.Replace(root, `"logging-to-file":false`, `"logging-to-file":true`, 1))
+	if got, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err != nil || len(got) != 2 {
+		t.Fatalf("the adopted destination with file logging enabled did not prove: %v %v", got, err)
+	}
+	served.Store(root)
 	for name, document := range map[string]string{
 		// Every one of these passes the record-independent subset the harness used
 		// to apply; each is a destination the product refuses.
-		"loopback host":            strings.Replace(root, `"host":"0.0.0.0"`, `"host":"127.0.0.1"`, 1),
-		"panel enabled":            strings.Replace(root, `"disable-control-panel":true`, `"disable-control-panel":false`, 1),
-		"foreign auth":             strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/runtime/gateway/auth"`, 1),
-		"gateway destination auth": strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/runtime/gateway/destination/auth"`, 1),
-		"same suffix temp auth":    strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/tmp/x/supervisor/destination/auth"`, 1),
-		"foreign plugins":          strings.Replace(root, `"/runtime/supervisor/plugins"`, `"/runtime/gateway/plugins"`, 1),
-		"same suffix temp plugin":  strings.Replace(root, `"/runtime/supervisor/plugins"`, `"/tmp/x/supervisor/plugins"`, 1),
-		"logging to file":          strings.Replace(root, `"logging-to-file":false`, `"logging-to-file":true`, 1),
-		"port moved":               strings.Replace(root, `"port":8317`, `"port":8318`, 1),
-		"plugin store":             strings.Replace(root, `"enabled":false`, `"enabled":false,"store":{}`, 1),
+		"loopback host":               strings.Replace(root, `"host":"0.0.0.0"`, `"host":"127.0.0.1"`, 1),
+		"panel enabled":               strings.Replace(root, `"disable-control-panel":true`, `"disable-control-panel":false`, 1),
+		"foreign auth":                strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/runtime/gateway/auth"`, 1),
+		"gateway destination auth":    strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/runtime/gateway/destination/auth"`, 1),
+		"same suffix temp auth":       strings.Replace(root, `"/runtime/supervisor/destination/auth"`, `"/tmp/x/supervisor/destination/auth"`, 1),
+		"foreign plugins":             strings.Replace(root, `"/runtime/supervisor/plugins"`, `"/runtime/gateway/plugins"`, 1),
+		"same suffix temp plugin":     strings.Replace(root, `"/runtime/supervisor/plugins"`, `"/tmp/x/supervisor/plugins"`, 1),
+		"non-boolean logging-to-file": strings.Replace(root, `"logging-to-file":false`, `"logging-to-file":"true"`, 1),
+		"unknown log key":             strings.Replace(root, `"logging-to-file":false`, `"logging-to-file":true,"log-dir":"/tmp/logs"`, 1),
+		"port moved":                  strings.Replace(root, `"port":8317`, `"port":8318`, 1),
+		"plugin store":                strings.Replace(root, `"enabled":false`, `"enabled":false,"store":{}`, 1),
 	} {
 		served.Store(document)
 		if _, err := ProveAdoptedDestination(t.Context(), server.URL, testManagement()); err == nil {
