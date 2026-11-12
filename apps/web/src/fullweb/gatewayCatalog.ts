@@ -261,7 +261,7 @@ export function gatewayFamilies(): GatewayFamilyMeta[] {
   ];
 }
 
-export function gatewayOwners(): GatewayOwnerMeta[] {
+export function gatewayOwners(mode?: string): GatewayOwnerMeta[] {
   const owner = (
     path: string,
     ownerKey: ReferenceTextKey,
@@ -288,17 +288,19 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       ],
       '/ai-providers'
     ),
-    owner('models.* / oauth.model-alias / oauth.excluded-models', 'models', 'ownerDetailModels', [
-      'models',
-      'oauth.model-alias',
-      'oauth.excluded-models',
-    ]),
+    owner('models.*', 'models', 'ownerDetailModels', ['models']),
+    owner(
+      'oauth.model-alias / oauth.excluded-models',
+      'auth',
+      'ownerDetailOauthModels',
+      ['oauth.model-alias', 'oauth.excluded-models'],
+      '/accounts'
+    ),
     owner(
       'oauth.auth-dir / oauth.auth-auto-refresh-workers / oauth.settings / oauth.request-scoped-errors',
       'auth',
       'ownerDetailAuth',
-      ['oauth.auth-dir', 'oauth.auth-auto-refresh-workers', 'oauth.settings', 'oauth.request-scoped-errors'],
-      '/accounts'
+      ['oauth.auth-dir', 'oauth.auth-auto-refresh-workers', 'oauth.settings', 'oauth.request-scoped-errors']
     ),
     owner('oauth.providers.codex.live-media-relay.*', 'live', 'ownerDetailLive', [
       'oauth.providers.codex.live-media-relay.enabled',
@@ -346,10 +348,19 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       'observability.pprof.enable',
       'observability.pprof.addr',
     ]),
-    owner('observability.usage.*', 'usage', 'ownerDetailUsage', [
+    owner(
       'observability.usage.usage-statistics-enabled',
+      'usage',
+      'ownerDetailUsageStats',
+      ['observability.usage.usage-statistics-enabled'],
+      mode === 'external' ? '/api-keys' : undefined
+    ),
+    owner(
       'observability.usage.redis-usage-queue-retention-seconds',
-    ], '/monitoring'),
+      'usage',
+      'ownerDetailUsageRetention',
+      ['observability.usage.redis-usage-queue-retention-seconds']
+    ),
     owner('server.* / management.*', 'deployment', 'ownerDetailDeployment', [
       'server.host',
       'server.port',
@@ -372,7 +383,7 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       'management.disable-auto-update-panel',
       'management.panel-github-repository',
       'management.base-url',
-    ], '/system'),
+    ]),
     owner('plugins.*', 'plugins', 'ownerDetailPlugins', [
       'plugins.enabled',
       'plugins.dir',
