@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -295,7 +296,11 @@ func runFreshInitializeFailure(t *testing.T, environment []string) (string, stri
 	if err == nil || ctx.Err() != nil {
 		t.Fatalf("expected non-zero initialize exit, err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
-	return stdout.String(), stderr.String()
+	stderrLine := strings.TrimSpace(stderr.String())
+	if len(stderrLine) > 20 && stderrLine[4] == '/' && stderrLine[7] == '/' && stderrLine[10] == ' ' && stderrLine[13] == ':' && stderrLine[16] == ':' && stderrLine[19] == ' ' {
+		stderrLine = stderrLine[20:]
+	}
+	return stdout.String(), stderrLine
 }
 
 func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFailure(t *testing.T) {
@@ -311,10 +316,13 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	if err != nil {
 		t.Fatal(err)
 	}
+	genericRefusal := freshInitializeErrorMessage(errors.New("unclassified"))
 	stdoutLocked, stderrLocked := runFreshInitializeFailure(t, env)
 	if stdoutLocked != "" ||
-		!strings.Contains(stderrLocked, "stop the writable Manager service before running initialize") ||
-		strings.Contains(stderrLocked, "inspect the host source and ownership") {
+		strings.Contains(stderrLocked, "#handoff=") ||
+		strings.Contains(stderrLocked, genericRefusal) ||
+		!strings.Contains(stderrLocked, "initialize") ||
+		strings.Contains(stderrLocked, "/console") {
 		opened.Close()
 		t.Fatalf("locked in-progress initialize output: stdout=%q stderr=%q", stdoutLocked, stderrLocked)
 	}
@@ -324,7 +332,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		opened.Close()
 		t.Fatal(err)
 	}
-	if _, err := store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+	updated, err := store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy:         bootstrap.NewManaged,
 			TargetIdentity:   "managed-v8",
@@ -339,6 +347,40 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 			Stage:       bootstrap.PrefixCommitted,
 			Committed:   true,
 		}
+		return nil
+	})
+	if err != nil {
+		opened.Close()
+		t.Fatal(err)
+	}
+
+	// 1. Active initial route (Routing.Committed && !ProductComplete) while live:
+	stdoutActiveLive, stderrActiveLive := runFreshInitializeFailure(t, env)
+	if stdoutActiveLive != "" ||
+		strings.Contains(stderrActiveLive, "#handoff=") ||
+		strings.Contains(stderrActiveLive, genericRefusal) ||
+		!strings.Contains(stderrActiveLive, "/console") ||
+		stderrActiveLive == stderrLocked {
+		opened.Close()
+		t.Fatalf("live active-route initialize output: stdout=%q stderr=%q", stdoutActiveLive, stderrActiveLive)
+	}
+
+	// 2. Active initial route while stopped:
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutActiveStopped, stderrActiveStopped := runFreshInitializeFailure(t, env)
+	if stdoutActiveStopped != "" || stderrActiveStopped != stderrActiveLive {
+		t.Fatalf("stopped active-route initialize output: stdout=%q stderr=%q want=%q", stdoutActiveStopped, stderrActiveStopped, stderrActiveLive)
+	}
+
+	// Advance to ProductComplete == true and verify live & stopped completed messages:
+	opened, err = fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = freshstore.New(opened.DB)
+	if _, err := store.Update(t.Context(), updated.Operation.Identity, updated.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.ProductComplete = true
 		return nil
 	}); err != nil {
@@ -346,27 +388,37 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		t.Fatal(err)
 	}
 
-	// 1. While the writable Manager holds the store lock on a completed installation:
+	// 3. Completed installation while live:
 	stdoutLive, stderrLive := runFreshInitializeFailure(t, env)
 	if stdoutLive != "" ||
-		!strings.Contains(stderrLive, "Installation is already complete") ||
+		strings.Contains(stderrLive, "#handoff=") ||
+		strings.Contains(stderrLive, genericRefusal) ||
 		!strings.Contains(stderrLive, "/console") ||
-		!strings.Contains(stderrLive, "no Bootstrap handoff is needed") ||
-		strings.Contains(stderrLive, "inspect the host source and ownership") {
+		stderrLive == stderrActiveLive ||
+		stderrLive == stderrLocked {
+		opened.Close()
 		t.Fatalf("live completed initialize output: stdout=%q stderr=%q", stdoutLive, stderrLive)
 	}
 
-	// 2. When the writable Manager is stopped on a completed installation:
+	// 4. Completed installation while stopped:
 	if err := opened.Close(); err != nil {
 		t.Fatal(err)
 	}
 	stdoutStopped, stderrStopped := runFreshInitializeFailure(t, env)
-	if stdoutStopped != "" ||
-		!strings.Contains(stderrStopped, "Installation is already complete") ||
-		!strings.Contains(stderrStopped, "/console") ||
-		!strings.Contains(stderrStopped, "no Bootstrap handoff is needed") ||
-		strings.Contains(stderrStopped, "inspect the host source and ownership") {
-		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q", stdoutStopped, stderrStopped)
+	if stdoutStopped != "" || stderrStopped != stderrLive {
+		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q want=%q", stdoutStopped, stderrStopped, stderrLive)
+	}
+
+	// 5. Fallback formatting when ControlBasePath is empty or unvalidated:
+	activeFallback := freshInitializeErrorMessage(fresh.RoutingCommittedError{})
+	completeFallback := freshInitializeErrorMessage(fresh.AlreadyCompleteError{})
+	for name, msg := range map[string]string{"active": activeFallback, "complete": completeFallback} {
+		if msg == "" || msg == genericRefusal || strings.Contains(msg, "/console") || strings.Contains(msg, "  ") || strings.Contains(msg, `""`) {
+			t.Fatalf("unexpected %s fallback message: %q", name, msg)
+		}
+	}
+	if activeFallback == completeFallback {
+		t.Fatalf("active and complete fallback messages should remain distinct: %q", activeFallback)
 	}
 }
 
@@ -387,10 +439,11 @@ func TestFreshInitializeFailsClosedWhenLockedStoreHasDamagedCheckpoint(t *testin
 	if _, err := opened.DB.Exec("update settings set value='malformed' where key=?", freshstore.OperationKey); err != nil {
 		t.Fatal(err)
 	}
+	genericRefusal := freshInitializeErrorMessage(errors.New("unclassified"))
 	stdout, stderr := runFreshInitializeFailure(t, env)
 	if stdout != "" ||
-		!strings.Contains(stderr, "Fresh initialization/handoff unavailable; inspect the host source and ownership before retrying") ||
-		strings.Contains(stderr, "stop the writable Manager service before running initialize") {
+		strings.Contains(stderr, "#handoff=") ||
+		!strings.Contains(stderr, genericRefusal) {
 		t.Fatalf("damaged locked store initialize output: stdout=%q stderr=%q", stdout, stderr)
 	}
 }

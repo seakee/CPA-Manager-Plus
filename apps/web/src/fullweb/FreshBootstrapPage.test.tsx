@@ -827,10 +827,10 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => renderer.unmount());
   });
 
-  it('surfaces unfinished Fresh installation resume guidance without legacy-preflight and re-translates on language switch', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
+  it('surfaces unfinished Fresh installation resume guidance without legacy-preflight, re-translates, and rechecks discovery on demand', async () => {
+    const discoveryFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
         Response.json(
           {
             contract_version: 'cpamp.phase4-01.discovery.v1',
@@ -843,7 +843,20 @@ describe('FreshBootstrapPage product preview workflow', () => {
           { status: 200 }
         )
       )
-    );
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'fresh_claim_required',
+            mode: 'fresh',
+            auth_entry: 'fresh_claim',
+            reason: 'fresh_claim_required',
+            authentication_required: true,
+          },
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal('fetch', discoveryFetch);
     setFullWebLanguage('zh-CN');
     let renderer!: ReactTestRenderer;
     await act(async () => {
@@ -869,6 +882,16 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(textOf(findByTestId(renderer.root, 'fresh-resume-instructions'))).toContain(
       '/.well-known/cpamp-bootstrap/ui#handoff=...'
     );
+
+    await act(async () => {
+      findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick();
+    });
+    expect(discoveryFetch).toHaveBeenCalledTimes(2);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-resume-instructions' })).toHaveLength(
+      0
+    );
+    expect(textOf(shell)).not.toContain(bootstrapJourneyText('pending', 'en'));
+    expect(textOf(shell)).toContain('New installation');
     await act(async () => renderer.unmount());
   });
 

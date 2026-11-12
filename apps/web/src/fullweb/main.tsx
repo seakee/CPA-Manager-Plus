@@ -42,9 +42,13 @@ if (window.location.pathname === BOOTSTRAP_UI) {
 } else if (isInitialRoutingContext(document)) {
   // An uncommitted initial route is a verification candidate, never a handoff
   // consumer or an active Console. Strip any fragment and show Bootstrap status.
-  if (window.location.hash) {
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  }
+  const stripFragment = () => {
+    if (window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+  window.addEventListener('hashchange', stripFragment);
+  stripFragment();
   render(<FreshBootstrapPage handoff={null} transport={createBootstrapTransport()} />);
 } else if (!context) {
   render(<p>Routing authority unavailable</p>);

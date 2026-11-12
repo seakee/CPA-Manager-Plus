@@ -40,8 +40,16 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 		if w.Code != tc.want || w.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Fatalf("%+v: %d", tc, w.Code)
 		}
-		if tc.want == 403 && tc.wantOrigin != "" && !strings.Contains(w.Body.String(), `"expected_origin":"`+tc.wantOrigin+`"`) {
-			t.Fatalf("%+v missing expected_origin in %s", tc, w.Body.String())
+		if tc.want == 403 {
+			if !strings.Contains(w.Body.String(), `"code":"origin_rejected"`) {
+				t.Fatalf("%+v missing origin_rejected code in %s", tc, w.Body.String())
+			}
+			if tc.wantOrigin != "" && !strings.Contains(w.Body.String(), `"expected_origin":"`+tc.wantOrigin+`"`) {
+				t.Fatalf("%+v missing expected_origin in %s", tc, w.Body.String())
+			}
+			if tc.wantOrigin == "" && strings.Contains(w.Body.String(), `"expected_origin"`) {
+				t.Fatalf("%+v unexpectedly emitted expected_origin in %s", tc, w.Body.String())
+			}
 		}
 	}
 	for _, invalid := range []string{"null", "file:///tmp/source", "https://user:pass@manager.test", "https://manager.test/path", "https://manager.test?key=test"} {

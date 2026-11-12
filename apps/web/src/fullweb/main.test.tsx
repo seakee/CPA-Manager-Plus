@@ -1,5 +1,11 @@
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, expect, it, vi } from 'vitest';
 
+function textOf(node: ReactTestInstance): string {
+  return node.children
+    .map((child) => (typeof child === 'string' ? child : textOf(child)))
+    .join('');
+}
 const { render } = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock('react-dom/client', () => ({ createRoot: () => ({ render }) }));
 vi.mock('react-router-dom', () => ({ createBrowserRouter: vi.fn(), RouterProvider: () => null }));
@@ -52,8 +58,43 @@ it('consumes a new host Handoff in an already-open Bootstrap tab and retires its
   expect(second.props.handoff).toEqual(handoff);
 });
 
-it('renders the Bootstrap unfinished-install guidance instead of bare Routing authority unavailable when an uncommitted initial route is opened directly', async () => {
-  const location = new URL('https://manager.example/console#handoff=ignored-on-provisional-route');
+it('renders unfinished-install Bootstrap guidance without consuming #handoff on an uncommitted initial route', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const validHandoff =
+    '#handoff=' +
+    btoa(
+      JSON.stringify({
+        identity: {
+          admissionId: 'admission',
+          installationId: 'installation',
+          generation: 'generation',
+          operationId: 'fresh-op',
+          databasePath: '/data/usage.sqlite',
+        },
+        claimGeneration: 2,
+        token: 'x'.repeat(43),
+        resume: true,
+      })
+    )
+      .replace(/=/g, '')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_');
+  const location = new URL(`https://manager.example/console?probe=1${validHandoff}`);
+  let hashChanged!: () => void;
+  const fetchMock = vi.fn().mockResolvedValue(
+    Response.json(
+      {
+        contract_version: 'cpamp.phase4-01.discovery.v1',
+        status: 'fresh_claim_required',
+        mode: 'fresh',
+        auth_entry: 'fresh_claim',
+        reason: 'fresh_resume_required',
+        authentication_required: true,
+      },
+      { status: 200 }
+    )
+  );
+  vi.stubGlobal('fetch', fetchMock);
   vi.stubGlobal('window', {
     location,
     history: {
@@ -61,9 +102,15 @@ it('renders the Bootstrap unfinished-install guidance instead of bare Routing au
         location.href = new URL(path, location.origin).href;
       },
     },
-    addEventListener: vi.fn(),
+    addEventListener: (name: string, handler: () => void) => {
+      if (name === 'hashchange') hashChanged = handler;
+    },
   });
   vi.stubGlobal('document', {
+    documentElement: {
+      setAttribute: vi.fn(),
+      classList: { toggle: vi.fn() },
+    },
     getElementById: (id: string) =>
       id === 'cpamp-routing-context'
         ? {
@@ -74,8 +121,52 @@ it('renders the Bootstrap unfinished-install guidance instead of bare Routing au
   });
   // main.tsx runs its bootstrap routing side effects at module evaluation time.
   await import('./main');
-  const page = render.mock.calls[0][0].props.children[1].props.children;
+  expect(location.search).toBe('?probe=1');
   expect(location.hash).toBe('');
-  expect(page.type.name).toBe('FreshBootstrapPage');
-  expect(page.props.handoff).toBeNull();
+
+  let mounted!: ReactTestRenderer;
+  await act(async () => {
+    mounted = create(render.mock.calls[0][0]);
+  });
+  const shell = mounted.root.findByProps({ 'data-testid': 'fresh-bootstrap-shell' });
+  expect(textOf(shell)).not.toContain('Routing authority unavailable');
+  expect(mounted.root.findByProps({ 'data-testid': 'fresh-resume-instructions' })).toBeTruthy();
+  expect(
+    textOf(mounted.root.findByProps({ 'data-testid': 'cli-handoff-command' }))
+  ).toBe('cpa-manager-plus initialize');
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][0]).toBe('/.well-known/cpamp-bootstrap');
+
+  location.hash = validHandoff;
+  hashChanged();
+  expect(location.hash).toBe('');
+  expect(location.search).toBe('?probe=1');
+  expect(render).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await act(async () => mounted.unmount());
+});
+
+it('fails closed to Routing authority unavailable when the routing context carrier is malformed', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.stubGlobal('window', {
+    location: new URL('https://manager.example/console'),
+    history: { replaceState: vi.fn() },
+    addEventListener: vi.fn(),
+  });
+  vi.stubGlobal('document', {
+    getElementById: (id: string) =>
+      id === 'cpamp-routing-context'
+        ? {
+            textContent: '{broken',
+            getAttribute: () => 'application/json',
+          }
+        : null,
+  });
+  await import('./main');
+  let mounted!: ReactTestRenderer;
+  await act(async () => {
+    mounted = create(render.mock.calls[0][0]);
+  });
+  expect(textOf(mounted.root.findByType('p'))).toBe('Routing authority unavailable');
+  await act(async () => mounted.unmount());
 });

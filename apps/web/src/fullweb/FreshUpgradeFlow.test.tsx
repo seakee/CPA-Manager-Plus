@@ -279,20 +279,17 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
     expect(view()).not.toContain('Preflight blocked the upgrade');
     expect(byTestId('upgrade-continue').props.disabled).toBe(false);
-    const readyNotice = `${byTestId('upgrade-preflight-ready').findByType('h3').children.join('')} ${byTestId('upgrade-preflight-ready').findByType('p').children.join('')}`;
-    expect(readyNotice).not.toContain('Every check passed');
-    expect(readyNotice).toContain('copy-in');
+    const readyHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
+    const readyBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
+    expect(readyHeading).not.toBe(t('preflightReadyTitle', 'en'));
+    expect(`${readyHeading} ${readyBody}`).toContain('--source-version');
 
     await press('upgrade-continue');
     expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
       '--source-version v1.14.10'
     );
 
-    for (const [locale, forbidden] of [
-      ['zh-CN', '所有检查均通过'],
-      ['zh-TW', '所有檢查均通過'],
-      ['ru', 'Все проверки пройдены'],
-    ] as const) {
+    for (const locale of ['zh-CN', 'zh-TW', 'ru'] as const) {
       await act(async () => {
         renderer!.update(
           <FreshUpgradeFlow
@@ -303,9 +300,10 @@ describe('Full Web upgrade wizard', () => {
         );
       });
       await press('upgrade-confirm-back');
-      const localizedReady = `${byTestId('upgrade-preflight-ready').findByType('h3').children.join('')} ${byTestId('upgrade-preflight-ready').findByType('p').children.join('')}`;
-      expect(localizedReady).not.toContain(forbidden);
-      expect(localizedReady).toContain('--source-version');
+      const localizedHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
+      const localizedBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
+      expect(localizedHeading).not.toBe(t('preflightReadyTitle', locale));
+      expect(`${localizedHeading} ${localizedBody}`).toContain('--source-version');
       await press('upgrade-continue');
       expect(byTestId('upgrade-confirm-version').children.join('')).not.toBe('unknown');
       expect(byTestId('upgrade-confirm-version').children.join('')).toContain(

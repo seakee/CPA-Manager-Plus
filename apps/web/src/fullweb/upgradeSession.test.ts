@@ -162,5 +162,69 @@ describe('existing Manager credential provenance', () => {
       reason: 'origin_rejected',
       expectedOrigin: 'https://public-manager.test',
     });
+    // Trailing slash on canonical origin normalizes cleanly to url.origin.
+    fetcher.mockResolvedValue(
+      Response.json(
+        {
+          contract_version: 'cpamp.upgrade-auth.v1',
+          error: {
+            code: 'origin_rejected',
+            expected_origin: 'https://public-manager.test/',
+          },
+        },
+        { status: 403 }
+      )
+    );
+    await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+      reason: 'origin_rejected',
+      expectedOrigin: 'https://public-manager.test',
+    });
+    // Omitted expected_origin (CPAMP_PUBLIC_ORIGIN unset) and malformed/non-origin values stay origin_rejected with undefined expectedOrigin.
+    for (const candidate of [
+      undefined,
+      '',
+      'not-a-url',
+      'ftp://public-manager.test',
+      'https://public-manager.test/console',
+      'https://user:pass@public-manager.test',
+      'https://public-manager.test?x=1',
+      'https://public-manager.test#frag',
+      123,
+    ]) {
+      fetcher.mockResolvedValue(
+        Response.json(
+          {
+            contract_version: 'cpamp.upgrade-auth.v1',
+            error:
+              candidate === undefined
+                ? { code: 'origin_rejected' }
+                : { code: 'origin_rejected', expected_origin: candidate },
+          },
+          { status: 403 }
+        )
+      );
+      await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+        reason: 'origin_rejected',
+        expectedOrigin: undefined,
+      });
+    }
+    // Non-origin_rejected 403 JSON, mismatched contract version, and non-JSON 403 fall back to unavailable.
+    for (const response of [
+      Response.json(
+        { contract_version: 'cpamp.upgrade-auth.v1', error: { code: 'forbidden' } },
+        { status: 403 }
+      ),
+      Response.json(
+        { contract_version: 'cpamp.other.v1', error: { code: 'origin_rejected' } },
+        { status: 403 }
+      ),
+      new Response('Forbidden', { status: 403 }),
+    ]) {
+      fetcher.mockResolvedValue(response);
+      await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+        reason: 'unavailable',
+        expectedOrigin: undefined,
+      });
+    }
   });
 });

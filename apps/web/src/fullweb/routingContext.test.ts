@@ -130,5 +130,9 @@ describe('Full Web consumes the verified Manager routing projection', () => {
     );
     expect(isInitialRoutingContext(source(JSON.stringify(snapshot)))).toBe(false);
     expect(isInitialRoutingContext(source('__CPAMP_ROUTING_CONTEXT__'))).toBe(false);
+    expect(isInitialRoutingContext(source('{broken'))).toBe(false);
+    expect(isInitialRoutingContext(source('{}'))).toBe(false);
+    expect(isInitialRoutingContext(source('null'))).toBe(false);
+    expect(isInitialRoutingContext({ getElementById: () => null })).toBe(false);
   });
 });
