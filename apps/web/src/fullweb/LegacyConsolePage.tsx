@@ -29,7 +29,7 @@ import { LogsAuthorityClientContext } from '@/features/logs/LogsAuthorityContext
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
 import { useAuthStore } from '../stores';
 import { FreshManagedResources } from './FreshManagedResources';
-import type { createPublicApiClient } from './publicApi';
+import type { PublicApiClient } from './publicApi';
 import { resolveRoutingContext, type RoutingContext } from './routingContext';
 import { activateFreshSession } from './freshSession';
 
@@ -57,7 +57,7 @@ export function LegacyConsolePage({
   context: RoutingContext;
   credential: string;
   onUnauthorized: () => void;
-  client?: ReturnType<typeof createPublicApiClient>;
+  client: PublicApiClient;
   /** The committed strategy, so External-only surfaces never mount elsewhere. */
   strategy?: string;
 }) {
@@ -146,14 +146,13 @@ export function LegacyConsolePage({
          * keeps its active item, breadcrumbs and
          * MainRoutes in the same coordinate system as the mounted router.
          */}
-        <LogsAuthorityClientContext.Provider value={client ?? null}>
-        <MainLayout
-          routeBase={context.basePath}
-          navigationBase={context.basePath}
-          logoutDisabled={freshPending}
-          hasUnsavedChanges={freshDirty}
-          contentFooter={
-            client ? (
+        <LogsAuthorityClientContext.Provider value={client}>
+          <MainLayout
+            routeBase={context.basePath}
+            navigationBase={context.basePath}
+            logoutDisabled={freshPending}
+            hasUnsavedChanges={freshDirty}
+            contentFooter={
               <FreshManagedResources
                 basePath={context.basePath}
                 client={client}
@@ -163,38 +162,36 @@ export function LegacyConsolePage({
                 onPending={setFreshPending}
                 onDirtyChange={setFreshDirty}
               />
-            ) : undefined
-          }
-          renderRoute={(pathname) => {
-            if (!client) return undefined;
-            const route = pathname.replace(/\/+$/, '') || '/';
-            // In Full Web, API keys, Gateway workspace and System configuration
-            // render in the persistent footer panels (RetainedRoutePanel) so that
-            // active drafts, one-time secrets and in-flight operations are
-            // retained across page transitions.
-            if (route === '/api-keys') return null;
-            if (route === '/gateway' || route === '/config') return null;
-            if (route === '/system') {
-              return (
-                <SystemPage
-                  logoutDisabled={freshPending}
-                  hasUnsavedChanges={freshDirty}
-                  workspace={<FreshSystemWorkspace basePath={context.basePath} />}
-                />
-              );
             }
-            if (route === '/system/runtime') {
-              return (
-                <RuntimeStatusPage
-                  client={client}
-                  credential={credential}
-                  onUnauthorized={onUnauthorized}
-                />
-              );
-            }
-            return undefined;
-          }}
-        />
+            renderRoute={(pathname) => {
+              const route = pathname.replace(/\/+$/, '') || '/';
+              // In Full Web, API keys, Gateway workspace and System configuration
+              // render in the persistent footer panels (RetainedRoutePanel) so that
+              // active drafts, one-time secrets and in-flight operations are
+              // retained across page transitions.
+              if (route === '/api-keys') return null;
+              if (route === '/gateway' || route === '/config') return null;
+              if (route === '/system') {
+                return (
+                  <SystemPage
+                    logoutDisabled={freshPending}
+                    hasUnsavedChanges={freshDirty}
+                    workspace={<FreshSystemWorkspace basePath={context.basePath} />}
+                  />
+                );
+              }
+              if (route === '/system/runtime') {
+                return (
+                  <RuntimeStatusPage
+                    client={client}
+                    credential={credential}
+                    onUnauthorized={onUnauthorized}
+                  />
+                );
+              }
+              return undefined;
+            }}
+          />
         </LogsAuthorityClientContext.Provider>
       </ManagerUpdates>
     </div>

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Button } from '../components/ui/Button';
 import i18n from '../i18n';
 import { apiKeysApi } from '../services/api/apiKeys';
+import { configApi } from '../services/api/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshConsolePage } from './FreshConsolePage';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
@@ -13,6 +14,7 @@ import { fullWebLanguage, fullWebText as t, setFullWebLanguage } from '../i18n/f
 import { LegacyConsolePage } from './LegacyConsolePage';
 import { LoginPage } from '../features/login/LoginPage';
 import { useAuthStore } from '../stores/useAuthStore';
+import { useConfigStore } from '../stores/useConfigStore';
 import { useLanguageStore } from '../stores/useLanguageStore';
 import { obfuscatedStorage } from '../services/storage/secureStorage';
 import { STORAGE_KEY_AUTH } from '../utils/constants';
@@ -663,5 +665,30 @@ describe('Fresh installation and Console authority boundary', () => {
     await act(async () => renderer.root.findByType(LegacyConsolePage).props.onUnauthorized());
     expect(has('legacy-console')).toBe(false);
     expect(input().props.value).toBe('');
+  });
+  it('propagates non-writable External capability through FreshConsolePage into LogsPage without passing authorityClient', async () => {
+    useConfigStore.getState().clearCache();
+    vi.spyOn(configApi, 'getConfig').mockResolvedValue({ loggingToFile: false });
+    await mount(async () =>
+      Response.json({
+        ...gatewayViewFixture(),
+        capability: {
+          mode: 'external',
+          readable: true,
+          writable: false,
+          rulesWritable: false,
+          reason: 'external_cpa_version_unsupported',
+        },
+      })
+    );
+    await login();
+    await navigate('/logs');
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    await vi.waitFor(() => {
+      expect(find('logs-empty-enable-button').props.disabled).toBe(true);
+      expect(has('logs-empty-authority-notice')).toBe(true);
+    });
   });
 });
