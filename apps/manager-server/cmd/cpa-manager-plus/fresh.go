@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityprojection"
@@ -69,15 +70,45 @@ func runFreshInitialize(ctx context.Context, stdout io.Writer) error {
 	}
 	opened, err := fresh.Open(ctx, paths, fresh.OpenOptions{Initialize: true, AdminKey: cfg.AdminKey, DataKey: cfg.DataKey})
 	if err != nil {
+		if classified, ok := fresh.ClassifyInitializeRefusal(ctx, paths.Database, err); ok {
+			return classified
+		}
 		return err
 	}
 	defer opened.Close()
+	if opened.Record.Operation.ProductComplete {
+		return fresh.AlreadyCompleteError{ControlBasePath: opened.Record.Operation.Routing.Target}
+	}
+	if opened.Record.Operation.Routing.Committed {
+		return fresh.RoutingCommittedError{ControlBasePath: opened.Record.Operation.Routing.Target}
+	}
 	handoff, err := fresh.New(freshstore.New(opened.DB)).Issue(ctx)
 	if err != nil {
 		return err
 	}
 	_, err = io.WriteString(stdout, bootstrap.FixedBootstrapUIPath+handoff.Fragment+"\n")
 	return err
+}
+
+func freshInitializeErrorMessage(err error) string {
+	var complete fresh.AlreadyCompleteError
+	if errors.As(err, &complete) {
+		if routing.ValidControlBasePath(complete.ControlBasePath) {
+			return fmt.Sprintf("Installation is already complete; open the console at %s with your administrator key (no Bootstrap handoff is needed)", complete.ControlBasePath)
+		}
+		return "Installation is already complete; open the console with your administrator key (no Bootstrap handoff is needed)"
+	}
+	var committed fresh.RoutingCommittedError
+	if errors.As(err, &committed) {
+		if routing.ValidControlBasePath(committed.ControlBasePath) {
+			return fmt.Sprintf("Initial console route %s is already active; open %s with your administrator key to finish setup (no Bootstrap handoff is needed)", committed.ControlBasePath, committed.ControlBasePath)
+		}
+		return "Initial console route is already active; open the console with your administrator key to finish setup (no Bootstrap handoff is needed)"
+	}
+	if errors.Is(err, fresh.ErrStoreLockedInProgress) {
+		return "Fresh installation is not finished and the Manager service holds the store lock; stop the writable Manager service before running initialize to issue a resume handoff"
+	}
+	return "Fresh initialization/handoff unavailable; inspect the host source and ownership before retrying"
 }
 
 func freshPaths(cfg config.Config) (sqliterepo.InspectionPaths, error) {

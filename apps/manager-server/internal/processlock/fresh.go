@@ -72,8 +72,36 @@ func (l *Lock) readFreshReceipt() (*FreshReceipt, error) {
 	if err := l.Validate(); err != nil {
 		return nil, err
 	}
+	return parseFreshReceipt(l.file, l.DatabasePath())
+}
+
+// ObserveFreshIdentity reads the Fresh marker provenance without acquiring the
+// process lock, so an offline host command can report whether a live Fresh
+// Manager holds a completed or unfinished installation without touching SQLite
+// on non-Fresh sources.
+func ObserveFreshIdentity(databasePath string) (*bootstrap.FreshIdentity, error) {
+	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := openLockFile(lockPath, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if err := openedMarker(file, marker); err != nil {
+		return nil, err
+	}
+	r, err := parseFreshReceipt(file, absolutePath)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	return &r.Identity, nil
+}
+
+func parseFreshReceipt(file *os.File, databasePath string) (*FreshReceipt, error) {
 	data := make([]byte, 4097)
-	n, err := l.file.ReadAt(data, 0)
+	n, err := file.ReadAt(data, 0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
@@ -93,7 +121,7 @@ func (l *Lock) readFreshReceipt() (*FreshReceipt, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return nil, errors.New("invalid Manager marker")
 	}
-	if r.Version != 1 || (r.State != pendingFresh && r.State != "manager") || !r.Identity.Valid() || r.Identity.DatabasePath != l.DatabasePath() {
+	if r.Version != 1 || (r.State != pendingFresh && r.State != "manager") || !r.Identity.Valid() || r.Identity.DatabasePath != databasePath {
 		return nil, errors.New("invalid Fresh admission receipt")
 	}
 	for _, id := range []string{r.Identity.AdmissionID, r.Identity.InstallationID, r.Identity.Generation} {

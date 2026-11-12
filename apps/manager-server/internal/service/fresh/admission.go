@@ -26,6 +26,62 @@ type OpenOptions struct {
 	// Hook is an isolated acceptance-test seam, never a configurable runtime state.
 	Hook func(string) error
 }
+
+// AlreadyCompleteError reports that the Fresh installation has already reached
+// product completion and therefore needs no Bootstrap handoff.
+type AlreadyCompleteError struct {
+	ControlBasePath string
+}
+
+func (e AlreadyCompleteError) Error() string {
+	return "fresh installation is already complete"
+}
+
+// RoutingCommittedError reports that the initial Console route is already
+// active and setup continues on that route with the administrator key.
+type RoutingCommittedError struct {
+	ControlBasePath string
+}
+
+func (e RoutingCommittedError) Error() string {
+	return "initial console route is already committed"
+}
+
+// ErrStoreLockedInProgress reports that a running Manager holds the Fresh store
+// lock while installation is still unfinished.
+var ErrStoreLockedInProgress = errors.New("fresh store lock is held by a running manager")
+
+// ClassifyInitializeRefusal inspects a locked Fresh store strictly read-only
+// after proving that its ownership marker carries valid Fresh provenance. Any
+// non-Fresh, unreadable or mismatched source returns ok == false so callers
+// keep the generic host-ownership refusal.
+func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr error) (error, bool) {
+	if !errors.Is(openErr, processlock.ErrLocked) {
+		return nil, false
+	}
+	markerIdentity, err := processlock.ObserveFreshIdentity(databasePath)
+	if err != nil || markerIdentity == nil {
+		return nil, false
+	}
+	record, err := inspectCheckpoint(ctx, markerIdentity.DatabasePath, nil)
+	if err != nil {
+		if errors.Is(err, freshstore.ErrNotFresh) {
+			// Fresh admission receipt exists and is locked, before first checkpoint write.
+			return ErrStoreLockedInProgress, true
+		}
+		return nil, false
+	}
+	if !record.Operation.Identity.Valid() || record.Operation.Identity != *markerIdentity || record.Operation.Validate() != nil {
+		return nil, false
+	}
+	if record.Operation.ProductComplete {
+		return AlreadyCompleteError{ControlBasePath: record.Operation.Routing.Target}, true
+	}
+	if record.Operation.Routing.Committed {
+		return RoutingCommittedError{ControlBasePath: record.Operation.Routing.Target}, true
+	}
+	return ErrStoreLockedInProgress, true
+}
 type Opened struct {
 	Admission *legacypreflight.Admission
 	DB        *sql.DB

@@ -72,7 +72,7 @@ func main() {
 				log.Fatal("Usage: cpa-manager-plus initialize")
 			}
 			if err := runFreshInitialize(context.Background(), os.Stdout); err != nil {
-				log.Print("Fresh initialization/handoff unavailable; inspect the host source and ownership before retrying")
+				log.Print(freshInitializeErrorMessage(err))
 				os.Exit(1)
 			}
 			return

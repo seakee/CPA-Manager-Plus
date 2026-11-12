@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -278,5 +279,93 @@ func TestFreshNewInstallationWiresDatabaseStatusAndCPAUpdateEndpoints(t *testing
 	updatesRec := harness.call("GET", "cpamp/usage-service/runtime/updates", "")
 	if updatesRec.Code != http.StatusOK {
 		t.Fatalf("GET /control/api/v2/cpamp/usage-service/runtime/updates status=%d body=%s", updatesRec.Code, updatesRec.Body.String())
+	}
+}
+
+func runFreshInitializeFailure(t *testing.T, environment []string) (string, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestManagerServerHelperProcess$", "--", "initialize")
+	command.Env = environment
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("expected non-zero initialize exit, err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
+}
+
+func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.sqlite")
+	writeOwnedProvisioningConfig(t, dir)
+	env := ownedPreflightEnvironment(dir, path)
+
+	runFreshInitializeProcess(t, env)
+	paths := legacypreflight.DefaultPaths(path)
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutLocked, stderrLocked := runFreshInitializeFailure(t, env)
+	if stdoutLocked != "" ||
+		!strings.Contains(stderrLocked, "stop the writable Manager service before running initialize") ||
+		strings.Contains(stderrLocked, "inspect the host source and ownership") {
+		opened.Close()
+		t.Fatalf("locked in-progress initialize output: stdout=%q stderr=%q", stdoutLocked, stderrLocked)
+	}
+	store := freshstore.New(opened.DB)
+	record, err := store.Load(t.Context())
+	if err != nil {
+		opened.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:         bootstrap.NewManaged,
+			TargetIdentity:   "managed-v8",
+			TargetArtifactID: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			TargetGeneration: 1,
+			Stage:            "committed",
+		}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID,
+			Revision:    1,
+			Target:      "/console",
+			Stage:       bootstrap.PrefixCommitted,
+			Committed:   true,
+		}
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		opened.Close()
+		t.Fatal(err)
+	}
+
+	// 1. While the writable Manager holds the store lock on a completed installation:
+	stdoutLive, stderrLive := runFreshInitializeFailure(t, env)
+	if stdoutLive != "" ||
+		!strings.Contains(stderrLive, "Installation is already complete") ||
+		!strings.Contains(stderrLive, "/console") ||
+		!strings.Contains(stderrLive, "no Bootstrap handoff is needed") ||
+		strings.Contains(stderrLive, "inspect the host source and ownership") {
+		t.Fatalf("live completed initialize output: stdout=%q stderr=%q", stdoutLive, stderrLive)
+	}
+
+	// 2. When the writable Manager is stopped on a completed installation:
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutStopped, stderrStopped := runFreshInitializeFailure(t, env)
+	if stdoutStopped != "" ||
+		!strings.Contains(stderrStopped, "Installation is already complete") ||
+		!strings.Contains(stderrStopped, "/console") ||
+		!strings.Contains(stderrStopped, "no Bootstrap handoff is needed") ||
+		strings.Contains(stderrStopped, "inspect the host source and ownership") {
+		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q", stdoutStopped, stderrStopped)
 	}
 }
