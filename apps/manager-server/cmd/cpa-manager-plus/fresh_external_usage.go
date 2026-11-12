@@ -493,12 +493,17 @@ func (a *freshApplication) externalUsageState(ctx context.Context) (externalUsag
 	// Assemble local Collector status strictly after legacyCredentialGate is
 	// released: usageCollectionStarted acquires usageStartMu, and startup paths
 	// lock usageStartMu -> legacyCredentialGate.
+	started := a.usageCollectionStarted()
+	blocked := a.usageStartBlock()
+	if enabled && !started && blocked == usageStartReasonStatisticsDisabled {
+		blocked = ""
+	}
 	return externalUsageState{
 		StatisticsEnabled: enabled,
 		Collector:         string(a.collectionPhase()),
-		CollectionStarted: a.usageCollectionStarted(),
+		CollectionStarted: started,
 		CPA:               externalVersionView{Version: report.Version, Support: report.Support, WriteBlocked: report.WriteBlocked},
-		BlockedReason:     a.usageStartBlock(),
+		BlockedReason:     blocked,
 	}, nil
 }
 

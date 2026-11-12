@@ -159,10 +159,10 @@ const messages = {
     'мониторинг запросов в Manager отключён',
   ],
   usageBlockedExternalAuthority: [
-    'the saved CPA credential could not be verified',
-    '无法验证已保存的 CPA 凭据',
-    '無法驗證已儲存的 CPA 憑證',
-    'не удалось проверить сохранённые учётные данные CPA',
+    'the external CPA could not complete the usage statistics check or update',
+    '外部 CPA 当前无法完成用量统计校验或写入',
+    '外部 CPA 目前無法完成用量統計驗證或寫入',
+    'внешний CPA не смог выполнить проверку или запись настройки статистики',
   ],
   usageBlockedUnknown: [
     'the last attempt was stopped for a reason this Console cannot name',
@@ -171,6 +171,7 @@ const messages = {
     'последняя попытка прервана по неизвестной этой консоли причине',
   ],
   usageEnableAction: ['Enable usage statistics on your CPA', '在你的 CPA 上启用用量统计', '在你的 CPA 上啟用用量統計', 'Включить статистику на вашем CPA'],
+  usageStartAction: ['Start usage collection', '开始采集用量', '開始擷取用量', 'Запустить сбор статистики'],
   usageConfirmTitle: ['Enable usage statistics on your CPA?', '要在你的 CPA 上启用用量统计吗？', '要在你的 CPA 上啟用用量統計嗎？', 'Включить статистику использования на вашем CPA?'],
   usageConfirmHelp: [
     'This writes usage-statistics-enabled: true to the CPA at this connection. It changes a setting on a CPA you administer, and it is the only write Manager makes before it collects anything.',

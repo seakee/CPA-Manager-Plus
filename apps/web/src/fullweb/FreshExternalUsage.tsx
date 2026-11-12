@@ -103,12 +103,18 @@ export function FreshExternalUsage({
       );
       if (!alive.current) return;
       if (!parsed) throw new Error('invalid usage state');
-      requestId.current = '';
+      const blockedReason = parsed.blockedReason;
       setState(parsed);
       setConfirming(false);
-      setConfirmFailed(false);
-      if (parsed.statisticsEnabled && !parsed.blockedReason) {
-        setNotice(x('usageConfirmed'));
+      if (blockedReason && blockedReason !== 'usage_monitoring_disabled') {
+        onBlocker?.(blockedReason);
+        setConfirmFailed(true);
+      } else {
+        requestId.current = '';
+        setConfirmFailed(false);
+        if (parsed.statisticsEnabled && !blockedReason) {
+          setNotice(x('usageConfirmed'));
+        }
       }
     } catch (err) {
       if (!alive.current) return;
@@ -116,6 +122,7 @@ export function FreshExternalUsage({
         onUnauthorized();
         return;
       }
+      if (err instanceof PublicApiError && err.code) onBlocker?.(err.code);
       setConfirming(false);
       // The request ID is kept: the retry is a replay of the same request, not a
       // second write.
@@ -202,16 +209,20 @@ export function FreshExternalUsage({
           </button>
         </p>
       )}
-      {!state.statisticsEnabled && state.blockedReason !== 'usage_monitoring_disabled' && (
-        <button
-          className="btn btn-primary btn-sm"
-          data-testid="external-usage-enable"
-          disabled={busy}
-          onClick={() => setConfirming(true)}
-        >
-          {x('usageEnableAction')}
-        </button>
-      )}
+      {(!state.statisticsEnabled ||
+        (!state.collectionStarted && state.collector === 'stopped')) &&
+        !confirmFailed &&
+        !state.cpaVersion.writeBlocked &&
+        state.blockedReason !== 'usage_monitoring_disabled' && (
+          <button
+            className="btn btn-primary btn-sm"
+            data-testid="external-usage-enable"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
+            {x(state.statisticsEnabled ? 'usageStartAction' : 'usageEnableAction')}
+          </button>
+        )}
       <Modal
         open={confirming}
         title={x('usageConfirmTitle')}

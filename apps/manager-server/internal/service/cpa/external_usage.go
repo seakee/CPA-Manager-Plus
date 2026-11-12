@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -39,7 +40,7 @@ func FetchExternalUsageStatistics(ctx context.Context, baseURL string, key strin
 		return false, ErrManagementClientForbidden
 	case http.StatusOK:
 	default:
-		return false, ErrProofUnavailable
+		return false, fmt.Errorf("%w (HTTP %d)", ErrProofUnavailable, code)
 	}
 	var raw map[string]any
 	if json.Unmarshal(body, &raw) != nil {
@@ -67,7 +68,7 @@ func SetExternalUsageStatistics(ctx context.Context, baseURL string, key string,
 		return ErrManagementClientForbidden
 	}
 	if code < 200 || code >= 300 {
-		return ErrProofUnavailable
+		return fmt.Errorf("%w (HTTP %d)", ErrProofUnavailable, code)
 	}
 	return nil
 }

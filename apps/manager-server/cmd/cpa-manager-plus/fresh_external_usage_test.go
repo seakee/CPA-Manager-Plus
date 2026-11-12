@@ -38,6 +38,7 @@ type externalUsageCPA struct {
 	enabled    atomic.Bool
 	rejects    atomic.Bool
 	statWrites atomic.Int32
+	failNextStatPut atomic.Bool
 	queueReads atomic.Int32
 	// refusals counts the requests this CPA answered 401 because the presented
 	// credential was not the current one. It is what proves a stopped Collector
@@ -77,6 +78,11 @@ func newExternalUsageCPA(t *testing.T, management string) *externalUsageCPA {
 			if r.Method == http.MethodPut {
 				f.statWrites.Add(1)
 				f.enabled.Store(true)
+				if f.failNextStatPut.CompareAndSwap(true, false) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"failed to save config"}`))
+					return
+				}
 			}
 			_, _ = w.Write([]byte(`{"usage-statistics-enabled":` + boolText(f.enabled.Load()) + `}`))
 		case "/v8/management/config/access/api-keys":
@@ -1841,4 +1847,70 @@ func TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle(t *testin
 			t.Fatalf("Collector polled usage-queue %d times with unreadable monitoring switch, want 0", got)
 		}
 	})
+}
+
+// TestExternalUsageEnableRecoveryAndPostRebindState reproduces the UI sequence
+// where an External CPA fails to persist usage-statistics-enabled on the first
+// PUT (while flipping its in-memory flag) and where statistics are enabled out
+// of band after a rebind.
+func TestExternalUsageEnableRecoveryAndPostRebindState(t *testing.T) {
+	h := newExternalUsageHarness(t)
+	h.cpa.version.Store("v8.0.55")
+
+	// 1. Direct transport error includes the upstream HTTP status code.
+	h.cpa.failNextStatPut.Store(true)
+	putErr := cpa.SetExternalUsageStatistics(t.Context(), h.cpa.server.URL, externalAuthorityManagement, true)
+	if !errors.Is(putErr, cpa.ErrProofUnavailable) || !strings.Contains(putErr.Error(), "500") {
+		t.Fatalf("SetExternalUsageStatistics 500 err = %v, want ErrProofUnavailable mentioning HTTP 500", putErr)
+	}
+
+	// Reset state for full HTTP route sequence.
+	h.cpa.statWrites.Store(0)
+	h.cpa.enabled.Store(false)
+	h.cpa.failNextStatPut.Store(true)
+
+	reqBody := `{"requestId":"` + strings.Repeat("a", 32) + `","confirmEnableStatistics":true}`
+	first := h.call(t, http.MethodPost, "external/usage", reqBody)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first confirm = %d %s, want 200", first.Code, first.Body.String())
+	}
+	firstState := decodeExternalUsageState(t, first.Body.Bytes())
+	if !firstState.StatisticsEnabled || firstState.CollectionStarted || firstState.BlockedReason != usageStartReasonExternalUnavailable {
+		t.Fatalf("first state = %+v, want statisticsEnabled=true, collectionStarted=false, blockedReason=%q", firstState, usageStartReasonExternalUnavailable)
+	}
+
+	retry := h.call(t, http.MethodPost, "external/usage", reqBody)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry confirm = %d %s, want 200", retry.Code, retry.Body.String())
+	}
+	retryState := decodeExternalUsageState(t, retry.Body.Bytes())
+	if !retryState.StatisticsEnabled || !retryState.CollectionStarted || retryState.BlockedReason != "" {
+		t.Fatalf("retry state = %+v, want running with no blockedReason", retryState)
+	}
+
+	// 2. Rotate key and restart CPA with stats disabled; rebind records statistics_disabled,
+	// then enabling stats on CPA clears the stale statistics_disabled blocker on GET and starts on POST.
+	const rotated = "rotated-ext-key-0000111122223333444455556666777788889999aaaabbbb"
+	h.cpa.management.Store(rotated)
+	h.cpa.enabled.Store(false)
+	if refused := h.call(t, http.MethodGet, "external/usage", ""); refused.Code != http.StatusConflict {
+		t.Fatalf("GET after key rotation = %d %s, want 409", refused.Code, refused.Body.String())
+	}
+	rebindRes := h.call(t, http.MethodPost, "external/rebind", fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("b", 32), rotated))
+	if rebindRes.Code != http.StatusOK {
+		t.Fatalf("rebind = %d %s, want 200", rebindRes.Code, rebindRes.Body.String())
+	}
+	h.cpa.enabled.Store(true)
+	afterManualEnable := decodeExternalUsageState(t, h.call(t, http.MethodGet, "external/usage", "").Body.Bytes())
+	if !afterManualEnable.StatisticsEnabled || afterManualEnable.CollectionStarted || afterManualEnable.BlockedReason == usageStartReasonStatisticsDisabled {
+		t.Fatalf("GET after CPA enabled stats = %+v, want statisticsEnabled=true, collectionStarted=false, no stale statistics_disabled blocker", afterManualEnable)
+	}
+	startAfterRebind := h.call(t, http.MethodPost, "external/usage", `{"requestId":"`+strings.Repeat("c", 32)+`","confirmEnableStatistics":true}`)
+	if startAfterRebind.Code != http.StatusOK {
+		t.Fatalf("POST after rebind = %d %s, want 200", startAfterRebind.Code, startAfterRebind.Body.String())
+	}
+	startedState := decodeExternalUsageState(t, startAfterRebind.Body.Bytes())
+	if !startedState.CollectionStarted || startedState.BlockedReason != "" {
+		t.Fatalf("post-rebind started state = %+v, want collectionStarted=true and empty blockedReason", startedState)
+	}
 }
