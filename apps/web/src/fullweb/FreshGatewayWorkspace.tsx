@@ -236,6 +236,12 @@ export function FreshGatewayWorkspace({
 
   const dirtyCount = dirtyEdits.length + dirtyFamilies.size;
 
+  // The discard dialog names how many drafts it throws away: every dirty leaf
+  // and rule family, or just the group the user asked to reset.
+  const discardCount = discardAll
+    ? dirtyCount
+    : (dirtyByGroup.get(discardGroup ?? '')?.length ?? 0);
+
   // One badge per tab: validation errors win over a plain unsaved count, so a
   // tab that cannot be saved never looks like a tab that merely has drafts.
   const tabMetrics = useMemo(() => {
@@ -761,6 +767,7 @@ export function FreshGatewayWorkspace({
             </label>
           ) : field.kind === 'select' ? (
             <select
+              className="input"
               aria-label={label}
               disabled={disabled}
               value={draft.action === 'default' ? '' : String(draft.value ?? '')}
@@ -789,6 +796,7 @@ export function FreshGatewayWorkspace({
             </select>
           ) : (
             <input
+              className="input"
               aria-label={label}
               type={field.type === 'int' ? 'number' : 'text'}
               inputMode={field.type === 'int' ? 'numeric' : undefined}
@@ -1073,6 +1081,7 @@ export function FreshGatewayWorkspace({
         <label className="search">
           <span>{c('search')}</span>
           <input
+            className="input"
             type="search"
             value={searchText}
             placeholder={c('searchPlaceholder')}
@@ -1334,7 +1343,9 @@ export function FreshGatewayWorkspace({
           </>
         }
       >
-        <p className="detail">{c('discardHelp')}</p>
+        <p className="detail" data-testid="gateway-discard-help">
+          {c('discardHelp', discardCount)}
+        </p>
       </Modal>
       {ruleFamily ? (
         <GatewayRuleEditor

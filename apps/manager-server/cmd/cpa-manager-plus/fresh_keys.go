@@ -80,14 +80,20 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			// five failed authentications ban the address for thirty minutes, and
 			// a page that refreshes is enough to reach that. The blocker is
 			// answered here, before any request leaves this process.
-			grant := a.externalReadGrant(r.Context())
-			if grant.Refused {
+			if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 				writeExternalManagementRejected(w)
+			}) {
 				return
 			}
 			var listErr error
-			keys, unverified, listErr = a.keyApply.ExternalKeyList(r.Context(), keys)
+			keys, unverified, listErr = a.keyApply.ExternalKeyList(a.withExternalSavedCredentialGate(r.Context()), keys)
 			switch {
+			case errors.Is(listErr, errExternalCredentialWaitCancelled):
+				writeExternalCredentialWaitCancelled(w)
+				return
+			case errors.Is(listErr, cpa.ErrExternalRejectionUnavailable):
+				writeExternalAuthorityUnavailable(w)
+				return
 			case errors.Is(listErr, cpa.ErrExternalTargetMoved):
 				// The connection no longer names the committed target. The staged
 				// keys are not an effect of any CPA, so the list is a typed blocker
@@ -100,9 +106,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 				return
 			case errors.Is(listErr, cpa.ErrManagementRejected):
 				// The user's CPA refused the stored management credential. The
-				// page must not offer a retry: only a rebind resolves it. The
-				// refusal is remembered, so no later read sends the key again.
-				a.noteExternalRejection(r.Context(), grant, listErr)
+				// page must not offer a retry: only a rebind resolves it.
 				writeExternalManagementRejected(w)
 				return
 			case listErr != nil:

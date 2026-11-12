@@ -137,6 +137,8 @@ import {
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
+import { useRequestMonitoringSwitch } from '@/hooks/useRequestMonitoringSwitch';
+import { configurationText as workspaceText } from '@/i18n/configurationWorkspace';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { useAuthStore, useConfigStore, useNotificationStore, useQuotaStore } from '@/stores';
 import { useUsageHeaderSnapshotStore } from '@/stores/useUsageHeaderSnapshotStore';
@@ -203,6 +205,7 @@ export function MonitoringCenterPage() {
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const requestMonitoringAvailability = useRequestMonitoringAvailability();
+  const requestMonitoringSwitch = useRequestMonitoringSwitch();
   const connectionFingerprint = useMemo(
     () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
     [apiBase, managementKey]
@@ -763,6 +766,26 @@ export function MonitoringCenterPage() {
         : t('monitoring.request_monitoring_not_configured_body');
   const monitoringBlockingLoading =
     monitoringLoading && (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot);
+  // A disabled collector is a switch, not a missing page: offer to start it
+  // here instead of sending the user to another workspace.
+  const monitoringDisabledAction =
+    requestMonitoringAvailability.reason === 'monitoring_disabled' ? (
+      <button
+        type="button"
+        className={styles.actionButtonPrimary}
+        data-testid="monitoring-enable-request-monitoring"
+        disabled={requestMonitoringSwitch.saving}
+        onClick={() => void requestMonitoringSwitch.setEnabled(true)}
+      >
+        {requestMonitoringSwitch.saving
+          ? workspaceText('requestMonitoringSaving')
+          : workspaceText('requestMonitoringEnable')}
+      </button>
+    ) : undefined;
+  useEffect(() => {
+    if (!requestMonitoringSwitch.failed) return;
+    showNotification(workspaceText('requestMonitoringFailed'), 'error');
+  }, [requestMonitoringSwitch.failed, showNotification]);
   const overallLoading =
     usageLoading || monitoringBlockingLoading || requestMonitoringAvailability.checking;
   const combinedError = monitoringUnavailable
@@ -2034,6 +2057,7 @@ export function MonitoringCenterPage() {
           monitoringUnavailable={monitoringUnavailable}
           monitoringUnavailableTitle={monitoringUnavailableTitle}
           monitoringUnavailableBody={monitoringUnavailableBody}
+          monitoringUnavailableAction={monitoringDisabledAction}
           t={t}
         />
       </div>
@@ -2051,6 +2075,7 @@ export function MonitoringCenterPage() {
         monitoringUnavailable={monitoringUnavailable}
         monitoringUnavailableTitle={monitoringUnavailableTitle}
         monitoringUnavailableBody={monitoringUnavailableBody}
+        monitoringUnavailableAction={monitoringDisabledAction}
         t={t}
       />
 

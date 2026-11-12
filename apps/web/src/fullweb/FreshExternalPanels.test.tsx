@@ -140,7 +140,7 @@ describe('External rebind dialog', () => {
     expect(rebound).toHaveBeenCalledWith({ reverified: true });
   });
 
-  it('shows the server detail of a refused rebind and keeps the request ID for a replay', async () => {
+  it('reads a refused rebind in the operator language and keeps the server detail as a diagnostic', async () => {
     let attempt = 0;
     const { client, calls } = stubClient(async () => {
       attempt += 1;
@@ -170,7 +170,8 @@ describe('External rebind dialog', () => {
     });
     await typeKey(renderer, 'wrong-key');
     await submit(renderer);
-    expect(textOf(renderer, 'rebind-error')).toContain('already committed');
+    expect(textOf(renderer, 'rebind-error')).toBe(x('rebindRefusedHelp'));
+    expect(textOf(renderer, 'rebind-error-detail')).toContain('already committed');
     // The input is cleared only on success, so a lost answer is not re-keyed.
     await submit(renderer);
     expect(calls).toHaveLength(2);
@@ -418,6 +419,62 @@ describe('External usage confirmation', () => {
     // The class is translated, never the raw wire token.
     expect(text).not.toContain('unsupported');
     expect(text).toContain(x('supportUnsupported'));
+  });
+
+  it('names the Manager monitoring-disabled blocker in all four locales and never claims confirmation while disabled', async () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      setFullWebLanguage(locale);
+      const { client } = stubClient(
+        async () => ({ ...usageState, blockedReason: 'usage_monitoring_disabled' }),
+        async () => ({ ...usageState, blockedReason: 'usage_monitoring_disabled' })
+      );
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+        );
+      });
+      const blocked = textOf(renderer, 'external-usage-blocked');
+      expect(blocked).toContain(x('usageBlockedMonitoring'));
+      expect(blocked).not.toContain(x('usageBlockedUnknown'));
+      expect(blocked).not.toContain('usage_monitoring_disabled');
+      // While Manager's own monitoring switch is off, the CPA write button is hidden.
+      expect(
+        renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-enable')
+      ).toHaveLength(0);
+      await act(async () => renderer.unmount());
+    }
+
+    // If monitoring was turned off while a confirmation dialog was already open,
+    // settling with `usage_monitoring_disabled` must not announce `usageConfirmed`.
+    setFullWebLanguage('en');
+    const { client } = stubClient(
+      async () => ({
+        ...usageState,
+        statisticsEnabled: false,
+        collectionStarted: false,
+        blockedReason: 'usage_monitoring_disabled',
+      }),
+      async () => usageState
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    const open = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-enable'
+    );
+    await act(async () => open.props.onClick());
+    const confirm = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm'
+    );
+    await act(async () => confirm.props.onClick());
+    expect(
+      renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-notice')
+    ).toHaveLength(0);
+    expect(textOf(renderer, 'external-usage-blocked')).toContain(x('usageBlockedMonitoring'));
   });
 
   it('rejects a malformed usage reply instead of inventing a state', () => {

@@ -506,8 +506,11 @@ func (s *Service) syncHTTPClient(ctx context.Context) (*http.Client, bool, error
 	if s.syncProxyTimeout > 0 {
 		proxyCtx, cancel = context.WithTimeout(ctx, s.syncProxyTimeout)
 	}
-	proxyURL := s.resolveCPAProxyURL(proxyCtx)
+	proxyURL, err := s.resolveCPAProxyURL(proxyCtx)
 	cancel()
+	if err != nil {
+		return nil, false, err
+	}
 	if proxyURL == "" {
 		return defaultSyncHTTPClient(), false, nil
 	}
@@ -520,19 +523,29 @@ func (s *Service) syncHTTPClient(ctx context.Context) (*http.Client, bool, error
 	return &http.Client{Timeout: 30 * time.Second, Transport: transport}, true, nil
 }
 
-func (s *Service) resolveCPAProxyURL(ctx context.Context) string {
+func (s *Service) resolveCPAProxyURL(ctx context.Context) (string, error) {
 	if s.setupResolver == nil {
-		return ""
+		return "", nil
+	}
+	if cpa.HasExternalSavedCredentialGate(ctx) {
+		cfg, err := cpa.FetchManagementConfig(ctx, "", "")
+		if err != nil {
+			if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+				return "", err
+			}
+			return "", nil
+		}
+		return strings.TrimSpace(cfg.ProxyURL), nil
 	}
 	setup, ok, err := s.setupResolver.ResolveSetup(ctx)
 	if err != nil || !ok || setup.CPAUpstreamURL == "" || setup.ManagementKey == "" {
-		return ""
+		return "", nil
 	}
 	cfg, err := cpa.FetchManagementConfig(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	return strings.TrimSpace(cfg.ProxyURL)
+	return strings.TrimSpace(cfg.ProxyURL), nil
 }
 
 func defaultSyncHTTPClient() *http.Client {

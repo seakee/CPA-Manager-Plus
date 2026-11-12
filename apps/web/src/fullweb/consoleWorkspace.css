@@ -540,18 +540,6 @@
   text-align: right;
 }
 
-.field-control input[type='text'],
-.field-control input[type='number'],
-.field-control select {
-  width: 100%;
-  padding: 8px 10px;
-  font-size: 13px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm);
-  background: var(--bg-subtle);
-  color: var(--text-primary);
-}
-
 .diff-list {
   display: grid;
   gap: 10px;
@@ -803,18 +791,14 @@
   color: var(--text-secondary);
 }
 
-/* The search field shares the row's dense control height so it lines up with the
-   buttons beside it instead of standing 6px taller. */
-.workspace-toolbar .search input {
+/* The search box shares the app's `.input` class; only the dense toolbar
+   height keeps it level with the buttons beside it instead of standing taller. */
+.workspace-toolbar .search .input {
   min-width: 240px;
   height: var(--control-height-sm);
   min-height: var(--control-height-sm);
   padding: 0 10px;
   font-size: 13px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm);
-  background: var(--bg-subtle);
-  color: var(--text-primary);
 }
 
 .workspace-toolbar .toggle {
@@ -883,11 +867,13 @@
   text-align: left;
 }
 
-.field-control input[type='text'],
-.field-control input[type='number'],
-.field-control select {
+/* Group fields use the shared `.input` class; the row keeps its own geometry
+   and the dense-toolbar height so a field and its reset button align. */
+.field-control .input {
   flex: 1 1 auto;
   max-width: 420px;
+  height: var(--control-height-sm);
+  padding: 0 10px;
 }
 
 .field-control .presence {

@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   fetchModelsViaApiCall: vi.fn(),
   updateConfigValue: vi.fn(),
   showNotification: vi.fn(),
+  showConfirmation: vi.fn(),
   updateOpenAIProvider: vi.fn(),
   createOpenAIProvider: vi.fn(),
   apiCallRequest: vi.fn(),
@@ -36,7 +37,10 @@ vi.mock('@/stores', () => ({
       config: { openaiCompatibility: [] },
       updateConfigValue: mocks.updateConfigValue,
     }),
-  useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+  useNotificationStore: () => ({
+    showNotification: mocks.showNotification,
+    showConfirmation: mocks.showConfirmation,
+  }),
 }));
 
 vi.mock('@/components/ui/Drawer', () => ({
@@ -433,8 +437,6 @@ describe('OpenAIEditDrawer model discovery', () => {
 
   it('does not stay dirty when the API key is changed and restored after auth-index invalidation', async () => {
     const onClose = vi.fn();
-    const confirmMock = vi.fn(() => true);
-    vi.stubGlobal('window', { confirm: confirmMock });
     mocks.getOpenAIProviders.mockResolvedValueOnce([
       {
         name: 'restore-key',
@@ -487,7 +489,7 @@ describe('OpenAIEditDrawer model discovery', () => {
         cancelButton!.props.onClick();
       });
 
-      expect(confirmMock).not.toHaveBeenCalled();
+      expect(mocks.showConfirmation).not.toHaveBeenCalled();
       expect(onClose).toHaveBeenCalledTimes(1);
       act(() => renderer!.unmount());
     } finally {

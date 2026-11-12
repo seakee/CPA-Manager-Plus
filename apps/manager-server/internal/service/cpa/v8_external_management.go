@@ -1,6 +1,7 @@
 package cpa
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +37,14 @@ var ErrManagementClientForbidden = fmt.Errorf("%w: %w", ErrManagementRejected, e
 // surface may treat it as a retry or as a missing proof.
 var ErrExternalTargetMoved = errors.New("external cpa target moved")
 
+// ErrExternalRejectionUnavailable reports that the Manager could not read or
+// verify the durable External management-credential refusal state within its
+// bounded persistence window (for example due to a SQLite read failure, a
+// corrupt refusal row, or a wedged persistence slot). Callers must fail closed
+// with a local unavailable response rather than falling back, retrying, or
+// contacting the External CPA.
+var ErrExternalRejectionUnavailable = errors.New("external cpa rejection state unavailable")
+
 // ExternalKeySnapshot is the user's CPA client-key list together with the digest
 // of the configuration that list belongs to. An External CPA owns its own
 // posture, key naming and extra credentials, so the only facts this Manager may
@@ -50,11 +59,30 @@ type ExternalKeySnapshot struct {
 // digest. Both reads authenticate with the persisted management key; a 401 is
 // the typed ErrManagementRejected blocker rather than an unavailable proof.
 func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) (ExternalKeySnapshot, error) {
+	if t == nil {
+		return ExternalKeySnapshot{}, ErrProofUnavailable
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out ExternalKeySnapshot
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if err := t.verifyExternalTarget(target); err != nil {
+				return err
+			}
+			var readErr error
+			out, readErr = t.externalKeySnapshotDirect(requestCtx, target.ManagementKey)
+			return readErr
+		})
+		return out, err
+	}
+	return t.externalKeySnapshotDirect(ctx, management)
+}
+
+func (t *Transport) externalKeySnapshotDirect(ctx context.Context, management string) (ExternalKeySnapshot, error) {
 	var snapshot ExternalKeySnapshot
 	if t == nil || !validManagementKey(management) {
 		return snapshot, ErrProofUnavailable
 	}
-	code, body, err := t.request(ctx, http.MethodGet, "/v8/management/config/access/api-keys", management, nil)
+	code, body, err := t.request(WithoutExternalHeaderRelease(ctx), http.MethodGet, "/v8/management/config/access/api-keys", management, nil)
 	if err != nil {
 		return snapshot, ErrProofUnavailable
 	}
@@ -93,12 +121,55 @@ func (t *Transport) ExternalKeySnapshot(ctx context.Context, management string) 
 	return snapshot, nil
 }
 
+// ExternalReadConfigDocument reads the External CPA configuration document and
+// distinguishes an authentication refusal (401/403) from an unreachable or
+// invalid document, so callers can record the typed credential blocker instead
+// of burning the CPA's five-strike lockout window.
+func (t *Transport) ExternalReadConfigDocument(ctx context.Context, management string) (map[string]any, error) {
+	if t == nil {
+		return nil, ErrProofUnavailable
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out map[string]any
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if err := t.verifyExternalTarget(target); err != nil {
+				return err
+			}
+			var readErr error
+			out, readErr = t.externalReadConfigDocumentDirect(requestCtx, target.ManagementKey)
+			return readErr
+		})
+		return out, err
+	}
+	return t.externalReadConfigDocumentDirect(ctx, management)
+}
+
+func (t *Transport) externalReadConfigDocumentDirect(ctx context.Context, management string) (map[string]any, error) {
+	if t == nil || !validManagementKey(management) {
+		return nil, ErrProofUnavailable
+	}
+	code, body, err := t.request(ctx, http.MethodGet, "/v8/management/config", management, nil)
+	if err != nil {
+		return nil, ErrProofUnavailable
+	}
+	switch code {
+	case http.StatusUnauthorized:
+		return nil, ErrManagementRejected
+	case http.StatusForbidden:
+		return nil, ErrManagementClientForbidden
+	case http.StatusOK:
+	default:
+		return nil, ErrProofUnavailable
+	}
+	return DecodeConfigDocument(body)
+}
+
 // ExternalWriteKeySet writes the whole client-key list of an External CPA. It
 // sends exactly one request and never retries: an acknowledged 401 is the typed
 // blocker, and anything else leaves the effect unknown for the caller's
 // read-back, exactly like the managed destination.
 func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, keys []string) error {
-	if t == nil || !validManagementKey(management) || len(keys) == 0 {
+	if t == nil || len(keys) == 0 {
 		return ErrSourceConflict
 	}
 	for i, key := range keys {
@@ -109,6 +180,24 @@ func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, 
 	body, err := json.Marshal(keys)
 	if err != nil {
 		return ErrProofUnavailable
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		return gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if err := t.verifyExternalTarget(target); err != nil {
+				return err
+			}
+			return t.externalWriteKeySetDirect(requestCtx, target.ManagementKey, body)
+		})
+	}
+	if !validManagementKey(management) {
+		return ErrSourceConflict
+	}
+	return t.externalWriteKeySetDirect(ctx, management, body)
+}
+
+func (t *Transport) externalWriteKeySetDirect(ctx context.Context, management string, body []byte) error {
+	if !validManagementKey(management) {
+		return ErrSourceConflict
 	}
 	code, _, err := t.request(ctx, http.MethodPut, "/v8/management/config/access/api-keys", management, body)
 	if err != nil {
@@ -125,6 +214,146 @@ func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, 
 		return ErrManagementClientForbidden
 	}
 	return ErrApplyUnknown
+}
+
+func (t *Transport) verifyExternalTarget(target ExternalSavedCredentialTarget) error {
+	normalized, err := NormalizeV8BaseURL(target.BaseURL)
+	if err != nil || normalized != t.endpoint {
+		return ErrExternalTargetMoved
+	}
+	return nil
+}
+
+// ExternalConfigTransport adapts Transport for External gateway configuration
+// reads and writes so 401/403 responses surface typed credential rejections
+// and participate in ExternalSavedCredentialGate without altering Managed or
+// Private Transport error mappings.
+type ExternalConfigTransport struct {
+	*Transport
+}
+
+// NewExternalConfigTransport constructs an External configuration transport
+// targeting endpoint.
+func NewExternalConfigTransport(endpoint string) *ExternalConfigTransport {
+	return &ExternalConfigTransport{Transport: NewTransportForEndpoint(endpoint)}
+}
+
+func (t *ExternalConfigTransport) ReadConfigDocument(ctx context.Context, management string) (map[string]any, error) {
+	if t == nil || t.Transport == nil {
+		return nil, ErrProofUnavailable
+	}
+	return t.Transport.ExternalReadConfigDocument(ctx, management)
+}
+
+func (t *ExternalConfigTransport) PatchConfigPath(ctx context.Context, management, prefix string, content []byte) error {
+	if prefix == "" || len(content) == 0 {
+		return ErrProofUnavailable
+	}
+	return t.writeExternalConfigPath(ctx, http.MethodPatch, prefix, management, content)
+}
+
+func (t *ExternalConfigTransport) PutConfigValue(ctx context.Context, management, path string, content []byte) error {
+	if path == "" || len(content) == 0 {
+		return ErrProofUnavailable
+	}
+	return t.writeExternalConfigPath(ctx, http.MethodPut, path, management, content)
+}
+
+func (t *ExternalConfigTransport) DeleteConfigPath(ctx context.Context, management, path string) error {
+	if path == "" {
+		return ErrProofUnavailable
+	}
+	return t.writeExternalConfigPath(ctx, http.MethodDelete, path, management, nil)
+}
+
+func (t *ExternalConfigTransport) writeExternalConfigPath(ctx context.Context, method, path, management string, content []byte) error {
+	if t == nil || t.Transport == nil {
+		return ErrProofUnavailable
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		return gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if err := t.Transport.verifyExternalTarget(target); err != nil {
+				return err
+			}
+			return t.writeExternalConfigPathDirect(requestCtx, method, path, target.ManagementKey, content)
+		})
+	}
+	return t.writeExternalConfigPathDirect(ctx, method, path, management, content)
+}
+
+func (t *ExternalConfigTransport) writeExternalConfigPathDirect(ctx context.Context, method, path, management string, content []byte) error {
+	if !validManagementKey(management) {
+		return ErrProofUnavailable
+	}
+	endpoint := configPathEndpoint(path)
+	code, body, err := t.Transport.request(ctx, method, endpoint, management, content)
+	if err != nil {
+		return ErrApplyUnknown
+	}
+	switch code {
+	case http.StatusOK, http.StatusNoContent:
+		return nil
+	case http.StatusUnauthorized:
+		return ErrManagementRejected
+	case http.StatusForbidden:
+		return ErrManagementClientForbidden
+	}
+	rejection := parseConfigWriteError(code, body)
+	if rejection.Definite() {
+		return rejection
+	}
+	return ErrApplyUnknown
+}
+
+func (t *ExternalConfigTransport) ReadConfigFieldValue(ctx context.Context, management, path string) (string, any, error) {
+	if t == nil || t.Transport == nil {
+		return "unknown", nil, ErrProofUnavailable
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var presence string
+		var val any
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			if err := t.Transport.verifyExternalTarget(target); err != nil {
+				return err
+			}
+			var readErr error
+			presence, val, readErr = t.readExternalConfigFieldValueDirect(requestCtx, target.ManagementKey, path)
+			return readErr
+		})
+		return presence, val, err
+	}
+	return t.readExternalConfigFieldValueDirect(ctx, management, path)
+}
+
+func (t *ExternalConfigTransport) readExternalConfigFieldValueDirect(ctx context.Context, management, path string) (string, any, error) {
+	endpoint, err := ConfigLeafEndpoint(path)
+	if err != nil || !validManagementKey(management) {
+		return "unknown", nil, ErrProofUnavailable
+	}
+	code, body, err := t.Transport.request(ctx, http.MethodGet, endpoint, management, nil)
+	if err != nil {
+		return "unknown", nil, err
+	}
+	switch code {
+	case http.StatusUnauthorized:
+		return "unknown", nil, ErrManagementRejected
+	case http.StatusForbidden:
+		return "unknown", nil, ErrManagementClientForbidden
+	case http.StatusNotFound:
+		return "missing", nil, nil
+	case http.StatusOK:
+		trimmed := bytes.TrimSpace(body)
+		if bytes.Equal(trimmed, []byte("null")) {
+			return "null", nil, nil
+		}
+		value, parseErr := ParseConfigLeafValue(path, trimmed)
+		if parseErr != nil {
+			return "unknown", nil, ErrSourceConflict
+		}
+		return "present", value, nil
+	default:
+		return "unknown", nil, ErrProofUnavailable
+	}
 }
 
 // ExternalModelSurface proves the gateway behind the External CPA serves the

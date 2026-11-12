@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"database/sql"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
@@ -999,4 +1001,163 @@ func TestModelPricesSyncUsesCPAProxyURL(t *testing.T) {
 
 func closeFloat(left float64, right float64) bool {
 	return math.Abs(left-right) < 0.0000001
+}
+
+// TestManagerConfigSwitchWritePreservesUntouchedFields pins the contract the
+// request-monitoring switch has to keep: it writes one field. The stored
+// document here carries an External usage service section, a TLS setting, and a
+// key this build does not model at all — a whole-document write would silently
+// drop every one of them, so the switch has its own narrow write and the
+// untouched bytes must come back byte for byte.
+func TestManagerConfigSwitchWritePreservesUntouchedFields(t *testing.T) {
+	var statistics atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case "/v0/management/usage-statistics-enabled":
+			body := struct {
+				Enabled bool `json:"usage-statistics-enabled"`
+			}{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			statistics.Store(body.Enabled)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := config.Config{DBPath: filepath.Join(t.TempDir(), "usage.sqlite"), Queue: "usage", PopSide: "right"}
+	raw, err := sqliterepo.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	db := store.New(raw)
+	testutil.EnsureAdminCredential(t, db)
+	t.Cleanup(func() { _ = raw.Close() })
+
+	enabled := true
+	if err := db.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{
+			CPABaseURL:    upstream.URL,
+			ManagementKey: "management-key",
+		},
+		Collector: store.ManagerCollectorConfig{
+			CollectorMode: "auto", Queue: "usage", PopSide: "right", BatchSize: 250,
+			PollIntervalMS: 2000, QueryLimit: 41000, TLSSkipVerify: true, Enabled: &enabled,
+		},
+		ExternalUsageService: store.ManagerExternalUsageServiceConfig{Enabled: true, ServiceBase: "https://usage.example.test"},
+	}); err != nil {
+		t.Fatalf("seed manager config: %v", err)
+	}
+	// A field a newer build wrote: this build's model has no name for it, so it
+	// survives only if the write leaves the document alone.
+	seed := rawManagerConfig(t, raw)
+	seed["futureKnob"] = json.RawMessage(`{"mode":"latent","depth":3}`)
+	writeRawManagerConfig(t, raw, seed)
+
+	handler := New(cfg, db, collector.NewManager(cfg, db)).Handler()
+	switchRequest := func(enabled bool) *httptest.ResponseRecorder {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{"enabled":`+map[bool]string{true: "true", false: "false"}[enabled]+`}`))
+		req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	for _, value := range []bool{false, true} {
+		before := rawManagerConfig(t, raw)
+		rr := switchRequest(value)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("switch %v = %d %s", value, rr.Code, rr.Body.String())
+		}
+		after := rawManagerConfig(t, raw)
+		for key := range before {
+			if key == "collector" || key == "updatedAtMs" {
+				continue
+			}
+			if !bytes.Equal(before[key], after[key]) {
+				t.Fatalf("switch %v rewrote %q: %s -> %s", value, key, before[key], after[key])
+			}
+		}
+		if !bytes.Equal(before["futureKnob"], after["futureKnob"]) {
+			t.Fatalf("switch %v dropped a field this build does not model", value)
+		}
+		collectorBefore := decodeRawObject(t, before["collector"])
+		collectorAfter := decodeRawObject(t, after["collector"])
+		if !bytes.Equal(collectorAfter["enabled"], json.RawMessage(map[bool]string{true: "true", false: "false"}[value])) {
+			t.Fatalf("stored switch = %s, want %v", collectorAfter["enabled"], value)
+		}
+		delete(collectorBefore, "enabled")
+		delete(collectorAfter, "enabled")
+		if len(collectorAfter) != len(collectorBefore) {
+			t.Fatalf("collector section lost fields: %v -> %v", collectorBefore, collectorAfter)
+		}
+		for key := range collectorBefore {
+			if !bytes.Equal(collectorBefore[key], collectorAfter[key]) {
+				t.Fatalf("switch %v rewrote collector.%s: %s -> %s", value, key, collectorBefore[key], collectorAfter[key])
+			}
+		}
+	}
+	if statistics.Load() {
+		t.Fatal("enabling the switch never reached the CPA's usage statistics")
+	}
+
+	// A body that carries more than the switch is refused instead of being
+	// interpreted: enabling is what proves the CPA accepts the collector.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{"enabled":false,"collector":{"queue":"other"}}`))
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("narrow write accepted a whole document: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{"enabled":false}`))
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated switch = %d, want 401", rr.Code)
+	}
+
+	// Authentication runs before body validation so an unauthenticated empty
+	// payload answers 401 rather than 400.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{}`))
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated malformed switch = %d, want 401", rr.Code)
+	}
+}
+
+func rawManagerConfig(t *testing.T, db *sql.DB) map[string]json.RawMessage {
+	t.Helper()
+	var raw string
+	if err := db.QueryRow(`select value from settings where key = 'manager_config_v1'`).Scan(&raw); err != nil {
+		t.Fatalf("read manager config: %v", err)
+	}
+	return decodeRawObject(t, json.RawMessage(raw))
+}
+
+func writeRawManagerConfig(t *testing.T, db *sql.DB, document map[string]json.RawMessage) {
+	t.Helper()
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update settings set value = ? where key = 'manager_config_v1'`, string(encoded)); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+}
+
+func decodeRawObject(t *testing.T, raw json.RawMessage) map[string]json.RawMessage {
+	t.Helper()
+	document := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	return document
 }

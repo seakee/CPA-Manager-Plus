@@ -2,6 +2,7 @@ package freshconfig
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -100,6 +101,9 @@ func (s *Service) reconcileFieldOperationH1(ctx context.Context, r freshstore.Re
 func (s *Service) resolveFieldOperationManaged(ctx context.Context, r freshstore.Record, auth authority, operation freshstore.ConfigOperation) (freshstore.ConfigOperation, error) {
 	presence, value, err := auth.wire.ReadConfigFieldValue(ctx, auth.secret, operation.Field)
 	if err != nil {
+		if auth.mode == ModeExternal && (errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalRejectionUnavailable)) {
+			return operation, err
+		}
 		return operation, cpa.ErrApplyUnknown
 	}
 	switch {

@@ -432,6 +432,8 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // In-flight creation must not show the unknown-reply recovery copy before settling.
+    expect(view()).not.toContain(t('keysUnknown'));
     await act(async () => reject(new Error('private transport error')));
     expect(view()).toContain(t('keysUnknown'));
     expect(view()).not.toContain('private transport error');

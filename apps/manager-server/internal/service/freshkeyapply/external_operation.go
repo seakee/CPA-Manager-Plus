@@ -266,6 +266,9 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 	step := o.Steps[index].Name
 	grant, err := s.keyPermit(ctx, o.ID, step)
 	if err != nil {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			return r, err
+		}
 		return r, ErrExternalUnavailable
 	}
 	now := time.Now().UnixMilli()
@@ -307,7 +310,10 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 		if snapshot.SourceSHA256 != grant.SourceSHA256 {
 			return cpa.ErrSourceConflict
 		}
-		if !s.keyGrantHeld(ctx, grant, o.ID, step) || time.Now().UnixMilli() >= grant.ExpiresAtMS {
+		if err := s.externalKeyGrantHeld(ctx, grant, o.ID, step); err != nil {
+			return err
+		}
+		if time.Now().UnixMilli() >= grant.ExpiresAtMS {
 			return ErrExternalUnavailable
 		}
 		// The version is asked before the step is journaled as attempted: a CPA
@@ -349,6 +355,13 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 			o.Steps[index].State = "unattempted"
 			o.Outcome = "pending"
 		}
+		if errors.Is(writeErr, cpa.ErrExternalRejectionUnavailable) {
+			// The saved-credential wire gate refused locally before presenting the
+			// credential to CPA, so no byte of the key list was written.
+			o.Steps[index].Returned = false
+			o.Steps[index].State = "unattempted"
+			o.Outcome = "pending"
+		}
 		// Retain the attempt on a lost client: the journal, not the reply, is the
 		// evidence a later reconcile reads.
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -366,4 +379,20 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 		return OperationResult{Operation: o, RuntimeState: "effect_unknown"}, err
 	}
 	return s.externalCheckOperation(ctx, o, generation)
+}
+
+func (s *Service) externalKeyGrantHeld(ctx context.Context, grant KeyPermit, operationID, step string) error {
+	current, err := s.keyPermit(ctx, operationID, step)
+	if err != nil {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+			return err
+		}
+		return ErrExternalUnavailable
+	}
+	if current.OperationID != grant.OperationID || current.Step != grant.Step ||
+		current.RunID != grant.RunID || current.Generation != grant.Generation ||
+		current.SourceSHA256 != grant.SourceSHA256 {
+		return ErrExternalUnavailable
+	}
+	return nil
 }

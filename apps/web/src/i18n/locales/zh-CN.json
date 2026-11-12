@@ -1,5 +1,7 @@
 {
   "fullweb": {
+    "pluginsProbeFailed": "插件服务没有响应，Console 无法确认当前 CPA 是否支持插件。",
+    "pluginsProbeRetry": "重试",
     "keysRevokeTitle": "撤销或替换密钥",
     "keysOperationHelp": "仅用于私有环境。需要替换时先创建并保存新密钥。每一步均需宿主授权，替换期间网关可能暂不可用。",
     "keysOperationId": "操作编号",

@@ -9,10 +9,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -1218,37 +1220,78 @@ func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
 	return a.runtimeStatusClientFor(a.effectiveRuntimeMode(context.Background()))
 }
 
-func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, client runtimeservice.RuntimeClient) (model.RuntimeObservedStatus, bool, error) {
-	if a == nil || client == nil {
-		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
-	}
-	gate := &a.legacyCredentialGate
-	requestCtx := ctx
-	if !hasExternalCredentialHold(ctx, gate) {
-		if !gate.acquire(ctx) {
-			return model.RuntimeObservedStatus{}, false, ctx.Err()
-		}
-		var hold *externalCredentialHold
-		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
-		defer hold.finish()
-	}
-	grant := a.externalReadGrant(requestCtx)
-	if grant.Refused {
-		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
-	}
-	observed, err := client.Status(requestCtx)
-	if err != nil {
-		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
-		return model.RuntimeObservedStatus{}, errors.Is(err, cpa.ErrManagementRejected), err
-	}
-	return observed, false, nil
-}
-
+// freshDatabaseStatusProvider reports the Manager database files and the WAL
+// checkpoint state observed for them. The legacy service starts SQLite WAL
+// maintenance before it builds its AppContext
+// (cmd/cpa-manager-plus/main.go); the Fresh service returns from main() before
+// that point, so a v2 installation would never checkpoint its WAL and its
+// System database card could only ever report an unobserved checkpoint. The
+// maintenance is started on the host lifetime by the Fresh application and
+// looked up here by database path, because this provider is a value the legacy
+// context holds.
 type freshDatabaseStatusProvider struct {
 	dbPath string
 }
 
+// freshDatabaseMaintenance is the one maintenance instance this process started
+// per database path. Only the Fresh application starts it, and only this file
+// reads it.
+var freshDatabaseMaintenance = struct {
+	mu    sync.Mutex
+	paths map[string]*sqliterepo.WALMaintenance
+}{paths: map[string]*sqliterepo.WALMaintenance{}}
+
+// startFreshDatabaseMaintenance starts the Fresh installation's WAL maintenance
+// on the host lifetime. Repeated calls are no-ops, so a completion replay or a
+// retried usage start cannot open a second maintainer.
+func startFreshDatabaseMaintenance(ctx context.Context, dbPath string) {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	defer freshDatabaseMaintenance.mu.Unlock()
+	if _, started := freshDatabaseMaintenance.paths[key]; started {
+		return
+	}
+	maintenance, err := sqliterepo.NewWALMaintenance(key)
+	if err != nil {
+		log.Printf("[startup] SQLite WAL maintenance unavailable; the database card reports an unobserved checkpoint: %v", err)
+		return
+	}
+	maintenance.Start(ctx)
+	freshDatabaseMaintenance.paths[key] = maintenance
+}
+
+func freshDatabaseMaintenanceFor(dbPath string) *sqliterepo.WALMaintenance {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return nil
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	defer freshDatabaseMaintenance.mu.Unlock()
+	return freshDatabaseMaintenance.paths[key]
+}
+
+// freshDatabaseMaintenanceKey resolves the file the maintenance and the card
+// both name, so a relative and an absolute spelling of one database cannot
+// produce two maintainers.
+func freshDatabaseMaintenanceKey(dbPath string) (string, bool) {
+	trimmed := strings.TrimSpace(dbPath)
+	if trimmed == "" {
+		return "", false
+	}
+	absolute, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", false
+	}
+	return absolute, true
+}
+
 func (p freshDatabaseStatusProvider) Snapshot() sqliterepo.WALMaintenanceSnapshot {
+	if maintenance := freshDatabaseMaintenanceFor(p.dbPath); maintenance != nil {
+		return maintenance.Snapshot()
+	}
 	return sqliterepo.InspectDatabaseFiles(p.dbPath)
 }
 
@@ -1280,6 +1323,69 @@ func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObs
 		return observed, err
 	}
 	return client.Status(ctx)
+}
+
+func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, client runtimeservice.RuntimeClient) (model.RuntimeObservedStatus, bool, error) {
+	if a == nil || client == nil {
+		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
+	}
+	gate := &a.legacyCredentialGate
+	alreadyHeld := hasExternalCredentialHold(ctx, gate)
+	requestCtx := ctx
+	var hold *externalCredentialHold
+	if !alreadyHeld {
+		if !gate.acquire(ctx) {
+			return model.RuntimeObservedStatus{}, false, errExternalCredentialWaitCancelled
+		}
+		hold, requestCtx = a.beginCredentialHold(ctx, a.externalCredentialHeaderBudget())
+		defer hold.finish()
+	}
+	if a.store == nil || a.externalSource == nil {
+		observed, err := client.Status(requestCtx)
+		return observed, false, err
+	}
+	var (
+		record freshstore.Record
+		ok     bool
+	)
+	if alreadyHeld {
+		record, ok = freshRecordSnapshotFromContext(requestCtx)
+	}
+	if !ok {
+		var loadErr error
+		record, loadErr = a.store.Load(requestCtx)
+		if loadErr != nil {
+			if requestCtx.Err() != nil {
+				return model.RuntimeObservedStatus{}, false, requestCtx.Err()
+			}
+			return model.RuntimeObservedStatus{}, false, loadErr
+		}
+	}
+	if !isCommittedExternalStrategy(record.Operation.Strategy) {
+		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
+	}
+	grant, _, targetErr := a.externalReadTargetFor(requestCtx, record)
+	if targetErr != nil {
+		return model.RuntimeObservedStatus{}, false, targetErr
+	}
+	if grant.Refused {
+		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
+	}
+	var recorded atomic.Bool
+	activeHold := hold
+	if activeHold == nil {
+		activeHold = externalCredentialHoldFromContext(requestCtx, gate)
+	}
+	statusCtx := withFreshRecordSnapshot(requestCtx, record)
+	statusCtx = a.observeExternalHoldHeaders(statusCtx, requestCtx, activeHold, !alreadyHeld, grant, &recorded)
+	observed, err := client.Status(statusCtx)
+	if err != nil {
+		if !recorded.Load() {
+			a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+		}
+		return model.RuntimeObservedStatus{}, errors.Is(err, cpa.ErrManagementRejected), err
+	}
+	return observed, false, nil
 }
 
 func (c freshRuntimeClientAdapter) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
@@ -1463,6 +1569,10 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unavailable", a.runtimeJournal))
 		return
 	}
+	// An External CPA that already refused the stored credential is not asked
+	// again: CPA bans the address after five failed authentications, and this
+	// page polls. The status is the typed blocker, with whatever was last
+	// observed, until a rebind or a re-verify proves the key.
 	now := time.Now().UTC()
 	var (
 		observed model.RuntimeObservedStatus
@@ -1479,6 +1589,10 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		observed, err = statusClient.Status(r.Context())
 	}
 	if err != nil {
+		if errors.Is(err, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unreachable", a.runtimeJournal))
 		return
 	}

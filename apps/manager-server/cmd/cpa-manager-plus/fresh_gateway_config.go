@@ -79,6 +79,14 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 		writeFreshJSON(w, v)
 		return
 	}
+	if errors.Is(e, errExternalCredentialWaitCancelled) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
+	if errors.Is(e, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	var rejection freshconfig.Rejection
 	var refusal freshconfig.CPARejection
 	var writeError cpa.ConfigWriteError
@@ -206,15 +214,12 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		}
 		// A key the user's CPA already refused is not presented again: this is
 		// the config page's own read, it polls, and five refusals ban the address.
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, freshconfig.View{}, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
-		view, err := service.Read(r.Context())
-		if errors.Is(err, cpa.ErrManagementRejected) {
-			a.noteExternalRejection(r.Context(), grant, err)
-		}
+		view, err := service.Read(a.withExternalSavedCredentialGate(r.Context()))
 		gatewayConfigReply(w, view, err)
 	case parts[0] == "groups" && len(parts) == 2:
 		if r.Method != http.MethodPost {
@@ -245,20 +250,15 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			// The user's CPA already refused the stored credential. This save would
 			// present it once more, and five refusals ban the address for thirty
 			// minutes: the answer is the same blocker, written locally.
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
-		operation, err := service.SaveGroup(r.Context(), parts[1], q)
-		// The first 401 a save meets is the refusal of the credential it presented,
-		// so it is filed against this request's grant exactly as the read and the
-		// Key installs file theirs. Without it the page would present the same
-		// refused key on its next poll until the CPA banned the address.
-		a.noteExternalRejection(r.Context(), grant, err)
+		operation, err := service.SaveGroup(a.withExternalSavedCredentialGate(r.Context()), parts[1], q)
 		gatewayConfigReply(w, operation, err)
 	case parts[0] == "rules" && len(parts) == 2:
 		if r.Method != http.MethodPost {
@@ -282,15 +282,12 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		if service == nil {
 			return
 		}
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
-		operation, err := service.SaveFamily(r.Context(), parts[1], q)
-		// A family save presents the stored credential exactly like a group save,
-		// so its first refusal is filed the same way.
-		a.noteExternalRejection(r.Context(), grant, err)
+		operation, err := service.SaveFamily(a.withExternalSavedCredentialGate(r.Context()), parts[1], q)
 		gatewayConfigReply(w, operation, err)
 	case parts[0] == "operations" && (len(parts) == 2 || len(parts) == 3 && parts[2] == "reconcile"):
 		a.gatewayConfigOperation(w, r, parts)
@@ -331,13 +328,12 @@ func (a *freshApplication) gatewayConfigOperation(w http.ResponseWriter, r *http
 		// CPA has already refused is never presented again: five refusals ban the
 		// address for thirty minutes, and this endpoint is polled. The plain
 		// inspection answers from the journal alone, so it stays ungated.
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
 			return
 		}
-		operation, err := service.Operation(r.Context(), parts[1], true)
-		a.noteExternalRejection(r.Context(), grant, err)
+		operation, err := service.Operation(a.withExternalSavedCredentialGate(r.Context()), parts[1], true)
 		gatewayConfigReply(w, operation, err)
 		return
 	}

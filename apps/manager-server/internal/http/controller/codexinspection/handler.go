@@ -11,6 +11,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	codexsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
 type Handler struct {
@@ -34,6 +36,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			TriggerKey:  "manual",
 		})
 		if err != nil {
+			if writeExternalCodexInspectionBlocker(w, err) {
+				return
+			}
 			response.Error(w, codexInspectionErrorStatus(err), err)
 			return
 		}
@@ -91,6 +96,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			result, err := h.App.CodexInspectionService.ExecuteManualActions(r.Context(), id, req)
 			if err != nil {
+				if writeExternalCodexInspectionBlocker(w, err) {
+					return
+				}
 				response.Error(w, codexInspectionErrorStatus(err), err)
 				return
 			}
@@ -143,4 +151,20 @@ func codexInspectionErrorStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func writeExternalCodexInspectionBlocker(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, cpa.ErrManagementRejected) {
+		response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonManagementRejected})
+		return true
+	}
+	if errors.Is(err, cpa.ErrExternalTargetMoved) {
+		response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonTargetMoved})
+		return true
+	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		response.JSON(w, http.StatusServiceUnavailable, map[string]string{"code": "external_cpa_authority_unavailable"})
+		return true
+	}
+	return false
 }

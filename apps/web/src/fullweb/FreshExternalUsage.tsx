@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal } from '../components/ui/Modal';
 import { FullWebIcon } from './FullWebIcon';
 import {
+  blockedReasonText,
   collectorStateText,
   externalWorkspaceText as x,
   versionSupportText,
@@ -106,7 +107,9 @@ export function FreshExternalUsage({
       setState(parsed);
       setConfirming(false);
       setConfirmFailed(false);
-      setNotice(x('usageConfirmed'));
+      if (parsed.statisticsEnabled && !parsed.blockedReason) {
+        setNotice(x('usageConfirmed'));
+      }
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -175,9 +178,7 @@ export function FreshExternalUsage({
         {state.blockedReason && (
           <div data-testid="external-usage-blocked">
             <dt>{x('usageBlockedReason')}</dt>
-            <dd>
-              <code>{state.blockedReason}</code>
-            </dd>
+            <dd>{blockedReasonText(state.blockedReason)}</dd>
           </div>
         )}
       </dl>
@@ -201,7 +202,7 @@ export function FreshExternalUsage({
           </button>
         </p>
       )}
-      {!state.statisticsEnabled && (
+      {!state.statisticsEnabled && state.blockedReason !== 'usage_monitoring_disabled' && (
         <button
           className="btn btn-primary btn-sm"
           data-testid="external-usage-enable"

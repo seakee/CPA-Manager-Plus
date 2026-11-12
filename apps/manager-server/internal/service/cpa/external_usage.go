@@ -91,14 +91,7 @@ func externalUsageRequest(ctx context.Context, method, baseURL, key string, payl
 	if len(payload) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	direct := http.DefaultTransport.(*http.Transport).Clone()
-	direct.Proxy = nil
-	direct.DisableKeepAlives = true
-	direct.MaxResponseHeaderBytes = 32 << 10
-	client := &http.Client{
-		Transport: direct, Timeout: 10 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	client := managementHTTPClient(ctx, 10*time.Second, true)
 	res, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -106,9 +99,21 @@ func externalUsageRequest(ctx context.Context, method, baseURL, key string, payl
 		}
 		return 0, nil, ErrProofUnavailable
 	}
+	ObserveExternalResponseStatus(ctx, res.StatusCode)
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
-	if err != nil {
+	switch res.StatusCode {
+	case http.StatusUnauthorized:
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return res.StatusCode, nil, ErrManagementRejected
+	case http.StatusForbidden:
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return res.StatusCode, nil, ErrManagementClientForbidden
+	}
+	if res.Header.Get("Content-Encoding") != "" && res.Header.Get("Content-Encoding") != "identity" {
+		return 0, nil, ErrProofUnavailable
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, (64<<10)+1))
+	if err != nil || len(body) > 64<<10 {
 		return 0, nil, ErrProofUnavailable
 	}
 	return res.StatusCode, body, nil

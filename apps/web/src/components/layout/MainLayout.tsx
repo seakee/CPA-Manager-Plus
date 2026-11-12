@@ -577,14 +577,18 @@ function MainLayoutContent({
         icon: sidebarIcons.usageAnalytics,
       }
     : null;
-  const monitoringNavItem = featureAvailability.requestMonitoringAvailable
-    ? {
-        path: '/monitoring',
-        label: t('nav.monitoring_center'),
-        shortLabel: navShortLabel('nav.monitoring_center', t('nav.monitoring_center')),
-        icon: sidebarIcons.monitoring,
-      }
-    : null;
+  // Request monitoring is a switch: while only the collector is off the entry
+  // stays in the sidebar and the page explains how to start it. Hiding it here
+  // is what made a disabled collector look like a missing feature.
+  const monitoringNavItem =
+    featureAvailability.requestMonitoringAvailable || featureAvailability.reason === 'monitoring_disabled'
+      ? {
+          path: '/monitoring',
+          label: t('nav.monitoring_center'),
+          shortLabel: navShortLabel('nav.monitoring_center', t('nav.monitoring_center')),
+          icon: sidebarIcons.monitoring,
+        }
+      : null;
   const pluginControlNavItems: NavItem[] = pluginControlMenuVisible
     ? [
         {

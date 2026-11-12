@@ -330,5 +330,5 @@ func (a *freshApplication) v8PluginCapable(ctx context.Context) bool {
 	if a == nil || a.gatewayConfig == nil {
 		return false
 	}
-	return a.gatewayConfig.SupportsPlugins(ctx)
+	return a.gatewayConfig.SupportsPlugins(a.withExternalSavedCredentialGate(ctx))
 }

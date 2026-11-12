@@ -57,6 +57,13 @@ func (s *Service) Status() collectorpkg.Status {
 	return s.manager.Status()
 }
 
+func (s *Service) ActiveRuntimeConfig() (collectorpkg.RuntimeConfig, bool) {
+	if s == nil || s.manager == nil {
+		return collectorpkg.RuntimeConfig{}, false
+	}
+	return s.manager.ActiveRuntimeConfig()
+}
+
 func RuntimeConfigFromManagerConfig(cfg store.ManagerConfig) collectorpkg.RuntimeConfig {
 	return collectorpkg.RuntimeConfig{
 		CPAUpstreamURL: cfg.CPAConnection.CPABaseURL,

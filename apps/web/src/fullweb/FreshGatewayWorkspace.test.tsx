@@ -26,6 +26,16 @@ vi.mock('../components/ui/Modal', () => ({
 
 const BASELINE = 'a'.repeat(64);
 
+/** The text a node's children render to, the way the operator reads it. */
+function flatten(children: ReactNode): string {
+  return [children]
+    .flat(Infinity)
+    .filter((part) => part !== null && part !== undefined && typeof part !== 'boolean')
+    .map((part) => String(part))
+    .join('');
+}
+
+
 // The Manager owns the type of every leaf; the test states the same inventory so
 // a wrong control in the page shows up as a wrong interaction here.
 const INT_PATHS = [
@@ -304,6 +314,39 @@ describe('FreshGatewayWorkspace', () => {
     expect(maybeTestId('gateway-field-requests.proxy-url')).toBeDefined();
     await act(async () => search.props.onChange({ target: { value: 'nothing-matches-this' } }));
     expect(maybeTestId('gateway-no-matches')).toBeDefined();
+  });
+
+  it('names the number of drafts the discard dialog throws away', async () => {
+    const { client } = fakeClient(buildView());
+    await mount(client);
+    await openTab('retry');
+    const row = testId('gateway-field-routing.retry.request-retry');
+    await act(async () => row.findByType('input').props.onChange({ target: { value: '5' } }));
+
+    const discard = renderer.root.findAll(
+      (node) => node.type === 'button' && [node.props.children].flat(2).includes(c('discard'))
+    )[0];
+    await act(async () => discard.props.onClick());
+
+    const help = testId('gateway-discard-help');
+    const text = [help.props.children].flat().join('');
+    // The rendered count is substituted, not the raw template.
+    expect(text).toBe(c('discardHelp', 1));
+    expect(text).toContain('1');
+  });
+
+  it('renders every overview statistic as a label and its own number', async () => {
+    const view = buildView();
+    const { client } = fakeClient(view);
+    await mount(client);
+    const overview = testId('gateway-overview');
+    const labels = overview.findAllByType('dt').map((node) => flatten(node.props.children));
+    const values = overview.findAllByType('dd').map((node) => flatten(node.props.children));
+
+    expect(labels).toEqual([c('fields'), c('ruleFamilies'), c('ownerGroups'), c('dirty')]);
+    expect(values).toHaveLength(labels.length);
+    expect(values[0]).toBe(String(view.fields.length));
+    for (const value of values) expect(value).toMatch(/^\d+$/);
   });
 
   it('saves one group with only the edited leaves and reports the draft as dirty', async () => {

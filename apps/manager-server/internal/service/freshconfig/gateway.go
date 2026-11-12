@@ -370,7 +370,7 @@ func (s *Service) externalWriteGate(ctx context.Context, auth authority) error {
 		// A refused credential and a moved target are the blockers of their own
 		// reads; an unreachable CPA is not evidence about its version. The probe's
 		// own refusal is what the page reports.
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) {
+		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
 			return err
 		}
 		return cpa.ErrProofUnavailable
@@ -453,7 +453,7 @@ func (s *Service) usesExternal(op bootstrap.FreshOperation) bool {
 	if !s.managed {
 		return true
 	}
-	return op.Strategy.Strategy == bootstrap.ConnectExternal
+	return op.Strategy.Strategy == bootstrap.ConnectExternal && op.Strategy.Stage == "committed"
 }
 
 // resolve proves the active profile for this installation checkpoint and
@@ -524,6 +524,9 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 			if errors.Is(err, cpa.ErrExternalTargetMoved) {
 				return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonTargetMoved}}, cpa.ErrExternalTargetMoved
 			}
+			if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+				return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonUnavailable}}, cpa.ErrExternalRejectionUnavailable
+			}
 			return authority{mode: ModeUnavailable, capable: Capability{Mode: ModeUnavailable, Reason: ReasonUnavailable}}, cpa.ErrProofUnavailable
 		}
 		if baseURL == "" || secret == "" {
@@ -538,7 +541,7 @@ func (s *Service) resolveProfile(ctx context.Context, r freshstore.Record) (auth
 		if wire != nil {
 			transport = wire(endpoint)
 		} else {
-			transport = cpa.NewTransportForEndpoint(endpoint)
+			transport = cpa.NewExternalConfigTransport(endpoint)
 		}
 		return authority{
 			mode:     ModeExternal,
@@ -619,7 +622,10 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 		Fields:   []FieldView{},
 		Families: []FamilyView{},
 	}
-	auth, _ := s.resolve(ctx, r, sc)
+	auth, resolveErr := s.resolve(ctx, r, sc)
+	if !sc.managedOnly && errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+		return View{}, resolveErr
+	}
 	view.Capability = auth.capable
 	view.ProfileLimits = auth.limits
 	journal := r.ConfigGroups
@@ -630,6 +636,9 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 	if auth.capable.Readable && auth.wire != nil {
 		document, err = auth.wire.ReadConfigDocument(ctx, auth.secret)
 		if err != nil {
+			if auth.mode == ModeExternal && (errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable)) {
+				return View{}, err
+			}
 			view.Capability.Readable = false
 			view.Capability.Writable = false
 			view.Capability.RulesWritable = false
@@ -905,6 +914,9 @@ func (s *Service) operation(ctx context.Context, sc scope, id string, reconcile 
 			if errors.Is(resolveErr, ErrPluginAuthority) {
 				return operation, resolveErr
 			}
+			if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+				return operation, resolveErr
+			}
 			if resolveErr != nil || !auth.capable.Readable {
 				return operation, cpa.ErrApplyUnknown
 			}
@@ -929,6 +941,9 @@ func (s *Service) operation(ctx context.Context, sc scope, id string, reconcile 
 			return legacyView(operation), nil
 		}
 		auth, resolveErr := s.resolve(ctx, r, sc)
+		if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+			return legacyView(operation), resolveErr
+		}
 		if resolveErr != nil {
 			return legacyView(operation), cpa.ErrApplyUnknown
 		}

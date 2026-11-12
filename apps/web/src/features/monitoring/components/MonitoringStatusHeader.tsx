@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
@@ -10,6 +11,8 @@ type MonitoringStatusHeaderProps = {
   monitoringUnavailable: boolean;
   monitoringUnavailableTitle: string;
   monitoringUnavailableBody: string;
+  /** Replaces the "open configuration" link when this page can act itself. */
+  monitoringUnavailableAction?: ReactNode;
   t: TFunction;
 };
 
@@ -76,6 +79,7 @@ export function MonitoringStatusHeader({
   monitoringUnavailable,
   monitoringUnavailableTitle,
   monitoringUnavailableBody,
+  monitoringUnavailableAction,
   t,
 }: MonitoringStatusHeaderProps) {
   return (
@@ -93,13 +97,15 @@ export function MonitoringStatusHeader({
         <div className={styles.callout}>
           <strong>{monitoringUnavailableTitle}</strong>
           <span>{monitoringUnavailableBody}</span>
-          <Link
-            to="/config"
-            className={styles.configLink}
-            onClick={() => localStorage.setItem('config-management:tab', 'manager')}
-          >
-            {t('monitoring.open_manager_config')}
-          </Link>
+          {monitoringUnavailableAction ?? (
+            <Link
+              to="/config"
+              className={styles.configLink}
+              onClick={() => localStorage.setItem('config-management:tab', 'manager')}
+            >
+              {t('monitoring.open_manager_config')}
+            </Link>
+          )}
         </div>
       ) : null}
     </>

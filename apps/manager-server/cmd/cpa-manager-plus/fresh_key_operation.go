@@ -74,6 +74,14 @@ func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResu
 		writeFreshJSON(w, result)
 		return
 	}
+	if errors.Is(err, errExternalCredentialWaitCancelled) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	status, code := keyOperationCode(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -99,7 +107,12 @@ func (a *freshApplication) prepareClientKeyOperation(w http.ResponseWriter, r *h
 	if !decodeKeyOperation(w, r, &body) {
 		return
 	}
-	result, err := a.keyApply.Prepare(r.Context(), body.RequestID, target, body.KeeperID, body.Mode, op.Strategy.TargetGeneration)
+	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
+		writeExternalManagementRejected(w)
+	}) {
+		return
+	}
+	result, err := a.keyApply.Prepare(a.withExternalSavedCredentialGate(r.Context()), body.RequestID, target, body.KeeperID, body.Mode, op.Strategy.TargetGeneration)
 	keyOperationReply(w, result, err)
 }
 
@@ -117,16 +130,20 @@ func (a *freshApplication) preflightClientKeyOperation(w http.ResponseWriter, r 
 	// poll. A credential the user's CPA already refused is never presented by it:
 	// five failed authentications ban the address for thirty minutes, and the
 	// answer is the same blocker the submit would give, written locally.
-	grant := a.externalReadGrant(r.Context())
-	if grant.Refused {
+	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 		keyOperationPreflightReply(w, false, freshconfig.ReasonManagementRejected)
+	}) {
 		return
 	}
-	err := a.keyApply.Preflight(r.Context(), target, keeper, mode, op.Strategy.TargetGeneration)
-	// The first 401 a preflight meets is the refusal of the credential it
-	// presented, so it is filed against this request's grant like every other
-	// browser-driven read of the user's CPA.
-	a.noteExternalRejection(r.Context(), grant, err)
+	err := a.keyApply.Preflight(a.withExternalSavedCredentialGate(r.Context()), target, keeper, mode, op.Strategy.TargetGeneration)
+	if errors.Is(err, errExternalCredentialWaitCancelled) {
+		writeExternalCredentialWaitCancelled(w)
+		return
+	}
+	if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+		writeExternalAuthorityUnavailable(w)
+		return
+	}
 	reason := ""
 	if err != nil {
 		_, reason = keyOperationCode(err)
@@ -155,17 +172,12 @@ func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Req
 		// A credential the user's CPA already refused is not presented again: this
 		// page polls a journaled step, and five failed authentications ban the
 		// address for thirty minutes.
-		grant := a.externalReadGrant(r.Context())
-		if grant.Refused {
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 			writeExternalManagementRejected(w)
+		}) {
 			return
 		}
-		result, err := a.keyApply.CheckOperation(r.Context(), id, op.Strategy.TargetGeneration)
-		if errors.Is(err, cpa.ErrManagementRejected) {
-			// The poll is where the refusal is first known, so it is recorded and
-			// the reads that follow answer it without contacting the CPA.
-			a.noteExternalRejection(r.Context(), grant, err)
-		}
+		result, err := a.keyApply.CheckOperation(a.withExternalSavedCredentialGate(r.Context()), id, op.Strategy.TargetGeneration)
 		keyOperationReply(w, result, err)
 		return
 	}
@@ -178,7 +190,12 @@ func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Req
 			w.WriteHeader(400)
 			return
 		}
-		result, err := a.keyApply.ContinueOperation(r.Context(), strings.TrimSuffix(id, "/continue"), op.Strategy.TargetGeneration)
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
+			writeExternalManagementRejected(w)
+		}) {
+			return
+		}
+		result, err := a.keyApply.ContinueOperation(a.withExternalSavedCredentialGate(r.Context()), strings.TrimSuffix(id, "/continue"), op.Strategy.TargetGeneration)
 		keyOperationReply(w, result, err)
 		return
 	}

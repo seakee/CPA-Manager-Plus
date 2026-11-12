@@ -2,11 +2,14 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Modal } from '../components/ui/Modal';
+import { ToggleSwitch } from '../components/ui/ToggleSwitch';
+import { useRequestMonitoringSwitch } from '../hooks/useRequestMonitoringSwitch';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 
 export function FreshSystemWorkspace({ basePath }: { basePath: string }) {
   const { i18n } = useTranslation();
   const navigate = useNavigate();
+  const requestMonitoring = useRequestMonitoringSwitch();
   const [recoveryModalOpen, setRecoveryModalOpen] = useState(false);
   const docsLanguage = i18n.resolvedLanguage?.startsWith('zh') ? '' : 'en/';
   return (
@@ -40,6 +43,44 @@ export function FreshSystemWorkspace({ basePath }: { basePath: string }) {
               </div>
             </div>
             <div className="notice">{c('entryNotice')}</div>
+          </section>
+          <section className="card" data-testid="system-request-monitoring-card">
+            <div className="card-head">
+              <div>
+                <h2>{c('requestMonitoring')}</h2>
+                <p className="muted">{c('requestMonitoringHelp')}</p>
+              </div>
+              <span
+                className={requestMonitoring.enabled ? 'badge badge-emerald' : 'badge'}
+                data-testid="system-request-monitoring-state"
+              >
+                {requestMonitoring.enabled ? c('requestMonitoringOn') : c('requestMonitoringOff')}
+              </span>
+            </div>
+            <div className="row" data-testid="system-request-monitoring-switch">
+              {requestMonitoring.writable ? (
+                <ToggleSwitch
+                  checked={requestMonitoring.enabled}
+                  disabled={!requestMonitoring.loaded || requestMonitoring.saving}
+                  ariaLabel={c('requestMonitoring')}
+                  label={
+                    requestMonitoring.saving
+                      ? c('requestMonitoringSaving')
+                      : requestMonitoring.enabled
+                        ? c('requestMonitoringOn')
+                        : c('requestMonitoringOff')
+                  }
+                  onChange={(next) => void requestMonitoring.setEnabled(next)}
+                />
+              ) : (
+                <p className="muted">{c('requestMonitoringUnavailable')}</p>
+              )}
+            </div>
+            {requestMonitoring.failed ? (
+              <div className="notice warn" data-testid="system-request-monitoring-error">
+                {c('requestMonitoringFailed')}
+              </div>
+            ) : null}
           </section>
           <section className="card" data-testid="system-startup-card">
             <div className="card-head">

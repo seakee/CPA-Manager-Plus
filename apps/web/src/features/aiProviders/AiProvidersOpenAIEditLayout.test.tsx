@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   fetchConfig: vi.fn(),
   updateConfigValue: vi.fn(),
   showNotification: vi.fn(),
+  showConfirmation: vi.fn(),
   navigate: vi.fn(),
   allowNextNavigation: vi.fn(),
   outletContext: { current: null as Record<string, unknown> | null },
@@ -61,7 +62,10 @@ vi.mock('@/stores', async () => {
         updateConfigValue: mocks.updateConfigValue,
         isCacheValid: () => true,
       }),
-    useNotificationStore: () => ({ showNotification: mocks.showNotification }),
+    useNotificationStore: () => ({
+    showNotification: mocks.showNotification,
+    showConfirmation: mocks.showConfirmation,
+  }),
     useOpenAIEditDraftStore: draftStore.useOpenAIEditDraftStore,
   };
 });

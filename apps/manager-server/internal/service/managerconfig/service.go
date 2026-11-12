@@ -42,9 +42,11 @@ type PublicManagerCPAConnectionConfig struct {
 }
 
 type Service struct {
-	cfg       config.Config
-	store     *store.Store
-	collector *collectorservice.Service
+	cfg                        config.Config
+	store                      *store.Store
+	collector                  *collectorservice.Service
+	externalCollectorLifecycle bool
+	cpaUsageProbeAllowed       func(context.Context) bool
 }
 
 func New(cfg config.Config, store *store.Store, collector *collectorservice.Service) *Service {
@@ -55,13 +57,39 @@ func New(cfg config.Config, store *store.Store, collector *collectorservice.Serv
 	}
 }
 
+// UseExternalCollectorLifecycle delegates Collector start/stop to an enclosing
+// host (Fresh) so neither Update nor SetCollectorEnabled starts or stops a
+// detached background Collector. Under this mode, SetCollectorEnabled (the
+// narrow monitoring-switch PATCH) updates only Manager's persisted
+// configuration row without mutating CPA usage-statistics settings, whereas
+// whole-document Update (PUT, permitted on non-External profiles) still
+// validates the connection and enables CPA usage-statistics when collector
+// monitoring is enabled.
+func (s *Service) UseExternalCollectorLifecycle() {
+	if s != nil {
+		s.externalCollectorLifecycle = true
+	}
+}
+
+// SetCPAUsageProbeAllowed configures whether Get may probe the persisted CPA
+// management endpoint for optional live usage-statistics metadata. When allow
+// returns false (for example on ConnectExternal, where External usage posture
+// is owned by GET external/usage), Get answers purely from Manager's persisted
+// configuration without presenting the saved management credential upstream.
+func (s *Service) SetCPAUsageProbeAllowed(allow func(context.Context) bool) {
+	if s != nil {
+		s.cpaUsageProbeAllowed = allow
+	}
+}
+
 func (s *Service) Get(ctx context.Context) (Response, error) {
 	cfg, source, _, err := s.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
 		return Response{}, err
 	}
 	var cpaUsage *cpa.UsageConfig
-	if cfg.CPAConnection.CPABaseURL != "" && cfg.CPAConnection.ManagementKey != "" {
+	if cfg.CPAConnection.CPABaseURL != "" && cfg.CPAConnection.ManagementKey != "" &&
+		(s.cpaUsageProbeAllowed == nil || s.cpaUsageProbeAllowed(ctx)) {
 		if usageCfg, err := cpa.FetchUsageConfig(
 			ctx,
 			cfg.CPAConnection.CPABaseURL,
@@ -157,7 +185,9 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		if err := s.store.SaveManagerConfig(ctx, next); err != nil {
 			return Response{}, err
 		}
-		_ = s.collector.Stop(context.Background())
+		if !s.externalCollectorLifecycle && s.collector != nil {
+			_ = s.collector.Stop(context.Background())
+		}
 		return Response{
 			Config: PublicConfig(next),
 			Source: string(SourceDB),
@@ -167,14 +197,92 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 	if err := s.store.SaveManagerConfigAndSetup(ctx, next, setup); err != nil {
 		return Response{}, err
 	}
-	if ManagerCollectorEnabled(next) {
-		_ = s.collector.Start(context.Background(), next)
-	} else {
-		_ = s.collector.Stop(context.Background())
+	if !s.externalCollectorLifecycle && s.collector != nil {
+		if ManagerCollectorEnabled(next) {
+			_ = s.collector.Start(context.Background(), next)
+		} else {
+			_ = s.collector.Stop(context.Background())
+		}
 	}
 	return Response{
 		Config: PublicConfig(next),
 		Source: string(SourceDB),
+	}, nil
+}
+
+// SetCollectorEnabled applies the request-monitoring switch as its own write.
+// The switch owns exactly one field, so this path patches the stored document
+// instead of submitting a whole configuration through Update: every other field
+// the installation carries survives, whether or not this build models it. A
+// whole-document write is what used to drop the stored External usage service
+// section and the TLS setting of a switch that never meant to touch them.
+//
+// Turning the switch off never fails on the CPA's account: a manager that could
+// not disable collection would be the opposite of a privacy control.
+func (s *Service) SetCollectorEnabled(ctx context.Context, enabled bool) (Response, error) {
+	current, source, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	if source == SourceEnv && ManagerCollectorEnabled(current) != enabled {
+		return Response{}, errors.New("connection setup is managed by environment variables")
+	}
+	connection := current.CPAConnection.CPABaseURL != "" && current.CPAConnection.ManagementKey != ""
+	if enabled && !s.externalCollectorLifecycle {
+		if !connection {
+			return Response{}, errors.New("cpaBaseUrl and managementKey are required when request monitoring is enabled")
+		}
+		// Enabling is proven against the CPA before anything is stored: the
+		// Collector would otherwise run against a CPA that records nothing.
+		if err := cpa.ValidateManagementAPI(ctx, current.CPAConnection.CPABaseURL, current.CPAConnection.ManagementKey); err != nil {
+			return Response{}, err
+		}
+		if err := cpa.ValidateCollectorConfig(
+			ctx,
+			current.CPAConnection.CPABaseURL,
+			current.CPAConnection.ManagementKey,
+			current.Collector.PollIntervalMS,
+		); err != nil {
+			return Response{}, err
+		}
+		if err := cpa.SetUsageStatisticsEnabled(
+			ctx,
+			current.CPAConnection.CPABaseURL,
+			current.CPAConnection.ManagementKey,
+			true,
+		); err != nil {
+			return Response{}, err
+		}
+	}
+	if source != SourceEnv {
+		patched, err := s.store.PatchManagerCollectorEnabled(ctx, enabled)
+		if err != nil {
+			return Response{}, err
+		}
+		if !patched {
+			// Nothing is stored yet, so there is no document to patch. The resolved
+			// configuration is what this Manager serves, and only the switch differs.
+			next := current
+			next.Collector.Enabled = BoolPtr(enabled)
+			if err := s.store.SaveManagerConfig(ctx, next); err != nil {
+				return Response{}, err
+			}
+		}
+	}
+	next, nextSource, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	if !s.externalCollectorLifecycle && s.collector != nil {
+		if ManagerCollectorEnabled(next) {
+			_ = s.collector.Start(context.Background(), next)
+		} else {
+			_ = s.collector.Stop(context.Background())
+		}
+	}
+	return Response{
+		Config: PublicConfig(next),
+		Source: string(nextSource),
 	}, nil
 }
 

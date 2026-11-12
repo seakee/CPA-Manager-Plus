@@ -3072,7 +3072,9 @@ describe('AccountsPage replacement flows', () => {
     ).toBe(true);
     expect(treeText(renderer)).toContain('accounts.config_section_routing');
     expect(mocks.configurationEnabledCalls).toContain(true);
-    expect(mocks.lastUnsavedGuardOptions?.enabled).toBe(true);
+    // A clean configuration tab registers no router blocker at all: a
+    // registered blocker alone makes react-router warn on manual hash edits.
+    expect(mocks.lastUnsavedGuardOptions?.enabled).toBe(false);
     expect(typeof mocks.lastUnsavedGuardOptions?.shouldBlock).toBe('function');
     const shouldBlock = mocks.lastUnsavedGuardOptions?.shouldBlock;
     if (typeof shouldBlock !== 'function') throw new Error('missing navigation blocker');

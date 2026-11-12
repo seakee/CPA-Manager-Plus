@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -10,13 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -58,13 +60,15 @@ func externalLegacyReplacedWrite(path, method string) bool {
 		return false
 	}
 	switch strings.TrimRight(path, "/") {
-	case "/v0/management/api-keys", "/v0/management/config.yaml", "/usage-service/config":
-		// API keys are owned by `api-keys`, the gateway document by
-		// `gateway/config`, and the usage-service settings document by the
-		// connection, the rebind and `external/usage`. On External the setup row
-		// is a mirror of the committed connection, so editing it here would
-		// desync the two.
+	case "/v0/management/api-keys", "/v0/management/config.yaml":
 		return true
+	case "/usage-service/config":
+		// Whole-document PUT rewrites the CPA connection and collector settings
+		// owned by the committed connection, the rebind and `external/usage`,
+		// so editing it here would desync the two. The narrow `PATCH`
+		// (`{"enabled": bool}`) owns only Manager's local request-monitoring
+		// switch and never touches the External CPA.
+		return method != http.MethodPatch
 	}
 	return false
 }
@@ -113,6 +117,37 @@ func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	return true
 }
 
+// legacyBridgeServicePresentsSavedKey reports whether a Manager-local legacy
+// controller route internally presents the saved management credential to the
+// user's CPA (synchronously or on a detached async job). Unlike reverse-proxied
+// routes, these handlers run a precheck and carry withExternalSavedCredentialGate
+// on r.Context() so each individual outbound CPA HTTP call serializes at the wire
+// boundary without holding legacyCredentialGate across non-CPA catalog fetches,
+// retry backoffs, run leases, or local SQLite transactions.
+func legacyBridgeServicePresentsSavedKey(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	cleaned := strings.TrimRight(r.URL.Path, "/")
+	switch {
+	case r.Method == http.MethodPost && cleaned == "/v0/management/model-prices/sync":
+		return true
+	case r.Method == http.MethodPost && strings.HasPrefix(cleaned, "/v0/management/account-action-candidates/") && strings.HasSuffix(cleaned, "/enable"):
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/account-action-candidates/"), "/enable")
+		return candidateID != "" && !strings.Contains(candidateID, "/")
+	case r.Method == http.MethodDelete && strings.HasPrefix(cleaned, "/v0/management/account-action-candidates/") && strings.HasSuffix(cleaned, "/auth-file"):
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/account-action-candidates/"), "/auth-file")
+		return candidateID != "" && !strings.Contains(candidateID, "/")
+	case r.Method == http.MethodPost && cleaned == "/v0/management/codex-inspection/run":
+		return true
+	case r.Method == http.MethodPost && strings.HasPrefix(cleaned, "/v0/management/codex-inspection/runs/") && strings.HasSuffix(cleaned, "/actions"):
+		runID := strings.TrimSuffix(strings.TrimPrefix(cleaned, "/v0/management/codex-inspection/runs/"), "/actions")
+		return runID != "" && !strings.Contains(runID, "/")
+	default:
+		return false
+	}
+}
+
 // externalLegacyDecision is the one answer the External cutover gives a legacy
 // request before anything is forwarded.
 type externalLegacyDecision int
@@ -127,9 +162,12 @@ const (
 	// legacyDecisionUnavailable is a saved-key request this Manager cannot decide
 	// because its own committed instruction is unreadable.
 	legacyDecisionUnavailable
-	// legacyDecisionGated is an admin-authorized request that will present the saved
-	// management key, so it is serialized and its refusal recorded.
+	// legacyDecisionGated is an admin-authorized reverse-proxied request that will
+	// present the saved management key, so it is serialized and its refusal recorded.
 	legacyDecisionGated
+	// legacyDecisionGatedService is an admin-authorized Manager-local controller
+	// action that internally presents the saved management key via CPA HTTP helpers.
+	legacyDecisionGatedService
 )
 
 // externalLegacyDecision decides one legacy request before anything is forwarded,
@@ -140,17 +178,18 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 		return legacyDecisionPassthrough, freshstore.Record{}
 	}
 	presents := legacyBridgePresentsSavedKey(r)
+	servicePresents := !presents && legacyBridgeServicePresentsSavedKey(r)
 	record, err := a.store.Load(r.Context())
 	if err != nil {
 		// Fail closed: without the committed instruction this Manager cannot prove
 		// which credential a saved-key request would present, and presenting a
 		// credential it cannot name is how an address gets banned.
-		if presents {
+		if presents || servicePresents {
 			return legacyDecisionUnavailable, freshstore.Record{}
 		}
 		return legacyDecisionPassthrough, freshstore.Record{}
 	}
-	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
+	if !isCommittedExternalStrategy(record.Operation.Strategy) {
 		// New Managed and Adopt keep the bridge they have always had: on those
 		// profiles it is the Console's own contract, not a duplicate route.
 		return legacyDecisionPassthrough, record
@@ -158,7 +197,7 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
 		return legacyDecisionReplacedWrite, record
 	}
-	if !presents {
+	if !presents && !servicePresents {
 		return legacyDecisionPassthrough, record
 	}
 	// Admin authorization runs before the gate. A caller-auth plugin-management
@@ -167,6 +206,9 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 	// the saved key: neither may serialize a CPA read or file a refusal.
 	if !freshAdminAuthenticated(record, r) {
 		return legacyDecisionPassthrough, record
+	}
+	if servicePresents {
+		return legacyDecisionGatedService, record
 	}
 	return legacyDecisionGated, record
 }
@@ -193,7 +235,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		decision, record := app.externalLegacyDecision(r)
+		decision, _ := app.externalLegacyDecision(r)
 		switch decision {
 		case legacyDecisionReplacedWrite:
 			writeLegacyRefusal(w, externalLegacyWriteReplaced)
@@ -201,10 +243,84 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		case legacyDecisionUnavailable:
 			writeExternalAuthorityUnavailable(w)
 			return
+		case legacyDecisionGatedService:
+			ctx := r.Context()
+			gate := &app.legacyCredentialGate
+			if !gate.acquire(ctx) {
+				writeExternalCredentialWaitCancelled(w)
+				return
+			}
+			record, err := app.store.Load(ctx)
+			if err != nil {
+				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			if !isCommittedExternalStrategy(record.Operation.Strategy) || !freshAdminAuthenticated(record, r) {
+				gate.release()
+				next.ServeHTTP(w, r)
+				return
+			}
+			var grant externalReadGrant
+			snapshotCtx := withFreshRecordSnapshot(ctx, record)
+			if app.externalSource != nil {
+				resolvedGrant, _, targetErr := app.externalReadTargetFor(snapshotCtx, record)
+				if targetErr != nil {
+					gate.release()
+					if ctx.Err() != nil {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
+					if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusConflict)
+						writeFreshJSON(w, struct {
+							Code string `json:"code"`
+						}{freshconfig.ReasonTargetMoved})
+						return
+					}
+					writeExternalAuthorityUnavailable(w)
+					return
+				}
+				grant = resolvedGrant
+			} else {
+				resolvedGrant, grantErr := app.externalReadGrantFor(snapshotCtx, record)
+				if grantErr != nil {
+					gate.release()
+					if ctx.Err() != nil {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
+					writeExternalAuthorityUnavailable(w)
+					return
+				}
+				grant = resolvedGrant
+			}
+			if grant.Refused {
+				gate.release()
+				writeExternalManagementRejected(w)
+				return
+			}
+			gate.release()
+			next.ServeHTTP(w, r.WithContext(app.withExternalSavedCredentialGate(ctx)))
+			return
 		case legacyDecisionGated:
 		default:
 			next.ServeHTTP(w, r)
 			return
+		}
+		if app != nil && app.legacyApp != nil && app.legacyApp.ProxyService != nil {
+			nextReq, releaseAuthFile, status, authErr := app.legacyApp.ProxyService.AcquireRequestAuthFileMutation(r)
+			if authErr != nil {
+				response.Error(w, status, authErr)
+				return
+			}
+			defer releaseAuthFile()
+			r = nextReq
 		}
 		ctx := r.Context()
 		gate := &app.legacyCredentialGate
@@ -215,29 +331,63 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			writeExternalCredentialWaitCancelled(w)
 			return
 		}
-		// One at a time, and the refusal is re-read under the lock: a page fires
-		// several of these in parallel, and the CPA bans an address after five
-		// failed authentications. Without this, one page load is enough to trip
-		// the ban and the blocker could never be cleared.
-		//
-		// The grant is taken here, before the request leaves. It is the credential
-		// this request is about to send, so a refusal is filed against that and not
-		// against whatever a concurrent rebind stored while it was in flight.
-		grant := app.externalReadGrantFor(ctx, record)
+		// Re-load the Fresh record inside legacyCredentialGate so both the
+		// refusal check/grant and the credential forwarded by the downstream
+		// proxy come from one post-wait snapshot even across a concurrent rebind.
+		record, err := app.store.Load(ctx)
+		if err != nil {
+			gate.release()
+			writeExternalAuthorityUnavailable(w)
+			return
+		}
+		if !isCommittedExternalStrategy(record.Operation.Strategy) || !freshAdminAuthenticated(record, r) {
+			gate.release()
+			next.ServeHTTP(w, r)
+			return
+		}
+		var grant externalReadGrant
+		snapshotCtx := withFreshRecordSnapshot(ctx, record)
+		snapshotCtx = app.withExternalSavedCredentialGate(snapshotCtx)
+		if app.externalSource != nil {
+			resolvedGrant, install, targetErr := app.externalReadTargetFor(snapshotCtx, record)
+			if targetErr != nil {
+				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
+				if errors.Is(targetErr, cpa.ErrExternalTargetMoved) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					writeFreshJSON(w, struct {
+						Code string `json:"code"`
+					}{freshconfig.ReasonTargetMoved})
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			grant = resolvedGrant
+			snapshotCtx = proxysvc.WithSavedSetupOverride(snapshotCtx, install.BaseURL, install.ManagementKey)
+		} else {
+			resolvedGrant, grantErr := app.externalReadGrantFor(snapshotCtx, record)
+			if grantErr != nil {
+				gate.release()
+				if ctx.Err() != nil {
+					writeExternalCredentialWaitCancelled(w)
+					return
+				}
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			grant = resolvedGrant
+		}
 		if grant.Refused {
 			gate.release()
-			// The refused credential is the rebind blocker for every method: a read
-			// the CPA would refuse again, and a write whose effect cannot be read
-			// back.
 			writeExternalManagementRejected(w)
 			return
 		}
-		// A stale credential is refused by the CPA with 401, and the browser reads
-		// a 401 from this namespace as its own Admin session having expired: it
-		// clears the session and returns to the login form before any page can
-		// name the cause. The refusal is the same fact the typed reads block on, so
-		// it is recorded and answered as that blocker instead.
-		markContext, mark := proxysvc.WithSavedKeyMark(ctx)
+		markContext, mark := proxysvc.WithSavedKeyMark(snapshotCtx)
 		// A console read's tenure is bounded in both directions: the recorder frees
 		// the gate the moment the status exists, and the budget frees it and ends
 		// the request when the CPA never sends one. Without the budget a CPA that
@@ -245,7 +395,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// read. A request that waits on an upstream provider takes no budget at all
 		// and keeps the tenure until its status arrives, exactly as the proxy
 		// itself bounds it.
-		hold, requestCtx := beginExternalCredentialHold(markContext, gate, app.externalCredentialHoldBudget(r.URL.Path))
+		hold, requestCtx := app.beginCredentialHold(markContext, app.externalCredentialHoldBudget(r.URL.Path))
 		recorder := &externalLegacyRecorder{
 			ResponseWriter: w,
 			// The refusal is recorded against a context the caller cannot cancel: a
@@ -265,8 +415,9 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 // up when its own request is cancelled: holding a console page behind a caller that
 // is already gone would stall every other CPA read for no answer.
 type externalCredentialGate struct {
-	once sync.Once
-	slot chan struct{}
+	once   sync.Once
+	slot   chan struct{}
+	onWait func()
 }
 
 func (g *externalCredentialGate) acquire(ctx context.Context) bool {
@@ -275,6 +426,9 @@ func (g *externalCredentialGate) acquire(ctx context.Context) bool {
 	case g.slot <- struct{}{}:
 		return true
 	default:
+	}
+	if g.onWait != nil {
+		g.onWait()
 	}
 	select {
 	case g.slot <- struct{}{}:
@@ -366,24 +520,46 @@ func writeExternalCredentialWaitCancelled(w http.ResponseWriter) {
 // budget releases it and ends the request when the CPA never produces one, so a
 // hung CPA cannot hold every other console read behind it. A provider-bound request
 // takes no budget: its own status or its caller's cancellation ends the tenure.
+type externalCredentialHoldState uint8
+
+const (
+	holdStateWaitingHeaders externalCredentialHoldState = iota
+	holdStateClaimed
+	holdStateReleased
+)
+
 type externalCredentialHold struct {
-	gate *externalCredentialGate
-	// timer is stored atomically because the budget callback can fire while the
-	// handle is still being built: the callback must never read a field the
-	// constructor has not published yet.
-	timer  atomic.Pointer[time.Timer]
-	cancel context.CancelFunc
-	once   sync.Once
+	mu          sync.Mutex
+	state       externalCredentialHoldState
+	gate        *externalCredentialGate
+	timer       *time.Timer
+	cancel      context.CancelFunc
+	afterExpiry func()
 }
 
 type externalCredentialHoldContextKey struct{}
 
-func hasExternalCredentialHold(ctx context.Context, gate *externalCredentialGate) bool {
+func externalCredentialHoldFromContext(ctx context.Context, gate *externalCredentialGate) *externalCredentialHold {
 	if ctx == nil || gate == nil {
-		return false
+		return nil
 	}
-	held, _ := ctx.Value(externalCredentialHoldContextKey{}).(*externalCredentialGate)
-	return held == gate
+	held, _ := ctx.Value(externalCredentialHoldContextKey{}).(*externalCredentialHold)
+	if held == nil || held.gate != gate {
+		return nil
+	}
+	return held
+}
+
+func hasExternalCredentialHold(ctx context.Context, gate *externalCredentialGate) bool {
+	return externalCredentialHoldFromContext(ctx, gate) != nil
+}
+
+// beginCredentialHold takes the tenure of an already-acquired gate for app.
+func (a *freshApplication) beginCredentialHold(
+	ctx context.Context,
+	budget time.Duration,
+) (*externalCredentialHold, context.Context) {
+	return beginExternalCredentialHold(ctx, &a.legacyCredentialGate, budget, a.afterCredentialHoldBudgetExpiry)
 }
 
 // beginExternalCredentialHold takes the tenure of an already-acquired gate and
@@ -394,32 +570,101 @@ func beginExternalCredentialHold(
 	ctx context.Context,
 	gate *externalCredentialGate,
 	budget time.Duration,
+	onBudgetExpiry ...func(),
 ) (*externalCredentialHold, context.Context) {
-	requestCtx, cancel := context.WithCancel(context.WithValue(ctx, externalCredentialHoldContextKey{}, gate))
-	hold := &externalCredentialHold{gate: gate, cancel: cancel}
+	var afterExpiry func()
+	if len(onBudgetExpiry) > 0 {
+		afterExpiry = onBudgetExpiry[0]
+	}
+	hold := &externalCredentialHold{
+		state:       holdStateWaitingHeaders,
+		gate:        gate,
+		afterExpiry: afterExpiry,
+	}
+	requestCtx, cancel := context.WithCancel(context.WithValue(ctx, externalCredentialHoldContextKey{}, hold))
+	hold.cancel = cancel
 	if budget > 0 {
-		hold.timer.Store(time.AfterFunc(budget, func() {
-			hold.release()
-			cancel()
-		}))
+		hold.mu.Lock()
+		hold.timer = time.AfterFunc(budget, hold.expireBudget)
+		hold.mu.Unlock()
 	}
 	return hold, requestCtx
+}
+
+// claimHeader transitions the hold from waiting-for-headers to claimed so a
+// concurrent tenure-budget expiry cannot release the gate before status
+// classification and durable refusal persistence complete.
+func (h *externalCredentialHold) claimHeader() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state == holdStateReleased {
+		return false
+	}
+	h.state = holdStateClaimed
+	return true
+}
+
+func (h *externalCredentialHold) expireBudget() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.state != holdStateWaitingHeaders {
+		afterExpiry := h.afterExpiry
+		h.mu.Unlock()
+		if afterExpiry != nil {
+			afterExpiry()
+		}
+		return
+	}
+	h.state = holdStateReleased
+	gate := h.gate
+	cancel := h.cancel
+	afterExpiry := h.afterExpiry
+	h.mu.Unlock()
+	if gate != nil {
+		gate.release()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if afterExpiry != nil {
+		afterExpiry()
+	}
 }
 
 // release frees the gate and stops the budget. It is safe to call more than once:
 // the recorder releases on the status, on a hijack and on every other exit.
 func (h *externalCredentialHold) release() {
-	h.once.Do(func() {
-		if timer := h.timer.Load(); timer != nil {
-			timer.Stop()
-		}
-		h.gate.release()
-	})
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.state == holdStateReleased {
+		h.mu.Unlock()
+		return
+	}
+	h.state = holdStateReleased
+	timer := h.timer
+	gate := h.gate
+	h.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	if gate != nil {
+		gate.release()
+	}
 }
 
 // finish ends the tenure once ServeHTTP returned. The request context is cancelled
 // only here: a streamed body whose status was already known keeps its own context.
 func (h *externalCredentialHold) finish() {
+	if h == nil {
+		return
+	}
 	h.release()
 	if h.cancel != nil {
 		h.cancel()
@@ -457,6 +702,9 @@ func (w *externalLegacyRecorder) WriteHeader(status int) {
 		return
 	}
 	w.decided = true
+	if w.hold != nil {
+		w.hold.claimHeader()
+	}
 	// Only a refusal of the saved key is this gate's business. The caller-auth
 	// entry points forward the caller's own header, and a 401 from one of those
 	// says nothing about the stored key: recording it would block a healthy
@@ -537,7 +785,7 @@ func writeExternalAuthorityUnavailable(w http.ResponseWriter) {
 // the legacy paths; this adapter keeps the Public API authority and admin
 // verification at the Fresh boundary while reusing the original business
 // services and response shapes.
-func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request, resource string) {
+func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
 	if a.legacy == nil {
 		http.Error(w, "resource unavailable", http.StatusServiceUnavailable)
 		return
@@ -549,6 +797,15 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	// every entry point into that router is covered by one gate.
 	bridged := strings.TrimPrefix(resource, "cpamp/")
 	if strings.HasPrefix(resource, "cpamp/") && legacyBridgePathAllowed(bridged, r.Method) {
+		// The model list is the one bridged read a CPA answers with its own
+		// gateway vocabulary. The legacy route forwards the caller's own header,
+		// and the console's header is the Admin credential a CPA does not accept
+		// as a gateway key, so that read is answered server-side with the client
+		// key the CPA already holds instead of being forwarded.
+		if consoleModelListResource(bridged, r.Method) {
+			a.consoleModelList(w, r)
+			return
+		}
 		parsed, err := url.Parse("/" + bridged)
 		if err != nil || parsed.Path == "" || parsed.Path == "/" {
 			http.NotFound(w, r)
@@ -558,7 +815,7 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 		clone := r.Clone(r.Context())
 		clone.URL = parsed
 		clone.RequestURI = parsed.RequestURI()
-		a.legacy.ServeHTTP(w, clone)
+		a.serveLegacyResource(w, r, clone, op, bridged)
 		return
 	}
 	var target string
@@ -569,7 +826,7 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 		today := time.Now()
 		start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).UnixMilli()
 		target = "/v0/management/dashboard/summary?today_start_ms=" + strconv.FormatInt(start, 10)
-	case resource == "cpamp/config" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+	case resource == "cpamp/config" && (r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		target = "/usage-service/config"
 	case resource == "cpamp/status" && r.Method == http.MethodGet:
 		target = "/status"
@@ -591,7 +848,74 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 	clone := r.Clone(r.Context())
 	clone.URL = parsed
 	clone.RequestURI = parsed.RequestURI()
-	a.legacy.ServeHTTP(w, clone)
+	a.serveLegacyResource(w, r, clone, op, strings.TrimPrefix(parsed.Path, "/"))
+}
+
+// serveLegacyResource forwards one bridged request and, when that request wrote
+// Manager's usage-service configuration, reconciles the host-bound Collector
+// with what was stored. A narrow PATCH flips only collector.enabled and keeps a
+// live Collector untouched on On->On; a whole-document PUT reloads the
+// Collector whenever its effective RuntimeConfig or connection authority changed.
+func (a *freshApplication) serveLegacyResource(
+	w http.ResponseWriter,
+	r *http.Request,
+	clone *http.Request,
+	op bootstrap.FreshOperation,
+	target string,
+) {
+	if !legacyMonitoringSwitchWrite(target, r.Method) {
+		a.legacy.ServeHTTP(w, clone)
+		return
+	}
+	recorder := &legacyStatusRecorder{ResponseWriter: w}
+	a.legacy.ServeHTTP(recorder, clone)
+	if recorder.status >= http.StatusOK && recorder.status < http.StatusMultipleChoices {
+		if r.Method == http.MethodPut {
+			a.applyUsageManagerConfig(r.Context(), op)
+		} else {
+			a.applyUsageMonitoringSwitch(r.Context(), op)
+		}
+	}
+}
+
+// legacyMonitoringSwitchWrite reports whether a bridged request writes the
+// request-monitoring switch. Both spellings the Console uses end at the same
+// legacy endpoint.
+func legacyMonitoringSwitchWrite(target, method string) bool {
+	if method != http.MethodPut && method != http.MethodPatch {
+		return false
+	}
+	return strings.TrimRight(target, "/") == "usage-service/config"
+}
+
+// legacyStatusRecorder keeps the status of one bridged write without changing
+// the response it forwards. Only switch writes are recorded, so the rest of the
+// bridge still hands the real writer to the legacy router untouched.
+type legacyStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *legacyStatusRecorder) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *legacyStatusRecorder) Write(body []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(body)
+}
+
+func (r *legacyStatusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+func (r *legacyStatusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // legacyBridgePathAllowed is an endpoint-and-method allowlist. The
@@ -610,7 +934,7 @@ func legacyBridgePathAllowed(resource, method string) bool {
 	case "usage-service/info":
 		return allowed(http.MethodGet)
 	case "usage-service/config":
-		return allowed(http.MethodGet, http.MethodPut)
+		return allowed(http.MethodGet, http.MethodPut, http.MethodPatch)
 	case "usage-service/account-processing-policy":
 		return allowed(http.MethodGet, http.MethodPatch)
 	case "usage-service/quota-cooldowns":

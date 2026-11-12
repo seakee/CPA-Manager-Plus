@@ -349,14 +349,25 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	ownershipMutation, err := inspectAuthFileOwnershipMutation(r)
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, errAuthFileMutationBodyTooLarge) {
-			status = http.StatusRequestEntityTooLarge
+	var (
+		ownershipMutation       authFileOwnershipMutation
+		releaseAuthFileMutation func()
+		preAcquired             bool
+	)
+	if existingMutation, ok := preAcquiredAuthFileMutationFromContext(r.Context()); ok {
+		ownershipMutation = existingMutation
+		releaseAuthFileMutation = func() {}
+		preAcquired = true
+	} else {
+		ownershipMutation, err = inspectAuthFileOwnershipMutation(r)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, errAuthFileMutationBodyTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			writeError(w, status, err)
+			return
 		}
-		writeError(w, status, err)
-		return
 	}
 	var (
 		activeDeletes         *credentialdeletemutation.Service
@@ -373,14 +384,16 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	releaseAuthFileMutation, err := s.acquireResolvedAuthFileMutation(r.Context(), ownershipMutation, activeDeletes)
-	if err != nil {
-		status := http.StatusRequestTimeout
-		if errors.Is(err, identitystoreports.ErrPendingCredentialDelete) {
-			status = http.StatusConflict
+	if !preAcquired {
+		releaseAuthFileMutation, err = s.acquireResolvedAuthFileMutation(r.Context(), ownershipMutation, activeDeletes)
+		if err != nil {
+			status := http.StatusRequestTimeout
+			if errors.Is(err, identitystoreports.ErrPendingCredentialDelete) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err)
+			return
 		}
-		writeError(w, status, err)
-		return
 	}
 	defer releaseAuthFileMutation()
 	ownershipMutation, err = s.prepareAuthFileMutation(r.Context(), setup, r, ownershipMutation)
@@ -568,6 +581,49 @@ func (s *Service) acquireResolvedAuthFileMutation(
 		}
 	}
 	return release, nil
+}
+
+type preAcquiredAuthFileMutationKey struct{}
+
+func preAcquiredAuthFileMutationFromContext(ctx context.Context) (authFileOwnershipMutation, bool) {
+	if ctx == nil {
+		return authFileOwnershipMutation{}, false
+	}
+	mutation, ok := ctx.Value(preAcquiredAuthFileMutationKey{}).(authFileOwnershipMutation)
+	return mutation, ok
+}
+
+// AcquireRequestAuthFileMutation parses and acquires any auth-file mutation
+// lock required by r before an outer credential gate is entered, preserving the
+// global lock order authFileMutations -> legacyCredentialGate.
+func (s *Service) AcquireRequestAuthFileMutation(r *http.Request) (*http.Request, func(), int, error) {
+	ownershipMutation, err := inspectAuthFileOwnershipMutation(r)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAuthFileMutationBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		return r, func() {}, status, err
+	}
+	keys, all := authFileMutationLockTargets(ownershipMutation)
+	var deletes *credentialdeletemutation.Service
+	if s != nil && (ownershipMutation.deleteMutation != nil || all || len(keys) > 0) {
+		var modeErr error
+		deletes, _, modeErr = s.resolveEmbeddedMutations(r.Context(), true, false)
+		if modeErr != nil {
+			return r, func() {}, http.StatusServiceUnavailable, modeErr
+		}
+	}
+	release, err := s.acquireResolvedAuthFileMutation(r.Context(), ownershipMutation, deletes)
+	if err != nil {
+		status := http.StatusRequestTimeout
+		if errors.Is(err, identitystoreports.ErrPendingCredentialDelete) {
+			status = http.StatusConflict
+		}
+		return r, func() {}, status, err
+	}
+	nextCtx := context.WithValue(r.Context(), preAcquiredAuthFileMutationKey{}, ownershipMutation)
+	return r.WithContext(nextCtx), release, 0, nil
 }
 
 func authFileMutationLockTargets(mutation authFileOwnershipMutation) ([]string, bool) {
@@ -1768,5 +1824,8 @@ func cleanRequestPath(requestPath string) string {
 }
 
 func (s *Service) resolveSetup(ctx context.Context) (store.Setup, bool, error) {
+	if override, ok := savedSetupOverride(ctx); ok {
+		return override, true, nil
+	}
 	return s.managerConfigService.ResolveSetup(ctx)
 }

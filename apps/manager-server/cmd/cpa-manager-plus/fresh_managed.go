@@ -85,48 +85,70 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 // on every call and decrypts the credential the user supplied. Nothing here is
 // cached, and nothing here contacts the user's CPA: an outage there must not hide
 // the target, so every refusal is the typed blocker of the read that met it.
+type freshRecordSnapshotKey struct{}
+
+func withFreshRecordSnapshot(ctx context.Context, record freshstore.Record) context.Context {
+	return context.WithValue(ctx, freshRecordSnapshotKey{}, record)
+}
+
+func freshRecordSnapshotFromContext(ctx context.Context) (freshstore.Record, bool) {
+	if ctx == nil {
+		return freshstore.Record{}, false
+	}
+	record, ok := ctx.Value(freshRecordSnapshotKey{}).(freshstore.Record)
+	return record, ok
+}
+
 func externalInstallSource(store freshstore.Store, protector *security.Protector) freshkeyapply.ExternalSource {
 	return func(ctx context.Context) (freshkeyapply.ExternalInstall, error) {
 		if store == nil || protector == nil {
 			return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
 		}
-		record, err := store.Load(ctx)
-		if err != nil {
-			return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+		record, ok := freshRecordSnapshotFromContext(ctx)
+		if !ok {
+			var err error
+			record, err = store.Load(ctx)
+			if err != nil {
+				return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+			}
 		}
-		checkpoint := record.Operation.Strategy
-		// External is the one profile whose completion this Manager cannot infer:
-		// no Runtime is staged for it, so the durable product checkpoint is the
-		// only proof the installation finished.
-		if checkpoint.Strategy != bootstrap.ConnectExternal || checkpoint.Stage != "committed" ||
-			!record.Operation.ProductComplete || checkpoint.TargetGeneration == 0 || record.Connection == nil {
-			return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
-		}
-		baseURL, err := cpa.NormalizeV8BaseURL(record.Connection.CPABaseURL)
-		if err != nil || baseURL != strings.TrimRight(record.Connection.CPABaseURL, "/") {
-			return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
-		}
-		// The committed target must still be the connection this Manager holds.
-		// Comparing the address digests is the only comparison available: the
-		// credential is a protected envelope, and a connection the user edited to
-		// another CPA is a different installation. It is reported as the typed
-		// blocker it is instead of claiming the installation is unavailable, and
-		// `POST external/rebind` refuses it too — a rebind replaces a credential
-		// and never an address — so the way back is a reconnect.
-		if checkpoint.TargetIdentity != freshkeyapply.ExternalIdentity(baseURL) {
-			return freshkeyapply.ExternalInstall{}, cpa.ErrExternalTargetMoved
-		}
-		key, err := protector.UnprotectString(record.Connection.ManagementKey)
-		if err != nil || !cpa.ValidV8ManagementKey(key) {
-			return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
-		}
-		return freshkeyapply.ExternalInstall{
-			Identity:      freshkeyapply.ExternalIdentity(baseURL),
-			Checkpoint:    checkpoint.TargetGeneration,
-			BaseURL:       baseURL,
-			ManagementKey: key,
-		}, nil
+		return externalInstallFromRecord(record, protector)
 	}
+}
+
+func externalInstallFromRecord(record freshstore.Record, protector *security.Protector) (freshkeyapply.ExternalInstall, error) {
+	checkpoint := record.Operation.Strategy
+	// External is the one profile whose completion this Manager cannot infer:
+	// no Runtime is staged for it, so the durable product checkpoint is the
+	// only proof the installation finished.
+	if checkpoint.Strategy != bootstrap.ConnectExternal || checkpoint.Stage != "committed" ||
+		!record.Operation.ProductComplete || checkpoint.TargetGeneration == 0 || record.Connection == nil {
+		return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+	}
+	baseURL, err := cpa.NormalizeV8BaseURL(record.Connection.CPABaseURL)
+	if err != nil || baseURL != strings.TrimRight(record.Connection.CPABaseURL, "/") {
+		return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+	}
+	// The committed target must still be the connection this Manager holds.
+	// Comparing the address digests is the only comparison available: the
+	// credential is a protected envelope, and a connection the user edited to
+	// another CPA is a different installation. It is reported as the typed
+	// blocker it is instead of claiming the installation is unavailable, and
+	// `POST external/rebind` refuses it too — a rebind replaces a credential
+	// and never an address — so the way back is a reconnect.
+	if checkpoint.TargetIdentity != freshkeyapply.ExternalIdentity(baseURL) {
+		return freshkeyapply.ExternalInstall{}, cpa.ErrExternalTargetMoved
+	}
+	key, err := protector.UnprotectString(record.Connection.ManagementKey)
+	if err != nil || !cpa.ValidV8ManagementKey(key) {
+		return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+	}
+	return freshkeyapply.ExternalInstall{
+		Identity:      freshkeyapply.ExternalIdentity(baseURL),
+		Checkpoint:    checkpoint.TargetGeneration,
+		BaseURL:       baseURL,
+		ManagementKey: key,
+	}, nil
 }
 
 // installInitialClientKey persists the default installation's Client Key before

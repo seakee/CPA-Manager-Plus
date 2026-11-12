@@ -175,6 +175,7 @@ type freshApplication struct {
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
 	legacy           http.Handler
+	legacyApp        *app.Context
 	// upgradeWizard is the one Upgrade reader this application serves. It is
 	// built once: the handler owns the per-request mount flight and the one
 	// bounded lookup a poll joins, so constructing one per request would give
@@ -191,6 +192,7 @@ type freshApplication struct {
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
 	credentialHeaderBudget time.Duration
+	afterCredentialHoldBudgetExpiry func()
 	legacyCollector        *collectorservice.Service
 	collectorWorker        *worker.CollectorWorker
 	identityWorker         *identityreconcile.Worker
@@ -202,14 +204,21 @@ type freshApplication struct {
 	// usageStartMu serializes post-completion startup attempts and guards the
 	// two success flags below. Only a fully successful attempt is recorded, so a
 	// failed start is retried by a completion replay or a later trigger.
-	usageStartMu          sync.Mutex
-	usageStarted          bool
-	usageWorkersStarted   bool
-	usageCollectorStarted bool
+	usageStartMu                     sync.Mutex
+	beforeUsageReconcileLock         func()
+	beforeCollectorAuthRejectionLock func(runID uint64)
+	afterCollectorAuthRejection      func(runID uint64)
+	afterExternalCollectorStart      func()
+	usageStarted                     bool
+	usageWorkersStarted              bool
+	usageCollectorStarted            bool
+	usageAwaitCancel                 context.CancelFunc
+	usageAwaitID                     uint64
 	// usageStartReason is the stable code of the last refused Collector start.
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.
-	usageStartReason atomic.Value
+	usageStartReason    atomic.Value
+	activeExternalGrant atomic.Value
 	// externalUsageConfirmed records the administrator's explicit confirmation
 	// to enable usage statistics on the user's own CPA. Without it nothing is
 	// written to that CPA and the collection window never opens. It is
@@ -264,6 +273,23 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
+	a.legacyApp = legacyContext
+	// Fresh owns Collector lifecycle on a.runCtx: narrow monitoring-switch PATCH
+	// updates only Manager's DB settings row, ConnectExternal blocks whole-config
+	// PUT and skips Get's optional CPA usage probe (External posture lives on
+	// GET external/usage), and Managed/Adopt reconcile the host-bound Collector
+	// after PUT.
+	legacyContext.ManagerConfigService.UseExternalCollectorLifecycle()
+	legacyContext.ManagerConfigService.SetCPAUsageProbeAllowed(func(probeCtx context.Context) bool {
+		if a.store == nil {
+			return true
+		}
+		record, loadErr := a.store.Load(probeCtx)
+		if loadErr != nil {
+			return false
+		}
+		return !isCommittedExternalStrategy(record.Operation.Strategy)
+	})
 	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
 		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
 	}
@@ -272,7 +298,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// terminal, not a retry: the Collector stops itself and reports, and this
 	// application records the blocker and drops the started latch so the
 	// workspace stops claiming coverage.
-	legacyCollector.SetAuthRejectionHandler(a.reportCollectorAuthRejection)
+	legacyCollector.SetAuthRejectionRunHandler(a.reportCollectorAuthRejection)
 	// The Collector is the only writer of Fresh usage events, so its inserts are
 	// exactly what the canonical identity projection must attribute.
 	a.usageProjection = identityprojection.NewWorker(legacyStore.IdentityProjections)
@@ -289,6 +315,13 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// externalConnection is the Manager-configured External CPA. It is the only
 	// source of an External management credential; no environment fallback exists.
 	externalConnection := func(ctx context.Context) (string, string, error) {
+		if a.store != nil && a.externalSource != nil {
+			install, err := a.externalSource(ctx)
+			if err != nil {
+				return "", "", err
+			}
+			return install.BaseURL, install.ManagementKey, nil
+		}
 		managerCfg, found, err := settings.LoadManagerConfig(ctx)
 		if err != nil {
 			return "", "", err
@@ -696,7 +729,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "operation" && r.Method == http.MethodGet:
 		writeFreshJSON(w, op)
 	case strings.HasPrefix(resource, "cpamp/"):
-		a.legacyResource(w, r, resource)
+		a.legacyResource(w, r, op, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
 	case resource == "installation/adoption" && r.Method == http.MethodGet:

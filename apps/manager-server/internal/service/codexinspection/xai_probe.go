@@ -3,6 +3,7 @@ package codexinspection
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -78,6 +79,7 @@ type xaiInferenceProbe struct {
 	Healthy    bool
 	StatusCode int
 	Decision   *xaiProbeDecision
+	Err        error
 }
 
 func (s *Service) inspectSingleXAIAccount(
@@ -86,7 +88,7 @@ func (s *Service) inspectSingleXAIAccount(
 	settings model.ManagerCodexInspectionConfig,
 	item account,
 	logger runLogger,
-) model.CodexInspectionResult {
+) (model.CodexInspectionResult, error) {
 	base := resultFromAccount(item)
 	if item.AuthIndex == "" {
 		base.ActionReason = "monitoring.xai_inspection_reason_missing_auth_index"
@@ -104,18 +106,24 @@ func (s *Service) inspectSingleXAIAccount(
 			"inferenceEnabled": settings.XAIInferenceEnabled,
 			"action":           base.Action,
 		})
-		return base
+		return base, nil
 	}
 
 	var billing xaiBillingProbe
 	var billingErr error
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		billing, billingErr = s.requestXAIBilling(ctx, setup, settings, item)
+		if errors.Is(billingErr, cpa.ErrManagementRejected) || errors.Is(billingErr, cpa.ErrExternalTargetMoved) || errors.Is(billingErr, cpa.ErrExternalRejectionUnavailable) {
+			break
+		}
 		if billingErr == nil && (!xaiProbeShouldRetry(billing) || attempt == settings.Retries) {
 			break
 		}
 	}
 	if billingErr != nil {
+		if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(billingErr, cpa.ErrExternalRejectionUnavailable) {
+			return base, billingErr
+		}
 		billing.Failures = append(billing.Failures, *xaiDecision(0, "upstream_error", billingErr.Error()))
 		billing.Partial = true
 	}
@@ -126,10 +134,13 @@ func (s *Service) inspectSingleXAIAccount(
 	if !settings.XAIInferenceEnabled {
 		base = resolveXAIBasicInspectionResult(base, billing)
 		logXAIInspectionResult(ctx, logger, item, base, billing, nil)
-		return base
+		return base, nil
 	}
 
 	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item, billing.OfficialAPIHealthy)
+	if cpa.HasExternalSavedCredentialGate(ctx) && errors.Is(inference.Err, cpa.ErrExternalRejectionUnavailable) {
+		return base, inference.Err
+	}
 	if inference.Healthy {
 		base.Action = "keep"
 		base.ActionReason = "monitoring.xai_inspection_reason_inference_healthy"
@@ -165,7 +176,7 @@ func (s *Service) inspectSingleXAIAccount(
 		base.ErrorDetail = decision.ErrorDetail
 	}
 	logXAIInspectionResult(ctx, logger, item, base, billing, &inference.Healthy)
-	return base
+	return base, nil
 }
 
 func logXAIInspectionResult(
@@ -299,6 +310,9 @@ func (s *Service) requestXAIInferenceWithRetries(
 	var probe xaiInferenceProbe
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
 		probe = s.requestXAIInference(ctx, setup, settings, item, forceOfficialAPI)
+		if errors.Is(probe.Err, cpa.ErrManagementRejected) || errors.Is(probe.Err, cpa.ErrExternalTargetMoved) || errors.Is(probe.Err, cpa.ErrExternalRejectionUnavailable) {
+			break
+		}
 		if probe.Healthy || probe.Decision == nil || !xaiInferenceShouldRetry(*probe.Decision) {
 			break
 		}
@@ -348,7 +362,7 @@ func (s *Service) requestXAIInference(
 		string(data),
 	)
 	if err != nil {
-		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error())}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error()), Err: err}
 	}
 	if !response.HasStatusCode {
 		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "protocol_changed", "xAI inference response missing status_code")}
@@ -866,45 +880,66 @@ func (s *Service) requestProviderAPICallAt(
 	if err != nil {
 		return apiCallResponse{}, 0, err
 	}
-	requestCtx := ctx
-	cancel := func() {}
-	if settings.Timeout > 0 {
-		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+	callOnce := func(callCtx context.Context, baseURL, managementKey string) (apiCallResponse, int, error) {
+		reqCtx := callCtx
+		cancel := func() {}
+		if settings.Timeout > 0 {
+			reqCtx, cancel = context.WithTimeout(callCtx, time.Duration(settings.Timeout)*time.Millisecond)
+		}
+		defer cancel()
+		req, err := http.NewRequestWithContext(
+			reqCtx,
+			http.MethodPost,
+			cpa.NormalizeBaseURL(baseURL)+"/v0/management/api-call",
+			strings.NewReader(string(data)),
+		)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		req.Header.Set("Authorization", "Bearer "+managementKey)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := s.client.Do(req)
+		if err != nil {
+			return apiCallResponse{}, 0, err
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
+			msg := fmt.Sprintf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
+			if res.StatusCode == http.StatusUnauthorized {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementRejected)
+			}
+			if res.StatusCode == http.StatusForbidden {
+				return apiCallResponse{}, res.StatusCode, fmt.Errorf("%s: %w", msg, cpa.ErrManagementClientForbidden)
+			}
+			return apiCallResponse{}, res.StatusCode, errors.New(msg)
+		}
+		var raw map[string]any
+		if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
+			return apiCallResponse{}, res.StatusCode, err
+		}
+		statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
+		bodyRaw, _ := firstValue(raw, "body")
+		bodyText, bodyValue := normalizeBody(bodyRaw)
+		return apiCallResponse{
+			StatusCode:    int(readFloat(statusRaw, 0)),
+			HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
+			BodyText:      bodyText,
+			Body:          bodyValue,
+		}, res.StatusCode, nil
 	}
-	defer cancel()
-	req, err := http.NewRequestWithContext(
-		requestCtx,
-		http.MethodPost,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+"/v0/management/api-call",
-		strings.NewReader(string(data)),
-	)
-	if err != nil {
-		return apiCallResponse{}, 0, err
+	if gate := cpa.ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out apiCallResponse
+		var status int
+		err := gate(ctx, func(gateCtx context.Context, target cpa.ExternalSavedCredentialTarget) error {
+			var callErr error
+			out, status, callErr = callOnce(gateCtx, target.BaseURL, target.ManagementKey)
+			return callErr
+		})
+		return out, status, err
 	}
-	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := s.client.Do(req)
-	if err != nil {
-		return apiCallResponse{}, 0, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
-		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
-	}
-	var raw map[string]any
-	if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
-		return apiCallResponse{}, res.StatusCode, err
-	}
-	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
-	bodyRaw, _ := firstValue(raw, "body")
-	bodyText, bodyValue := normalizeBody(bodyRaw)
-	return apiCallResponse{
-		StatusCode:    int(readFloat(statusRaw, 0)),
-		HasStatusCode: hasStatus && strings.TrimSpace(fmt.Sprint(statusRaw)) != "",
-		BodyText:      bodyText,
-		Body:          bodyValue,
-	}, res.StatusCode, nil
+	return callOnce(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 }
 
 func resolveXAIUserID(file authFile) string {

@@ -81,20 +81,26 @@ func (a *freshApplication) externalRebindRoute(w http.ResponseWriter, r *http.Re
 	// The credential was proven with one authenticated read, so whatever the CPA
 	// refused before is now answered. Clearing it is what ends the local blocker:
 	// the reads resume, and a re-verify leaves the installation itself untouched.
-	a.clearExternalRejection(r.Context())
+	clearErr := a.clearExternalRejection(r.Context())
 	// The connection changed under every cached authority, so the capabilities
 	// proven against the previous credential are forgotten rather than reused. A
 	// re-verify changed no credential, so it has nothing to forget.
 	if !rebound.Reverified {
 		a.pluginCapability.forget()
 	}
-	// Either outcome is the resolution of a refused credential, so collection is
-	// restarted on the credential that now authenticates. The old Collector is
-	// stopped explicitly: it may still be retrying the refused key, and starting a
-	// second run over it would leave two pollers authenticating against a CPA that
-	// bans the address after a handful of failures.
+	// Either outcome is the resolution of a refused credential, and the current
+	// process already treats the proven credential as unblocked (pendingClear),
+	// so the old Collector is stopped and collection is reconciled on the proven
+	// credential under the existing monitoring/version/statistics gates even if
+	// durable refusal DELETE has not committed yet. When clearErr != nil, HTTP
+	// 503 external_rebind_unavailable still prompts retry so durable SQLite state
+	// converges across restarts without leaving a live monitoring gap.
 	a.stopUsageCollection(r.Context())
 	a.startUsageCollection(op)
+	if clearErr != nil {
+		a.writeExternalRebindError(w, clearErr)
+		return
+	}
 	status := "rebound"
 	if rebound.Reverified {
 		status = "reverified"

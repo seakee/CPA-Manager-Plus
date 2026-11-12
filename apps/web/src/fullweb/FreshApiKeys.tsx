@@ -207,13 +207,14 @@ export function FreshApiKeys({
     setRetryAllowed(false);
     ++copyAttempt.current;
     setCopyFeedback('');
+    // The same request ID is reused for a retry after an unknown answer, so it
+    // is minted before the request and kept by the failure branch below.
+    const requestId =
+      pending ||
+      Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+        byte.toString(16).padStart(2, '0')
+      ).join('');
     try {
-      const requestId =
-        pending ||
-        Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
-          byte.toString(16).padStart(2, '0')
-        ).join('');
-      setPending(requestId);
       creationPendingRef.current = true;
       reportPending();
       const result = await client.post<{ key: Key; createdSecret?: string }>(
@@ -287,10 +288,19 @@ export function FreshApiKeys({
         reportPending();
       }
     } catch (err) {
-      if (alive.current) {
-        // HTTP errors are also reconciled: a proxy failure can lose a committed reply.
-        failure(err);
+      if (!alive.current) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        creationPendingRef.current = false;
+        reportPending();
+        onUnauthorized();
+        return;
       }
+      // Only a failed request has an unknown outcome: a proxy failure can lose
+      // a reply the Manager already committed, so the request ID is kept and
+      // the result is reconciled instead of replayed blindly.
+      setPending(requestId);
+      // HTTP errors are also reconciled: a proxy failure can lose a committed reply.
+      failure(err);
     } finally {
       inFlight.current = false;
       if (alive.current) setBusy(false);
@@ -677,7 +687,6 @@ export function FreshApiKeys({
                 <FullWebIcon name="key" size={24} />
               </span>
               <div>
-                <h3>{k('secretTitle')}</h3>
                 <p>{t('keysCreated')}</p>
               </div>
             </div>

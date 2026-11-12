@@ -53,6 +53,42 @@ func (e *actionHTTPError) Error() string {
 	return fmt.Sprintf("%s %s: HTTP %d %s", e.method, e.path, e.statusCode, strings.TrimSpace(e.body))
 }
 
+func (e *actionHTTPError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	switch e.statusCode {
+	case http.StatusUnauthorized:
+		return cpa.ErrManagementRejected
+	case http.StatusForbidden:
+		return cpa.ErrManagementClientForbidden
+	default:
+		return nil
+	}
+}
+
+func wrapReadStatusError(method, path string, statusCode int, body string) error {
+	return &actionHTTPError{
+		method:     method,
+		path:       path,
+		statusCode: statusCode,
+		body:       strings.TrimSpace(body),
+	}
+}
+
+func (c *Client) runManagementCall(
+	ctx context.Context,
+	baseURL string,
+	managementKey string,
+	fn func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error,
+) error {
+	if gate := cpa.ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		return gate(ctx, func(requestCtx context.Context, target cpa.ExternalSavedCredentialTarget) error {
+			return fn(requestCtx, target.BaseURL, target.ManagementKey)
+		})
+	}
+	return fn(ctx, baseURL, managementKey)
+}
 type Client struct {
 	httpClient       *http.Client
 	timeout          time.Duration
@@ -152,27 +188,38 @@ func (c *Client) PhysicalFileExists(ctx context.Context, baseURL, managementKey,
 	if fileName == "" || strings.TrimSpace(fileName) != fileName {
 		return false, errors.New("invalid physical auth file name")
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
-		authFileDownloadEndpoint(cpa.NormalizeBaseURL(baseURL), fileName), nil)
-	if err != nil {
-		return false, errors.New("physical auth file probe unavailable")
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, errors.New("physical auth file probe unavailable")
-	}
-	defer res.Body.Close()
-	switch res.StatusCode {
-	case http.StatusOK:
-		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, errors.New("physical auth file probe inconclusive")
-	}
+	var exists bool
+	err := c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+			authFileDownloadEndpoint(cpa.NormalizeBaseURL(resolvedBaseURL), fileName), nil)
+		if err != nil {
+			return errors.New("physical auth file probe unavailable")
+		}
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return errors.New("physical auth file probe unavailable")
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		switch res.StatusCode {
+		case http.StatusOK:
+			exists = true
+			return nil
+		case http.StatusNotFound:
+			exists = false
+			return nil
+		case http.StatusUnauthorized:
+			return cpa.ErrManagementRejected
+		case http.StatusForbidden:
+			return cpa.ErrManagementClientForbidden
+		default:
+			return errors.New("physical auth file probe inconclusive")
+		}
+	})
+	return exists, err
 }
 
 func (c *Client) Download(ctx context.Context, baseURL string, managementKey string, fileName string) ([]byte, error) {
@@ -180,58 +227,59 @@ func (c *Client) Download(ctx context.Context, baseURL string, managementKey str
 	if fileName == "" {
 		return nil, fmt.Errorf("%w: download selector is empty", ErrAuthFileNotFound)
 	}
-	base := cpa.NormalizeBaseURL(baseURL)
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(
-		reqCtx,
-		http.MethodGet,
-		authFileDownloadEndpoint(base, fileName),
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		if res.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf(
-				"%w: GET %s: HTTP %d %s",
-				ErrAuthFileNotFound,
+	var downloaded []byte
+	err := c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		base := cpa.NormalizeBaseURL(resolvedBaseURL)
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(
+			reqCtx,
+			http.MethodGet,
+			authFileDownloadEndpoint(base, fileName),
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			if res.StatusCode == http.StatusNotFound {
+				return fmt.Errorf(
+					"%w: GET %s: HTTP %d %s",
+					ErrAuthFileNotFound,
+					authFilesDownloadPath,
+					res.StatusCode,
+					strings.TrimSpace(string(body)),
+				)
+			}
+			return wrapReadStatusError(http.MethodGet, authFilesDownloadPath, res.StatusCode, string(body))
+		}
+		limit := c.maxResponseBytes
+		if limit <= 0 {
+			limit = defaultMaxAuthFilesResponseSize
+		}
+		body, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
+		}
+		if int64(len(body)) > limit {
+			return fmt.Errorf(
+				"GET %s: %w",
 				authFilesDownloadPath,
-				res.StatusCode,
-				strings.TrimSpace(string(body)),
+				responseTooLargeError("auth-file download", limit),
 			)
 		}
-		return nil, fmt.Errorf(
-			"GET %s: HTTP %d %s",
-			authFilesDownloadPath,
-			res.StatusCode,
-			strings.TrimSpace(string(body)),
-		)
-	}
-	limit := c.maxResponseBytes
-	if limit <= 0 {
-		limit = defaultMaxAuthFilesResponseSize
-	}
-	body, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesDownloadPath, err)
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf(
-			"GET %s: %w",
-			authFilesDownloadPath,
-			responseTooLargeError("auth-file download", limit),
-		)
-	}
-	return body, nil
+		downloaded = body
+		return nil
+	})
+	return downloaded, err
 }
 
 func (c *Client) Fetch(ctx context.Context, baseURL string, managementKey string) ([]File, error) {
@@ -249,35 +297,41 @@ func (c *Client) Fetch(ctx context.Context, baseURL string, managementKey string
 // It requires the root to be a JSON object containing a "files" array, where every element is a non-empty JSON object.
 // Returns ErrMalformedAuthFilesResponse if the response does not satisfy this authoritative contract.
 func (c *Client) FetchStrictInventory(ctx context.Context, baseURL string, managementKey string) ([]File, error) {
-	base := cpa.NormalizeBaseURL(baseURL)
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+authFilesPath, nil)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return nil, fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
-	}
-	body, limit := c.limitedAuthFilesResponse(res.Body)
-	files, err := scanStrictFiles(body)
-	if err != nil {
-		if body.N == 0 {
-			return nil, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+	var out []File
+	err := c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		base := cpa.NormalizeBaseURL(resolvedBaseURL)
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+authFilesPath, nil)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
 		}
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	if body.N == 0 {
-		return nil, fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
-	}
-	return files, nil
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			return wrapReadStatusError(http.MethodGet, authFilesPath, res.StatusCode, string(body))
+		}
+		body, limit := c.limitedAuthFilesResponse(res.Body)
+		files, err := scanStrictFiles(body)
+		if err != nil {
+			if body.N == 0 {
+				return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+			}
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
+		}
+		if body.N == 0 {
+			return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+		}
+		out = files
+		return nil
+	})
+	return out, err
 }
 
 func (c *Client) Visit(ctx context.Context, baseURL string, managementKey string, visit func(File) (bool, error)) error {
@@ -292,37 +346,40 @@ func (c *Client) visit(
 	authIndex string,
 	visit func(File) (bool, error),
 ) error {
-	base := cpa.NormalizeBaseURL(baseURL)
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, authFilesEndpoint(base, fileName, authIndex), nil)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("GET %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
-	}
 	if visit == nil {
 		return errors.New("CPA auth file visitor is required")
 	}
-	body, limit := c.limitedAuthFilesResponse(res.Body)
-	if err := scanFiles(body, visit); err != nil {
+	return c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		base := cpa.NormalizeBaseURL(resolvedBaseURL)
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, authFilesEndpoint(base, fileName, authIndex), nil)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			return wrapReadStatusError(http.MethodGet, authFilesPath, res.StatusCode, string(body))
+		}
+		body, limit := c.limitedAuthFilesResponse(res.Body)
+		if err := scanFiles(body, visit); err != nil {
+			if body.N == 0 {
+				return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
+			}
+			return fmt.Errorf("GET %s: %w", authFilesPath, err)
+		}
 		if body.N == 0 {
 			return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
 		}
-		return fmt.Errorf("GET %s: %w", authFilesPath, err)
-	}
-	if body.N == 0 {
-		return fmt.Errorf("GET %s: %w", authFilesPath, responseTooLargeError("auth-files response", limit))
-	}
-	return nil
+		return nil
+	})
 }
 
 func (c *Client) Find(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (File, bool, error) {
@@ -1368,41 +1425,44 @@ func (c *Client) patchDisabledTarget(
 	} else if selector != runtimeID {
 		return fmt.Errorf("PATCH %s preflight: %w: mutation target has no stable runtime id", authFilesStatusPath, ErrStatusMutationScopeAmbiguous)
 	}
-	payload := map[string]any{"name": selector, "disabled": disabled}
+	bodyMap := map[string]any{"name": selector, "disabled": disabled}
 	if resolvedAuthIndex := strings.TrimSpace(target.File.AuthIndex); resolvedAuthIndex != "" {
-		payload["auth_index"] = resolvedAuthIndex
+		bodyMap["auth_index"] = resolvedAuthIndex
 	}
-	data, err := json.Marshal(payload)
+	data, err := json.Marshal(bodyMap)
 	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+		return fmt.Errorf("marshal request: %w", err)
 	}
-	base := cpa.NormalizeBaseURL(baseURL)
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPatch, base+authFilesStatusPath, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		if err := ValidateActionResponse(res.Body); err != nil {
+	return c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		base := cpa.NormalizeBaseURL(resolvedBaseURL)
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPatch, base+authFilesStatusPath, bytes.NewReader(data))
+		if err != nil {
 			return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
 		}
-		return nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	return &actionHTTPError{
-		method:     http.MethodPatch,
-		path:       authFilesStatusPath,
-		statusCode: res.StatusCode,
-		body:       strings.TrimSpace(string(body)),
-	}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			if err := ValidateActionResponse(res.Body); err != nil {
+				return fmt.Errorf("PATCH %s: %w", authFilesStatusPath, err)
+			}
+			return nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return &actionHTTPError{
+			method:     http.MethodPatch,
+			path:       authFilesStatusPath,
+			statusCode: res.StatusCode,
+			body:       strings.TrimSpace(string(body)),
+		}
+	})
 }
 
 func (c *Client) DeleteVerifiedSingleCredential(
@@ -1465,33 +1525,36 @@ func (c *Client) Delete(ctx context.Context, baseURL string, managementKey strin
 }
 
 func (c *Client) delete(ctx context.Context, baseURL string, managementKey string, fileName string) error {
-	base := cpa.NormalizeBaseURL(baseURL)
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	endpoint := base + authFilesPath + "?name=" + url.QueryEscape(fileName)
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodDelete, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+managementKey)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		if err := ValidateActionResponse(res.Body); err != nil {
+	return c.runManagementCall(ctx, baseURL, managementKey, func(callCtx context.Context, resolvedBaseURL, resolvedKey string) error {
+		base := cpa.NormalizeBaseURL(resolvedBaseURL)
+		reqCtx, cancel := context.WithTimeout(callCtx, c.timeout)
+		defer cancel()
+		endpoint := base + authFilesPath + "?name=" + url.QueryEscape(fileName)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodDelete, endpoint, nil)
+		if err != nil {
 			return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
 		}
-		return nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	return &actionHTTPError{
-		method:     http.MethodDelete,
-		path:       authFilesPath,
-		statusCode: res.StatusCode,
-		body:       strings.TrimSpace(string(body)),
-	}
+		req.Header.Set("Authorization", "Bearer "+resolvedKey)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
+		}
+		cpa.ObserveExternalResponseStatus(callCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			if err := ValidateActionResponse(res.Body); err != nil {
+				return fmt.Errorf("DELETE %s: %w", authFilesPath, err)
+			}
+			return nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return &actionHTTPError{
+			method:     http.MethodDelete,
+			path:       authFilesPath,
+			statusCode: res.StatusCode,
+			body:       strings.TrimSpace(string(body)),
+		}
+	})
 }
 
 func isPluginVirtualMutationConflict(err error) bool {

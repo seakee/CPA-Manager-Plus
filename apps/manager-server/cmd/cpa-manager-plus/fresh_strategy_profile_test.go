@@ -2773,21 +2773,11 @@ func TestExternalRuntimeStatusSerializesAndRecordsRejectedKey(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			secondAuthorized := make(chan struct{})
+			secondParked := make(chan struct{})
 			var secondOnce sync.Once
-			observingStore := &nthLoadFailingStore{
-				Store: app.store,
-				onCall: func(n int32) {
-					// Request 1 uses store.Load #1 (authorizeCanonical), #2 (externalReadGrant),
-					// #3 (ExternalClient connectionSource) before blocking on externalServer.
-					// Request 2 uses store.Load #4 in authorizeCanonical and then blocks on
-					// legacyCredentialGate before reaching externalReadGrant (#5).
-					if n >= 4 {
-						secondOnce.Do(func() { close(secondAuthorized) })
-					}
-				},
+			app.legacyCredentialGate.onWait = func() {
+				secondOnce.Do(func() { close(secondParked) })
 			}
-			app.store = observingStore
 
 			callStatus := func() *httptest.ResponseRecorder {
 				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
@@ -2802,7 +2792,7 @@ func TestExternalRuntimeStatusSerializesAndRecordsRejectedKey(t *testing.T) {
 			go func() { firstDone <- callStatus() }()
 			<-entered
 			go func() { secondDone <- callStatus() }()
-			<-secondAuthorized
+			<-secondParked
 			if got := upstreamHits.Load(); got != 1 {
 				t.Fatalf("concurrent runtime/status probes reached upstream %d times while first was in flight, want 1", got)
 			}
@@ -4926,5 +4916,108 @@ func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUnti
 	res3 := postExternal(strings.Repeat("c", 32))
 	if res3.Code != http.StatusOK || !strings.Contains(res3.Body.String(), `"stage":"committed"`) {
 		t.Fatalf("ConnectExternal after Supervisor generation change = %d %s, want 200 committed", res3.Code, res3.Body.String())
+	}
+}
+
+// TestUncommittedValidatedExternalCheckpointDoesNotActivateExternalSurface
+// verifies that an uncommitted {Strategy: ConnectExternal, Stage: "validated"}
+// checkpoint does not activate committed-External legacy write replacement,
+// gateway plugin-scope External classification, or runtimeExternal fallback to
+// settings.LoadManagerConfig.
+func TestUncommittedValidatedExternalCheckpointDoesNotActivateExternalSurface(t *testing.T) {
+	var externalHits atomic.Int32
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		externalHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config":{}}`))
+	}))
+	defer externalServer.Close()
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "runtime.token")
+	if err := os.WriteFile(tokenPath, []byte("sup-token-uncommitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/runtime/status" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"stopped","observedAt":"2026-04-12T00:00:00Z","supervisorGeneration":1}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer supervisor.Close()
+
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = opened.Close() }()
+
+	cfg := config.Config{
+		RuntimeURL:       supervisor.URL,
+		RuntimeTokenFile: tokenPath,
+		CPAUpstreamURL:   "http://127.0.0.1:18398",
+	}
+	app := newFreshApplication(opened, cfg, nil)
+
+	protected, err := opened.Protector.ProtectString(externalAuthorityManagement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: r.Operation.Identity.OperationID, Revision: 1,
+			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:         bootstrap.ConnectExternal,
+			TargetIdentity:   freshkeyapply.ExternalIdentity(externalServer.URL),
+			TargetGeneration: 1,
+			Stage:            "validated",
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL:    externalServer.URL,
+			ManagementKey: protected,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Legacy management writes must not claim committed-External replacement
+	// while the checkpoint is still uncommitted (Stage == "validated").
+	putReq := httptest.NewRequest(http.MethodPut, "/v0/management/api-keys", strings.NewReader(`{}`))
+	putReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	putReq.Header.Set("Content-Type", "application/json")
+	putRes := httptest.NewRecorder()
+	app.legacy.ServeHTTP(putRes, putReq)
+	if putRes.Code == http.StatusConflict && strings.Contains(putRes.Body.String(), externalLegacyWriteReplaced) {
+		t.Errorf("uncommitted validated External returned committed-External replacement: %d %s", putRes.Code, putRes.Body.String())
+	}
+
+	// 2. Gateway plugin scope must report unavailable rather than
+	// external/plugin_managed_only on an uncommitted validated checkpoint.
+	pluginView, pluginErr := app.gatewayConfig.ReadPlugins(t.Context())
+	if pluginErr != nil {
+		t.Fatalf("ReadPlugins on uncommitted validated External returned error: %v", pluginErr)
+	}
+	if pluginView.Capability.Mode == freshconfig.ModeExternal || pluginView.Capability.Reason == freshconfig.ReasonPluginManagedOnly {
+		t.Errorf("ReadPlugins on uncommitted validated External = %+v, want non-External unavailable", pluginView.Capability)
+	}
+
+	// 3. runtimeExternal must resolve through externalSource (failing closed on
+	// uncommitted checkpoint) rather than falling back to settings.LoadManagerConfig.
+	if status, statusErr := app.runtimeExternal.Status(t.Context()); statusErr == nil {
+		t.Errorf("runtimeExternal.Status on uncommitted validated External succeeded: %+v", status)
+	}
+	if hits := externalHits.Load(); hits != 0 {
+		t.Errorf("uncommitted validated External contacted External CPA %d times, want 0", hits)
 	}
 }

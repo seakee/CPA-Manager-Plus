@@ -1713,6 +1713,10 @@ export function AccountsPage() {
   // Searches this page wrote itself, in order, until the router reports them back.
   const pendingWorkspaceSearchesRef = useRef<string[]>([]);
   const syncingWorkspaceLocationRef = useRef(false);
+  // The pathname this page was mounted on. A manual address-bar edit moves the
+  // router off this route, and writing the workspace search back afterwards
+  // would restore the accounts URL and strand the legacy redirect.
+  const accountsRoutePathnameRef = useRef(location.pathname);
   const hasProcessedInitialWorkspaceLocationRef = useRef(false);
   const currentHashHistoryStateRef = useRef<unknown>(
     typeof window === 'undefined' ? null : window.history?.state
@@ -4568,18 +4572,24 @@ export function AccountsPage() {
     configurationEditor.reset();
     return true;
   }, [configurationEditor, configurationSaving, showNotification, t]);
-  const { allowNextNavigation, allowNavigationTo } = useUnsavedChangesGuard({
-    enabled: activeView === 'accounts' && (detailTab === 'config' || detailTab === 'models'),
-    shouldBlock: shouldBlockConfigurationNavigation,
-    onConfirmNavigation: handleRouterNavigationConfirm,
-    dialog: {
-      title: t('common.unsaved_changes_title'),
-      message: t('common.unsaved_changes_message'),
-      confirmText: t('common.leave'),
-      cancelText: t('common.stay'),
-      variant: 'danger',
-    },
-  });
+  const { allowNextNavigation, allowNavigationTo, blocker: unsavedChangesBlocker } =
+    useUnsavedChangesGuard({
+      // Only a page with unsaved edits registers a router blocker: registering
+      // one at all makes react-router warn on every manual address-bar edit.
+      enabled:
+        (configurationEditor.dirty || configurationSaving) &&
+        activeView === 'accounts' &&
+        (detailTab === 'config' || detailTab === 'models'),
+      shouldBlock: shouldBlockConfigurationNavigation,
+      onConfirmNavigation: handleRouterNavigationConfirm,
+      dialog: {
+        title: t('common.unsaved_changes_title'),
+        message: t('common.unsaved_changes_message'),
+        confirmText: t('common.leave'),
+        cancelText: t('common.stay'),
+        variant: 'danger',
+      },
+    });
   const discardConfigurationRequestRef = useRef<Promise<boolean> | null>(null);
   const confirmConfigurationDiscard = useCallback(
     (resetDraftOnConfirm = true): Promise<boolean> => {
@@ -5251,6 +5261,8 @@ export function AccountsPage() {
   }, [location.hash, location.pathname, location.search]);
 
   useEffect(() => {
+    // Write URL state back only while this page still owns the route.
+    if (location.pathname !== accountsRoutePathnameRef.current) return;
     if (syncingWorkspaceLocationRef.current) {
       syncingWorkspaceLocationRef.current = false;
       return;
@@ -10403,6 +10415,7 @@ export function AccountsPage() {
 
   return (
     <div className={styles.container} lang={i18n.language}>
+      {unsavedChangesBlocker}
       <section className={styles.controlsPanel}>
         <div className={styles.controlsTabsRow}>
           {renderViewTabs()}

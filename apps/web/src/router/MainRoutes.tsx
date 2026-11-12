@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Navigate,
   useLocation,
@@ -31,6 +32,7 @@ import { SystemPage } from '@/pages/SystemPage';
 import { RuntimeStatusPage } from '@/pages/RuntimeStatusPage';
 import { ManagerUpdatePage } from '@/pages/ManagerUpdatePage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore, useConfigStore } from '@/stores';
@@ -46,15 +48,144 @@ function LegacyAccountsRedirect({ healthMode }: { healthMode: 'local' | 'server'
   return <Navigate to={{ pathname: '/accounts', search: search ? `?${search}` : '' }} replace />;
 }
 
-function PluginGate({ children }: { children: ReactElement }) {
+type PluginProbeStatus = 'unknown' | 'supported' | 'unsupported' | 'error';
+
+interface PluginProbeTarget {
+  apiBase: string;
+  managementKey: string;
+}
+
+interface PluginProbe extends PluginProbeTarget {
+  status: PluginProbeStatus;
+}
+
+function samePluginProbeTarget(
+  left: PluginProbeTarget | null,
+  apiBase: string,
+  managementKey: string
+): boolean {
+  return left !== null && left.apiBase === apiBase && left.managementKey === managementKey;
+}
+
+/**
+ * Only a refusal that names the plugin namespace itself proves the CPA has no
+ * plugins. Every other failure — missing auth, reload, timeout, proxy error —
+ * is evidence about that one request, not about the connection, so it must
+ * never be remembered as "unsupported": that verdict redirects a page that a
+ * supporting CPA would have served.
+ */
+function pluginNamespaceMissing(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 404 || status === 405;
+}
+
+export function PluginGate({ children }: { children: ReactElement }) {
+  const { t } = useTranslation();
   const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
-  if (__DEMO_SITE__ && isDemoMode()) {
+  const apiBase = useAuthStore((state) => state.apiBase);
+  const managementKey = useAuthStore((state) => state.managementKey) ?? '';
+  const updateServerPluginSupport = useAuthStore((state) => state.updateServerPluginSupport);
+  const demo = __DEMO_SITE__ && isDemoMode();
+  const [probe, setProbe] = useState<PluginProbe>({
+    apiBase: '',
+    managementKey: '',
+    status: 'unknown',
+  });
+  // The probe reads and writes this mirror rather than the render state, so a
+  // re-render caused by the probe itself cannot invalidate its own result.
+  const probeRef = useRef<PluginProbe>(probe);
+  // The connection and credential a probe is already being asked of, so a
+  // re-render for an unrelated reason does not ask it twice.
+  const askedRef = useRef<PluginProbeTarget | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  const record = (next: PluginProbe) => {
+    probeRef.current = next;
+    setProbe(next);
+  };
+
+  // The plugin capability travels on a CPA management response header, so a
+  // cold load into `/console/plugins` has not seen it yet. One probe settles
+  // the answer, keyed by the connection and credential it was asked of:
+  // pointing the Console at another CPA or re-authenticating after a 401
+  // probes again instead of inheriting the previous verdict.
+  useEffect(() => {
+    if (demo || supportsPlugin || !apiBase) return;
+    if (
+      samePluginProbeTarget(probeRef.current, apiBase, managementKey) &&
+      probeRef.current.status !== 'unknown'
+    ) {
+      return;
+    }
+    if (samePluginProbeTarget(askedRef.current, apiBase, managementKey)) return;
+    askedRef.current = { apiBase, managementKey };
+    let cancelled = false;
+    void pluginsApi.list().then(
+      () => {
+        // A namespace that answered is itself the evidence: this CPA serves
+        // plugins even when the async capability header has not arrived yet, so
+        // sync the shared store before child plugin pages read `supportsPlugin`.
+        if (!cancelled) {
+          record({ apiBase, managementKey, status: 'supported' });
+          updateServerPluginSupport?.(true);
+        }
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          record({
+            apiBase,
+            managementKey,
+            status: pluginNamespaceMissing(error) ? 'unsupported' : 'error',
+          });
+        }
+      }
+    );
+    return () => {
+      cancelled = true;
+      if (samePluginProbeTarget(askedRef.current, apiBase, managementKey)) {
+        askedRef.current = null;
+      }
+    };
+    // The probe result stays out of the dependencies: settling the probe would
+    // otherwise re-run this effect and cancel its own result.
+  }, [apiBase, attempt, demo, managementKey, supportsPlugin, updateServerPluginSupport]);
+
+  if (demo || supportsPlugin) {
     return children;
   }
-  if (!supportsPlugin) {
+  if (!apiBase) {
+    return <LoadingSpinner />;
+  }
+  const status = samePluginProbeTarget(probe, apiBase, managementKey) ? probe.status : 'unknown';
+  if (status === 'supported') {
+    return children;
+  }
+  if (status === 'unsupported') {
     return <Navigate to="/" replace />;
   }
-  return children;
+  if (status === 'error') {
+    return (
+      <div className="card">
+        <p role="alert" className="card-body" data-testid="plugin-probe-error">
+          {t('fullweb.pluginsProbeFailed')}
+        </p>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            const reset: PluginProbe = { apiBase: '', managementKey: '', status: 'unknown' };
+            probeRef.current = reset;
+            askedRef.current = null;
+            setProbe(reset);
+            setAttempt((current) => current + 1);
+          }}
+        >
+          {t('fullweb.pluginsProbeRetry')}
+        </button>
+      </div>
+    );
+  }
+  return <LoadingSpinner />;
 }
 
 function FeatureGate({
@@ -81,6 +212,39 @@ function FeatureGate({
   }
 
   return children;
+}
+
+/**
+ * Request monitoring is a switch, not a missing feature: when only the
+ * collector is off, the monitoring page itself owns the "not started" state and
+ * its enable action. Redirecting away from it here made the Gateway workspace's
+ * ownership link bounce back and left the user with no way to turn it on.
+ *
+ * Data sub-pages cannot render without the collector, so they pass
+ * `unavailablePath` and land on the monitoring page that explains the switch.
+ */
+export function MonitoringGate({
+  children,
+  unavailablePath,
+}: {
+  children: ReactElement;
+  unavailablePath?: string;
+}) {
+  const availability = usePanelFeatureAvailability();
+
+  if (availability.checking) {
+    return <LoadingSpinner />;
+  }
+
+  if (availability.requestMonitoringAvailable) {
+    return children;
+  }
+
+  if (!unavailablePath && availability.reason === 'monitoring_disabled') {
+    return children;
+  }
+
+  return <Navigate to={unavailablePath ?? '/config'} replace />;
 }
 
 function LogsGate({ children }: { children: ReactElement }) {
@@ -176,17 +340,17 @@ const mainRoutes: RouteObject[] = [
   {
     path: '/monitoring',
     element: (
-      <FeatureGate feature="requestMonitoring">
+      <MonitoringGate>
         <MonitoringCenterPage />
-      </FeatureGate>
+      </MonitoringGate>
     ),
   },
   {
     path: '/monitoring/account-actions',
     element: (
-      <FeatureGate feature="requestMonitoring">
+      <MonitoringGate unavailablePath="/monitoring">
         <AccountActionCandidatesPage />
-      </FeatureGate>
+      </MonitoringGate>
     ),
   },
   {
