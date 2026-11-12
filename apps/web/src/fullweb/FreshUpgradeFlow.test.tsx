@@ -241,28 +241,28 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('shows a pending version declaration as information, not as a failure', async () => {
-    await mount(
-      wizardRead({
-        preflight: () =>
-          preflightDocument({
-            checks: [
-              { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
-              {
-                name: 'source_version',
-                status: 'pending',
-                code: 'upgrade_source_version_declared_at_copy_in',
-                detail: 'expected=v1.14.10 declared=none',
-              },
-              { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
-              { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
-              { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
-              { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
-            ],
-            pendingDeclaration: true,
-            expectedVersion: 'v1.14.10',
-          }),
-      })
-    );
+    const pendingRead = wizardRead({
+      preflight: () =>
+        preflightDocument({
+          checks: [
+            { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
+            {
+              name: 'source_version',
+              status: 'pending',
+              code: 'upgrade_source_version_declared_at_copy_in',
+              detail: 'expected=v1.14.10 declared=none',
+            },
+            { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
+            { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
+            { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
+            { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
+          ],
+          sourceVersion: '',
+          pendingDeclaration: true,
+          expectedVersion: 'v1.14.10',
+        }),
+    });
+    await mount(pendingRead);
 
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
     expect(view()).toContain('--source-version v1.14.10');
@@ -275,6 +275,35 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
     expect(view()).not.toContain('Preflight blocked the upgrade');
     expect(byTestId('upgrade-continue').props.disabled).toBe(false);
+    const readyNotice = `${byTestId('upgrade-preflight-ready').findByType('h3').children.join('')} ${byTestId('upgrade-preflight-ready').findByType('p').children.join('')}`;
+    expect(readyNotice).not.toContain('Every check passed');
+    expect(readyNotice).toContain('copy-in');
+
+    await press('upgrade-continue');
+    expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
+      '--source-version v1.14.10'
+    );
+
+    for (const [locale, forbidden] of [
+      ['zh-CN', '所有检查均通过'],
+      ['zh-TW', '所有檢查均通過'],
+      ['ru', 'Все проверки пройдены'],
+    ] as const) {
+      await act(async () => {
+        renderer!.update(
+          <FreshUpgradeFlow
+            read={pendingRead}
+            language={locale}
+            pollDelays={[10]}
+          />
+        );
+      });
+      await press('upgrade-confirm-back');
+      const localizedReady = `${byTestId('upgrade-preflight-ready').findByType('h3').children.join('')} ${byTestId('upgrade-preflight-ready').findByType('p').children.join('')}`;
+      expect(localizedReady).not.toContain(forbidden);
+      expect(localizedReady).toContain('--source-version');
+      await press('upgrade-continue');
+    }
   });
 
   it('treats a pending flag that disagrees with its row as a typed read failure', async () => {

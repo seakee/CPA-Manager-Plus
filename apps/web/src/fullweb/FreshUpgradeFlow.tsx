@@ -798,8 +798,24 @@ export function FreshUpgradeFlow({
                 >
                   <FullWebIcon name="check" size={24} />
                   <div>
-                    <h3>{t('preflightReadyTitle', language)}</h3>
-                    <p>{t('preflightReadyHelp', language)}</p>
+                    <h3>
+                      {t(
+                        preflightReport.pendingDeclaration ||
+                          preflightReport.checks.some((check) => check.status === 'pending')
+                          ? 'preflightReadyPendingTitle'
+                          : 'preflightReadyTitle',
+                        language
+                      )}
+                    </h3>
+                    <p>
+                      {t(
+                        preflightReport.pendingDeclaration ||
+                          preflightReport.checks.some((check) => check.status === 'pending')
+                          ? 'preflightReadyPendingHelp'
+                          : 'preflightReadyHelp',
+                        language
+                      )}
+                    </p>
                   </div>
                 </div>
               )}
@@ -841,7 +857,10 @@ export function FreshUpgradeFlow({
             <div>
               <dt>{t('confirmSourceVersion', language)}</dt>
               <dd data-testid="upgrade-confirm-version">
-                {preflightReport?.sourceVersion || t('preflightUnknown', language)}
+                {preflightReport?.sourceVersion ||
+                  (preflightReport?.pendingDeclaration && preflightReport.expectedVersion
+                    ? `${t('checkPending', language)} (--source-version ${preflightReport.expectedVersion})`
+                    : t('preflightUnknown', language))}
               </dd>
             </div>
           </dl>

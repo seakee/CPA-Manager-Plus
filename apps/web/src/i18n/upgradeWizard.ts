@@ -41,6 +41,9 @@ const en = {
   preflightReadyTitle: 'The source passed preflight',
   preflightReadyHelp:
     'Every check passed. Nothing has been copied yet; the next step describes what the operation will do.',
+  preflightReadyPendingTitle: 'The source passed preflight (pending copy-in confirmation)',
+  preflightReadyPendingHelp:
+    'No blocking issues were found; pending items must be confirmed at CLI copy-in (--source-version). Nothing has been copied yet; the next step describes what the operation will do.',
   preflightGapsTitle: 'Retained history gaps',
   preflightGapsHelp:
     'Days whose deleted raw events no longer match the retained projection. The copy-in reports them; it never repairs them silently.',
@@ -257,6 +260,9 @@ const zh: typeof en = {
   preflightBlockedHelp: '请在宿主机上逐项解决下列问题后重新预检。当前尚未复制任何数据。',
   preflightReadyTitle: '来源已通过预检',
   preflightReadyHelp: '所有检查均通过。尚未复制任何数据；下一步说明该操作将要做什么。',
+  preflightReadyPendingTitle: '来源已通过预检（含复制阶段待确认项）',
+  preflightReadyPendingHelp:
+    '未发现阻断项，待定检查项需在命令行复制阶段通过 --source-version 声明确认。尚未复制任何数据；下一步说明该操作将要做什么。',
   preflightGapsTitle: '留存历史缺口',
   preflightGapsHelp:
     '这些日期的原始事件已删除，但与留存投影不一致。复制步骤会如实上报，不会静默修补。',
@@ -451,6 +457,9 @@ const tw: typeof en = {
   preflightBlockedHelp: '請在主機上逐項解決下列問題後重新預檢。目前尚未複製任何資料。',
   preflightReadyTitle: '來源已通過預檢',
   preflightReadyHelp: '所有檢查均通過。尚未複製任何資料；下一步說明此操作將要做什麼。',
+  preflightReadyPendingTitle: '來源已通過預檢（含複製階段待確認項目）',
+  preflightReadyPendingHelp:
+    '未發現阻斷項目，待定檢查項目需在命令列複製階段透過 --source-version 宣告確認。尚未複製任何資料；下一步說明此操作將要做什麼。',
   preflightGapsTitle: '留存歷史缺口',
   preflightGapsHelp:
     '這些日期的原始事件已刪除，但與留存投影不一致。複製步驟會如實回報，不會靜默修補。',
@@ -647,6 +656,10 @@ const ru: typeof en = {
   preflightReadyTitle: 'Источник прошёл проверку',
   preflightReadyHelp:
     'Все проверки пройдены. Данные ещё не скопированы; следующий шаг описывает, что сделает операция.',
+  preflightReadyPendingTitle:
+    'Источник прошёл проверку (есть пункты для подтверждения при копировании)',
+  preflightReadyPendingHelp:
+    'Блокирующих проблем не найдено; ожидающие проверки нужно подтвердить при копировании в CLI (--source-version). Данные ещё не скопированы; следующий шаг описывает, что сделает операция.',
   preflightGapsTitle: 'Пробелы в сохранённой истории',
   preflightGapsHelp:
     'Дни, в которых удалённые исходные события больше не совпадают с сохранённой проекцией. Копирование сообщает о них и никогда не исправляет их молча.',
