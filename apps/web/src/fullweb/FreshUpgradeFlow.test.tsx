@@ -257,7 +257,7 @@ describe('Full Web upgrade wizard', () => {
             { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
             { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
           ],
-          sourceVersion: '',
+          sourceVersion: 'unknown',
           pendingDeclaration: true,
           expectedVersion: 'v1.14.10',
         }),
@@ -265,6 +265,10 @@ describe('Full Web upgrade wizard', () => {
     await mount(pendingRead);
 
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
+    expect(byTestId('upgrade-preflight-version').children.join('')).toContain(
+      '--source-version v1.14.10'
+    );
+    expect(byTestId('upgrade-preflight-version').children.join('')).not.toBe('unknown');
     expect(view()).toContain('--source-version v1.14.10');
     expect(view()).toContain('declared at copy-in');
     // The row is labelled pending, in the same vocabulary as every other check.
@@ -303,7 +307,26 @@ describe('Full Web upgrade wizard', () => {
       expect(localizedReady).not.toContain(forbidden);
       expect(localizedReady).toContain('--source-version');
       await press('upgrade-continue');
+      expect(byTestId('upgrade-confirm-version').children.join('')).not.toBe('unknown');
+      expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
+        '--source-version v1.14.10'
+      );
     }
+  });
+
+  it('formats an unknown sourceVersion without pending declaration as localized Not reported rather than raw unknown', async () => {
+    await mount(
+      wizardRead({
+        preflight: () => preflightDocument({ sourceVersion: 'unknown' }),
+      })
+    );
+    expect(byTestId('upgrade-preflight-version').children.join('')).toBe(
+      t('preflightUnknown', 'en')
+    );
+    await press('upgrade-continue');
+    expect(byTestId('upgrade-confirm-version').children.join('')).toBe(
+      t('preflightUnknown', 'en')
+    );
   });
 
   it('treats a pending flag that disagrees with its row as a typed read failure', async () => {
