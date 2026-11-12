@@ -1,22 +1,4 @@
 export const repository = 'https://github.com/seakee/CPA-Manager-Plus';
-// The published documentation moved to cpamp-hq/docs: 1.x serves `main` at the
-// docs origin root and v2 serves `next` under /next/. Upgrade guides are links
-// the updater opens, so they point at the built pages, not at the sources.
-export const docsOrigin = 'https://cpamp-docs.seakee.dev';
-export function assertUpgradeGuide(value, message) {
-  const guide = new URL(value);
-  if (
-    guide.username ||
-    guide.password ||
-    guide.search ||
-    guide.hash ||
-    !((guide.origin === 'https://github.com' &&
-      guide.pathname.startsWith('/seakee/CPA-Manager-Plus/')) ||
-      (guide.origin === docsOrigin &&
-        (guide.pathname.startsWith('/next/') || /^\/(en\/)?[^/]/.test(guide.pathname))))
-  )
-    throw new Error(message);
-}
 const pattern =
   /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 export function parseVersion(tag) {
@@ -266,7 +248,14 @@ export function validateV2Info(info, tag) {
     throw new Error(
       `v2 release must record minimum_direct_upgrade_version ${v2MinimumDirectUpgradeVersion}`
     );
-  assertUpgradeGuide(info.update.upgrade_guide_url, 'Invalid v2 upgrade guide');
+  const guide = new URL(info.update.upgrade_guide_url);
+  if (
+    guide.origin !== 'https://github.com' ||
+    guide.username ||
+    guide.password ||
+    !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/')
+  )
+    throw new Error('Invalid v2 upgrade guide');
   if (info.compatibility?.minimum_cpa_version !== v2MinimumCPAVersion)
     throw new Error(`v2 release must require CPA ${v2MinimumCPAVersion}`);
   if (JSON.stringify(info.supported_modes) !== JSON.stringify(v2SupportedModes))
@@ -388,7 +377,14 @@ export function validateInfo(info, tag, options = {}) {
     throw new Error('Explicit update flags required');
   if (info.update.minimum_direct_upgrade_version !== null)
     parseVersion(info.update.minimum_direct_upgrade_version);
-  assertUpgradeGuide(info.update.upgrade_guide_url, 'Invalid upgrade guide');
+  const guide = new URL(info.update.upgrade_guide_url);
+  if (
+    guide.origin !== 'https://github.com' ||
+    guide.username ||
+    guide.password ||
+    !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/')
+  )
+    throw new Error('Invalid upgrade guide');
   if (
     info.distribution?.docker?.image !== 'seakee/cpa-manager-plus' ||
     info.distribution.docker.version_tag !== tag ||

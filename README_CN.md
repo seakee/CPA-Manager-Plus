@@ -14,7 +14,7 @@
 
 在一个本地面板中管理 Provider、认证文件、OAuth、插件和配置，并持久化请求历史、成本分析与账号自动化状态。
 
-[官网](https://cpamp.seakee.dev/) ｜ [English](README.md) ｜ v2 Beta：[在线演示](https://cpamp-demo.seakee.dev/) ｜ [在线文档](https://cpamp-docs.seakee.dev/next/) ｜ [1.x 文档](https://cpamp-docs.seakee.dev/) ｜ [快速安装](#快速开始)
+[官网](https://cpamp.seakee.dev/) ｜ [English](README.md) ｜ [1.x 在线演示](https://cpamp-demo.seakee.dev/) ｜ [1.x 文档](https://cpamp-docs.seakee.dev/) ｜ v2 Beta [文档](https://cpamp-docs.seakee.dev/next/) ｜ [快速安装](#快速开始)
 
 </div>
 

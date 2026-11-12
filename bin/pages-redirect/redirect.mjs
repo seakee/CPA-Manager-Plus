@@ -1,7 +1,13 @@
 // Pure redirect mapping for the legacy `seakee.github.io/CPA-Manager-Plus/**`
-// GitHub Pages site. Kept dependency-free so both the browser pages
-// (`index.html`, `404.html`) and `tests/pagesRedirect.test.mjs` share one
-// implementation.
+// GitHub Pages site.
+//
+// This file is the single source of truth. `index.html` and `404.html` cannot
+// import it: GitHub Pages serves `404.html` at the *original* nested URL, so a
+// relative `./redirect.mjs` request would resolve under `/docs/en/guide/` and
+// 404. The page fallback therefore inlines the same logic as a classic script,
+// and `tests/pagesRedirect.test.mjs` fails if the inlined copy drifts from this
+// module. Keep the body of `legacyRedirectTarget` free of module syntax so the
+// executable source can be embedded verbatim.
 //
 // Mapping:
 //   /CPA-Manager-Plus/                    -> https://cpamp-demo.seakee.dev/ + hash
@@ -11,9 +17,46 @@
 //
 // Query strings and hashes are preserved on every target.
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 export const DEMO_ORIGIN = 'https://cpamp-demo.seakee.dev';
 export const DOCS_ORIGIN = 'https://cpamp-docs.seakee.dev';
 export const LEGACY_BASE_PATH = '/CPA-Manager-Plus';
+
+// BEGIN INLINE
+function legacyRedirectTarget(pathname, search, hash) {
+  var DEMO = 'https://cpamp-demo.seakee.dev';
+  var DOCS = 'https://cpamp-docs.seakee.dev';
+  var BASE = '/CPA-Manager-Plus';
+  var suffix = (search || '') + (hash || '');
+  var normalized = (pathname || '/').replace(/[\\/]+/g, '/');
+  var rest;
+
+  if (normalized.indexOf(BASE + '/') === 0) {
+    rest = normalized.slice(BASE.length);
+  } else if (normalized === BASE) {
+    rest = '/';
+  } else {
+    rest = normalized;
+  }
+
+  if (rest === '/' || rest === '/index.html') {
+    return DEMO + '/' + suffix;
+  }
+
+  if (rest.indexOf('/docs/') === 0) {
+    return DOCS + '/' + rest.slice('/docs/'.length) + suffix;
+  }
+
+  // `/docs` without a trailing slash is the docs root.
+  if (rest === '/docs') {
+    return DOCS + '/' + suffix;
+  }
+
+  return DEMO + '/' + suffix;
+}
+// END INLINE
 
 /**
  * Resolve the new-site URL for a legacy GitHub Pages request.
@@ -23,34 +66,11 @@ export const LEGACY_BASE_PATH = '/CPA-Manager-Plus';
  * @param {string} [hash] Fragment including `#` when present.
  * @returns {string} Absolute URL on the new site.
  */
-export const resolveRedirectTarget = (pathname, search = '', hash = '') => {
-  const suffix = `${search}${hash}`;
-  const normalized = (pathname || '/').replace(/\/{2,}/g, '/');
-  const withoutBase = normalized.startsWith(`${LEGACY_BASE_PATH}/`)
-    ? normalized.slice(LEGACY_BASE_PATH.length)
-    : normalized === LEGACY_BASE_PATH
-      ? '/'
-      : normalized;
-
-  if (withoutBase === '/' || withoutBase === '/index.html') {
-    return `${DEMO_ORIGIN}/${suffix}`;
-  }
-
-  if (withoutBase.startsWith('/docs/')) {
-    return `${DOCS_ORIGIN}/${withoutBase.slice('/docs/'.length)}${suffix}`;
-  }
-
-  // `/docs` without a trailing slash is the docs root.
-  if (withoutBase === '/docs') {
-    return `${DOCS_ORIGIN}/${suffix}`;
-  }
-
-  return `${DEMO_ORIGIN}/${suffix}`;
-};
+export const resolveRedirectTarget = (pathname, search = '', hash = '') =>
+  legacyRedirectTarget(pathname, search, hash);
 
 /**
- * Redirect the current browser location. Split out so the page bootstrap stays
- * a one-liner and remains testable through `resolveRedirectTarget`.
+ * Redirect the current browser location.
  *
  * @param {{ pathname: string, search?: string, hash?: string }} location
  * @param {(target: string) => void} [replace]
@@ -61,3 +81,26 @@ export const applyRedirect = (location, replace) => {
   if (typeof replace === 'function') replace(target);
   return target;
 };
+
+/**
+ * The executable payload embedded in `index.html` and `404.html`. Derived from
+ * this file's own text between the `BEGIN INLINE`/`END INLINE` markers so the
+ * shipped HTML is byte-identical to the source above. Exported so the drift
+ * test can assert both pages contain it exactly.
+ */
+const MODULE_SOURCE = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+const INLINE_BLOCK = MODULE_SOURCE.slice(
+  MODULE_SOURCE.indexOf('// BEGIN INLINE'),
+  MODULE_SOURCE.indexOf('// END INLINE') + '// END INLINE'.length
+);
+
+/** Full script body inlined in both HTML files, function plus bootstrap. */
+export const INLINE_SCRIPT = `${INLINE_BLOCK}
+(function () {
+  var target = legacyRedirectTarget(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash
+  );
+  window.location.replace(target);
+})();`;
