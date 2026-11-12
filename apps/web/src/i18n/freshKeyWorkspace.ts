@@ -19,6 +19,7 @@ const en = {
   overview: 'Overview',
   rename: 'Rename',
   cancel: 'Cancel',
+  closeDialog: 'Close',
   moreActions: 'More actions',
   generatedOnServer:
     'Manager generates a secure random key when you create it. Its full value is shown once.',
@@ -173,6 +174,7 @@ const zh: typeof en = {
   overview: '概览',
   rename: '修改名称',
   cancel: '取消',
+  closeDialog: '关闭',
   moreActions: '更多操作',
   generatedOnServer: '创建时由 Manager 生成安全随机密钥，完整内容仅显示一次。',
   connectionPending: '模型 API 地址等待网关配置。保存密钥不代表已能接入模型。',
@@ -316,6 +318,7 @@ const tw: typeof en = {
   overview: '概覽',
   rename: '修改名稱',
   cancel: '取消',
+  closeDialog: '關閉',
   moreActions: '更多操作',
   generatedOnServer: '建立時由 Manager 產生安全隨機金鑰，完整內容僅顯示一次。',
   connectionPending: '模型 API 位址等待閘道設定。儲存金鑰不代表已能接入模型。',
@@ -459,6 +462,7 @@ const ru: typeof en = {
   overview: 'Обзор',
   rename: 'Изменить имя',
   cancel: 'Отмена',
+  closeDialog: 'Закрыть',
   moreActions: 'Другие действия',
   generatedOnServer:
     'Manager создаст случайный безопасный ключ. Полное значение показывается один раз.',

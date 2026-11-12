@@ -331,4 +331,174 @@ describe('Canonical revocation recovery UI', () => {
     expect(view.root.findAllByType('select')[0].props.value).toBe(target);
     expect(view.root.findAllByType('select')[2].props.value).toBe('replace');
   });
+
+  it('completes a preset adopted-key revoke in a single confirmation and renders a clean post-commit state', async () => {
+    const adoptedKeys = [
+      {
+        ...keys[0],
+        origin: 'adopted' as const,
+        maskedPreview: 'cpamp_sk_…1111',
+      },
+      {
+        ...keys[1],
+        origin: 'adopted' as const,
+        maskedPreview: 'cpamp_sk_…2222',
+      },
+    ];
+    const preparedRevoke = {
+      id,
+      targetId: target,
+      keeperId: keeper,
+      mode: 'revoke' as const,
+      outcome: 'pending' as const,
+      revision: 1,
+      steps: [{ name: 'revoke' as const, state: 'unattempted' as const, returned: false }],
+    };
+    const committedRevoke = {
+      ...preparedRevoke,
+      outcome: 'committed' as const,
+      revision: 3,
+      steps: [{ name: 'revoke' as const, state: 'observed' as const, returned: true }],
+    };
+    let preflightCalls = 0;
+    const fetchMock = routed(
+      [
+        () => result(null, ''),
+        () => result(preparedRevoke, 'revoke'),
+        () => result(committedRevoke, ''),
+      ],
+      () => {
+        preflightCalls += 1;
+        return preflightCalls === 1
+          ? Response.json({ ready: true, reason: '' })
+          : Response.json({ ready: false, reason: 'key_operation_not_found' });
+      }
+    );
+    const apiClient = createPublicApiClient(
+      () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+      fetchMock
+    );
+    const preset = { targetId: target, mode: 'revoke' as const, seq: 1 };
+
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          keys={adoptedKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={preset}
+        />
+      );
+    });
+
+    const confirmBtn = view.root
+      .findAllByType('button')
+      .find((b) => b.props.children === k('confirmOperation'))!;
+    expect(confirmBtn.props.disabled).toBe(false);
+
+    // A single click on Confirm operation executes both Prepare and Continue.
+    await act(async () => confirmBtn.props.onClick());
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(pending).toHaveBeenLastCalledWith(false);
+
+    // Parent refreshes keys: revoked target is now superseded, leaving 1 active key.
+    const refreshedKeys = [
+      { ...adoptedKeys[0], lifecycle: 'superseded' as const },
+      adoptedKeys[1],
+    ];
+    await act(async () => {
+      view.update(
+        <FreshKeyRevocation
+          keys={refreshedKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={preset}
+        />
+      );
+    });
+
+    const rendered = JSON.stringify(view.toJSON());
+    expect(rendered).toContain(t('keysOperationCommitted'));
+    expect(rendered).not.toContain(t('keysOperationPending'));
+    expect(rendered).toContain(k('adoptedOrigin'));
+    expect(rendered).toContain('cpamp_sk_…1111');
+    expect(rendered).not.toContain(t('keysUnnamed'));
+    expect(rendered).not.toContain(k('operationBlockedUnavailable'));
+    expect(rendered).not.toContain(k('lastKeyProtectionTitle'));
+    expect(preflightCalls).toBe(1);
+  });
+
+  it('retains the durable journal for recovery when a preset step fails mid-flight', async () => {
+    const attemptedAdd = {
+      ...operation,
+      outcome: 'unknown' as const,
+      revision: 2,
+      steps: [{ name: 'add' as const, state: 'attempted' as const, returned: true }, operation.steps[1]],
+    };
+    const observedAdd = {
+      ...operation,
+      outcome: 'pending' as const,
+      revision: 3,
+      steps: [{ name: 'add' as const, state: 'observed' as const, returned: true }, operation.steps[1]],
+    };
+    const committedReplace = {
+      ...operation,
+      outcome: 'committed' as const,
+      revision: 5,
+      steps: operation.steps.map((s) => ({ ...s, state: 'observed' as const, returned: true })),
+    };
+    const fetchMock = routed([
+      () => result(null, ''),
+      () => result(operation, 'add'),
+      () =>
+        Response.json(
+          {
+            code: 'key_operation_unknown',
+            result: { operation: attemptedAdd, nextStep: '', runtimeState: 'effect_unknown', expiresAtMs: 0 },
+          },
+          { status: 503 }
+        ),
+      () => result(observedAdd, 'revoke'),
+      () => result(committedReplace, ''),
+    ]);
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          keys={keys}
+          client={createPublicApiClient(
+            () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+            fetchMock
+          )}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={{ targetId: target, mode: 'replace', seq: 2 }}
+        />
+      );
+    });
+    const confirmBtn = view.root
+      .findAllByType('button')
+      .find((b) => b.props.children === k('confirmOperation'))!;
+    await act(async () => confirmBtn.props.onClick());
+
+    expect(JSON.stringify(view.toJSON())).toContain(t('keysOperationUnknown'));
+    expect(pending).toHaveBeenLastCalledWith(true);
+    expect(button('keysOperationContinue').props.disabled).toBe(true);
+
+    await click('keysOperationCheck');
+    expect(button('keysOperationContinue').props.disabled).toBe(false);
+    await click('keysOperationContinue');
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(pending).toHaveBeenLastCalledWith(false);
+  });
 });
