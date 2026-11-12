@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>CPA Manager Plus has moved</title>
+    <link rel="canonical" href="https://cpamp-demo.seakee.dev/" />
+    <meta http-equiv="refresh" content="0; url=https://cpamp-demo.seakee.dev/" />
+    <script type="module">
+      import { applyRedirect } from './redirect.mjs';
+
+      // GitHub Pages serves this page for every unknown path, including the
+      // legacy `/docs/<rest>` documentation deep links.
+      applyRedirect(window.location, (target) => window.location.replace(target));
+    </script>
+  </head>
+  <body>
+    <p>
+      The CPA Manager Plus demo moved to
+      <a href="https://cpamp-demo.seakee.dev/">https://cpamp-demo.seakee.dev/</a>.
+      Documentation moved to
+      <a href="https://cpamp-docs.seakee.dev/">https://cpamp-docs.seakee.dev/</a>.
+    </p>
+  </body>
+</html>
