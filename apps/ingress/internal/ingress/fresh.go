@@ -38,6 +38,8 @@ func (f *FreshRoutes) Matches(p string) bool {
 }
 func (f *FreshRoutes) Active() bool { return f.State().OperationID != "" }
 
+func (s FreshRouteState) Valid() bool { return validFreshState(s) }
+
 var freshTarget = regexp.MustCompile(`^/[A-Za-z0-9._~$&+,/:;=@-]+$`)
 
 func validFreshState(s FreshRouteState) bool {

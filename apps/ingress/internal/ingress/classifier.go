@@ -13,6 +13,9 @@ import (
 // against the Manager routing contract and fixture.
 const FixedBootstrapDiscoveryPath = "/.well-known/cpamp-bootstrap"
 
+// FixedBootstrapUIPath is the fixed Bootstrap browser entry shell under FixedBootstrapDiscoveryPath.
+const FixedBootstrapUIPath = FixedBootstrapDiscoveryPath + "/ui"
+
 // Route identifies the internal owner of a public request.
 type Route uint8
 

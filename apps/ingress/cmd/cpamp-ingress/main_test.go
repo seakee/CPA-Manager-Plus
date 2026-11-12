@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/ingress/internal/ingress"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -101,6 +103,77 @@ func TestLegacyGatewayRequiresExplicitManagerAuthority(t *testing.T) {
 	// A new Ingress process has no legacy acknowledgement to reuse.
 	if managerLegacyGateway(managerFreshAuthority(u))(t.Context()) {
 		t.Fatal("restart inherited stale legacy mode")
+	}
+}
+
+func TestPreFreshPostureDistinguishesBootstrapCommittedLegacyAndOutage(t *testing.T) {
+	var status atomic.Int32
+	var body atomic.Value
+	body.Store("")
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != ingress.FreshRoutingAuthorityPath || r.Method != http.MethodGet {
+			t.Errorf("unexpected authority request: %s %s", r.Method, r.URL.Path)
+		}
+		code := int(status.Load())
+		w.WriteHeader(code)
+		if code == http.StatusOK {
+			_, _ = io.WriteString(w, body.Load().(string))
+		}
+	}))
+	defer manager.Close()
+	u, err := url.Parse(manager.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posture := managerPreFreshPosture(managerFreshAuthority(u))
+
+	// 404 (pristine Fresh, pre-prepare Fresh, or read-only startup inspection) -> PreFreshBootstrap.
+	status.Store(http.StatusNotFound)
+	if got := posture(t.Context()); got != ingress.PreFreshBootstrap {
+		t.Fatalf("404 posture = %v, want PreFreshBootstrap", got)
+	}
+
+	// Valid uncommitted Fresh projection -> PreFreshBootstrap.
+	uncommitted := ingress.FreshRouteState{InstallationID: "install-one", Generation: "gen-one", OperationID: "op-one", Revision: 1, Target: "/console", Committed: false}
+	status.Store(http.StatusOK)
+	body.Store(freshAuthorityJSON(uncommitted, ""))
+	if got := posture(t.Context()); got != ingress.PreFreshBootstrap {
+		t.Fatalf("uncommitted 200 posture = %v, want PreFreshBootstrap", got)
+	}
+
+	// Committed Fresh projection awaiting Restore after Ingress restart -> PreFreshPendingClosed.
+	committed := uncommitted
+	committed.Committed = true
+	body.Store(freshAuthorityJSON(committed, ""))
+	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
+		t.Fatalf("committed 200 posture = %v, want PreFreshPendingClosed", got)
+	}
+
+	// Empty/incomplete 200 JSON -> fail closed to PreFreshPendingClosed.
+	body.Store("{}")
+	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
+		t.Fatalf("empty 200 posture = %v, want PreFreshPendingClosed", got)
+	}
+
+	// 503 unavailable -> PreFreshPendingClosed.
+	status.Store(http.StatusServiceUnavailable)
+	if got := posture(t.Context()); got != ingress.PreFreshPendingClosed {
+		t.Fatalf("503 posture = %v, want PreFreshPendingClosed", got)
+	}
+
+	// Explicit 204 legacy Manager -> PreFreshLegacyGateway and retained across outage.
+	status.Store(http.StatusNoContent)
+	if got := posture(t.Context()); got != ingress.PreFreshLegacyGateway {
+		t.Fatalf("204 posture = %v, want PreFreshLegacyGateway", got)
+	}
+	manager.Close()
+	if got := posture(t.Context()); got != ingress.PreFreshLegacyGateway {
+		t.Fatalf("post-outage legacy posture = %v, want PreFreshLegacyGateway", got)
+	}
+
+	// Fresh Ingress process with Manager unreachable -> PreFreshPendingClosed.
+	if got := managerPreFreshPosture(managerFreshAuthority(u))(t.Context()); got != ingress.PreFreshPendingClosed {
+		t.Fatalf("unreachable Manager posture = %v, want PreFreshPendingClosed", got)
 	}
 }
 

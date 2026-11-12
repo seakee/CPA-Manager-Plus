@@ -183,9 +183,40 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 		b, _ := io.ReadAll(response.Body)
 		return response.StatusCode, string(b), response.Header
 	}
+	noRedirectClient := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	rawRequest := func(method, path, accept string) (int, http.Header) {
+		t.Helper()
+		r, e := http.NewRequest(method, origin+path, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if accept != "" {
+			r.Header.Set("Accept", accept)
+		}
+		response, e := noRedirectClient.Do(r)
+		if e != nil {
+			t.Fatal(e)
+		}
+		_ = response.Body.Close()
+		return response.StatusCode, response.Header
+	}
 	base := bootstrap.FixedBootstrapAPIPath
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded before routing prepare/Apply")
+	}
+	if code, header := rawRequest("GET", "/console", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"); code != http.StatusSeeOther || header.Get("Location") != bootstrap.FixedBootstrapUIPath || header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("pre-prepare browser /console = %d Location=%q Cache-Control=%q", code, header.Get("Location"), header.Get("Cache-Control"))
+	}
+	if code, _, header := request("GET", "/console", "", nil); code != http.StatusOK || header.Get("X-CPAMP-Route-Owner") != "manager" {
+		t.Fatalf("pre-prepare browser /console did not land on Bootstrap UI: status=%d owner=%q", code, header.Get("X-CPAMP-Route-Owner"))
+	}
+	if code, header := rawRequest("GET", "/console", "*/*"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare non-HTML /console = %d Location=%q", code, header.Get("Location"))
+	}
+	if code, header := rawRequest("POST", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare POST /console = %d Location=%q", code, header.Get("Location"))
 	}
 	for _, auth := range []string{"Bearer cpamp_RoutingIntegration0123456789!", "Bearer cpa-management-key", "", "Fresh wrong-session"} {
 		code, body, _ := request("GET", base+"operation", auth, nil)
@@ -208,6 +239,9 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded with prepared authority before Apply")
 	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusSeeOther || header.Get("Location") != bootstrap.FixedBootstrapUIPath {
+		t.Fatalf("prepared uncommitted browser /console = %d Location=%q", code, header.Get("Location"))
+	}
 	if code, body, _ := request("POST", base+"routing/activate", "Fresh "+payload.Token, map[string]any{"identity": id}); code != 200 {
 		t.Fatal("activate real Ingress", code, body)
 	}
@@ -227,6 +261,9 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway activated during Fresh")
 	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit non-target browser /console = %d Location=%q", code, header.Get("Location"))
+	}
 	// Ingress alone restarts; Manager republishes the original committed
 	// checkpoint rather than creating another operation or reopening claim.
 	before := op.Revision
@@ -234,6 +271,9 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	start()
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded after Ingress restart before Restore")
+	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit Ingress restart browser /console before Restore = %d Location=%q", code, header.Get("Location"))
 	}
 	if e = fixed.Routing.Restore(t.Context()); e != nil {
 		t.Fatal(e)
