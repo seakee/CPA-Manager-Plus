@@ -34,7 +34,7 @@ import { ManagerUpdatePage } from '@/pages/ManagerUpdatePage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
-import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
+import { ensureRouteBasePathname } from '@/router/routeBase';
 import { useAuthStore, useConfigStore } from '@/stores';
 
 type FeatureKey = 'requestMonitoring' | 'modelPrices';
@@ -85,7 +85,6 @@ export function PluginGate({ children }: { children: ReactElement }) {
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey) ?? '';
   const updateServerPluginSupport = useAuthStore((state) => state.updateServerPluginSupport);
-  const demo = __DEMO_SITE__ && isDemoMode();
   const [probe, setProbe] = useState<PluginProbe>({
     apiBase: '',
     managementKey: '',
@@ -110,7 +109,7 @@ export function PluginGate({ children }: { children: ReactElement }) {
   // pointing the Console at another CPA or re-authenticating after a 401
   // probes again instead of inheriting the previous verdict.
   useEffect(() => {
-    if (demo || supportsPlugin || !apiBase) return;
+    if (supportsPlugin || !apiBase) return;
     if (
       samePluginProbeTarget(probeRef.current, apiBase, managementKey) &&
       probeRef.current.status !== 'unknown'
@@ -148,9 +147,9 @@ export function PluginGate({ children }: { children: ReactElement }) {
     };
     // The probe result stays out of the dependencies: settling the probe would
     // otherwise re-run this effect and cancel its own result.
-  }, [apiBase, attempt, demo, managementKey, supportsPlugin, updateServerPluginSupport]);
+  }, [apiBase, attempt, managementKey, supportsPlugin, updateServerPluginSupport]);
 
-  if (demo || supportsPlugin) {
+  if (supportsPlugin) {
     return children;
   }
   if (!apiBase) {

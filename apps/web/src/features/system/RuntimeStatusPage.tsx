@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useAuthStore, useNotificationStore } from '@/stores';
-import { isDemoMode } from '@/features/demo/demoMode';
 import { createPublicApiClient, PublicApiError } from '@/fullweb/publicApi';
 import type { FullWebCredential, PublicApiClient } from '@/fullweb/publicApi';
 import type { ArtifactStatus } from '@/fullweb/freshArtifact';
@@ -48,31 +47,6 @@ type RuntimeOperation = {
 
 const defaultClient = createPublicApiClient();
 const POLL_MS = 30_000;
-
-// The demo site runs without a Manager behind it, so the Full Web API this page
-// reads cannot answer there and the page would forever show the unavailable
-// observation. It renders this fixture instead — the same approach the panel
-// feature availability hook takes with `demoAvailability`. The gateway reports
-// no lifecycle capability, so the demo offers no start, stop or restart it
-// could not perform.
-const DEMO_ARTIFACT_ID = 'sha256:' + 'a'.repeat(64);
-const DEMO_RUNTIME_STATUS: RuntimeStatusResponse = {
-  mode: 'embedded',
-  status: 'ready',
-  manager: { state: 'ready' },
-  gateway: {
-    identity: 'demo-runtime',
-    generation: 1,
-    protocolVersion: 'v1',
-    state: 'ready',
-    ready: true,
-    artifactId: DEMO_ARTIFACT_ID,
-  },
-};
-const DEMO_RUNTIME_ARTIFACT: Pick<ArtifactStatus, 'active' | 'required'> = {
-  active: { artifactId: DEMO_ARTIFACT_ID, origin: 'bundled' },
-  required: false,
-};
 
 function newRequestId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -130,7 +104,6 @@ export function RuntimeStatusPage({
     if (i18n.exists(key)) return t(key);
     return value ? value.replace(/_/g, ' ') : t('runtime_status.operation_unknown');
   };
-  const demo = __DEMO_SITE__ && isDemoMode();
   const [status, setStatus] = useState<RuntimeStatusResponse | null>(null);
   const [operation, setOperation] = useState<RuntimeOperation | null>(null);
   const [artifact, setArtifact] = useState<Pick<ArtifactStatus, 'active' | 'required'> | null>(null);
@@ -141,12 +114,6 @@ export function RuntimeStatusPage({
   const busyRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    if (demo) {
-      setStatus({ ...DEMO_RUNTIME_STATUS, observedAt: new Date().toISOString() });
-      setArtifact(DEMO_RUNTIME_ARTIFACT);
-      setLoading(false);
-      return;
-    }
     if (!managerCredential) {
       setLoading(false);
       return;
@@ -184,16 +151,15 @@ export function RuntimeStatusPage({
     } finally {
       if (requestId === requestRef.current) setLoading(false);
     }
-  }, [client, demo, managerCredential, onUnauthorized]);
+  }, [client, managerCredential, onUnauthorized]);
 
   useEffect(() => {
     void refresh();
-    if (demo) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
     }, POLL_MS);
     return () => window.clearInterval(timer);
-  }, [demo, refresh]);
+  }, [refresh]);
 
   const queryOperation = useCallback(
     async (requestId: string) => {

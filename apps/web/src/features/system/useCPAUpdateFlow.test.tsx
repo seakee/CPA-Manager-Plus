@@ -27,7 +27,6 @@ const mocks = vi.hoisted(() => ({
   auth: { isAuthenticated: true, managementKey: 'key-a' },
   base: 'https://manager.test',
   available: true,
-  demo: false,
 }));
 vi.mock('@/stores', () => ({
   useAuthStore: (select: (state: typeof mocks.auth) => unknown) => select(mocks.auth),
@@ -37,10 +36,6 @@ vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
     managerServiceAvailable: mocks.available,
     managerServiceBase: mocks.base,
   }),
-}));
-vi.mock('@/features/demo/demoMode', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/features/demo/demoMode')>()),
-  isDemoMode: () => mocks.demo,
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const request = vi.spyOn(axios, 'request');
@@ -111,7 +106,6 @@ beforeEach(() => {
   mocks.auth = { isAuthenticated: true, managementKey: 'key-a' };
   mocks.base = 'https://manager.test';
   mocks.available = true;
-  mocks.demo = false;
   storage = memoryStorage();
   vi.stubGlobal('localStorage', storage);
   vi.stubGlobal('navigator', { locks: memoryLockManager() });
@@ -873,8 +867,8 @@ describe('CPA recovery context boundaries', () => {
     expect(posts()).toHaveLength(0);
   });
 
-  it('performs zero real CPA calls in demo, even with a retained intent', async () => {
-    mocks.demo = true;
+  it('performs zero real CPA calls when Manager service is unavailable, even with a retained intent', async () => {
+    mocks.available = false;
     storeIntent();
     await mount();
     await act(async () => {
@@ -882,7 +876,7 @@ describe('CPA recovery context boundaries', () => {
       await flow.prepare();
       await flow.check();
     });
-    expect(flow.demo).toBe(true);
+    expect(flow.available).toBe(false);
     expect(request).not.toHaveBeenCalled();
   });
 });

@@ -79,7 +79,6 @@ beforeEach(() => {
     busy: false,
     storageError: null,
     available: false,
-    demo: false,
     scope: 'test-cpa-scope',
     unresolved: false,
     canCheck: false,

@@ -10,7 +10,6 @@ import type { PluginListResponse } from '@/types';
 import { createPluginHostStyleBridge, type PluginHostStyleBridge } from './pluginHostStyle';
 import {
   collectPluginResourceEntries,
-  isDemoPluginDocument,
   PLUGIN_RESOURCES_REFRESH_EVENT,
   resolvePluginAssetURL,
 } from './pluginResources';
@@ -121,15 +120,9 @@ function PluginResourcePageContent() {
   }, [data?.plugins, menuIndex, pluginID]);
 
   // Only same-origin plugin resource paths are supported; anything else is
-  // reported as an unsupported plugin page instead of being loaded. The
-  // published demo site has no Manager proxy behind it, so its own mock
-  // documents are the single, build-time-only exception.
+  // reported as an unsupported plugin page instead of being loaded.
   const declaredPath = resource?.menu.path.trim() ?? '';
-  const iframeSrc = resource
-    ? isDemoPluginDocument(declaredPath)
-      ? declaredPath
-      : resolvePluginAssetURL(declaredPath, apiBase)
-    : '';
+  const iframeSrc = resource ? resolvePluginAssetURL(declaredPath, apiBase) : '';
   const unsupportedTarget = Boolean(declaredPath) && !iframeSrc;
 
   const refreshPluginHostStyle = useCallback(() => {

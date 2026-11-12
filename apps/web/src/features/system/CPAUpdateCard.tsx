@@ -20,17 +20,15 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const { status, intent } = flow;
   const external = status?.mode === 'external';
-  const state = flow.demo
-    ? 'demo'
-    : !flow.available
-      ? 'unavailable'
-      : !flow.initialized
-        ? 'loading'
-        : flow.statusError
-          ? 'status_unavailable'
-          : external
-            ? 'managed_externally'
-            : status?.state || 'status_unavailable';
+  const state = !flow.available
+    ? 'unavailable'
+    : !flow.initialized
+      ? 'loading'
+      : flow.statusError
+        ? 'status_unavailable'
+        : external
+          ? 'managed_externally'
+          : status?.state || 'status_unavailable';
   const showFlow = !!intent && !external;
   const confirm = (kind: Confirmation['kind']) => {
     setConfirmation({ kind, scope: flow.scope, intent, record: flow.recoveryRecord });

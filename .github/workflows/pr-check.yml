@@ -46,7 +46,7 @@ jobs:
       native_control: ${{ steps.classify.outputs.native_control }}
       docker: ${{ steps.classify.outputs.docker }}
       docker_all_images: ${{ steps.classify.outputs.docker_all_images }}
-      demo_docs: ${{ steps.classify.outputs.demo_docs }}
+      docs: ${{ steps.classify.outputs.docs }}
       release_content: ${{ steps.classify.outputs.release_content }}
 
     steps:
@@ -156,9 +156,6 @@ jobs:
         run: npm --workspace apps/web run build:bundle
         env:
           VERSION: ci
-
-      - name: Check demo isolation
-        run: npm run check:demo-isolation
 
       - name: Verify packaged read-only preflight HTTP transport
         env:
@@ -915,10 +912,10 @@ jobs:
           CPAMP_RUNTIME19_SKIP_BUILD: 'true'
         run: bin/ci/runtime19-phase1-exit-e2e.sh
 
-  demo-docs:
-    name: Demo and Docs
+  docs:
+    name: Docs
     needs: changes
-    if: needs.changes.outputs.demo_docs == 'true'
+    if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -933,11 +930,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Build demo site
-        run: npm --workspace apps/web run build:demo:bundle
-        env:
-          VERSION: ci-demo
 
       - name: Build docs site
         run: npm run docs:build
@@ -995,7 +987,7 @@ jobs:
       - manager-server-windows-sqlite
       - native-control
       - docker-build
-      - demo-docs
+      - docs
       - release-content
     if: always()
     runs-on: ubuntu-latest
@@ -1013,7 +1005,7 @@ jobs:
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
           DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
-          DEMO_DOCS_RESULT: ${{ needs['demo-docs'].result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
           RELEASE_CONTENT_RESULT: ${{ needs['release-content'].result }}
         shell: bash
         run: |
@@ -1035,7 +1027,7 @@ jobs:
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"
             "Docker Build:${DOCKER_BUILD_RESULT}"
-            "Demo and Docs:${DEMO_DOCS_RESULT}"
+            "Docs:${DOCS_RESULT}"
             "Release Content:${RELEASE_CONTENT_RESULT}"
           )
 

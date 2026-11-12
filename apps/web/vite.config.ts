@@ -38,14 +38,9 @@ function getVersion(): string {
   return 'dev';
 }
 
-const isDemoSiteBuild = (mode: string) =>
-  mode === 'demo' || process.env.DEMO_SITE === 'true' || process.env.VITE_DEMO_SITE === 'true';
-
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  const demoSite = isDemoSiteBuild(mode);
-  const useRealDemoFixtures = demoSite || mode === 'test';
-  const panelBuild = !demoSite && mode !== 'test';
+  const panelBuild = mode !== 'test';
 
   return {
     plugins: [
@@ -71,7 +66,6 @@ export default defineConfig(({ mode }) => {
     define: {
       __PANEL_LITE__: JSON.stringify(panelBuild),
       __APP_VERSION__: JSON.stringify(getVersion()),
-      __DEMO_SITE__: JSON.stringify(demoSite || mode === 'test'),
     },
     resolve: {
       alias: [
@@ -87,15 +81,6 @@ export default defineConfig(({ mode }) => {
               },
             ]
           : []),
-        {
-          find: /^@\/features\/demo\/demoFixtures$/,
-          replacement: path.resolve(
-            __dirname,
-            useRealDemoFixtures
-              ? './src/features/demo/demoFixtures.ts'
-              : './src/features/demo/demoFixtures.empty.ts'
-          ),
-        },
         {
           find: '@',
           replacement: path.resolve(__dirname, './src'),
@@ -115,7 +100,7 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       target: 'es2020',
-      outDir: demoSite ? 'dist-demo' : 'dist/panel',
+      outDir: 'dist/panel',
       assetsInlineLimit: 100000000,
       chunkSizeWarningLimit: 100000000,
       cssCodeSplit: false,

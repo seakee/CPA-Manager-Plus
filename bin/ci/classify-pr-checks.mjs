@@ -15,7 +15,7 @@ const CHECK_NAMES = [
   'native_control',
   'docker',
   'docker_all_images',
-  'demo_docs',
+  'docs',
   'release_content',
 ];
 
@@ -218,8 +218,7 @@ const triggersDockerAllImages = (filePath) =>
   startsWithPath(filePath, 'docker') ||
   filePath === '.dockerignore';
 
-const triggersDemoDocs = (filePath) =>
-  startsWithPath(filePath, 'apps/web') ||
+const triggersDocs = (filePath) =>
   startsWithPath(filePath, 'apps/docs') ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json';
@@ -249,7 +248,7 @@ export const classifyChangedFiles = (changedFiles) => {
     native_control: files.some(triggersNativeControl),
     docker: files.some(triggersDocker),
     docker_all_images: files.some(triggersDockerAllImages),
-    demo_docs: files.some(triggersDemoDocs),
+    docs: files.some(triggersDocs),
     release_content: files.some(triggersReleaseContent),
   };
 };

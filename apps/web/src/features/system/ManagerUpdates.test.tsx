@@ -16,7 +16,6 @@ vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
     managerServiceBase: 'http://manager.test',
   }),
 }));
-vi.mock('@/features/demo/demoMode', () => ({ isDemoMode: () => false }));
 vi.mock('./managerUpdateApi', () => ({ managerUpdateRequest: mocks.request }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en' } }),

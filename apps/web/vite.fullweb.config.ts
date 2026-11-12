@@ -64,7 +64,6 @@ export default defineConfig({
   base: './',
   define: {
     __PANEL_LITE__: 'false',
-    __DEMO_SITE__: 'false',
     __APP_VERSION__: JSON.stringify(process.env.VERSION || 'dev'),
   },
   plugins: [react(), loadingBoundaryEvidence(), cspNoncePlaceholder()],

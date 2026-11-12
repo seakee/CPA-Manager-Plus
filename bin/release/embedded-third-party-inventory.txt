@@ -113,7 +113,7 @@
     "apps/manager-server/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
     "apps/runtime-supervisor/go.mod": "sha256:05ddebf81d0e395d7629c0dc2ae61368065f1c8427dd845aca9f50152ff06589",
     "apps/runtime-supervisor/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
-    "apps/web/package.json": "sha256:26dfc107d28c4eec5faa03265f00522431de05afb6a249f6cd98045e27447b22",
+    "apps/web/package.json": "sha256:481f5e4e89cd5bcdfc5ac68f06d2cd64d0659babbb69dcbb356469ad05cd6542",
     "package-lock.json": "sha256:3ebf352d75bafa70ff10935d000094668c4fecfe72434dc85744f1efe3e41a45"
   },
   "schemaVersion": 1,

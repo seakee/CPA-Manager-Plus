@@ -108,15 +108,17 @@ describe('GitHub Actions workflow integrity', () => {
     expect(trigger).toContain('- edited');
   });
 
-  it('keeps Demo and Docs inside the stable required-check aggregate', () => {
+  it('keeps Docs inside the stable required-check aggregate', () => {
     const workflow = readWorkflow('pr-check.yml');
-    const demoJob = jobBlock(workflow, 'demo-docs');
+    const docsJob = jobBlock(workflow, 'docs');
     const requiredJob = jobBlock(workflow, 'required');
 
-    expect(demoJob).toContain('name: Demo and Docs');
-    expect(requiredJob).toContain('- demo-docs');
-    expect(requiredJob).toContain("DEMO_DOCS_RESULT: ${{ needs['demo-docs'].result }}");
-    expect(requiredJob).toContain('"Demo and Docs:${DEMO_DOCS_RESULT}"');
+    expect(docsJob).toContain('name: Docs');
+    expect(docsJob).toContain('run: npm run docs:build');
+    expect(docsJob).not.toContain('ci-demo');
+    expect(requiredJob).toContain('- docs');
+    expect(requiredJob).toContain('DOCS_RESULT: ${{ needs.docs.result }}');
+    expect(requiredJob).toContain('"Docs:${DOCS_RESULT}"');
   });
 
   it('always calls the security workflow and waits for it in Required checks', () => {

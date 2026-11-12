@@ -1,33 +1,7 @@
 import axios from 'axios';
 import type { UsagePayload } from '@/features/monitoring/hooks/useUsageData';
-import {
-  getDemoAccountActionCandidates,
-  getDemoAccountHistory,
-  getDemoAccountWindowUsage,
-  getDemoAccountProcessingPolicy,
-  getDemoApiKeyAliases,
-  getDemoAuthFiles,
-  getDemoCodexInspectionRun,
-  getDemoDashboardSummary,
-  getDemoHeaderSnapshots,
-  getDemoManagerConfig,
-  getDemoModelPriceUsageSummary,
-  getDemoModelPrices,
-  getDemoMonitoringAnalytics,
-  getDemoQuotaCooldowns,
-  getDemoUsagePayload,
-  getDemoUsageServiceInfo,
-  getDemoUsageServiceStatus,
-} from '@/features/demo/demoFixtures';
-import { isDemoMode } from '@/features/demo/demoMode';
-import { hasCodexInspectionStableIdentity } from '@/features/monitoring/model/codexInspectionOwnership';
-import type { AuthFileItem, QuotaModelScope } from '@/types';
+import type { QuotaModelScope } from '@/types';
 import { normalizeApiBase } from '@/utils/connection';
-import {
-  getAuthFileStatusIdentityKey,
-  readAuthFileStatusPhysicalName,
-  resolveAuthFileStatusMutationTarget,
-} from '@/utils/authFileStatusMutation';
 import type { ModelPrice } from '@/utils/usage';
 
 const USAGE_SERVICE_ERROR_CODES = new Set([
@@ -524,74 +498,6 @@ export interface UsageImportSession {
   error?: string;
   result?: UsageImportResponse;
 }
-
-const demoUsageImportSessions = new Map<string, UsageImportSession>();
-let demoUsageImportSessionSequence = 0;
-
-const cloneUsageImportSession = (session: UsageImportSession): UsageImportSession => ({
-  ...session,
-  result: session.result
-    ? { ...session.result, warnings: [...(session.result.warnings ?? [])] }
-    : undefined,
-});
-
-const getDemoUsageImportSession = (sessionId: string): UsageImportSession => {
-  const session = demoUsageImportSessions.get(sessionId);
-  if (!session) {
-    const error = new Error('usage import session not found') as UsageServiceApiError;
-    error.code = 'usage_import_session_not_found';
-    throw error;
-  }
-  return cloneUsageImportSession(session);
-};
-
-const createDemoUsageImportSession = (filename: string, sizeBytes: number): UsageImportSession => {
-  const now = Date.now();
-  const id = `demo-usage-import-${++demoUsageImportSessionSequence}`;
-  const session: UsageImportSession = {
-    id,
-    filename,
-    status: 'uploading',
-    size_bytes: sizeBytes,
-    received_bytes: 0,
-    chunk_size_bytes: Math.min(4 * 1024 * 1024, sizeBytes),
-    created_at_ms: now,
-    updated_at_ms: now,
-    expires_at_ms: now + 24 * 60 * 60 * 1000,
-  };
-  demoUsageImportSessions.set(id, session);
-  return cloneUsageImportSession(session);
-};
-
-const uploadDemoUsageImportSessionChunk = (
-  sessionId: string,
-  offset: number,
-  chunkSize: number
-): UsageImportSession => {
-  const session = getDemoUsageImportSession(sessionId);
-  session.received_bytes = Math.min(session.size_bytes, offset + chunkSize);
-  session.status = session.received_bytes === session.size_bytes ? 'ready' : 'uploading';
-  session.updated_at_ms = Date.now();
-  demoUsageImportSessions.set(sessionId, session);
-  return cloneUsageImportSession(session);
-};
-
-const completeDemoUsageImportSession = (sessionId: string): UsageImportSession => {
-  const session = getDemoUsageImportSession(sessionId);
-  session.status = 'completed';
-  session.updated_at_ms = Date.now();
-  session.result = { format: 'jsonl', added: 12, skipped: 0, total: 12, failed: 0 };
-  demoUsageImportSessions.set(sessionId, session);
-  return cloneUsageImportSession(session);
-};
-
-const cancelDemoUsageImportSession = (sessionId: string): UsageImportSession => {
-  const session = getDemoUsageImportSession(sessionId);
-  session.status = 'cancelled';
-  session.updated_at_ms = Date.now();
-  demoUsageImportSessions.set(sessionId, session);
-  return cloneUsageImportSession(session);
-};
 
 export interface UsageExportResponse {
   blob: Blob;
@@ -1105,166 +1011,6 @@ export interface AccountQuotaSnapshotQueryResponse {
     windows: AccountQuotaSnapshotWindow[];
   }>;
 }
-
-const buildDemoAccountQuotaSnapshotWindows = (
-  account: AccountQuotaSnapshotQueryAccount,
-  nowMs: number
-): AccountQuotaSnapshotWindow[] => {
-  if (account.provider === 'codex' && account.account.auth_index === 'codex-team-01') {
-    const fiveHourDuration = 5 * 60 * 60;
-    const weeklyDuration = 7 * 24 * 60 * 60;
-    const fiveHourEndMs = nowMs + 2 * 60 * 60 * 1000 + 18 * 60 * 1000;
-    const fiveHourStartMs = fiveHourEndMs - fiveHourDuration * 1000;
-    const weeklyEndMs = nowMs + (3 * 24 * 60 * 60 + 8 * 60 * 60) * 1000;
-    const weeklyStartMs = weeklyEndMs - weeklyDuration * 1000;
-    const observedAtMs = nowMs - 8 * 60 * 1000;
-    return [
-      {
-        provider_window_id: 'five-hour',
-        window_kind: 'five_hour',
-        window_mode: 'fixed',
-        model_scope_kind: 'all',
-        source: 'api_query',
-        observed_at_ms: observedAtMs,
-        boundary_accuracy: 'exact',
-        cycle_start_ms: fiveHourStartMs,
-        cycle_end_ms: fiveHourEndMs,
-        duration_seconds: fiveHourDuration,
-        used_percent: 36,
-        remaining_percent: 64,
-        relationship_kind: 'concurrent_subwindow',
-        container_provider_window_id: 'weekly',
-        stale: false,
-        logical_window_id: 101,
-        activation_generation: 2,
-        availability: 'active',
-        first_seen_at_ms: weeklyStartMs - weeklyDuration * 1000,
-        last_seen_at_ms: observedAtMs,
-        current_cycle: {
-          id: 301,
-          activation_id: 201,
-          state: 'active',
-          scheduled_start_ms: fiveHourStartMs,
-          scheduled_end_ms: fiveHourEndMs,
-          actual_start_ms: fiveHourStartMs,
-          duration_seconds: fiveHourDuration,
-          boundary_accuracy: 'exact',
-          parent_cycle_id: 302,
-          forecast_eligible: true,
-        },
-        previous_cycle: {
-          id: 299,
-          activation_id: 201,
-          state: 'closed',
-          scheduled_start_ms: fiveHourStartMs - fiveHourDuration * 1000,
-          scheduled_end_ms: fiveHourStartMs,
-          actual_start_ms: fiveHourStartMs - fiveHourDuration * 1000,
-          actual_end_ms: fiveHourStartMs,
-          duration_seconds: fiveHourDuration,
-          boundary_accuracy: 'exact',
-          end_reason: 'scheduled',
-          parent_cycle_id: 298,
-          forecast_eligible: true,
-        },
-      },
-      {
-        provider_window_id: 'weekly',
-        window_kind: 'weekly',
-        window_mode: 'fixed',
-        model_scope_kind: 'all',
-        source: 'api_query',
-        observed_at_ms: observedAtMs,
-        boundary_accuracy: 'exact',
-        cycle_start_ms: weeklyStartMs,
-        cycle_end_ms: weeklyEndMs,
-        duration_seconds: weeklyDuration,
-        used_percent: 41,
-        remaining_percent: 59,
-        stale: false,
-        logical_window_id: 102,
-        activation_generation: 1,
-        availability: 'active',
-        first_seen_at_ms: weeklyStartMs - weeklyDuration * 1000,
-        last_seen_at_ms: observedAtMs,
-        current_cycle: {
-          id: 302,
-          activation_id: 202,
-          state: 'active',
-          scheduled_start_ms: weeklyStartMs,
-          scheduled_end_ms: weeklyEndMs,
-          actual_start_ms: weeklyStartMs,
-          duration_seconds: weeklyDuration,
-          boundary_accuracy: 'exact',
-          forecast_eligible: true,
-        },
-        previous_cycle: {
-          id: 300,
-          activation_id: 202,
-          state: 'closed',
-          scheduled_start_ms: weeklyStartMs - weeklyDuration * 1000,
-          scheduled_end_ms: weeklyStartMs + 3 * 24 * 60 * 60 * 1000,
-          actual_start_ms: weeklyStartMs - 3 * 24 * 60 * 60 * 1000,
-          actual_end_ms: weeklyStartMs,
-          duration_seconds: weeklyDuration,
-          boundary_accuracy: 'exact',
-          end_reason: 'early_reset',
-          forecast_eligible: false,
-        },
-      },
-      {
-        provider_window_id: 'monthly',
-        window_kind: 'monthly',
-        window_mode: 'fixed',
-        model_scope_kind: 'all',
-        source: 'inspection',
-        observed_at_ms: nowMs - 5 * 24 * 60 * 60 * 1000,
-        boundary_accuracy: 'exact',
-        cycle_start_ms: nowMs - 20 * 24 * 60 * 60 * 1000,
-        cycle_end_ms: nowMs + 10 * 24 * 60 * 60 * 1000,
-        duration_seconds: 30 * 24 * 60 * 60,
-        used_percent: 12,
-        remaining_percent: 88,
-        stale: true,
-        logical_window_id: 103,
-        activation_generation: 1,
-        availability: 'inactive',
-        first_seen_at_ms: nowMs - 20 * 24 * 60 * 60 * 1000,
-        last_seen_at_ms: nowMs - 5 * 24 * 60 * 60 * 1000,
-        missing_since_ms: nowMs - 4 * 24 * 60 * 60 * 1000,
-        deactivated_at_ms: nowMs - 4 * 24 * 60 * 60 * 1000,
-      },
-    ];
-  }
-  if (account.provider !== 'xai' || account.account.auth_index !== 'xai-ops-01') return [];
-  const observedAtMs = nowMs - 60_000;
-  return [
-    {
-      provider_window_id: 'included-free-rolling-24h',
-      window_kind: 'rolling_24h',
-      window_mode: 'rolling',
-      model_scope_kind: 'models',
-      model_scope_key: 'grok-4.5-build-free',
-      model_ids: ['grok-4.5-build-free'],
-      source: 'response_body',
-      source_observation_id: 'demo-xai-free-usage-429',
-      observed_at_ms: observedAtMs,
-      boundary_accuracy: 'estimated',
-      cycle_end_ms: observedAtMs + 24 * 60 * 60 * 1000,
-      duration_seconds: 24 * 60 * 60,
-      used_percent: 100,
-      remaining_percent: 0,
-      used_value: 1_024_413,
-      limit_value: 1_000_000,
-      quota_unit: 'tokens',
-      stale: false,
-      logical_window_id: 201,
-      activation_generation: 1,
-      availability: 'active',
-      first_seen_at_ms: observedAtMs,
-      last_seen_at_ms: observedAtMs,
-    },
-  ];
-};
 
 export interface MonitoringAnalyticsSummary {
   total_calls: number;
@@ -2038,575 +1784,8 @@ const parseContentDispositionFilename = (value: string): string => {
   return plainMatch?.[1]?.trim() || '';
 };
 
-const getDemoAccountActionCandidateResponse = (
-  id: number,
-  status?: AccountActionStatus
-): AccountActionCandidateResponse => {
-  const candidates = getDemoAccountActionCandidates().items;
-  const fallback = candidates[0];
-  const item = candidates.find((candidate) => candidate.id === id) ?? fallback;
-  return {
-    item: {
-      ...item,
-      status: status ?? item.status,
-      updatedAtMs: Date.now(),
-    },
-  };
-};
-
-const getDemoAccountActionCandidatesResponse = (
-  status: string,
-  limit: number
-): AccountActionCandidatesResponse => {
-  const response = getDemoAccountActionCandidates();
-  const filtered =
-    !status || status === 'all'
-      ? response.items
-      : response.items.filter((item) => item.status === status);
-  return {
-    items: filtered.slice(0, limit),
-    pendingCount: response.pendingCount,
-  };
-};
-
-const getDemoPatchedAccountProcessingPolicy = (
-  patch: AccountProcessingPolicyPatch
-): AccountProcessingPolicy => {
-  const policy = getDemoAccountProcessingPolicy();
-  return {
-    ...policy,
-    updatedAtMs: Date.now(),
-    codexQuotaCooldown: {
-      ...policy.codexQuotaCooldown,
-      enabled: patch.codexQuotaCooldownEnabled ?? policy.codexQuotaCooldown.enabled,
-    },
-    authIssueQueue: {
-      ...policy.authIssueQueue,
-      enabled: patch.authIssueQueueEnabled ?? policy.authIssueQueue.enabled,
-    },
-    authIssueAutoDisable: {
-      ...policy.authIssueAutoDisable,
-      enabled: patch.authIssueAutoDisableEnabled ?? policy.authIssueAutoDisable.enabled,
-    },
-  };
-};
-
-const createDemoCodexInspectionError = (message: string, status: number): UsageServiceApiError => {
-  const details = { error: message, code: 'request_failed' };
-  const error = new Error(message) as UsageServiceApiError;
-  error.name = 'UsageServiceApiError';
-  error.status = status;
-  error.code = 'request_failed';
-  error.details = details;
-  error.data = details;
-  return error;
-};
-
-const cloneDemoCodexInspectionDetail = (
-  detail: CodexInspectionRunDetail
-): CodexInspectionRunDetail => JSON.parse(JSON.stringify(detail)) as CodexInspectionRunDetail;
-
-export const isDemoCodexInspectionStatusMutationAmbiguous = (
-  _results: Array<Pick<CodexInspectionResult, 'accountKey' | 'fileName'>>,
-  result: Pick<
-    CodexInspectionResult,
-    | 'accountKey'
-    | 'fileName'
-    | 'action'
-    | 'authIndex'
-    | 'accountId'
-    | 'provider'
-    | 'accountSnapshot'
-  >,
-  authFiles = getDemoAuthFiles().files
-): boolean => {
-  if (result.action !== 'disable' && result.action !== 'enable') return false;
-  const fileName = result.fileName.trim();
-  if (!fileName) return true;
-  const accountSnapshot = result.accountSnapshot?.trim() ?? '';
-  const resolution = resolveAuthFileStatusMutationTarget(authFiles, {
-    name: fileName,
-    authIndex: result.authIndex,
-    provider: result.provider,
-    accountId: result.accountId,
-    accountSnapshot: accountSnapshot && accountSnapshot !== fileName ? accountSnapshot : null,
-  });
-  return (
-    resolution.failure !== null ||
-    resolution.scope === 'ambiguous' ||
-    resolution.scope === 'expanded-child'
-  );
-};
-
-type DemoSourceFileStatusActionPlan = {
-  canonicalResultId: number;
-  action: 'disable' | 'enable';
-  memberResultIds: Set<number>;
-};
-
-export const buildDemoCodexInspectionSourceFileStatusActionPlans = (
-  results: CodexInspectionResult[],
-  authFiles: AuthFileItem[] = getDemoAuthFiles().files
-): Map<string, DemoSourceFileStatusActionPlan> => {
-  const plans = new Map<string, DemoSourceFileStatusActionPlan>();
-  const filesByName = new Map<string, AuthFileItem[]>();
-  authFiles.forEach((file) => {
-    const fileName = readAuthFileStatusPhysicalName(file);
-    if (!fileName) return;
-    const siblings = filesByName.get(fileName) ?? [];
-    siblings.push(file);
-    filesByName.set(fileName, siblings);
-  });
-
-  const resolved = results.flatMap((result) => {
-    if (result.action !== 'disable' && result.action !== 'enable') return [];
-    const accountSnapshot = result.accountSnapshot?.trim() ?? '';
-    const resolution = resolveAuthFileStatusMutationTarget(authFiles, {
-      name: result.fileName,
-      authIndex: result.authIndex,
-      provider: result.provider,
-      accountId: result.accountId,
-      accountSnapshot:
-        accountSnapshot && accountSnapshot !== result.fileName.trim() ? accountSnapshot : null,
-    });
-    if (!resolution.target || resolution.failure !== null) return [];
-    return [{ result, resolution }];
-  });
-
-  filesByName.forEach((currentFiles, fileName) => {
-    if (currentFiles.length <= 1) return;
-    const entries = resolved.filter(
-      (entry) => readAuthFileStatusPhysicalName(entry.resolution.target!) === fileName
-    );
-    const matchedEntries: typeof entries = [];
-    const members: number[] = [];
-    let action: 'disable' | 'enable' | null = null;
-    for (const currentFile of currentFiles) {
-      const matches = entries.filter((entry) => entry.resolution.target === currentFile);
-      if (matches.length !== 1) return;
-      const matchedAction = matches[0].result.action;
-      if (matchedAction !== 'disable' && matchedAction !== 'enable') return;
-      if (action === null) action = matchedAction;
-      if (matchedAction !== action) return;
-      matchedEntries.push(matches[0]);
-      members.push(matches[0].result.id);
-    }
-    const sourceEntries = matchedEntries.filter(
-      (entry) => entry.resolution.scope === 'source-file'
-    );
-    if (!action || sourceEntries.length > 1) return;
-    const canonicalEntry = sourceEntries[0] ?? matchedEntries[0];
-    if (!canonicalEntry) return;
-    plans.set(fileName, {
-      canonicalResultId: canonicalEntry.result.id,
-      action,
-      memberResultIds: new Set(members),
-    });
-  });
-  return plans;
-};
-
-export const getDemoCodexInspectionActionIdentityKey = (
-  item: Pick<
-    CodexInspectionResult,
-    'fileName' | 'provider' | 'authIndex' | 'accountId' | 'accountSnapshot' | 'displayAccount'
-  >
-): string => {
-  const fileName = item.fileName.trim();
-  const accountSnapshot = item.accountSnapshot?.trim() ?? '';
-  return getAuthFileStatusIdentityKey({
-    name: fileName,
-    provider: item.provider,
-    authIndex: item.authIndex,
-    accountId: item.accountId,
-    accountSnapshot: accountSnapshot && accountSnapshot !== fileName ? accountSnapshot : null,
-  });
-};
-
-let demoCodexInspectionRunState: CodexInspectionRunDetail | null = null;
-
-export const resetDemoCodexInspectionRunState = () => {
-  demoCodexInspectionRunState = null;
-};
-
-const readDemoCodexInspectionRunState = (): CodexInspectionRunDetail => {
-  if (!demoCodexInspectionRunState) {
-    demoCodexInspectionRunState = getDemoCodexInspectionRun();
-  }
-  return cloneDemoCodexInspectionDetail(demoCodexInspectionRunState);
-};
-
-const replaceDemoCodexInspectionRunState = (
-  detail: CodexInspectionRunDetail
-): CodexInspectionRunDetail => {
-  demoCodexInspectionRunState = cloneDemoCodexInspectionDetail(detail);
-  return cloneDemoCodexInspectionDetail(demoCodexInspectionRunState);
-};
-
-const getDemoCodexInspectionActionsResponse = (
-  runId: number,
-  resultIds: number[],
-  actionOverrides: CodexInspectionActionOverride[] = []
-): CodexInspectionActionsResponse => {
-  const requestedIDs = new Set(resultIds.filter((resultId) => resultId > 0));
-  if (requestedIDs.size === 0) {
-    throw createDemoCodexInspectionError('codex inspection action result ids are required', 400);
-  }
-
-  const detail = readDemoCodexInspectionRunState();
-  if (runId !== detail.run.id) {
-    throw createDemoCodexInspectionError('codex inspection run not found', 404);
-  }
-
-  const completedAt = Date.now();
-  const overrideByID = new Map<number, 'delete'>();
-  actionOverrides.forEach((item) => {
-    const result = detail.results.find((candidate) => candidate.id === item.resultId);
-    if (
-      item.resultId <= 0 ||
-      item.action !== 'delete' ||
-      !requestedIDs.has(item.resultId) ||
-      result?.action !== 'reauth'
-    ) {
-      throw createDemoCodexInspectionError('codex inspection action override is invalid', 400);
-    }
-    overrideByID.set(item.resultId, item.action);
-  });
-
-  const manualResults = detail.results.map((result) => {
-    const action = overrideByID.get(result.id);
-    return action ? { ...result, action } : result;
-  });
-  const selected = manualResults.filter((result) => requestedIDs.has(result.id));
-  if (selected.length === 0) {
-    throw createDemoCodexInspectionError('codex inspection has no actionable results', 400);
-  }
-  const executableActions = new Set(['delete', 'disable', 'enable']);
-  const normalizeActionStatus = (result: CodexInspectionResult): string => {
-    switch (result.actionStatus) {
-      case 'none':
-      case 'pending':
-      case 'success':
-      case 'failed':
-      case 'skipped':
-      case 'needs_review':
-        return result.actionStatus;
-      default:
-        return executableActions.has(result.action) ? 'pending' : 'none';
-    }
-  };
-  const sourceFilePlans = buildDemoCodexInspectionSourceFileStatusActionPlans(
-    selected.filter((result) => {
-      const status = normalizeActionStatus(result);
-      return status !== 'success' && status !== 'skipped' && status !== 'needs_review';
-    })
-  );
-  type DemoActionGroup = { key: string; items: CodexInspectionResult[]; mixed: boolean };
-  const itemsByFileName = new Map<string, CodexInspectionResult[]>();
-  manualResults.forEach((result) => {
-    const fileName = result.fileName.trim();
-    if (!fileName) return;
-    const fileItems = itemsByFileName.get(fileName) ?? [];
-    fileItems.push(result);
-    itemsByFileName.set(fileName, fileItems);
-  });
-  const groupByResultID = new Map<number, DemoActionGroup>();
-  itemsByFileName.forEach((allFileItems, fileName) => {
-    const fileItems = allFileItems.filter((item) => executableActions.has(item.action));
-    if (fileItems.length === 0) return;
-    if (fileItems.some((item) => item.action === 'delete')) {
-      const group = {
-        key: `file:${fileName}`,
-        items: fileItems,
-        mixed: allFileItems.some((item) => item.action !== 'delete'),
-      };
-      fileItems.forEach((item) => groupByResultID.set(item.id, group));
-      return;
-    }
-    const identityGroups = new Map<string, DemoActionGroup>();
-    fileItems.forEach((item) => {
-      const identityKey = getDemoCodexInspectionActionIdentityKey(item);
-      const group = identityGroups.get(identityKey) ?? {
-        key: `credential:${identityKey}`,
-        items: [],
-        mixed: false,
-      };
-      if (group.items.length > 0 && group.items[0].action !== item.action) group.mixed = true;
-      group.items.push(item);
-      identityGroups.set(identityKey, group);
-      groupByResultID.set(item.id, group);
-    });
-  });
-  const seenGroupKeys = new Set<string>();
-  const plannedOutcomes = selected.map((result) => {
-    const action = result.action;
-    const currentStatus = normalizeActionStatus(result);
-    if (!executableActions.has(action)) {
-      return {
-        result,
-        action,
-        status: 'skipped',
-        success: true,
-        error: '该巡检结果不是可执行动作',
-      };
-    }
-    if (currentStatus === 'success') {
-      return {
-        result,
-        action,
-        status: 'skipped',
-        success: true,
-        error: '该建议动作已执行成功',
-      };
-    }
-    if (currentStatus === 'skipped') {
-      return {
-        result,
-        action,
-        status: 'skipped',
-        success: true,
-        error: '该建议动作已跳过',
-      };
-    }
-    if (currentStatus === 'needs_review') {
-      return {
-        result,
-        action,
-        status: 'needs_review',
-        success: true,
-        error: '该建议动作需要到凭证管理中人工处理',
-      };
-    }
-    const fileName = result.fileName.trim();
-    if (!fileName) {
-      return {
-        result,
-        action,
-        status: 'failed',
-        success: false,
-        error: '认证文件名为空，无法执行',
-      };
-    }
-    if (
-      !hasCodexInspectionStableIdentity({
-        fileName: result.fileName,
-        runtimeId: result.runtimeId,
-        provider: result.provider,
-        authIndex: result.authIndex,
-        accountId: result.accountId,
-        accountSnapshot: result.accountSnapshot,
-      })
-    ) {
-      return {
-        result,
-        action,
-        status: 'needs_review',
-        success: true,
-        error: '巡检结果缺少稳定账号标识，已阻止处理，请人工确认',
-      };
-    }
-    const sourceFilePlan = sourceFilePlans.get(fileName);
-    if (
-      sourceFilePlan?.memberResultIds.has(result.id) &&
-      sourceFilePlan.canonicalResultId !== result.id
-    ) {
-      return {
-        result,
-        action,
-        status: 'skipped',
-        success: true,
-        error: '该认证目标已由另一条结果处理',
-      };
-    }
-    if (
-      sourceFilePlan?.canonicalResultId !== result.id &&
-      isDemoCodexInspectionStatusMutationAmbiguous(manualResults, result)
-    ) {
-      return {
-        result,
-        action,
-        status: 'needs_review',
-        success: true,
-        error:
-          '认证凭证缺少唯一 runtime ID，或 runtime ID 与物理文件选择器冲突，已阻止状态修改，请人工确认',
-      };
-    }
-    const group = groupByResultID.get(result.id) ?? {
-      key: `credential:${result.id}`,
-      items: [result],
-      mixed: false,
-    };
-    if (group.mixed) {
-      return {
-        result,
-        action,
-        status: 'needs_review',
-        success: true,
-        error: '同一认证文件下存在多个不同建议动作，文件级处理已阻止，请到凭证管理中手动处理',
-      };
-    }
-    if (seenGroupKeys.has(group.key)) {
-      return {
-        result,
-        action,
-        status: 'skipped',
-        success: true,
-        error: '该认证目标已由另一条结果处理',
-      };
-    }
-    seenGroupKeys.add(group.key);
-    return {
-      result,
-      action,
-      status: 'success',
-      success: true,
-      error: '',
-    };
-  });
-  const outcomeByID = new Map(plannedOutcomes.map((outcome) => [outcome.result.id, outcome]));
-  const actionCount = plannedOutcomes.filter((outcome) => outcome.status === 'success').length;
-  let nextLogID = detail.logs.reduce((maximum, entry) => Math.max(maximum, entry.id), 0) + 1;
-  const createLog = (level: string, message: string, logDetail: unknown) => ({
-    id: nextLogID++,
-    runId: detail.run.id,
-    level,
-    message,
-    detail: logDetail,
-    createdAtMs: completedAt,
-  });
-
-  detail.logs.push(
-    createLog('info', '手动处理账号开始', {
-      requestedCount: resultIds.length,
-      actionCount,
-    })
-  );
-  plannedOutcomes
-    .filter((outcome) => outcome.status !== 'success')
-    .forEach((outcome) => {
-      const failed = outcome.status === 'failed' || !outcome.success;
-      detail.logs.push(
-        createLog(
-          failed ? 'error' : outcome.status === 'needs_review' ? 'warning' : 'info',
-          failed ? '手动处理账号失败' : '手动处理账号跳过',
-          {
-            fileName: outcome.result.fileName,
-            displayAccount: outcome.result.displayAccount,
-            action: outcome.action,
-            status: outcome.status,
-            reason: outcome.error,
-          }
-        )
-      );
-    });
-  detail.results = detail.results.map((result) => {
-    const outcome = outcomeByID.get(result.id);
-    if (!outcome) return result;
-    if (normalizeActionStatus(result) === 'success' && outcome.status === 'skipped') {
-      return result;
-    }
-    if (outcome.status !== 'success') {
-      return {
-        ...result,
-        actionStatus: outcome.status,
-        executedAction: undefined,
-        actionError: outcome.error,
-      };
-    }
-    return {
-      ...result,
-      disabled:
-        outcome.action === 'disable' ? true : outcome.action === 'enable' ? false : result.disabled,
-      actionStatus: 'success',
-      executedAction: outcome.action,
-      actionError: undefined,
-    };
-  });
-  plannedOutcomes
-    .filter((outcome) => outcome.status === 'success')
-    .forEach((outcome) => {
-      detail.logs.push(
-        createLog('success', '手动处理账号成功', {
-          fileName: outcome.result.fileName,
-          displayAccount: outcome.result.displayAccount,
-          action: outcome.action,
-        })
-      );
-    });
-  const outcomeSummary = plannedOutcomes.reduce(
-    (summary, outcome) => {
-      if (outcome.status === 'success') summary.success += 1;
-      else if (outcome.status === 'skipped') summary.skipped += 1;
-      else if (outcome.status === 'needs_review') summary.needsReview += 1;
-      else summary.failed += 1;
-      return summary;
-    },
-    { success: 0, failed: 0, skipped: 0, needsReview: 0 }
-  );
-  detail.logs.push(
-    createLog(
-      outcomeSummary.failed > 0 || outcomeSummary.needsReview > 0 ? 'warning' : 'success',
-      '手动处理账号完成',
-      {
-        successCount: outcomeSummary.success,
-        failedCount: outcomeSummary.failed,
-        skippedCount: outcomeSummary.skipped,
-        needsReviewCount: outcomeSummary.needsReview,
-        resultWriteFailedCount: 0,
-      }
-    )
-  );
-  detail.run.disabledCount = detail.results.filter((result) => result.disabled).length;
-  detail.run.enabledCount = detail.results.length - detail.run.disabledCount;
-  detail.run.error =
-    outcomeSummary.failed > 0
-      ? `${outcomeSummary.failed} 个手动处理动作执行失败，详见巡检日志`
-      : undefined;
-  detail.run.updatedAtMs = completedAt;
-  const nextDetail = replaceDemoCodexInspectionRunState(detail);
-  return {
-    outcomes: plannedOutcomes.map((outcome) => ({
-      resultId: outcome.result.id,
-      accountKey: outcome.result.accountKey,
-      fileName: outcome.result.fileName,
-      displayAccount: outcome.result.displayAccount,
-      action: outcome.action,
-      status: outcome.status,
-      success: outcome.success,
-      ...(outcome.error ? { error: outcome.error } : {}),
-    })),
-    detail: nextDetail,
-  };
-};
-
-const getDemoModelPriceSyncResponse = (models?: string[]): ModelPriceSyncResponse => {
-  const prices = getDemoModelPrices().prices;
-  const selectedModels = new Set((models || []).map((model) => model.trim()).filter(Boolean));
-  const selectedPrices =
-    selectedModels.size > 0
-      ? Object.fromEntries(Object.entries(prices).filter(([model]) => selectedModels.has(model)))
-      : prices;
-
-  return {
-    prices: selectedPrices,
-    source: 'demo',
-    sources: ['demo'],
-    imported: Object.keys(selectedPrices).length,
-    skipped: 0,
-    matched: selectedPrices,
-    candidates: [],
-    unmatched: [],
-    proxyUsed: false,
-    sourceResults: [{ source: 'demo', models: Object.keys(selectedPrices).length, skipped: 0 }],
-  };
-};
-
 export const usageServiceApi = {
   getInfo: async (base: string, managementKey?: string): Promise<UsageServiceInfo> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoUsageServiceInfo();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageServiceInfo>(buildUrl(base, '/usage-service/info'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -2621,10 +1800,6 @@ export const usageServiceApi = {
     payload: UsageServiceSetupRequest,
     adminKey?: string
   ): Promise<void> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return;
-    }
-
     await withUsageServiceError(async () => {
       await axios.post(buildUrl(base, '/setup'), payload, {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -2637,10 +1812,6 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<ManagerConfigResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoManagerConfig();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
@@ -2658,23 +1829,6 @@ export const usageServiceApi = {
     config: ManagerConfig,
     managementKey?: string
   ): Promise<ManagerConfigResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const submittedKey = config.cpaConnection.managementKey?.trim();
-      return {
-        ...getDemoManagerConfig(),
-        config: {
-          ...config,
-          cpaConnection: {
-            cpaBaseUrl: config.cpaConnection.cpaBaseUrl,
-            managementKeyConfigured: Boolean(
-              submittedKey || config.cpaConnection.managementKeyConfigured
-            ),
-          },
-        },
-        source: 'db',
-      };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.put<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
@@ -2699,17 +1853,6 @@ export const usageServiceApi = {
     enabled: boolean,
     managementKey?: string
   ): Promise<ManagerConfigResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const current = getDemoManagerConfig();
-      return {
-        ...current,
-        config: {
-          ...current.config,
-          collector: { ...current.config.collector, enabled },
-        },
-      };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.patch<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
@@ -2728,11 +1871,6 @@ export const usageServiceApi = {
     managementKey?: string,
     limit = 20
   ): Promise<CodexInspectionRunsResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const detail = readDemoCodexInspectionRunState();
-      return { items: [detail.run].slice(0, limit) };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<CodexInspectionRunsResponse>(
         buildUrl(base, '/v0/management/codex-inspection/runs'),
@@ -2751,14 +1889,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<CodexInspectionRunDetail> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const detail = readDemoCodexInspectionRunState();
-      if (id !== detail.run.id) {
-        throw createDemoCodexInspectionError('codex inspection run not found', 404);
-      }
-      return detail;
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<CodexInspectionRunDetail>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${id}`),
@@ -2775,10 +1905,6 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<CodexInspectionRunDetail> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return replaceDemoCodexInspectionRunState(getDemoCodexInspectionRun());
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionRunDetail>(
         buildUrl(base, '/v0/management/codex-inspection/run'),
@@ -2797,35 +1923,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     runId: number
   ): Promise<CodexInspectionRunDetail> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const detail = readDemoCodexInspectionRunState();
-      if (runId !== detail.run.id) {
-        throw createDemoCodexInspectionError('codex inspection run not found', 404);
-      }
-      if (detail.run.status === 'cancelled') {
-        return detail;
-      }
-      if (detail.run.status !== 'running' && detail.run.status !== 'cancelling') {
-        throw createDemoCodexInspectionError('codex inspection run cannot be cancelled', 409);
-      }
-      const completedAt = Date.now();
-      detail.run.status = 'cancelled';
-      detail.run.active = false;
-      detail.run.cancellable = false;
-      detail.run.finishedAtMs = completedAt;
-      detail.run.updatedAtMs = completedAt;
-      detail.run.error = '用户主动取消巡检';
-      detail.logs.push({
-        id: detail.logs.reduce((maximum, entry) => Math.max(maximum, entry.id), 0) + 1,
-        runId,
-        level: 'warning',
-        message: '凭证健康巡检已取消',
-        detail: { status: 'cancelled' },
-        createdAtMs: completedAt,
-      });
-      return replaceDemoCodexInspectionRunState(detail);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionRunDetail>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${runId}/cancel`),
@@ -2846,10 +1943,6 @@ export const usageServiceApi = {
     resultIds: number[],
     actionOverrides: CodexInspectionActionOverride[] = []
   ): Promise<CodexInspectionActionsResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoCodexInspectionActionsResponse(runId, resultIds, actionOverrides);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionActionsResponse>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${runId}/actions`),
@@ -2868,10 +1961,6 @@ export const usageServiceApi = {
     managementKey?: string,
     scope?: UsageServiceStatusScope
   ): Promise<UsageServiceStatus> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoUsageServiceStatus();
-    }
-
     return withUsageServiceError(async () => {
       const statusPath =
         scope === 'database-maintenance' ? '/status?scope=database-maintenance' : '/status';
@@ -2887,10 +1976,6 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<AccountProcessingPolicy> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountProcessingPolicy();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<AccountProcessingPolicy>(
         buildUrl(base, '/usage-service/account-processing-policy'),
@@ -2907,10 +1992,6 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<QuotaCooldownInfo[]> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoQuotaCooldowns();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<QuotaCooldownsResponse>(
         buildUrl(base, '/usage-service/quota-cooldowns'),
@@ -2928,10 +2009,6 @@ export const usageServiceApi = {
     managementKey: string,
     request: QuotaCooldownRecoveryRequest
   ): Promise<QuotaCooldownRecoveryResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return { recovered: false };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<QuotaCooldownRecoveryResponse>(
         buildUrl(base, '/usage-service/quota-cooldowns/recover'),
@@ -2950,10 +2027,6 @@ export const usageServiceApi = {
     managementKey: string,
     patch: AccountProcessingPolicyPatch
   ): Promise<AccountProcessingPolicy> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoPatchedAccountProcessingPolicy(patch);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.patch<AccountProcessingPolicy>(
         buildUrl(base, '/usage-service/account-processing-policy'),
@@ -2968,10 +2041,6 @@ export const usageServiceApi = {
   },
 
   getUsage: async (base: string, managementKey?: string): Promise<UsagePayload> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoUsagePayload() as UsagePayload;
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<UsagePayload>(buildUrl(base, '/v0/management/usage'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -2982,10 +2051,6 @@ export const usageServiceApi = {
   },
 
   getModelPrices: async (base: string, managementKey?: string): Promise<ModelPricesResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoModelPrices();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<ModelPricesResponse>(
         buildUrl(base, '/v0/management/model-prices'),
@@ -3003,10 +2068,6 @@ export const usageServiceApi = {
     managementKey?: string,
     signal?: AbortSignal
   ): Promise<ModelPriceUsageSummaryResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoModelPriceUsageSummary();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<ModelPriceUsageSummaryResponse>(
         buildUrl(base, '/v0/management/model-prices/usage-summary'),
@@ -3025,10 +2086,6 @@ export const usageServiceApi = {
     prices: Record<string, ModelPrice>,
     managementKey?: string
   ): Promise<ModelPricesResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return { prices };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.put<ModelPricesResponse>(
         buildUrl(base, '/v0/management/model-prices'),
@@ -3046,10 +2103,6 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<ApiKeyAliasesResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoApiKeyAliases();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<ApiKeyAliasesResponse>(
         buildUrl(base, '/v0/management/api-key-aliases'),
@@ -3069,10 +2122,6 @@ export const usageServiceApi = {
     activeApiKeyHashes?: string[],
     allowOrphanAliasCleanup?: boolean
   ): Promise<ApiKeyAliasesResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return { items };
-    }
-
     return withUsageServiceError(async () => {
       const body: {
         items: ApiKeyAlias[];
@@ -3102,10 +2151,6 @@ export const usageServiceApi = {
     apiKeyHash: string,
     managementKey?: string
   ): Promise<void> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return;
-    }
-
     await withUsageServiceError(async () => {
       await axios.delete(
         buildUrl(base, `/v0/management/api-key-aliases/${encodeURIComponent(apiKeyHash)}`),
@@ -3123,10 +2168,6 @@ export const usageServiceApi = {
     status = 'pending',
     limit = 100
   ): Promise<AccountActionCandidatesResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountActionCandidatesResponse(status, limit);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<AccountActionCandidatesResponse>(
         buildUrl(base, '/v0/management/account-action-candidates'),
@@ -3145,10 +2186,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<AccountActionCandidateResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountActionCandidateResponse(id, 'ignored');
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<AccountActionCandidateResponse>(
         buildUrl(
@@ -3170,10 +2207,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<AccountActionCandidateResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountActionCandidateResponse(id, 'resolved');
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<AccountActionCandidateResponse>(
         buildUrl(
@@ -3195,10 +2228,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<AccountActionCandidateResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountActionCandidateResponse(id, 'resolved');
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<AccountActionCandidateResponse>(
         buildUrl(
@@ -3220,10 +2249,6 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<AccountActionCandidateResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountActionCandidateResponse(id, 'deleted');
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.delete<AccountActionCandidateResponse>(
         buildUrl(
@@ -3244,10 +2269,6 @@ export const usageServiceApi = {
     managementKey?: string,
     models?: string[]
   ): Promise<ModelPriceSyncResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoModelPriceSyncResponse(models);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<ModelPriceSyncResponse>(
         buildUrl(base, '/v0/management/model-prices/sync'),
@@ -3262,15 +2283,6 @@ export const usageServiceApi = {
   },
 
   exportUsage: async (base: string, managementKey?: string): Promise<UsageExportResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return {
-        blob: new Blob(['{"demo":true,"event":"usage-export"}\n'], {
-          type: 'application/jsonl',
-        }),
-        filename: 'demo-usage-events.jsonl',
-      };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<Blob>(buildUrl(base, '/v0/management/usage/export'), {
         timeout: USAGE_SERVICE_TRANSFER_TIMEOUT_MS,
@@ -3290,10 +2302,6 @@ export const usageServiceApi = {
     payload: Blob | string,
     managementKey?: string
   ): Promise<UsageImportResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return { format: 'jsonl', added: 12, skipped: 0, total: 12, failed: 0 };
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageImportResponse>(
         buildUrl(base, '/v0/management/usage/import'),
@@ -3315,10 +2323,6 @@ export const usageServiceApi = {
     resumeKey?: string,
     signal?: AbortSignal
   ): Promise<UsageImportSession> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return createDemoUsageImportSession(filename, sizeBytes);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageImportSession>(
         buildUrl(base, '/v0/management/usage/import-sessions'),
@@ -3343,10 +2347,6 @@ export const usageServiceApi = {
     managementKey?: string,
     signal?: AbortSignal
   ): Promise<UsageImportSession> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoUsageImportSession(sessionId);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageImportSession>(
         buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
@@ -3368,10 +2368,6 @@ export const usageServiceApi = {
     managementKey?: string,
     signal?: AbortSignal
   ): Promise<UsageImportSession> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return uploadDemoUsageImportSessionChunk(sessionId, offset, chunk.size);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.put<UsageImportSession>(
         buildUrl(
@@ -3398,10 +2394,6 @@ export const usageServiceApi = {
     managementKey?: string,
     signal?: AbortSignal
   ): Promise<UsageImportSession> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return completeDemoUsageImportSession(sessionId);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageImportSession>(
         buildUrl(
@@ -3424,10 +2416,6 @@ export const usageServiceApi = {
     sessionId: string,
     managementKey?: string
   ): Promise<UsageImportSession> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return cancelDemoUsageImportSession(sessionId);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.delete<UsageImportSession>(
         buildUrl(base, `/v0/management/usage/import-sessions/${encodeURIComponent(sessionId)}`),
@@ -3447,10 +2435,6 @@ export const dashboardApi = {
     managementKey: string | undefined,
     params: DashboardSummaryParams
   ): Promise<DashboardSummaryResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoDashboardSummary();
-    }
-
     return withUsageServiceError(async () => {
       const query: Record<string, number> = {
         today_start_ms: params.todayStartMs,
@@ -3479,10 +2463,6 @@ export const monitoringAnalyticsApi = {
     params: { days?: number; limit?: number } = {},
     signal?: AbortSignal
   ): Promise<UsageHeaderSnapshotsResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoHeaderSnapshots();
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageHeaderSnapshotsResponse>(
         buildUrl(base, '/v0/management/monitoring/header-snapshots'),
@@ -3502,10 +2482,6 @@ export const monitoringAnalyticsApi = {
     request: MonitoringAccountHistoryRequest,
     signal?: AbortSignal
   ): Promise<MonitoringAccountHistoryResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountHistory(request);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<MonitoringAccountHistoryResponse>(
         buildUrl(base, '/v0/management/monitoring/account-history'),
@@ -3525,10 +2501,6 @@ export const monitoringAnalyticsApi = {
     request: MonitoringAccountWindowUsageRequest,
     signal?: AbortSignal
   ): Promise<MonitoringAccountWindowUsageResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoAccountWindowUsage(request);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<MonitoringAccountWindowUsageResponse>(
         buildUrl(base, '/v0/management/monitoring/account-window-usage'),
@@ -3548,10 +2520,6 @@ export const monitoringAnalyticsApi = {
     request: MonitoringAnalyticsRequest,
     signal?: AbortSignal
   ): Promise<MonitoringAnalyticsResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return getDemoMonitoringAnalytics(request);
-    }
-
     return withUsageServiceError(async () => {
       const response = await axios.post<MonitoringAnalyticsResponse>(
         buildUrl(base, '/v0/management/monitoring/analytics'),
@@ -3574,17 +2542,6 @@ export const accountQuotaSnapshotApi = {
     entries: AccountQuotaSnapshotWriteEntry[],
     signal?: AbortSignal
   ): Promise<AccountQuotaSnapshotWriteResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      return {
-        observed_at_ms: Date.now(),
-        items: entries.map((entry) => ({
-          row_key: entry.row_key,
-          account_key: entry.row_key ?? '',
-          provider: entry.provider,
-          inserted_count: entry.windows.length,
-        })),
-      };
-    }
     return withUsageServiceError(async () => {
       const response = await axios.post<AccountQuotaSnapshotWriteResponse>(
         buildUrl(base, '/v0/management/quota-snapshots'),
@@ -3605,20 +2562,6 @@ export const accountQuotaSnapshotApi = {
     options: { nowMs?: number; includeInactive?: boolean } = {},
     signal?: AbortSignal
   ): Promise<AccountQuotaSnapshotQueryResponse> => {
-    if (__DEMO_SITE__ && isDemoMode()) {
-      const generatedAtMs = options.nowMs ?? Date.now();
-      return {
-        generated_at_ms: generatedAtMs,
-        items: accounts.map((account) => ({
-          row_key: account.row_key,
-          account_key: account.row_key,
-          provider: account.provider,
-          windows: buildDemoAccountQuotaSnapshotWindows(account, generatedAtMs).filter(
-            (window) => options.includeInactive || window.availability !== 'inactive'
-          ),
-        })),
-      };
-    }
     return withUsageServiceError(async () => {
       const response = await axios.post<AccountQuotaSnapshotQueryResponse>(
         buildUrl(base, '/v0/management/quota-snapshots/query'),

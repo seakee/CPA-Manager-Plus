@@ -23,7 +23,7 @@ const noChecks = {
   native_control: false,
   docker: false,
   docker_all_images: false,
-  demo_docs: false,
+  docs: false,
   release_content: false,
 };
 
@@ -139,7 +139,7 @@ describe('PR check classifier', () => {
       docker_all_images: true,
       native_control: true,
       docker: true,
-      demo_docs: true,
+      docs: true,
       release_content: true,
     });
   });
@@ -189,7 +189,6 @@ describe('PR check classifier', () => {
       ...noChecks,
       frontend: true,
       docker: true,
-      demo_docs: true,
     });
   });
 
@@ -197,16 +196,21 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['apps/docs/index.md', 'README.md'])).toEqual({
       ...noChecks,
       frontend: true,
-      demo_docs: true,
+      docs: true,
     });
   });
 
-  it('runs Demo and Docs checks for web and docs-site changes', () => {
+  it('runs Docs checks for docs-site changes alongside web changes', () => {
     expect(classifyChangedFiles(['apps/docs/index.md', 'apps/web/src/App.tsx'])).toEqual({
       ...noChecks,
       frontend: true,
       docker: true,
-      demo_docs: true,
+      docs: true,
+    });
+    expect(classifyChangedFiles(['apps/docs/index.md'])).toEqual({
+      ...noChecks,
+      frontend: true,
+      docs: true,
     });
   });
 
@@ -524,7 +528,7 @@ describe('PR check classifier', () => {
       frontend: true,
       native_control: true,
       docker: true,
-      demo_docs: true,
+      docs: true,
     });
   });
 
@@ -547,7 +551,7 @@ describe('PR check classifier', () => {
         docker_all_images: true,
         native_control: true,
         docker: true,
-        demo_docs: true,
+        docs: true,
         release_content: true,
       });
     }
@@ -582,7 +586,6 @@ describe('PR check classifier', () => {
       runtime_lifecycle: true,
       docker_all_images: true,
       docker: true,
-      demo_docs: true,
     });
   });
 

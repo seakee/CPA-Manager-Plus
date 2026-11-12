@@ -18,7 +18,6 @@ export const LEGACY_USAGE_SERVICE_LAST_CPA_BASE_KEYS = [
 export const normalizeUsageServiceBase = normalizeApiBase;
 export const isUsageServiceId = () => false;
 export const getUsageServiceErrorCode = () => '';
-export const resetDemoCodexInspectionRunState = () => {};
 
 const unsupported = async (): Promise<never> => {
   throw new Error('Manager API is unavailable in Panel Lite');

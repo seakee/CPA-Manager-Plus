@@ -227,13 +227,13 @@ describe('CodexInspectionResultsPanel', () => {
     const renderer = renderPanel(
       createItem({
         action: 'disable',
-        actionReason: 'monitoring.codex_inspection_reason_quota_threshold',
+        actionReason: 'monitoring.xai_inspection_reason_spending_limit_disable',
       }),
       { t: translatedT }
     );
     const text = collectText(renderer);
 
-    expect(text).toContain('translated:monitoring.codex_inspection_reason_quota_threshold');
+    expect(text).toContain('translated:monitoring.xai_inspection_reason_spending_limit_disable');
     expect(text).not.toContain('translated:monitoring.codex_inspection_conclusion');
     expect(
       renderer.root.findAll((node) =>

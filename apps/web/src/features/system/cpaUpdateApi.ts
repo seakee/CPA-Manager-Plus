@@ -1,5 +1,4 @@
 import axios, { type AxiosRequestConfig } from 'axios';
-import { isDemoMode } from '@/features/demo/demoMode';
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 import { REQUEST_TIMEOUT_MS } from '@/utils/constants';
 
@@ -211,8 +210,8 @@ async function request<T>(
   options: AxiosRequestConfig = {},
   acceptsTerminalFailure = false
 ): Promise<T> {
-  // Guard the transport as well as the UI, including direct calls in demo mode.
-  if (__PANEL_LITE__ || !connection.base || !connection.key || (__DEMO_SITE__ && isDemoMode())) {
+  // Guard the transport as well as the UI, including direct calls.
+  if (__PANEL_LITE__ || !connection.base || !connection.key) {
     throw new CPAUpdateAPIError('unavailable', 'update_unavailable');
   }
   try {

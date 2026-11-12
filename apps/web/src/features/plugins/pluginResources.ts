@@ -75,12 +75,6 @@ export const isSupportedPluginResourcePath = (value: string): boolean => {
   return !/^[a-z][a-z0-9+.-]*:/i.test(rest) && !rest.startsWith('/');
 };
 
-// The published demo site has no Manager to serve plugin resources, so its
-// fixtures are self-contained mock documents. The constant is a build-time
-// literal, so this branch disappears from the Manager-served Full Web build.
-export const isDemoPluginDocument = (value: string): boolean =>
-  __DEMO_SITE__ && /^data:text\/html[;,]/.test(value.trim());
-
 const documentOrigin = (): string => {
   if (typeof window === 'undefined') return '';
   const origin = window.location?.origin;
