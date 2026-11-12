@@ -21,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
@@ -1793,6 +1794,51 @@ func TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle(t *testin
 		}
 		if got := h.cpa.queueReads.Load() - queueBeforeFaultRebind; got != 0 {
 			t.Fatalf("monitoring Off polled usage-queue %d times after 200 retry, want 0", got)
+		}
+	})
+
+	t.Run("unreadable_monitoring_switch_sets_collector_unavailable_blocker_without_starting", func(t *testing.T) {
+		h := newExternalUsageHarness(t)
+		h.cpa.enabled.Store(true)
+		queueAuthCh := make(chan string, 32)
+		h.cpa.onQueueRead.Store(func(auth string) {
+			select {
+			case queueAuthCh <- auth:
+			default:
+			}
+		})
+
+		// 1. Start the real External Collector first so usageStarted=true and polling is live.
+		h.app.startUsageCollection(h.operation(t))
+		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "initial collector before switch fault")
+
+		// 2. Fault the runtimeSettings SQLite read so usageMonitoringEnabled fails.
+		switchCtrl := &rejectionSQLController{
+			onSelect: func() error {
+				return errors.New("simulated monitoring switch read failure")
+			},
+		}
+		h.app.runtimeSettings = setting.New(openControlledRejectionDB(t, h.app, switchCtrl), h.app.protector)
+
+		// 3. Same-key rebind stops the running Collector and re-runs startUsageCollection(op):
+		// unreadable switch must keep Collector stopped and expose usage_collector_unavailable.
+		reverifyBody := fmt.Sprintf(`{"requestId":%q,"managementKey":%q}`, strings.Repeat("e", 32), externalAuthorityManagement)
+		reverifyRes := h.call(t, http.MethodPost, "external/rebind", reverifyBody)
+		if reverifyRes.Code != http.StatusOK {
+			t.Fatalf("same-key rebind with unreadable switch = %d %s, want 200", reverifyRes.Code, reverifyRes.Body.String())
+		}
+		queueAfterStop := h.cpa.queueReads.Load()
+		usageRes := h.call(t, http.MethodGet, "external/usage", "")
+		if usageRes.Code != http.StatusOK {
+			t.Fatalf("GET external/usage with unreadable switch = %d %s, want 200", usageRes.Code, usageRes.Body.String())
+		}
+		state := decodeExternalUsageState(t, usageRes.Body.Bytes())
+		if state.CollectionStarted || state.Collector != string(usageapp.PhaseStopped) || state.BlockedReason != usageStartReasonCollectorFailed {
+			t.Fatalf("usage state on unreadable monitoring switch = %+v, want stopped, collectionStarted=false, blockedReason=%q",
+				state, usageStartReasonCollectorFailed)
+		}
+		if got := h.cpa.queueReads.Load() - queueAfterStop; got != 0 {
+			t.Fatalf("Collector polled usage-queue %d times with unreadable monitoring switch, want 0", got)
 		}
 	})
 }

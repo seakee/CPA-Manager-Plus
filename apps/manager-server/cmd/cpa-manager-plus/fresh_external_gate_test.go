@@ -4129,6 +4129,28 @@ func TestExternalSameKeyReverifyPropagatesDeleteFailureAcrossRestartAndRecoversO
 //  2. Zero additional CPA authentication attempts are sent after the single
 //     refused probe on the newly rotated key.
 func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *testing.T) {
+	awaitArmedTimer := func(t *testing.T, timers <-chan chan time.Time, label string) chan time.Time {
+		t.Helper()
+		select {
+		case ch := <-timers:
+			return ch
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: timed out waiting for persistence timer to arm", label)
+			return nil
+		}
+	}
+
+	awaitSlotIdle := func(t *testing.T, r *externalRejection, label string) {
+		t.Helper()
+		slot := r.slot()
+		select {
+		case slot <- struct{}{}:
+			<-slot
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: timed out waiting for dbSlot to become idle", label)
+		}
+	}
+
 	t.Run("new_refusal_queued_behind_in_flight_delete_persists_and_stays_409", func(t *testing.T) {
 		const (
 			keyK2 = "interleave-queued-k2-0000111122223333444455556666777788889999aa"
@@ -4142,8 +4164,12 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 			pauseDelete   atomic.Bool
 			deleteEntered = make(chan struct{}, 1)
 			releaseDelete = make(chan struct{})
+			releaseOnce   sync.Once
 			insertDone    = make(chan struct{}, 4)
 		)
+		unblockDelete := func() { releaseOnce.Do(func() { close(releaseDelete) }) }
+		t.Cleanup(unblockDelete)
+
 		ctrl := &rejectionSQLController{
 			onDelete: func() error {
 				if pauseDelete.Load() {
@@ -4165,18 +4191,27 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 			},
 		}
 		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
-		persistClockCh := make(chan time.Time, 4)
-		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
-			return persistClockCh, func() {}
-		}
 
-		// 1. Persist initial refusal for K1.
+		// 1. Persist initial refusal for K1 using the default timer, then wait until
+		// its SQL worker has released dbSlot before installing per-operation timers.
 		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
 			t.Fatalf("initial K1 refusal = %d %s, want 409", first.Code, first.Body.String())
 		}
-		<-insertDone
+		select {
+		case <-insertDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("initial K1 refusal INSERT did not complete")
+		}
+		awaitSlotIdle(t, app.rejection, "after initial K1 refusal")
 
-		// 2. Rebind to K2 while pausing clear's DELETE in flight; fire persist deadline so rebind returns 503.
+		armedTimers := make(chan chan time.Time, 8)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			ch := make(chan time.Time, 1)
+			armedTimers <- ch
+			return ch, func() {}
+		}
+
+		// 2. Rebind to K2 while pausing clear's DELETE in flight; fire only clear's timer.
 		pauseDelete.Store(true)
 		rebindDone := make(chan *httptest.ResponseRecorder, 1)
 		rebindBody := fmt.Sprintf(`{"baseUrl":%q,"managementKey":%q,"requestId":%q}`,
@@ -4184,18 +4219,19 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 		go func() {
 			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
 		}()
+		clearTimer := awaitArmedTimer(t, armedTimers, "rebind clear")
 		select {
 		case <-deleteEntered:
 		case <-time.After(5 * time.Second):
 			t.Fatal("rebind clear did not enter SQLite DELETE")
 		}
-		persistClockCh <- time.Now()
+		clearTimer <- time.Now()
 		select {
 		case rb := <-rebindDone:
 			if rb.Code != http.StatusServiceUnavailable || errorCode(t, rb) != "external_rebind_unavailable" {
 				t.Fatalf("rebind with DELETE in flight = %d %s, want 503 external_rebind_unavailable", rb.Code, rb.Body.String())
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("rebind did not return after clear deadline expired")
 		}
 
@@ -4205,27 +4241,15 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 		cpaSrv.mu.Unlock()
 		cpaBeforeK2Probe := cpaSrv.requests.Load()
 
-		probeEnteredSlotWait := make(chan struct{}, 1)
-		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
-			select {
-			case probeEnteredSlotWait <- struct{}{}:
-			default:
-			}
-			return make(chan time.Time), func() {}
-		}
 		k2ProbeDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
 			k2ProbeDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
 		}()
-		select {
-		case <-probeEnteredSlotWait:
-		case <-time.After(5 * time.Second):
-			t.Fatal("K2 refusal record did not enter dbSlot wait while DELETE was in flight")
-		}
+		_ = awaitArmedTimer(t, armedTimers, "K2 refusal record waiting on dbSlot")
 
 		// 4. Let the earlier clear DELETE complete so the queued K2 refusal write persists.
 		pauseDelete.Store(false)
-		close(releaseDelete)
+		unblockDelete()
 		select {
 		case res := <-k2ProbeDone:
 			if res.Code != http.StatusConflict || errorCode(t, res) != freshconfig.ReasonManagementRejected {
@@ -4267,8 +4291,21 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 			pauseDelete   atomic.Bool
 			deleteEntered = make(chan struct{}, 1)
 			releaseDelete = make(chan struct{})
+			releaseOnce   sync.Once
+			insertDone    = make(chan struct{}, 4)
 		)
+		unblockDelete := func() { releaseOnce.Do(func() { close(releaseDelete) }) }
+		t.Cleanup(unblockDelete)
+
 		ctrl := &rejectionSQLController{
+			afterInsert: func(error) {
+				if !pauseDelete.Load() {
+					select {
+					case insertDone <- struct{}{}:
+					default:
+					}
+				}
+			},
 			afterDelete: func(error) {
 				if pauseDelete.Load() {
 					select {
@@ -4280,13 +4317,22 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 			},
 		}
 		app.rejection = newExternalRejection(openControlledRejectionDB(t, app, ctrl))
-		persistClockCh := make(chan time.Time, 4)
-		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
-			return persistClockCh, func() {}
-		}
 
 		if first := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); first.Code != http.StatusConflict {
 			t.Fatalf("initial K1 refusal = %d %s, want 409", first.Code, first.Body.String())
+		}
+		select {
+		case <-insertDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("initial K1 refusal INSERT did not complete")
+		}
+		awaitSlotIdle(t, app.rejection, "after initial K1 refusal")
+
+		armedTimers := make(chan chan time.Time, 8)
+		app.rejection.newPersistTimer = func(time.Duration) (<-chan time.Time, func()) {
+			ch := make(chan time.Time, 1)
+			armedTimers <- ch
+			return ch, func() {}
 		}
 
 		pauseDelete.Store(true)
@@ -4296,27 +4342,45 @@ func TestExternalClearDeleteInFlightInterleavedWithNewRefusalKeepsLocal409(t *te
 		go func() {
 			rebindDone <- gatewayRequest(t, app, http.MethodPost, "external/rebind", rebindBody, "application/json")
 		}()
-		<-deleteEntered
-		persistClockCh <- time.Now()
-		if rb := <-rebindDone; rb.Code != http.StatusServiceUnavailable {
-			t.Fatalf("rebind = %d %s, want 503", rb.Code, rb.Body.String())
+		clearTimer := awaitArmedTimer(t, armedTimers, "rebind clear")
+		select {
+		case <-deleteEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("rebind clear did not reach afterDelete")
+		}
+		clearTimer <- time.Now()
+		select {
+		case rb := <-rebindDone:
+			if rb.Code != http.StatusServiceUnavailable {
+				t.Fatalf("rebind = %d %s, want 503", rb.Code, rb.Body.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("rebind did not return after clear deadline expired")
 		}
 
-		// K2 is refused while DELETE still holds dbSlot, and K2's record() also hits its persist deadline.
+		// K2 is refused while DELETE still holds dbSlot, and K2's record() expires only its own timer.
 		cpaSrv.mu.Lock()
 		cpaSrv.activeKey = keyK3
 		cpaSrv.mu.Unlock()
 		cpaBefore := cpaSrv.requests.Load()
-		persistClockCh <- time.Now()
-		if k2Res := gatewayRequest(t, app, http.MethodGet, "gateway/config", "", ""); k2Res.Code != http.StatusConflict || errorCode(t, k2Res) != freshconfig.ReasonManagementRejected {
-			t.Fatalf("K2 refusal = %d %s, want 409", k2Res.Code, k2Res.Body.String())
+		k2ProbeDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			k2ProbeDone <- gatewayRequest(t, app, http.MethodGet, "gateway/config", "", "")
+		}()
+		recordTimer := awaitArmedTimer(t, armedTimers, "K2 refusal record")
+		recordTimer <- time.Now()
+		select {
+		case k2Res := <-k2ProbeDone:
+			if k2Res.Code != http.StatusConflict || errorCode(t, k2Res) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("K2 refusal = %d %s, want 409", k2Res.Code, k2Res.Body.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("K2 refusal did not return after its persist deadline expired")
 		}
 
 		pauseDelete.Store(false)
-		close(releaseDelete)
-		slot := app.rejection.slot()
-		slot <- struct{}{}
-		<-slot
+		unblockDelete()
+		awaitSlotIdle(t, app.rejection, "after late DELETE completed")
 		cpaAfterRefusal := cpaSrv.requests.Load()
 		if sent := cpaAfterRefusal - cpaBefore; sent != 1 {
 			t.Fatalf("K2 probe sent %d CPA requests, want 1", sent)
