@@ -20,6 +20,18 @@ const en = {
   ownershipChownDesc:
     'To verify your 1.x administrator key and read the operation status on this volume, stop the v2 container, run one one-off container that mounts the volume and changes ownership only on the database and key files (never on /data/runtime, which must stay 0:0), start the v2 container again, and re-check:',
   recheckButton: 'Recheck source status',
+  resumeStepTag: 'Bootstrap Gate · Resume Setup',
+  resumePageTitle: 'Installation is not finished — issue a new Handoff link on the host to resume',
+  resumePageDesc:
+    'Administrator setup is saved, while the Console route and installation completion are still pending. Run cpa-manager-plus initialize on the deployment host to obtain a new resume link without resetting your administrator key.',
+  resumeGuidanceTitle: 'Existing unfinished Fresh installation detected',
+  resumeGuidanceDetail:
+    'The installation checkpoint is preserved on /data, and model traffic stays closed until setup completes. A new one-time Handoff link from the host will resume from the saved step.',
+  resumeActionTitle: 'Next step: issue a new Handoff link on the host',
+  resumeActionLead:
+    'Stop the writable CPAMP service on the host, run the command below to print a new ',
+  resumeActionTail:
+    ' link, start the service again, and open that full URL in this browser to resume the wizard:',
 };
 
 const zh: typeof en = {
@@ -37,6 +49,16 @@ const zh: typeof en = {
   ownershipChownDesc:
     '若需在该卷上验证原 1.x 管理员密钥并查看升级状态：先停止 v2 容器，用一个一次性容器挂载该卷、仅修改 usage.sqlite* 与 data.key 的属主（切勿改动 /data/runtime，它必须保持 0:0），再启动 v2 容器并点击下方重新检查：',
   recheckButton: '重新检查来源状态',
+  resumeStepTag: 'Bootstrap Gate · 继续安装',
+  resumePageTitle: '安装尚未完成，请在宿主机重新签发 Handoff 链接继续安装',
+  resumePageDesc:
+    '管理员设置已保存，但控制台路由与安装完成步骤仍未执行完毕。请在部署宿主机运行 cpa-manager-plus initialize 获取新的继续安装链接，无需重置管理员密钥。',
+  resumeGuidanceTitle: '检测到未完成的全新安装记录',
+  resumeGuidanceDetail:
+    '当前 /data 数据卷中已保留先前的安装进度检查点，完成前模型流量保持受控关闭。从宿主机重新签发一次性 Handoff 链接后将从已保存步骤继续。',
+  resumeActionTitle: '下一步：在宿主机签发新的 Handoff 链接',
+  resumeActionLead: '先在宿主机停止运行中的可写 CPAMP 服务，执行下方命令输出新的 ',
+  resumeActionTail: ' 链接，重新启动服务后在浏览器打开该完整 URL 即可恢复向导进度：',
 };
 
 const tw: typeof en = {
@@ -54,6 +76,16 @@ const tw: typeof en = {
   ownershipChownDesc:
     '若需在該資料卷上驗證原 1.x 管理員金鑰並檢視升級狀態：先停止 v2 容器，用一個一次性容器掛載該資料卷、僅修改 usage.sqlite* 與 data.key 的擁有者（切勿改動 /data/runtime，它必須維持 0:0），再啟動 v2 容器並點擊下方重新檢查：',
   recheckButton: '重新檢查來源狀態',
+  resumeStepTag: 'Bootstrap Gate · 繼續安裝',
+  resumePageTitle: '安裝尚未完成，請在主機重新簽發 Handoff 連結繼續安裝',
+  resumePageDesc:
+    '管理員設定已儲存，但主控台路由與安裝完成步驟仍未執行完畢。請在部署主機執行 cpa-manager-plus initialize 取得新的繼續安裝連結，無需重設管理員金鑰。',
+  resumeGuidanceTitle: '偵測到未完成的全新安裝記錄',
+  resumeGuidanceDetail:
+    '目前 /data 資料卷中已保留先前的安裝進度檢查點，完成前模型流量維持受控關閉。從主機重新簽發一次性 Handoff 連結後將從已儲存步驟繼續。',
+  resumeActionTitle: '下一步：在主機簽發新的 Handoff 連結',
+  resumeActionLead: '先在主機停止執行中的可寫 CPAMP 服務，執行下方命令輸出新的 ',
+  resumeActionTail: ' 連結，重新啟動服務後在瀏覽器開啟該完整 URL 即可恢復精靈進度：',
 };
 
 const ru: typeof en = {
@@ -74,6 +106,19 @@ const ru: typeof en = {
   ownershipChownDesc:
     'Чтобы проверить исходный ключ администратора 1.x и увидеть состояние обновления на этом томе: остановите контейнер v2, запустите один разовый контейнер с этим томом и смените владельца только файлов базы данных и ключа (никогда не меняйте /data/runtime — он должен принадлежать 0:0), затем запустите контейнер v2 и нажмите повторную проверку:',
   recheckButton: 'Проверить состояние источника снова',
+  resumeStepTag: 'Bootstrap Gate · Продолжение установки',
+  resumePageTitle:
+    'Установка не завершена — выпустите новую ссылку Handoff на хосте для продолжения',
+  resumePageDesc:
+    'Настройка администратора сохранена, но маршрут консоли и завершение установки ещё не выполнены. Запустите cpa-manager-plus initialize на хосте развёртывания, чтобы получить новую ссылку и продолжить без сброса ключа администратора.',
+  resumeGuidanceTitle: 'Обнаружена незавершённая новая установка',
+  resumeGuidanceDetail:
+    'Контрольная точка установки сохранена в /data, трафик моделей закрыт до завершения настройки. Новая одноразовая ссылка Handoff с хоста продолжит мастер с сохранённого шага.',
+  resumeActionTitle: 'Следующий шаг: выпустить новую ссылку Handoff на хосте',
+  resumeActionLead:
+    'Остановите запущенный сервис CPAMP на хосте, выполните команду ниже для выпуска новой ссылки ',
+  resumeActionTail:
+    ', снова запустите сервис и откройте полный URL в браузере для продолжения мастера:',
 };
 
 export type BootstrapDiscoveryTextKey = keyof typeof en;

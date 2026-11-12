@@ -22,6 +22,7 @@ type PublicReason string
 
 const (
 	ReasonFreshClaimRequired         PublicReason = "fresh_claim_required"
+	ReasonFreshResumeRequired        PublicReason = "fresh_resume_required"
 	ReasonAdminAuthentication        PublicReason = "admin_authentication_required"
 	ReasonQualificationUnavailable   PublicReason = "qualification_unavailable"
 	ReasonRecoveryHostIntervention   PublicReason = "recovery_host_intervention"
@@ -50,7 +51,7 @@ func validPublicStatus(value PublicStatus) bool {
 
 func validPublicReason(value PublicReason) bool {
 	switch value {
-	case ReasonFreshClaimRequired, ReasonAdminAuthentication,
+	case ReasonFreshClaimRequired, ReasonFreshResumeRequired, ReasonAdminAuthentication,
 		ReasonQualificationUnavailable, ReasonRecoveryHostIntervention,
 		ReasonSourceOwnershipUnavailable, ReasonObservationUnavailable:
 		return true
@@ -112,7 +113,8 @@ func (d PublicDiscovery) Validate() error {
 	switch d.Status {
 	case PublicFreshClaimRequired:
 		if d.Mode == nil || *d.Mode != Fresh || !d.AuthenticationRequired ||
-			d.AuthEntry != AuthEntryFreshClaim || d.Reason != ReasonFreshClaimRequired {
+			d.AuthEntry != AuthEntryFreshClaim ||
+			(d.Reason != ReasonFreshClaimRequired && d.Reason != ReasonFreshResumeRequired) {
 			return errors.New("fresh discovery requires a fresh claim entry")
 		}
 	case PublicAdminAuthenticationRequired:

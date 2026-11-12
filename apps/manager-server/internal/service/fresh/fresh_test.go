@@ -237,8 +237,8 @@ func TestClaimAdminContinuationAndRestart(t *testing.T) {
 	if _, err = s.GenerateAdmin(ctx, session.Token); err == nil {
 		t.Fatal("admin generated after commit")
 	}
-	if s.Discover(ctx).Status != bootstrap.PublicUnavailable {
-		t.Fatal("initialized leaked admin auth entry")
+	if got := s.Discover(ctx); got.Status != bootstrap.PublicFreshClaimRequired || string(got.Reason) != "fresh_resume_required" || got.AuthEntry != bootstrap.AuthEntryFreshClaim {
+		t.Fatalf("initialized Fresh discovery = %+v", got)
 	}
 	if _, err = s.Authorize(ctx, key); err == nil {
 		t.Fatal("Admin Key accepted as session")

@@ -199,7 +199,7 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, _, _ := request("GET", bootstrap.FixedBootstrapUIPath, "", nil); code != 200 {
 		t.Fatal("same-build shell unavailable")
 	}
-	if code, body, _ := request("GET", bootstrap.FixedBootstrapDiscoveryPath, "", nil); code != http.StatusServiceUnavailable || strings.Contains(body, "admin_authentication_required") || !strings.Contains(body, "unavailable") {
+	if code, body, _ := request("GET", bootstrap.FixedBootstrapDiscoveryPath, "", nil); code != http.StatusOK || strings.Contains(body, "admin_authentication_required") || !strings.Contains(body, `"reason":"fresh_resume_required"`) {
 		t.Fatal("initialized Fresh discovery", code, body)
 	}
 	if code, body, _ := request("POST", base+"routing/prepare", "Fresh "+payload.Token, map[string]any{"identity": id, "target": "/private-control"}); code != 200 {

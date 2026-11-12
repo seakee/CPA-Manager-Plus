@@ -80,3 +80,18 @@ export function readRoutingContext(
     return null;
   }
 }
+
+export function isInitialRoutingContext(source: Pick<Document, 'getElementById'>): boolean {
+  const element = source.getElementById('cpamp-routing-context');
+  if (!element || element.getAttribute('type') !== 'application/json') return false;
+  try {
+    const parsed: unknown = JSON.parse(element.textContent ?? '');
+    return (
+      !!parsed &&
+      typeof parsed === 'object' &&
+      (parsed as Record<string, unknown>).state === 'initial_routing'
+    );
+  } catch {
+    return false;
+  }
+}

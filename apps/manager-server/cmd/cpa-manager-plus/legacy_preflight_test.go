@@ -639,17 +639,11 @@ func TestNativeSourceDiscoveryDoesNotInferCompleted(t *testing.T) {
 	writeOwnedProvisioningConfig(t, dir)
 	runFreshInitializeProcess(t, ownedPreflightEnvironment(dir, path))
 	first := startManagerServerProcess(t, dir, path)
-	status, body := waitForManagerResponse(t, first.addr, http.MethodGet, bootstrapdiscovery.Path)
-	if status != http.StatusServiceUnavailable || strings.Contains(body, `"mode"`) {
-		t.Fatalf("fresh graph readiness completed Bootstrap or reused Fresh evidence: status=%d body=%s", status, body)
-	}
+	assertFreshPendingDiscovery(t, first.addr)
 	first.stop(t)
 	second := startManagerServerProcess(t, dir, path)
 	defer second.stop(t)
-	status, body = waitForManagerResponse(t, second.addr, http.MethodGet, bootstrapdiscovery.Path)
-	if status != http.StatusServiceUnavailable || strings.Contains(body, `"mode"`) {
-		t.Fatalf("native graph readiness inferred completion or reused pre-write evidence: status=%d body=%s", status, body)
-	}
+	assertFreshPendingDiscovery(t, second.addr)
 }
 
 func TestNativePreflightRetainsEncryptedKeyGuardsForBothSettings(t *testing.T) {
@@ -933,12 +927,18 @@ func assertFreshPendingDiscovery(t *testing.T, addr string) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		status, body := waitForManagerResponse(t, addr, http.MethodGet, bootstrapdiscovery.Path)
-		if status == http.StatusServiceUnavailable && strings.Contains(body, `"status":"unavailable"`) {
+		if strings.Contains(body, `"completed"`) || strings.Contains(body, `"admin_authentication_required"`) {
+			t.Fatalf("Fresh discovery leaked forbidden post-install mode: status=%d body=%s", status, body)
+		}
+		if status == http.StatusOK &&
+			strings.Contains(body, `"status":"fresh_claim_required"`) &&
+			strings.Contains(body, `"reason":"fresh_resume_required"`) &&
+			strings.Contains(body, `"auth_entry":"fresh_claim"`) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("host-admin Fresh did not remain pre-canonical unavailable")
+	t.Fatal("host-admin Fresh did not project unfinished resume discovery")
 }
 
 func TestNativeV2CrashWALStartupReadsCommittedUsage(t *testing.T) {
