@@ -59,19 +59,35 @@ func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr
 	if !errors.Is(openErr, processlock.ErrLocked) {
 		return nil, false
 	}
-	markerIdentity, err := processlock.ObserveFreshIdentity(databasePath)
-	if err != nil || markerIdentity == nil {
+	receipt, err := processlock.ObserveFreshReceipt(databasePath)
+	if err != nil || receipt == nil {
 		return nil, false
 	}
-	record, err := inspectCheckpoint(ctx, markerIdentity.DatabasePath, nil)
-	if err != nil {
-		if errors.Is(err, freshstore.ErrNotFresh) {
-			// Fresh admission receipt exists and is locked, before first checkpoint write.
+	var pending *bootstrap.FreshIdentity
+	if receipt.IsPending() {
+		pending = &receipt.Identity
+	}
+	info, statErr := os.Stat(receipt.Identity.DatabasePath)
+	if statErr != nil {
+		if pending != nil && os.IsNotExist(statErr) {
 			return ErrStoreLockedInProgress, true
 		}
 		return nil, false
 	}
-	if !record.Operation.Identity.Valid() || record.Operation.Identity != *markerIdentity || record.Operation.Validate() != nil {
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, false
+	}
+	record, err := inspectCheckpoint(ctx, receipt.Identity.DatabasePath, pending)
+	if err != nil {
+		return nil, false
+	}
+	if !record.Operation.Identity.Valid() {
+		if pending != nil {
+			return ErrStoreLockedInProgress, true
+		}
+		return nil, false
+	}
+	if record.Operation.Identity != receipt.Identity || record.Operation.Validate() != nil {
 		return nil, false
 	}
 	if record.Operation.ProductComplete {

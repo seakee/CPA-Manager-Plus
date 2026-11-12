@@ -689,3 +689,83 @@ func TestPendingSchemaWithRetainedProductRowsNeverBecomesFresh(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyInitializeRefusalFailsClosedOnDamagedOrNonFreshStoreUnderLock(t *testing.T) {
+	t.Run("malformed-checkpoint-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		if _, err := o.DB.Exec("update settings set value='malformed' where key=?", freshstore.OperationKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on malformed checkpoint, got %v", classified)
+		}
+	})
+
+	t.Run("legacy-rows-without-fresh-checkpoint-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		if _, err := o.DB.Exec("delete from settings where key in (?, ?); insert into settings(key,value,updated_at_ms) values('setup','{}',1)", freshstore.OperationKey, freshstore.AuthorityKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on legacy settings under lock, got %v", classified)
+		}
+	})
+
+	t.Run("mismatched-checkpoint-identity-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		other := o.Record.Operation
+		other.Identity.OperationID = "fresh-op-other"
+		raw, err := json.Marshal(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := o.DB.Exec("update settings set value=? where key=?", string(raw), freshstore.OperationKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on mismatched identity, got %v", classified)
+		}
+	})
+
+	t.Run("pending-admission-before-checkpoint-stays-in-progress", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		admission, err := legacypreflight.AdmitStartup(t.Context(), p, legacypreflight.Options{FreshAdmission: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admission.Close()
+		dbPath := admission.DatabasePath()
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked); !ok || !errors.Is(classified, ErrStoreLockedInProgress) {
+			t.Fatalf("expected ErrStoreLockedInProgress before DB creation, got %v, %v", classified, ok)
+		}
+		db, err := sqlite.Open(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked); !ok || !errors.Is(classified, ErrStoreLockedInProgress) {
+			t.Fatalf("expected ErrStoreLockedInProgress on pristine migrated DB before checkpoint write, got %v, %v", classified, ok)
+		}
+		if _, err := db.Exec("insert into settings(key,value,updated_at_ms) values('setup','{}',1)"); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal when pending DB contains legacy rows, got %v", classified)
+		}
+	})
+}

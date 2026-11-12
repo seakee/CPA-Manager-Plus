@@ -75,11 +75,17 @@ func (l *Lock) readFreshReceipt() (*FreshReceipt, error) {
 	return parseFreshReceipt(l.file, l.DatabasePath())
 }
 
-// ObserveFreshIdentity reads the Fresh marker provenance without acquiring the
+// IsPending reports whether the receipt is still in pending_fresh_admission
+// before FinalizeFreshAdmission commits the initial checkpoint.
+func (r FreshReceipt) IsPending() bool {
+	return r.State == pendingFresh
+}
+
+// ObserveFreshReceipt reads the Fresh marker provenance without acquiring the
 // process lock, so an offline host command can report whether a live Fresh
 // Manager holds a completed or unfinished installation without touching SQLite
 // on non-Fresh sources.
-func ObserveFreshIdentity(databasePath string) (*bootstrap.FreshIdentity, error) {
+func ObserveFreshReceipt(databasePath string) (*FreshReceipt, error) {
 	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
 	if err != nil {
 		return nil, err
@@ -96,7 +102,7 @@ func ObserveFreshIdentity(databasePath string) (*bootstrap.FreshIdentity, error)
 	if err != nil || r == nil {
 		return nil, err
 	}
-	return &r.Identity, nil
+	return r, nil
 }
 
 func parseFreshReceipt(file *os.File, databasePath string) (*FreshReceipt, error) {

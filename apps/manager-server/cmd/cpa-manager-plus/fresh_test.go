@@ -369,3 +369,28 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q", stdoutStopped, stderrStopped)
 	}
 }
+
+func TestFreshInitializeFailsClosedWhenLockedStoreHasDamagedCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.sqlite")
+	writeOwnedProvisioningConfig(t, dir)
+	env := ownedPreflightEnvironment(dir, path)
+
+	runFreshInitializeProcess(t, env)
+	paths := legacypreflight.DefaultPaths(path)
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if _, err := opened.DB.Exec("update settings set value='malformed' where key=?", freshstore.OperationKey); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := runFreshInitializeFailure(t, env)
+	if stdout != "" ||
+		!strings.Contains(stderr, "Fresh initialization/handoff unavailable; inspect the host source and ownership before retrying") ||
+		strings.Contains(stderr, "stop the writable Manager service before running initialize") {
+		t.Fatalf("damaged locked store initialize output: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
