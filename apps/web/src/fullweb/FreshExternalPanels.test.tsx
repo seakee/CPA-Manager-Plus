@@ -23,15 +23,18 @@ function textOf(renderer: ReactTestRenderer, testId: string): string {
 vi.mock('../components/ui/Modal', () => ({
   Modal: ({
     open,
+    title,
     children,
     footer,
   }: {
     open: boolean;
+    title?: string;
     children?: ReactNode;
     footer?: ReactNode;
   }) =>
     open ? (
-      <div>
+      <div data-testid="mock-modal">
+        {title && <h3>{title}</h3>}
         {children}
         {footer}
       </div>
@@ -558,13 +561,21 @@ describe('External usage confirmation', () => {
     const startBtn = renderer.root.find(
       (node) => node.props['data-testid'] === 'external-usage-enable'
     );
+    expect(startBtn.children).toEqual([x('usageStartAction')]);
     await act(async () => startBtn.props.onClick());
+    const modalText = textOf(renderer, 'mock-modal');
+    expect(modalText).toContain(x('usageStartConfirmTitle'));
+    expect(modalText).toContain(x('usageStartConfirmHelp'));
+    expect(modalText).not.toContain(x('usageConfirmTitle'));
+    expect(modalText).not.toContain(x('usageConfirmHelp'));
     const startConfirm = renderer.root.find(
       (node) => node.props['data-testid'] === 'external-usage-confirm'
     );
+    expect(startConfirm.children).toEqual([x('usageStartConfirmAction')]);
     await act(async () => startConfirm.props.onClick());
     expect(postRebind.calls).toHaveLength(1);
     expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    expect(textOf(renderer, 'external-usage-notice')).toBe(x('usageStarted'));
   });
 
   it('rejects a malformed usage reply instead of inventing a state', () => {

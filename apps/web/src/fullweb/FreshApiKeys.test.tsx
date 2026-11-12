@@ -928,4 +928,142 @@ describe('Fresh client key persistence UI', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('clears usage-originated external blocker after retry succeeds without clearing key-list blockers', async () => {
+    let usagePostCount = 0;
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+    };
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        usagePostCount += 1;
+        if (usagePostCount === 1) {
+          return Promise.resolve(
+            Response.json({
+              ...usageBase,
+              statisticsEnabled: true,
+              collector: 'stopped',
+              collectionStarted: false,
+              blockedReason: 'external_cpa_authority_unavailable',
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: false,
+            collector: 'stopped',
+            collectionStarted: false,
+            blockedReason: 'usage_statistics_disabled',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+          externalUsage={true}
+        />
+      );
+    });
+
+    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enableBtn.props.onClick());
+    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmBtn.props.onClick());
+
+    // First 200 with authority_unavailable blocker shows both page blocker and panel retry.
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })
+    ).toHaveLength(1);
+
+    // Retry succeeds -> page-level authority blocker disappears while collector reports running.
+    const retryBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm-retry' });
+    await act(async () => retryBtn.props.onClick());
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    const collectorText = renderer.root
+      .findByProps({ 'data-testid': 'external-usage-collector' })
+      .findByType('dd').children;
+    expect(collectorText.join('')).not.toBe('');
+
+    await act(async () => renderer.unmount());
+
+    // A key-list refusal blocker (from GET /api-keys) must NOT be cleared by a healthy usage read.
+    const keyListRefusedFetch = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json(
+            { code: 'external_management_key_rejected', detail: '401' },
+            { status: 409 }
+          )
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, keyListRefusedFetch)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+          externalUsage={true}
+        />
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(1);
+  });
 });

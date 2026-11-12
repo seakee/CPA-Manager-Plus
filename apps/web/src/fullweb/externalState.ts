@@ -76,8 +76,8 @@ export function parseExternalUsageState(value: unknown): ExternalUsageState | nu
   };
 }
 
-// newExternalRequestId is the idempotency identity of one External write. It is
-// kept across a retry so a lost answer can be replayed rather than repeated.
+// newExternalRequestId mints the 32-hex request identifier required by External
+// write endpoints and retained across retries of the same UI attempt.
 export function newExternalRequestId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, '0')

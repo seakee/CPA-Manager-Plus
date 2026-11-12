@@ -181,12 +181,31 @@ const messages = {
   ],
   usageConfirmAction: ['Write and start collection', '写入并开始采集', '寫入並開始擷取', 'Записать и начать сбор'],
   usageConfirmCancel: ['Cancel', '取消', '取消', 'Отмена'],
+  usageStartConfirmTitle: [
+    'Start usage collection from your CPA?',
+    '要开始从你的 CPA 采集用量吗？',
+    '要開始從你的 CPA 擷取用量嗎？',
+    'Запустить сбор статистики с вашего CPA?',
+  ],
+  usageStartConfirmHelp: [
+    'Usage statistics are already enabled on this CPA, so Manager will start collection without changing your CPA settings unless statistics were turned off before confirmation (in which case it writes usage-statistics-enabled: true).',
+    '该 CPA 上的用量统计当前已开启，Manager 会直接开始采集而不改动 CPA 设置；仅当确认前该开关已被关闭时，才会写入 usage-statistics-enabled: true。',
+    '該 CPA 上的用量統計目前已開啟，Manager 會直接開始擷取而不改動 CPA 設定；僅當確認前該開關已被關閉時，才會寫入 usage-statistics-enabled: true。',
+    'Статистика использования на этом CPA уже включена, поэтому Manager запустит сбор без изменения настроек CPA — запись usage-statistics-enabled: true выполнится только если статистика была отключена до подтверждения.',
+  ],
+  usageStartConfirmAction: ['Start collection', '开始采集', '開始擷取', 'Начать сбор'],
   usageConfirmRetry: ['Try again', '重试', '重試', 'Повторить'],
   usageConfirmed: [
     'Usage statistics were enabled and collection started.',
     '用量统计已启用，采集已开始。',
     '用量統計已啟用，擷取已開始。',
     'Статистика включена, сбор начат.',
+  ],
+  usageStarted: [
+    'Usage collection started.',
+    '用量采集已开始。',
+    '用量擷取已開始。',
+    'Сбор статистики запущен.',
   ],
   usageEnableFailed: [
     'The confirmation could not be applied. Nothing is claimed about your CPA until it is read back.',
