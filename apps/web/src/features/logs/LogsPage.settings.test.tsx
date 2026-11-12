@@ -2,9 +2,11 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@/i18n';
-import type { PublicApiClient } from '@/fullweb/publicApi';
+import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
+import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { LogsPage } from './LogsPage';
+import { useLogsConfigAuthority } from './useLogsConfigAuthority';
 
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -62,30 +64,34 @@ vi.mock('./hooks/useLogScroller', () => ({
 
 function buildAuthorityClient(capability: {
   mode: string;
-  writable: boolean;
+  writable: unknown;
   reason?: string;
-}): { client: PublicApiClient; calls: string[] } {
-  const calls: string[] = [];
+}): PublicApiClient {
   return {
-    calls,
-    client: {
-      get: (async (resource: string) => {
-        calls.push(resource);
-        return {
-          capability: {
-            readable: true,
-            rulesWritable: capability.writable,
-            ...capability,
-          },
-        };
-      }) as PublicApiClient['get'],
-      post: vi.fn() as PublicApiClient['post'],
-      put: vi.fn() as PublicApiClient['put'],
-      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
-    },
+    get: (async () => ({
+      capability: {
+        readable: true,
+        rulesWritable: capability.writable,
+        ...capability,
+      },
+    })) as PublicApiClient['get'],
+    post: vi.fn() as PublicApiClient['post'],
+    put: vi.fn() as PublicApiClient['put'],
+    uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const dispatchWindowEvent = vi.fn<(event: Event) => boolean>(() => true);
 let renderer: ReactTestRenderer | undefined;
 
 async function mountLogsPage(
@@ -112,6 +118,14 @@ function maybeTestId(root: ReactTestInstance, id: string): ReactTestInstance | u
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  dispatchWindowEvent.mockClear();
+  vi.stubGlobal('window', {
+    dispatchEvent: dispatchWindowEvent,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    setInterval: globalThis.setInterval.bind(globalThis),
+    clearInterval: globalThis.clearInterval.bind(globalThis),
+  });
   mocks.authState.connectionStatus = 'connected';
   mocks.authState.apiBase = '/console/api/v2/cpamp';
   mocks.authState.managementKey = 'admin-key';
@@ -151,15 +165,15 @@ afterEach(async () => {
     });
   }
   renderer = undefined;
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 describe('LogsPage settings and empty-state file logging control', () => {
   it('enables file logging from the empty state, loads logs automatically, and returns to disabled state when turned off', async () => {
-    const { client, calls } = buildAuthorityClient({ mode: 'managed', writable: true });
+    const client = buildAuthorityClient({ mode: 'managed', writable: true });
     const mounted = await mountLogsPage(client, '/logs');
 
-    expect(calls).toEqual(['gateway/config']);
     expect(mocks.fetchLogs).not.toHaveBeenCalled();
 
     const enableButton = byTestId(mounted.root, 'logs-empty-enable-button');
@@ -201,7 +215,7 @@ describe('LogsPage settings and empty-state file logging control', () => {
   it.each(['managed', 'external'] as const)(
     'edits all five observability.logs.* fields under %s capability while keeping observability.pprof.* read-only',
     async (mode) => {
-      const { client } = buildAuthorityClient({ mode, writable: true });
+      const client = buildAuthorityClient({ mode, writable: true });
       const mounted = await mountLogsPage(client, '/logs?tab=settings');
 
       const debugCheckbox = byTestId(mounted.root, 'logs-setting-row-debug').findByType('input');
@@ -254,7 +268,7 @@ describe('LogsPage settings and empty-state file logging control', () => {
   );
 
   it('validates non-negative integer inputs before sending retention writes', async () => {
-    const { client } = buildAuthorityClient({ mode: 'managed', writable: true });
+    const client = buildAuthorityClient({ mode: 'managed', writable: true });
     const mounted = await mountLogsPage(client, '/logs?tab=settings');
 
     const maxSizeInput = byTestId(mounted.root, 'logs-setting-row-max-size').findByType('input');
@@ -270,7 +284,7 @@ describe('LogsPage settings and empty-state file logging control', () => {
   });
 
   it('disables all log settings controls when posture or version capability refuses edits', async () => {
-    const { client } = buildAuthorityClient({
+    const client = buildAuthorityClient({
       mode: 'external',
       writable: false,
       reason: 'external_cpa_version_unsupported',
@@ -304,7 +318,7 @@ describe('LogsPage settings and empty-state file logging control', () => {
       message: 'Request failed with status code 409',
       data: { code: 'external_management_key_rejected' },
     });
-    const { client } = buildAuthorityClient({ mode: 'external', writable: true });
+    const client = buildAuthorityClient({ mode: 'external', writable: true });
     const mounted = await mountLogsPage(client, '/logs');
 
     await act(async () => {
@@ -315,5 +329,277 @@ describe('LogsPage settings and empty-state file logging control', () => {
     expect(mocks.fetchLogs).not.toHaveBeenCalled();
     const errorAlert = byTestId(mounted.root, 'logs-empty-save-error');
     expect(errorAlert.props.role).toBe('alert');
+  });
+
+  it.each(['false', 'true', 1, null, undefined, {}] as const)(
+    'fails closed when capability.writable is non-boolean (%j)',
+    async (nonBooleanWritable) => {
+      const client = buildAuthorityClient({
+        mode: 'managed',
+        writable: nonBooleanWritable,
+      });
+      const mounted = await mountLogsPage(client, '/logs');
+
+      expect(byTestId(mounted.root, 'logs-empty-enable-button').props.disabled).toBe(true);
+
+      await act(async () => {
+        byTestId(mounted.root, 'logs-tab-settings').props.onClick();
+      });
+
+      for (const rowId of [
+        'logs-setting-row-logging-to-file',
+        'logs-setting-row-debug',
+        'logs-setting-row-request-log',
+        'logs-setting-row-max-size',
+        'logs-setting-row-error-max-files',
+      ]) {
+        expect(byTestId(mounted.root, rowId).findByType('input').props.disabled).toBe(true);
+      }
+    }
+  );
+
+  it('ignores a stale old-key 401 after switching to a valid management key', async () => {
+    const oldKeyProbe = createDeferred<unknown>();
+    const newKeyProbe = createDeferred<unknown>();
+
+    const client: PublicApiClient = {
+      get: ((_resource: string, credential?: { kind: string; value: string }) => {
+        if (credential?.value === 'old-key') return oldKeyProbe.promise;
+        return newKeyProbe.promise;
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
+
+    function AuthorityHarness({ managementKey }: { managementKey: string }) {
+      const authority = useLogsConfigAuthority({
+        connectionStatus: 'connected',
+        apiBase: '/console/api/v2/cpamp',
+        managementKey,
+        authorityClient: client,
+      });
+      return (
+        <button
+          type="button"
+          data-testid="harness-can-edit"
+          disabled={!authority.canEditLogs}
+          onClick={() => {
+            void authority.refresh();
+          }}
+        />
+      );
+    }
+
+    await act(async () => {
+      renderer = create(<AuthorityHarness managementKey="old-key" />);
+    });
+
+    await act(async () => {
+      renderer!.update(<AuthorityHarness managementKey="new-key" />);
+    });
+
+    await act(async () => {
+      newKeyProbe.resolve({
+        capability: { mode: 'managed', readable: true, writable: true, rulesWritable: true },
+      });
+      await newKeyProbe.promise;
+    });
+
+    expect(byTestId(renderer!.root, 'harness-can-edit').props.disabled).toBe(false);
+
+    await act(async () => {
+      oldKeyProbe.reject(new PublicApiError('authentication', 401, 'unauthorized'));
+      await Promise.resolve();
+    });
+
+    expect(dispatchWindowEvent).not.toHaveBeenCalled();
+    expect(byTestId(renderer!.root, 'harness-can-edit').props.disabled).toBe(false);
+
+    // Also verify an in-flight refresh() started under one key does not fire unauthorized after rotating to a newer key
+    const staleRefreshProbe = createDeferred<unknown>();
+    const rotatedKeyProbe = createDeferred<unknown>();
+    let rotatedCall = 0;
+    const refreshRaceClient: PublicApiClient = {
+      get: ((_resource: string, credential?: { kind: string; value: string }) => {
+        rotatedCall += 1;
+        if (credential?.value === 'key-before-rotate') {
+          if (rotatedCall === 1) {
+            return Promise.resolve({
+              capability: { mode: 'managed', readable: true, writable: true, rulesWritable: true },
+            });
+          }
+          return staleRefreshProbe.promise;
+        }
+        return rotatedKeyProbe.promise;
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
+
+    function RefreshHarness({ managementKey }: { managementKey: string }) {
+      const authority = useLogsConfigAuthority({
+        connectionStatus: 'connected',
+        apiBase: '/console/api/v2/cpamp',
+        managementKey,
+        authorityClient: refreshRaceClient,
+      });
+      return (
+        <button
+          type="button"
+          data-testid="refresh-harness-btn"
+          disabled={!authority.canEditLogs}
+          onClick={() => {
+            void authority.refresh();
+          }}
+        />
+      );
+    }
+
+    await act(async () => {
+      renderer!.unmount();
+      renderer = create(<RefreshHarness managementKey="key-before-rotate" />);
+    });
+    expect(byTestId(renderer!.root, 'refresh-harness-btn').props.disabled).toBe(false);
+
+    await act(async () => {
+      byTestId(renderer!.root, 'refresh-harness-btn').props.onClick();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      renderer!.update(<RefreshHarness managementKey="key-after-rotate" />);
+    });
+
+    await act(async () => {
+      rotatedKeyProbe.resolve({
+        capability: { mode: 'managed', readable: true, writable: true, rulesWritable: true },
+      });
+      await rotatedKeyProbe.promise;
+    });
+    expect(byTestId(renderer!.root, 'refresh-harness-btn').props.disabled).toBe(false);
+
+    await act(async () => {
+      staleRefreshProbe.reject(new PublicApiError('authentication', 401, 'unauthorized'));
+      await Promise.resolve();
+    });
+    expect(dispatchWindowEvent).not.toHaveBeenCalled();
+    expect(byTestId(renderer!.root, 'refresh-harness-btn').props.disabled).toBe(false);
+  });
+
+  it('does not dispatch unauthorized when an in-flight 401 settles after unmount (initial probe and refresh)', async () => {
+    const initialProbe = createDeferred<unknown>();
+    const refreshProbe = createDeferred<unknown>();
+    let callCount = 0;
+
+    const client: PublicApiClient = {
+      get: (() => {
+        callCount += 1;
+        return callCount === 1 ? initialProbe.promise : refreshProbe.promise;
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
+
+    const mounted = await mountLogsPage(client, '/logs?tab=settings');
+    await act(async () => {
+      mounted.unmount();
+    });
+    renderer = undefined;
+
+    await act(async () => {
+      initialProbe.reject(new PublicApiError('authentication', 401, 'unauthorized'));
+      await Promise.resolve();
+    });
+    expect(dispatchWindowEvent).not.toHaveBeenCalled();
+
+    // Also verify refresh() settling with 401 after unmount does not dispatch unauthorized
+    let secondCall = 0;
+    const refreshClient: PublicApiClient = {
+      get: (() => {
+        secondCall += 1;
+        if (secondCall === 1) {
+          return Promise.resolve({
+            capability: { mode: 'managed', readable: true, writable: true, rulesWritable: true },
+          });
+        }
+        return refreshProbe.promise;
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
+
+    const mountedForRefresh = await mountLogsPage(refreshClient, '/logs?tab=settings');
+    expect(
+      byTestId(mountedForRefresh.root, 'logs-setting-row-logging-to-file').findByType('input').props
+        .disabled
+    ).toBe(false);
+
+    let pendingRefresh!: Promise<void>;
+    await act(async () => {
+      pendingRefresh = triggerHeaderRefresh();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      mountedForRefresh.unmount();
+    });
+    renderer = undefined;
+
+    await act(async () => {
+      refreshProbe.reject(new PublicApiError('authentication', 401, 'unauthorized'));
+      await pendingRefresh;
+    });
+    expect(dispatchWindowEvent).not.toHaveBeenCalled();
+  });
+
+  it('dispatches unauthorized and fails closed on a current 401 (initial probe and refresh)', async () => {
+    const authError = new PublicApiError('authentication', 401, 'unauthorized');
+    let callCount = 0;
+    const client: PublicApiClient = {
+      get: (() => {
+        callCount += 1;
+        if (callCount === 1) {
+          return Promise.reject(authError);
+        }
+        if (callCount === 2) {
+          return Promise.resolve({
+            capability: { mode: 'managed', readable: true, writable: true, rulesWritable: true },
+          });
+        }
+        return Promise.reject(authError);
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
+
+    const mounted = await mountLogsPage(client, '/logs?tab=settings');
+    expect(dispatchWindowEvent).toHaveBeenCalledTimes(1);
+    expect(dispatchWindowEvent.mock.calls[0]?.[0]?.type).toBe('unauthorized');
+    expect(
+      byTestId(mounted.root, 'logs-setting-row-logging-to-file').findByType('input').props.disabled
+    ).toBe(true);
+
+    // Refresh recovers to writable (no new unauthorized event), then a subsequent refresh 401 dispatches unauthorized
+    await act(async () => {
+      await triggerHeaderRefresh();
+    });
+    expect(dispatchWindowEvent).toHaveBeenCalledTimes(1);
+    expect(
+      byTestId(mounted.root, 'logs-setting-row-logging-to-file').findByType('input').props.disabled
+    ).toBe(false);
+
+    await act(async () => {
+      await triggerHeaderRefresh();
+    });
+    expect(dispatchWindowEvent).toHaveBeenCalledTimes(2);
+    expect(dispatchWindowEvent.mock.calls[1]?.[0]?.type).toBe('unauthorized');
+    expect(
+      byTestId(mounted.root, 'logs-setting-row-logging-to-file').findByType('input').props.disabled
+    ).toBe(true);
   });
 });

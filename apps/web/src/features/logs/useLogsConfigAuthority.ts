@@ -11,11 +11,11 @@ export type LogsAuthorityMode = 'managed' | 'external' | 'private' | 'none' | 's
 
 interface GatewayCapabilityPayload {
   capability?: {
-    mode?: string;
-    readable?: boolean;
-    writable?: boolean;
-    rulesWritable?: boolean;
-    reason?: string;
+    mode?: unknown;
+    readable?: unknown;
+    writable?: unknown;
+    rulesWritable?: unknown;
+    reason?: unknown;
   };
 }
 
@@ -81,7 +81,7 @@ export function extractWriteRefusalCode(error: unknown): string | undefined {
   return undefined;
 }
 
-function normalizeMode(raw: string | undefined): LogsAuthorityMode {
+function normalizeMode(raw: unknown): LogsAuthorityMode {
   switch (raw) {
     case 'managed':
     case 'external':
@@ -92,6 +92,12 @@ function normalizeMode(raw: string | undefined): LogsAuthorityMode {
   }
 }
 
+function normalizeReason(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed !== '' ? trimmed : undefined;
+}
+
 interface ResolvedAuthorityState {
   scopeKey: string;
   mode: LogsAuthorityMode;
@@ -99,45 +105,62 @@ interface ResolvedAuthorityState {
   reason?: string;
 }
 
+interface ProbeOutcome {
+  state: ResolvedAuthorityState;
+  authenticationFailed: boolean;
+}
+
+function dispatchUnauthorizedIfPresent(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('unauthorized'));
+  }
+}
+
 async function probeAuthority(
   targetClient: PublicApiClient,
   targetKey: string,
   currentScope: string
-): Promise<ResolvedAuthorityState> {
+): Promise<ProbeOutcome> {
   try {
     const view = await targetClient.get<GatewayCapabilityPayload>('gateway/config', {
       kind: 'admin',
       value: targetKey,
     });
     const mode = normalizeMode(view?.capability?.mode);
+    const reason = normalizeReason(view?.capability?.reason);
     if (mode === 'private') {
       return {
-        scopeKey: currentScope,
-        mode: 'private',
-        canEdit: false,
-        reason: view?.capability?.reason || 'private_profile_scope_frozen',
+        state: {
+          scopeKey: currentScope,
+          mode: 'private',
+          canEdit: false,
+          reason: reason || 'private_profile_scope_frozen',
+        },
+        authenticationFailed: false,
       };
     }
     const permitted =
-      Boolean(view?.capability?.writable) && (mode === 'managed' || mode === 'external');
+      view?.capability?.writable === true && (mode === 'managed' || mode === 'external');
     return {
-      scopeKey: currentScope,
-      mode,
-      canEdit: permitted,
-      reason: permitted ? undefined : view?.capability?.reason || 'config_authority_unavailable',
+      state: {
+        scopeKey: currentScope,
+        mode,
+        canEdit: permitted,
+        reason: permitted ? undefined : reason || 'config_authority_unavailable',
+      },
+      authenticationFailed: false,
     };
   } catch (err: unknown) {
-    if (err instanceof PublicApiError && err.kind === 'authentication') {
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new Event('unauthorized'));
-      }
-    }
+    const authenticationFailed = err instanceof PublicApiError && err.kind === 'authentication';
     const code = extractWriteRefusalCode(err) || 'config_authority_unavailable';
     return {
-      scopeKey: currentScope,
-      mode: 'none',
-      canEdit: false,
-      reason: code,
+      state: {
+        scopeKey: currentScope,
+        mode: 'none',
+        canEdit: false,
+        reason: code,
+      },
+      authenticationFailed,
     };
   }
 }
@@ -164,9 +187,21 @@ export function useLogsConfigAuthority({
     mode: 'standalone',
     canEdit: true,
   });
+  const mountedRef = useRef(false);
+  const activeScopeRef = useRef('');
   const requestIdRef = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeScopeRef.current = '';
+      requestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    activeScopeRef.current = scopeKey;
     if (!client || !managementKey) {
       return () => {
         requestIdRef.current += 1;
@@ -174,9 +209,19 @@ export function useLogsConfigAuthority({
     }
     let cancelled = false;
     const requestId = ++requestIdRef.current;
-    probeAuthority(client, managementKey, scopeKey).then((next) => {
-      if (cancelled || requestIdRef.current !== requestId) return;
-      setResolved(next);
+    probeAuthority(client, managementKey, scopeKey).then((outcome) => {
+      if (
+        cancelled ||
+        !mountedRef.current ||
+        requestIdRef.current !== requestId ||
+        activeScopeRef.current !== scopeKey
+      ) {
+        return;
+      }
+      if (outcome.authenticationFailed) {
+        dispatchUnauthorizedIfPresent();
+      }
+      setResolved(outcome.state);
     });
     return () => {
       cancelled = true;
@@ -187,9 +232,18 @@ export function useLogsConfigAuthority({
   const refresh = useCallback(async () => {
     if (!client || !managementKey) return;
     const requestId = ++requestIdRef.current;
-    const next = await probeAuthority(client, managementKey, scopeKey);
-    if (requestIdRef.current !== requestId) return;
-    setResolved(next);
+    const outcome = await probeAuthority(client, managementKey, scopeKey);
+    if (
+      !mountedRef.current ||
+      requestIdRef.current !== requestId ||
+      activeScopeRef.current !== scopeKey
+    ) {
+      return;
+    }
+    if (outcome.authenticationFailed) {
+      dispatchUnauthorizedIfPresent();
+    }
+    setResolved(outcome.state);
   }, [client, managementKey, scopeKey]);
 
   if (!client) {
