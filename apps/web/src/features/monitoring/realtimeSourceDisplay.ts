@@ -32,6 +32,7 @@ export const buildRealtimeSourceDisplay = (
     Partial<
       Pick<
         MonitoringEventRow,
+        | 'credentialLabel'
         | 'clientIp'
         | 'userAgent'
         | 'xForwardedFor'
@@ -76,6 +77,7 @@ export const buildRealtimeSourceDisplay = (
     : '';
   const primary =
     firstReadable(
+      row.credentialLabel,
       keyDisambiguatedSource,
       nonGenericChannel,
       host,

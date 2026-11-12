@@ -994,6 +994,11 @@
     "delete_confirm": "确定要删除这个API密钥吗？"
   },
   "ai_providers": {
+    "credential_label": "凭证备注",
+    "credential_label_edit": "编辑凭证备注",
+    "credential_label_hint": "可填写邮箱或账号备注，最多 120 字。留空可清除；由 Manager Server 保存，不影响路由。",
+    "credential_label_invalid": "最多 120 字，不能包含控制字符。",
+    "credential_label_save_error": "备注保存失败，已保留输入内容。",
     "title": "AI 提供商配置",
     "delete_second_title": "再次确认永久删除",
     "delete_second_confirm": "这是最后一次确认：确定永久删除 {{provider}} 配置 {{target}} 吗？此操作不可恢复。",

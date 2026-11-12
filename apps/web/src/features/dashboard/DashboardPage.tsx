@@ -1,3 +1,4 @@
+import { useCredentialLabels } from '@/hooks/useCredentialLabels';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -79,6 +80,7 @@ export function DashboardPage() {
 }
 
 function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: boolean }) {
+  const { labels: credentialLabels } = useCredentialLabels();
   const { t, i18n } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -277,6 +279,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
   const sourceInfoMap = useMemo(
     () =>
       buildSourceInfoMap({
+        credentialLabels,
         geminiApiKeys: config?.geminiApiKeys || [],
         claudeApiKeys: config?.claudeApiKeys || [],
         codexApiKeys: config?.codexApiKeys || [],
@@ -285,7 +288,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
       }),
-    [config]
+    [config, credentialLabels]
   );
   const channelByAuthIndex = useMemo(() => {
     const map = new Map<string, MonitoringChannelMeta>();
@@ -391,7 +394,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           ? aliasesResult.value.items
           : current.apiKeyAliases,
     }));
-  }, [apiBase, config, managementKey, t, usageEnabled, usageServiceBase]);
+  }, [config, managementKey, t, usageEnabled, usageServiceBase]);
 
   const refreshDashboard = useCallback(async () => {
     setCurrentTime(new Date());
@@ -596,7 +599,11 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           errorLogsLoaded={errorLogsLoaded}
         />
       </section>
-      {healthMetaError ? <div className="error-box" role="alert">{healthMetaError}</div> : null}
+      {healthMetaError ? (
+        <div className="error-box" role="alert">
+          {healthMetaError}
+        </div>
+      ) : null}
 
       {/* 3. Today's Overview (Metrics Cards) */}
       {usageSummary.enabled && (

@@ -1,3 +1,4 @@
+import { useCredentialLabels } from '@/hooks/useCredentialLabels';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMonitoringAnalytics } from '@/features/monitoring/hooks/useMonitoringAnalytics';
@@ -93,6 +94,7 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 }
 
 export function useUsageAnalytics() {
+  const { labels: credentialLabels } = useCredentialLabels();
   const config = useConfigStore((state) => state.config);
   const { apiKeyAliases, loadApiKeyAliases } = useUsageData({ loadUsageEvents: false });
   const [monitoringMeta, setMonitoringMeta] = useState<UsageAnalyticsMonitoringMeta>(
@@ -182,6 +184,7 @@ export function useUsageAnalytics() {
   const sourceInfoMap = useMemo(
     () =>
       buildSourceInfoMap({
+        credentialLabels,
         geminiApiKeys: config?.geminiApiKeys || [],
         claudeApiKeys: config?.claudeApiKeys || [],
         codexApiKeys: config?.codexApiKeys || [],
@@ -190,7 +193,7 @@ export function useUsageAnalytics() {
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
       }),
-    [config]
+    [config, credentialLabels]
   );
   const channelByAuthIndex = useMemo(() => {
     const map = new Map<string, MonitoringChannelMeta>();

@@ -87,7 +87,16 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 - 管理 CPA Provider 配置，包括 Gemini、Codex、Claude、Vertex、xAI、Devin、Muse / Meta 和 OpenAI-compatible Provider。
 - 维护认证文件、OAuth 登录、API Key、模型别名、优先级、插件、日志和系统配置。Muse / Meta 的 Device Flow 凭证与 `meta-api-key` 推理 Provider 分离管理。
+- 在 Manager Server 模式为原生提供商 API Key 保存邮箱或备注，并在提供商、请求监控和用量分析中统一展示，不改变路由或统计身份。
 - 导入官方 Sub2API OpenAI OAuth 导出，并把多账号拆分为独立的 CPA Codex 认证文件。
+
+### 上游凭证备注
+
+在 Manager Server 模式，点击原生提供商密钥旁的铅笔按钮，可填写邮箱或账号备注（最多 120 字），保存后在提供商列表/详情、仪表盘、[请求监控](https://cpamp-docs.seakee.dev/manual/monitoring.html)和[用量分析](https://cpamp-docs.seakee.dev/manual/usage-analytics.html)中展示。留空保存可清除备注；账号汇总仍遵循现有脱敏/完整显示开关。
+
+备注保存在 Manager 数据库中，以原始 Key 的完整 SHA-256 关联，不保存原始 Key。备注仅影响显示，不改变路由、聚合、去重或历史统计；同名凭证不会合并。客户端 API Key 别名仍独立管理。备份 Manager 数据库也会保留备注。
+
+轻量 CPA 面板或不支持此接口的旧 Manager 不显示备注编辑入口。
 
 ### 请求监控与失败诊断
 

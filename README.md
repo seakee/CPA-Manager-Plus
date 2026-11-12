@@ -89,7 +89,16 @@ See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/en/guide/choosing-a-pan
 
 - Manage CPA provider configurations, including Gemini, Codex, Claude, Vertex, xAI, Devin, Muse / Meta, and OpenAI-compatible providers.
 - Maintain auth files, OAuth logins, API keys, model aliases, priorities, plugins, logs, and system settings. Muse / Meta supports Device Flow credentials separately from `meta-api-key` inference providers.
+- In Manager Server mode, save an email or remark for each native provider API key and reuse it across providers, monitoring, and usage analytics without changing routing or usage identities.
 - Import official Sub2API OpenAI OAuth exports and split multiple accounts into separate CPA Codex auth files.
+
+### Upstream Credential Remarks
+
+In Manager Server mode, use the pencil beside a native provider key to save an email or account remark (up to 120 characters). The remark appears in provider lists/details, the dashboard, [Monitoring](https://cpamp-docs.seakee.dev/en/manual/monitoring.html), and [Usage Analytics](https://cpamp-docs.seakee.dev/en/manual/usage-analytics.html). Save an empty value to clear it. Account summaries retain the existing masked/full display toggle.
+
+Remarks are stored in the Manager database under the full SHA-256 of the original key, without storing the raw key. They affect display only: routing, aggregation, deduplication, and historical identities remain unchanged, and equal remarks do not merge credentials. Client API key aliases remain separate. Manager database backups include remarks.
+
+The lightweight CPA panel and older Managers without this API do not show the remark editor.
 
 ### Request Monitoring And Failure Diagnosis
 
