@@ -668,6 +668,7 @@ describe('upgrade authentication lifecycle', () => {
       expect(adapter().error).toContain('data.key');
       expect(adapter().error).toContain('/legacy:ro');
       expect(adapter().error).toContain('/data/runtime');
+      expect(adapter().error).toMatch(/restart|重启|重啟|перезапуст/i);
       expect(adapter().error).not.toBe(genericUnavailableByLocale[locale]);
     }
   });

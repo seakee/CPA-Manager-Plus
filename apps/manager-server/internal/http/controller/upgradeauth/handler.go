@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
@@ -46,12 +48,27 @@ type Handler struct {
 	sourceRoot           string
 	preserveManagerStore bool
 	managerPaths         sqlite.InspectionPaths
-	instance             [32]byte
-	mu                   sync.Mutex
-	observed             sqlite.LegacyInspection
-	encoded              string
-	credentialRevision   string
-	publicOrigin         string
+	// InspectionTimeout bounds both the ownership probe and the inspection
+	// behind it. Zero uses legacypreflight.DiscoveryInspectionTimeout.
+	InspectionTimeout time.Duration
+	// probeOwnership is the test seam for sourceOwnershipUnavailable: a test
+	// substitutes a lookup that blocks on a channel to prove caller
+	// cancellation, deadline enforcement, and single-flight coalescing without
+	// sleeps. Production leaves it nil so sourceOwnershipUnavailable runs.
+	probeOwnership     func(paths sqlite.InspectionPaths, checkDataKey bool) bool
+	ownershipMu        sync.Mutex
+	ownershipFlight    *ownershipFlight
+	instance           [32]byte
+	mu                 sync.Mutex
+	observed           sqlite.LegacyInspection
+	encoded            string
+	credentialRevision string
+	publicOrigin       string
+}
+
+type ownershipFlight struct {
+	done   chan struct{}
+	denied bool
 }
 
 // StatusObservationUnavailable is the entry's answer when the presented key is
@@ -93,11 +110,11 @@ func (h *Handler) SetManagerStorePaths(paths sqlite.InspectionPaths) {
 
 // verifyCredential proves the key against the one credential file this surface
 // resolved, reading it the way that file requires.
-func (h *Handler) verifyCredential(ctx context.Context, paths sqlite.InspectionPaths, mountSource bool, key string) error {
-	if mountSource {
+func (h *Handler) verifyCredential(ctx context.Context, key string) error {
+	if h.mountSource {
 		return upgradeservice.VerifyAdminSource(ctx, upgradeservice.PreservedSource{
-			Database: paths.Database,
-			DataKey:  paths.DataKey,
+			Database: h.paths.Database,
+			DataKey:  h.paths.DataKey,
 		}, key,
 			upgradeservice.ScratchRoot{Label: "the target root", Dir: parentDir(h.managerPaths.Database)},
 			upgradeservice.ScratchRoot{Label: "the Manager data key directory", Dir: parentDir(h.managerPaths.DataKey)})
@@ -110,29 +127,64 @@ func (h *Handler) verifyCredential(ctx context.Context, paths sqlite.InspectionP
 	// TMPDIR inside it is refused by the service instead of staging a copy there.
 	// The store's data key travels with it for the same reason: a configuration may
 	// keep that file outside the data root.
-	return upgradeservice.VerifyManagerCredential(ctx, paths.Database, upgradeservice.CredentialSnapshotRoots{
-		Target:         filepath.Dir(paths.Database),
+	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, upgradeservice.CredentialSnapshotRoots{
+		Target:         filepath.Dir(h.paths.Database),
 		Source:         h.sourceRoot,
 		SourceKnown:    true,
 		PreserveTarget: h.preserveManagerStore,
-		DataKey:        paths.DataKey,
+		DataKey:        h.paths.DataKey,
 	}, key)
 }
 
-func (h *Handler) effectivePaths() (sqlite.InspectionPaths, bool) {
-	if h.mountSource {
-		return h.paths, true
+func (h *Handler) inspectionTimeout() time.Duration {
+	if h.InspectionTimeout > 0 {
+		return h.InspectionTimeout
 	}
-	if h.sourceRoot != "" {
-		legacyPaths := legacypreflight.DefaultPaths(filepath.Join(h.sourceRoot, "usage.sqlite"))
-		if sourceOwnershipUnavailable(legacyPaths, true) {
-			return legacyPaths, true
-		}
-		if database, _ := upgradeservice.MountDatabase(h.sourceRoot); database != "" {
-			return legacypreflight.DefaultPaths(database), true
-		}
+	return legacypreflight.DiscoveryInspectionTimeout
+}
+
+// resolveSourceOwnership inspects only the construction-time bound source
+// (h.paths) inside a single-flight bound that honours ctx cancellation and
+// deadline. A hung mount therefore leaves at most one blocked filesystem call
+// in flight and never holds the HTTP request past ctx.Done().
+func (h *Handler) resolveSourceOwnership(ctx context.Context) (denied bool, ok bool) {
+	if ctx.Err() != nil {
+		return false, false
 	}
-	return h.paths, false
+	flight := h.joinOwnershipFlight()
+	select {
+	case <-flight.done:
+		return flight.denied, true
+	case <-ctx.Done():
+		return false, false
+	}
+}
+
+func (h *Handler) joinOwnershipFlight() *ownershipFlight {
+	h.ownershipMu.Lock()
+	defer h.ownershipMu.Unlock()
+	if h.ownershipFlight != nil {
+		return h.ownershipFlight
+	}
+	flight := &ownershipFlight{done: make(chan struct{})}
+	h.ownershipFlight = flight
+	paths := h.paths
+	checkDataKey := h.mountSource || h.preserveManagerStore
+	probe := sourceOwnershipUnavailable
+	if h.probeOwnership != nil {
+		probe = h.probeOwnership
+	}
+	go func() {
+		denied := probe(paths, checkDataKey)
+		h.ownershipMu.Lock()
+		flight.denied = denied
+		if h.ownershipFlight == flight {
+			h.ownershipFlight = nil
+		}
+		h.ownershipMu.Unlock()
+		close(flight.done)
+	}()
+	return flight
 }
 
 func sourceOwnershipUnavailable(paths sqlite.InspectionPaths, checkDataKey bool) bool {
@@ -216,14 +268,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeOriginRejected(w, h.publicOrigin)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), legacypreflight.DiscoveryInspectionTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), h.inspectionTimeout())
 	defer cancel()
-	paths, mountSource := h.effectivePaths()
-	if sourceOwnershipUnavailable(paths, mountSource || h.preserveManagerStore) {
+	denied, ok := h.resolveSourceOwnership(ctx)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, "source_unavailable")
+		return
+	}
+	if denied {
 		write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
 		return
 	}
-	legacypreflight.WithAuthenticatedInspection(ctx, paths, key, func(report legacypreflight.Report, err error) {
+	legacypreflight.WithAuthenticatedInspection(ctx, h.paths, key, func(report legacypreflight.Report, err error) {
 		// observedFile is the projection the entry can offer this caller. When the
 		// public observation refuses the source, the credential is asked directly:
 		// a proved key still answers authenticated, because only the observation is
@@ -236,7 +292,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		case errors.Is(err, sqlite.ErrLegacyAdminUnauthorized):
 			observedFile = false
-			verifyErr := h.verifyCredential(ctx, paths, mountSource, key)
+			verifyErr := h.verifyCredential(ctx, key)
 			if errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized) {
 				write(w, http.StatusUnauthorized, "admin_unauthorized")
 				return
@@ -256,7 +312,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// observation fault is what stranded a resumable operation. This is not
 			// a credential verdict, so a wrong key stays 503 here rather than 401.
 			observedFile = false
-			if verifyErr := h.verifyCredential(ctx, paths, mountSource, key); verifyErr != nil {
+			if verifyErr := h.verifyCredential(ctx, key); verifyErr != nil {
 				if errors.Is(verifyErr, os.ErrPermission) {
 					write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
 					return

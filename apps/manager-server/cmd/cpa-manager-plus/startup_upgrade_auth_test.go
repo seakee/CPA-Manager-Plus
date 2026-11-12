@@ -351,6 +351,91 @@ func TestStartupUpgradeAuthenticationClassifiesPermissionDeniedLegacySource(t *t
 	}
 }
 
+// TestStartupUpgradeAuthenticationKeepsBoundSourceWhenLegacyMountAppearsAfterConstruction
+// pins ADR-0004: the entry leaf binds its credential source once at construction
+// time. When the configured legacy root held no readable database at startup,
+// a database (readable or unreadable) appearing under that root later neither
+// blocks nor replaces the bound Manager store until the handler is rebuilt.
+func TestStartupUpgradeAuthenticationKeepsBoundSourceWhenLegacyMountAppearsAfterConstruction(t *testing.T) {
+	const (
+		legacyKey  = "late-legacy-mount-admin-key-123456"
+		managerKey = "bound-manager-data-admin-key-123456"
+	)
+	_, managerPaths := upgradeAuthSource(t, managerKey)
+	legacyMount := t.TempDir()
+	t.Setenv(legacyRootEnvironment, legacyMount)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+
+	postAuth := func(target http.Handler, presentedKey string) (int, string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, upgradeauth.Path, nil)
+		r.Host = "manager.test"
+		r.Header.Set("Authorization", "Bearer "+presentedKey)
+		w := httptest.NewRecorder()
+		target.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+
+	if code, body := postAuth(h, managerKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("bound manager key before mount appeared = %d %s, want 200", code, body)
+	}
+
+	// Materialize a complete 1.x source into the configured legacy root after
+	// construction. Even with an unreadable lock marker or a valid foreign key,
+	// the already-constructed leaf must stay bound to managerPaths.
+	stagedDir, _ := upgradeAuthSource(t, legacyKey)
+	entries, err := os.ReadDir(stagedDir)
+	if err != nil {
+		t.Fatalf("read staged legacy dir: %v", err)
+	}
+	for _, entry := range entries {
+		src := filepath.Join(stagedDir, entry.Name())
+		raw, readErr := os.ReadFile(src)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", src, readErr)
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			t.Fatalf("stat %s: %v", src, statErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(legacyMount, entry.Name()), raw, info.Mode().Perm()); writeErr != nil {
+			t.Fatalf("copy %s into legacy mount: %v", entry.Name(), writeErr)
+		}
+	}
+	if os.Geteuid() != 0 {
+		lateLock := filepath.Join(legacyMount, "usage.sqlite.manager.lock")
+		if err := os.Chmod(lateLock, 0o000); err != nil {
+			t.Fatalf("chmod late lock: %v", err)
+		}
+		if code, body := postAuth(h, managerKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+			_ = os.Chmod(lateLock, 0o600)
+			t.Fatalf("bound manager key with unreadable late mount lock = %d %s, want 200", code, body)
+		}
+		if err := os.Chmod(lateLock, 0o600); err != nil {
+			t.Fatalf("restore late lock: %v", err)
+		}
+	}
+
+	if code, body := postAuth(h, legacyKey); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"admin_unauthorized"`) {
+		t.Fatalf("late legacy key before rebuild = %d %s, want 401 admin_unauthorized", code, body)
+	}
+	if code, body := postAuth(h, managerKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("bound manager key after readable late mount = %d %s, want 200", code, body)
+	}
+
+	// Rebuilding the leaf (as on container restart) picks up the mounted source.
+	rebuilt := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	rebuilt.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+	if code, body := postAuth(rebuilt, legacyKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("legacy key after rebuild = %d %s, want 200", code, body)
+	}
+	if code, body := postAuth(rebuilt, managerKey); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"admin_unauthorized"`) {
+		t.Fatalf("manager key after rebuild = %d %s, want 401 admin_unauthorized", code, body)
+	}
+}
+
 // readSourceTree records every entry under a source root with its mode and
 // content, so a test can prove a read-only mount was neither written nor
 // recreated.

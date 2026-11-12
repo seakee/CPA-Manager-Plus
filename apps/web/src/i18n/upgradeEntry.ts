@@ -29,7 +29,7 @@ const en = {
   unavailable:
     'This source cannot be verified safely. Check the stopped installation on its host; do not initialize it again.',
   source_ownership_unavailable:
-    'The mounted 1.x source files (usage.sqlite* and data.key under /legacy or /data) are owned by root (0:0) and cannot be read by the v2 Manager user (10002:10002). On the host, run a one-off root container to change ownership only on those files (chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key, or mount a copy readable by 10002:10002 at /legacy:ro; never run chown -R on /data because /data/runtime must stay 0:0), then try again.',
+    'The mounted 1.x source files (usage.sqlite* and data.key under /legacy or /data) are owned by root (0:0) and cannot be read by the v2 Manager user (10002:10002). On the host, run a one-off root container to change ownership only on those files (chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key, or mount a copy readable by 10002:10002 at /legacy:ro; never run chown -R on /data because /data/runtime must stay 0:0), then try again (restart the v2 container if this message persists).',
   changed:
     'The source or Manager process has changed. Sign in again to verify the current installation.',
   network: 'Authentication could not be confirmed. Check the connection and sign in again.',
@@ -67,7 +67,7 @@ const zh: typeof en = {
   invalid: '无法验证原 Manager 管理员密钥，请重新输入。此处不能使用 CPA 管理密钥。',
   unavailable: '当前来源无法安全验证。请在宿主机停机检查原安装，不要重新初始化。',
   source_ownership_unavailable:
-    '当前挂载的 1.x 来源文件（/legacy 或 /data 下的 usage.sqlite* 与 data.key）仍属 root (0:0)，v2 Manager 运行用户（10002:10002）无权读取。请在宿主机通过一次性 root 容器仅修改这些文件的属主（chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key，或将 10002:10002 可读的副本只读挂载到 /legacy:ro；切勿对 /data 执行 chown -R，/data/runtime 必须保持 0:0），完成后重试。',
+    '当前挂载的 1.x 来源文件（/legacy 或 /data 下的 usage.sqlite* 与 data.key）仍属 root (0:0)，v2 Manager 运行用户（10002:10002）无权读取。请在宿主机通过一次性 root 容器仅修改这些文件的属主（chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key，或将 10002:10002 可读的副本只读挂载到 /legacy:ro；切勿对 /data 执行 chown -R，/data/runtime 必须保持 0:0），完成后重试（若仍显示此提示，请重启 v2 容器）。',
   changed: '来源或 Manager 进程已变化，请重新登录以验证当前安装。',
   network: '身份验证结果未确认，请检查连接后重新登录。',
   expired: '身份验证已过期，请重新登录。',
@@ -104,7 +104,7 @@ const tw: typeof en = {
   invalid: '無法驗證原 Manager 管理員金鑰，請重新輸入。此處不能使用 CPA 管理金鑰。',
   unavailable: '目前來源無法安全驗證。請在主機停機檢查原安裝，不要重新初始化。',
   source_ownership_unavailable:
-    '目前掛載的 1.x 來源檔案（/legacy 或 /data 下的 usage.sqlite* 與 data.key）仍屬 root (0:0)，v2 Manager 執行使用者（10002:10002）無權讀取。請在主機透過一次性 root 容器僅修改這些檔案的擁有者（chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key，或將 10002:10002 可讀的副本唯讀掛載至 /legacy:ro；切勿對 /data 執行 chown -R，/data/runtime 必須維持 0:0），完成後重試。',
+    '目前掛載的 1.x 來源檔案（/legacy 或 /data 下的 usage.sqlite* 與 data.key）仍屬 root (0:0)，v2 Manager 執行使用者（10002:10002）無權讀取。請在主機透過一次性 root 容器僅修改這些檔案的擁有者（chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key，或將 10002:10002 可讀的副本唯讀掛載至 /legacy:ro；切勿對 /data 執行 chown -R，/data/runtime 必須維持 0:0），完成後重試（若仍顯示此提示，請重啟 v2 容器）。',
   changed: '來源或 Manager 程序已變更，請重新登入以驗證目前安裝。',
   network: '身分驗證結果未確認，請檢查連線後重新登入。',
   expired: '身分驗證已過期，請重新登入。',
@@ -145,7 +145,7 @@ const ru: typeof en = {
   unavailable:
     'Этот источник нельзя безопасно проверить. Проверьте остановленную установку на её хосте; не инициализируйте её заново.',
   source_ownership_unavailable:
-    'Смонтированные файлы источника 1.x (usage.sqlite* и data.key в /legacy или /data) принадлежат root (0:0) и недоступны для чтения пользователю v2 Manager (10002:10002). На хосте запустите разовый контейнер от root и смените владельца только этих файлов (chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key либо смонтируйте в /legacy:ro копию, доступную для чтения 10002:10002; никогда не выполняйте chown -R для /data, так как /data/runtime должен принадлежать 0:0), затем повторите попытку.',
+    'Смонтированные файлы источника 1.x (usage.sqlite* и data.key в /legacy или /data) принадлежат root (0:0) и недоступны для чтения пользователю v2 Manager (10002:10002). На хосте запустите разовый контейнер от root и смените владельца только этих файлов (chown -h 10002:10002 /legacy/usage.sqlite* /legacy/data.key либо смонтируйте в /legacy:ro копию, доступную для чтения 10002:10002; никогда не выполняйте chown -R для /data, так как /data/runtime должен принадлежать 0:0), затем повторите попытку (перезапустите контейнер v2, если сообщение сохраняется).',
   changed:
     'Источник или процесс Manager изменились. Войдите снова, чтобы проверить текущую установку.',
   network: 'Не удалось подтвердить проверку личности. Проверьте соединение и войдите снова.',
