@@ -360,20 +360,35 @@ describe('Canonical revocation recovery UI', () => {
       revision: 3,
       steps: [{ name: 'revoke' as const, state: 'observed' as const, returned: true }],
     };
-    let preflightCalls = 0;
-    const fetchMock = routed(
-      [
-        () => result(null, ''),
-        () => result(preparedRevoke, 'revoke'),
-        () => result(committedRevoke, ''),
-      ],
-      () => {
-        preflightCalls += 1;
-        return preflightCalls === 1
-          ? Response.json({ ready: true, reason: '' })
-          : Response.json({ ready: false, reason: 'key_operation_not_found' });
+    const recordedCalls: Array<{ method: string; url: string; body: unknown }> = [];
+    const preflightUrls: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = new URL(String(input)).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && /\/revocation\/[0-9a-f]{32}\/(revoke|replace)$/.test(url)) {
+        preflightUrls.push(url);
+        return Promise.resolve(
+          preflightUrls.length === 1
+            ? Response.json({ ready: true, reason: '' })
+            : Response.json({ ready: false, reason: 'key_operation_not_found' })
+        );
       }
-    );
+      const parsedBody = typeof init?.body === 'string' && init.body ? JSON.parse(init.body) : null;
+      recordedCalls.push({ method, url, body: parsedBody });
+      if (method === 'GET' && url === '/control/api/v2/api-keys/operations/latest') {
+        return Promise.resolve(result(null, ''));
+      }
+      if (method === 'POST' && url === `/control/api/v2/api-keys/${target}/revocation`) {
+        return Promise.resolve(result(preparedRevoke, 'revoke'));
+      }
+      if (
+        method === 'POST' &&
+        url === `/control/api/v2/api-keys/operations/${preparedRevoke.id}/continue`
+      ) {
+        return Promise.resolve(result(committedRevoke, ''));
+      }
+      return Promise.reject(new Error(`unexpected ${method} ${url}`));
+    });
     const apiClient = createPublicApiClient(
       () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
       fetchMock
@@ -400,10 +415,23 @@ describe('Canonical revocation recovery UI', () => {
       .find((b) => b.props.children === k('confirmOperation'))!;
     expect(confirmBtn.props.disabled).toBe(false);
 
-    // A single click on Confirm operation executes both Prepare and Continue.
+    // A single click on Confirm operation executes Prepare then exactly one Continue on the prepared operation ID.
     await act(async () => confirmBtn.props.onClick());
     expect(changed).toHaveBeenCalledTimes(1);
     expect(pending).toHaveBeenLastCalledWith(false);
+    expect(recordedCalls).toEqual([
+      { method: 'GET', url: '/control/api/v2/api-keys/operations/latest', body: null },
+      {
+        method: 'POST',
+        url: `/control/api/v2/api-keys/${target}/revocation`,
+        body: { requestId: id, keeperId: keeper, mode: 'revoke' },
+      },
+      {
+        method: 'POST',
+        url: `/control/api/v2/api-keys/operations/${preparedRevoke.id}/continue`,
+        body: {},
+      },
+    ]);
 
     // Parent refreshes keys: revoked target is now superseded, leaving 1 active key.
     const refreshedKeys = [
@@ -425,15 +453,30 @@ describe('Canonical revocation recovery UI', () => {
       );
     });
 
-    const rendered = JSON.stringify(view.toJSON());
-    expect(rendered).toContain(t('keysOperationCommitted'));
-    expect(rendered).not.toContain(t('keysOperationPending'));
-    expect(rendered).toContain(k('adoptedOrigin'));
-    expect(rendered).toContain('cpamp_sk_…1111');
-    expect(rendered).not.toContain(t('keysUnnamed'));
-    expect(rendered).not.toContain(k('operationBlockedUnavailable'));
-    expect(rendered).not.toContain(k('lastKeyProtectionTitle'));
-    expect(preflightCalls).toBe(1);
+    // Verify DOM resource card and committed status node directly.
+    const resourceCard = view.root.findByProps({ className: 'key-operation-resource' });
+    expect(resourceCard.findByType('strong').children).toEqual([k('adoptedOrigin')]);
+    expect(resourceCard.findByType('code').children).toEqual([refreshedKeys[0].maskedPreview]);
+
+    const statusRegion = view.root.findByProps({ role: 'status' });
+    const statusCodes = statusRegion
+      .findByProps({ className: 'key-record-identifiers' })
+      .findAllByType('code')
+      .map((node) => node.children.join(''));
+    expect(statusCodes).toEqual([preparedRevoke.id, target, keeper]);
+    const statusParagraphs = statusRegion
+      .findAllByType('p')
+      .map((node) => node.children.filter((c): c is string => typeof c === 'string').join(''));
+    expect(statusParagraphs).toContain(t('keysOperationCommitted'));
+    expect(statusParagraphs).not.toContain(t('keysOperationPending'));
+
+    expect(view.root.findAllByType('fieldset')).toHaveLength(0);
+    expect(view.root.findAllByProps({ 'data-testid': 'key-operation-preflight' })).toHaveLength(0);
+    expect(view.root.findAllByProps({ 'data-testid': 'last-key-protection-notice' })).toHaveLength(
+      0
+    );
+    expect(preflightUrls).toEqual([`/control/api/v2/api-keys/${target}/revocation/${keeper}/revoke`]);
+    expect(recordedCalls).toHaveLength(3);
   });
 
   it('retains the durable journal for recovery when a preset step fails mid-flight', async () => {
@@ -455,20 +498,47 @@ describe('Canonical revocation recovery UI', () => {
       revision: 5,
       steps: operation.steps.map((s) => ({ ...s, state: 'observed' as const, returned: true })),
     };
-    const fetchMock = routed([
-      () => result(null, ''),
-      () => result(operation, 'add'),
-      () =>
-        Response.json(
-          {
-            code: 'key_operation_unknown',
-            result: { operation: attemptedAdd, nextStep: '', runtimeState: 'effect_unknown', expiresAtMs: 0 },
-          },
-          { status: 503 }
-        ),
-      () => result(observedAdd, 'revoke'),
-      () => result(committedReplace, ''),
-    ]);
+    const recordedCalls: Array<{ method: string; url: string; body: unknown }> = [];
+    let continueAttempts = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = new URL(String(input)).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && /\/revocation\/[0-9a-f]{32}\/(revoke|replace)$/.test(url)) {
+        return Promise.resolve(ready());
+      }
+      const parsedBody = typeof init?.body === 'string' && init.body ? JSON.parse(init.body) : null;
+      recordedCalls.push({ method, url, body: parsedBody });
+      if (method === 'GET' && url === '/control/api/v2/api-keys/operations/latest') {
+        return Promise.resolve(result(null, ''));
+      }
+      if (method === 'POST' && url === `/control/api/v2/api-keys/${target}/revocation`) {
+        return Promise.resolve(result(operation, 'add'));
+      }
+      if (method === 'POST' && url === `/control/api/v2/api-keys/operations/${operation.id}/continue`) {
+        continueAttempts += 1;
+        if (continueAttempts === 1) {
+          return Promise.resolve(
+            Response.json(
+              {
+                code: 'key_operation_unknown',
+                result: {
+                  operation: attemptedAdd,
+                  nextStep: '',
+                  runtimeState: 'effect_unknown',
+                  expiresAtMs: 0,
+                },
+              },
+              { status: 503 }
+            )
+          );
+        }
+        return Promise.resolve(result(committedReplace, ''));
+      }
+      if (method === 'GET' && url === `/control/api/v2/api-keys/operations/${operation.id}`) {
+        return Promise.resolve(result(observedAdd, 'revoke'));
+      }
+      return Promise.reject(new Error(`unexpected ${method} ${url}`));
+    });
     await act(async () => {
       view = create(
         <FreshKeyRevocation
@@ -491,14 +561,39 @@ describe('Canonical revocation recovery UI', () => {
       .find((b) => b.props.children === k('confirmOperation'))!;
     await act(async () => confirmBtn.props.onClick());
 
-    expect(JSON.stringify(view.toJSON())).toContain(t('keysOperationUnknown'));
+    // Stops immediately after the first failed continue without issuing a second POST.
+    expect(recordedCalls).toEqual([
+      { method: 'GET', url: '/control/api/v2/api-keys/operations/latest', body: null },
+      {
+        method: 'POST',
+        url: `/control/api/v2/api-keys/${target}/revocation`,
+        body: { requestId: id, keeperId: keeper, mode: 'replace' },
+      },
+      {
+        method: 'POST',
+        url: `/control/api/v2/api-keys/operations/${operation.id}/continue`,
+        body: {},
+      },
+    ]);
+    expect(view.root.findByProps({ role: 'alert' }).findByType('span').children).toEqual([
+      t('keysOperationUnknown'),
+    ]);
     expect(pending).toHaveBeenLastCalledWith(true);
     expect(button('keysOperationContinue').props.disabled).toBe(true);
 
+    // Check inspects the exact original operation ID, then Continue resumes that same operation ID.
     await click('keysOperationCheck');
     expect(button('keysOperationContinue').props.disabled).toBe(false);
     await click('keysOperationContinue');
     expect(changed).toHaveBeenCalledTimes(1);
     expect(pending).toHaveBeenLastCalledWith(false);
+    expect(recordedCalls.slice(3)).toEqual([
+      { method: 'GET', url: `/control/api/v2/api-keys/operations/${operation.id}`, body: null },
+      {
+        method: 'POST',
+        url: `/control/api/v2/api-keys/operations/${operation.id}/continue`,
+        body: {},
+      },
+    ]);
   });
 });

@@ -96,7 +96,7 @@ func (a *freshApplication) externalRebindRoute(w http.ResponseWriter, r *http.Re
 	// 503 external_rebind_unavailable still prompts retry so durable SQLite state
 	// converges across restarts without leaving a live monitoring gap.
 	a.stopUsageCollection(r.Context())
-	a.startUsageCollection(rebound.Record.Operation)
+	a.startUsageCollection(op)
 	if clearErr != nil {
 		a.writeExternalRebindError(w, clearErr)
 		return
