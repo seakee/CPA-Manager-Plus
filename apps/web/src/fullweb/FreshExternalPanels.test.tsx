@@ -23,15 +23,18 @@ function textOf(renderer: ReactTestRenderer, testId: string): string {
 vi.mock('../components/ui/Modal', () => ({
   Modal: ({
     open,
+    title,
     children,
     footer,
   }: {
     open: boolean;
+    title?: string;
     children?: ReactNode;
     footer?: ReactNode;
   }) =>
     open ? (
-      <div>
+      <div data-testid="mock-modal">
+        {title && <h3>{title}</h3>}
         {children}
         {footer}
       </div>
@@ -475,6 +478,104 @@ describe('External usage confirmation', () => {
       renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-notice')
     ).toHaveLength(0);
     expect(textOf(renderer, 'external-usage-blocked')).toContain(x('usageBlockedMonitoring'));
+  });
+
+  it('surfaces retry when confirm returns 200 with unstarted blocked collector and allows starting when statistics are already enabled', async () => {
+    let attempts = 0;
+    const { client, calls } = stubClient(
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return {
+            ...usageState,
+            statisticsEnabled: true,
+            collector: 'stopped',
+            collectionStarted: false,
+            blockedReason: 'external_cpa_authority_unavailable',
+          };
+        }
+        return {
+          ...usageState,
+          statisticsEnabled: true,
+          collector: 'running',
+          collectionStarted: true,
+          blockedReason: '',
+        };
+      },
+      async () => ({ ...usageState, blockedReason: 'usage_statistics_disabled' })
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    const open = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-enable'
+    );
+    await act(async () => open.props.onClick());
+    const confirm = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm'
+    );
+    await act(async () => confirm.props.onClick());
+
+    expect(textOf(renderer, 'external-usage-confirm-failed')).toContain(x('usageEnableFailed'));
+    expect(
+      renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-notice')
+    ).toHaveLength(0);
+    const retry = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm-retry'
+    );
+    await act(async () => retry.props.onClick());
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body).toEqual(calls[0].body);
+    expect(textOf(renderer, 'external-usage-notice')).toBe(x('usageConfirmed'));
+    await act(async () => renderer.unmount());
+
+    // Also verify when statisticsEnabled is already true on initial GET while collector is stopped (e.g. post-rebind).
+    const postRebind = stubClient(
+      async () => ({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+        blockedReason: '',
+      }),
+      async () => ({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'stopped',
+        collectionStarted: false,
+        blockedReason: 'external_cpa_authority_unavailable',
+      })
+    );
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={postRebind.client}
+          credential="admin"
+          onUnauthorized={() => undefined}
+        />
+      );
+    });
+    const startBtn = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-enable'
+    );
+    expect(startBtn.children).toEqual([x('usageStartAction')]);
+    await act(async () => startBtn.props.onClick());
+    const modalText = textOf(renderer, 'mock-modal');
+    expect(modalText).toContain(x('usageStartConfirmTitle'));
+    expect(modalText).toContain(x('usageStartConfirmHelp'));
+    expect(modalText).not.toContain(x('usageConfirmTitle'));
+    expect(modalText).not.toContain(x('usageConfirmHelp'));
+    const startConfirm = renderer.root.find(
+      (node) => node.props['data-testid'] === 'external-usage-confirm'
+    );
+    expect(startConfirm.children).toEqual([x('usageStartConfirmAction')]);
+    await act(async () => startConfirm.props.onClick());
+    expect(postRebind.calls).toHaveLength(1);
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    expect(textOf(renderer, 'external-usage-notice')).toBe(x('usageStarted'));
   });
 
   it('rejects a malformed usage reply instead of inventing a state', () => {

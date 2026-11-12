@@ -46,6 +46,7 @@ export function FreshApiKeys({
   // the generic failure so the page names the state and offers its way out
   // instead of collapsing everything into "key state is unavailable".
   const [blocker, setBlocker] = useState<ExternalBlocker | null>(null);
+  const [usageBlocker, setUsageBlocker] = useState<ExternalBlocker | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -162,6 +163,7 @@ export function FreshApiKeys({
   // A successful rebind changes `reloadToken`, so the blocker this page is
   // showing is re-read instead of outliving the fix that resolved it.
   useEffect(() => {
+    setUsageBlocker(null);
     void refresh();
   }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -508,12 +510,15 @@ export function FreshApiKeys({
           </button>
         </div>
       </header>
-      {blocker && (
+      {(blocker ?? usageBlocker) && (
         <FreshExternalBlocker
-          state={blocker}
+          state={(blocker ?? usageBlocker)!}
           onRebind={onRebind}
           onReload={() => void refresh()}
-          onDismiss={() => setBlocker(null)}
+          onDismiss={() => {
+            if (blocker) setBlocker(null);
+            else setUsageBlocker(null);
+          }}
         />
       )}
       {error && !createOpen && !pending && (
@@ -529,8 +534,7 @@ export function FreshApiKeys({
           credential={credential}
           onUnauthorized={onUnauthorized}
           onBlocker={(code) => {
-            const typed = blockerOf(code);
-            if (typed) setBlocker(typed);
+            setUsageBlocker(code ? blockerOf(code) : null);
           }}
         />
       )}

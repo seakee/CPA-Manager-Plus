@@ -99,6 +99,8 @@ export function FreshKeyRevocation({
   const preflightSeq = useRef(0);
   const [message, setMessage] = useState('');
   const [showGuide, setShowGuide] = useState(false);
+  const [settledPresetSeq, setSettledPresetSeq] = useState<number | null>(null);
+  const latestResult = useRef<Result | null>(null);
   const active = useRef(true);
   const flight = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
@@ -113,9 +115,18 @@ export function FreshKeyRevocation({
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const unresolved = !!request || (!!result?.operation && result.operation.outcome !== 'committed');
+  const presetSettled =
+    !!preset &&
+    !unresolved &&
+    settledPresetSeq === preset.seq &&
+    result?.operation?.outcome === 'committed';
+
   useEffect(() => {
     if (!preset || request || (result?.operation && result.operation.outcome !== 'committed'))
       return;
+    if (settledPresetSeq === preset.seq) return;
+    setMessage('');
     if (available.some((item) => item.id === preset.targetId)) {
       setTarget(preset.targetId);
       setMode(preset.mode);
@@ -126,11 +137,19 @@ export function FreshKeyRevocation({
           ? previous
           : fallbackKeeper
       );
+    } else {
+      setTarget('');
     }
-  }, [preset, keys]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [preset, keys, settledPresetSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentSelection =
-    target && keeper && target !== keeper && !(result?.operation && result.operation.outcome !== 'committed')
+    target &&
+    keeper &&
+    target !== keeper &&
+    !presetSettled &&
+    available.some((item) => item.id === target) &&
+    available.some((item) => item.id === keeper) &&
+    !(result?.operation && result.operation.outcome !== 'committed')
       ? target + '|' + keeper + '|' + mode
       : '';
 
@@ -190,21 +209,22 @@ export function FreshKeyRevocation({
         value.operation.mode !== selection.mode)
     )
       throw new Error();
+    const prevResult = latestResult.current;
     if (
-      result?.operation &&
+      prevResult?.operation &&
       ((!value.operation &&
-        (result.operation.outcome !== 'committed' ||
+        (prevResult.operation.outcome !== 'committed' ||
           !expected ||
-          expected === result.operation.id)) ||
+          expected === prevResult.operation.id)) ||
         (value.operation &&
-          value.operation.id === result.operation.id &&
-          (value.operation.targetId !== result.operation.targetId ||
-            value.operation.keeperId !== result.operation.keeperId ||
-            value.operation.mode !== result.operation.mode ||
-            value.operation.revision < result.operation.revision ||
-            (result.operation.outcome === 'committed' && value.operation.outcome !== 'committed') ||
+          value.operation.id === prevResult.operation.id &&
+          (value.operation.targetId !== prevResult.operation.targetId ||
+            value.operation.keeperId !== prevResult.operation.keeperId ||
+            value.operation.mode !== prevResult.operation.mode ||
+            value.operation.revision < prevResult.operation.revision ||
+            (prevResult.operation.outcome === 'committed' && value.operation.outcome !== 'committed') ||
             value.operation.steps.some((step, i) => {
-              const previous = result.operation!.steps[i];
+              const previous = prevResult.operation!.steps[i];
               const rank = { unattempted: 0, attempted: 1, observed: 2 };
               return (
                 rank[step.state] < rank[previous.state] || (previous.returned && !step.returned)
@@ -213,12 +233,16 @@ export function FreshKeyRevocation({
     )
       throw new Error();
     if (!active.current) return;
+    latestResult.current = value;
     setResult(value);
     setChecked(observed);
     setMessage(observed ? '' : t('keysOperationUnknown'));
     setRequest(null);
     onPending(!observed || (!!value.operation && value.operation.outcome !== 'committed'));
-    if (observed && value.operation?.outcome === 'committed') onChanged();
+    if (observed && value.operation?.outcome === 'committed') {
+      if (preset && expected === value.operation.id) setSettledPresetSeq(preset.seq);
+      onChanged();
+    }
   }
   function failure(err: unknown, expected?: string, selection = request) {
     if (!active.current) return;
@@ -290,19 +314,62 @@ export function FreshKeyRevocation({
     setRequest(selection);
     setChecked(false);
     onPending(true);
-    await run(
-      async () => {
-        const value = await client.post<Result>(
-          'api-keys/' + target + '/revocation',
-          { requestId: id, keeperId: keeper, mode },
+    if (!preset) {
+      await run(
+        async () => {
+          const value = await client.post<Result>(
+            'api-keys/' + target + '/revocation',
+            { requestId: id, keeperId: keeper, mode },
+            auth
+          );
+          if (!value.operation) throw new Error();
+          return value;
+        },
+        id,
+        selection
+      );
+      return;
+    }
+    flight.current = true;
+    setBusy(true);
+    let currentId: string | undefined = id;
+    let activeSelection: typeof selection | null = selection;
+    try {
+      let current = await client.post<Result>(
+        'api-keys/' + target + '/revocation',
+        { requestId: id, keeperId: keeper, mode },
+        auth
+      );
+      if (!current.operation) throw new Error();
+      accept(current, id, selection);
+      activeSelection = null;
+      currentId = current.operation.id;
+      const maxSteps = current.operation.steps.length;
+      for (
+        let step = 0;
+        active.current &&
+        current.operation &&
+        current.operation.outcome !== 'committed' &&
+        !!current.nextStep &&
+        step < maxSteps;
+        step += 1
+      ) {
+        setChecked(false);
+        onPending(true);
+        const next = await client.post<Result>(
+          'api-keys/operations/' + current.operation.id + '/continue',
+          {},
           auth
         );
-        if (!value.operation) throw new Error();
-        return value;
-      },
-      id,
-      selection
-    );
+        accept(next, current.operation.id, null);
+        current = next;
+      }
+    } catch (err) {
+      failure(err, currentId, activeSelection);
+    } finally {
+      flight.current = false;
+      if (active.current) setBusy(false);
+    }
   }
   async function proceed() {
     const o = result?.operation;
@@ -323,8 +390,8 @@ export function FreshKeyRevocation({
       o.id
     );
   }
-  const unresolved = !!request || (!!result?.operation && result.operation.outcome !== 'committed');
-  const guiding = showGuide && !!onCreateReplacement && checked && !unresolved;
+  const guiding = showGuide && !!onCreateReplacement && checked && !unresolved && !presetSettled;
+  const presetKey = preset ? keys.find((item) => item.id === preset.targetId) : undefined;
   const content = (
     <section className="console-key-result key-revocation-workspace" aria-busy={busy}>
       {/* CI browser proofs locate controls via this heading's direct parent. */}
@@ -360,9 +427,11 @@ export function FreshKeyRevocation({
       {preset && (
         <div className="key-operation-resource">
           <strong>
-            {(() => { const key = available.find((item) => item.id === preset.targetId); return key ? keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed')) : t('keysUnnamed'); })()}
+            {presetKey
+              ? keyDisplayName(presetKey, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))
+              : t('keysUnnamed')}
           </strong>
-          <code>{available.find((key) => key.id === preset.targetId)?.maskedPreview}</code>
+          <code>{presetKey?.maskedPreview}</code>
         </div>
       )}
       {available.length <= 1 && guiding && (
@@ -372,8 +441,8 @@ export function FreshKeyRevocation({
       )}
       {!guiding && (
         <>
-          <p className="key-field-help">{t('keysOperationHelp')}</p>
-          {available.length <= 1 && (
+          {!preset && <p className="key-field-help">{t('keysOperationHelp')}</p>}
+          {!presetSettled && !unresolved && available.length <= 1 && (
             <div className="key-notice key-notice-warning" data-testid="last-key-protection-notice">
               <FullWebIcon name="shield" />
               <div>
@@ -393,7 +462,7 @@ export function FreshKeyRevocation({
               {t('keysOperationId')}: <code>{request.id}</code>
             </p>
           )}
-          {result?.operation && (
+          {result?.operation && (!preset || unresolved || presetSettled) && (
             <div role="status">
               <details className="key-record-identifiers">
                 <summary>{k('diagnostics')}</summary>
@@ -421,101 +490,114 @@ export function FreshKeyRevocation({
                   )}
                 </p>
               )}
-              <button
-                className="btn btn-primary"
-                disabled={disabled || busy || !checked || !result.nextStep || !!request}
-                onClick={() => void proceed()}
-              >
-                {t('keysOperationContinue')}
-              </button>
+              {!presetSettled && (
+                <button
+                  className="btn btn-primary"
+                  disabled={disabled || busy || !checked || !result.nextStep || !!request}
+                  onClick={() => void proceed()}
+                >
+                  {t('keysOperationContinue')}
+                </button>
+              )}
+              {presetSettled && onClose && (
+                <div className="key-modal-actions">
+                  <button className="btn btn-primary" type="button" onClick={onClose}>
+                    {k('closeDialog')}
+                  </button>
+                </div>
+              )}
             </div>
           )}
-          <fieldset
-            className="form-group console-key-operation-fields"
-            disabled={disabled || busy || unresolved || !checked}
-          >
-            <label className="form-group" hidden={!!preset}>
-              {t('keysOperationTarget')}
-              <span className="input-wrap">
-                <select
-                  className="form-input"
-                  value={target}
-                  onChange={(e) => setTarget(e.target.value)}
-                >
-                  <option value="">{t('keysOperationSelect')}</option>
-                  {available.map((key) => (
-                    <option key={key.id} value={key.id}>
-                      {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
-                    </option>
-                  ))}
-                </select>
-              </span>
-            </label>
-            <label className="form-group">
-              {t('keysOperationKeeper')}
-              <span className="input-wrap">
-                <select
-                  className="form-input"
-                  value={keeper}
-                  onChange={(e) => setKeeper(e.target.value)}
-                >
-                  <option value="">{t('keysOperationSelect')}</option>
-                  {available
-                    .filter((key) => key.id !== target)
-                    .map((key) => (
-                      <option key={key.id} value={key.id}>
-                        {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
-                      </option>
-                    ))}
-                </select>
-              </span>
-            </label>
-            <label className="form-group" hidden={!!preset}>
-              {t('keysOperationMode')}
-              <span className="input-wrap">
-                <select
-                  className="form-input"
-                  value={mode}
-                  onChange={(e) => setMode(e.target.value as 'revoke' | 'replace')}
-                >
-                  <option value="revoke">{t('keysOperationRevoke')}</option>
-                  <option value="replace">{t('keysOperationReplace')}</option>
-                </select>
-              </span>
-            </label>
-            {!!currentSelection && !!preflight && preflight.selection === currentSelection && !preflight.ready && (
-              <div
-                role="alert"
-                className="key-notice key-notice-warning"
-                data-testid="key-operation-preflight"
+          {!presetSettled && (
+            <>
+              <fieldset
+                className="form-group console-key-operation-fields"
+                disabled={disabled || busy || unresolved || !checked}
               >
-                <FullWebIcon name="alert" />
-                <div>
-                  <p>{preflightText(preflight.reason)}</p>
-                </div>
-              </div>
-            )}
-            <p className="key-field-help">{t('keysOperationConfirm')}</p>
-            <button
-              className="btn btn-primary"
-              disabled={
-                !target ||
-                !keeper ||
-                target === keeper ||
-                available.length <= 1 ||
-                !currentSelection ||
-                !preflight ||
-                preflight.selection !== currentSelection ||
-                !preflight.ready
-              }
-              onClick={() => void prepare()}
-            >
-              {preset ? k('confirmOperation') : t('keysOperationPrepare')}
-            </button>
-          </fieldset>
-          <button className="btn btn-secondary" disabled={busy} onClick={() => void read()}>
-            {t('keysOperationCheck')}
-          </button>
+                <label className="form-group" hidden={!!preset}>
+                  {t('keysOperationTarget')}
+                  <span className="input-wrap">
+                    <select
+                      className="form-input"
+                      value={target}
+                      onChange={(e) => setTarget(e.target.value)}
+                    >
+                      <option value="">{t('keysOperationSelect')}</option>
+                      {available.map((key) => (
+                        <option key={key.id} value={key.id}>
+                          {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
+                        </option>
+                      ))}
+                    </select>
+                  </span>
+                </label>
+                <label className="form-group">
+                  {t('keysOperationKeeper')}
+                  <span className="input-wrap">
+                    <select
+                      className="form-input"
+                      value={keeper}
+                      onChange={(e) => setKeeper(e.target.value)}
+                    >
+                      <option value="">{t('keysOperationSelect')}</option>
+                      {available
+                        .filter((key) => key.id !== target)
+                        .map((key) => (
+                          <option key={key.id} value={key.id}>
+                            {keyDisplayName(key, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} — {key.maskedPreview} ({key.id})
+                          </option>
+                        ))}
+                    </select>
+                  </span>
+                </label>
+                <label className="form-group" hidden={!!preset}>
+                  {t('keysOperationMode')}
+                  <span className="input-wrap">
+                    <select
+                      className="form-input"
+                      value={mode}
+                      onChange={(e) => setMode(e.target.value as 'revoke' | 'replace')}
+                    >
+                      <option value="revoke">{t('keysOperationRevoke')}</option>
+                      <option value="replace">{t('keysOperationReplace')}</option>
+                    </select>
+                  </span>
+                </label>
+                {!!currentSelection && !!preflight && preflight.selection === currentSelection && !preflight.ready && (
+                  <div
+                    role="alert"
+                    className="key-notice key-notice-warning"
+                    data-testid="key-operation-preflight"
+                  >
+                    <FullWebIcon name="alert" />
+                    <div>
+                      <p>{preflightText(preflight.reason)}</p>
+                    </div>
+                  </div>
+                )}
+                <p className="key-field-help">{t('keysOperationConfirm')}</p>
+                <button
+                  className="btn btn-primary"
+                  disabled={
+                    !target ||
+                    !keeper ||
+                    target === keeper ||
+                    available.length <= 1 ||
+                    !currentSelection ||
+                    !preflight ||
+                    preflight.selection !== currentSelection ||
+                    !preflight.ready
+                  }
+                  onClick={() => void prepare()}
+                >
+                  {preset ? k('confirmOperation') : t('keysOperationPrepare')}
+                </button>
+              </fieldset>
+              <button className="btn btn-secondary" disabled={busy} onClick={() => void read()}>
+                {t('keysOperationCheck')}
+              </button>
+            </>
+          )}
         </>
       )}
     </section>

@@ -9,6 +9,7 @@ import {
 } from '../i18n/freshExternal';
 import { PublicApiError, type PublicApiClient } from './publicApi';
 import {
+  blockerOf,
   newExternalRequestId,
   parseExternalUsageState,
   type ExternalUsageState,
@@ -37,7 +38,7 @@ export function FreshExternalUsage({
   client: PublicApiClient;
   credential: string;
   onUnauthorized: () => void;
-  onBlocker?: (code: string) => void;
+  onBlocker?: (code: string | null) => void;
   /** Bumped by the shell after a successful rebind to re-read this panel. */
   reloadToken?: number;
 }) {
@@ -50,6 +51,8 @@ export function FreshExternalUsage({
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [startOnlyConfirm, setStartOnlyConfirm] = useState(false);
+  const startOnlyRef = useRef(false);
   const requestId = useRef('');
   const alive = useRef(true);
 
@@ -69,6 +72,13 @@ export function FreshExternalUsage({
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
       setReadError('');
+      if (
+        !parsed.blockedReason ||
+        parsed.blockedReason === 'usage_monitoring_disabled' ||
+        !blockerOf(parsed.blockedReason)
+      ) {
+        onBlocker?.(null);
+      }
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -89,6 +99,7 @@ export function FreshExternalUsage({
 
   async function confirmEnable() {
     if (busy) return;
+    const startOnly = startOnlyRef.current;
     setBusy(true);
     setNotice('');
     setConfirmFailed(false);
@@ -103,12 +114,19 @@ export function FreshExternalUsage({
       );
       if (!alive.current) return;
       if (!parsed) throw new Error('invalid usage state');
-      requestId.current = '';
+      const blockedReason = parsed.blockedReason;
       setState(parsed);
       setConfirming(false);
-      setConfirmFailed(false);
-      if (parsed.statisticsEnabled && !parsed.blockedReason) {
-        setNotice(x('usageConfirmed'));
+      if (blockedReason && blockedReason !== 'usage_monitoring_disabled') {
+        onBlocker?.(blockedReason);
+        setConfirmFailed(true);
+      } else {
+        onBlocker?.(null);
+        requestId.current = '';
+        setConfirmFailed(false);
+        if (parsed.statisticsEnabled && !blockedReason) {
+          setNotice(x(startOnly ? 'usageStarted' : 'usageConfirmed'));
+        }
       }
     } catch (err) {
       if (!alive.current) return;
@@ -116,9 +134,10 @@ export function FreshExternalUsage({
         onUnauthorized();
         return;
       }
+      if (err instanceof PublicApiError && err.code) onBlocker?.(err.code);
       setConfirming(false);
-      // The request ID is kept: the retry is a replay of the same request, not a
-      // second write.
+      // Keep the request ID across retries of this confirmation attempt; whether
+      // CPA receives another PUT depends on whether statistics still read back off.
       setConfirmFailed(true);
     } finally {
       if (alive.current) setBusy(false);
@@ -202,19 +221,27 @@ export function FreshExternalUsage({
           </button>
         </p>
       )}
-      {!state.statisticsEnabled && state.blockedReason !== 'usage_monitoring_disabled' && (
-        <button
-          className="btn btn-primary btn-sm"
-          data-testid="external-usage-enable"
-          disabled={busy}
-          onClick={() => setConfirming(true)}
-        >
-          {x('usageEnableAction')}
-        </button>
-      )}
+      {(!state.statisticsEnabled ||
+        (!state.collectionStarted && state.collector === 'stopped')) &&
+        !confirmFailed &&
+        !state.cpaVersion.writeBlocked &&
+        state.blockedReason !== 'usage_monitoring_disabled' && (
+          <button
+            className="btn btn-primary btn-sm"
+            data-testid="external-usage-enable"
+            disabled={busy}
+            onClick={() => {
+              startOnlyRef.current = state.statisticsEnabled;
+              setStartOnlyConfirm(state.statisticsEnabled);
+              setConfirming(true);
+            }}
+          >
+            {x(state.statisticsEnabled ? 'usageStartAction' : 'usageEnableAction')}
+          </button>
+        )}
       <Modal
         open={confirming}
-        title={x('usageConfirmTitle')}
+        title={x(startOnlyConfirm ? 'usageStartConfirmTitle' : 'usageConfirmTitle')}
         className="key-create-modal"
         closeDisabled={busy}
         onClose={() => {
@@ -238,12 +265,12 @@ export function FreshExternalUsage({
               data-testid="external-usage-confirm"
               onClick={() => void confirmEnable()}
             >
-              {x('usageConfirmAction')}
+              {x(startOnlyConfirm ? 'usageStartConfirmAction' : 'usageConfirmAction')}
             </button>
           </>
         }
       >
-        <p>{x('usageConfirmHelp')}</p>
+        <p>{x(startOnlyConfirm ? 'usageStartConfirmHelp' : 'usageConfirmHelp')}</p>
       </Modal>
     </section>
   );
