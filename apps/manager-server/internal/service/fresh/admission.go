@@ -54,7 +54,9 @@ var ErrStoreLockedInProgress = errors.New("fresh store lock is held by a running
 // ClassifyInitializeRefusal inspects a locked Fresh store strictly read-only
 // after proving that its ownership marker carries valid Fresh provenance. Any
 // non-Fresh, unreadable or mismatched source returns ok == false so callers
-// keep the generic host-ownership refusal.
+// keep the generic host-ownership refusal. On Windows, a held LockFileEx lock
+// on byte [0, 1) prevents cross-handle reads of .manager.lock, so ObserveFreshReceipt
+// returns an error and ClassifyInitializeRefusal fails closed (ok == false).
 func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr error) (error, bool) {
 	if !errors.Is(openErr, processlock.ErrLocked) {
 		return nil, false

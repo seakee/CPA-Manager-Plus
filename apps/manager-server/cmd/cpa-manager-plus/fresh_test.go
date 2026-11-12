@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -318,7 +319,12 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	}
 	genericRefusal := freshInitializeErrorMessage(errors.New("unclassified"))
 	stdoutLocked, stderrLocked := runFreshInitializeFailure(t, env)
-	if stdoutLocked != "" ||
+	if runtime.GOOS == "windows" {
+		if stdoutLocked != "" || stderrLocked != genericRefusal {
+			opened.Close()
+			t.Fatalf("Windows locked in-progress initialize output: stdout=%q stderr=%q want=%q", stdoutLocked, stderrLocked, genericRefusal)
+		}
+	} else if stdoutLocked != "" ||
 		strings.Contains(stderrLocked, "#handoff=") ||
 		strings.Contains(stderrLocked, genericRefusal) ||
 		!strings.Contains(stderrLocked, "initialize") ||
@@ -356,7 +362,12 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 
 	// 1. Active initial route (Routing.Committed && !ProductComplete) while live:
 	stdoutActiveLive, stderrActiveLive := runFreshInitializeFailure(t, env)
-	if stdoutActiveLive != "" ||
+	if runtime.GOOS == "windows" {
+		if stdoutActiveLive != "" || stderrActiveLive != genericRefusal {
+			opened.Close()
+			t.Fatalf("Windows live active-route initialize output: stdout=%q stderr=%q want=%q", stdoutActiveLive, stderrActiveLive, genericRefusal)
+		}
+	} else if stdoutActiveLive != "" ||
 		strings.Contains(stderrActiveLive, "#handoff=") ||
 		strings.Contains(stderrActiveLive, genericRefusal) ||
 		!strings.Contains(stderrActiveLive, "/console") ||
@@ -365,13 +376,19 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		t.Fatalf("live active-route initialize output: stdout=%q stderr=%q", stdoutActiveLive, stderrActiveLive)
 	}
 
-	// 2. Active initial route while stopped:
+	// 2. Active initial route while stopped (works on every OS because fresh.Open acquires the lock):
 	if err := opened.Close(); err != nil {
 		t.Fatal(err)
 	}
 	stdoutActiveStopped, stderrActiveStopped := runFreshInitializeFailure(t, env)
-	if stdoutActiveStopped != "" || stderrActiveStopped != stderrActiveLive {
-		t.Fatalf("stopped active-route initialize output: stdout=%q stderr=%q want=%q", stdoutActiveStopped, stderrActiveStopped, stderrActiveLive)
+	if stdoutActiveStopped != "" ||
+		strings.Contains(stderrActiveStopped, "#handoff=") ||
+		strings.Contains(stderrActiveStopped, genericRefusal) ||
+		!strings.Contains(stderrActiveStopped, "/console") {
+		t.Fatalf("stopped active-route initialize output: stdout=%q stderr=%q", stdoutActiveStopped, stderrActiveStopped)
+	}
+	if runtime.GOOS != "windows" && stderrActiveStopped != stderrActiveLive {
+		t.Fatalf("stopped active-route initialize output %q != live %q", stderrActiveStopped, stderrActiveLive)
 	}
 
 	// Advance to ProductComplete == true and verify live & stopped completed messages:
@@ -390,7 +407,12 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 
 	// 3. Completed installation while live:
 	stdoutLive, stderrLive := runFreshInitializeFailure(t, env)
-	if stdoutLive != "" ||
+	if runtime.GOOS == "windows" {
+		if stdoutLive != "" || stderrLive != genericRefusal {
+			opened.Close()
+			t.Fatalf("Windows live completed initialize output: stdout=%q stderr=%q want=%q", stdoutLive, stderrLive, genericRefusal)
+		}
+	} else if stdoutLive != "" ||
 		strings.Contains(stderrLive, "#handoff=") ||
 		strings.Contains(stderrLive, genericRefusal) ||
 		!strings.Contains(stderrLive, "/console") ||
@@ -400,13 +422,20 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		t.Fatalf("live completed initialize output: stdout=%q stderr=%q", stdoutLive, stderrLive)
 	}
 
-	// 4. Completed installation while stopped:
+	// 4. Completed installation while stopped (works on every OS because fresh.Open acquires the lock):
 	if err := opened.Close(); err != nil {
 		t.Fatal(err)
 	}
 	stdoutStopped, stderrStopped := runFreshInitializeFailure(t, env)
-	if stdoutStopped != "" || stderrStopped != stderrLive {
-		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q want=%q", stdoutStopped, stderrStopped, stderrLive)
+	if stdoutStopped != "" ||
+		strings.Contains(stderrStopped, "#handoff=") ||
+		strings.Contains(stderrStopped, genericRefusal) ||
+		!strings.Contains(stderrStopped, "/console") ||
+		stderrStopped == stderrActiveStopped {
+		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q", stdoutStopped, stderrStopped)
+	}
+	if runtime.GOOS != "windows" && stderrStopped != stderrLive {
+		t.Fatalf("stopped completed initialize output %q != live %q", stderrStopped, stderrLive)
 	}
 
 	// 5. Fallback formatting when ControlBasePath is empty or unvalidated:

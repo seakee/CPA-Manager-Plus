@@ -84,7 +84,10 @@ func (r FreshReceipt) IsPending() bool {
 // ObserveFreshReceipt reads the Fresh marker provenance without acquiring the
 // process lock, so an offline host command can report whether a live Fresh
 // Manager holds a completed or unfinished installation without touching SQLite
-// on non-Fresh sources.
+// on non-Fresh sources. On Windows, LockFileEx places a mandatory exclusive
+// lock on byte [0, 1) of .manager.lock, so cross-handle reads while the lock is
+// held fail with ERROR_LOCK_VIOLATION and callers fail closed; unheld markers
+// remain readable on both Unix and Windows.
 func ObserveFreshReceipt(databasePath string) (*FreshReceipt, error) {
 	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
 	if err != nil {
