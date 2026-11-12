@@ -447,6 +447,115 @@ describe('External usage confirmation', () => {
     expect(new Set(blockers)).toEqual(new Set([null]));
   });
 
+  // Ordering 5: a confirmation failure is the newest fact the panel holds, so it
+  // retires the reads still waiting on the pre-confirmation installation. Those
+  // report the state the failed confirmation was trying to change, and applying
+  // one would clear the blocker the failure just named.
+  it('keeps a confirmation blocker when a read from before it settles afterwards', async () => {
+    let settleHeldRead: (response: unknown) => void = () => undefined;
+    let reads = 0;
+    const blockers: (string | null | undefined)[] = [];
+    const client = {
+      get: vi.fn(async () => {
+        reads += 1;
+        // The read issued before the confirmation is held open.
+        if (reads === 2)
+          return new Promise<unknown>((resolve) => {
+            settleHeldRead = resolve;
+          });
+        return usageState;
+      }),
+      post: vi.fn(async () => {
+        throw new PublicApiError('http', 503, undefined, 'external_cpa_authority_unavailable');
+      }),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        onBlocker={(code) => blockers.push(code)}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    // A reload starts a read that is still pending when the operator confirms.
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirm.props.onClick());
+    expect(blockers[blockers.length - 1]).toBe('external_cpa_authority_unavailable');
+    const afterFailure = blockers.length;
+
+    // The read that described the pre-confirmation installation now answers.
+    await act(async () =>
+      settleHeldRead({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+      })
+    );
+
+    // The page does not hear a stale clear, and the blocker stands.
+    expect(blockers).toHaveLength(afterFailure);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })).toHaveLength(1);
+  });
+
+  // Ordering 6: an authentication failure from a retired confirmation is not an
+  // answer about the current session. The rebind already proved the connection
+  // works, so retiring happens before any failure callback, including that one.
+  it('does not end the session for an authentication failure of a retired confirmation', async () => {
+    let failStaleConfirm: (error: Error) => void = () => undefined;
+    let reads = 0;
+    const unauthorized = vi.fn();
+    const client = {
+      get: vi.fn(async () => {
+        reads += 1;
+        return reads === 1
+          ? usageState
+          : { ...usageState, statisticsEnabled: true, collector: 'running', collectionStarted: true };
+      }),
+      post: vi.fn(
+        async () =>
+          new Promise<unknown>((_resolve, reject) => {
+            failStaleConfirm = reject;
+          })
+      ),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={unauthorized}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    act(() => void confirm.props.onClick());
+    // The rebind re-reads the panel and proves the connection works.
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    await act(async () => failStaleConfirm(new PublicApiError('authentication', 401)));
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+  });
+
   // Ordering 4: the reload reports an authority failure while an older
   // confirmation is still pending. Its late success must not clear that newer
   // blocker, while it still releases the button it held.

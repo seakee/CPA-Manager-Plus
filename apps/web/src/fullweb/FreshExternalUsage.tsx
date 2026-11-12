@@ -155,12 +155,16 @@ export function FreshExternalUsage({
         }
       }
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
+      // This failure is the newest fact the panel holds, so it retires the reads
+      // still waiting on the pre-confirmation installation: a read that reports
+      // the state the failed confirmation was trying to change would clear the
+      // blocker that failure just named.
+      generation.current += 1;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
       }
-      if (generation.current !== ticket) return;
       if (err instanceof PublicApiError && err.code) onBlocker?.(err.code);
       setConfirming(false);
       // Keep the request ID across retries of this confirmation attempt; whether
