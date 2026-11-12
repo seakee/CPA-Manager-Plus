@@ -233,7 +233,7 @@ func (s *Service) Revoke(ctx context.Context) error {
 func (s *Service) Discover(ctx context.Context) bootstrap.PublicDiscovery {
 	d := bootstrap.PublicDiscovery{ContractVersion: bootstrap.PublicDiscoveryContractVersion, Status: bootstrap.PublicUnavailable, AuthEntry: bootstrap.AuthEntryUnavailable, Reason: bootstrap.ReasonObservationUnavailable}
 	v, err := s.active(ctx)
-	if err != nil || v.Operation.AdminInitialized || v.Authority.ClaimClosed {
+	if err != nil || v.Operation.Validate() != nil || v.Operation.ProductComplete {
 		return d
 	}
 	mode := bootstrap.Fresh
@@ -241,6 +241,10 @@ func (s *Service) Discover(ctx context.Context) bootstrap.PublicDiscovery {
 	d.Mode = &mode
 	d.AuthenticationRequired = true
 	d.AuthEntry = bootstrap.AuthEntryFreshClaim
-	d.Reason = bootstrap.ReasonFreshClaimRequired
+	if v.Operation.AdminInitialized || v.Authority.ClaimClosed {
+		d.Reason = bootstrap.ReasonFreshResumeRequired
+	} else {
+		d.Reason = bootstrap.ReasonFreshClaimRequired
+	}
 	return d
 }

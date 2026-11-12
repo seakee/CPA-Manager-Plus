@@ -15,7 +15,7 @@ func TestOwnedFreshDiscoveryDoesNotRequestForbiddenAdminAuthentication(t *testin
 		t.Fatal(got)
 	}
 	op.AdminInitialized = true
-	if got := Project(Input{FreshOperation: &op}); got.Status != bootstrap.PublicUnavailable || got.AuthEntry == bootstrap.AuthEntryAdminSession {
+	if got := Project(Input{FreshOperation: &op}); got.Status != bootstrap.PublicFreshClaimRequired || string(got.Reason) != "fresh_resume_required" || got.AuthEntry != bootstrap.AuthEntryFreshClaim {
 		t.Fatal(got)
 	}
 	op.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: op.Identity.OperationID, Target: "/control", Revision: 1, Committed: true, Stage: bootstrap.PrefixCommitted}

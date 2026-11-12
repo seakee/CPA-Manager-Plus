@@ -72,8 +72,45 @@ func (l *Lock) readFreshReceipt() (*FreshReceipt, error) {
 	if err := l.Validate(); err != nil {
 		return nil, err
 	}
+	return parseFreshReceipt(l.file, l.DatabasePath())
+}
+
+// IsPending reports whether the receipt is still in pending_fresh_admission
+// before FinalizeFreshAdmission commits the initial checkpoint.
+func (r FreshReceipt) IsPending() bool {
+	return r.State == pendingFresh
+}
+
+// ObserveFreshReceipt reads the Fresh marker provenance without acquiring the
+// process lock, so an offline host command can report whether a live Fresh
+// Manager holds a completed or unfinished installation without touching SQLite
+// on non-Fresh sources. On Windows, LockFileEx places a mandatory exclusive
+// lock on byte [0, 1) of .manager.lock, so cross-handle reads while the lock is
+// held fail with ERROR_LOCK_VIOLATION and callers fail closed; unheld markers
+// remain readable on both Unix and Windows.
+func ObserveFreshReceipt(databasePath string) (*FreshReceipt, error) {
+	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := openLockFile(lockPath, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if err := openedMarker(file, marker); err != nil {
+		return nil, err
+	}
+	r, err := parseFreshReceipt(file, absolutePath)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func parseFreshReceipt(file *os.File, databasePath string) (*FreshReceipt, error) {
 	data := make([]byte, 4097)
-	n, err := l.file.ReadAt(data, 0)
+	n, err := file.ReadAt(data, 0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
@@ -93,7 +130,7 @@ func (l *Lock) readFreshReceipt() (*FreshReceipt, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return nil, errors.New("invalid Manager marker")
 	}
-	if r.Version != 1 || (r.State != pendingFresh && r.State != "manager") || !r.Identity.Valid() || r.Identity.DatabasePath != l.DatabasePath() {
+	if r.Version != 1 || (r.State != pendingFresh && r.State != "manager") || !r.Identity.Valid() || r.Identity.DatabasePath != databasePath {
 		return nil, errors.New("invalid Fresh admission receipt")
 	}
 	for _, id := range []string{r.Identity.AdmissionID, r.Identity.InstallationID, r.Identity.Generation} {

@@ -32,6 +32,10 @@ const en = {
     'The source or Manager process has changed. Sign in again to verify the current installation.',
   network: 'Authentication could not be confirmed. Check the connection and sign in again.',
   expired: 'Authentication has expired. Sign in again.',
+  origin_rejected:
+    'This browser address does not match the configured public console origin (CPAMP_PUBLIC_ORIGIN). Open the canonical public console URL to verify your administrator key and continue the upgrade.',
+  origin_rejected_url:
+    'This browser address does not match the configured public console origin ({origin}). Open {url} to verify your administrator key and continue the upgrade.',
   placeholder: 'Existing CPAMP administrator key',
   loginHint:
     'Existing installation detected. Verify your original CPAMP administrator key to view the upgrade starting page. Authentication does not start migration or connect to CPA.',
@@ -63,6 +67,10 @@ const zh: typeof en = {
   changed: '来源或 Manager 进程已变化，请重新登录以验证当前安装。',
   network: '身份验证结果未确认，请检查连接后重新登录。',
   expired: '身份验证已过期，请重新登录。',
+  origin_rejected:
+    '当前浏览器访问地址与已配置的公开控制台地址（CPAMP_PUBLIC_ORIGIN）不一致。请改为通过部署配置的公开控制台 URL 打开升级入口后再试。',
+  origin_rejected_url:
+    '当前浏览器访问地址与已配置的公开控制台地址（{origin}）不一致。请改为打开 {url} 验证管理员密钥并继续升级。',
   placeholder: '原 CPAMP 管理员密钥',
   loginHint:
     '检测到现有安装。请验证原 CPAMP 管理员密钥，进入升级起始页；认证不会启动迁移或连接 CPA。',
@@ -94,6 +102,10 @@ const tw: typeof en = {
   changed: '來源或 Manager 程序已變更，請重新登入以驗證目前安裝。',
   network: '身分驗證結果未確認，請檢查連線後重新登入。',
   expired: '身分驗證已過期，請重新登入。',
+  origin_rejected:
+    '目前瀏覽器存取位址與已設定的公開主控台位址（CPAMP_PUBLIC_ORIGIN）不一致。請改為透過部署設定的公開主控台 URL 開啟升級入口後再試。',
+  origin_rejected_url:
+    '目前瀏覽器存取位址與已設定的公開主控台位址（{origin}）不一致。請改為開啟 {url} 驗證管理員金鑰並繼續升級。',
   placeholder: '原 CPAMP 管理員金鑰',
   loginHint:
     '偵測到現有安裝。請驗證原 CPAMP 管理員金鑰，進入升級起始頁；驗證不會啟動移轉或連線 CPA。',
@@ -130,6 +142,10 @@ const ru: typeof en = {
     'Источник или процесс Manager изменились. Войдите снова, чтобы проверить текущую установку.',
   network: 'Не удалось подтвердить проверку личности. Проверьте соединение и войдите снова.',
   expired: 'Срок проверки личности истёк. Войдите снова.',
+  origin_rejected:
+    'Текущий адрес в браузере не совпадает с настроенным публичным адресом консоли (CPAMP_PUBLIC_ORIGIN). Откройте канонический публичный URL консоли для подтверждения ключа администратора и продолжения обновления.',
+  origin_rejected_url:
+    'Текущий адрес в браузере не совпадает с настроенным публичным адресом консоли ({origin}). Откройте {url}, чтобы подтвердить ключ администратора и продолжить обновление.',
   placeholder: 'Ключ администратора существующего CPAMP',
   loginHint:
     'Обнаружена существующая установка. Подтвердите исходный ключ администратора CPAMP, чтобы открыть страницу начала обновления. Проверка не запускает миграцию и не подключается к CPA.',

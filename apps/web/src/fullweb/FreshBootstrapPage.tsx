@@ -65,7 +65,7 @@ type DiscoveryGuidance =
   | (ActionFeedback & { flow: 'fresh' | 'host' | 'upgrade'; retryable?: true })
   | {
       tone: ActionFeedback['tone'];
-      flow: 'ownership';
+      flow: 'ownership' | 'fresh_resume';
       retryable: true;
       // copyKey names the dictionary entries a card must re-derive at render time.
       // The discovery answer is fetched once and kept in state, so a card built from
@@ -78,7 +78,7 @@ type DiscoveryGuidance =
 // dictionary entries is resolved here, on every render, so a language switch
 // applies to a payload that was fetched once.
 function guidanceCopy(note: DiscoveryGuidance): { title: string; detail: string } {
-  if (note.flow === 'ownership') {
+  if ('copyKey' in note) {
     return {
       title: discoveryText(note.copyKey.title),
       detail: discoveryText(note.copyKey.detail),
@@ -106,6 +106,20 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
       flow: 'fresh',
       title: 'guidanceFreshTitle',
       detail: 'guidanceFreshDetail',
+    };
+  }
+  if (
+    value.status === 'fresh_claim_required' &&
+    value.mode === 'fresh' &&
+    value.auth_entry === 'fresh_claim' &&
+    value.reason === 'fresh_resume_required' &&
+    value.authentication_required === true
+  ) {
+    return {
+      tone: 'info',
+      flow: 'fresh_resume',
+      retryable: true,
+      copyKey: { title: 'resumeGuidanceTitle', detail: 'resumeGuidanceDetail' },
     };
   }
   if (
@@ -333,8 +347,12 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
         <div className="brand-group">
           <img className="journey-logo" src={lightTheme ? logo : logoOnDark} alt="CPAMP" />
           <span className="badge badge-indigo">
-            {phase === 'no_handoff' && discoveryNote?.flow !== 'fresh'
-              ? journey('preflight')
+            {phase === 'no_handoff'
+              ? discoveryNote?.flow === 'fresh'
+                ? journey('preview')
+                : discoveryNote?.flow === 'fresh_resume'
+                  ? journey('pending')
+                  : journey('preflight')
               : journey('preview')}
           </span>
           {operation && (
@@ -386,30 +404,36 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                   <span>
                     {discoveryNote?.flow === 'ownership'
                       ? discoveryText('ownershipStepTag')
-                      : bootstrapText(
-                          discoveryNote?.flow === 'fresh' ? 'gateTagBootstrap' : 'gateTagPreflight'
-                        )}
+                      : discoveryNote?.flow === 'fresh_resume'
+                        ? discoveryText('resumeStepTag')
+                        : bootstrapText(
+                            discoveryNote?.flow === 'fresh' ? 'gateTagBootstrap' : 'gateTagPreflight'
+                          )}
                   </span>
                 </div>
                 <h1 className="wizard-title">
                   {discoveryNote?.flow === 'ownership'
                     ? discoveryText('ownershipPageTitle')
-                    : discoveryNote?.flow === 'host'
-                      ? bootstrapText('gateHostTitle')
-                      : discoveryNote?.flow === 'fresh'
-                        ? journey('claimRequired')
-                        : bootstrapText(
-                            discoveryChecked ? 'gateUnconfirmedTitle' : 'gateCheckingTitle'
-                          )}
+                    : discoveryNote?.flow === 'fresh_resume'
+                      ? discoveryText('resumePageTitle')
+                      : discoveryNote?.flow === 'host'
+                        ? bootstrapText('gateHostTitle')
+                        : discoveryNote?.flow === 'fresh'
+                          ? journey('claimRequired')
+                          : bootstrapText(
+                              discoveryChecked ? 'gateUnconfirmedTitle' : 'gateCheckingTitle'
+                            )}
                 </h1>
                 <p className="wizard-desc">
                   {discoveryNote?.flow === 'ownership'
                     ? discoveryText('ownershipPageDesc')
-                    : discoveryNote?.flow === 'host'
-                      ? bootstrapText('gateHostDesc')
-                      : discoveryNote?.flow === 'fresh'
-                        ? journey('claimRequiredHelp')
-                        : bootstrapText('gateUnconfirmedDesc')}
+                    : discoveryNote?.flow === 'fresh_resume'
+                      ? discoveryText('resumePageDesc')
+                      : discoveryNote?.flow === 'host'
+                        ? bootstrapText('gateHostDesc')
+                        : discoveryNote?.flow === 'fresh'
+                          ? journey('claimRequiredHelp')
+                          : bootstrapText('gateUnconfirmedDesc')}
                 </p>
               </div>
               <div className="wizard-card-body">
@@ -462,6 +486,23 @@ docker start <v2_container>`}
                       </div>
                     </div>
                   </div>
+                ) : discoveryNote?.flow === 'fresh_resume' ? (
+                  <>
+                    <div className="alert alert-info" data-testid="fresh-resume-instructions">
+                      <FullWebIcon name="info" size={22} />
+                      <div className="alert-content">
+                        <div className="alert-title">{discoveryText('resumeActionTitle')}</div>
+                        <div className="alert-desc">
+                          {discoveryText('resumeActionLead')}
+                          <code>/.well-known/cpamp-bootstrap/ui#handoff=...</code>
+                          {discoveryText('resumeActionTail')}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="code-block" data-testid="cli-handoff-command">
+                      cpa-manager-plus initialize
+                    </div>
+                  </>
                 ) : discoveryNote?.flow === 'fresh' ? (
                   <>
                     <div className="alert alert-warn">
@@ -506,7 +547,7 @@ docker start <v2_container>`}
                       setDiscoveryAttempt((attempt) => attempt + 1);
                     }}
                   >
-                    {discoveryNote?.flow === 'ownership'
+                    {discoveryNote?.flow === 'ownership' || discoveryNote?.flow === 'fresh_resume'
                       ? discoveryText('recheckButton')
                       : bootstrapText('recheck')}
                   </button>

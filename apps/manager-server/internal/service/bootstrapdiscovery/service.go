@@ -77,12 +77,16 @@ func Project(input Input) bootstrap.PublicDiscovery {
 	}
 	if input.FreshOperation != nil {
 		op := *input.FreshOperation
-		if op.Validate() != nil || op.ProductComplete || op.Routing.Committed || op.AdminInitialized {
+		if op.Validate() != nil || op.ProductComplete || op.Routing.Committed {
 			return Unavailable()
 		}
 		// Only the canonical store consumer can supply this positively owned
 		// checkpoint. The ordinary native-v2 branch below is unchanged.
-		return publicDiscovery(bootstrap.PublicFreshClaimRequired, bootstrap.Fresh, true, bootstrap.AuthEntryFreshClaim, bootstrap.ReasonFreshClaimRequired)
+		reason := bootstrap.ReasonFreshClaimRequired
+		if op.AdminInitialized {
+			reason = bootstrap.ReasonFreshResumeRequired
+		}
+		return publicDiscovery(bootstrap.PublicFreshClaimRequired, bootstrap.Fresh, true, bootstrap.AuthEntryFreshClaim, reason)
 	}
 	if !safeObservation(input.Report) {
 		return Unavailable()

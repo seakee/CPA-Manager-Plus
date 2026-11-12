@@ -26,6 +26,80 @@ type OpenOptions struct {
 	// Hook is an isolated acceptance-test seam, never a configurable runtime state.
 	Hook func(string) error
 }
+
+// AlreadyCompleteError reports that the Fresh installation has already reached
+// product completion and therefore needs no Bootstrap handoff.
+type AlreadyCompleteError struct {
+	ControlBasePath string
+}
+
+func (e AlreadyCompleteError) Error() string {
+	return "fresh installation is already complete"
+}
+
+// RoutingCommittedError reports that the initial Console route is already
+// active and setup continues on that route with the administrator key.
+type RoutingCommittedError struct {
+	ControlBasePath string
+}
+
+func (e RoutingCommittedError) Error() string {
+	return "initial console route is already committed"
+}
+
+// ErrStoreLockedInProgress reports that a running Manager holds the Fresh store
+// lock while installation is still unfinished.
+var ErrStoreLockedInProgress = errors.New("fresh store lock is held by a running manager")
+
+// ClassifyInitializeRefusal inspects a locked Fresh store strictly read-only
+// after proving that its ownership marker carries valid Fresh provenance. Any
+// non-Fresh, unreadable or mismatched source returns ok == false so callers
+// keep the generic host-ownership refusal. On Windows, a held LockFileEx lock
+// on byte [0, 1) prevents cross-handle reads of .manager.lock, so ObserveFreshReceipt
+// returns an error and ClassifyInitializeRefusal fails closed (ok == false).
+func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr error) (error, bool) {
+	if !errors.Is(openErr, processlock.ErrLocked) {
+		return nil, false
+	}
+	receipt, err := processlock.ObserveFreshReceipt(databasePath)
+	if err != nil || receipt == nil {
+		return nil, false
+	}
+	var pending *bootstrap.FreshIdentity
+	if receipt.IsPending() {
+		pending = &receipt.Identity
+	}
+	info, statErr := os.Stat(receipt.Identity.DatabasePath)
+	if statErr != nil {
+		if pending != nil && os.IsNotExist(statErr) {
+			return ErrStoreLockedInProgress, true
+		}
+		return nil, false
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, false
+	}
+	record, err := inspectCheckpoint(ctx, receipt.Identity.DatabasePath, pending)
+	if err != nil {
+		return nil, false
+	}
+	if !record.Operation.Identity.Valid() {
+		if pending != nil {
+			return ErrStoreLockedInProgress, true
+		}
+		return nil, false
+	}
+	if record.Operation.Identity != receipt.Identity || record.Operation.Validate() != nil {
+		return nil, false
+	}
+	if record.Operation.ProductComplete {
+		return AlreadyCompleteError{ControlBasePath: record.Operation.Routing.Target}, true
+	}
+	if record.Operation.Routing.Committed {
+		return RoutingCommittedError{ControlBasePath: record.Operation.Routing.Target}, true
+	}
+	return ErrStoreLockedInProgress, true
+}
 type Opened struct {
 	Admission *legacypreflight.Admission
 	DB        *sql.DB

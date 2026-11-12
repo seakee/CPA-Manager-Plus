@@ -241,30 +241,34 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('shows a pending version declaration as information, not as a failure', async () => {
-    await mount(
-      wizardRead({
-        preflight: () =>
-          preflightDocument({
-            checks: [
-              { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
-              {
-                name: 'source_version',
-                status: 'pending',
-                code: 'upgrade_source_version_declared_at_copy_in',
-                detail: 'expected=v1.14.10 declared=none',
-              },
-              { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
-              { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
-              { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
-              { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
-            ],
-            pendingDeclaration: true,
-            expectedVersion: 'v1.14.10',
-          }),
-      })
-    );
+    const pendingRead = wizardRead({
+      preflight: () =>
+        preflightDocument({
+          checks: [
+            { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
+            {
+              name: 'source_version',
+              status: 'pending',
+              code: 'upgrade_source_version_declared_at_copy_in',
+              detail: 'expected=v1.14.10 declared=none',
+            },
+            { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
+            { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
+            { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
+            { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
+          ],
+          sourceVersion: 'unknown',
+          pendingDeclaration: true,
+          expectedVersion: 'v1.14.10',
+        }),
+    });
+    await mount(pendingRead);
 
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
+    expect(byTestId('upgrade-preflight-version').children.join('')).toContain(
+      '--source-version v1.14.10'
+    );
+    expect(byTestId('upgrade-preflight-version').children.join('')).not.toBe('unknown');
     expect(view()).toContain('--source-version v1.14.10');
     expect(view()).toContain('declared at copy-in');
     // The row is labelled pending, in the same vocabulary as every other check.
@@ -275,6 +279,52 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
     expect(view()).not.toContain('Preflight blocked the upgrade');
     expect(byTestId('upgrade-continue').props.disabled).toBe(false);
+    const readyHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
+    const readyBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
+    expect(readyHeading).not.toBe(t('preflightReadyTitle', 'en'));
+    expect(`${readyHeading} ${readyBody}`).toContain('--source-version');
+
+    await press('upgrade-continue');
+    expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
+      '--source-version v1.14.10'
+    );
+
+    for (const locale of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        renderer!.update(
+          <FreshUpgradeFlow
+            read={pendingRead}
+            language={locale}
+            pollDelays={[10]}
+          />
+        );
+      });
+      await press('upgrade-confirm-back');
+      const localizedHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
+      const localizedBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
+      expect(localizedHeading).not.toBe(t('preflightReadyTitle', locale));
+      expect(`${localizedHeading} ${localizedBody}`).toContain('--source-version');
+      await press('upgrade-continue');
+      expect(byTestId('upgrade-confirm-version').children.join('')).not.toBe('unknown');
+      expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
+        '--source-version v1.14.10'
+      );
+    }
+  });
+
+  it('formats an unknown sourceVersion without pending declaration as localized Not reported rather than raw unknown', async () => {
+    await mount(
+      wizardRead({
+        preflight: () => preflightDocument({ sourceVersion: 'unknown' }),
+      })
+    );
+    expect(byTestId('upgrade-preflight-version').children.join('')).toBe(
+      t('preflightUnknown', 'en')
+    );
+    await press('upgrade-continue');
+    expect(byTestId('upgrade-confirm-version').children.join('')).toBe(
+      t('preflightUnknown', 'en')
+    );
   });
 
   it('treats a pending flag that disagrees with its row as a typed read failure', async () => {

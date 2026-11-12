@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readRoutingContext, resolveRoutingContext } from './routingContext';
+import { isInitialRoutingContext, readRoutingContext, resolveRoutingContext } from './routingContext';
 
 const snapshot = {
   state: 'verified_effective',
@@ -123,5 +123,16 @@ describe('Full Web consumes the verified Manager routing projection', () => {
     expect(readRoutingContext(source('__CPAMP_ROUTING_CONTEXT__'))).toBeNull();
     expect(readRoutingContext(source(JSON.stringify(snapshot), 'text/javascript'))).toBeNull();
     expect(readRoutingContext({ getElementById: () => null })).toBeNull();
+    expect(readRoutingContext(source('{"state":"initial_routing"}'))).toBeNull();
+    expect(isInitialRoutingContext(source('{"state":"initial_routing"}'))).toBe(true);
+    expect(isInitialRoutingContext(source('{"state":"initial_routing"}', 'text/javascript'))).toBe(
+      false
+    );
+    expect(isInitialRoutingContext(source(JSON.stringify(snapshot)))).toBe(false);
+    expect(isInitialRoutingContext(source('__CPAMP_ROUTING_CONTEXT__'))).toBe(false);
+    expect(isInitialRoutingContext(source('{broken'))).toBe(false);
+    expect(isInitialRoutingContext(source('{}'))).toBe(false);
+    expect(isInitialRoutingContext(source('null'))).toBe(false);
+    expect(isInitialRoutingContext({ getElementById: () => null })).toBe(false);
   });
 });

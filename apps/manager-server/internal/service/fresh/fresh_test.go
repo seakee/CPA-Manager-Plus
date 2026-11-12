@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,8 +238,8 @@ func TestClaimAdminContinuationAndRestart(t *testing.T) {
 	if _, err = s.GenerateAdmin(ctx, session.Token); err == nil {
 		t.Fatal("admin generated after commit")
 	}
-	if s.Discover(ctx).Status != bootstrap.PublicUnavailable {
-		t.Fatal("initialized leaked admin auth entry")
+	if got := s.Discover(ctx); got.Status != bootstrap.PublicFreshClaimRequired || string(got.Reason) != "fresh_resume_required" || got.AuthEntry != bootstrap.AuthEntryFreshClaim {
+		t.Fatalf("initialized Fresh discovery = %+v", got)
 	}
 	if _, err = s.Authorize(ctx, key); err == nil {
 		t.Fatal("Admin Key accepted as session")
@@ -688,4 +689,185 @@ func TestPendingSchemaWithRetainedProductRowsNeverBecomesFresh(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyInitializeRefusalFailsClosedOnDamagedOrNonFreshStoreUnderLock(t *testing.T) {
+	t.Run("malformed-checkpoint-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		if _, err := o.DB.Exec("update settings set value='malformed' where key=?", freshstore.OperationKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on malformed checkpoint, got %v", classified)
+		}
+	})
+
+	t.Run("legacy-rows-without-fresh-checkpoint-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		if _, err := o.DB.Exec("delete from settings where key in (?, ?); insert into settings(key,value,updated_at_ms) values('setup','{}',1)", freshstore.OperationKey, freshstore.AuthorityKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on legacy settings under lock, got %v", classified)
+		}
+	})
+
+	t.Run("mismatched-checkpoint-identity-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer o.Close()
+		other := o.Record.Operation
+		other.Identity.OperationID = "fresh-op-other"
+		raw, err := json.Marshal(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := o.DB.Exec("update settings set value=? where key=?", string(raw), freshstore.OperationKey); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), p.Database, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal on mismatched identity, got %v", classified)
+		}
+	})
+
+	t.Run("pending-admission-before-checkpoint-under-live-lock", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		admission, err := legacypreflight.AdmitStartup(t.Context(), p, legacypreflight.Options{FreshAdmission: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admission.Close()
+		dbPath := admission.DatabasePath()
+		classified, ok := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		if runtime.GOOS == "windows" {
+			if ok || classified != nil {
+				t.Fatalf("expected Windows held LockFileEx to fail closed before DB creation, got %v, %v", classified, ok)
+			}
+		} else if !ok || !errors.Is(classified, ErrStoreLockedInProgress) {
+			t.Fatalf("expected ErrStoreLockedInProgress before DB creation, got %v, %v", classified, ok)
+		}
+		db, err := sqlite.Open(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		classified, ok = ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		if runtime.GOOS == "windows" {
+			if ok || classified != nil {
+				t.Fatalf("expected Windows held LockFileEx to fail closed on pristine DB, got %v, %v", classified, ok)
+			}
+		} else if !ok || !errors.Is(classified, ErrStoreLockedInProgress) {
+			t.Fatalf("expected ErrStoreLockedInProgress on pristine migrated DB before checkpoint write, got %v, %v", classified, ok)
+		}
+		if _, err := db.Exec("insert into settings(key,value,updated_at_ms) values('setup','{}',1)"); err != nil {
+			t.Fatal(err)
+		}
+		if classified, ok := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked); ok {
+			t.Fatalf("expected fail-closed refusal when pending DB contains legacy rows, got %v", classified)
+		}
+	})
+
+	t.Run("valid-checkpoint-states-under-live-lock-and-after-release", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{Initialize: true, AdminKey: "cpamp_AbcDef0123456789AdminKey!"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dbPath := o.Admission.DatabasePath()
+		classifiedHeld, okHeld := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		if runtime.GOOS == "windows" {
+			if okHeld || classifiedHeld != nil {
+				o.Close()
+				t.Fatalf("expected Windows held LockFileEx to fail closed on valid checkpoint, got %v, %v", classifiedHeld, okHeld)
+			}
+		} else if !okHeld || !errors.Is(classifiedHeld, ErrStoreLockedInProgress) {
+			o.Close()
+			t.Fatalf("expected ErrStoreLockedInProgress on held valid checkpoint, got %v, %v", classifiedHeld, okHeld)
+		}
+		store := freshstore.New(o.DB)
+		updated, err := store.Update(t.Context(), o.Record.Operation.Identity, o.Record.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:         bootstrap.NewManaged,
+				TargetIdentity:   "managed-v8",
+				TargetArtifactID: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				TargetGeneration: 1,
+				Stage:            "committed",
+			}
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: r.Operation.Identity.OperationID,
+				Revision:    1,
+				Target:      "/console",
+				Stage:       bootstrap.PrefixCommitted,
+				Committed:   true,
+			}
+			return nil
+		})
+		if err != nil {
+			o.Close()
+			t.Fatal(err)
+		}
+		classifiedCommittedHeld, okCommittedHeld := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		var wantCommitted RoutingCommittedError
+		if runtime.GOOS == "windows" {
+			if okCommittedHeld || classifiedCommittedHeld != nil {
+				o.Close()
+				t.Fatalf("expected Windows held LockFileEx to fail closed on active route, got %v, %v", classifiedCommittedHeld, okCommittedHeld)
+			}
+		} else if !okCommittedHeld || !errors.As(classifiedCommittedHeld, &wantCommitted) || wantCommitted.ControlBasePath != "/console" {
+			o.Close()
+			t.Fatalf("expected RoutingCommittedError(/console) while held on Unix, got %v, %v", classifiedCommittedHeld, okCommittedHeld)
+		}
+		if err := o.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// Once the OS file handle is released, readable receipt + SQLite inspection works on every OS.
+		classifiedCommitted, okCommitted := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		if !okCommitted || !errors.As(classifiedCommitted, &wantCommitted) || wantCommitted.ControlBasePath != "/console" {
+			t.Fatalf("expected RoutingCommittedError(/console) with readable receipt, got %v, %v", classifiedCommitted, okCommitted)
+		}
+
+		o, err = Open(t.Context(), legacypaths(dbPath), OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store = freshstore.New(o.DB)
+		if _, err := store.Update(t.Context(), updated.Operation.Identity, updated.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			o.Close()
+			t.Fatal(err)
+		}
+		classifiedCompleteHeld, okCompleteHeld := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		var wantComplete AlreadyCompleteError
+		if runtime.GOOS == "windows" {
+			if okCompleteHeld || classifiedCompleteHeld != nil {
+				o.Close()
+				t.Fatalf("expected Windows held LockFileEx to fail closed on completed checkpoint, got %v, %v", classifiedCompleteHeld, okCompleteHeld)
+			}
+		} else if !okCompleteHeld || !errors.As(classifiedCompleteHeld, &wantComplete) || wantComplete.ControlBasePath != "/console" {
+			o.Close()
+			t.Fatalf("expected AlreadyCompleteError(/console) while held on Unix, got %v, %v", classifiedCompleteHeld, okCompleteHeld)
+		}
+		if err := o.Close(); err != nil {
+			t.Fatal(err)
+		}
+		classifiedComplete, okComplete := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
+		if !okComplete || !errors.As(classifiedComplete, &wantComplete) || wantComplete.ControlBasePath != "/console" {
+			t.Fatalf("expected AlreadyCompleteError(/console) with readable receipt, got %v, %v", classifiedComplete, okComplete)
+		}
+	})
 }

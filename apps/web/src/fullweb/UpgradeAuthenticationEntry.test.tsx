@@ -2,17 +2,27 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UpgradeAuthenticationEntry } from './UpgradeAuthenticationEntry';
 import { FullWebLoginPage } from './FullWebLoginPage';
+import { UPGRADE_AUTH_CONTRACT, type verifyUpgradeCredential } from './upgradeSession';
 import type { ConsoleLoginAdapter } from '../features/login/LoginPage';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import loginI18n from '../i18n';
 
-const mocks = vi.hoisted(() => ({ candidate: vi.fn(), verify: vi.fn(), remember: vi.fn() }));
-vi.mock('./upgradeSession', async (original) => ({
-  ...(await original<object>()),
-  rememberedUpgradeCredential: mocks.candidate,
-  verifyUpgradeCredential: mocks.verify,
-  rememberUpgradeCredential: mocks.remember,
+const mocks = vi.hoisted(() => ({
+  candidate: vi.fn(),
+  verify: vi.fn(),
+  remember: vi.fn(),
+  realVerify: null as typeof verifyUpgradeCredential | null,
 }));
+vi.mock('./upgradeSession', async (original) => {
+  const actual = await original<{ verifyUpgradeCredential: typeof verifyUpgradeCredential }>();
+  mocks.realVerify = actual.verifyUpgradeCredential;
+  return {
+    ...actual,
+    rememberedUpgradeCredential: mocks.candidate,
+    verifyUpgradeCredential: mocks.verify,
+    rememberUpgradeCredential: mocks.remember,
+  };
+});
 vi.mock('./FullWebLoginPage', () => ({
   FullWebLoginPage: () => <div data-testid="login-adapter" />,
   FullWebUpgradeHeader: () => <header />,
@@ -526,4 +536,83 @@ describe('upgrade authentication lifecycle', () => {
       ).toHaveLength(1);
     }
   );
+
+  it('parses real 403 origin_rejected responses and names the canonical console URL across locales', async () => {
+    mocks.verify.mockImplementation((credential: string, signal: AbortSignal, source?: string) =>
+      mocks.realVerify!(credential, signal, source)
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
+          error: { code: 'surface_rejected' },
+        },
+        { status: 403 }
+      )
+    );
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    const surfaceErrorByLocale: Record<string, string | null> = {};
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      surfaceErrorByLocale[locale] = adapter().error;
+    }
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
+          error: {
+            code: 'origin_rejected',
+            expected_origin: 'https://public-manager.test',
+          },
+        },
+        { status: 403 }
+      )
+    );
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      expect(adapter().error).toContain(
+        'https://public-manager.test/.well-known/cpamp-bootstrap/ui'
+      );
+      expect(adapter().error).not.toBe(surfaceErrorByLocale[locale]);
+    }
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
+          error: { code: 'origin_rejected' },
+        },
+        { status: 403 }
+      )
+    );
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      expect(adapter().error).toContain('CPAMP_PUBLIC_ORIGIN');
+      expect(adapter().error).not.toContain('undefined');
+      expect(adapter().error).not.toContain('/.well-known/cpamp-bootstrap/ui');
+      expect(adapter().error).not.toBe(surfaceErrorByLocale[locale]);
+    }
+  });
 });

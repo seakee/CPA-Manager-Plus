@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { AppBackground } from '../components/common/AppBackground';
-import { readRoutingContext } from './routingContext';
+import { isInitialRoutingContext, readRoutingContext } from './routingContext';
 import { activateFreshLanguage } from './freshLanguage';
 import { BOOTSTRAP_UI, consumeHandoff, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
@@ -39,6 +39,17 @@ if (window.location.pathname === BOOTSTRAP_UI) {
   // the fragment. Retire the previous in-memory authority before remounting.
   window.addEventListener('hashchange', openHandoff);
   openHandoff();
+} else if (isInitialRoutingContext(document)) {
+  // An uncommitted initial route is a verification candidate, never a handoff
+  // consumer or an active Console. Strip any fragment and show Bootstrap status.
+  const stripFragment = () => {
+    if (window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+  window.addEventListener('hashchange', stripFragment);
+  stripFragment();
+  render(<FreshBootstrapPage handoff={null} transport={createBootstrapTransport()} />);
 } else if (!context) {
   render(<p>Routing authority unavailable</p>);
 } else {

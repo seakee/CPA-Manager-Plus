@@ -194,31 +194,62 @@ func TestPreflightServesAReport(t *testing.T) {
 // adds: the declaration is always reported as a boolean, it agrees with the row
 // that describes it, and it never appears without the version the copy-in needs.
 func TestPreflightReportsThePendingDeclarationShape(t *testing.T) {
-	handler := newHandler(legacySourceDir(t), "")
-	_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
-	if !strings.Contains(body, `"pendingDeclaration"`) {
-		t.Fatalf("preflight omitted the pending declaration flag: %s", body)
-	}
-	var report preflightDocument
-	if err := json.Unmarshal([]byte(body), &report); err != nil {
-		t.Fatalf("decode preflight: %v: %s", err, body)
-	}
-	rowPending := false
-	for _, check := range report.Checks {
-		if check.Name == "source_version" && check.Status == "pending" {
-			rowPending = true
+	t.Run("blocked-pre-v114-source", func(t *testing.T) {
+		handler := newHandler(legacySourceDir(t), "")
+		_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
+		if !strings.Contains(body, `"pendingDeclaration":false`) {
+			t.Fatalf("blocked preflight must report pendingDeclaration=false: %s", body)
 		}
-	}
-	if report.PendingDeclaration != rowPending {
-		t.Fatalf("pendingDeclaration = %v but the source_version row says %v: %s", report.PendingDeclaration, rowPending, body)
-	}
-	if report.PendingDeclaration {
+		var report preflightDocument
+		if err := json.Unmarshal([]byte(body), &report); err != nil {
+			t.Fatalf("decode preflight: %v: %s", err, body)
+		}
+		if report.PendingDeclaration || report.ExpectedVersion != "" || report.SourceVersion != upgradeservice.VersionUnknown {
+			t.Fatalf("unexpected blocked preflight header fields: %+v", report)
+		}
+	})
+
+	t.Run("v114-pending-declaration-with-unknown-wire-sentinel", func(t *testing.T) {
+		dir := legacySourceDir(t)
+		db, err := sql.Open("sqlite", filepath.Join(dir, "usage.sqlite"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`pragma journal_mode = delete;
+create table usage_event_identity_ledger (event_hash text primary key);
+create table usage_archive_event_refs (event_hash text primary key, raw_event_id integer not null, timestamp_ms integer not null, raw_deleted_at_ms integer);
+create table usage_monitoring_event_projection_v1 (event_id integer primary key, timestamp_ms integer not null);
+create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, structure_revision text not null, status text not null, coverage_event_id integer not null);
+create table usage_archive_deleted_coverage_daily (utc_day integer primary key, deleted_event_count integer not null);`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		handler := newHandler(dir, "")
+		_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
+		var report preflightDocument
+		if err := json.Unmarshal([]byte(body), &report); err != nil {
+			t.Fatalf("decode preflight: %v: %s", err, body)
+		}
+		rowPending := false
+		for _, check := range report.Checks {
+			if check.Name == "source_version" && check.Status == "pending" {
+				rowPending = true
+			}
+		}
+		if !rowPending || !report.PendingDeclaration {
+			t.Fatalf("expected pendingDeclaration=true and pending source_version row: %s", body)
+		}
+		if report.SourceVersion != upgradeservice.VersionUnknown {
+			t.Fatalf("pending preflight sourceVersion = %q, want %q: %s", report.SourceVersion, upgradeservice.VersionUnknown, body)
+		}
 		if report.ExpectedVersion == "" || !report.Ready || len(report.Blocked) != 0 {
 			t.Fatalf("a pending declaration is not a usable report: %s", body)
 		}
-	} else if report.ExpectedVersion != "" {
-		t.Fatalf("a declared version still reported an expectation: %s", body)
-	}
+	})
 }
 
 func TestPreflightMissingLegacyRootIsTyped(t *testing.T) {

@@ -827,6 +827,74 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => renderer.unmount());
   });
 
+  it('surfaces unfinished Fresh installation resume guidance without legacy-preflight, re-translates, and rechecks discovery on demand', async () => {
+    const discoveryFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'fresh_claim_required',
+            mode: 'fresh',
+            auth_entry: 'fresh_claim',
+            reason: 'fresh_resume_required',
+            authentication_required: true,
+          },
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            contract_version: 'cpamp.phase4-01.discovery.v1',
+            status: 'fresh_claim_required',
+            mode: 'fresh',
+            auth_entry: 'fresh_claim',
+            reason: 'fresh_claim_required',
+            authentication_required: true,
+          },
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal('fetch', discoveryFetch);
+    setFullWebLanguage('zh-CN');
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    const shell = findByTestId(renderer.root, 'fresh-bootstrap-shell');
+    expect(textOf(shell)).toContain(bootstrapJourneyText('pending', 'zh-CN'));
+    expect(findByTestId(renderer.root, 'fresh-resume-instructions')).toBeTruthy();
+    expect(textOf(findByTestId(renderer.root, 'cli-handoff-command'))).toBe(
+      'cpa-manager-plus initialize'
+    );
+    expect(renderer.root.findAllByProps({ 'data-testid': 'host-preflight-command' })).toHaveLength(
+      0
+    );
+    expect(textOf(shell)).not.toContain('legacy-preflight');
+
+    await act(async () => {
+      findByTestId(renderer.root, 'bootstrap-language').props.onChange({ target: { value: 'en' } });
+    });
+    expect(textOf(shell)).toContain(bootstrapJourneyText('pending', 'en'));
+    expect(textOf(findByTestId(renderer.root, 'fresh-resume-instructions'))).toContain(
+      '/.well-known/cpamp-bootstrap/ui#handoff=...'
+    );
+
+    await act(async () => {
+      findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick();
+    });
+    expect(discoveryFetch).toHaveBeenCalledTimes(2);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-resume-instructions' })).toHaveLength(
+      0
+    );
+    expect(textOf(shell)).not.toContain(bootstrapJourneyText('pending', 'en'));
+    expect(textOf(shell)).toContain('New installation');
+    await act(async () => renderer.unmount());
+  });
+
   it.each(['en', 'ru', 'zh-CN', 'zh-TW'] as const)(
     'renders every blocked discovery gate in %s without falling back to one language',
     async (language) => {
@@ -837,6 +905,17 @@ describe('FreshBootstrapPage product preview workflow', () => {
             mode: 'fresh',
             auth_entry: 'fresh_claim',
             reason: 'fresh_claim_required',
+            authentication_required: true,
+          },
+          httpStatus: 200,
+          hostPreflight: false,
+        },
+        {
+          payload: {
+            status: 'fresh_claim_required',
+            mode: 'fresh',
+            auth_entry: 'fresh_claim',
+            reason: 'fresh_resume_required',
             authentication_required: true,
           },
           httpStatus: 200,

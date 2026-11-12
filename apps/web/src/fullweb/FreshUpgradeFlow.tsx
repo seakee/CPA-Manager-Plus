@@ -23,6 +23,21 @@ import { readRoutingContext } from './routingContext';
 // its own. The copy-in, the reconciliation, the CPA import and the connection are
 // started from the Manager host.
 export const UPGRADE_WIZARD_CONTRACT = 'cpamp.upgrade-wizard.v1';
+const SOURCE_VERSION_UNKNOWN = 'unknown';
+
+function formatPreflightSourceVersion(
+  report: UpgradePreflight | undefined,
+  language: string | undefined
+): string {
+  const reported = report?.sourceVersion ?? '';
+  if (reported && reported !== SOURCE_VERSION_UNKNOWN) {
+    return reported;
+  }
+  if (report?.pendingDeclaration && report.expectedVersion) {
+    return `${t('checkPending', language)} (--source-version ${report.expectedVersion})`;
+  }
+  return t('preflightUnknown', language);
+}
 
 export type UpgradeWizardResource =
   | 'installation/upgrade/preflight'
@@ -737,7 +752,7 @@ export function FreshUpgradeFlow({
                 <div>
                   <dt>{t('preflightSourceVersion', language)}</dt>
                   <dd data-testid="upgrade-preflight-version">
-                    {preflightReport.sourceVersion || t('preflightUnknown', language)}
+                    {formatPreflightSourceVersion(preflightReport, language)}
                   </dd>
                 </div>
                 <div>
@@ -798,8 +813,24 @@ export function FreshUpgradeFlow({
                 >
                   <FullWebIcon name="check" size={24} />
                   <div>
-                    <h3>{t('preflightReadyTitle', language)}</h3>
-                    <p>{t('preflightReadyHelp', language)}</p>
+                    <h3>
+                      {t(
+                        preflightReport.pendingDeclaration ||
+                          preflightReport.checks.some((check) => check.status === 'pending')
+                          ? 'preflightReadyPendingTitle'
+                          : 'preflightReadyTitle',
+                        language
+                      )}
+                    </h3>
+                    <p>
+                      {t(
+                        preflightReport.pendingDeclaration ||
+                          preflightReport.checks.some((check) => check.status === 'pending')
+                          ? 'preflightReadyPendingHelp'
+                          : 'preflightReadyHelp',
+                        language
+                      )}
+                    </p>
                   </div>
                 </div>
               )}
@@ -841,7 +872,7 @@ export function FreshUpgradeFlow({
             <div>
               <dt>{t('confirmSourceVersion', language)}</dt>
               <dd data-testid="upgrade-confirm-version">
-                {preflightReport?.sourceVersion || t('preflightUnknown', language)}
+                {formatPreflightSourceVersion(preflightReport, language)}
               </dd>
             </div>
           </dl>
