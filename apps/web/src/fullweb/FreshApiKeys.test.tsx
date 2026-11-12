@@ -1164,6 +1164,87 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(x('usageCollectorRunning'));
   });
 
+  // A rebind reload can start while a normal read is still in flight. When that
+  // older read answers first its result is dropped, but it must also release
+  // nothing: `inFlight` and `busy` belong to the read that replaced it, or the page
+  // reports itself idle and lets a mutation interleave with a pending read whose
+  // older snapshot would then erase the key it just created.
+  it('keeps the page busy when a superseded read settles first', async () => {
+    const created = { ...key, id: 'f'.repeat(32), requestId: '1'.repeat(32) };
+    let settleFirstRead: (response: Response) => void = () => undefined;
+    let settleSecondRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleFirstRead = resolve;
+          });
+        return new Promise<Response>((resolve) => {
+          settleSecondRead = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.resolve(Response.json({ key: created, createdSecret: secret }));
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    // The rebind re-reads while the first read is still open.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+
+    // The superseded read answers first with a list that predates anything.
+    await act(async () => {
+      settleFirstRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+
+    // Its answer and its release both belong to the newer read.
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+    expect(button(t('keysCreate')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settleSecondRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    // The newer read settles the page: one list request per read, no extra GET,
+    // and the key it reports is the only list statement the page holds.
+    expect(keyReads).toBe(2);
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(key.id);
+  });
+
   // The page's own read chain carries the same ownership rule as the usage panel.
   // A rebind re-reads it, and the answer the previous read is still waiting on
   // describes the installation before the fix: publishing it would repaint the
@@ -1242,24 +1323,25 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(key.id);
   });
 
-  // An expired session reported by the retired read is not a fact about the
-  // current one: the rebind already proved the connection works.
+  // An expired session reported by a retired *usage-summary* read is not a fact
+  // about the current one: the rebind already proved the connection works. The
+  // summary is the read the key list hands off to, so it is the one held open.
   it('does not end the session for an authentication failure of a retired page read', async () => {
-    let settleStaleRead: (response: Response) => void = () => undefined;
-    let keyReads = 0;
+    let settleStaleSummary: (response: Response) => void = () => undefined;
+    let summaryReads = 0;
     const fetchMock = vi.fn<typeof fetch>((input, init) => {
       const url = String(input);
       if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
-        keyReads += 1;
-        if (keyReads === 1)
-          return new Promise<Response>((resolve) => {
-            settleStaleRead = resolve;
-          });
         return Promise.resolve(
           Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
         );
       }
       if (url.endsWith('/api-keys/usage-summary')) {
+        summaryReads += 1;
+        if (summaryReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleSummary = resolve;
+          });
         return Promise.resolve(
           Response.json({
             fromMs: 1,
@@ -1296,11 +1378,16 @@ describe('Fresh client key persistence UI', () => {
     await act(async () => {
       renderer = create(page(0));
     });
+    expect(summaryReads).toBe(1);
+    // The rebind re-reads the page while the first summary is still open.
     await act(async () => {
       renderer.update(page(1));
     });
+    expect(summaryReads).toBe(2);
+
+    // The retired summary now answers as an expired session.
     await act(async () => {
-      settleStaleRead(Response.json({ code: 'unauthorized' }, { status: 401 }));
+      settleStaleSummary(Response.json({ code: 'unauthorized' }, { status: 401 }));
     });
     expect(unauthorized).not.toHaveBeenCalled();
     expect(view()).toContain(key.id);

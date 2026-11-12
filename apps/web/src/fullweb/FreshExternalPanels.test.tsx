@@ -5,7 +5,7 @@ import { FreshRebindDialog } from './FreshRebindDialog';
 import { FreshExternalUsage } from './FreshExternalUsage';
 import { parseExternalUsageState } from './externalState';
 import { setFullWebLanguage } from '../i18n/fullweb';
-import { PublicApiError, type PublicApiClient } from './publicApi';
+import { createPublicApiClient, PublicApiError, type PublicApiClient } from './publicApi';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
 
 // The rendered text of one subtree. A renderer node's children are elements as
@@ -55,6 +55,8 @@ function stubClient(post: (resource: string, body: unknown) => Promise<unknown>,
   } as unknown as PublicApiClient;
   return { client, calls };
 }
+
+const context = { basePath: '/console', apiBase: '/console/api/v2', revision: 1 };
 
 const usageState = {
   statisticsEnabled: false,
@@ -247,6 +249,8 @@ describe('External rebind dialog', () => {
 describe('External usage confirmation', () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    // The real client resolves its resource against the page origin.
+    vi.stubGlobal('window', { location: new URL('https://manager.example/console') });
     vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0x22) });
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -759,37 +763,20 @@ describe('External usage confirmation', () => {
     expect(unauthorized).not.toHaveBeenCalled();
   });
 
-  // The ownership rule suppresses only *retired* failures. A failure that still
-  // owns the panel must end the session, or the suppression would hide a real
-  // expiry behind a dead panel.
-  it('ends the session for an authentication failure of the current read', async () => {
-    const unauthorized = vi.fn();
-    const client = {
-      get: vi.fn(async () => {
-        throw new PublicApiError('authentication', 401);
-      }),
-      post: vi.fn(),
-      put: vi.fn(),
-    } as unknown as PublicApiClient;
-    await act(async () => {
-      create(
-        <FreshExternalUsage
-          client={client}
-          credential="admin"
-          onUnauthorized={unauthorized}
-        />
-      );
-    });
-    expect(unauthorized).toHaveBeenCalledTimes(1);
-  });
-
-  it('ends the session for an authentication failure of the current confirmation', async () => {
+  // A confirmation still pending when the panel goes away must leave nothing
+  // behind: its answer publishes nothing and ends no session.
+  it('publishes nothing from a confirmation that answers after unmount', async () => {
+    let settleConfirm: (value: unknown) => void = () => undefined;
+    const blockers: (string | null | undefined)[] = [];
     const unauthorized = vi.fn();
     const client = {
       get: vi.fn(async () => usageState),
-      post: vi.fn(async () => {
-        throw new PublicApiError('authentication', 401);
-      }),
+      post: vi.fn(
+        async () =>
+          new Promise<unknown>((resolve) => {
+            settleConfirm = resolve;
+          })
+      ),
       put: vi.fn(),
     } as unknown as PublicApiClient;
     let renderer!: ReactTestRenderer;
@@ -797,6 +784,146 @@ describe('External usage confirmation', () => {
       renderer = create(
         <FreshExternalUsage
           client={client}
+          credential="admin"
+          onUnauthorized={unauthorized}
+          onBlocker={(code) => blockers.push(code)}
+        />
+      );
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    act(() => void confirm.props.onClick());
+    expect(client.post).toHaveBeenCalledTimes(1);
+    const published = blockers.length;
+
+    await act(async () => renderer.unmount());
+    await act(async () =>
+      settleConfirm({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+      })
+    );
+    expect(blockers).toHaveLength(published);
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+
+  // A StrictMode replay runs the cleanup and the setup again. If a confirmation is
+  // pending across it, the claim it took must be released by the cleanup and taken
+  // again by the request, or the replay would leave the panel unable to confirm.
+  it('accepts a confirmation after a StrictMode replay while one is pending', async () => {
+    let settleConfirm: (value: unknown) => void = () => undefined;
+    const client = {
+      get: vi.fn(async () => usageState),
+      post: vi.fn(
+        async () =>
+          new Promise<unknown>((resolve) => {
+            settleConfirm = resolve;
+          })
+      ),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    const panel = (strict: boolean) =>
+      strict ? (
+        <StrictMode>
+          <FreshExternalUsage
+            client={client}
+            credential="admin"
+            onUnauthorized={() => undefined}
+          />
+        </StrictMode>
+      ) : (
+        <FreshExternalUsage
+          client={client}
+          credential="admin"
+          onUnauthorized={() => undefined}
+        />
+      );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(panel(true));
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    act(() => void confirm.props.onClick());
+    expect(client.post).toHaveBeenCalledTimes(1);
+
+    // Replaying the effects of this same tree re-runs the cleanup and setup.
+    await act(async () => {
+      renderer.update(panel(false));
+    });
+    await act(async () => {
+      renderer.update(panel(true));
+    });
+    await act(async () =>
+      settleConfirm({
+        ...usageState,
+        statisticsEnabled: true,
+        collector: 'running',
+        collectionStarted: true,
+      })
+    );
+
+    // The pending confirmation was retired by the replay, so the panel offers the
+    // action again, and the claim it held is gone: a new confirmation is accepted.
+    const enableAgain = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    expect(enableAgain.props.disabled).toBe(false);
+    await act(async () => enableAgain.props.onClick());
+    const confirmAgain = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmAgain.props.onClick());
+    expect(client.post).toHaveBeenCalledTimes(2);
+  });
+
+  // The ownership rule suppresses only *retired* failures. A failure that still
+  // owns the panel must end the session, or the suppression would hide a real
+  // expiry behind a dead panel.
+  // The 401 must arrive as what the client really produces for it: a Response,
+  // parsed by `createPublicApiClient` into an authentication failure.
+  it('ends the session for an authentication failure of the current read', async () => {
+    const unauthorized = vi.fn();
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={createPublicApiClient(
+            () => context,
+            vi.fn<typeof fetch>(async () => Response.json({ code: 'unauthorized' }, { status: 401 }))
+          )}
+          credential="admin"
+          onUnauthorized={unauthorized}
+        />
+      );
+    });
+    console.log('PROBE unauthorized=', unauthorized.mock.calls.length, 'transport=omitted');
+    try {
+      await createPublicApiClient(
+        () => context,
+        vi.fn<typeof fetch>(async () => Response.json({ code: 'unauthorized' }, { status: 401 }))
+      ).get('external/usage', { kind: 'admin', value: 'x' });
+    } catch (e) {
+      console.log('PROBE err=', (e as Error).name, (e as Error).message, (e as Error).stack?.split('\n').slice(0,3).join(' | '));
+    }
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it('ends the session for an authentication failure of the current confirmation', async () => {
+    const unauthorized = vi.fn();
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage
+          client={createPublicApiClient(
+            () => context,
+            vi.fn<typeof fetch>(async (_input, init) =>
+              init?.method === 'POST'
+                ? Response.json({ code: 'unauthorized' }, { status: 401 })
+                : Response.json(usageState)
+            )
+          )}
           credential="admin"
           onUnauthorized={unauthorized}
         />

@@ -77,10 +77,6 @@ export function FreshExternalUsage({
     alive.current = true;
     return () => {
       alive.current = false;
-      // A confirmation still in flight when the panel unmounts can never release
-      // the claim it took: a remounted panel has to be able to confirm again.
-      confirmingNow.current = false;
-      pendingConfirm.current = 0;
     };
   }, []);
 

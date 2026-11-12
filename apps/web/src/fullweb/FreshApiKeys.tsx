@@ -84,6 +84,11 @@ export function FreshApiKeys({
   // installation before that fix: publishing it would repaint the blocker the
   // rebind resolved, or end a session the rebind already proved works.
   const reloadEpoch = useRef(0);
+  // A read's key list is a snapshot of the moment the Manager answered it. A key
+  // this page just created is newer than any read that started before that write,
+  // so a snapshot opened earlier can only be applied if no mutation has published
+  // since. Without this, an older list would erase the key the operator just made.
+  const mutationSeq = useRef(0);
   const copyAttempt = useRef(0);
   const secretPendingRef = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
@@ -133,6 +138,7 @@ export function FreshApiKeys({
     if ((inFlight.current && !forced) || selected || detailPendingRef.current) return;
     inFlight.current = true;
     const epoch = ++reloadEpoch.current;
+    const mutationsAtStart = mutationSeq.current;
     setBusy(true);
     setError('');
     setUsage(null);
@@ -151,7 +157,9 @@ export function FreshApiKeys({
         typeof result.revocationAvailable !== 'boolean'
       )
         throw new Error();
-      setKeys(result.keys);
+      // A mutation that published while this read was open has a newer statement
+      // of the key list: keep it instead of the snapshot this read started from.
+      if (mutationSeq.current === mutationsAtStart) setKeys(result.keys);
       setGatewayPending(result.gatewayPending);
       setRevocationAvailable(result.revocationAvailable);
       setBlocker(null);
@@ -168,8 +176,13 @@ export function FreshApiKeys({
     } catch (err) {
       if (alive.current && reloadEpoch.current === epoch) failure(err);
     } finally {
-      inFlight.current = false;
-      if (alive.current) setBusy(false);
+      // A read that no longer owns the page releases nothing: the newer read is
+      // the one holding `inFlight` and `busy`, and clearing them here would let a
+      // mutation start while that read is still pending.
+      if (reloadEpoch.current === epoch) {
+        inFlight.current = false;
+        if (alive.current) setBusy(false);
+      }
     }
   }
 
@@ -247,6 +260,9 @@ export function FreshApiKeys({
             result.key.maskedPreview !== maskedPreviewOf(result.createdSecret)))
       )
         throw new Error();
+      // This key is a fact newer than any list read still open: a snapshot that
+      // started before it must not erase it when it answers.
+      mutationSeq.current += 1;
       setKeys((previous) => [
         ...(previous || []).filter((key) => key.id !== result.key.id),
         result.key,
@@ -420,6 +436,7 @@ export function FreshApiKeys({
       const key = await client.get<Key>('api-keys/requests/' + pending, auth);
       if (!alive.current) return;
       if (!validKey(key) || key.requestId !== pending) throw new Error();
+      mutationSeq.current += 1;
       setKeys((previous) => [...(previous || []).filter((item) => item.id !== key.id), key]);
       setConfirmed(true);
       setPending('');
