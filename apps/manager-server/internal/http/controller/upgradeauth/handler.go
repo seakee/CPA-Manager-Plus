@@ -9,10 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
@@ -22,6 +22,12 @@ import (
 
 const Path = "/.well-known/cpamp-bootstrap/upgrade/authenticate"
 const Contract = "cpamp.upgrade-auth.v1"
+
+// CodeSourceOwnershipUnavailable reports that the resolved 1.x source (for
+// example a root-owned 1.x volume mounted at /legacy:ro while Manager runs as
+// 10002:10002) has database, lock marker, journal, or data.key files that the
+// current Manager user does not have permission to read.
+const CodeSourceOwnershipUnavailable = "source_ownership_unavailable"
 
 type Handler struct {
 	paths sqlite.InspectionPaths
@@ -87,11 +93,11 @@ func (h *Handler) SetManagerStorePaths(paths sqlite.InspectionPaths) {
 
 // verifyCredential proves the key against the one credential file this surface
 // resolved, reading it the way that file requires.
-func (h *Handler) verifyCredential(ctx context.Context, key string) error {
-	if h.mountSource {
+func (h *Handler) verifyCredential(ctx context.Context, paths sqlite.InspectionPaths, mountSource bool, key string) error {
+	if mountSource {
 		return upgradeservice.VerifyAdminSource(ctx, upgradeservice.PreservedSource{
-			Database: h.paths.Database,
-			DataKey:  h.paths.DataKey,
+			Database: paths.Database,
+			DataKey:  paths.DataKey,
 		}, key,
 			upgradeservice.ScratchRoot{Label: "the target root", Dir: parentDir(h.managerPaths.Database)},
 			upgradeservice.ScratchRoot{Label: "the Manager data key directory", Dir: parentDir(h.managerPaths.DataKey)})
@@ -104,13 +110,77 @@ func (h *Handler) verifyCredential(ctx context.Context, key string) error {
 	// TMPDIR inside it is refused by the service instead of staging a copy there.
 	// The store's data key travels with it for the same reason: a configuration may
 	// keep that file outside the data root.
-	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, upgradeservice.CredentialSnapshotRoots{
-		Target:         filepath.Dir(h.paths.Database),
+	return upgradeservice.VerifyManagerCredential(ctx, paths.Database, upgradeservice.CredentialSnapshotRoots{
+		Target:         filepath.Dir(paths.Database),
 		Source:         h.sourceRoot,
 		SourceKnown:    true,
 		PreserveTarget: h.preserveManagerStore,
-		DataKey:        h.paths.DataKey,
+		DataKey:        paths.DataKey,
 	}, key)
+}
+
+func (h *Handler) effectivePaths() (sqlite.InspectionPaths, bool) {
+	if h.mountSource {
+		return h.paths, true
+	}
+	if h.sourceRoot != "" {
+		legacyPaths := legacypreflight.DefaultPaths(filepath.Join(h.sourceRoot, "usage.sqlite"))
+		if sourceOwnershipUnavailable(legacyPaths, true) {
+			return legacyPaths, true
+		}
+		if database, _ := upgradeservice.MountDatabase(h.sourceRoot); database != "" {
+			return legacypreflight.DefaultPaths(database), true
+		}
+	}
+	return h.paths, false
+}
+
+func sourceOwnershipUnavailable(paths sqlite.InspectionPaths, checkDataKey bool) bool {
+	database := strings.TrimSpace(paths.Database)
+	if database == "" {
+		return false
+	}
+	info, err := os.Lstat(database)
+	if err != nil {
+		return errors.Is(err, os.ErrPermission)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+		return false
+	}
+	if fileReadPermissionDenied(database) {
+		return true
+	}
+	for _, suffix := range []string{".manager.lock", "-wal", "-shm", "-journal"} {
+		if regularFilePermissionDenied(database + suffix) {
+			return true
+		}
+	}
+	if checkDataKey {
+		if dataKey := strings.TrimSpace(paths.DataKey); dataKey != "" && regularFilePermissionDenied(dataKey) {
+			return true
+		}
+	}
+	return false
+}
+
+func regularFilePermissionDenied(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return errors.Is(err, os.ErrPermission)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false
+	}
+	return fileReadPermissionDenied(path)
+}
+
+func fileReadPermissionDenied(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return errors.Is(err, os.ErrPermission)
+	}
+	_ = file.Close()
+	return false
 }
 
 func parentDir(path string) string {
@@ -148,7 +218,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), legacypreflight.DiscoveryInspectionTimeout)
 	defer cancel()
-	legacypreflight.WithAuthenticatedInspection(ctx, h.paths, key, func(report legacypreflight.Report, err error) {
+	paths, mountSource := h.effectivePaths()
+	if sourceOwnershipUnavailable(paths, mountSource || h.preserveManagerStore) {
+		write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+		return
+	}
+	legacypreflight.WithAuthenticatedInspection(ctx, paths, key, func(report legacypreflight.Report, err error) {
 		// observedFile is the projection the entry can offer this caller. When the
 		// public observation refuses the source, the credential is asked directly:
 		// a proved key still answers authenticated, because only the observation is
@@ -156,11 +231,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		observedFile := true
 		switch {
 		case err == nil:
+		case errors.Is(err, os.ErrPermission):
+			write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+			return
 		case errors.Is(err, sqlite.ErrLegacyAdminUnauthorized):
 			observedFile = false
-			verifyErr := h.verifyCredential(ctx, key)
+			verifyErr := h.verifyCredential(ctx, paths, mountSource, key)
 			if errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized) {
 				write(w, http.StatusUnauthorized, "admin_unauthorized")
+				return
+			}
+			if errors.Is(verifyErr, os.ErrPermission) {
+				write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
 				return
 			}
 			if verifyErr != nil {
@@ -174,7 +256,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// observation fault is what stranded a resumable operation. This is not
 			// a credential verdict, so a wrong key stays 503 here rather than 401.
 			observedFile = false
-			if verifyErr := h.verifyCredential(ctx, key); verifyErr != nil {
+			if verifyErr := h.verifyCredential(ctx, paths, mountSource, key); verifyErr != nil {
+				if errors.Is(verifyErr, os.ErrPermission) {
+					write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+					return
+				}
 				write(w, http.StatusServiceUnavailable, "source_unavailable")
 				return
 			}
