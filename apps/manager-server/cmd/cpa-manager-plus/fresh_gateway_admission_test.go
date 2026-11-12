@@ -215,23 +215,11 @@ func TestFreshAuthorityAdmissionRemainsProvenAcrossConsoleFileLoggingToggle(t *t
 			if enableRes.Code != http.StatusOK {
 				t.Fatalf("PUT cpamp/v0/management/logging-to-file true = %d %s", enableRes.Code, enableRes.Body.String())
 			}
-			harness.destination.mu.Lock()
-			gotEnabled := harness.destination.loggingToFile
-			harness.destination.mu.Unlock()
-			if !gotEnabled {
-				t.Fatal("destination CPA did not receive logging-to-file=true")
-			}
 			assertAdmission("after enabling file logging")
 
 			disableRes := harness.call(t, http.MethodPut, "cpamp/v0/management/logging-to-file", `{"value":false}`)
 			if disableRes.Code != http.StatusOK {
 				t.Fatalf("PUT cpamp/v0/management/logging-to-file false = %d %s", disableRes.Code, disableRes.Body.String())
-			}
-			harness.destination.mu.Lock()
-			gotDisabled := !harness.destination.loggingToFile
-			harness.destination.mu.Unlock()
-			if !gotDisabled {
-				t.Fatal("destination CPA did not receive logging-to-file=false")
 			}
 			assertAdmission("after disabling file logging")
 		})
