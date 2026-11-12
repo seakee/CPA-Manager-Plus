@@ -180,9 +180,6 @@ jobs:
         env:
           VERSION: ${{ needs.preflight.outputs.release_tag }}
 
-      - name: Check demo isolation
-        run: npm run check:demo-isolation
-
       - name: Build native release packages
         run: bin/release/package-native.sh
         env:

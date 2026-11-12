@@ -550,13 +550,13 @@ describe('design token checker', () => {
     [
       'R1-01 flags undefined CSS variables when the same key appears only in a non-style TS/TSX object literal',
       {
-        'features/demo/notAStyle.tsx': `export const translations = { '--missing-design-token': 'display text' };\n`,
-        'features/demo/Demo.module.scss': `.demo { color: var(--missing-design-token); }\n`,
+        'features/sample/notAStyle.tsx': `export const translations = { '--missing-design-token': 'display text' };\n`,
+        'features/sample/Sample.module.scss': `.demo { color: var(--missing-design-token); }\n`,
       },
       {
         ...emptyRules,
         'undefined-var': {
-          'features/demo/Demo.module.scss': { '--missing-design-token': 1 },
+          'features/sample/Sample.module.scss': { '--missing-design-token': 1 },
         },
       },
     ],

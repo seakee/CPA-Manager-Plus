@@ -2,7 +2,6 @@ node_modules
 **/node_modules
 dist
 apps/web/dist
-apps/web/dist-demo
 apps/manager-server/internal/httpapi/web/fullweb
 .git
 .DS_Store
