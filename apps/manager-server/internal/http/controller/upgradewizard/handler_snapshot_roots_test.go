@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
 // materializingManagerTarget copies a real 1.x source with a live WAL into a
@@ -657,6 +658,13 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 
 	t.Run("database-rewritten-with-restored-mtime-fails-closed", func(t *testing.T) {
 		dbPath, handler := makeHandler(t)
+		// The preserved-evidence guard compares identity, size, mtime and change
+		// stamp, so a rewrite that restores its own bytes and mtime is only
+		// detectable through the change stamp. Pin that stamp into the past
+		// first: on Windows ChangeTime is file metadata, so every later write
+		// reports a strictly later one instead of relying on two writes landing
+		// in different clock ticks.
+		testutil.AgeChangeStamp(t, dbPath, copyinmarker.ChangeStamp)
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
@@ -665,12 +673,14 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
+		origStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
 		// The rewrite must change bytes, not merely re-write the ones already
-		// there. A same-content write is not a rewrite: NTFS need not advance a
-		// file's ChangeTime for it, leaving the before/after identity comparison
-		// with no evidence to reject, so this subtest would prove nothing. Mutate
-		// the header's user-version field, which SQLite tolerates on read, so the
-		// probe still answers normally.
+		// there. Mutate the header's user-version field, which SQLite tolerates
+		// on read, so the probe still answers normally and only the before/after
+		// identity comparison can reject the change.
 		const userVersionOffset = 60
 		rewritten := append([]byte(nil), cleanBytes...)
 		rewrittenVersion := binary.BigEndian.Uint32(cleanBytes[userVersionOffset:]) ^ 0xa5a5a5a5
@@ -696,6 +706,12 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 				}
 				return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
 			}()
+			if hookErr != nil {
+				return
+			}
+			// Name a broken precondition here rather than reporting it as a
+			// guard failure below.
+			testutil.RequireChangeStampAdvanced(t, target, origStamp, copyinmarker.ChangeStamp)
 		}
 		defer func() { afterPreservedEvidenceProbe = origHook }()
 

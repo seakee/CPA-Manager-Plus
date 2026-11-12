@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
 func sourceState(t *testing.T, root string) map[string]string {
@@ -935,6 +936,13 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// The detector compares identity, size, mtime and change stamp, so a
+		// rewrite that restores its own bytes and mtime is only detectable
+		// through the change stamp. Pin that stamp into the past first: on
+		// Windows ChangeTime is file metadata, so every later write reports a
+		// strictly later one instead of relying on two writes landing in
+		// different clock ticks.
+		testutil.AgeChangeStamp(t, dbPath, copyinmarker.ChangeStamp)
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
@@ -943,13 +951,14 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
+		origStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
 		// The rewrite must change bytes, not merely re-write the ones already
-		// there. A same-content write is not a rewrite: NTFS need not advance a
-		// file's ChangeTime for it, so the detector could not see it and the
-		// subtest would pass or fail on the OS's bookkeeping rather than on the
-		// invariant it claims to prove. Mutate the header's user-version field,
-		// which SQLite tolerates on read, so the probe still answers normally and
-		// only the before/after identity comparison can reject the change.
+		// there. Mutate the header's user-version field, which SQLite tolerates
+		// on read, so the probe still answers normally and only the before/after
+		// identity comparison can reject the change.
 		const userVersionOffset = 60
 		rewritten := append([]byte(nil), coldBytes...)
 		rewrittenVersion := binary.BigEndian.Uint32(coldBytes[userVersionOffset:]) ^ 0xa5a5a5a5
@@ -975,6 +984,12 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 				}
 				return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
 			}()
+			if hookErr != nil {
+				return
+			}
+			// Name a broken precondition here rather than reporting it as a
+			// detector failure below.
+			testutil.RequireChangeStampAdvanced(t, target, origStamp, copyinmarker.ChangeStamp)
 		}
 		defer func() { beforeOperationEvidenceProbe = origHook }()
 
