@@ -615,4 +615,60 @@ describe('upgrade authentication lifecycle', () => {
       expect(adapter().error).not.toBe(surfaceErrorByLocale[locale]);
     }
   });
+
+  it('parses real 503 source_ownership_unavailable responses and renders the ownership remedy across locales', async () => {
+    mocks.verify.mockImplementation((credential: string, signal: AbortSignal, source?: string) =>
+      mocks.realVerify!(credential, signal, source)
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
+          error: { code: 'source_unavailable' },
+        },
+        { status: 503 }
+      )
+    );
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    const genericUnavailableByLocale: Record<string, string | null> = {};
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      genericUnavailableByLocale[locale] = adapter().error;
+    }
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
+          error: { code: 'source_ownership_unavailable' },
+        },
+        { status: 503 }
+      )
+    );
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      expect(adapter().error).toContain('chown -h 10002:10002');
+      expect(adapter().error).toContain('usage.sqlite*');
+      expect(adapter().error).toContain('data.key');
+      expect(adapter().error).toContain('/legacy:ro');
+      expect(adapter().error).toContain('/data/runtime');
+      expect(adapter().error).not.toBe(genericUnavailableByLocale[locale]);
+    }
+  });
 });

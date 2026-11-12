@@ -282,6 +282,75 @@ func TestStartupUpgradeAuthenticationAcceptsAReadOnlySource(t *testing.T) {
 	}
 }
 
+// TestStartupUpgradeAuthenticationClassifiesPermissionDeniedLegacySource pins
+// the Option-1 /legacy:ro contract when the 1.x volume still has root-only
+// (0600) ownership on usage.sqlite.manager.lock, data.key, or usage.sqlite:
+// authentication reports 503 source_ownership_unavailable for both wrong and
+// right keys without comparing credentials or mutating the source, and compares
+// credentials (401 wrong key, 200 right key) once read access is restored.
+func TestStartupUpgradeAuthenticationClassifiesPermissionDeniedLegacySource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0000 file permissions")
+	}
+	const (
+		legacyKey  = "legacy-mount-admin-key-123456"
+		managerKey = "manager-data-admin-key-123456"
+	)
+	_, managerPaths := upgradeAuthSource(t, managerKey)
+	legacyDir, legacyPaths := upgradeAuthSource(t, legacyKey)
+	t.Setenv(legacyRootEnvironment, legacyDir)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+
+	postAuth := func(presentedKey string) (int, string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, upgradeauth.Path, nil)
+		r.Host = "manager.test"
+		r.Header.Set("Authorization", "Bearer "+presentedKey)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+
+	lockPath := legacyPaths.Database + ".manager.lock"
+	for _, blockedPath := range []string{lockPath, legacyPaths.DataKey, legacyPaths.Database} {
+		info, err := os.Lstat(blockedPath)
+		if err != nil {
+			t.Fatalf("stat %s: %v", blockedPath, err)
+		}
+		origPerm := info.Mode().Perm()
+		if err := os.Chmod(blockedPath, 0o000); err != nil {
+			t.Fatalf("chmod 0000 %s: %v", blockedPath, err)
+		}
+		for _, candidate := range []string{"wrong-admin-key", managerKey, legacyKey} {
+			code, body := postAuth(candidate)
+			if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_ownership_unavailable"`) {
+				_ = os.Chmod(blockedPath, origPerm)
+				t.Fatalf("unreadable %s with key %q = %d %s, want 503 source_ownership_unavailable", filepath.Base(blockedPath), candidate, code, body)
+			}
+		}
+		if err := os.Chmod(blockedPath, origPerm); err != nil {
+			t.Fatalf("restore %s mode: %v", blockedPath, err)
+		}
+	}
+
+	// After the ownership remedy on the read-only legacy tree, credential
+	// comparison runs against the mounted 1.x source without writing to it.
+	readOnlyTree(t, legacyDir)
+	before := readSourceTree(t, legacyDir)
+
+	if code, body := postAuth("wrong-admin-key"); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"admin_unauthorized"`) {
+		t.Fatalf("wrong key after remedy = %d %s, want 401 admin_unauthorized", code, body)
+	}
+	if code, body := postAuth(legacyKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("right key after remedy = %d %s, want 200 authenticated", code, body)
+	}
+	if after := readSourceTree(t, legacyDir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("authentication mutated the read-only legacy tree: before %v after %v", before, after)
+	}
+}
+
 // readSourceTree records every entry under a source root with its mode and
 // content, so a test can prove a read-only mount was neither written nor
 // recreated.

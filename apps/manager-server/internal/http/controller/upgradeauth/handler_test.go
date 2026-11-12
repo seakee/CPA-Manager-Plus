@@ -1,11 +1,12 @@
 package upgradeauth
 
 import (
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
 
@@ -56,5 +57,41 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 		if _, err := New(paths, invalid, false, ""); err == nil {
 			t.Fatalf("accepted invalid origin %q", invalid)
 		}
+	}
+}
+
+func TestPermissionDeniedSourceReportsSourceOwnershipUnavailable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0000 file permissions")
+	}
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "usage.sqlite"))
+	if err := os.WriteFile(paths.Database, []byte("sqlite-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.DataKey, []byte("legacy-data-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := paths.Database + ".manager.lock"
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
+
+	h, err := New(paths, "https://public-manager.test", true, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, Path, nil)
+	r.Host = "public-manager.test"
+	r.Header.Set("Authorization", "Bearer test-key")
+	r.Header.Set("Origin", "https://public-manager.test")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"source_ownership_unavailable"`) {
+		t.Fatalf("permission-denied lock got %d %s, want 503 source_ownership_unavailable", w.Code, w.Body.String())
 	}
 }
