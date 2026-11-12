@@ -55,10 +55,18 @@ export function FreshExternalUsage({
   const startOnlyRef = useRef(false);
   const requestId = useRef('');
   const alive = useRef(true);
-  // Every read this panel issues takes a ticket. A rebind re-reads here, and the
-  // read it replaced may still be in flight: that one describes the installation
-  // before the fix, so its failure must not repaint a blocker the rebind resolved.
-  const readTicket = useRef(0);
+  // Every usage-state response — a read or a confirmation — is published only
+  // while its request still owns the panel. A `read()` opening a new generation
+  // retires whatever was in flight: the answer it is replacing describes the
+  // installation before the reload, so applying it would repaint a blocker the
+  // rebind resolved or regress facts the newer read already settled. A
+  // confirmation that succeeds takes the panel too, because the state it returns
+  // is newer than any read still waiting on the pre-confirmation CPA.
+  const generation = useRef(0);
+  // The publication rule above must cover `busy` as well, but a confirmation the
+  // operator can no longer see settled the panel once already: it still has to
+  // release the button, so the release is counted instead of claimed by a ticket.
+  const pendingConfirm = useRef(0);
 
   useEffect(() => {
     alive.current = true;
@@ -68,16 +76,15 @@ export function FreshExternalUsage({
   }, []);
 
   async function read() {
-    // A newer read supersedes this one: a rebind bumping `reloadToken` issues a
-    // fresh read of the installation as it now stands, and the answer this call
-    // is still waiting on describes the state before that fix. Applying it would
-    // repaint the blocker the rebind just resolved.
-    const ticket = ++readTicket.current;
+    // A read opens a generation: it is the newest statement of the installation's
+    // state, so every response still in flight — read or confirmation — belongs to
+    // the installation before it and is retired below.
+    const ticket = ++generation.current;
     try {
       const parsed = parseExternalUsageState(
         await client.get<unknown>('external/usage', { kind: 'admin', value: credential })
       );
-      if (!alive.current || readTicket.current !== ticket) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
       setReadError('');
@@ -89,7 +96,7 @@ export function FreshExternalUsage({
         onBlocker?.(null);
       }
     } catch (err) {
-      if (!alive.current || readTicket.current !== ticket) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
@@ -109,6 +116,12 @@ export function FreshExternalUsage({
   async function confirmEnable() {
     if (busy) return;
     const startOnly = startOnlyRef.current;
+    // A confirmation outlives a read request: it writes to the CPA, so the state
+    // it returns is the newest fact this panel holds. The `busy` release is
+    // counted rather than reported, because a confirmation the operator can no
+    // longer see was already settled by the reload that retired it.
+    const ticket = generation.current;
+    pendingConfirm.current += 1;
     setBusy(true);
     setNotice('');
     setConfirmFailed(false);
@@ -123,6 +136,10 @@ export function FreshExternalUsage({
       );
       if (!alive.current) return;
       if (!parsed) throw new Error('invalid usage state');
+      if (generation.current !== ticket) return;
+      // This answer is newer than any read still waiting on the pre-confirmation
+      // installation, so publishing it retires them.
+      generation.current += 1;
       const blockedReason = parsed.blockedReason;
       setState(parsed);
       setConfirming(false);
@@ -143,13 +160,15 @@ export function FreshExternalUsage({
         onUnauthorized();
         return;
       }
+      if (generation.current !== ticket) return;
       if (err instanceof PublicApiError && err.code) onBlocker?.(err.code);
       setConfirming(false);
       // Keep the request ID across retries of this confirmation attempt; whether
       // CPA receives another PUT depends on whether statistics still read back off.
       setConfirmFailed(true);
     } finally {
-      if (alive.current) setBusy(false);
+      pendingConfirm.current -= 1;
+      if (alive.current && pendingConfirm.current === 0) setBusy(false);
     }
   }
 

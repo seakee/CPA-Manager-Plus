@@ -329,9 +329,9 @@ describe('External usage confirmation', () => {
     expect(reads).toBe(2);
   });
 
-  // A rebind re-reads the panel. The read it replaced may still be in flight, and
-  // that one describes the installation before the fix: its answer must never
-  // repaint the blocker the rebind resolved.
+  // A rebind re-reads the panel. Whatever the previous generation still owes the
+  // panel describes the installation before the fix, so it must never repaint a
+  // blocker the rebind resolved: not a read, not a confirmation.
   it('ignores a read superseded by the rebind re-read', async () => {
     let failStale: (error: Error) => void = () => undefined;
     let reads = 0;
@@ -370,14 +370,135 @@ describe('External usage confirmation', () => {
     await act(async () => {
       renderer.update(panel(1));
     });
-    await act(async () => failStale(new TypeError('Failed to fetch')));
-    // The stale failure reached no blocker and no read-error state: the caller
-    // learns the installation is clean exactly once, from the read that replaced it.
+    // The stale read fails the way a superseded authority read does: a typed code
+    // that on its own would paint `authority_unavailable`.
+    await act(async () =>
+      failStale(
+        new PublicApiError('http', 503, undefined, 'external_cpa_authority_unavailable')
+      )
+    );
     expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
     expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(
       0
     );
+    // The retried authority code never reached the page: the only statement the
+    // caller heard is the clean one from the read that replaced it.
     expect(blockers).toEqual([null]);
+  });
+
+  // Ordering 3: a confirmation is in flight when the rebind re-reads the panel.
+  // The stale confirmation's failure must not put an authority blocker over the
+  // healthy state the reload just proved, and its release must still settle.
+  it('ignores a confirmation superseded by the rebind re-read', async () => {
+    let confirmAt = 0;
+    let reads = 0;
+    let failStaleConfirm: (error: Error) => void = () => undefined;
+    const blockers: (string | null | undefined)[] = [];
+    const client = {
+      // The first read offers the enable action; the rebind's re-read proves it.
+      get: vi.fn(async () => {
+        reads += 1;
+        return reads === 1
+          ? usageState
+          : { ...usageState, statisticsEnabled: true, collector: 'running', collectionStarted: true };
+      }),
+      post: vi.fn(async () => {
+        confirmAt += 1;
+        if (confirmAt === 1)
+          return new Promise<unknown>((_resolve, reject) => {
+            failStaleConfirm = reject;
+          });
+        return { ...usageState, statisticsEnabled: true, collector: 'running', collectionStarted: true };
+      }),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        onBlocker={(code) => blockers.push(code)}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    // The confirmation is pending and the operator rebinds meanwhile.
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    act(() => void confirm.props.onClick());
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    await act(async () =>
+      failStaleConfirm(
+        new PublicApiError('http', 503, undefined, 'external_cpa_authority_unavailable')
+      )
+    );
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })
+    ).toHaveLength(0);
+    // Every statement the page heard is a clear one; the stale failure added none.
+    expect(blockers).not.toContain('external_cpa_authority_unavailable');
+    expect(new Set(blockers)).toEqual(new Set([null]));
+  });
+
+  // Ordering 4: the reload reports an authority failure while an older
+  // confirmation is still pending. Its late success must not clear that newer
+  // blocker, while it still releases the button it held.
+  it('keeps the re-read blocker when an older confirmation settles afterwards', async () => {
+    let postResolve: ((value: unknown) => void) | undefined;
+    const blockers: (string | null | undefined)[] = [];
+    let reads = 0;
+    const client = {
+      get: vi.fn(async () => {
+        reads += 1;
+        if (reads === 1) return usageState;
+        throw new PublicApiError('http', 503, undefined, 'external_cpa_authority_unavailable');
+      }),
+      post: vi.fn(
+        async () =>
+          new Promise<unknown>((resolve) => {
+            postResolve = resolve;
+          })
+      ),
+      put: vi.fn(),
+    } as unknown as PublicApiClient;
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        onBlocker={(code) => blockers.push(code)}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    const enable = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enable.props.onClick());
+    const confirm = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    act(() => void confirm.props.onClick());
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    expect(blockers).toContain('external_cpa_authority_unavailable');
+    const blockerCount = blockers.length;
+
+    await act(async () => postResolve?.({ ...usageState, statisticsEnabled: true, collector: 'running', collectionStarted: true }));
+
+    // The stale success publishes nothing: the page keeps the newer blocker.
+    expect(blockers).toHaveLength(blockerCount);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(1);
+    // The button the superseded confirmation held is still released.
+    const enableAgain = renderer.root.findAllByProps({ 'data-testid': 'external-usage-enable' });
+    expect(enableAgain.every((node) => node.props.disabled === false)).toBe(true);
   });
 
   it('names the collector state in the page language instead of the wire value', async () => {

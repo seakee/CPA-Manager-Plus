@@ -1068,18 +1068,114 @@ describe('Fresh client key persistence UI', () => {
     ).toHaveLength(1);
   });
 
+  // Ordering 1: the panel's own read is still pending when the operator confirms
+  // collection. That confirmation IS the newest state of the installation, so the
+  // retired read's failure must not wipe the running facts it proved nor put an
+  // authority blocker over them.
+  it('does not let a read retired by a successful confirmation repaint a blocker', async () => {
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+    };
+    const disabled = {
+      ...usageBase,
+      statisticsEnabled: false,
+      collector: 'stopped',
+      collectionStarted: false,
+      blockedReason: 'usage_statistics_disabled',
+    };
+    const running = {
+      ...usageBase,
+      statisticsEnabled: true,
+      collector: 'running',
+      collectionStarted: true,
+      blockedReason: '',
+    };
+    let settlePendingRead: (response: Response) => void = () => undefined;
+    let usageGetCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        return Promise.resolve(Response.json(running));
+      }
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        // The first read settles so the enable action is offered; the read issued
+        // with the confirmation is the one held open.
+        if (usageGetCount === 1) return Promise.resolve(Response.json(disabled));
+        return new Promise<Response>((resolve) => {
+          settlePendingRead = resolve;
+        });
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enableBtn.props.onClick());
+    // A reload starts a read that is still pending when the operator confirms.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(usageGetCount).toBe(2);
+
+    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmBtn.props.onClick());
+    expect(view()).toContain(x('usageCollectorRunning'));
+
+    // The read issued before the confirmation now fails with the typed refusal.
+    await act(async () => {
+      settlePendingRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
+    });
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('rebindUnavailableHelp'));
+    expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
   // Regression: a rebind resolves the blocker, and the shell re-reads the page by
-  // bumping `reloadToken`. The usage panel must not repaint the blocker with a
-  // failure that belongs to the request it issued *before* the rebind: the page
+  // bumping `reloadToken`. The usage panel must not repaint the blocker with an
+  // answer that belongs to the request it issued *before* the rebind: the page
   // would show the fix and the refusal it resolved in the same frame.
   it('does not repaint an External blocker from a usage read issued before the rebind', async () => {
     const usageBase = {
       cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
     };
-    // The pre-rebind usage read is held open so the test chooses when it fails.
-    let rejectStaleRead: (error: Error) => void = () => undefined;
+    // The pre-rebind usage read is held open so the test chooses how it settles.
+    let settleStaleRead: (response: Response) => void = () => undefined;
     let usageGetCount = 0;
-    const health: unknown = {
+    const health = {
       ...usageBase,
       statisticsEnabled: true,
       collector: 'running',
@@ -1106,8 +1202,8 @@ describe('Fresh client key persistence UI', () => {
       if (url.endsWith('/external/usage')) {
         usageGetCount += 1;
         if (usageGetCount === 1)
-          return new Promise<Response>((_resolve, reject) => {
-            rejectStaleRead = reject;
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
           });
         return Promise.resolve(Response.json(health));
       }
@@ -1134,8 +1230,12 @@ describe('Fresh client key persistence UI', () => {
     await act(async () => {
       renderer.update(page(1));
     });
+    // The retired read answers with the typed authority refusal, the very code
+    // that paints this page's blocker when it belongs to the current state.
     await act(async () => {
-      rejectStaleRead(new TypeError('Failed to fetch'));
+      settleStaleRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
     });
 
     expect(
@@ -1145,7 +1245,7 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
     ).toHaveLength(0);
     expect(view()).not.toContain(x('rebindUnavailableHelp'));
-    // The read that replaced it is what the panel reports from.
+    // The read that replaced it is what the page reports from.
     expect(view()).toContain(x('usageCollectorRunning'));
   });
 });
