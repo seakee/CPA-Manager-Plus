@@ -14,7 +14,7 @@ var managedRequiredRoots = []string{
 	"access",         // Enforced (api-keys list; >=1 canonical client key required by validKeys): prevents unauthenticated /v1 model access.
 	"oauth",          // Enforced (auth-dir under destination/auth; OAuth/model settings allowed): confines OAuth token files to Supervisor storage.
 	"plugins",        // Enforced (dir under supervisor/plugins; enabled/configs/store-sources allowed): confines native plugin loading to Supervisor storage.
-	"observability",  // Enforced (logging-to-file=false, usage-statistics-enabled=true, pprof off; log/usage tuning allowed): keeps stdout logging and usage collection intact.
+	"observability",  // Enforced (logging-to-file bool, usage-statistics-enabled=true, pprof off; closed log/usage keys with no path override): allows Console file logging while keeping usage collection intact.
 }
 
 // managedOptionalObjectRoots are the CPA v8 top-level sections that operator
@@ -50,7 +50,7 @@ var managedAllowedObservabilityLogKeys = map[string]bool{
 }
 
 var managedAllowedObservabilityUsageKeys = map[string]bool{
-	"usage-statistics-enabled":           true,
+	"usage-statistics-enabled":            true,
 	"redis-usage-queue-retention-seconds": true,
 }
 
@@ -214,7 +214,10 @@ func (p proofPosture) matchesManagedObservability(raw json.RawMessage) bool {
 			return false
 		}
 	}
-	if !exactJSONBool(logs["logging-to-file"], false) {
+	// CPA resolves file logs under the prepared Gateway logs directory (or
+	// <oauth.auth-dir>/logs fallback) with no configurable path key; allow the
+	// Console Logs toggle in either direction while requiring an exact JSON bool.
+	if _, ok := parseExactJSONBool(logs["logging-to-file"]); !ok {
 		return false
 	}
 
