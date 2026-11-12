@@ -16,7 +16,7 @@ A self-hosted CPA / CLIProxyAPI management panel and AI gateway observability da
 
 Operate providers, credentials, OAuth, plugins, and configuration while keeping persistent request history, cost analytics, and account automation in local storage.
 
-[中文](README_CN.md) ｜ [Live Demo](https://seakee.github.io/CPA-Manager-Plus/) ｜ [Documentation](https://seakee.github.io/CPA-Manager-Plus/docs/en/) ｜ [Install](#quick-start)
+[中文](README_CN.md) ｜ [Live Demo](https://cpamp-demo.seakee.dev/) ｜ [Documentation](https://cpamp-docs.seakee.dev/en/) ｜ [Homepage](https://cpamp.seakee.dev/) ｜ [Install](#quick-start)
 
 </div>
 
@@ -81,7 +81,7 @@ CPA / CLIProxyAPI can serve either the official Management Center or the CPAMP L
 | CPAMP Lightweight Panel                                                                                      | Replacing only the UI without another service or database   | CPA `:8317/management.html`             |
 | CPAMP Full Mode                                                                                              | Request history, cost analytics, inspection, and automation | Manager Server `:18317/management.html` |
 
-See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/guide/choosing-a-panel.html) for the comparison, or [install the CPAMP Lightweight Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/cpa-panel.html) directly in CPA.
+See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/en/guide/choosing-a-panel.html) for the comparison, or [install the CPAMP Lightweight Panel](https://cpamp-docs.seakee.dev/en/deployment/cpa-panel.html) directly in CPA.
 
 ## Core Capabilities
 
@@ -96,30 +96,30 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 - Persist requests from the CPA usage queue in local SQLite and search account, client API key, and realtime request views.
 - Inspect status, latency, token, cache, trace, and redacted failure evidence without exposing raw failure bodies.
 - Export or import request history as JSONL.
-- Open the [Monitoring Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring).
+- Open the [Monitoring Demo](https://cpamp-demo.seakee.dev/#/demo/monitoring).
 
 ### Cost And Usage Analytics
 
 - Break down calls, tokens, cost, latency, and failures by model, provider, account, credential, API key, project, channel, and time range.
 - Track input, output, reasoning, cache, service tier, and long-context pricing semantics.
 - Sync model prices from models.dev first, with LiteLLM and OpenRouter fallbacks plus local overrides for aliases or internal models.
-- Open the [Usage Analytics Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics).
+- Open the [Usage Analytics Demo](https://cpamp-demo.seakee.dev/#/demo/usage-analytics).
 
 ### Account Health, Quota, And Automation
 
 - Inspect Codex and xAI accounts locally or on a Manager Server schedule.
 - Read quota windows, reset evidence, credential state, workspace state, and provider-specific health signals when available.
 - Apply controlled quota cooldowns and route credential failures into an account action queue for review and recovery.
-- Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts).
+- Open the unified [Accounts Demo](https://cpamp-demo.seakee.dev/#/demo/accounts).
 
 ### Production Operations
 
 - Run CPAMP Full Mode as one Docker container or a native Linux, macOS, or Windows package for amd64/arm64; the full stack can run alongside CPA.
 - Keep request history, Manager configuration, automation state, and model prices in local files with no account registration or telemetry SDK.
 - Back up SQLite files together with `data.key` to preserve encrypted CPA Management Keys.
-- If you harden the runtime with a read-only root filesystem or a non-root user, give SQLite a writable temporary directory and a writable database file; see [Read-Only Root Filesystem](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/docker.html).
+- If you harden the runtime with a read-only root filesystem or a non-root user, give SQLite a writable temporary directory and a writable database file; see [Read-Only Root Filesystem](https://cpamp-docs.seakee.dev/en/deployment/docker.html).
 
-Want to preview the interface first? Open the [Live Demo](https://seakee.github.io/CPA-Manager-Plus/). The demo uses fictional data only. It is not a deployment or runtime mode and cannot connect to, manage, or monitor a real CPA instance.
+Want to preview the interface first? Open the [Live Demo](https://cpamp-demo.seakee.dev/). The demo uses fictional data only. It is not a deployment or runtime mode and cannot connect to, manage, or monitor a real CPA instance.
 
 CPAMP manages and observes traffic through CPA / CLIProxyAPI. It is not a replacement proxy and does not forward model traffic by itself.
 
@@ -140,7 +140,7 @@ Preview without deploying:
 CPAMP_DRY_RUN=1 bash install-cpamp.sh
 ```
 
-See [One-Click Installer](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/installer.html) for upgrade, repair, and admin-key recovery behavior.
+See [One-Click Installer](https://cpamp-docs.seakee.dev/en/deployment/installer.html) for upgrade, repair, and admin-key recovery behavior.
 
 ### CPA + CPAMP Together
 
@@ -192,16 +192,16 @@ Recommended CPA version: `v7.3.4+`. The HTTP usage queue needs `v6.10.8+`.
 
 | Task                                                      | Guide                                                                                                                                                                                                                                                                      |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Choose the right panel and deployment mode                | [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/guide/choosing-a-panel.html)                                                                                                                                                                      |
-| Replace the official UI without deploying another service | [CPAMP Lightweight Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/cpa-panel.html)                                                                                                                                                                     |
-| Install and complete first setup                          | [Getting Started](https://seakee.github.io/CPA-Manager-Plus/docs/en/guide/getting-started.html)                                                                                                                                                                            |
-| Understand supported features and modes                   | [Capability Matrix](https://seakee.github.io/CPA-Manager-Plus/docs/en/reference/capability-matrix.html)                                                                                                                                                                    |
-| Understand runtime ports, keys, and request flow          | [Runtime Model](https://seakee.github.io/CPA-Manager-Plus/docs/en/guide/runtime-model.html)                                                                                                                                                                                |
-| Configure providers, credentials, quota, and plugins      | [AI Providers](https://seakee.github.io/CPA-Manager-Plus/docs/en/manual/ai-providers.html), [Accounts](https://seakee.github.io/CPA-Manager-Plus/docs/en/manual/accounts.html), [Plugin Management](https://seakee.github.io/CPA-Manager-Plus/docs/en/manual/plugins.html) |
-| Operate Manager Server, backups, upgrades, and migrations | [Manager Server Guide](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/manager-server.html)                                                                                                                                                                   |
-| Back up data or recover a lost admin key                  | [Backup And Restore](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/backup.html), [Reset Admin Key](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/reset-admin-key.html)                                                                       |
-| Migrate from the legacy CPA-Manager                       | [Migration From CPA-Manager](https://seakee.github.io/CPA-Manager-Plus/docs/en/migration/from-cpa-manager.html)                                                                                                                                                            |
-| Diagnose empty monitoring or queue problems               | [Troubleshooting](https://seakee.github.io/CPA-Manager-Plus/docs/en/troubleshooting/request-monitoring.html)                                                                                                                                                               |
+| Choose the right panel and deployment mode                | [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/en/guide/choosing-a-panel.html)                                                                                                                                                                      |
+| Replace the official UI without deploying another service | [CPAMP Lightweight Panel](https://cpamp-docs.seakee.dev/en/deployment/cpa-panel.html)                                                                                                                                                                     |
+| Install and complete first setup                          | [Getting Started](https://cpamp-docs.seakee.dev/en/guide/getting-started.html)                                                                                                                                                                            |
+| Understand supported features and modes                   | [Capability Matrix](https://cpamp-docs.seakee.dev/en/reference/capability-matrix.html)                                                                                                                                                                    |
+| Understand runtime ports, keys, and request flow          | [Runtime Model](https://cpamp-docs.seakee.dev/en/guide/runtime-model.html)                                                                                                                                                                                |
+| Configure providers, credentials, quota, and plugins      | [AI Providers](https://cpamp-docs.seakee.dev/en/manual/ai-providers.html), [Accounts](https://cpamp-docs.seakee.dev/en/manual/accounts.html), [Plugin Management](https://cpamp-docs.seakee.dev/en/manual/plugins.html) |
+| Operate Manager Server, backups, upgrades, and migrations | [Manager Server Guide](https://cpamp-docs.seakee.dev/en/operations/manager-server.html)                                                                                                                                                                   |
+| Back up data or recover a lost admin key                  | [Backup And Restore](https://cpamp-docs.seakee.dev/en/operations/backup.html), [Reset Admin Key](https://cpamp-docs.seakee.dev/en/operations/reset-admin-key.html)                                                                       |
+| Migrate from the legacy CPA-Manager                       | [Migration From CPA-Manager](https://cpamp-docs.seakee.dev/en/migration/from-cpa-manager.html)                                                                                                                                                            |
+| Diagnose empty monitoring or queue problems               | [Troubleshooting](https://cpamp-docs.seakee.dev/en/troubleshooting/request-monitoring.html)                                                                                                                                                               |
 
 ## Data, Privacy, And Security
 
@@ -222,8 +222,11 @@ npm run type-check
 npm run lint
 npm run test
 npm run build
-npm run docs:build
 ```
+
+The documentation site lives in
+[`cpamp-hq/docs`](https://github.com/cpamp-hq/docs) (1.x → `main`, v2 → `next`);
+build it there with `npm install && npm run docs:build`.
 
 Manager Server:
 

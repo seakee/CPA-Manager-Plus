@@ -14,7 +14,7 @@
 
 在一个本地面板中管理 Provider、认证文件、OAuth、插件和配置，并持久化请求历史、成本分析与账号自动化状态。
 
-[English](README.md) ｜ [在线演示](https://seakee.github.io/CPA-Manager-Plus/) ｜ [在线文档](https://seakee.github.io/CPA-Manager-Plus/docs/) ｜ [快速安装](#快速开始)
+[English](README.md) ｜ [在线演示](https://cpamp-demo.seakee.dev/) ｜ [在线文档](https://cpamp-docs.seakee.dev/) ｜ [项目主页](https://cpamp.seakee.dev/) ｜ [快速安装](#快速开始)
 
 </div>
 
@@ -79,7 +79,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 | CPAMP 轻量面板                                                                                           | 只替换界面，不增加额外服务或数据库       | CPA `:8317/management.html`             |
 | CPAMP 完整模式                                                                                           | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server `:18317/management.html` |
 
-详细区别见 [如何选择 CPA 面板](https://seakee.github.io/CPA-Manager-Plus/docs/guide/choosing-a-panel.html)，也可以直接查看 [CPAMP 轻量面板安装指南](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/cpa-panel.html)。
+详细区别见 [如何选择 CPA 面板](https://cpamp-docs.seakee.dev/guide/choosing-a-panel.html)，也可以直接查看 [CPAMP 轻量面板安装指南](https://cpamp-docs.seakee.dev/deployment/cpa-panel.html)。
 
 ## 核心能力
 
@@ -94,30 +94,30 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 - 将 CPA usage queue 中的请求持久化到本地 SQLite，并按账号、调用方 API Key 查看实时请求。
 - 查看状态、延迟、Token、缓存、Trace 和脱敏失败证据，不暴露原始失败体。
 - 使用 JSONL 导入或导出请求历史。
-- 打开 [请求监控演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring)。
+- 打开 [请求监控演示](https://cpamp-demo.seakee.dev/#/demo/monitoring)。
 
 ### 成本与用量分析
 
 - 按模型、Provider、账号、认证文件、API Key、项目、渠道和时间范围拆解请求、Token、成本、延迟和失败。
 - 追踪 input、output、reasoning、cache、service tier 和长上下文计费语义。
 - 从 LiteLLM 和 OpenRouter 同步模型价格，并为别名或内部模型保留本地覆盖。
-- 打开 [用量分析演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics)。
+- 打开 [用量分析演示](https://cpamp-demo.seakee.dev/#/demo/usage-analytics)。
 
 ### 账号健康、配额与自动化
 
 - 在浏览器本地或 Manager Server 定时巡检 Codex 和 xAI 账号。
 - 在 Provider 可提供信息时展示配额窗口、reset 证据、凭证状态、工作区状态和健康信号。
 - 对明确额度耗尽执行受控冷却，并将认证故障汇总到账号处理队列，支持复核与恢复。
-- 打开统一的 [凭证管理演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/accounts)。
+- 打开统一的 [凭证管理演示](https://cpamp-demo.seakee.dev/#/demo/accounts)。
 
 ### 生产运维
 
 - 使用单 Docker 容器，或 Linux、macOS、Windows 的 amd64/arm64 原生包运行；完整栈可以与 CPA 一起部署。
 - 请求历史、Manager 配置、账号自动化和模型价格都保存在本地文件，不需要注册账号，也不包含遥测 SDK。
 - 备份 SQLite 时同时保存 `data.key`，才能恢复加密后的 CPA Management Key。
-- 如果用只读根文件系统或非 root 用户加固运行环境，需要给 SQLite 提供可写的临时目录和可写的数据库文件；参见[只读根文件系统](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/docker.html)。
+- 如果用只读根文件系统或非 root 用户加固运行环境，需要给 SQLite 提供可写的临时目录和可写的数据库文件；参见[只读根文件系统](https://cpamp-docs.seakee.dev/deployment/docker.html)。
 
-想先了解界面？可以打开[在线演示](https://seakee.github.io/CPA-Manager-Plus/)。演示站只使用虚构数据，不是部署或运行模式，不能连接、管理或监控真实 CPA。
+想先了解界面？可以打开[在线演示](https://cpamp-demo.seakee.dev/)。演示站只使用虚构数据，不是部署或运行模式，不能连接、管理或监控真实 CPA。
 
 CPAMP 管理和观测经过 CPA / CLIProxyAPI 的流量，本身不是模型代理，也不会独立转发模型请求。
 
@@ -138,7 +138,7 @@ bash install-cpamp.sh
 CPAMP_DRY_RUN=1 bash install-cpamp.sh
 ```
 
-升级、修复和管理员密钥恢复行为见 [一键安装脚本](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/installer.html)。
+升级、修复和管理员密钥恢复行为见 [一键安装脚本](https://cpamp-docs.seakee.dev/deployment/installer.html)。
 
 ### CPA + CPAMP 一起部署
 
@@ -190,16 +190,16 @@ docker run -d \
 
 | 任务                                  | 文档                                                                                                                                                                                                                                                    |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 选择面板和部署模式                    | [如何选择 CPA 面板](https://seakee.github.io/CPA-Manager-Plus/docs/guide/choosing-a-panel.html)                                                                                                                                                         |
-| 不部署额外服务，直接替换官方 UI       | [CPAMP 轻量面板](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/cpa-panel.html)                                                                                                                                                              |
-| 安装并完成首次配置                    | [快速开始](https://seakee.github.io/CPA-Manager-Plus/docs/guide/getting-started.html)                                                                                                                                                                   |
-| 查看功能、Provider 和模式边界         | [能力矩阵](https://seakee.github.io/CPA-Manager-Plus/docs/reference/capability-matrix.html)                                                                                                                                                             |
-| 了解运行端口、密钥和请求流向          | [运行模型](https://seakee.github.io/CPA-Manager-Plus/docs/guide/runtime-model.html)                                                                                                                                                                     |
-| 配置 Provider、凭证、配额和插件       | [AI Provider](https://seakee.github.io/CPA-Manager-Plus/docs/manual/ai-providers.html)、[凭证管理](https://seakee.github.io/CPA-Manager-Plus/docs/manual/accounts.html)、[插件管理](https://seakee.github.io/CPA-Manager-Plus/docs/manual/plugins.html) |
-| 运维 Manager Server、备份、升级与迁移 | [Manager Server 指南](https://seakee.github.io/CPA-Manager-Plus/docs/operations/manager-server.html)                                                                                                                                                    |
-| 备份数据或恢复丢失的管理员密钥        | [备份与恢复](https://seakee.github.io/CPA-Manager-Plus/docs/operations/backup.html)、[重置管理员密钥](https://seakee.github.io/CPA-Manager-Plus/docs/operations/reset-admin-key.html)                                                                   |
-| 从旧版 CPA-Manager 迁移               | [CPA-Manager 迁移指南](https://seakee.github.io/CPA-Manager-Plus/docs/migration/from-cpa-manager.html)                                                                                                                                                  |
-| 排查监控为空或队列问题                | [请求监控排障](https://seakee.github.io/CPA-Manager-Plus/docs/troubleshooting/request-monitoring.html)                                                                                                                                                  |
+| 选择面板和部署模式                    | [如何选择 CPA 面板](https://cpamp-docs.seakee.dev/guide/choosing-a-panel.html)                                                                                                                                                         |
+| 不部署额外服务，直接替换官方 UI       | [CPAMP 轻量面板](https://cpamp-docs.seakee.dev/deployment/cpa-panel.html)                                                                                                                                                              |
+| 安装并完成首次配置                    | [快速开始](https://cpamp-docs.seakee.dev/guide/getting-started.html)                                                                                                                                                                   |
+| 查看功能、Provider 和模式边界         | [能力矩阵](https://cpamp-docs.seakee.dev/reference/capability-matrix.html)                                                                                                                                                             |
+| 了解运行端口、密钥和请求流向          | [运行模型](https://cpamp-docs.seakee.dev/guide/runtime-model.html)                                                                                                                                                                     |
+| 配置 Provider、凭证、配额和插件       | [AI Provider](https://cpamp-docs.seakee.dev/manual/ai-providers.html)、[凭证管理](https://cpamp-docs.seakee.dev/manual/accounts.html)、[插件管理](https://cpamp-docs.seakee.dev/manual/plugins.html) |
+| 运维 Manager Server、备份、升级与迁移 | [Manager Server 指南](https://cpamp-docs.seakee.dev/operations/manager-server.html)                                                                                                                                                    |
+| 备份数据或恢复丢失的管理员密钥        | [备份与恢复](https://cpamp-docs.seakee.dev/operations/backup.html)、[重置管理员密钥](https://cpamp-docs.seakee.dev/operations/reset-admin-key.html)                                                                   |
+| 从旧版 CPA-Manager 迁移               | [CPA-Manager 迁移指南](https://cpamp-docs.seakee.dev/migration/from-cpa-manager.html)                                                                                                                                                  |
+| 排查监控为空或队列问题                | [请求监控排障](https://cpamp-docs.seakee.dev/troubleshooting/request-monitoring.html)                                                                                                                                                  |
 
 ## 数据、隐私与安全
 
@@ -220,8 +220,10 @@ npm run type-check
 npm run lint
 npm run test
 npm run build
-npm run docs:build
 ```
+
+文档站位于 [`cpamp-hq/docs`](https://github.com/cpamp-hq/docs)（1.x 用 `main`，
+v2 Beta 用 `next`），在那边用 `npm install && npm run docs:build` 构建。
 
 Manager Server：
 

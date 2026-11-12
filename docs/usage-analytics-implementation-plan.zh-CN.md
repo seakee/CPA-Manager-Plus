@@ -1,6 +1,6 @@
 # Usage Analytics 原型对齐实施记录
 
-> 内部历史记录：本文记录 Usage Analytics 开发过程中的原型差异和阶段任务，不是用户使用文档，也不是文档站内容来源。用户文档请以 `apps/docs/` 文档站为准。
+> 内部历史记录：本文记录 Usage Analytics 开发过程中的原型差异和阶段任务，不是用户使用文档，也不是文档站内容来源。用户文档请以 [`cpamp-hq/docs`](https://github.com/cpamp-hq/docs)（[cpamp-docs.seakee.dev](https://cpamp-docs.seakee.dev/)）为准。
 
 ## 范围说明
 
