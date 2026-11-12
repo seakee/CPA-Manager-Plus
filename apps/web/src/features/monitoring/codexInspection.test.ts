@@ -251,21 +251,6 @@ describe('credential inspection state labels', () => {
     expect(localInspectionPageSource).not.toContain("appendLog('warning', skippedMessage)");
   });
 
-  it('keeps demo conclusion reason translations available in every locale', () => {
-    const keys = [
-      'codex_inspection_reason_healthy',
-      'codex_inspection_reason_reauth',
-      'codex_inspection_reason_quota_threshold',
-      'codex_inspection_reason_recovered',
-    ] as const;
-
-    for (const locale of [en, zhCN, zhTW, ru]) {
-      for (const key of keys) {
-        expect(locale.monitoring[key]).toBeTypeOf('string');
-      }
-    }
-  });
-
   it('uses a neutral details label for inspection logs in every locale', () => {
     expect(en.monitoring.codex_inspection_log_detail).toBe('Details');
     expect(zhCN.monitoring.codex_inspection_log_detail).toBe('详情');

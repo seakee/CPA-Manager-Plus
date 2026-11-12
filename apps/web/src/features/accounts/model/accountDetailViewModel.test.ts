@@ -1792,7 +1792,7 @@ describe('accountDetailViewModel', () => {
         inspection: {
           source: 'local',
           action: 'reauth',
-          actionReason: 'monitoring.codex_inspection_reason_reauth',
+          actionReason: 'monitoring.xai_inspection_reason_auth_invalid',
           actionStatus: 'pending',
           statusCode: 401,
           usedPercent: null,
@@ -1815,7 +1815,7 @@ describe('accountDetailViewModel', () => {
         {
           key: 'reason',
           labelKey: 'accounts.detail_reason',
-          value: 'monitoring.codex_inspection_reason_reauth',
+          value: 'monitoring.xai_inspection_reason_auth_invalid',
           valueKind: 'i18n',
         },
       ])
@@ -2002,7 +2002,7 @@ describe('accountDetailViewModel', () => {
         inspection: {
           source: 'server',
           action: 'reauth',
-          actionReason: 'monitoring.codex_inspection_reason_reauth',
+          actionReason: 'monitoring.xai_inspection_reason_auth_invalid',
           actionStatus: 'none',
           statusCode: 401,
           usedPercent: null,
@@ -2039,7 +2039,7 @@ describe('accountDetailViewModel', () => {
         inspection: {
           source: 'server',
           action: 'disable',
-          actionReason: 'monitoring.codex_inspection_reason_disable',
+          actionReason: 'monitoring.xai_inspection_reason_spending_limit_disable',
           actionStatus: 'none',
           statusCode: 429,
           usedPercent: null,
