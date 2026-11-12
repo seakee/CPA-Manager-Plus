@@ -89,8 +89,9 @@ describe('FreshSystemWorkspace component', () => {
 
     // Close modal
     expect(JSON.stringify(renderer.toJSON())).toContain('cpa-manager-plus reset-admin-key');
-    expect(recoveryModal.findByType('a').props.href).toContain(
-      '/docs/operations/reset-admin-key.html'
+    // The v2 docs live in cpamp-hq/docs: the guide follows the UI language.
+    expect(recoveryModal.findByType('a').props.href).toMatch(
+      /^https:\/\/cpamp-docs\.seakee\.dev\/next\/(?:en\/)?operations\/reset-admin-key\.html$/
     );
     const closeBtn = renderer.root.findByProps({ 'data-testid': 'close-recovery-btn' });
     await act(async () => closeBtn.props.onClick());
