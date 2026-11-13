@@ -899,8 +899,13 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 			t.Fatalf("RecordedOperationEvidence = (inFile=%v, journalPending=%v, err=%v), want (false, true, nil)", inFile, journalPending, err)
 		}
 
-		// Reset to cold DB and verify DatabaseUpgradeAdmission.Admitted replays the newly created WAL.
-		if err := os.Remove(dbPath + "-wal"); err != nil {
+		// The replay below asks whether admission reads a WAL that appeared, not
+		// whether it survives a writer mid-flight: leaving the seam installed
+		// re-creates the WAL while admission is copying the source, and the copy
+		// then legitimately refuses a source it saw change. Front the WAL
+		// instead, so the step proves what it claims on every file system.
+		beforeOperationEvidenceProbe = nil
+		if err := os.WriteFile(dbPath+"-wal", walBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background())
