@@ -105,14 +105,14 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 	if reconcileCtx == nil {
 		reconcileCtx = context.WithoutCancel(ctx)
 	}
-	if a.runCtx != nil && a.usageProjection != nil && !a.isClosing() {
-		startFreshDatabaseMaintenance(a.lifecycleContext(a.runCtx), a.cfg.DBPath)
-	}
 	if hook := a.beforeUsageReconcileLock; hook != nil {
 		hook()
 	}
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
+	if a.runCtx != nil && a.usageProjection != nil && !a.isClosing() {
+		a.startDatabaseMaintenance(a.lifecycleContext(a.runCtx))
+	}
 	enabled, err := a.usageMonitoringEnabled(reconcileCtx)
 	if err != nil {
 		log.Printf("Fresh request monitoring switch unavailable: %v", err)
@@ -216,13 +216,16 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
+	a.usageStartMu.Lock()
+	defer a.usageStartMu.Unlock()
+	if a.isClosing() {
+		return
+	}
 	// WAL maintenance is the other background owner of this installation's
 	// database. The legacy startup creates it in main(), which the Fresh service
 	// returns from earlier, so it starts here with the same host lifetime.
-	startFreshDatabaseMaintenance(a.lifecycleContext(runCtx), a.cfg.DBPath)
-	a.usageStartMu.Lock()
-	defer a.usageStartMu.Unlock()
-	if a.usageStarted || a.isClosing() {
+	a.startDatabaseMaintenance(a.lifecycleContext(runCtx))
+	if a.usageStarted {
 		return
 	}
 	if a.attemptUsageStart(runCtx, op) {

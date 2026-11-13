@@ -13,6 +13,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 )
@@ -511,12 +512,14 @@ func (h *Handler) writeImportSessionChunk(w http.ResponseWriter, r *http.Request
 		response.Error(w, http.StatusBadRequest, errors.New("usage import chunk offset is invalid"))
 		return
 	}
+	body, stopBody := requestbody.Wrap(r.Context(), r.Body, w, requestbody.DefaultReadIdleTimeout)
+	defer stopBody()
 	session, err := h.App.UsageService.WriteImportSessionChunk(
 		r.Context(),
 		id,
 		offset,
 		r.ContentLength,
-		r.Body,
+		body,
 		r.Header.Get("X-Usage-Import-Prefix-SHA256"),
 	)
 	if err != nil {

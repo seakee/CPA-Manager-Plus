@@ -262,10 +262,20 @@ func (m *importSessionManager) StopAndWait(ctx context.Context) error {
 	m.mu.Lock()
 	m.stopping = true
 	stopCancel := m.stopCancel
-	cancels := make([]context.CancelFunc, 0, len(m.sessions))
+	cancels := make([]context.CancelFunc, 0, len(m.sessions)*2)
+	closers := make([]io.Closer, 0, len(m.sessions))
 	for _, state := range m.sessions {
-		if state != nil && state.cancel != nil {
+		if state == nil {
+			continue
+		}
+		if state.cancel != nil {
 			cancels = append(cancels, state.cancel)
+		}
+		if state.chunkCancel != nil {
+			cancels = append(cancels, state.chunkCancel)
+		}
+		if state.chunkClose != nil {
+			closers = append(closers, state.chunkClose)
 		}
 	}
 	m.mu.Unlock()
@@ -275,6 +285,9 @@ func (m *importSessionManager) StopAndWait(ctx context.Context) error {
 	}
 	for _, cancel := range cancels {
 		cancel()
+	}
+	for _, closer := range closers {
+		_ = closer.Close()
 	}
 	if ctx.Done() == nil {
 		m.wg.Wait()
@@ -790,7 +803,9 @@ func (m *importSessionManager) WriteChunk(
 		state.chunkClose = closer
 	}
 	state.chunkDone = chunkDone
+	m.wg.Add(1)
 	m.mu.Unlock()
+	defer m.wg.Done()
 
 	limited := &io.LimitedReader{R: &contextReader{ctx: chunkCtx, reader: reader}, N: maxChunkBytes + 1}
 	if state.prefixHash == nil {

@@ -244,6 +244,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 		Handler:           startupHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	defer func() { _ = server.Close() }()
 	serverResult := make(chan error, 1)
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	go serveHTTPServer(server, listener, stop, serverResult)
@@ -682,6 +683,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
+		_ = server.Close()
 	}
 	if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
 		log.Printf("shutdown usage archive retention: %v", err)

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1331,5 +1333,553 @@ func TestFreshShutdownPreservesDBAcrossLongRuntimeMutationAndEarlyServerExit(t *
 			t.Fatal("waitForReadOnlyStartup + stopAwait hung when serverResult fired without parentCtx cancellation")
 		}
 		_ = runtimeservice.DefaultReconcileInterval
+	})
+}
+
+func TestOpenedClosePreventsLateDatabaseMaintenanceStartFromLeakingDB(t *testing.T) {
+	t.Run("start_usage_collection_gated_between_check_and_register", func(t *testing.T) {
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-maint-race-start-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			stopFreshDatabaseMaintenance(paths.Database)
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+		app.runCtx = t.Context()
+		quietProjection(app)
+
+		gateEntered := make(chan struct{})
+		releaseGate := make(chan struct{})
+		closeMarked := make(chan struct{})
+		var enterOnce, markOnce sync.Once
+		app.beforeDatabaseMaintenanceStart = func() {
+			enterOnce.Do(func() { close(gateEntered) })
+			<-releaseGate
+		}
+		app.afterCloseMarked = func() {
+			markOnce.Do(func() { close(closeMarked) })
+		}
+
+		callerDone := make(chan struct{})
+		go func() {
+			defer close(callerDone)
+			app.startUsageCollection(opened.Record.Operation)
+		}()
+
+		<-gateEntered
+		closeDone := make(chan error, 1)
+		closed = true
+		go func() {
+			closeDone <- opened.Close()
+		}()
+		<-closeMarked
+		close(releaseGate)
+		<-callerDone
+		if err := <-closeDone; err != nil {
+			t.Fatalf("opened.Close(): %v", err)
+		}
+		if leaked := freshDatabaseMaintenanceFor(paths.Database); leaked != nil {
+			t.Fatalf("expected nil WAL maintainer after opened.Close(), got %p", leaked)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	})
+
+	t.Run("direct_maintenance_start_gated_past_full_close", func(t *testing.T) {
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-maint-race-direct-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			stopFreshDatabaseMaintenance(paths.Database)
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+		app.runCtx = t.Context()
+
+		gateEntered := make(chan struct{})
+		releaseGate := make(chan struct{})
+		var enterOnce sync.Once
+		app.beforeDatabaseMaintenanceStart = func() {
+			enterOnce.Do(func() { close(gateEntered) })
+			<-releaseGate
+		}
+
+		callerDone := make(chan struct{})
+		go func() {
+			defer close(callerDone)
+			app.startDatabaseMaintenance(app.lifecycleContext(t.Context()))
+		}()
+		<-gateEntered
+
+		closed = true
+		if err := opened.Close(); err != nil {
+			t.Fatalf("opened.Close(): %v", err)
+		}
+		close(releaseGate)
+		<-callerDone
+		if leaked := freshDatabaseMaintenanceFor(paths.Database); leaked != nil {
+			t.Fatalf("expected nil WAL maintainer after post-Close resume, got %p", leaked)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	})
+
+	t.Run("reconcile_usage_monitoring_gated_before_usage_lock", func(t *testing.T) {
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-maint-race-reconcile-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			stopFreshDatabaseMaintenance(paths.Database)
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+		app.runCtx = t.Context()
+		quietProjection(app)
+
+		gateEntered := make(chan struct{})
+		releaseGate := make(chan struct{})
+		var enterOnce sync.Once
+		app.beforeUsageReconcileLock = func() {
+			enterOnce.Do(func() { close(gateEntered) })
+			<-releaseGate
+		}
+
+		callerDone := make(chan struct{})
+		go func() {
+			defer close(callerDone)
+			app.applyUsageMonitoringSwitch(t.Context(), opened.Record.Operation)
+		}()
+		<-gateEntered
+
+		closed = true
+		if err := opened.Close(); err != nil {
+			t.Fatalf("opened.Close(): %v", err)
+		}
+		close(releaseGate)
+		<-callerDone
+		if leaked := freshDatabaseMaintenanceFor(paths.Database); leaked != nil {
+			t.Fatalf("expected nil WAL maintainer after reconcile raced Close(), got %p", leaked)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	})
+}
+
+func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *testing.T) {
+	t.Run("stalled_ordinary_post_gateway_config_and_chunk_upload_abort_while_runtime_mutation_completes", func(t *testing.T) {
+		const artifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		startEntered := make(chan struct{})
+		releaseStart := make(chan struct{})
+		var startOnce, releaseOnce sync.Once
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/start":
+				var reqBody struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&reqBody)
+				startOnce.Do(func() { close(startEntered) })
+				<-releaseStart
+				_, _ = w.Write([]byte(`{"operationId":"` + reqBody.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("shutdown-runtime-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-stalled-requests-shutdown-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(releaseStart) })
+		})
+
+		app := newFreshApplication(opened, config.Config{
+			DataDir:                   dbDir,
+			DBPath:                    paths.Database,
+			RuntimeURL:                supervisor.URL,
+			RuntimeTokenFile:          tokenPath,
+			CPAUpstreamURL:            "http://127.0.0.1:8317",
+			UsageImportChunkBytes:     64 * 1024,
+			UsageImportDiskQuotaBytes: 1024 * 1024,
+			UsageImportMaxSessions:    4,
+			UsageImportSessionTTL:     time.Hour,
+		}, nil)
+		configReadBlocked := make(chan struct{})
+		chunkReadBlocked := make(chan struct{})
+		var configOnce, chunkOnce sync.Once
+		app.onRequestBodyRead = func(r *http.Request, attempt int) {
+			if attempt < 2 || r == nil || r.URL == nil {
+				return
+			}
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/gateway/config/groups/routing"):
+				configOnce.Do(func() { close(configReadBlocked) })
+			case strings.HasSuffix(r.URL.Path, "/chunk"):
+				chunkOnce.Do(func() { close(chunkReadBlocked) })
+			}
+		}
+
+		protected, err := opened.Protector.ProtectString(strings.Repeat("f", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		op := opened.Record.Operation
+		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              artifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+		if _, err := app.runtimeSettings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(t.Context(), model.EmbeddedRuntimeDesiredStopped); err != nil {
+			t.Fatal(err)
+		}
+
+		sess, err := app.legacyApp.UsageService.CreateImportSession(t.Context(), "stalled.jsonl", 4096, "")
+		if err != nil {
+			t.Fatalf("CreateImportSession: %v", err)
+		}
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler:           app,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		// 1a. Ordinary POST /gateway/config/groups/routing with an unfinished JSON
+		// body over real TCP (never disconnects).
+		stalledConfigConn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stalledConfigConn.Close() })
+		rawConfigReq := fmt.Sprintf(
+			"POST /control/api/v2/gateway/config/groups/routing HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Authorization: Bearer %s\r\n"+
+				"Content-Type: application/json\r\n"+
+				"Content-Length: 4096\r\n\r\n"+
+				`{"requestId":"11`,
+			listener.Addr().String(),
+			strategyTestAdmin,
+		)
+		if _, err := stalledConfigConn.Write([]byte(rawConfigReq)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-configReadBlocked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stalled gateway/config POST did not reach blocking socket Read")
+		}
+
+		// 1b. Bridged PUT .../usage/import-sessions/:id/chunk with an unfinished
+		// body over real TCP (never disconnects).
+		stalledChunkConn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stalledChunkConn.Close() })
+		rawChunkReq := fmt.Sprintf(
+			"PUT /control/api/v2/cpamp/v0/management/usage/import-sessions/%s/chunk?offset=0 HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Authorization: Bearer %s\r\n"+
+				"Content-Length: 4096\r\n\r\n"+
+				`{"partial":true}`,
+			sess.ID,
+			listener.Addr().String(),
+			strategyTestAdmin,
+		)
+		if _, err := stalledChunkConn.Write([]byte(rawChunkReq)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-chunkReadBlocked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stalled chunk upload did not reach blocking socket Read")
+		}
+
+		// 2. Concurrent runtime mutation blocked in Supervisor.
+		type httpOutcome struct {
+			status int
+			err    error
+		}
+		mutationRespCh := make(chan httpOutcome, 1)
+		go func() {
+			req, reqErr := http.NewRequest(
+				http.MethodPost,
+				"http://"+listener.Addr().String()+"/control/api/v2/runtime/operations",
+				strings.NewReader(`{"action":"start","requestId":"88888888-8888-4888-8888-888888888888"}`),
+			)
+			if reqErr != nil {
+				mutationRespCh <- httpOutcome{err: reqErr}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			resp, doErr := http.DefaultClient.Do(req)
+			if doErr != nil {
+				mutationRespCh <- httpOutcome{err: doErr}
+				return
+			}
+			_ = resp.Body.Close()
+			mutationRespCh <- httpOutcome{status: resp.StatusCode}
+		}()
+		<-startEntered
+
+		// 3. Shutdown HTTP server with short budget (times out), then start
+		// opened.Close(). Both stalled body reads must abort immediately while
+		// opened.Close() continues waiting for the runtime mutation.
+		shutdownHTTPServer(server, 20*time.Millisecond)
+		closeDone := make(chan error, 1)
+		closed = true
+		go func() {
+			closeDone <- opened.Close()
+		}()
+
+		for name, conn := range map[string]net.Conn{
+			"gateway/config": stalledConfigConn,
+			"import-chunk":   stalledChunkConn,
+		} {
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			respLine, rErr := bufio.NewReader(conn).ReadString('\n')
+			if rErr != nil && !errors.Is(rErr, io.EOF) {
+				t.Fatalf("stalled %s request did not abort on Close(): %v", name, rErr)
+			}
+			if rErr == nil && strings.Contains(respLine, " 200 ") {
+				t.Fatalf("stalled %s request unexpectedly succeeded: %q", name, respLine)
+			}
+		}
+
+		select {
+		case prematureErr := <-closeDone:
+			t.Fatalf("opened.Close() returned %v before active runtime mutation finished", prematureErr)
+		default:
+		}
+
+		// 4. Release the runtime mutation: it must complete with 200 OK and durable
+		// desired state before DB close, and opened.Close() must finish promptly
+		// while both stalled TCP sockets remain open.
+		releaseOnce.Do(func() { close(releaseStart) })
+		mutOut := <-mutationRespCh
+		if mutOut.err != nil || mutOut.status != http.StatusOK {
+			t.Fatalf("runtime mutation across stalled-body shutdown = (%d, %v), want (200, nil)", mutOut.status, mutOut.err)
+		}
+		select {
+		case closeErr := <-closeDone:
+			if closeErr != nil {
+				t.Fatalf("opened.Close(): %v", closeErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("opened.Close() hung past budget on stalled TCP sockets")
+		}
+		reopened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatalf("reopen store to verify durable runtime mutation: %v", err)
+		}
+		verifyApp := newFreshApplication(reopened, config.Config{DBPath: paths.Database}, nil)
+		desired, found, err := verifyApp.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context())
+		if err != nil || !found || desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+			_ = reopened.Close()
+			t.Fatalf("desired lifecycle after shutdown = (%+v, %v, %v), want running", desired, found, err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened.Close(): %v", err)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	})
+
+	t.Run("stalled_response_write_aborts_on_close", func(t *testing.T) {
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-stalled-write-shutdown-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		const artifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		app := newFreshApplication(opened, config.Config{DBPath: paths.Database, CPAUpstreamURL: "http://127.0.0.1:8317"}, nil)
+		protected, err := opened.Protector.ProtectString(strings.Repeat("f", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		op := opened.Record.Operation
+		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              artifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+
+		writeBlocked := make(chan struct{})
+		writeErrCh := make(chan error, 1)
+		var blockOnce sync.Once
+		payload := make([]byte, 8*1024*1024)
+		app.legacy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rc := http.NewResponseController(w)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_ = rc.Flush()
+			blockOnce.Do(func() { close(writeBlocked) })
+			_, wErr := w.Write(payload)
+			writeErrCh <- wErr
+		})
+
+		tcpListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler:           app,
+			ReadHeaderTimeout: 10 * time.Second,
+			ConnState: func(c net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					if tc, ok := c.(*net.TCPConn); ok {
+						_ = tc.SetWriteBuffer(1024)
+					}
+				}
+			},
+		}
+		go func() { _ = server.Serve(tcpListener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		stalledReader, err := net.DialTCP("tcp", nil, tcpListener.Addr().(*net.TCPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stalledReader.Close() })
+		_ = stalledReader.SetReadBuffer(1024)
+
+		rawGet := fmt.Sprintf(
+			"GET /control/api/v2/cpamp/v0/management/usage HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Authorization: Bearer %s\r\n\r\n",
+			tcpListener.Addr().String(),
+			strategyTestAdmin,
+		)
+		if _, err := stalledReader.Write([]byte(rawGet)); err != nil {
+			t.Fatal(err)
+		}
+		<-writeBlocked
+
+		shutdownHTTPServer(server, 20*time.Millisecond)
+		closeDone := make(chan error, 1)
+		closed = true
+		go func() {
+			closeDone <- opened.Close()
+		}()
+		select {
+		case closeErr := <-closeDone:
+			if closeErr != nil {
+				t.Fatalf("opened.Close(): %v", closeErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("opened.Close() hung on stalled HTTP response write")
+		}
+		if wErr := <-writeErrCh; wErr == nil {
+			t.Fatal("expected stalled w.Write to fail with write deadline error on Close(), got nil")
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
 	})
 }

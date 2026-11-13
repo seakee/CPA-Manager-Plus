@@ -19,6 +19,7 @@ import (
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -278,14 +279,21 @@ type freshApplication struct {
 	// bans an address after five failed authentications, so a page that keeps
 	// presenting a key its own CPA already rejected is what turns a rotation into
 	// a thirty-minute outage.
-	rejection   *externalRejection
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
-	bgMu        sync.Mutex
-	closing     bool
-	bgWG        sync.WaitGroup
-	inflightWG  sync.WaitGroup
-	closeOnce   sync.Once
+	rejection                      *externalRejection
+	closeCtx                       context.Context
+	closeCancel                    context.CancelFunc
+	bgMu                           sync.Mutex
+	closing                        bool
+	bgWG                           sync.WaitGroup
+	inflightWG                     sync.WaitGroup
+	closeOnce                      sync.Once
+	maintenanceMu                  sync.Mutex
+	maintenanceStopped             bool
+	beforeDatabaseMaintenanceStart func()
+	afterCloseMarked               func()
+	onRequestBodyRead              func(r *http.Request, attempt int)
+	bodyReadTimeout                time.Duration
+	shutdownWriteGrace             time.Duration
 }
 
 func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshrouting.Driver) *freshApplication {
@@ -629,6 +637,114 @@ func (a *freshApplication) launchBackground(fn func()) bool {
 	return true
 }
 
+func (a *freshApplication) effectiveBodyReadTimeout() time.Duration {
+	if a != nil && a.bodyReadTimeout > 0 {
+		return a.bodyReadTimeout
+	}
+	return requestbody.DefaultReadIdleTimeout
+}
+
+const freshDefaultShutdownWriteGrace = 2 * time.Second
+
+func (a *freshApplication) effectiveShutdownWriteGrace() time.Duration {
+	if a != nil && a.shutdownWriteGrace > 0 {
+		return a.shutdownWriteGrace
+	}
+	return freshDefaultShutdownWriteGrace
+}
+
+type freshRequestControlKey struct{}
+
+// freshRequestControl aborts response writes on ordinary handlers as soon as
+// closeCtx cancels, while deferring write-deadline expiry for accepted runtime
+// mutations until their durable SQLite writes have finished.
+type freshRequestControl struct {
+	rc         *http.ResponseController
+	writeGrace time.Duration
+
+	mu         sync.Mutex
+	inMutation bool
+	closing    bool
+	stopWatch  func() bool
+}
+
+func newFreshRequestControl(closeCtx context.Context, w http.ResponseWriter, writeGrace time.Duration) *freshRequestControl {
+	var rc *http.ResponseController
+	if w != nil {
+		rc = http.NewResponseController(w)
+	}
+	c := &freshRequestControl{rc: rc, writeGrace: writeGrace}
+	if closeCtx != nil {
+		c.stopWatch = context.AfterFunc(closeCtx, c.onClose)
+	}
+	return c
+}
+
+func (c *freshRequestControl) stop() {
+	if c != nil && c.stopWatch != nil {
+		c.stopWatch()
+	}
+}
+
+func (c *freshRequestControl) onClose() {
+	c.mu.Lock()
+	c.closing = true
+	if !c.inMutation && c.rc != nil {
+		_ = c.rc.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	}
+	c.mu.Unlock()
+}
+
+func enterFreshRequestMutation(ctx context.Context) func() {
+	if ctx == nil {
+		return func() {}
+	}
+	c, _ := ctx.Value(freshRequestControlKey{}).(*freshRequestControl)
+	if c == nil {
+		return func() {}
+	}
+	c.mu.Lock()
+	c.inMutation = true
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			c.inMutation = false
+			if c.closing && c.rc != nil {
+				_ = c.rc.SetWriteDeadline(time.Now().Add(c.writeGrace))
+			}
+			c.mu.Unlock()
+		})
+	}
+}
+
+func (a *freshApplication) startDatabaseMaintenance(ctx context.Context) {
+	if a == nil || a.isClosing() {
+		return
+	}
+	if hook := a.beforeDatabaseMaintenanceStart; hook != nil {
+		hook()
+	}
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+	if a.maintenanceStopped || a.isClosing() {
+		return
+	}
+	startFreshDatabaseMaintenance(ctx, a.cfg.DBPath)
+}
+
+func (a *freshApplication) stopDatabaseMaintenance() {
+	if a == nil {
+		return
+	}
+	a.maintenanceMu.Lock()
+	a.maintenanceStopped = true
+	dbPath := a.cfg.DBPath
+	defer a.maintenanceMu.Unlock()
+	stopFreshDatabaseMaintenance(dbPath)
+}
+
 // Close cancels and drains in-flight requests and background work owned by this
 // Fresh application in producer-before-consumer order before Opened.Close
 // closes SQLite and releases the process admission lock.
@@ -640,6 +756,9 @@ func (a *freshApplication) Close() {
 		a.bgMu.Lock()
 		a.closing = true
 		a.bgMu.Unlock()
+		if hook := a.afterCloseMarked; hook != nil {
+			hook()
+		}
 		if a.closeCancel != nil {
 			a.closeCancel()
 		}
@@ -676,7 +795,7 @@ func (a *freshApplication) Close() {
 			a.usageProjection.Wait()
 		}
 		// 7. Close WAL maintenance and its private SQLite connection.
-		stopFreshDatabaseMaintenance(a.cfg.DBPath)
+		a.stopDatabaseMaintenance()
 		// 8. Drain externalRejection last after all its callers have stopped.
 		if a.rejection != nil {
 			a.rejection.close()
@@ -718,7 +837,20 @@ func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r != nil {
 		reqCtx, cancelReq := a.requestContext(r.Context())
 		defer cancelReq()
-		r = r.WithContext(context.WithValue(reqCtx, freshRequestTrackedKey{}, true))
+		if obs := a.onRequestBodyRead; obs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithReadObserver(reqCtx, func(attempt int) {
+				obs(reqClone, attempt)
+			})
+		}
+		ctrl := newFreshRequestControl(a.closeCtx, w, a.effectiveShutdownWriteGrace())
+		defer ctrl.stop()
+		body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
+		defer stopBody()
+		reqCtx = context.WithValue(reqCtx, freshRequestTrackedKey{}, true)
+		reqCtx = context.WithValue(reqCtx, freshRequestControlKey{}, ctrl)
+		r = r.WithContext(reqCtx)
+		r.Body = body
 	}
 	// The plugin capability is a claim about the saved connection, so it is
 	// announced only when that connection proves it; a route existing is not a
