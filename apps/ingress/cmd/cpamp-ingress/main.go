@@ -372,18 +372,14 @@ func decodesPreCommitBootstrapSignal(res *http.Response) bool {
 	if err != nil || mediaType != "application/json" {
 		return false
 	}
-	var buf [maxPreCommitBootstrapSignalBytes + 1]byte
-	n, err := io.ReadFull(res.Body, buf[:])
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return false
-	}
-	if n > maxPreCommitBootstrapSignalBytes {
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxPreCommitBootstrapSignalBytes+1))
+	if err != nil || len(body) > maxPreCommitBootstrapSignalBytes {
 		return false
 	}
 	var signal struct {
 		BootstrapUI bool `json:"bootstrapUI"`
 	}
-	decoder := json.NewDecoder(bytes.NewReader(buf[:n]))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&signal); err != nil || !signal.BootstrapUI {
 		return false

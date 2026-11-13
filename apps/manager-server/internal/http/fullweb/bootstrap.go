@@ -18,19 +18,18 @@ import (
 // graph. It never invents an effective routing snapshot or serves SPA fallback.
 type BootstrapHandler struct{ Dist fs.FS }
 
-// Ready reports whether ServeHTTP can open a non-directory index.html for
+// Ready reports whether ServeHTTP can read a non-directory index.html for
 // FixedBootstrapUIPath without rendering the document or scanning assets.
 func (h BootstrapHandler) Ready() bool {
 	if h.Dist == nil {
 		return false
 	}
-	f, err := h.Dist.Open("index.html")
-	if err != nil {
+	info, err := fs.Stat(h.Dist, "index.html")
+	if err != nil || info.IsDir() {
 		return false
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	return err == nil && !info.IsDir()
+	_, err = fs.ReadFile(h.Dist, "index.html")
+	return err == nil
 }
 
 var htmlAssetReference = regexp.MustCompile(`(?:src|href)=["']\./(assets/[^"']+)["']`)

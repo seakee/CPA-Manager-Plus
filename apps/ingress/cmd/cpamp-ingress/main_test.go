@@ -112,6 +112,7 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 	var contentType atomic.Value
 	var body atomic.Value
 	var uiServing atomic.Bool
+	var truncateBody atomic.Bool
 	contentType.Store("")
 	body.Store("")
 
@@ -125,8 +126,23 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 				w.Header().Set("Content-Type", ct)
 			}
 			code := int(status.Load())
+			payload := body.Load().(string)
+			if truncateBody.Load() {
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, payload)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				if hijacker, ok := w.(http.Hijacker); ok {
+					if conn, _, hErr := hijacker.Hijack(); hErr == nil {
+						_ = conn.Close()
+					}
+				}
+				return
+			}
 			w.WriteHeader(code)
-			if payload := body.Load().(string); payload != "" {
+			if payload != "" {
 				_, _ = io.WriteString(w, payload)
 			}
 		case ingress.FixedBootstrapUIPath:
@@ -207,6 +223,20 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 			}
 		})
 	}
+
+	// Truncated Content-Length stream over real HTTP (Content-Length 100, only valid JSON written before close) -> 503, no Location.
+	t.Run("truncated-content-length-body", func(t *testing.T) {
+		uiServing.Store(true)
+		status.Store(http.StatusNotFound)
+		contentType.Store("application/json")
+		body.Store(validSignal)
+		truncateBody.Store(true)
+		defer truncateBody.Store(false)
+		rec := navigate(handler, "/console")
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+			t.Fatalf("truncated Content-Length status=%d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+		}
+	})
 
 	// Positive pre-commit 404 JSON (canonical and exact-limit valid) with Bootstrap UI serving -> 303 whose Location returns 200.
 	uiServing.Store(true)

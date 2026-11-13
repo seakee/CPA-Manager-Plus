@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +35,30 @@ func reserveLoopbackAddr(t *testing.T) string {
 	_ = ln.Close()
 	return addr
 }
+
+type unreadableIndexFS struct{}
+
+func (unreadableIndexFS) Open(name string) (fs.File, error) {
+	if name != "index.html" {
+		return nil, fs.ErrNotExist
+	}
+	return unreadableIndexFile{}, nil
+}
+
+type unreadableIndexFile struct{}
+
+func (unreadableIndexFile) Stat() (fs.FileInfo, error) { return unreadableIndexInfo{}, nil }
+func (unreadableIndexFile) Read([]byte) (int, error) {
+	return 0, errors.New("simulated index read failure")
+}
+func (unreadableIndexFile) Close() error { return nil }
+
+type unreadableIndexInfo struct{ fs.FileInfo }
+
+func (unreadableIndexInfo) Name() string      { return "index.html" }
+func (unreadableIndexInfo) Size() int64       { return 32 }
+func (unreadableIndexInfo) Mode() fs.FileMode { return 0o444 }
+func (unreadableIndexInfo) IsDir() bool       { return false }
 
 // TestRealIngressWithProductionStartupAndFreshHandlers verifies across the real
 // cpamp-ingress subprocess and production Manager startup/Fresh handlers that
@@ -173,6 +199,13 @@ func TestRealIngressWithProductionStartupAndFreshHandlers(t *testing.T) {
 	}
 	assertClosed503("readOnlyDiscovery enabled without usable shell bundle")
 
+	startup.projectionMu.Lock()
+	startup.readOnlyShell = fullweb.BootstrapHandler{Dist: unreadableIndexFS{}}
+	startup.projectionMu.Unlock()
+	if uiCode, _, _ := doRaw(http.MethodGet, bootstrap.FixedBootstrapUIPath, browserAccept); uiCode != http.StatusNotFound {
+		t.Fatalf("unreadable-index startup UI = %d, want 404", uiCode)
+	}
+	assertClosed503("readOnlyDiscovery with Open+Stat ok but Read-failing index.html")
 	// 3. Attach production fullweb.BootstrapHandler with packaged-shape HTML: pristine /console -> 303 -> 200 UI.
 	realShell := fullweb.BootstrapHandler{
 		Dist: fstest.MapFS{
@@ -219,6 +252,16 @@ func TestRealIngressWithProductionStartupAndFreshHandlers(t *testing.T) {
 	app.fixed = fixedHandler
 	startup.SetFreshHandler(app)
 	assertRedirectReaches200UI("Fresh store takeover before routing/prepare")
+	fixedHandler.Shell = fullweb.BootstrapHandler{Dist: unreadableIndexFS{}}
+	app.fixed = fixedHandler
+	startup.SetFreshHandler(app)
+	if uiCode, _, _ := doRaw(http.MethodGet, bootstrap.FixedBootstrapUIPath, browserAccept); uiCode != http.StatusNotFound {
+		t.Fatalf("unreadable-index Fresh UI = %d, want 404", uiCode)
+	}
+	assertClosed503("Fresh pre-prepare with Open+Stat ok but Read-failing index.html")
+	fixedHandler.Shell = realShell
+	app.fixed = fixedHandler
+	startup.SetFreshHandler(app)
 
 	var savedOperation string
 	if err := opened.DB.QueryRow("SELECT value FROM settings WHERE key='fresh_operation_v1'").Scan(&savedOperation); err != nil {
