@@ -532,6 +532,134 @@ describe('LogsPage settings and empty-state file logging control', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps download disabled and never resurfaces old lines when re-enabling file logging fails its first fetch', async () => {
+    useConfigStore.setState((state) => ({
+      ...state,
+      config: {
+        ...state.config!,
+        loggingToFile: true,
+      },
+    }));
+    mocks.fetchLogs.mockResolvedValueOnce({
+      lines: ['[2026-11-12 10:00:00] [info] [log_writer.go:1] old-session-line'],
+      'line-count': 1,
+      'latest-timestamp': 100,
+      latestAfter: 100,
+      nextCursor: 'cursor-1',
+    });
+
+    const client = buildAuthorityClient({ mode: 'managed', writable: true });
+    const mounted = await mountLogsPage(client, '/logs');
+
+    expect(findDownloadButton(mounted.root).props.disabled).toBe(false);
+    expect(JSON.stringify(mounted.toJSON())).toContain('old-session-line');
+
+    mocks.getConfig.mockResolvedValueOnce({
+      ...useConfigStore.getState().config!,
+      loggingToFile: false,
+    });
+    await act(async () => {
+      await useConfigStore.getState().fetchConfig(undefined, true);
+    });
+    expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+
+    // Re-enable file logging while the first fetch fails: stale buffer must stay cleared.
+    mocks.fetchLogs.mockRejectedValueOnce(new Error('first load after re-enable failed'));
+    await act(async () => {
+      byTestId(mounted.root, 'logs-empty-enable-button').props.onClick();
+    });
+
+    expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchLogs).toHaveBeenLastCalledWith({ limit: 10000 });
+    expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+    expect(JSON.stringify(mounted.toJSON())).not.toContain('old-session-line');
+  });
+
+  it('issues an immediate full load on re-enable even with a prior poll still pending and ignores its late backfill', async () => {
+    vi.useFakeTimers();
+    try {
+      useConfigStore.setState((state) => ({
+        ...state,
+        config: {
+          ...state.config!,
+          loggingToFile: true,
+        },
+      }));
+      const client = buildAuthorityClient({ mode: 'managed', writable: true });
+      const mounted = await mountLogsPage(client, '/logs');
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        findAutoRefreshSwitch(mounted.root).props.onChange(true);
+      });
+
+      const pendingOldPoll = createDeferred<{
+        lines: string[];
+        'line-count': number;
+        'latest-timestamp': number;
+        latestAfter: number;
+        nextCursor: string;
+      }>();
+      mocks.fetchLogs.mockReturnValueOnce(pendingOldPoll.promise);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+
+      // External disable occurs while pendingOldPoll is still in flight.
+      mocks.getConfig.mockResolvedValueOnce({
+        ...useConfigStore.getState().config!,
+        loggingToFile: false,
+      });
+      await act(async () => {
+        await useConfigStore.getState().fetchConfig(undefined, true);
+      });
+
+      // Re-enable before pendingOldPoll settles: new session must issue full load immediately.
+      mocks.fetchLogs.mockResolvedValueOnce({
+        lines: ['[2026-11-12 10:05:00] [info] [log_writer.go:5] fresh-session-line'],
+        'line-count': 1,
+        'latest-timestamp': 500,
+        latestAfter: 500,
+        nextCursor: 'cursor-fresh',
+      });
+      await act(async () => {
+        byTestId(mounted.root, 'logs-empty-enable-button').props.onClick();
+      });
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+      expect(mocks.fetchLogs).toHaveBeenLastCalledWith({ limit: 10000 });
+      expect(JSON.stringify(mounted.toJSON())).toContain('fresh-session-line');
+
+      // Late response from pendingOldPoll must NOT backfill buffer or trigger extra fetches.
+      await act(async () => {
+        pendingOldPoll.resolve({
+          lines: ['[2026-11-12 10:02:00] [info] [log_writer.go:2] late-stale-poll-line'],
+          'line-count': 1,
+          'latest-timestamp': 200,
+          latestAfter: 200,
+          nextCursor: 'stale-cursor-2',
+        });
+        await pendingOldPoll.promise;
+      });
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+      expect(JSON.stringify(mounted.toJSON())).not.toContain('late-stale-poll-line');
+      await act(async () => {
+        findDownloadButton(mounted.root).props.onClick();
+      });
+      expect(mocks.downloadBlob).toHaveBeenCalledTimes(1);
+      const exported = await mocks.downloadBlob.mock.calls[0][0].blob.text();
+      expect(exported).toContain('fresh-session-line');
+      expect(exported).not.toContain('late-stale-poll-line');
+      expect(exported).not.toContain('file logging active');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(['managed', 'external'] as const)(
     'edits all five observability.logs.* fields under %s capability while keeping observability.pprof.* read-only',
     async (mode) => {
