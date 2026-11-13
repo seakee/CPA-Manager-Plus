@@ -1,10 +1,11 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshApiKeys } from './FreshApiKeys';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { DropdownMenu } from '../components/ui/DropdownMenu';
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
@@ -1065,5 +1066,1389 @@ describe('Fresh client key persistence UI', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
     ).toHaveLength(1);
+  });
+
+  // Ordering 1: the panel's own read is still pending when the operator confirms
+  // collection. That confirmation IS the newest state of the installation, so the
+  // retired read's failure must not wipe the running facts it proved nor put an
+  // authority blocker over them.
+  it('does not let a read retired by a successful confirmation repaint a blocker', async () => {
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+    };
+    const disabled = {
+      ...usageBase,
+      statisticsEnabled: false,
+      collector: 'stopped',
+      collectionStarted: false,
+      blockedReason: 'usage_statistics_disabled',
+    };
+    const running = {
+      ...usageBase,
+      statisticsEnabled: true,
+      collector: 'running',
+      collectionStarted: true,
+      blockedReason: '',
+    };
+    let settlePendingRead: (response: Response) => void = () => undefined;
+    let usageGetCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        return Promise.resolve(Response.json(running));
+      }
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        // The first read settles so the enable action is offered; the read issued
+        // with the confirmation is the one held open.
+        if (usageGetCount === 1) return Promise.resolve(Response.json(disabled));
+        return new Promise<Response>((resolve) => {
+          settlePendingRead = resolve;
+        });
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enableBtn.props.onClick());
+    // A reload starts a read that is still pending when the operator confirms.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(usageGetCount).toBe(2);
+
+    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmBtn.props.onClick());
+    expect(view()).toContain(x('usageCollectorRunning'));
+
+    // The read issued before the confirmation now fails with the typed refusal.
+    await act(async () => {
+      settlePendingRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
+    });
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('rebindUnavailableHelp'));
+    expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
+  // A rebind reload can start while a normal read is still in flight. When that
+  // older read answers first its result is dropped, but it must also release
+  // nothing: `inFlight` and `busy` belong to the read that replaced it, or the page
+  // reports itself idle and lets a mutation interleave with a pending read whose
+  // older snapshot would then erase the key it just created.
+  it('keeps the page busy when a superseded read settles first', async () => {
+    let settleFirstRead: (response: Response) => void = () => undefined;
+    let settleSecondRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleFirstRead = resolve;
+          });
+        return new Promise<Response>((resolve) => {
+          settleSecondRead = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    // The rebind re-reads while the first read is still open.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+
+    // The superseded read answers first with a list that predates anything.
+    await act(async () => {
+      settleFirstRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+
+    // Its answer and its release both belong to the newer read.
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+    expect(button(t('keysCreate')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settleSecondRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    // The newer read settles the page: one list request per read, no extra GET,
+    // and the key it reports is the only list statement the page holds.
+    expect(keyReads).toBe(2);
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(key.id);
+  });
+
+  // The page's own read chain carries the same ownership rule as the usage panel.
+  // A rebind re-reads it, and the answer the previous read is still waiting on
+  // describes the installation before the fix: publishing it would repaint the
+  // blocker the rebind resolved.
+  it('does not repaint a key-list blocker from an api-keys read issued before the rebind', async () => {
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(keyReads).toBe(1);
+
+    // The rebind succeeded and the shell re-reads the page.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // The retired read now answers with the typed key refusal.
+    await act(async () => {
+      settleStaleRead(
+        Response.json(
+          { code: 'external_management_key_rejected', detail: '401' },
+          { status: 409 }
+        )
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('blockerKeyRejectedTitle'));
+    expect(view()).toContain(key.id);
+  });
+
+  // An expired session reported by a retired *usage-summary* read is not a fact
+  // about the current one: the rebind already proved the connection works. The
+  // summary is the read the key list hands off to, so it is the one held open.
+  it('does not end the session for an authentication failure of a retired page read', async () => {
+    let settleStaleSummary: (response: Response) => void = () => undefined;
+    let summaryReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        summaryReads += 1;
+        if (summaryReads === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleSummary = resolve;
+          });
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(summaryReads).toBe(1);
+    // The rebind re-reads the page while the first summary is still open.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(summaryReads).toBe(2);
+
+    // The retired summary now answers as an expired session.
+    await act(async () => {
+      settleStaleSummary(Response.json({ code: 'unauthorized' }, { status: 401 }));
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(view()).toContain(key.id);
+  });
+
+  // Regression: a rebind resolves the blocker, and the shell re-reads the page by
+  // bumping `reloadToken`. The usage panel must not repaint the blocker with an
+  // answer that belongs to the request it issued *before* the rebind: the page
+  // would show the fix and the refusal it resolved in the same frame.
+  it('does not repaint an External blocker from a usage read issued before the rebind', async () => {
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+    };
+    // The pre-rebind usage read is held open so the test chooses how it settles.
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let usageGetCount = 0;
+    const health = {
+      ...usageBase,
+      statisticsEnabled: true,
+      collector: 'running',
+      collectionStarted: true,
+      blockedReason: '',
+    };
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        if (usageGetCount === 1)
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        return Promise.resolve(Response.json(health));
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(usageGetCount).toBe(1);
+
+    // The rebind succeeded: the shell re-reads the page and the usage panel.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // The retired read answers with the typed authority refusal, the very code
+    // that paints this page's blocker when it belongs to the current state.
+    await act(async () => {
+      settleStaleRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
+    });
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(x('rebindUnavailableHelp'));
+    // The read that replaced it is what the page reports from.
+    expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
+  it('keeps the page busy when createKey settles while a rebind read is still open', async () => {
+    const created = {
+      ...key,
+      id: 'f'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…cccc',
+    };
+    let settlePost: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, created], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+
+    // Mutation settles while rebind read is still open: busy lock must stay held.
+    await act(async () => {
+      settlePost(Response.json({ key: created, createdSecret: secret }, { status: 201 }));
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+    expect(button(t('keysCreate')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, created], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(key.id);
+    expect(view()).toContain(created.id);
+  });
+
+  it('keeps the page busy when a rebind read settles while createKey is still open', async () => {
+    const created = {
+      ...key,
+      id: 'f'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…cccc',
+    };
+    let settlePost: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind read settles immediately while POST is still pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settlePost(Response.json({ key: created, createdSecret: secret }, { status: 201 }));
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(created.id);
+  });
+
+  it('re-reads and keeps the full post-rebind key list when reconcile resolves during a rebind read', async () => {
+    const reconciled = {
+      ...key,
+      id: 'c'.repeat(32),
+      requestId: 'b'.repeat(32),
+      name: 'Recovered Key',
+    };
+    const postRebindPeer = {
+      ...key,
+      id: 'd'.repeat(32),
+      requestId: 'e'.repeat(32),
+      name: 'Post-Rebind Peer',
+    };
+    let settleReconcile: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.reject(new Error('lost reply'));
+      }
+      if (url.includes('/api-keys/requests/')) {
+        return new Promise<Response>((resolve) => {
+          settleReconcile = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            keys: [key, postRebindPeer, reconciled],
+            gatewayPending: false,
+            revocationAvailable: false,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await click(t('keysCreate'));
+    act(() => {
+      void button(t('keysCheck')).props.onClick();
+    });
+    // Rebind starts while reconcile is pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Reconcile resolves first, bumping mutation revision while rebind read is open.
+    await act(async () => {
+      settleReconcile(Response.json(reconciled));
+    });
+    // Rebind read settles with the full post-rebind list.
+    await act(async () => {
+      settleRebindRead(
+        Response.json({
+          keys: [key, postRebindPeer, reconciled],
+          gatewayPending: false,
+          revocationAvailable: false,
+        })
+      );
+    });
+    expect(view()).toContain(key.id);
+    expect(view()).toContain(postRebindPeer.id);
+    expect(view()).toContain(reconciled.id);
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+  });
+
+  it('does not let an overlapping list snapshot overwrite a saved creation name', async () => {
+    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1 };
+    const named = { ...unnamed, name: 'Prod CLI', nameRevision: 2 };
+    let settleNamePut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
+        return new Promise<Response>((resolve) => {
+          settleNamePut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await setCreateName('Prod CLI');
+    await act(async () => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind read starts while name PUT is in flight.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Name PUT resolves first, then the pre-PUT list snapshot arrives.
+    await act(async () => {
+      settleNamePut(Response.json(named));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(view()).toContain('Prod CLI');
+  });
+
+  it('does not let an overlapping list snapshot overwrite a key name saved in details', async () => {
+    const renamed = { ...key, name: 'Renamed Key', nameRevision: 2 };
+    let settleRenamePut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/' + key.id) && init?.method === 'PUT') {
+        return new Promise<Response>((resolve) => {
+          settleRenamePut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/' + key.id) && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json(key));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/usage')) {
+        return Promise.resolve(
+          Response.json({
+            keyId: key.id,
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [renamed], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+    });
+    await click(k('rename'));
+    await act(async () => {
+      renderer.root
+        .findByProps({ id: 'key-name' })
+        .props.onChange({ target: { value: 'Renamed Key' } });
+    });
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+    await act(async () => {
+      settleRenamePut(Response.json(renamed));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    await click(t('keysCloseDetails'));
+    expect(view()).toContain('Renamed Key');
+  });
+
+  it('refreshes the key list when revocation commits while a read is in flight', async () => {
+    const second = { ...key, id: 'd'.repeat(32), requestId: 'e'.repeat(32), name: 'Keeper Key' };
+    const superseded = { ...key, lifecycle: 'superseded' as const };
+    let revokeRequestId = '';
+    let settleRevoke: (response: Response) => void = () => undefined;
+    let settleInFlightRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    let revoked = false;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/operations/latest')) {
+        return Promise.resolve(
+          Response.json({
+            operation: null,
+            nextStep: '',
+            runtimeState: 'effect_unknown',
+            expiresAtMs: 0,
+          })
+        );
+      }
+      if (url.includes('/revocation/') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json({ ready: true, reason: '' }));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/revocation') && init?.method === 'POST') {
+        const parsed: unknown = JSON.parse(String(init.body));
+        if (parsed && typeof parsed === 'object' && 'requestId' in parsed && typeof parsed.requestId === 'string') {
+          revokeRequestId = parsed.requestId;
+        }
+        return new Promise<Response>((resolve) => {
+          settleRevoke = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key, second], gatewayPending: false, revocationAvailable: true })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleInFlightRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            keys: revoked ? [superseded, second] : [key, second],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={client}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+        />
+      );
+    });
+    await act(async () => {
+      renderer.root
+        .findAllByType(DropdownMenu)[0]
+        .props.items.find((item: { key: string }) => item.key === 'revoke')
+        .onClick();
+    });
+    act(() => {
+      void button(k('confirmOperation')).props.onClick();
+    });
+    // An unforced read opens while the revocation request is in flight.
+    act(() => {
+      void button(t('refresh')).props.onClick();
+    });
+    expect(keyReads).toBe(2);
+
+    // Revocation commits and fires onChanged() while read #2 is still open.
+    revoked = true;
+    await act(async () => {
+      settleRevoke(
+        Response.json({
+          operation: {
+            id: revokeRequestId,
+            targetId: key.id,
+            keeperId: second.id,
+            mode: 'revoke',
+            outcome: 'committed',
+            revision: 1,
+            steps: [{ name: 'revoke', state: 'observed', returned: true }],
+          },
+          runtimeState: 'effective_observed',
+          expiresAtMs: 0,
+          nextStep: '',
+        })
+      );
+    });
+    await act(async () => {
+      settleInFlightRead(
+        Response.json({ keys: [key, second], gatewayPending: false, revocationAvailable: true })
+      );
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong').children
+    ).toEqual(['1']);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-summary-replaced' }).findByType('strong')
+        .children
+    ).toEqual(['1']);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-row-' + key.id })).toHaveLength(0);
+  });
+
+  it('clears stale blockers, retires pre-rebind reads, and reloads keys on rebind even while the details drawer is open', async () => {
+    const postRebind = { ...key, id: 'c'.repeat(32), requestId: 'd'.repeat(32), name: 'Post Rebind' };
+    let settlePreRebindUsage: (response: Response) => void = () => undefined;
+    let usageReads = 0;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/' + key.id)) {
+        return Promise.resolve(Response.json(key));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/usage')) {
+        return Promise.resolve(
+          Response.json({
+            keyId: key.id,
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        keyReads += 1;
+        return Promise.resolve(
+          Response.json({
+            keys: keyReads === 1 ? [key] : [key, postRebind],
+            gatewayPending: false,
+            revocationAvailable: false,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        usageReads += 1;
+        if (usageReads === 1) {
+          return Promise.resolve(
+            Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+          );
+        }
+        if (usageReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settlePreRebindUsage = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(1);
+
+    // Open details drawer, click reload on the usage panel so a pre-rebind read stays open,
+    // then complete a rebind while the drawer remains open.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-reload' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Pre-rebind read #2 settles late with a key rejection while drawer is still open.
+    await act(async () => {
+      settlePreRebindUsage(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(keyReads).toBe(2);
+
+    await click(t('keysCloseDetails'));
+    expect(view()).toContain(postRebind.id);
+    expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
+  it('does not let an overlapping list snapshot overwrite a retried creation name', async () => {
+    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1 };
+    const named = { ...unnamed, name: 'Retried Name', nameRevision: 2 };
+    let settleRetryPut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
+        const body: unknown = JSON.parse(String(init.body));
+        if (body && typeof body === 'object' && 'name' in body && body.name === 'Initial Fail') {
+          return Promise.resolve(new Response('', { status: 503 }));
+        }
+        return new Promise<Response>((resolve) => {
+          settleRetryPut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json(unnamed));
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await setCreateName('Initial Fail');
+    await click(t('keysCreate'));
+    await setCreateName('Retried Name');
+    act(() => {
+      void renderer.root.findByProps({ 'data-testid': 'retry-create-name' }).props.onClick();
+    });
+    // Rebind starts while retryCreateName PUT is in flight.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    await act(async () => {
+      settleRetryPut(Response.json(named));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(view()).toContain('Retried Name');
+  });
+
+  it('retires the discarded StrictMode mount read so its late 401/blocker cannot affect the page', async () => {
+    let settleFirstRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return new Promise<Response>((resolve) => {
+            settleFirstRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <StrictMode>
+          <FreshApiKeys
+            client={client}
+            credential="admin-test-only"
+            onUnauthorized={unauthorized}
+            onCreationPending={vi.fn()}
+          />
+        </StrictMode>
+      );
+    });
+    expect(keyReads).toBe(2);
+    await act(async () => {
+      settleFirstRead(Response.json({ code: 'unauthorized' }, { status: 401 }));
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(view()).toContain(key.id);
+  });
+
+  it('does not erase a post-rebind blocker or paint a stale error when a pre-rebind createKey fails', async () => {
+    let settlePost: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        return Promise.resolve(Response.json({ code: 'external_target_moved' }, { status: 409 }));
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind finishes and discovers external_target_moved while pre-rebind POST is still pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+
+    // Pre-rebind POST settles late with external_management_key_rejected.
+    await act(async () => {
+      settlePost(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(t('keysUnavailable'));
+  });
+
+  it('does not erase a post-rebind blocker or paint a stale error when a pre-rebind reconcile fails', async () => {
+    let settleReconcile: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.reject(new Error('lost reply'));
+      }
+      if (url.includes('/api-keys/requests/')) {
+        return new Promise<Response>((resolve) => {
+          settleReconcile = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        return Promise.resolve(Response.json({ code: 'external_target_moved' }, { status: 409 }));
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await click(t('keysCreate'));
+    act(() => {
+      void button(t('keysCheck')).props.onClick();
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+
+    await act(async () => {
+      settleReconcile(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(t('keysUnavailable'));
+  });
+
+  it('releases the mutation lock when createKey requestId generation throws synchronously', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    await mount(fetchMock);
+    await openCreate();
+    const entropySpy = vi.spyOn(crypto, 'getRandomValues').mockImplementationOnce(() => {
+      throw new Error('entropy unavailable');
+    });
+    try {
+      await act(async () => {
+        void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+      });
+    } finally {
+      entropySpy.mockRestore();
+    }
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
   });
 });

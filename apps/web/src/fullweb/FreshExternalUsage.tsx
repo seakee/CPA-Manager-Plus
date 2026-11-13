@@ -55,23 +55,40 @@ export function FreshExternalUsage({
   const startOnlyRef = useRef(false);
   const requestId = useRef('');
   const alive = useRef(true);
+  // Every usage-state response — a read or a confirmation — is published only
+  // while its request still owns the panel. Every `read()` and `confirmEnable()`
+  // advances `generation` on entry so earlier in-flight requests retire before
+  // any later failure or answer can overwrite the newer owner.
+  const generation = useRef(0);
+  // One confirmation at a time. `busy` is state, so two entries in the same React
+  // batch both read the old value and would both send a POST that writes to the
+  // user's CPA. The claim is synchronous, before any await.
+  const confirmingNow = useRef(false);
 
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      generation.current += 1;
     };
   }, []);
 
   async function read() {
+    // A new state read retires any earlier read or confirmation and discards any
+    // pre-reload requestId so a future confirmation starts fresh.
+    requestId.current = '';
+    const ticket = ++generation.current;
     try {
       const parsed = parseExternalUsageState(
         await client.get<unknown>('external/usage', { kind: 'admin', value: credential })
       );
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
       setReadError('');
+      setConfirmFailed(false);
+      setConfirming(false);
+      setNotice('');
       if (
         !parsed.blockedReason ||
         parsed.blockedReason === 'usage_monitoring_disabled' ||
@@ -80,7 +97,7 @@ export function FreshExternalUsage({
         onBlocker?.(null);
       }
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
@@ -98,13 +115,17 @@ export function FreshExternalUsage({
   }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function confirmEnable() {
-    if (busy) return;
+    if (confirmingNow.current) return;
+    confirmingNow.current = true;
     const startOnly = startOnlyRef.current;
+    // Advance the generation on start so earlier in-flight reads retire
+    // immediately, while a newer reload `read()` still retires this POST.
+    const ticket = ++generation.current;
     setBusy(true);
     setNotice('');
     setConfirmFailed(false);
-    if (!requestId.current) requestId.current = newExternalRequestId();
     try {
+      if (!requestId.current) requestId.current = newExternalRequestId();
       const parsed = parseExternalUsageState(
         await client.post<unknown>(
           'external/usage',
@@ -112,10 +133,11 @@ export function FreshExternalUsage({
           { kind: 'admin', value: credential }
         )
       );
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
       const blockedReason = parsed.blockedReason;
       setState(parsed);
+      setReadError('');
       setConfirming(false);
       if (blockedReason && blockedReason !== 'usage_monitoring_disabled') {
         onBlocker?.(blockedReason);
@@ -129,7 +151,7 @@ export function FreshExternalUsage({
         }
       }
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
@@ -140,6 +162,7 @@ export function FreshExternalUsage({
       // CPA receives another PUT depends on whether statistics still read back off.
       setConfirmFailed(true);
     } finally {
+      confirmingNow.current = false;
       if (alive.current) setBusy(false);
     }
   }
