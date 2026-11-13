@@ -1,6 +1,9 @@
 package fullweb
 
 import (
+	"errors"
+	"io/fs"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -51,5 +54,48 @@ func TestBootstrapSameBuildBoundedStaticGraph(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type openStatOnlyFS struct{}
+
+func (openStatOnlyFS) Open(name string) (fs.File, error) {
+	if name != "index.html" {
+		return nil, fs.ErrNotExist
+	}
+	return openStatOnlyFile{}, nil
+}
+
+type openStatOnlyFile struct{}
+
+func (openStatOnlyFile) Stat() (fs.FileInfo, error) { return openStatOnlyInfo{}, nil }
+func (openStatOnlyFile) Read([]byte) (int, error)   { return 0, errors.New("unreadable index.html") }
+func (openStatOnlyFile) Close() error               { return nil }
+
+type openStatOnlyInfo struct{ fs.FileInfo }
+
+func (openStatOnlyInfo) Name() string      { return "index.html" }
+func (openStatOnlyInfo) Size() int64       { return 16 }
+func (openStatOnlyInfo) Mode() fs.FileMode { return 0o444 }
+func (openStatOnlyInfo) IsDir() bool       { return false }
+
+func TestBootstrapHandlerReadyRequiresReadableNonDirIndex(t *testing.T) {
+	if (BootstrapHandler{}).Ready() {
+		t.Fatal("nil Dist reported Ready")
+	}
+	if (BootstrapHandler{Dist: fstest.MapFS{"index.html": {Mode: fs.ModeDir}}}).Ready() {
+		t.Fatal("directory index.html reported Ready")
+	}
+	readFail := BootstrapHandler{Dist: openStatOnlyFS{}}
+	if readFail.Ready() {
+		t.Fatal("unreadable index.html reported Ready")
+	}
+	rec := httptest.NewRecorder()
+	readFail.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, bootstrap.FixedBootstrapUIPath, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unreadable index.html /ui status = %d, want 404", rec.Code)
+	}
+	if !(BootstrapHandler{Dist: fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}}}).Ready() {
+		t.Fatal("readable index.html did not report Ready")
 	}
 }

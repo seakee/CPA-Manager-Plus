@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -37,6 +39,18 @@ func freeAddr(t *testing.T) string {
 	address := l.Addr().String()
 	l.Close()
 	return address
+}
+
+type selectiveCommitDriver struct {
+	freshrouting.Driver
+	rejectCommittedApply bool
+}
+
+func (d *selectiveCommitDriver) Apply(ctx context.Context, s freshrouting.State) error {
+	if s.Committed && d.rejectCommittedApply {
+		return errors.New("simulated post-commit projection publish failure")
+	}
+	return d.Driver.Apply(ctx, s)
 }
 
 // This test builds and runs the actual stdlib-only Ingress process against
@@ -66,7 +80,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if _, e = st.Create(t.Context(), id, &credential); e != nil {
 		t.Fatal(e)
 	}
+	var failCurrentRead atomic.Bool
 	current := func(ctx context.Context) (bootstrap.FreshOperation, error) {
+		if failCurrentRead.Load() {
+			return bootstrap.FreshOperation{}, errors.New("simulated Fresh store read failure")
+		}
 		r, e := st.Load(ctx)
 		return r.Operation, e
 	}
@@ -103,7 +121,18 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 				return
 			}
 			op, e := current(r.Context())
-			if e != nil || op.Routing.Target == "" || op.Routing.OperationID == "" {
+			if e != nil || op.Validate() != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if op.Routing.Target == "" || op.Routing.OperationID == "" {
+				if !op.Routing.Committed && fixed.Shell != nil {
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, "{\"bootstrapUI\":true}\n")
+					return
+				}
 				http.NotFound(w, r)
 				return
 			}
@@ -157,10 +186,11 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	}
 	defer stop()
 	start()
-	driver, e := freshrouting.NewHTTPDriver(freshrouting.HTTPConfig{IngressControlURL: "http://" + controlAddr, PublicOrigin: origin})
+	rawDriver, e := freshrouting.NewHTTPDriver(freshrouting.HTTPConfig{IngressControlURL: "http://" + controlAddr, PublicOrigin: origin})
 	if e != nil {
 		t.Fatal(e)
 	}
+	driver := &selectiveCommitDriver{Driver: rawDriver}
 	fixed.Routing = freshrouting.New(st, driver)
 	request := func(method, path, auth string, body any) (int, string, http.Header) {
 		var data []byte
@@ -183,10 +213,52 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 		b, _ := io.ReadAll(response.Body)
 		return response.StatusCode, string(b), response.Header
 	}
+	noRedirectClient := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	rawRequest := func(method, path, accept string) (int, http.Header) {
+		t.Helper()
+		r, e := http.NewRequest(method, origin+path, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if accept != "" {
+			r.Header.Set("Accept", accept)
+		}
+		response, e := noRedirectClient.Do(r)
+		if e != nil {
+			t.Fatal(e)
+		}
+		_ = response.Body.Close()
+		return response.StatusCode, response.Header
+	}
 	base := bootstrap.FixedBootstrapAPIPath
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded before routing prepare/Apply")
 	}
+	if code, header := rawRequest("GET", "/console", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"); code != http.StatusSeeOther || header.Get("Location") != bootstrap.FixedBootstrapUIPath || header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("pre-prepare browser /console = %d Location=%q Cache-Control=%q", code, header.Get("Location"), header.Get("Cache-Control"))
+	}
+	if code, _, header := request("GET", "/console", "", nil); code != http.StatusOK || header.Get("X-CPAMP-Route-Owner") != "manager" {
+		t.Fatalf("pre-prepare browser /console did not land on Bootstrap UI: status=%d owner=%q", code, header.Get("X-CPAMP-Route-Owner"))
+	}
+	if code, header := rawRequest("GET", "/console", "*/*"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare non-HTML /console = %d Location=%q", code, header.Get("Location"))
+	}
+	if code, header := rawRequest("POST", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare POST /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(true)
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare unreadable-store browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(false)
+	savedShell := fixed.Shell
+	fixed.Shell = nil
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("pre-prepare bare-404 without shell browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	fixed.Shell = savedShell
 	for _, auth := range []string{"Bearer cpamp_RoutingIntegration0123456789!", "Bearer cpa-management-key", "", "Fresh wrong-session"} {
 		code, body, _ := request("GET", base+"operation", auth, nil)
 		if code != 401 || strings.Contains(body, "secret") {
@@ -208,12 +280,24 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded with prepared authority before Apply")
 	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusSeeOther || header.Get("Location") != bootstrap.FixedBootstrapUIPath {
+		t.Fatalf("prepared uncommitted browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	// Simulate durable SQLite commit succeeding while the post-commit
+	// Committed=true projection publish to Ingress fails: Bootstrap UI retires
+	// immediately to 404, so Ingress must consult Manager's durable authority
+	// and keep /console on 503 rather than redirecting to a retired 404 page.
+	driver.rejectCommittedApply = true
 	if code, body, _ := request("POST", base+"routing/activate", "Fresh "+payload.Token, map[string]any{"identity": id}); code != 200 {
 		t.Fatal("activate real Ingress", code, body)
 	}
+	driver.rejectCommittedApply = false
 	op, e := current(t.Context())
 	if e != nil || !op.Routing.Committed || op.Routing.OperationID != id.OperationID {
 		t.Fatal(op, e)
+	}
+	if projected, inspectErr := rawDriver.Inspect(t.Context()); inspectErr != nil || projected.Committed {
+		t.Fatalf("expected uncommitted Ingress projection before Restore: state=%+v err=%v", projected, inspectErr)
 	}
 	for _, suffix := range []string{"", "/ui", "/assets/index-AbCd1234.js", "/api/v2/operation", "/unknown", "%2fui", "/api/v2/claim/exchange"} {
 		code, body, header := request("GET", bootstrap.FixedBootstrapDiscoveryPath+suffix, "Fresh "+payload.Token, nil)
@@ -221,11 +305,25 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 			t.Fatal("fixed namespace did not retire", suffix, code, body)
 		}
 	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit stale-projection browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(true)
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit stale-projection unreadable-store browser /console = %d Location=%q", code, header.Get("Location"))
+	}
+	failCurrentRead.Store(false)
+	if e = fixed.Routing.Restore(t.Context()); e != nil {
+		t.Fatal(e)
+	}
 	if code, _, _ := request("GET", "/private-control", "", nil); code != 200 {
 		t.Fatal("canonical route unavailable")
 	}
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway activated during Fresh")
+	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit non-target browser /console = %d Location=%q", code, header.Get("Location"))
 	}
 	// Ingress alone restarts; Manager republishes the original committed
 	// checkpoint rather than creating another operation or reopening claim.
@@ -234,6 +332,9 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 	start()
 	if code, _, _ := request("GET", "/v1/models", "Bearer client-key", nil); code != 503 || gatewayHits != 0 {
 		t.Fatal("Gateway forwarded after Ingress restart before Restore")
+	}
+	if code, header := rawRequest("GET", "/console", "text/html"); code != http.StatusServiceUnavailable || header.Get("Location") != "" {
+		t.Fatalf("post-commit Ingress restart browser /console before Restore = %d Location=%q", code, header.Get("Location"))
 	}
 	if e = fixed.Routing.Restore(t.Context()); e != nil {
 		t.Fatal(e)

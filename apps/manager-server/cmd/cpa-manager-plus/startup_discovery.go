@@ -18,6 +18,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
@@ -111,15 +112,16 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	}
 	h.projectionMu.RLock()
 	readOnly := h.readOnlyDiscovery != nil
+	shell := h.readOnlyShell
 	h.projectionMu.RUnlock()
-	if !readOnly || h.readOnlyShell == nil {
+	if !readOnly || shell == nil {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	h.readOnlyShell.ServeHTTP(w, r)
+	shell.ServeHTTP(w, r)
 }
 
 // upgradeWizardNamespace is the one namespace the wizard owns on the fixed
@@ -634,9 +636,12 @@ func (h *startupHTTPHandler) SetFreshHandler(handler http.Handler) {
 
 func (h *startupHTTPHandler) serveNonDiscovery(w http.ResponseWriter, r *http.Request) {
 	if !h.ready.Load() {
-		if r != nil && r.URL != nil && r.URL.Path == bootstrapdiscovery.HealthPath {
+		switch {
+		case r != nil && r.URL != nil && r.URL.Path == bootstrapdiscovery.HealthPath:
 			bootstrapdiscovery.NotReadyHandler{}.ServeHTTP(w, r)
-		} else {
+		case r != nil && r.URL != nil && r.URL.Path == freshrouting.AuthorityPath:
+			h.serveStartupAuthority(w, r)
+		default:
 			http.NotFound(w, r)
 		}
 		return
@@ -647,4 +652,36 @@ func (h *startupHTTPHandler) serveNonDiscovery(w http.ResponseWriter, r *http.Re
 		return
 	}
 	target.handler.ServeHTTP(w, r)
+}
+
+// serveStartupAuthority answers Ingress's private routing authority read while
+// the startup listener owns HTTP traffic. It emits the positive pre-commit
+// Bootstrap signal only when the fixed Bootstrap UI is actively serving 200;
+// unready, writable-transition, failed-store, and retry windows return 503.
+func (h *startupHTTPHandler) serveStartupAuthority(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.EscapedPath() != r.URL.Path || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.bootstrapUIAvailable(r.Context()) {
+		writePreCommitBootstrapAuthority(w)
+		return
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
+func (h *startupHTTPHandler) bootstrapUIAvailable(ctx context.Context) bool {
+	if h.ready.Load() || h.discoveryLifecycle() != routingdomain.DiscoveryActive {
+		return false
+	}
+	h.projectionMu.RLock()
+	readOnly := h.readOnlyDiscovery != nil
+	shell := h.readOnlyShell
+	h.projectionMu.RUnlock()
+	return readOnly && bootstrapShellReady(ctx, shell)
 }

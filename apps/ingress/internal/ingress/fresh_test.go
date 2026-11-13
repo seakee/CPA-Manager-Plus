@@ -137,3 +137,255 @@ func TestOnlyExplicitLegacyManagerAllowsGatewayWithoutFreshProjection(t *testing
 	routes.state = FreshRouteState{OperationID: "fresh-operation"}
 	check(503, 1)
 }
+
+func TestPreCommitBrowserNavigationRedirectsToBootstrapUI(t *testing.T) {
+	var managerProxyHits, gatewayHits int
+	bootstrapUI := FixedBootstrapDiscoveryPath + "/ui"
+	uiAvailable := false
+	authorityStatus := http.StatusNotFound
+	authorityBody := ""
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case FreshRoutingAuthorityPath:
+			if authorityBody != "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
+			w.WriteHeader(authorityStatus)
+			if authorityBody != "" {
+				_, _ = io.WriteString(w, authorityBody)
+			}
+		case bootstrapUI:
+			if !uiAvailable {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "<!doctype html><div id=\"root\"></div>")
+		default:
+			managerProxyHits++
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer manager.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gatewayHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+	m, _ := url.Parse(manager.URL)
+	g, _ := url.Parse(gateway.URL)
+	routes := &FreshRoutes{}
+	legacy := false
+	h := NewFreshHandler(routes, m, g, log.New(io.Discard, "", 0), func(context.Context) bool { return legacy })
+
+	do := func(method, target string, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		if host, ok := headers["Host"]; ok {
+			req.Host = host
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+	// Constructor default without EnablePreFreshPosture fails closed (503, no Location).
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("default posture without EnablePreFreshPosture = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Wire posture reading Manager's private authority over HTTP; bare 404 keeps 503.
+	h.EnablePreFreshPosture(func(ctx context.Context) PreFreshPosture {
+		if legacy {
+			return PreFreshLegacyGateway
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, manager.URL+FreshRoutingAuthorityPath, nil)
+		if err != nil {
+			return PreFreshPendingClosed
+		}
+		res, err := manager.Client().Do(req)
+		if err != nil {
+			return PreFreshPendingClosed
+		}
+		defer res.Body.Close()
+		if res.StatusCode == http.StatusNotFound && recContentTypeJSON(res.Header.Get("Content-Type")) {
+			var sig struct {
+				BootstrapUI bool `json:"bootstrapUI"`
+			}
+			if json.NewDecoder(res.Body).Decode(&sig) == nil && sig.BootstrapUI {
+				return PreFreshBootstrap
+			}
+		}
+		return PreFreshPendingClosed
+	})
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("bare 404 authority navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Enable positive Bootstrap UI availability on Manager so 303 correlates with a 200 UI target.
+	uiAvailable = true
+	authorityBody = `{"bootstrapUI":true}`
+	for _, tc := range []struct {
+		name    string
+		method  string
+		target  string
+		headers map[string]string
+	}{
+		{
+			name:    "browser-get-console",
+			method:  http.MethodGet,
+			target:  "/console",
+			headers: map[string]string{"Accept": browserAccept},
+		},
+		{
+			name:    "browser-head-console",
+			method:  http.MethodHead,
+			target:  "/console",
+			headers: map[string]string{"Accept": "text/html"},
+		},
+		{
+			name:    "browser-get-console-subpath",
+			method:  http.MethodGet,
+			target:  "/console/login",
+			headers: map[string]string{"Accept": browserAccept},
+		},
+		{
+			name:   "xhtml-first-navigate",
+			method: http.MethodGet,
+			target: "/console",
+			headers: map[string]string{
+				"Accept":         "application/xhtml+xml, text/html;q=0.9, */*;q=0.8",
+				"Sec-Fetch-Mode": "navigate",
+				"Sec-Fetch-Dest": "document",
+			},
+		},
+		{
+			name:   "untrusted-host-and-forwarding-headers",
+			method: http.MethodGet,
+			target: "/console",
+			headers: map[string]string{
+				"Accept":           "text/html",
+				"Host":             "untrusted.example:9999",
+				"X-Forwarded-Host": "other.example",
+				"Forwarded":        "host=other.example;proto=https",
+			},
+		},
+		{
+			name:    "quoted-param-containing-q-zero-with-positive-html-weight",
+			method:  http.MethodGet,
+			target:  "/console",
+			headers: map[string]string{"Accept": `text/html;profile="a;q=0,b";q=0.9, application/json;q=0.5`},
+		},
+	} {
+		t.Run("pre-projection/"+tc.name, func(t *testing.T) {
+			rec := do(tc.method, tc.target, tc.headers)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			if got := rec.Header().Get("Location"); got != bootstrapUI {
+				t.Fatalf("Location = %q, want %q", got, bootstrapUI)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", got)
+			}
+			if got := rec.Header().Get("X-CPAMP-Route-Owner"); got != "gateway" {
+				t.Fatalf("X-CPAMP-Route-Owner = %q, want gateway", got)
+			}
+			if tc.method == http.MethodHead && rec.Body.Len() != 0 {
+				t.Fatalf("HEAD body len = %d, want 0", rec.Body.Len())
+			}
+			landing := do(http.MethodGet, rec.Header().Get("Location"), map[string]string{"Accept": browserAccept})
+			if landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
+				t.Fatalf("303 target %q returned status=%d owner=%q, want 200 manager", rec.Header().Get("Location"), landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		method  string
+		target  string
+		headers map[string]string
+	}{
+		{name: "no-accept", method: http.MethodGet, target: "/console"},
+		{name: "curl-wildcard-accept", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "*/*"}},
+		{name: "json-accept", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "application/json"}},
+		{name: "json-preferred-over-html", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "application/json, text/html;q=0.9"}},
+		{name: "plain-tied-with-html", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "text/plain, text/html"}},
+		{name: "html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "text/html;q=0"}},
+		{name: "wildcard-preferred-over-html", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": "*/*, text/html;q=0.8"}},
+		{name: "quoted-param-with-semicolon-and-html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="a;q=1;b";q=0, application/json;q=0.9`}},
+		{name: "quoted-param-with-escaped-quote-and-html-q-zero", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="a,\"q=1\",b";q=0, application/json;q=0.9`}},
+		{name: "unterminated-quoted-accept-param", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": `text/html;profile="unterminated`}},
+		{name: "post-console-with-html-accept", method: http.MethodPost, target: "/console", headers: map[string]string{"Accept": browserAccept}},
+		{name: "put-console-with-html-accept", method: http.MethodPut, target: "/console", headers: map[string]string{"Accept": browserAccept}},
+		{name: "cors-fetch-mode", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": browserAccept, "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}},
+		{name: "websocket-upgrade", method: http.MethodGet, target: "/console", headers: map[string]string{"Accept": browserAccept, "Connection": "Upgrade", "Upgrade": "websocket"}},
+		{name: "model-v1-models-with-html-accept", method: http.MethodGet, target: "/v1/models", headers: map[string]string{"Accept": browserAccept}},
+		{name: "model-v1beta-models-with-html-accept", method: http.MethodGet, target: "/v1beta/models", headers: map[string]string{"Accept": browserAccept}},
+		{name: "model-root-models-with-html-accept", method: http.MethodGet, target: "/models", headers: map[string]string{"Accept": browserAccept}},
+		{name: "encoded-model-v1-models", method: http.MethodGet, target: "/v1%2fmodels", headers: map[string]string{"Accept": browserAccept}},
+	} {
+		t.Run("unchanged-503/"+tc.name, func(t *testing.T) {
+			rec := do(tc.method, tc.target, tc.headers)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+			}
+			if got := rec.Header().Get("Location"); got != "" {
+				t.Fatalf("unexpected Location = %q", got)
+			}
+			if got := rec.Header().Get("X-CPAMP-Route-Owner"); got != "gateway" {
+				t.Fatalf("X-CPAMP-Route-Owner = %q, want gateway", got)
+			}
+		})
+	}
+
+	if managerProxyHits != 0 || gatewayHits != 0 {
+		t.Fatalf("unexpected non-Bootstrap upstream traffic before projection: manager=%d gateway=%d", managerProxyHits, gatewayHits)
+	}
+
+	// Uncommitted Fresh projection on another candidate path redirects /console
+	// browser navigations only while Manager's durable authority confirms pre-commit.
+	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: false}
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != bootstrapUI {
+		t.Fatalf("uncommitted projection navigation = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": "*/*"}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("uncommitted projection non-HTML = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	// Durable commit succeeded in Manager (or Manager posture is unknown/503) while
+	// the post-commit projection publish to Ingress failed: keep 503, never 303 to 404.
+	uiAvailable = false
+	authorityStatus = http.StatusServiceUnavailable
+	authorityBody = ""
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("durable-committed or unavailable posture with uncommitted projection = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+	uiAvailable = true
+	authorityStatus = http.StatusNotFound
+	authorityBody = `{"bootstrapUI":true}`
+	// Once Fresh routing is committed, unadmitted non-Control browser navigations keep 503 unchanged.
+	routes.state = FreshRouteState{InstallationID: "i", Generation: "g", OperationID: "op", Revision: 1, Target: "/private", Committed: true}
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("committed projection navigation = %d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+	}
+	if managerProxyHits != 0 || gatewayHits != 0 {
+		t.Fatalf("unexpected non-Bootstrap upstream traffic on unadmitted routes: manager=%d gateway=%d", managerProxyHits, gatewayHits)
+	}
+	// Explicit legacy Manager mode still forwards to Gateway unchanged.
+	routes.state = FreshRouteState{}
+	legacy = true
+	if rec := do(http.MethodGet, "/console", map[string]string{"Accept": browserAccept}); rec.Code != http.StatusOK || gatewayHits != 1 {
+		t.Fatalf("legacy passthrough = %d gatewayHits=%d", rec.Code, gatewayHits)
+	}
+}
+
+func recContentTypeJSON(ct string) bool {
+	return ct == "application/json" || len(ct) > len("application/json;") && ct[:len("application/json;")] == "application/json;"
+}

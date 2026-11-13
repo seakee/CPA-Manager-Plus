@@ -134,6 +134,39 @@ func TestFreshAuthorityRequiresAPublishedRoutingProjection(t *testing.T) {
 	}
 }
 
+func TestFreshAuthorityFailsClosedWith503OnStoreReadFailure(t *testing.T) {
+	for _, state := range []string{"missing operation", "malformed operation", "closed database"} {
+		t.Run(state, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+			paths.Config = filepath.Join(dir, "config.json")
+			opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer opened.Close()
+			app := newFreshApplication(opened, config.Config{}, nil)
+			if response := authorityResponse(t, app); response.Code != http.StatusNotFound {
+				t.Fatalf("healthy pre-routing authority = %d, want 404", response.Code)
+			}
+			switch state {
+			case "missing operation":
+				_, err = opened.DB.Exec("DELETE FROM settings WHERE key='fresh_operation_v1'")
+			case "malformed operation":
+				_, err = opened.DB.Exec("UPDATE settings SET value='{}' WHERE key='fresh_operation_v1'")
+			case "closed database":
+				err = opened.DB.Close()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response := authorityResponse(t, app); response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("unreadable store authority = %d, want 503", response.Code)
+			}
+		})
+	}
+}
+
 func TestFreshAuthorityAdmissionRemainsProvenAcrossConsoleFileLoggingToggle(t *testing.T) {
 	adoptInstall := func(r *freshstore.Record, env managedInstallEnv) {
 		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{

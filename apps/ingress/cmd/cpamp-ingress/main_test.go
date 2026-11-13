@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/ingress/internal/ingress"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -101,6 +104,205 @@ func TestLegacyGatewayRequiresExplicitManagerAuthority(t *testing.T) {
 	// A new Ingress process has no legacy acknowledgement to reuse.
 	if managerLegacyGateway(managerFreshAuthority(u))(t.Context()) {
 		t.Fatal("restart inherited stale legacy mode")
+	}
+}
+
+func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *testing.T) {
+	var status atomic.Int32
+	var contentType atomic.Value
+	var body atomic.Value
+	var uiServing atomic.Bool
+	var truncateBody atomic.Bool
+	contentType.Store("")
+	body.Store("")
+
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case ingress.FreshRoutingAuthorityPath:
+			if r.Method != http.MethodGet {
+				t.Errorf("unexpected authority method: %s", r.Method)
+			}
+			if ct := contentType.Load().(string); ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			code := int(status.Load())
+			payload := body.Load().(string)
+			if truncateBody.Load() {
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, payload)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				if hijacker, ok := w.(http.Hijacker); ok {
+					if conn, _, hErr := hijacker.Hijack(); hErr == nil {
+						_ = conn.Close()
+					}
+				}
+				return
+			}
+			w.WriteHeader(code)
+			if payload != "" {
+				_, _ = io.WriteString(w, payload)
+			}
+		case ingress.FixedBootstrapUIPath:
+			if !uiServing.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "<!doctype html><div id=\"root\"></div>")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer manager.Close()
+
+	var gatewayHits atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gatewayHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+
+	mURL, err := url.Parse(manager.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gURL, err := url.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newHandler := func() http.Handler {
+		fresh := &ingress.FreshRoutes{}
+		posture := managerPreFreshPosture(managerFreshAuthority(mURL))
+		h := ingress.NewFreshHandler(fresh, mURL, gURL, log.New(io.Discard, "", 0), func(ctx context.Context) bool {
+			return posture(ctx) == ingress.PreFreshLegacyGateway
+		})
+		h.EnablePreFreshPosture(posture)
+		return h
+	}
+	handler := newHandler()
+	navigate := func(h http.Handler, target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	validSignal := `{"bootstrapUI":true}`
+	paddedAtLimit := validSignal + strings.Repeat(" ", maxPreCommitBootstrapSignalBytes-len(validSignal))
+
+	// Generic/bare 404, false flag, unknown field, trailing data, and over-limit bodies stay closed (503, no Location).
+	for _, tc := range []struct {
+		name string
+		ct   string
+		body string
+	}{
+		{name: "bare-404", ct: "text/plain; charset=utf-8", body: "404 page not found\n"},
+		{name: "empty-404", ct: "", body: ""},
+		{name: "json-false", ct: "application/json", body: `{"bootstrapUI":false}`},
+		{name: "json-unknown-field", ct: "application/json", body: `{"bootstrapUI":true,"extra":1}`},
+		{name: "json-trailing-data", ct: "application/json", body: `{"bootstrapUI":true}{}`},
+		{name: "padded-to-limit-plus-trailing-json", ct: "application/json", body: paddedAtLimit + `{}`},
+		{name: "padded-to-limit-plus-trailing-text", ct: "application/json", body: paddedAtLimit + "trailing"},
+		{name: "over-limit-valid-json-whitespace", ct: "application/json", body: paddedAtLimit + " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uiServing.Store(false)
+			status.Store(http.StatusNotFound)
+			contentType.Store(tc.ct)
+			body.Store(tc.body)
+			rec := navigate(handler, "/console")
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+				t.Fatalf("status=%d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+			}
+		})
+	}
+
+	// Truncated Content-Length stream over real HTTP (Content-Length 100, only valid JSON written before close) -> 503, no Location.
+	t.Run("truncated-content-length-body", func(t *testing.T) {
+		uiServing.Store(true)
+		status.Store(http.StatusNotFound)
+		contentType.Store("application/json")
+		body.Store(validSignal)
+		truncateBody.Store(true)
+		defer truncateBody.Store(false)
+		rec := navigate(handler, "/console")
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+			t.Fatalf("truncated Content-Length status=%d Location=%q, want 503 without redirect", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	// Positive pre-commit 404 JSON (canonical and exact-limit valid) with Bootstrap UI serving -> 303 whose Location returns 200.
+	uiServing.Store(true)
+	status.Store(http.StatusNotFound)
+	contentType.Store("application/json; charset=utf-8")
+	for _, payload := range []string{validSignal, paddedAtLimit} {
+		body.Store(payload)
+		rec := navigate(handler, "/console")
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
+			t.Fatalf("explicit bootstrap 404 (len=%d) = %d Location=%q", len(payload), rec.Code, rec.Header().Get("Location"))
+		}
+		if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
+			t.Fatalf("landing (len=%d) = %d owner=%q", len(payload), landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+		}
+	}
+
+	var rec *httptest.ResponseRecorder
+	// Valid uncommitted 200 Fresh projection -> 303 whose Location returns 200.
+	uncommitted := ingress.FreshRouteState{InstallationID: "install-one", Generation: "gen-one", OperationID: "op-one", Revision: 1, Target: "/console", Committed: false}
+	status.Store(http.StatusOK)
+	contentType.Store("application/json")
+	body.Store(freshAuthorityJSON(uncommitted, ""))
+	rec = navigate(handler, "/console")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
+		t.Fatalf("uncommitted 200 = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK {
+		t.Fatalf("uncommitted landing = %d", landing.Code)
+	}
+
+	// Committed Fresh projection awaiting Restore, empty 200 JSON, and 503 stay closed (503, no Location).
+	uiServing.Store(false)
+	committed := uncommitted
+	committed.Committed = true
+	for _, tc := range []struct {
+		name string
+		code int32
+		body string
+	}{
+		{name: "committed-200", code: http.StatusOK, body: freshAuthorityJSON(committed, "")},
+		{name: "empty-200", code: http.StatusOK, body: "{}"},
+		{name: "unavailable-503", code: http.StatusServiceUnavailable, body: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status.Store(tc.code)
+			body.Store(tc.body)
+			if got := navigate(handler, "/console"); got.Code != http.StatusServiceUnavailable || got.Header().Get("Location") != "" {
+				t.Fatalf("status=%d Location=%q, want 503 without redirect", got.Code, got.Header().Get("Location"))
+			}
+		})
+	}
+
+	// Explicit 204 legacy Manager forwards to Gateway and retains confirmation across outage.
+	status.Store(http.StatusNoContent)
+	body.Store("")
+	if got := navigate(handler, "/console"); got.Code != http.StatusOK || gatewayHits.Load() != 1 {
+		t.Fatalf("legacy 204 = %d gatewayHits=%d", got.Code, gatewayHits.Load())
+	}
+	manager.Close()
+	if got := navigate(handler, "/console"); got.Code != http.StatusOK || gatewayHits.Load() != 2 {
+		t.Fatalf("post-outage legacy = %d gatewayHits=%d", got.Code, gatewayHits.Load())
+	}
+
+	// Fresh Ingress instance with Manager unreachable stays closed (503, no Location).
+	if got := navigate(newHandler(), "/console"); got.Code != http.StatusServiceUnavailable || got.Header().Get("Location") != "" {
+		t.Fatalf("unreachable Manager = %d Location=%q, want 503 without redirect", got.Code, got.Header().Get("Location"))
 	}
 }
 

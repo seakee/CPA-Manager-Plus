@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/seakee/cpa-manager-plus/apps/ingress/internal/ingress"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,7 +21,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"github.com/seakee/cpa-manager-plus/apps/ingress/internal/ingress"
 )
 
 const (
@@ -44,7 +46,11 @@ func main() {
 	logger := log.New(os.Stderr, "cpamp-ingress: ", log.LstdFlags)
 	fresh := &ingress.FreshRoutes{}
 	authority := managerFreshAuthority(cfg.managerURL)
-	handler := ingress.NewFreshHandler(fresh, cfg.managerURL, cfg.gatewayURL, logger, managerLegacyGateway(authority))
+	posture := managerPreFreshPosture(authority)
+	handler := ingress.NewFreshHandler(fresh, cfg.managerURL, cfg.gatewayURL, logger, func(ctx context.Context) bool {
+		return posture(ctx) == ingress.PreFreshLegacyGateway
+	})
+	handler.EnablePreFreshPosture(posture)
 	// Fresh Gateway traffic opens only on a current, consistently bound private
 	// Manager admission answer. Legacy 204 passthrough above is unchanged.
 	handler.EnableFreshGatewayAdmission(ingress.NewGatewayAdmitter(fresh, authority, ingress.DefaultGatewayAdmissionTTL).Admitted)
@@ -259,7 +265,10 @@ func (c *trackedConn) Close() error {
 	return err
 }
 
-var errLegacyManager = errors.New("Manager is serving the legacy application")
+var (
+	errLegacyManager      = errors.New("Manager is serving the legacy application")
+	errPreCommitAuthority = errors.New("Manager has no Fresh routing checkpoint yet")
+)
 
 // Only the fully started legacy Manager serves 204 on the existing private
 // authority endpoint. Unknown/Fresh/startup/error responses never open Gateway.
@@ -267,15 +276,30 @@ var errLegacyManager = errors.New("Manager is serving the legacy application")
 // an Ingress restart must obtain it again. Fresh admission cannot replace an
 // initialized legacy store through normal startup.
 func managerLegacyGateway(authority func(context.Context) (ingress.FreshAuthority, error)) func(context.Context) bool {
-	var confirmed atomic.Bool
+	posture := managerPreFreshPosture(authority)
 	return func(ctx context.Context) bool {
-		if !confirmed.Load() {
-			_, err := authority(ctx)
-			if errors.Is(err, errLegacyManager) {
-				confirmed.Store(true)
-			}
+		return posture(ctx) == ingress.PreFreshLegacyGateway
+	}
+}
+
+func managerPreFreshPosture(authority func(context.Context) (ingress.FreshAuthority, error)) func(context.Context) ingress.PreFreshPosture {
+	var confirmed atomic.Bool
+	return func(ctx context.Context) ingress.PreFreshPosture {
+		if confirmed.Load() {
+			return ingress.PreFreshLegacyGateway
 		}
-		return confirmed.Load()
+		reply, err := authority(ctx)
+		switch {
+		case errors.Is(err, errLegacyManager):
+			confirmed.Store(true)
+			return ingress.PreFreshLegacyGateway
+		case errors.Is(err, errPreCommitAuthority):
+			return ingress.PreFreshBootstrap
+		case err == nil && reply.FreshRouteState.Valid() && !reply.Committed:
+			return ingress.PreFreshBootstrap
+		default:
+			return ingress.PreFreshPendingClosed
+		}
 	}
 }
 
@@ -319,6 +343,12 @@ func managerFreshAuthority(managerURL *url.URL) func(context.Context) (ingress.F
 		if res.StatusCode == http.StatusNoContent {
 			return reply, errLegacyManager
 		}
+		if res.StatusCode == http.StatusNotFound {
+			if decodesPreCommitBootstrapSignal(res) {
+				return reply, errPreCommitAuthority
+			}
+			return reply, errors.New("Manager routing authority not found")
+		}
 		if res.StatusCode != http.StatusOK {
 			return reply, fmt.Errorf("Manager routing authority unavailable: status %d", res.StatusCode)
 		}
@@ -333,6 +363,29 @@ func managerFreshAuthority(managerURL *url.URL) func(context.Context) (ingress.F
 		}
 		return reply, nil
 	}
+}
+
+const maxPreCommitBootstrapSignalBytes = 256
+
+func decodesPreCommitBootstrapSignal(res *http.Response) bool {
+	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxPreCommitBootstrapSignalBytes+1))
+	if err != nil || len(body) > maxPreCommitBootstrapSignalBytes {
+		return false
+	}
+	var signal struct {
+		BootstrapUI bool `json:"bootstrapUI"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&signal); err != nil || !signal.BootstrapUI {
+		return false
+	}
+	var trailing any
+	return errors.Is(decoder.Decode(&trailing), io.EOF)
 }
 
 func parseUpstream(name, value, fallback string) (*url.URL, error) {
@@ -351,4 +404,3 @@ func parseUpstream(name, value, fallback string) (*url.URL, error) {
 	parsed.Path = ""
 	return parsed, nil
 }
-
