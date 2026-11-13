@@ -2,6 +2,7 @@ package requestbody
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -56,6 +57,7 @@ type Reader struct {
 	mu        sync.Mutex
 	reads     int
 	reading   bool
+	eof       bool
 	canceled  bool
 	closed    bool
 	stopWatch func() bool
@@ -124,6 +126,10 @@ func (r *Reader) Read(p []byte) (int, error) {
 		r.mu.Unlock()
 		return 0, http.ErrBodyReadAfterClose
 	}
+	if r.eof {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
 	if r.canceled || r.ctx.Err() != nil {
 		r.canceled = true
 		r.mu.Unlock()
@@ -147,11 +153,15 @@ func (r *Reader) Read(p []byte) (int, error) {
 
 	r.mu.Lock()
 	r.reading = false
+	sawEOF := errors.Is(err, io.EOF)
+	if sawEOF {
+		r.eof = true
+	}
 	canceled := r.canceled || r.closed || r.ctx.Err() != nil
-	// Reset the read deadline between body chunks when more body remains. When
-	// inner.Read hits io.EOF, net/http's startBackgroundRead has already cleared
-	// the read deadline before starting its disconnect watcher.
-	if r.rc != nil && !canceled && err == nil && r.idleTimeout > 0 {
+	// Clear the read deadline both between body chunks (err == nil) and on any
+	// io.EOF return so a post-EOF read deadline never arms net/http's
+	// backgroundRead disconnect watcher.
+	if r.rc != nil && !canceled && r.idleTimeout > 0 && (err == nil || sawEOF) {
 		_ = r.rc.SetReadDeadline(time.Time{})
 	}
 	r.mu.Unlock()

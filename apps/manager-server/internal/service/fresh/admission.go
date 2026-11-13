@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -109,12 +108,14 @@ type Opened struct {
 	Protector *security.Protector
 	Record    freshstore.Record
 
-	closeMu     sync.Mutex
-	closing     bool
-	closed      bool
-	closeDone   chan struct{}
-	closeErr    error
-	beforeClose []func()
+	closeMu       sync.Mutex
+	closing       bool
+	closed        bool
+	closeDone     chan struct{}
+	closeErr      error
+	beforeClose   []func()
+	waitDBClosed  func()
+	afterDBClosed func()
 }
 
 // BeforeClose registers a teardown hook that Close runs in LIFO order before
@@ -166,22 +167,24 @@ func (o *Opened) Close() error {
 	var err error
 	if o.DB != nil {
 		err = o.DB.Close()
-		waitForClosedDBConnections(o.DB, 5*time.Second)
+		if o.afterDBClosed != nil {
+			o.afterDBClosed()
+		}
+		if o.waitDBClosed != nil {
+			o.waitDBClosed()
+		} else {
+			waitForClosedDBConnections(o.DB)
+		}
 	}
 	o.closeErr = errors.Join(err, o.Admission.Close())
 	return o.closeErr
 }
 
-// waitForClosedDBConnections waits for database/sql's internal async cleanup
-// goroutines (such as (*sql.Tx).awaitDone winning tx.done CAS when a request
-// context cancels right as the caller defers Rollback) to finish rolling back
-// and closing their driverConn before .manager.lock is released.
-func waitForClosedDBConnections(db *sql.DB, budget time.Duration) {
-	if db == nil || db.Stats().OpenConnections == 0 {
-		return
-	}
-	deadline := time.Now().Add(budget)
-	for db.Stats().OpenConnections > 0 && time.Now().Before(deadline) {
+// waitForClosedDBConnections is a fallback for manually constructed Opened
+// values in tests that did not open o.DB via sqlite.OpenTracked; it never
+// returns while OpenConnections > 0.
+func waitForClosedDBConnections(db *sql.DB) {
+	for db != nil && db.Stats().OpenConnections > 0 {
 		runtime.Gosched()
 	}
 }
@@ -287,7 +290,7 @@ func Open(ctx context.Context, paths sqlite.InspectionPaths, opts OpenOptions) (
 	if err != nil {
 		return nil, err
 	}
-	o.DB, err = sqlite.Open(paths.Database)
+	o.DB, o.waitDBClosed, err = sqlite.OpenTracked(paths.Database)
 	if err != nil {
 		return nil, err
 	}

@@ -7,8 +7,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 )
 
 func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
@@ -98,4 +101,67 @@ func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
 			t.Fatal("stalled HTTP body read did not fail within idle timeout")
 		}
 	})
+}
+
+func TestPostEOFExtraBodyReadDoesNotCancelRequestContextOnLiveHandler(t *testing.T) {
+	const idleTimeout = 30 * time.Millisecond
+	handlerCtxErrCh := make(chan error, 1)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := middleware.RequestLogger(Middleware(idleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			handlerCtxErrCh <- fmt.Errorf("ReadAll: %w", readErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if string(bodyBytes) != "hello-post-eof" {
+			handlerCtxErrCh <- fmt.Errorf("body = %q, want hello-post-eof", string(bodyBytes))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// Legal extra Read after io.EOF: must short-circuit without setting a new
+		// socket read deadline on net/http's backgroundRead watcher.
+		var extra [8]byte
+		if n, extraErr := r.Body.Read(extra[:]); n != 0 || !errors.Is(extraErr, io.EOF) {
+			handlerCtxErrCh <- fmt.Errorf("extra Read after EOF = (%d, %v), want (0, io.EOF)", n, extraErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// Continue running well past 4x idleTimeout; r.Context() must remain live.
+		timer := time.NewTimer(4 * idleTimeout)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			handlerCtxErrCh <- r.Context().Err()
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		case <-timer.C:
+		}
+		handlerCtxErrCh <- r.Context().Err()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})))
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/post-eof", strings.NewReader("hello-post-eof"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do(POST /post-eof): %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ctxErr := <-handlerCtxErrCh; ctxErr != nil {
+		t.Fatalf("r.Context().Err() after post-EOF Read and 4x idleTimeout = %v, want nil", ctxErr)
+	}
 }

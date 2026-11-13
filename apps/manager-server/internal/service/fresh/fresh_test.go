@@ -3,6 +3,8 @@ package fresh
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -945,5 +947,170 @@ func TestOpenedCloseSerializesConcurrentCallersAndRunsInCloseHooks(t *testing.T)
 	}
 	if postCloseHookRan.Load() {
 		t.Fatal("BeforeClose hook registered after Close() completed should be ignored")
+	}
+}
+
+type blockingRollbackConnector struct {
+	base    driver.Connector
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingRollbackConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackConn{inner: conn, parent: c}, nil
+}
+
+func (c *blockingRollbackConnector) Driver() driver.Driver {
+	return c.base.Driver()
+}
+
+type blockingRollbackConn struct {
+	inner  driver.Conn
+	parent *blockingRollbackConnector
+}
+
+func (c *blockingRollbackConn) Prepare(query string) (driver.Stmt, error) {
+	return c.inner.Prepare(query)
+}
+
+func (c *blockingRollbackConn) Close() error {
+	return c.inner.Close()
+}
+
+func (c *blockingRollbackConn) Begin() (driver.Tx, error) {
+	//nolint:staticcheck // required by driver.Conn interface
+	tx, err := c.inner.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackTx{inner: tx, parent: c.parent}, nil
+}
+
+func (c *blockingRollbackConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	var (
+		tx  driver.Tx
+		err error
+	)
+	if b, ok := c.inner.(driver.ConnBeginTx); ok {
+		tx, err = b.BeginTx(ctx, opts)
+	} else {
+		//nolint:staticcheck // fallback
+		tx, err = c.inner.Begin()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackTx{inner: tx, parent: c.parent}, nil
+}
+
+type blockingRollbackTx struct {
+	inner  driver.Tx
+	parent *blockingRollbackConnector
+}
+
+func (t *blockingRollbackTx) Commit() error {
+	return t.inner.Commit()
+}
+
+func (t *blockingRollbackTx) Rollback() error {
+	t.parent.once.Do(func() { close(t.parent.entered) })
+	<-t.parent.release
+	return t.inner.Rollback()
+}
+
+func TestOpenedCloseHoldsAdmissionUntilAsyncTxRollbackClosesDriverConn(t *testing.T) {
+	p := pathsFor(t.TempDir())
+	o, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	rollbackEntered := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		if !closed {
+			_ = o.Close()
+		}
+	})
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseRollback) })
+	})
+
+	// Swap o.DB to a controlled connector over the same admitted SQLite database
+	// while o.Admission continues holding .manager.lock.
+	if err := o.DB.Close(); err != nil {
+		t.Fatalf("close initial DB handle: %v", err)
+	}
+	if o.waitDBClosed != nil {
+		o.waitDBClosed()
+	}
+	baseConnector, err := sqlite.NewConnector(p.Database)
+	if err != nil {
+		t.Fatalf("NewConnector: %v", err)
+	}
+	controlled := &blockingRollbackConnector{
+		base:    baseConnector,
+		entered: rollbackEntered,
+		release: releaseRollback,
+	}
+	tracked, waitClosed := sqlite.WrapConnectorWithCloseWaiter(controlled)
+	o.DB = sql.OpenDB(tracked)
+	o.waitDBClosed = waitClosed
+	dbCloseCalled := make(chan struct{})
+	o.afterDBClosed = func() {
+		close(dbCloseCalled)
+	}
+
+	txCtx, cancelTx := context.WithCancel(context.Background())
+	tx, err := o.DB.BeginTx(txCtx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	// Cancel txCtx so database/sql's internal go (*sql.Tx).awaitDone wins the
+	// tx.done CAS and enters driver.Tx.Rollback asynchronously.
+	cancelTx()
+	<-rollbackEntered
+	if rbErr := tx.Rollback(); !errors.Is(rbErr, sql.ErrTxDone) {
+		t.Fatalf("synchronous tx.Rollback() = %v, want sql.ErrTxDone while awaitDone owns Rollback", rbErr)
+	}
+
+	closeDone := make(chan error, 1)
+	closed = true
+	go func() {
+		closeDone <- o.Close()
+	}()
+	<-dbCloseCalled
+
+	select {
+	case prematureErr := <-closeDone:
+		t.Fatalf("Close() returned %v while async Tx.awaitDone Rollback still held connection", prematureErr)
+	default:
+	}
+	if _, reopenErr := Open(t.Context(), p, OpenOptions{}); !errors.Is(reopenErr, processlock.ErrLocked) {
+		t.Fatalf("Open while async Rollback still active = %v, want processlock.ErrLocked", reopenErr)
+	}
+
+	releaseOnce.Do(func() { close(releaseRollback) })
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil {
+			t.Fatalf("Close(): %v", closeErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not finish promptly after async Rollback completed")
+	}
+
+	reopened, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatalf("Open after Close() drained async Rollback: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("reopened.Close(): %v", err)
 	}
 }
