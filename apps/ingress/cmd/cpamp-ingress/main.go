@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -364,15 +365,25 @@ func managerFreshAuthority(managerURL *url.URL) func(context.Context) (ingress.F
 	}
 }
 
+const maxPreCommitBootstrapSignalBytes = 256
+
 func decodesPreCommitBootstrapSignal(res *http.Response) bool {
 	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return false
 	}
+	var buf [maxPreCommitBootstrapSignalBytes + 1]byte
+	n, err := io.ReadFull(res.Body, buf[:])
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false
+	}
+	if n > maxPreCommitBootstrapSignalBytes {
+		return false
+	}
 	var signal struct {
 		BootstrapUI bool `json:"bootstrapUI"`
 	}
-	decoder := json.NewDecoder(io.LimitReader(res.Body, 256))
+	decoder := json.NewDecoder(bytes.NewReader(buf[:n]))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&signal); err != nil || !signal.BootstrapUI {
 		return false

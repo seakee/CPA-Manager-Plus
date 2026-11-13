@@ -668,9 +668,20 @@ func (h *startupHTTPHandler) serveStartupAuthority(w http.ResponseWriter, r *htt
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if bootstrapShellServing(r.Context(), http.HandlerFunc(h.serveFixedBootstrap)) {
+	if h.bootstrapUIAvailable(r.Context()) {
 		writePreCommitBootstrapAuthority(w)
 		return
 	}
 	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
+func (h *startupHTTPHandler) bootstrapUIAvailable(ctx context.Context) bool {
+	if h.ready.Load() || h.discoveryLifecycle() != routingdomain.DiscoveryActive {
+		return false
+	}
+	h.projectionMu.RLock()
+	readOnly := h.readOnlyDiscovery != nil
+	shell := h.readOnlyShell
+	h.projectionMu.RUnlock()
+	return readOnly && bootstrapShellReady(ctx, shell)
 }

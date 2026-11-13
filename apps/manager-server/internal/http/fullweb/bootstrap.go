@@ -18,6 +18,21 @@ import (
 // graph. It never invents an effective routing snapshot or serves SPA fallback.
 type BootstrapHandler struct{ Dist fs.FS }
 
+// Ready reports whether ServeHTTP can open a non-directory index.html for
+// FixedBootstrapUIPath without rendering the document or scanning assets.
+func (h BootstrapHandler) Ready() bool {
+	if h.Dist == nil {
+		return false
+	}
+	f, err := h.Dist.Open("index.html")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	return err == nil && !info.IsDir()
+}
+
 var htmlAssetReference = regexp.MustCompile(`(?:src|href)=["']\./(assets/[^"']+)["']`)
 var moduleReference = regexp.MustCompile(`(?:\bfrom\s*|\bimport\s*)["']([^"']+)["']`)
 var cssReference = regexp.MustCompile(`url\(["']?([^"')]+)["']?\)`)

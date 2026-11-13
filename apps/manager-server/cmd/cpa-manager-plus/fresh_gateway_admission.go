@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/freshbootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
@@ -47,7 +48,7 @@ func (a *freshApplication) freshAuthority(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if op.Routing.Target == "" || op.Routing.OperationID == "" {
-		if !op.Routing.Committed && bootstrapShellServing(r.Context(), a.fixed) {
+		if !op.Routing.Committed && a.bootstrapUIAvailable(r.Context()) {
 			writePreCommitBootstrapAuthority(w)
 			return
 		}
@@ -121,9 +122,22 @@ func (w *statusProbeWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func bootstrapShellServing(ctx context.Context, handler http.Handler) bool {
+func (a *freshApplication) bootstrapUIAvailable(ctx context.Context) bool {
+	if a == nil || a.fixed == nil {
+		return false
+	}
+	if fixed, ok := a.fixed.(freshbootstrap.Handler); ok {
+		return fixed.Authority != nil && fixed.Current != nil && bootstrapShellReady(ctx, fixed.Shell)
+	}
+	return bootstrapShellReady(ctx, a.fixed)
+}
+
+func bootstrapShellReady(ctx context.Context, handler http.Handler) bool {
 	if handler == nil {
 		return false
+	}
+	if ready, ok := handler.(interface{ Ready() bool }); ok {
+		return ready.Ready()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, bootstrap.FixedBootstrapUIPath, nil)
 	if err != nil {

@@ -178,7 +178,10 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 		return rec
 	}
 
-	// Generic/bare 404 (plain NotFound, false flag, unknown field, or trailing data) stays closed (503, no Location).
+	validSignal := `{"bootstrapUI":true}`
+	paddedAtLimit := validSignal + strings.Repeat(" ", maxPreCommitBootstrapSignalBytes-len(validSignal))
+
+	// Generic/bare 404, false flag, unknown field, trailing data, and over-limit bodies stay closed (503, no Location).
 	for _, tc := range []struct {
 		name string
 		ct   string
@@ -189,6 +192,9 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 		{name: "json-false", ct: "application/json", body: `{"bootstrapUI":false}`},
 		{name: "json-unknown-field", ct: "application/json", body: `{"bootstrapUI":true,"extra":1}`},
 		{name: "json-trailing-data", ct: "application/json", body: `{"bootstrapUI":true}{}`},
+		{name: "padded-to-limit-plus-trailing-json", ct: "application/json", body: paddedAtLimit + `{}`},
+		{name: "padded-to-limit-plus-trailing-text", ct: "application/json", body: paddedAtLimit + "trailing"},
+		{name: "over-limit-valid-json-whitespace", ct: "application/json", body: paddedAtLimit + " "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			uiServing.Store(false)
@@ -202,19 +208,22 @@ func TestPreFreshAuthoritySignalsGateBrowserRedirectAndLegacyPassthrough(t *test
 		})
 	}
 
-	// Positive pre-commit 404 JSON with Bootstrap UI serving -> 303 whose Location returns 200.
+	// Positive pre-commit 404 JSON (canonical and exact-limit valid) with Bootstrap UI serving -> 303 whose Location returns 200.
 	uiServing.Store(true)
 	status.Store(http.StatusNotFound)
 	contentType.Store("application/json; charset=utf-8")
-	body.Store(`{"bootstrapUI":true}`)
-	rec := navigate(handler, "/console")
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
-		t.Fatalf("explicit bootstrap 404 = %d Location=%q", rec.Code, rec.Header().Get("Location"))
-	}
-	if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
-		t.Fatalf("landing = %d owner=%q", landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+	for _, payload := range []string{validSignal, paddedAtLimit} {
+		body.Store(payload)
+		rec := navigate(handler, "/console")
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != ingress.FixedBootstrapUIPath {
+			t.Fatalf("explicit bootstrap 404 (len=%d) = %d Location=%q", len(payload), rec.Code, rec.Header().Get("Location"))
+		}
+		if landing := navigate(handler, rec.Header().Get("Location")); landing.Code != http.StatusOK || landing.Header().Get("X-CPAMP-Route-Owner") != "manager" {
+			t.Fatalf("landing (len=%d) = %d owner=%q", len(payload), landing.Code, landing.Header().Get("X-CPAMP-Route-Owner"))
+		}
 	}
 
+	var rec *httptest.ResponseRecorder
 	// Valid uncommitted 200 Fresh projection -> 303 whose Location returns 200.
 	uncommitted := ingress.FreshRouteState{InstallationID: "install-one", Generation: "gen-one", OperationID: "op-one", Revision: 1, Target: "/console", Committed: false}
 	status.Store(http.StatusOK)
