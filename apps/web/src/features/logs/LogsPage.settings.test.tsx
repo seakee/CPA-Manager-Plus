@@ -169,7 +169,9 @@ beforeEach(() => {
     error: null,
   });
   useNotificationStore.getState().clearAll();
-
+  mocks.getConfig.mockReset();
+  mocks.fetchLogs.mockReset();
+  mocks.downloadBlob.mockReset();
   mocks.updateLoggingToFile.mockResolvedValue({ ok: true });
   mocks.updateDebug.mockResolvedValue({ ok: true });
   mocks.updateRequestLog.mockResolvedValue({ ok: true });
@@ -348,13 +350,7 @@ describe('LogsPage settings and empty-state file logging control', () => {
         loggingToFile: false,
       });
       await act(async () => {
-        useConfigStore.setState((state) => ({
-          ...state,
-          config: {
-            ...state.config!,
-            loggingToFile: false,
-          },
-        }));
+        await useConfigStore.getState().fetchConfig(undefined, true);
       });
 
       expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
@@ -398,6 +394,140 @@ describe('LogsPage settings and empty-state file logging control', () => {
         await vi.advanceTimersByTimeAsync(24000);
       });
       expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves buffer, in-flight header refresh load, and persisted autoRefresh across transient config === null', async () => {
+    vi.useFakeTimers();
+    try {
+      useConfigStore.setState((state) => ({
+        ...state,
+        config: {
+          ...state.config!,
+          loggingToFile: true,
+        },
+      }));
+      const client = buildAuthorityClient({ mode: 'managed', writable: true });
+      const mounted = await mountLogsPage(client, '/logs');
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(1);
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(false);
+
+      await act(async () => {
+        findAutoRefreshSwitch(mounted.root).props.onChange(true);
+      });
+      expect(findAutoRefreshSwitch(mounted.root).props.checked).toBe(true);
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+
+      // 1) MainLayout.handleRefreshAll: clearCache() sets config: null while
+      // fetchConfig(undefined, true) and triggerHeaderRefresh() -> loadLogs(false) run concurrently.
+      const pendingConfig = createDeferred<Record<string, unknown>>();
+      const pendingHeaderLogs = createDeferred<{
+        lines: string[];
+        'line-count': number;
+        'latest-timestamp': number;
+        latestAfter: number;
+        nextCursor: string;
+      }>();
+      mocks.getConfig.mockReturnValueOnce(pendingConfig.promise);
+      mocks.fetchLogs.mockReturnValueOnce(pendingHeaderLogs.promise);
+
+      let refreshPromise: Promise<unknown> | undefined;
+      let headerRefreshPromise: Promise<void> | undefined;
+      await act(async () => {
+        useConfigStore.getState().clearCache();
+        refreshPromise = useConfigStore.getState().fetchConfig(undefined, true).catch(() => undefined);
+        headerRefreshPromise = triggerHeaderRefresh();
+      });
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+
+      // Concurrent loadLogs(false) started by triggerHeaderRefresh() must NOT be aborted by config === null.
+      await act(async () => {
+        pendingHeaderLogs.resolve({
+          lines: ['[2026-11-12 10:02:00] [info] [log_writer.go:3] refreshed-during-null'],
+          'line-count': 1,
+          'latest-timestamp': 300,
+          latestAfter: 300,
+          nextCursor: 'cursor-after-null',
+        });
+        await headerRefreshPromise;
+      });
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+
+      // 2) Failed refetch during transient config === null leaves persisted autoRefresh intact;
+      // recovering config with a failing follow-up loadLogs proves the earlier buffer stayed intact.
+      mocks.fetchLogs.mockRejectedValueOnce(new Error('temporary log fetch failure'));
+      await act(async () => {
+        pendingConfig.reject(new Error('transient config failure'));
+        await refreshPromise;
+      });
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+
+      await act(async () => {
+        useConfigStore.setState({
+          config: {
+            debug: false,
+            requestLog: false,
+            loggingToFile: true,
+            logsMaxTotalSizeMb: 0,
+            errorLogsMaxFiles: 10,
+            pprofEnable: false,
+            pprofAddr: '127.0.0.1:8316',
+            raw: {},
+          },
+          loading: false,
+          error: null,
+        });
+      });
+
+      expect(findAutoRefreshSwitch(mounted.root).props.checked).toBe(true);
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(false);
+      await act(async () => {
+        findDownloadButton(mounted.root).props.onClick();
+      });
+      expect(mocks.downloadBlob).toHaveBeenCalledTimes(1);
+      expect(await mocks.downloadBlob.mock.calls[0][0].blob.text()).toContain(
+        'refreshed-during-null'
+      );
+
+      // Polling resumes because autoRefresh remained true across null -> true.
+      mocks.fetchLogs.mockResolvedValueOnce({
+        lines: ['[2026-11-12 10:03:00] [info] [log_writer.go:4] polled-after-recovery'],
+        'line-count': 1,
+        'latest-timestamp': 400,
+        latestAfter: 400,
+        nextCursor: 'cursor-4',
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(4);
+
+      // 3) If a subsequent null -> false lands, full cleanup STILL executes.
+      await act(async () => {
+        useConfigStore.getState().clearCache();
+      });
+      await act(async () => {
+        useConfigStore.setState({
+          config: {
+            debug: false,
+            requestLog: false,
+            loggingToFile: false,
+            logsMaxTotalSizeMb: 0,
+            errorLogsMaxFiles: 10,
+            pprofEnable: false,
+            pprofAddr: '127.0.0.1:8316',
+            raw: {},
+          },
+          loading: false,
+          error: null,
+        });
+      });
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('false');
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
