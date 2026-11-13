@@ -15,6 +15,7 @@ export interface UseDashboardUsageSummaryReturn {
   enabled: boolean;
   loading: boolean;
   error: string;
+  evidenceScope: string;
   summary: DashboardSummaryResponse | null;
   recentFailures: DashboardSummaryResponse['recent_failures'];
   topModels: DashboardSummaryResponse['top_models_today'];
@@ -31,40 +32,84 @@ export interface UseDashboardUsageSummaryReturn {
 }
 
 export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
+  const apiBase = useAuthStore((state) => state.apiBase ?? '');
   const managementKey = useAuthStore((state) => state.managementKey);
+  const connectionScope = useMemo(
+    () => JSON.stringify([apiBase, managementKey]),
+    [apiBase, managementKey]
+  );
   const availability = useRequestMonitoringAvailability();
   const [summary, setSummary] = useState<DashboardSummaryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [evidenceScope, setEvidenceScope] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const requestIdRef = useRef(0);
 
-  const enabled = availability.available && Boolean(availability.serviceBase);
-  const serviceBase = availability.serviceBase;
+  const rawEnabled = availability.available && Boolean(availability.serviceBase);
+  const rawServiceBase = availability.serviceBase;
 
+  const [settledTarget, setSettledTarget] = useState<{
+    scope: string;
+    enabled: boolean;
+    serviceBase: string;
+  }>(() => ({
+    scope: connectionScope,
+    enabled: rawEnabled,
+    serviceBase: rawServiceBase,
+  }));
+
+  if (settledTarget.scope !== connectionScope) {
+    setSettledTarget({
+      scope: connectionScope,
+      enabled: rawEnabled,
+      serviceBase: rawServiceBase,
+    });
+  } else if (
+    (!availability.checking || rawServiceBase !== '') &&
+    (settledTarget.enabled !== rawEnabled || settledTarget.serviceBase !== rawServiceBase)
+  ) {
+    setSettledTarget({
+      scope: connectionScope,
+      enabled: rawEnabled,
+      serviceBase: rawServiceBase,
+    });
+  }
+
+  const retainReprobeTarget =
+    settledTarget.scope === connectionScope &&
+    availability.checking &&
+    rawServiceBase === '';
+  const enabled = retainReprobeTarget ? settledTarget.enabled : rawEnabled;
+  const serviceBase = retainReprobeTarget ? settledTarget.serviceBase : rawServiceBase;
   useLayoutEffect(() => {
     requestIdRef.current += 1;
     setSummary(null);
     setLastRefreshedAt(null);
     setError('');
+    setEvidenceScope('');
     setLoading(enabled);
     return () => {
       requestIdRef.current += 1;
     };
-  }, [enabled, managementKey, serviceBase]);
+  }, [connectionScope, enabled, serviceBase]);
 
   const refresh = useCallback(async () => {
     if (!enabled || !serviceBase) {
-      setSummary(null);
-      setLastRefreshedAt(null);
-      setLoading(false);
+      if (!availability.checking) {
+        setSummary(null);
+        setLastRefreshedAt(null);
+        setError('');
+        setEvidenceScope('');
+        setLoading(false);
+      }
       return;
     }
 
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    const scopeAtStart = connectionScope;
     setLoading(true);
-    setError('');
 
     try {
       const response = await dashboardApi.getSummary(serviceBase, managementKey, {
@@ -75,16 +120,19 @@ export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
       });
       if (requestIdRef.current !== requestId) return;
       setSummary(response);
+      setError('');
+      setEvidenceScope(scopeAtStart);
       setLastRefreshedAt(new Date());
     } catch (err) {
       if (requestIdRef.current !== requestId) return;
       setError(err instanceof Error ? err.message : String(err));
+      setEvidenceScope(scopeAtStart);
     } finally {
       if (requestIdRef.current === requestId) {
         setLoading(false);
       }
     }
-  }, [enabled, managementKey, serviceBase]);
+  }, [availability.checking, connectionScope, enabled, managementKey, serviceBase]);
 
   useEffect(() => {
     if (availability.checking) {
@@ -108,6 +156,7 @@ export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
       enabled,
       loading: availability.checking || loading,
       error,
+      evidenceScope,
       summary,
       recentFailures: summary?.recent_failures ?? [],
       topModels: summary?.top_models_today ?? [],
@@ -122,6 +171,16 @@ export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
       serviceBase,
       refresh,
     }),
-    [availability.checking, enabled, error, lastRefreshedAt, loading, refresh, serviceBase, summary]
+    [
+      availability.checking,
+      enabled,
+      error,
+      evidenceScope,
+      lastRefreshedAt,
+      loading,
+      refresh,
+      serviceBase,
+      summary,
+    ]
   );
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import {
   IconBot,
   IconFileText,
@@ -18,7 +19,10 @@ import {
   type UsageServiceStatus,
 } from '@/services/api/usageService';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
+import {
+  usePanelFeatureAvailability,
+  type PanelFeatureAvailability,
+} from '@/hooks/usePanelFeatureAvailability';
 import { loadMonitoringMetaPayload } from '@/features/monitoring/services/monitoringMetaService';
 import { buildMonitoringAuthMetaMap } from '@/features/monitoring/model/authMeta';
 import { buildAuthFileMapFromMeta } from '@/features/monitoring/model/sourceDisplay';
@@ -31,7 +35,16 @@ import { UsageMetricsCard } from './components/UsageMetricsCard';
 import { CollectorStatusCard } from './components/CollectorStatusCard';
 import { HealthAlertsCard } from './components/HealthAlertsCard';
 import { TrafficOverviewCard } from './components/TrafficOverviewCard';
+import {
+  readDashboardUiState,
+  writeDashboardUiState,
+  type DashboardDisplayMode,
+} from './dashboardUiState';
 import { useDashboardUsageSummary } from './hooks/useDashboardUsageSummary';
+import {
+  evaluateCollectorHealth,
+  hasCollectorAttention,
+} from './model/dashboardHealthEvaluator';
 import { getDashboardModelCountDisplay } from './modelCountDisplay';
 import { resolveProviderCount } from './providerStats';
 import styles from './DashboardPage.module.scss';
@@ -66,19 +79,105 @@ export function DashboardPage() {
     JSON.stringify([state.apiBase, state.managementKey])
   );
   const featureAvailability = usePanelFeatureAvailability();
+  const [displayMode, setDisplayMode] = useState<DashboardDisplayMode>(
+    () => readDashboardUiState().displayMode
+  );
+  const [expandedState, setExpandedState] = useState<{ scope: string; expanded: boolean }>({
+    scope: connectionScope,
+    expanded: false,
+  });
+
+  const rawManagerServiceBase = featureAvailability.managerServiceBase ?? '';
+  const [settledServiceBase, setSettledServiceBase] = useState<{
+    scope: string;
+    base: string;
+  }>(() => ({
+    scope: connectionScope,
+    base: rawManagerServiceBase,
+  }));
+
+  if (settledServiceBase.scope !== connectionScope) {
+    setSettledServiceBase({
+      scope: connectionScope,
+      base: rawManagerServiceBase,
+    });
+  } else if (
+    (!featureAvailability.checking || rawManagerServiceBase !== '') &&
+    settledServiceBase.base !== rawManagerServiceBase
+  ) {
+    setSettledServiceBase({
+      scope: connectionScope,
+      base: rawManagerServiceBase,
+    });
+  }
+
+  const effectiveManagerServiceBase =
+    settledServiceBase.scope !== connectionScope
+      ? rawManagerServiceBase
+      : featureAvailability.checking && rawManagerServiceBase === ''
+        ? settledServiceBase.base
+        : rawManagerServiceBase;
+  const detailsExpanded =
+    expandedState.scope === connectionScope ? expandedState.expanded : false;
+
+  const handleDisplayModeChange = useCallback(
+    (nextMode: DashboardDisplayMode) => {
+      setDisplayMode((prevMode) => {
+        if (prevMode === nextMode) {
+          return prevMode;
+        }
+        writeDashboardUiState(nextMode);
+        return nextMode;
+      });
+      setExpandedState({ scope: connectionScope, expanded: false });
+    },
+    [connectionScope]
+  );
+
+  const handleToggleDetails = useCallback(() => {
+    setExpandedState((prev) => ({
+      scope: connectionScope,
+      expanded: prev.scope === connectionScope ? !prev.expanded : true,
+    }));
+  }, [connectionScope]);
+
   const useApiBaseAsCpaBase =
-    featureAvailability.panelHostConfirmed &&
+    Boolean(featureAvailability.panelHostConfirmed) &&
     featureAvailability.panelHostMode === 'external_panel';
 
   return (
     <DashboardPageContent
-      key={`${connectionScope}:${featureAvailability.managerServiceBase}`}
+      key={`${connectionScope}:${effectiveManagerServiceBase}`}
+      connectionScope={connectionScope}
+      featureAvailability={featureAvailability}
       useApiBaseAsCpaBase={useApiBaseAsCpaBase}
+      displayMode={displayMode}
+      detailsExpanded={detailsExpanded}
+      onDisplayModeChange={handleDisplayModeChange}
+      onToggleDetails={handleToggleDetails}
     />
   );
 }
 
-function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: boolean }) {
+interface DashboardPageContentProps {
+  connectionScope: string;
+  featureAvailability: PanelFeatureAvailability;
+  useApiBaseAsCpaBase: boolean;
+  displayMode: DashboardDisplayMode;
+  detailsExpanded: boolean;
+  onDisplayModeChange: (mode: DashboardDisplayMode) => void;
+  onToggleDetails: () => void;
+}
+
+function DashboardPageContent({
+  connectionScope,
+  featureAvailability,
+  useApiBaseAsCpaBase,
+  displayMode,
+  detailsExpanded,
+  onDisplayModeChange,
+  onToggleDetails,
+}: DashboardPageContentProps) {
   const { t, i18n } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -125,6 +224,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
   const [errorLogsError, setErrorLogsError] = useState('');
   const [managerCpaBase, setManagerCpaBase] = useState('');
   const [healthMetaError, setHealthMetaError] = useState('');
+  const [healthEvidenceScope, setHealthEvidenceScope] = useState('');
   const [displayMeta, setDisplayMeta] = useState<DashboardDisplayMeta>({
     authFiles: [],
     channels: [],
@@ -263,6 +363,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           claude: resolveProviderCount(claudeRes) ?? current.claude,
           openai: resolveProviderCount(openaiRes) ?? current.openai,
         }));
+
         setStatsError(
           [keysRes, filesRes, geminiRes, codexRes, xaiRes, claudeRes, openaiRes].some(
             (result) => result.status === 'rejected'
@@ -321,18 +422,22 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
 
   const refreshHealth = useCallback(async () => {
     const requestId = ++healthRequestId.current;
+    const scopeAtStart = connectionScope;
     if (!usageEnabled || !usageServiceBase) {
-      setCollectorStatus(null);
-      setCollectorError('');
-      setCollectorLoading(false);
-      setErrorLogs([]);
-      setErrorLogsLoaded(false);
-      setErrorLogsError('');
-      setErrorLogsLoading(false);
-      setManagerCpaBase('');
-      setHealthMetaError('');
-      channelsSnapshotLoadedRef.current = false;
-      setDisplayMeta({ authFiles: [], channels: [], apiKeyAliases: [] });
+      if (!featureAvailability.checking) {
+        setCollectorStatus(null);
+        setCollectorError('');
+        setCollectorLoading(false);
+        setErrorLogs([]);
+        setErrorLogsLoaded(false);
+        setErrorLogsError('');
+        setErrorLogsLoading(false);
+        setManagerCpaBase('');
+        setHealthMetaError('');
+        setHealthEvidenceScope('');
+        channelsSnapshotLoadedRef.current = false;
+        setDisplayMeta({ authFiles: [], channels: [], apiKeyAliases: [] });
+      }
       return;
     }
 
@@ -349,6 +454,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
       ]);
 
     if (requestId !== healthRequestId.current) return;
+    setHealthEvidenceScope(scopeAtStart);
     if (collectorResult.status === 'fulfilled') {
       setCollectorStatus(collectorResult.value);
       setCollectorError('');
@@ -402,7 +508,15 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           ? aliasesResult.value.items
           : current.apiKeyAliases,
     }));
-  }, [config, managementKey, t, usageEnabled, usageServiceBase]);
+  }, [
+    config,
+    connectionScope,
+    featureAvailability.checking,
+    managementKey,
+    t,
+    usageEnabled,
+    usageServiceBase,
+  ]);
 
   const refreshDashboard = useCallback(async () => {
     setCurrentTime(new Date());
@@ -415,8 +529,11 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
   }, [fetchModels, refreshStats]);
 
   useEffect(() => {
+    if (featureAvailability.checking) {
+      return;
+    }
     void refreshHealth();
-  }, [refreshHealth]);
+  }, [featureAvailability.checking, refreshHealth]);
 
   useEffect(() => {
     if (!usageEnabled) return;
@@ -427,6 +544,59 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
   }, [refreshHealth, usageEnabled]);
 
   useHeaderRefresh(refreshDashboard);
+
+  const collectorEvalInput = useMemo(
+    () => ({
+      panelHostMode: featureAvailability.panelHostMode ?? 'manager_embedded',
+      managerServiceAvailable: Boolean(featureAvailability.managerServiceAvailable),
+      featureChecking: Boolean(featureAvailability.checking),
+      featureReason: featureAvailability.reason ?? '',
+      usageEnabled,
+      currentScope: connectionScope,
+      evidenceScope: healthEvidenceScope,
+      status: collectorStatus,
+      loading: collectorLoading,
+      error: collectorError,
+    }),
+    [
+      collectorError,
+      collectorLoading,
+      collectorStatus,
+      connectionScope,
+      featureAvailability.checking,
+      featureAvailability.managerServiceAvailable,
+      featureAvailability.panelHostMode,
+      featureAvailability.reason,
+      healthEvidenceScope,
+      usageEnabled,
+    ]
+  );
+
+  const collectorEval = useMemo(
+    () => evaluateCollectorHealth(collectorEvalInput),
+    [collectorEvalInput]
+  );
+  const collectorAttention = useMemo(
+    () => hasCollectorAttention(collectorEvalInput),
+    [collectorEvalInput]
+  );
+
+  const usageEvidenceScope =
+    usageSummary.evidenceScope ??
+    (usageSummary.summary || usageSummary.error ? connectionScope : healthEvidenceScope);
+
+  const isSimpleMode = displayMode === 'simple';
+  const showCollectorCard = !isSimpleMode || detailsExpanded || collectorAttention;
+  const showConfigSummary = !isSimpleMode || detailsExpanded;
+  const showApiBaseBlock = !isSimpleMode || connectionStatus !== 'connected';
+
+  const displayModeItems = useMemo(
+    () => [
+      { id: 'simple' as const, label: t('dashboard.display_mode_simple') },
+      { id: 'advanced' as const, label: t('dashboard.display_mode_advanced') },
+    ],
+    [t]
+  );
 
   // Calculate total provider keys only when all provider stats are available.
   const providerStatsReady =
@@ -531,10 +701,16 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
     hour12: false,
   });
 
+  const dataRowClassName = !isSimpleMode
+    ? styles.dataRow
+    : showCollectorCard
+      ? `${styles.dataRow} ${styles.dataRowSimpleWithCollector}`
+      : `${styles.dataRow} ${styles.dataRowSimple}`;
+
   return (
     <>
       {/* 1. Header Section */}
-      <header className={styles.header}>
+      <header className={`${styles.header} ${isSimpleMode ? styles.headerSimple : ''}`}>
         <div className={styles.headerLeft}>
           <div className={styles.connectionStatus}>
             <span
@@ -548,7 +724,15 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             />
             <div className={styles.statusInfo}>
               <span className={styles.statusLabel}>{t('common.connection_status')}</span>
-              <span className={styles.statusValue}>
+              <span
+                className={`${styles.statusValue} ${
+                  connectionStatus === 'connecting'
+                    ? styles.statusValueConnecting
+                    : connectionStatus !== 'connected'
+                      ? styles.statusValueDisconnected
+                      : ''
+                }`}
+              >
                 {t(
                   connectionStatus === 'connected'
                     ? 'common.connected'
@@ -559,29 +743,47 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
               </span>
             </div>
           </div>
-          <div className={styles.apiBaseBlock}>
-            <span className={styles.apiLabel}>{t('dashboard.api_base')}</span>
-            <span className={styles.apiValue}>{apiBase || 'http://localhost:3000'}</span>
-          </div>
+          {showApiBaseBlock ? (
+            <div className={styles.apiBaseBlock}>
+              <span className={styles.apiLabel}>{t('dashboard.api_base')}</span>
+              <span className={styles.apiValue}>{apiBase || 'http://localhost:3000'}</span>
+            </div>
+          ) : null}
         </div>
 
         <div className={styles.headerRight}>
-          <div className={styles.timeDisplay}>
-            <span className={styles.time}>{formattedDateTime}</span>
-            <span className={styles.date}>{formattedDate}</span>
-          </div>
+          {!isSimpleMode ? (
+            <div className={styles.timeDisplay}>
+              <span className={styles.time}>{formattedDateTime}</span>
+              <span className={styles.date}>{formattedDate}</span>
+            </div>
+          ) : null}
           <div className={styles.headerActions}>
-            <button
-              className={styles.actionBtn}
-              onClick={refreshDashboard}
-              title={t('common.refresh')}
-            >
-              <IconRefreshCw size={16} />
-              <span>{t('common.refresh')}</span>
-            </button>
-            <Link to="/config" className={styles.actionBtn} title={t('nav.system_config')}>
-              <IconSettings size={16} />
-            </Link>
+            <SegmentedTabs
+              className={styles.displayModeTabs}
+              idBase="dashboard-display-mode"
+              ariaLabel={t('dashboard.display_mode_label')}
+              items={displayModeItems}
+              activeTab={displayMode}
+              onChange={onDisplayModeChange}
+              responsiveFullWidth={false}
+            />
+            {!isSimpleMode ? (
+              <>
+                <button
+                  type="button"
+                  className={styles.actionBtn}
+                  onClick={refreshDashboard}
+                  title={t('common.refresh')}
+                >
+                  <IconRefreshCw size={16} />
+                  <span>{t('common.refresh')}</span>
+                </button>
+                <Link to="/config" className={styles.actionBtn} title={t('nav.system_config')}>
+                  <IconSettings size={16} />
+                </Link>
+              </>
+            ) : null}
           </div>
         </div>
       </header>
@@ -597,6 +799,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           refreshSignal={cardRefreshSignal}
           usageEnabled={usageSummary.enabled}
           usageLoading={usageSummary.loading && !usageSummary.summary}
+          usageLoaded={Boolean(usageSummary.summary)}
           usageError={usageSummary.error}
           collectorStatus={collectorStatus}
           collectorLoading={collectorLoading}
@@ -605,6 +808,13 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           errorLogsLoading={errorLogsLoading && !errorLogsLoaded}
           errorLogsError={errorLogsError}
           errorLogsLoaded={errorLogsLoaded}
+          healthMetaError={healthMetaError}
+          currentScope={connectionScope}
+          evidenceScope={healthEvidenceScope}
+          usageEvidenceScope={usageEvidenceScope}
+          displayMode={displayMode}
+          detailsExpanded={detailsExpanded}
+          onToggleDetails={onToggleDetails}
         />
       </section>
       {healthMetaError ? <div className="error-box" role="alert">{healthMetaError}</div> : null}
@@ -621,6 +831,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             error={usageSummary.error}
             lastRefreshedAt={usageSummary.lastRefreshedAt}
             mode="metrics-only"
+            displayMode={displayMode}
           />
         </section>
       )}
@@ -634,22 +845,25 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             todayRequestHealthTimeline={usageSummary.todayRequestHealthTimeline}
             tokenMix={usageSummary.tokenMix}
             loading={usageSummary.loading && !usageSummary.summary}
+            displayMode={displayMode}
           />
         </section>
       )}
 
       {/* 5. Data & Status Row (Rankings, Health, Failures) */}
-      {usageSummary.enabled && !usageSummaryBootstrapError && (
-        <section className={styles.dataRow}>
-          <UsageMetricsCard
-            summary={usageSummary.summary}
-            topModels={usageSummary.topModels}
-            modelCostRank={usageSummary.modelCostRank}
-            loading={usageSummary.loading && !usageSummary.summary}
-            error={usageSummary.error}
-            lastRefreshedAt={usageSummary.lastRefreshedAt}
-            mode="rank-only"
-          />
+      {usageSummary.enabled && !usageSummaryBootstrapError ? (
+        <section className={dataRowClassName}>
+          {!isSimpleMode ? (
+            <UsageMetricsCard
+              summary={usageSummary.summary}
+              topModels={usageSummary.topModels}
+              modelCostRank={usageSummary.modelCostRank}
+              loading={usageSummary.loading && !usageSummary.summary}
+              error={usageSummary.error}
+              lastRefreshedAt={usageSummary.lastRefreshedAt}
+              mode="rank-only"
+            />
+          ) : null}
           <HealthAlertsCard
             loading={usageSummary.loading && !usageSummary.summary}
             recentFailures={usageSummary.recentFailures}
@@ -660,6 +874,21 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             channelByAuthIndex={channelByAuthIndex}
             apiKeyAliasMap={apiKeyAliasMap}
           />
+          {showCollectorCard ? (
+            <CollectorStatusCard
+              enabled={usageSummary.enabled}
+              serviceBase={usageSummary.serviceBase}
+              managementKey={managementKey}
+              refreshSignal={cardRefreshSignal}
+              status={collectorStatus}
+              loading={collectorLoading}
+              error={collectorError}
+              healthEvaluation={collectorEval}
+            />
+          ) : null}
+        </section>
+      ) : isSimpleMode && collectorAttention ? (
+        <section className={`${styles.dataRow} ${styles.dataRowSingle}`}>
           <CollectorStatusCard
             enabled={usageSummary.enabled}
             serviceBase={usageSummary.serviceBase}
@@ -668,16 +897,25 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             status={collectorStatus}
             loading={collectorLoading}
             error={collectorError}
+            healthEvaluation={collectorEval}
           />
         </section>
-      )}
+      ) : null}
 
       {/* 6. Quick Stats + Config Summary */}
       {statsError ? <div role="alert">{statsError}</div> : null}
       {modelsCache && modelsError ? <div role="alert">{modelsError}</div> : null}
-      <section className={styles.bottomSummaryRow}>
+      <section
+        className={`${styles.bottomSummaryRow} ${
+          !showConfigSummary ? styles.bottomSummaryRowSimple : ''
+        }`}
+      >
         <div className={styles.quickStatsPanel}>
-          <div className={styles.bentoGrid}>
+          <div
+            className={`${styles.bentoGrid} ${
+              isSimpleMode && !detailsExpanded ? styles.bentoGridCompact : ''
+            }`}
+          >
             {quickStats.map((stat, index) => (
               <Link
                 key={stat.path}
@@ -689,9 +927,9 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
                 <div className={styles.bentoContent}>
                   <span className={styles.bentoLabel}>{stat.label}</span>
                   <span className={styles.bentoValue}>{stat.loading ? '...' : stat.value}</span>
-                  {stat.sublabel && !stat.loading && (
+                  {(!isSimpleMode || detailsExpanded) && stat.sublabel && !stat.loading ? (
                     <span className={styles.bentoSublabel}>{stat.sublabel}</span>
-                  )}
+                  ) : null}
                 </div>
                 <div className={styles.bentoArrow}>{t('dashboard.manage')} →</div>
               </Link>
@@ -699,7 +937,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           </div>
         </div>
 
-        {config && (
+        {config && showConfigSummary && (
           <div className={styles.configCard}>
             <div className={styles.configHeader}>
               <h3>{t('dashboard.current_config_summary')}</h3>

@@ -11,6 +11,7 @@ import { useThemeStore } from '@/stores';
 import type { DashboardSummaryResponse } from '@/services/api/usageService';
 import { getDataPalette } from '@/utils/dataPalette';
 import { formatCompactNumber, formatDurationMs, formatUsd } from '@/utils/usage';
+import type { DashboardDisplayMode } from '../dashboardUiState';
 import styles from './UsageMetricsCard.module.scss';
 
 interface UsageMetricsCardProps {
@@ -21,6 +22,7 @@ interface UsageMetricsCardProps {
   error?: string;
   lastRefreshedAt: Date | null;
   mode?: 'metrics-only' | 'rank-only' | 'all';
+  displayMode?: DashboardDisplayMode;
 }
 
 const formatMetric = (value: number | undefined, digits = 0) => {
@@ -71,6 +73,7 @@ export function UsageMetricsCard({
   error,
   lastRefreshedAt,
   mode = 'all',
+  displayMode = 'advanced',
 }: UsageMetricsCardProps) {
   const { t, i18n } = useTranslation();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -84,69 +87,86 @@ export function UsageMetricsCard({
       })
     : undefined;
 
-  const metrics = [
-    {
-      label: t('dashboard.today_requests'),
-      value: today ? formatMetric(today.total_calls) : loadingText,
-      subValue: today
-        ? t('dashboard.metric_failure_count', { value: formatMetric(today.failure_calls) })
-        : lastRefreshedText,
-      icon: <IconInbox size={20} />,
-      color: dataPalette.blue,
-    },
-    {
-      label: t('dashboard.rpm_30m'),
-      value: rolling ? formatMetric(rolling.rpm, 1) : loadingText,
-      subValue: rolling
-        ? t('dashboard.metric_rolling_calls', { value: formatMetric(rolling.total_calls) })
-        : undefined,
-      icon: <IconChartLine size={20} />,
-      color: dataPalette.violet,
-    },
-    {
-      label: t('dashboard.tpm_30m'),
-      value: rolling ? formatCompactNumber(rolling.tpm) : loadingText,
-      subValue: rolling
-        ? t('dashboard.metric_rolling_tokens', { value: formatCompactNumber(rolling.total_tokens) })
-        : undefined,
-      icon: <IconTrendingUp size={20} />,
-      color: dataPalette.emerald,
-    },
-    {
-      label: t('dashboard.today_cost'),
-      value: today ? formatUsd(today.total_cost) : loadingText,
-      subValue: today
-        ? t('dashboard.metric_total_tokens', { value: formatCompactNumber(today.total_tokens) })
-        : undefined,
-      icon: <IconDollarSign size={20} />,
-      color: dataPalette.amber,
-    },
-    {
-      label: t('dashboard.success_rate'),
-      value: today ? formatPercent(today.success_rate) : loadingText,
-      subValue: today
-        ? `${formatMetric(today.success_calls)} / ${formatMetric(today.total_calls)}`
-        : undefined,
-      icon: <IconTrendingUp size={20} />,
-      color: dataPalette.green,
-    },
-    {
-      label: t('dashboard.avg_latency'),
-      value: today
-        ? formatDurationMs(today.average_latency_ms, { locale: i18n.language })
-        : loadingText,
-      subValue: today
-        ? t('dashboard.metric_zero_token_calls', { value: formatMetric(today.zero_token_calls) })
-        : undefined,
-      icon: <IconTimer size={20} />,
-      color: dataPalette.red,
-    },
-  ];
+  const todayRequestsMetric = {
+    label: t('dashboard.today_requests'),
+    value: today ? formatMetric(today.total_calls) : loadingText,
+    subValue: today
+      ? t('dashboard.metric_failure_count', { value: formatMetric(today.failure_calls) })
+      : lastRefreshedText,
+    icon: <IconInbox size={20} />,
+    color: dataPalette.blue,
+  };
+  const rpmMetric = {
+    label: t('dashboard.rpm_30m'),
+    value: rolling ? formatMetric(rolling.rpm, 1) : loadingText,
+    subValue: rolling
+      ? t('dashboard.metric_rolling_calls', { value: formatMetric(rolling.total_calls) })
+      : undefined,
+    icon: <IconChartLine size={20} />,
+    color: dataPalette.violet,
+  };
+  const tpmMetric = {
+    label: t('dashboard.tpm_30m'),
+    value: rolling ? formatCompactNumber(rolling.tpm) : loadingText,
+    subValue: rolling
+      ? t('dashboard.metric_rolling_tokens', { value: formatCompactNumber(rolling.total_tokens) })
+      : undefined,
+    icon: <IconTrendingUp size={20} />,
+    color: dataPalette.emerald,
+  };
+  const todayCostMetric = {
+    label: t('dashboard.today_cost'),
+    value: today ? formatUsd(today.total_cost) : loadingText,
+    subValue: today
+      ? t('dashboard.metric_total_tokens', { value: formatCompactNumber(today.total_tokens) })
+      : undefined,
+    icon: <IconDollarSign size={20} />,
+    color: dataPalette.amber,
+  };
+  const successRateMetric = {
+    label: t('dashboard.success_rate'),
+    value: today ? formatPercent(today.success_rate) : loadingText,
+    subValue: today
+      ? `${formatMetric(today.success_calls)} / ${formatMetric(today.total_calls)}`
+      : undefined,
+    icon: <IconTrendingUp size={20} />,
+    color: dataPalette.green,
+  };
+  const avgLatencyMetric = {
+    label: t('dashboard.avg_latency'),
+    value: today
+      ? formatDurationMs(today.average_latency_ms, { locale: i18n.language })
+      : loadingText,
+    subValue:
+      displayMode === 'simple'
+        ? undefined
+        : today
+          ? t('dashboard.metric_zero_token_calls', { value: formatMetric(today.zero_token_calls) })
+          : undefined,
+    icon: <IconTimer size={20} />,
+    color: dataPalette.red,
+  };
+
+  const metrics =
+    displayMode === 'simple'
+      ? [todayRequestsMetric, successRateMetric, todayCostMetric, avgLatencyMetric]
+      : [
+          todayRequestsMetric,
+          rpmMetric,
+          tpmMetric,
+          todayCostMetric,
+          successRateMetric,
+          avgLatencyMetric,
+        ];
 
   if (mode === 'metrics-only') {
     return (
       <>
-        <div className={styles.metricsGrid}>
+        <div
+          className={`${styles.metricsGrid} ${
+            displayMode === 'simple' ? styles.metricsGridSimple : ''
+          }`}
+        >
           {metrics.map((m) => (
             <MetricCard key={m.label} {...m} loading={loading && !summary} />
           ))}
