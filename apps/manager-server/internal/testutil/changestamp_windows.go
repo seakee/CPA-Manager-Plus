@@ -36,20 +36,33 @@ func filetimeSince1601(t time.Time) int64 {
 	return t.UTC().Unix()*intervalsPerSecond + int64(t.UTC().Nanosecond())/100 + unixEpochInIntervals
 }
 
-// applyDetectableRewrite pins the file's ChangeTime and the other FILETIME
-// members to a fixed instant in the past, then applies write once.
+// prepareDetectableRewrite pins path's FILE_BASIC_INFO timestamps into the past
+// before baseline capture so origInfo, origStamp and the production detector's
+// before snapshot all record agedChangeTime.
+func prepareDetectableRewrite(t testing.TB, path string, stamp func(string) (string, error)) error {
+	t.Helper()
+	return pinChangeStamp(t, path, stamp)
+}
+
+// applyDetectableRewrite applies write once and verifies that ChangeTime moved
+// away from before.
 //
-// Windows records ChangeTime as file metadata, so any later write to the data
-// stream reports a strictly later change stamp than the pinned one: a single
-// write is enough and no retry is needed. Pinning also removes the coarse-clock
-// coincidence the other platforms have to work around.
+// Because PrepareDetectableRewrite pinned the baseline ChangeTime to
+// agedChangeTime before the probe began, write() plus os.Chtimes restores
+// LastWriteTime to agedChangeTime while NTFS updates ChangeTime to the current
+// Windows system clock. Checking after != before verifies that precondition
+// held rather than assuming it.
 func applyDetectableRewrite(t testing.TB, path string, before string, write func() error, stamp func(string) (string, error)) error {
 	t.Helper()
-	if err := pinChangeStamp(t, path, stamp); err != nil {
-		return err
-	}
 	if err := write(); err != nil {
 		return err
+	}
+	after, err := stamp(path)
+	if err != nil {
+		return fmt.Errorf("read post-rewrite change stamp of %s: %w", path, err)
+	}
+	if after == before {
+		return fmt.Errorf("change stamp of %s stayed %q across mtime-restored rewrite: ensure PrepareDetectableRewrite ran before capturing baseline", path, before)
 	}
 	return nil
 }
@@ -68,7 +81,6 @@ func pinChangeStamp(t testing.TB, path string, stamp func(string) (string, error
 	if err != nil {
 		return fmt.Errorf("open %s to pin its change stamp: %w", path, err)
 	}
-	defer func() { _ = windows.CloseHandle(handle) }()
 
 	pinned := filetimeSince1601(agedChangeTime)
 	basic := fileBasicInfo{
@@ -77,11 +89,15 @@ func pinChangeStamp(t testing.TB, path string, stamp func(string) (string, error
 		LastWriteTime:  pinned,
 		ChangeTime:     pinned,
 	}
-	if err := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo,
-		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
-		return fmt.Errorf("pin the change stamp of %s: %w", path, err)
+	setErr := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo,
+		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic)))
+	closeErr := windows.CloseHandle(handle)
+	if setErr != nil {
+		return fmt.Errorf("pin the change stamp of %s: %w", path, setErr)
 	}
-
+	if closeErr != nil {
+		return fmt.Errorf("close %s after pinning its change stamp: %w", path, closeErr)
+	}
 	// The mtime and stamp the detector reads must agree with what the fixture
 	// pinned, so state the precondition instead of trusting it.
 	info, err := os.Lstat(path)

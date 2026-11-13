@@ -941,20 +941,12 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		// The detector compares identity, size, mtime and change stamp, so a
-		// rewrite that restores its own bytes and mtime is only detectable
-		// through the change stamp. The helper makes that difference real: it
-		// pins the stamp into the past on Windows and re-applies the rewrite
-		// on the platforms whose change stamp only moves between coarse
-		// ticks, so the rejection never depends on two writes landing in
-		// different ticks.
-		// Adopt the precision this file system keeps, so the restored mtime the
-		// fixture asserts is the one the rewrite will actually leave behind.
-		seedInfo, err := os.Lstat(dbPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		testutil.CanonicalModTime(t, dbPath, seedInfo.ModTime())
+		// The detector compares identity, size, mtime and change stamp, so an
+		// in-place, same-size rewrite that restores mtime is only detectable
+		// through the change stamp. PrepareDetectableRewrite pins the baseline
+		// stamp into the past on Windows and normalizes stored mtime precision on
+		// Unix before origInfo, origStamp and the detector's baseline are read.
+		testutil.PrepareDetectableRewrite(t, dbPath, copyinmarker.ChangeStamp)
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
@@ -1012,8 +1004,8 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		}
 
 		// Prove the fixture exercised the invariant instead of assuming it: the
-		// file keeps its identity, size and restored mtime, and only its content
-		// and kernel change stamp moved.
+		// file keeps its identity, size and restored mtime, while its content and
+		// kernel change stamp moved.
 		afterInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
@@ -1022,9 +1014,16 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
+		afterStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if afterID != origID || afterInfo.Size() != origInfo.Size() || afterInfo.ModTime().UnixNano() != origInfo.ModTime().UnixNano() {
 			t.Fatalf("fixture did not preserve inode/size/mtime: id %+v->%+v size %d->%d mtime %d->%d",
 				origID, afterID, origInfo.Size(), afterInfo.Size(), origInfo.ModTime().UnixNano(), afterInfo.ModTime().UnixNano())
+		}
+		if afterStamp == origStamp {
+			t.Fatalf("fixture did not advance change stamp: stayed %q", origStamp)
 		}
 		current, err := os.ReadFile(dbPath)
 		if err != nil {

@@ -4,6 +4,7 @@ package testutil
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"time"
 )
@@ -15,13 +16,28 @@ import (
 // stamp fails by name instead of looping.
 const rewriteDeadline = 2 * time.Second
 
+// prepareDetectableRewrite normalizes path's modification time to the stored
+// precision of the underlying file system before baseline capture.
+func prepareDetectableRewrite(t testing.TB, path string, stamp func(string) (string, error)) error {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		return fmt.Errorf("normalize stored mtime of %s: %w", path, err)
+	}
+	if _, err := stamp(path); err != nil {
+		return fmt.Errorf("read baseline change stamp of %s: %w", path, err)
+	}
+	return nil
+}
+
 // applyDetectableRewrite re-applies write until the change stamp leaves before.
 //
-// No API sets ctime, so this is the only way to make the difference real: each
-// attempt repeats the whole idempotent mutation (the fixture's write plus its
-// mtime restore), and every attempt is cheap, so the loop simply retries until
-// a write lands in the next tick. It never sleeps between attempts, because the
-// next attempt is itself the wait and sleeping would only lose ticks.
+// No API sets ctime, so each attempt repeats the idempotent mutation (the
+// fixture's write plus its mtime restore) without sleeping until a write lands
+// in the next kernel ctime tick.
 func applyDetectableRewrite(t testing.TB, path string, before string, write func() error, stamp func(string) (string, error)) error {
 	t.Helper()
 	deadline := time.Now().Add(rewriteDeadline)

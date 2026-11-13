@@ -1,49 +1,44 @@
 package testutil
 
-import (
-	"os"
-	"testing"
-	"time"
-)
+import "testing"
 
-// ApplyDetectableRewrite performs write at path and then checks that the file's
-// kernel change stamp (ctime / FILE_BASIC_INFO.ChangeTime) has actually moved
-// away from before.
+// PrepareDetectableRewrite prepares path before baseline metadata and change
+// stamps are captured for an mtime-restored rewrite test.
 //
-// The admission recorders reject a rewrite by comparing identity, size, mtime
-// and change stamp. A fixture that rewrites a file and restores its mtime keeps
-// identity, size and mtime equal by construction, so the change stamp is the
-// only evidence left and the fixture proves nothing unless that stamp moves.
-// Linux file systems stamp ctime from a coarse clock and only advance it when a
-// write crosses a tick boundary, so a single write usually lands inside the tick
-// the baseline was taken in: on tmpfs a tick measured near one millisecond and
-// 196 of 200 back-to-back rewrites left ctime unchanged. Platforms that can pin
-// the stamp into the past make one write enough; the others re-apply the same
-// write until the stamp moves, which costs less than a tick and never sleeps
-// past a deadline.
+// On Windows, it pins FILE_BASIC_INFO (CreationTime, LastAccessTime,
+// LastWriteTime and ChangeTime) to a fixed past instant and verifies that both
+// os.Lstat and stamp report that instant, so origInfo, origStamp and the
+// production detector's baseline all observe the pinned timestamp before the
+// probe starts.
 //
-// It returns an error instead of failing the test so a caller inside a test
-// seam can report it through the assertion that follows the seam.
+// On Unix platforms, where ctime cannot be backdated via syscall, it normalizes
+// path's modification time to the precision stored by the underlying file
+// system (for example whole seconds on coarse ext4, nanoseconds on APFS/tmpfs)
+// so restoring origInfo.ModTime() during the rewrite leaves the exact same
+// stored mtime on disk, and verifies stamp is readable.
+func PrepareDetectableRewrite(t testing.TB, path string, stamp func(string) (string, error)) {
+	t.Helper()
+	if err := prepareDetectableRewrite(t, path, stamp); err != nil {
+		t.Fatalf("prepare detectable rewrite for %s: %v", path, err)
+	}
+}
+
+// ApplyDetectableRewrite performs write at path inside a mid-probe seam and
+// verifies that the file's kernel change stamp (ctime /
+// FILE_BASIC_INFO.ChangeTime) moved away from before.
+//
+// The admission and status detectors reject an in-place, same-size,
+// mtime-restored rewrite through the change stamp because identity, size and
+// mtime stay equal by construction. On Windows, PrepareDetectableRewrite has
+// already pinned the baseline stamp into the past, so one write advances
+// ChangeTime to the current system clock and ApplyDetectableRewrite verifies
+// stamp(path) != before. On Unix, where coarse kernel clocks advance ctime once
+// per jiffy, ApplyDetectableRewrite re-applies the idempotent write without
+// sleeping until stamp(path) != before, bounded by a safety deadline.
+//
+// It returns an error instead of calling t.Fatalf directly so a caller inside a
+// synchronous test seam can report any failure right after the probe returns.
 func ApplyDetectableRewrite(t testing.TB, path string, before string, write func() error, stamp func(string) (string, error)) error {
 	t.Helper()
 	return applyDetectableRewrite(t, path, before, write, stamp)
-}
-
-// CanonicalModTime reports the modification time path actually stores after
-// mt is restored to it.
-//
-// File systems differ in the precision they keep: ext4 stores whole seconds,
-// APFS and NTFS keep 100 ns ticks. A fixture that restores the mtime it read
-// before the rewrite then compares that value against what the file system
-// kept, so it has to adopt the stored value instead of the requested one.
-func CanonicalModTime(t testing.TB, path string, mt time.Time) time.Time {
-	t.Helper()
-	if err := os.Chtimes(path, mt, mt); err != nil {
-		t.Fatalf("restore the mtime of %s: %v", path, err)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatalf("stat %s to read its stored mtime: %v", path, err)
-	}
-	return info.ModTime()
 }
