@@ -11,6 +11,10 @@
   border: 1px solid var(--glass-border);
   border-radius: var(--app-radius-md);
 
+  &.headerSimple {
+    padding: 10px 20px;
+  }
+
   .headerLeft,
   .headerRight {
     display: flex;
@@ -41,6 +45,7 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
+      flex: 0 0 auto;
       &.connected { background: var(--data-emerald-base); }
       &.connecting { background: var(--color-warning); animation: pulse 1.5s infinite; }
       &.disconnected { background: var(--color-danger); }
@@ -54,6 +59,12 @@
         font-size: 13px;
         font-weight: 600;
         color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+      }
+      .statusValueConnecting {
+        color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+      }
+      .statusValueDisconnected {
+        color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
       }
     }
   }
@@ -84,15 +95,32 @@
 
   .headerActions {
     display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
+
+    .displayModeTabs {
+      min-height: var(--control-height-md);
+      box-sizing: border-box;
+      padding: 3px;
+
+      [role='tab'] {
+        min-height: var(--control-height-xs);
+        min-width: 68px;
+        padding: 0 12px;
+        font-size: 13px;
+      }
+    }
 
     .actionBtn {
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      min-height: 36px;
-      padding: 8px 14px;
+      height: var(--control-height-md);
+      min-height: var(--control-height-md);
+      box-sizing: border-box;
+      padding: 0 14px;
       background: var(--app-surface-muted);
       border: 1px solid var(--app-border);
       border-radius: var(--app-radius-md);
@@ -152,12 +180,28 @@
   min-width: 0;
 }
 
+.dataRowSimple {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dataRowSimpleWithCollector {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(260px, 1fr);
+}
+
+.dataRowSingle {
+  grid-template-columns: 1fr;
+}
+
 .bottomSummaryRow {
   display: grid;
   grid-template-columns: minmax(0, 2.2fr) minmax(360px, 1.15fr);
   gap: 12px;
   align-items: stretch;
   min-width: 0;
+
+  &.bottomSummaryRowSimple {
+    grid-template-columns: 1fr;
+  }
 
   .quickStatsPanel,
   .configCard {
@@ -201,6 +245,7 @@
       .bentoIcon {
         width: 38px;
         height: 38px;
+        flex: 0 0 38px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -212,6 +257,7 @@
       .bentoContent {
         display: flex;
         flex-direction: column;
+        min-width: 0;
         .bentoValue { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; order: 2; }
         .bentoLabel { font-size: 14px; color: var(--text-primary); margin-top: 4px; order: 1; }
         .bentoSublabel {
@@ -232,6 +278,36 @@
            primary on white is 2.38:1. */
         color: var(--primary-text);
         font-weight: 600;
+        white-space: nowrap;
+      }
+    }
+
+    &.bentoGridCompact {
+      .bentoCard {
+        flex-direction: row;
+        align-items: center;
+        padding: 14px 18px;
+        gap: 12px;
+
+        .bentoContent {
+          flex: 1 1 auto;
+
+          .bentoLabel {
+            margin-top: 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+          }
+
+          .bentoValue {
+            font-size: 22px;
+          }
+        }
+
+        .bentoArrow {
+          position: static;
+          margin-left: auto;
+          flex: 0 0 auto;
+        }
       }
     }
   }
@@ -279,8 +355,6 @@
           white-space: nowrap;
         }
         .configBadge {
-          // The item wraps when label and badge cannot share one line; keep the
-          // badge on the right edge of its own line instead of squeezing the label.
           margin-left: auto;
           padding: 2px 8px;
           border-radius: var(--app-radius-xs);
@@ -333,7 +407,8 @@
 }
 
 @media (max-width: 1200px) {
-  .dataRow {
+  .dataRow,
+  .dataRowSimpleWithCollector {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -358,7 +433,7 @@
 }
 
 @media (max-width: 768px) {
-  .header {
+  .header:not(.headerSimple) {
     flex-direction: column;
     align-items: stretch;
     gap: 16px;
@@ -374,7 +449,23 @@
     }
   }
 
-  .dataRow {
+  .header.headerSimple {
+    flex-wrap: wrap;
+    gap: 10px 12px;
+
+    .headerLeft,
+    .headerRight {
+      gap: 12px;
+    }
+
+    .apiBaseBlock .apiValue {
+      max-width: 54vw;
+    }
+  }
+
+  .dataRow,
+  .dataRowSimple,
+  .dataRowSimpleWithCollector {
     grid-template-columns: 1fr;
   }
 
@@ -385,11 +476,16 @@
   .bottomSummaryRow .bentoGrid .bentoCard {
     border-right: 0;
     border-bottom: 1px solid var(--app-border);
+
+    &:last-child {
+      border-bottom: 0;
+    }
   }
 }
 
 @media (max-width: 520px) {
-  .header {
+  .header,
+  .header.headerSimple {
     padding: 12px;
 
     .headerLeft,

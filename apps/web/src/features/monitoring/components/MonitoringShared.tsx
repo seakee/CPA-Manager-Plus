@@ -202,11 +202,6 @@ export function SummaryCard({
           {meta}
         </span>
       </div>
-      <div className={styles.summaryCardChart} aria-hidden="true">
-        <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-          <path d="M0,25 Q15,5 30,20 T60,10 T100,25" />
-        </svg>
-      </div>
     </div>
   );
 }

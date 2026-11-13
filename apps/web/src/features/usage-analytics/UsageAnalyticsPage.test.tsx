@@ -1410,6 +1410,11 @@ describe('UsageAnalyticsPage', () => {
     expect(text).toContain('sk-****7890');
     expect(text).toContain('openai');
     expect(text).not.toContain('abcdef1234567890');
+    expect(
+      renderer.root.findAll(
+        (node) => node.type === 'svg' && node.props.preserveAspectRatio === 'none'
+      )
+    ).toHaveLength(0);
 
     clickHostButton(findHostButtonByText(renderer, '06/08'));
     expect(usageState.selectHeatmapDate).toHaveBeenCalledWith('2026-06-08');

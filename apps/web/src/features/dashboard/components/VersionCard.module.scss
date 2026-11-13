@@ -16,10 +16,18 @@
   padding: 16px;
   min-width: 0;
 
+  .sectionHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
   .heading {
     font-size: 16px;
     font-weight: 600;
-    margin: 0 0 14px;
+    margin: 0;
     color: var(--text-primary);
   }
 }
@@ -300,5 +308,181 @@
     background: var(--data-badge-success-bg);
     color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
     border: 1px solid var(--data-badge-success-border);
+  }
+}
+
+.compactBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  min-width: 0;
+  padding: 10px 16px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-backdrop-filter);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--app-radius-md);
+}
+
+.compactStatusGroup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.compactStatusPill,
+.compactAlertPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-height-xs);
+  padding: 4px 10px;
+  border-radius: var(--app-radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  max-width: 100%;
+
+  svg {
+    flex: 0 0 auto;
+  }
+}
+
+.compactStatusOk {
+  background: var(--data-badge-success-bg);
+  border: 1px solid var(--data-badge-success-border);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+}
+
+.compactStatusMuted {
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
+  color: var(--text-secondary);
+}
+
+.compactStatusError,
+.compactAlertError {
+  background: var(--data-badge-danger-bg);
+  border: 1px solid var(--data-badge-danger-border);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+}
+
+.compactAlertWarn {
+  background: var(--data-badge-warning-bg);
+  border: 1px solid var(--data-badge-warning-border);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+}
+
+.compactAlertLink {
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus-border);
+    outline-offset: 2px;
+  }
+}
+
+.compactMetaGroup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.compactVersions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+  font-size: 12px;
+
+  .value {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .versionLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-primary);
+    text-decoration: none;
+    border-radius: var(--app-radius-xs);
+
+    &:hover {
+      color: var(--focus-text);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+  }
+}
+
+.compactVersionItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.compactVersionLabel {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.compactDivider {
+  color: var(--text-muted);
+}
+
+.detailsToggleBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-height-sm);
+  padding: 0 12px;
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+
+  &:hover {
+    background: var(--app-accent-soft);
+    border-color: var(--color-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus-border);
+    outline-offset: 2px;
+  }
+}
+
+@media (max-width: 560px) {
+  .compactBar {
+    padding: 10px 12px;
+  }
+
+  .compactMetaGroup {
+    width: 100%;
+    justify-content: space-between;
   }
 }

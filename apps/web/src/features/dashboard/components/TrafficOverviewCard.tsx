@@ -21,12 +21,15 @@ import { formatCompactNumber } from '@/utils/usage';
 import { buildVisibleTrafficTimeline, isCurrentTrafficBucket } from './trafficOverviewChartModel';
 import styles from './TrafficOverviewCard.module.scss';
 
+import type { DashboardDisplayMode } from '../dashboardUiState';
+
 interface TrafficOverviewCardProps {
   timeline: DashboardTrafficPoint[];
   trafficNowMs?: number | null;
   todayRequestHealthTimeline: DashboardTodayRequestHealthTimeline | null;
   tokenMix: DashboardTokenMixSegment[];
   loading: boolean;
+  displayMode?: DashboardDisplayMode;
 }
 
 type TrafficTrendChartOption = ComposeOption<
@@ -253,6 +256,7 @@ export function TrafficOverviewCard({
   todayRequestHealthTimeline,
   tokenMix,
   loading,
+  displayMode = 'advanced',
 }: TrafficOverviewCardProps) {
   const { t, i18n } = useTranslation();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -289,7 +293,11 @@ export function TrafficOverviewCard({
   );
 
   return (
-    <div className={styles.chartsGrid}>
+    <div
+      className={`${styles.chartsGrid} ${
+        displayMode === 'simple' ? styles.chartsGridSimple : ''
+      }`}
+    >
       {/* 1. 流量趋势 */}
       <section className={`${styles.chartCard} ${styles.activityCard}`}>
         <div className={styles.cardHeader}>
@@ -323,7 +331,8 @@ export function TrafficOverviewCard({
       </section>
 
       {/* 2. 请求健康时间线 */}
-      <section className={`${styles.chartCard} ${styles.healthTimelineCard}`}>
+      {displayMode !== 'simple' ? (
+        <section className={`${styles.chartCard} ${styles.healthTimelineCard}`}>
         <div className={`${styles.cardHeader} ${styles.healthHeader}`}>
           <div className={styles.healthTitle}>
             <h3>{t('dashboard.request_health_timeline')}</h3>
@@ -394,7 +403,8 @@ export function TrafficOverviewCard({
           <span><i className={styles.healthBad} /> {t('dashboard.request_health_failure')}</span>
           <span><i className={styles.healthFuture} /> {t('dashboard.request_health_future')}</span>
         </div>
-      </section>
+        </section>
+      ) : null}
 
       {/* 3. Token 构成 */}
       <section className={`${styles.chartCard} ${styles.tokenCard}`}>
