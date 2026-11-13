@@ -56,17 +56,13 @@ export function FreshExternalUsage({
   const requestId = useRef('');
   const alive = useRef(true);
   // Every usage-state response — a read or a confirmation — is published only
-  // while its request still owns the panel. A `read()` opening a new generation
-  // retires whatever was in flight: the answer it is replacing describes the
-  // installation before the reload, so applying it would repaint a blocker the
-  // rebind resolved or regress facts the newer read already settled. A
-  // confirmation that succeeds takes the panel too, because the state it returns
-  // is newer than any read still waiting on the pre-confirmation CPA.
+  // while its request still owns the panel. Every `read()` and `confirmEnable()`
+  // advances `generation` on entry so earlier in-flight requests retire before
+  // any later failure or answer can overwrite the newer owner.
   const generation = useRef(0);
   // One confirmation at a time. `busy` is state, so two entries in the same React
   // batch both read the old value and would both send a POST that writes to the
-  // user's CPA: the first to answer would then claim the generation and the other
-  // real outcome would be dropped. The claim is synchronous, before any await.
+  // user's CPA. The claim is synchronous, before any await.
   const confirmingNow = useRef(false);
 
   useEffect(() => {
@@ -78,9 +74,9 @@ export function FreshExternalUsage({
   }, []);
 
   async function read() {
-    // A read opens a generation: it is the newest statement of the installation's
-    // state, so every response still in flight — read or confirmation — belongs to
-    // the installation before it and is retired below.
+    // A new state read retires any earlier read or confirmation and discards any
+    // pre-reload requestId so a future confirmation starts fresh.
+    requestId.current = '';
     const ticket = ++generation.current;
     try {
       const parsed = parseExternalUsageState(
@@ -122,14 +118,14 @@ export function FreshExternalUsage({
     if (confirmingNow.current) return;
     confirmingNow.current = true;
     const startOnly = startOnlyRef.current;
-    // A confirmation outlives a read request: it writes to the CPA, so the state
-    // it returns is the newest fact this panel holds.
-    const ticket = generation.current;
+    // Advance the generation on start so earlier in-flight reads retire
+    // immediately, while a newer reload `read()` still retires this POST.
+    const ticket = ++generation.current;
     setBusy(true);
     setNotice('');
     setConfirmFailed(false);
-    if (!requestId.current) requestId.current = newExternalRequestId();
     try {
+      if (!requestId.current) requestId.current = newExternalRequestId();
       const parsed = parseExternalUsageState(
         await client.post<unknown>(
           'external/usage',
@@ -139,11 +135,9 @@ export function FreshExternalUsage({
       );
       if (!alive.current || generation.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
-      // This answer is newer than any read still waiting on the pre-confirmation
-      // installation, so publishing it retires them.
-      generation.current += 1;
       const blockedReason = parsed.blockedReason;
       setState(parsed);
+      setReadError('');
       setConfirming(false);
       if (blockedReason && blockedReason !== 'usage_monitoring_disabled') {
         onBlocker?.(blockedReason);
@@ -158,11 +152,6 @@ export function FreshExternalUsage({
       }
     } catch (err) {
       if (!alive.current || generation.current !== ticket) return;
-      // This failure is the newest fact the panel holds, so it retires the reads
-      // still waiting on the pre-confirmation installation: a read that reports
-      // the state the failed confirmation was trying to change would clear the
-      // blocker that failure just named.
-      generation.current += 1;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;

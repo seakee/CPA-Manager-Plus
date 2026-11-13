@@ -132,12 +132,11 @@ export function FreshApiKeys({
     }
   }
 
-  function failure(err: unknown, allowExternalBlocker = true) {
+  function failure(err: unknown) {
     if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
     else {
       // A typed External code is a state the page names, not a generic outage.
-      const typed =
-        allowExternalBlocker && err instanceof PublicApiError ? blockerOf(err.code) : null;
+      const typed = err instanceof PublicApiError ? blockerOf(err.code) : null;
       setBlocker(
         typed && err instanceof PublicApiError
           ? typed.kind === 'key_rejected'
@@ -284,14 +283,15 @@ export function FreshApiKeys({
     setRetryAllowed(false);
     ++copyAttempt.current;
     setCopyFeedback('');
-    // The same request ID is reused for a retry after an unknown answer, so it
-    // is minted before the request and kept by the failure branch below.
-    const requestId =
-      pending ||
-      Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
-        byte.toString(16).padStart(2, '0')
-      ).join('');
+    let requestId = '';
     try {
+      // The same request ID is reused for a retry after an unknown answer, so it
+      // is minted before the request and kept by the failure branch below.
+      requestId =
+        pending ||
+        Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+          byte.toString(16).padStart(2, '0')
+        ).join('');
       creationPendingRef.current = true;
       reportPending();
       const result = await client.post<{ key: Key; createdSecret?: string }>(
@@ -379,9 +379,9 @@ export function FreshApiKeys({
       // Only a failed request has an unknown outcome: a proxy failure can lose
       // a reply the Manager already committed, so the request ID is kept and
       // the result is reconciled instead of replayed blindly.
-      setPending(requestId);
+      if (requestId) setPending(requestId);
       // HTTP errors are also reconciled: a proxy failure can lose a committed reply.
-      failure(err, rebindAtStart === rebindSeq.current);
+      if (rebindAtStart === rebindSeq.current) failure(err);
     } finally {
       finishMutation();
     }
@@ -509,8 +509,10 @@ export function FreshApiKeys({
         else {
           if (err instanceof PublicApiError && err.kind === 'authentication') {
             pendingRefresh.current = false;
+            onUnauthorized();
+          } else if (rebindAtStart === rebindSeq.current) {
+            failure(err);
           }
-          failure(err, rebindAtStart === rebindSeq.current);
         }
       }
     } finally {
