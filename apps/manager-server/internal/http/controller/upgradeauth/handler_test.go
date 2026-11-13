@@ -133,69 +133,64 @@ func TestSourceOwnershipUnavailableEligibilityMatrix(t *testing.T) {
 	const legacyKey = "legacy-matrix-admin-key-123456"
 
 	t.Run("proven 1.x mount with unreadable lock or data.key reports ownership code", func(t *testing.T) {
-		dir, paths := createLegacyAuthFixture(t, legacyKey, "")
-		lockPath := paths.Database + ".manager.lock"
-		if err := os.Chmod(lockPath, 0o000); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
-
-		h, err := New(paths, "https://public-manager.test", true, dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, presented := range []string{"wrong-key", legacyKey} {
-			code, body := postAuthRequest(t, h, presented)
-			if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_ownership_unavailable"`) {
-				t.Fatalf("key %q got %d %s, want 503 source_ownership_unavailable", presented, code, body)
-			}
-		}
-	})
-
-	t.Run("non-sqlite stub with unreadable lock stays generic source_unavailable", func(t *testing.T) {
-		dir := t.TempDir()
-		paths := legacypreflight.DefaultPaths(filepath.Join(dir, "usage.sqlite"))
-		if err := os.WriteFile(paths.Database, []byte(strings.Repeat("not-sqlite-", 20)), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(paths.DataKey, []byte("legacy-data-key"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		lockPath := paths.Database + ".manager.lock"
-		if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(lockPath, 0o000); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
-
-		h, err := New(paths, "https://public-manager.test", true, dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		code, body := postAuthRequest(t, h, "any-key")
-		if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_unavailable"`) {
-			t.Fatalf("non-sqlite stub got %d %s, want 503 source_unavailable", code, body)
-		}
-	})
-
-	t.Run("native v2 schema and fresh checkpoint DB stay generic source_unavailable", func(t *testing.T) {
-		for _, tc := range []struct {
-			name string
-			ddl  string
-		}{
-			{name: "native v2 table", ddl: `create table upgrade_operations(id integer primary key);`},
-			{name: "fresh checkpoint setting", ddl: `insert into settings values('fresh_operation_v1','{"active":true}');`},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				dir, paths := createLegacyAuthFixture(t, legacyKey, tc.ddl)
-				lockPath := paths.Database + ".manager.lock"
-				if err := os.Chmod(lockPath, 0o000); err != nil {
+		for _, memberName := range []string{"lock", "data.key"} {
+			t.Run(memberName, func(t *testing.T) {
+				dir, paths := createLegacyAuthFixture(t, legacyKey, "")
+				target := paths.DataKey
+				restoreMode := os.FileMode(0o600)
+				if memberName == "lock" {
+					target = paths.Database + ".manager.lock"
+				}
+				if err := os.Chmod(target, 0o000); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
+				t.Cleanup(func() { _ = os.Chmod(target, restoreMode) })
 
+				h, err := New(paths, "https://public-manager.test", true, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, presented := range []string{"wrong-key", legacyKey} {
+					code, body := postAuthRequest(t, h, presented)
+					if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_ownership_unavailable"`) {
+						t.Fatalf("key %q got %d %s, want 503 source_ownership_unavailable", presented, code, body)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("1.x mount with unreadable database or journal sidecar stays generic source_unavailable", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			mutate func(t *testing.T, paths sqlite.InspectionPaths)
+		}{
+			{
+				name: "unreadable database",
+				mutate: func(t *testing.T, paths sqlite.InspectionPaths) {
+					if err := os.Chmod(paths.Database, 0o000); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(paths.Database, 0o644) })
+				},
+			},
+			{
+				name: "unreadable wal sidecar",
+				mutate: func(t *testing.T, paths sqlite.InspectionPaths) {
+					walPath := paths.Database + "-wal"
+					if err := os.WriteFile(walPath, nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(walPath, 0o000); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(walPath, 0o600) })
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir, paths := createLegacyAuthFixture(t, legacyKey, "")
+				tc.mutate(t, paths)
 				h, err := New(paths, "https://public-manager.test", true, dir)
 				if err != nil {
 					t.Fatal(err)
@@ -210,23 +205,82 @@ func TestSourceOwnershipUnavailableEligibilityMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("unreadable mounted database without 1.x companion data.key stays generic source_unavailable", func(t *testing.T) {
-		dir, paths := createLegacyAuthFixture(t, legacyKey, "")
-		if err := os.Remove(paths.DataKey); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(paths.Database, 0o000); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(paths.Database, 0o644) })
+	t.Run("non-sqlite stub with unreadable lock or unreadable database stays generic source_unavailable", func(t *testing.T) {
+		for _, unreadableDB := range []bool{false, true} {
+			name := "unreadable lock"
+			if unreadableDB {
+				name = "unreadable database"
+			}
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				paths := legacypreflight.DefaultPaths(filepath.Join(dir, "usage.sqlite"))
+				if err := os.WriteFile(paths.Database, []byte(strings.Repeat("not-sqlite-", 20)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.DataKey, []byte("legacy-data-key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				lockPath := paths.Database + ".manager.lock"
+				if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target := lockPath
+				if unreadableDB {
+					target = paths.Database
+				}
+				if err := os.Chmod(target, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(target, 0o600) })
 
-		h, err := New(paths, "https://public-manager.test", true, dir)
-		if err != nil {
-			t.Fatal(err)
+				h, err := New(paths, "https://public-manager.test", true, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				code, body := postAuthRequest(t, h, "any-key")
+				if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_unavailable"`) {
+					t.Fatalf("non-sqlite stub (%s) got %d %s, want 503 source_unavailable", name, code, body)
+				}
+			})
 		}
-		code, body := postAuthRequest(t, h, legacyKey)
-		if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_unavailable"`) {
-			t.Fatalf("lone unreadable db got %d %s, want 503 source_unavailable", code, body)
+	})
+
+	t.Run("native v2 schema and fresh checkpoint DB stay generic source_unavailable", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			ddl  string
+		}{
+			{name: "native v2 table", ddl: `create table upgrade_operations(id integer primary key);`},
+			{name: "fresh checkpoint setting", ddl: `insert into settings values('fresh_operation_v1','{"active":true}');`},
+		} {
+			for _, unreadableDB := range []bool{false, true} {
+				modeName := tc.name + "/unreadable_lock"
+				if unreadableDB {
+					modeName = tc.name + "/unreadable_database"
+				}
+				t.Run(modeName, func(t *testing.T) {
+					dir, paths := createLegacyAuthFixture(t, legacyKey, tc.ddl)
+					target := paths.Database + ".manager.lock"
+					if unreadableDB {
+						target = paths.Database
+					}
+					if err := os.Chmod(target, 0o000); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(target, 0o600) })
+
+					h, err := New(paths, "https://public-manager.test", true, dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, presented := range []string{"wrong-key", legacyKey} {
+						code, body := postAuthRequest(t, h, presented)
+						if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_unavailable"`) {
+							t.Fatalf("%s (%s) got %d %s, want 503 source_unavailable", modeName, presented, code, body)
+						}
+					}
+				})
+			}
 		}
 	})
 

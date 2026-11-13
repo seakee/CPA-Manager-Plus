@@ -52,11 +52,12 @@ func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 //
 // Only the entry leaf resolves through this function, and it resolves once, when
 // it is constructed. The wizard's two reads inspect the mount per request and
-// apply upgradeservice.CredentialDatabaseFrom: while a mounted 1.x file denies
-// read permission, the entry leaf reports the ownership remedy (when the mount
-// carries a recognized 1.x layout), and once the operator runs targeted chown
-// both the already-bound entry leaf and the per-request wizard reads agree on
-// the mounted 1.x database without restarting the container. A mount that
+// apply upgradeservice.CredentialDatabaseFrom: while a proven 1.x database's
+// lock or data.key denies read permission, the entry leaf reports the ownership
+// remedy (or generic source_unavailable while the database itself is
+// unreadable), and once the operator runs targeted chown both the already-bound
+// entry leaf and the per-request wizard reads agree on the mounted 1.x database
+// without restarting the container. A mount that
 // appears, disappears, or is repointed after startup is seen by the reads first,
 // and the entry leaf keeps its startup resolution until it is rebuilt.
 func upgradeCredentialDatabase(legacyRoot, managerDatabase string) string {

@@ -300,41 +300,6 @@ func ProvenUnfenceableLegacySource(ctx context.Context, source PreservedSource, 
 	return classifyUnfenceableSource(ctx, source, info, extraRoots...) == LegacyDiscoveryOwnershipUnavailable
 }
 
-// RecognizedUnreadableLegacyMountLayout reports whether an operator-mounted
-// legacy source whose database or active journal sidecar cannot yet be opened
-// (os.ErrPermission) nonetheless carries the canonical 1.x directory layout
-// via path metadata alone: a single-link regular usage.sqlite of at least the
-// 100-byte SQLite header size, a non-empty single-link regular data.key, and
-// sidecar entries free of links, special files, or a non-empty rollback journal.
-func RecognizedUnreadableLegacyMountLayout(source PreservedSource) bool {
-	databasePath := strings.TrimSpace(source.Database)
-	dataKeyPath := strings.TrimSpace(source.DataKey)
-	if databasePath == "" || dataKeyPath == "" {
-		return false
-	}
-	dbInfo, err := processlock.InspectRegularSingleLink(databasePath)
-	if err != nil || dbInfo.Size() < 100 {
-		return false
-	}
-	keyInfo, err := processlock.InspectRegularSingleLink(dataKeyPath)
-	if err != nil || keyInfo.Size() <= 0 {
-		return false
-	}
-	for _, suffix := range []string{".manager.lock", "-wal", "-shm", "-journal"} {
-		sidecarInfo, sidecarErr := processlock.InspectRegularSingleLink(databasePath + suffix)
-		if os.IsNotExist(sidecarErr) {
-			continue
-		}
-		if sidecarErr != nil {
-			return false
-		}
-		if suffix == "-journal" && sidecarInfo.Size() > 0 {
-			return false
-		}
-	}
-	return true
-}
-
 func classifyUnfenceableDatabase(ctx context.Context, db *sql.DB, verifyIntegrity bool) LegacyDiscoveryObservation {
 	if verifyIntegrity {
 		if err := quickCheckSource(ctx, db); err != nil {

@@ -29,8 +29,9 @@ const Contract = "cpamp.upgrade-auth.v1"
 
 // CodeSourceOwnershipUnavailable reports that the bound 1.x source (for example
 // a root-owned 1.x volume mounted at /legacy:ro while Manager runs as
-// 10002:10002) is a recognized 1.x installation whose database, lock marker,
-// journal sidecars, or data.key deny read permission to the current user.
+// 10002:10002) has been proven to be a 1.x installation by reading its SQLite
+// database, while its lock marker or data.key denies read permission to the
+// current user.
 const CodeSourceOwnershipUnavailable = "source_ownership_unavailable"
 type Handler struct {
 	paths sqlite.InspectionPaths
@@ -264,21 +265,15 @@ func assessSourceOwnership(
 	}
 
 	var (
-		snap                  sourceSnapshot
-		anyPermDenied         bool
-		dbOrSidecarPermDenied bool
+		snap          sourceSnapshot
+		anyPermDenied bool
 	)
-	dbMember, dbUncacheable, dbPerm, dbOK := inspectReadableMember(database, true)
+	dbMember, dbUncacheable, _, dbOK := inspectReadableMember(database, true)
 	if !dbOK {
-		if !dbPerm {
-			return ownershipAssessment{status: ownershipUnavailable}
-		}
-		anyPermDenied = true
-		dbOrSidecarPermDenied = true
-	} else {
-		snap.database = dbMember
-		snap.uncacheable = snap.uncacheable || dbUncacheable
+		return ownershipAssessment{status: ownershipUnavailable}
 	}
+	snap.database = dbMember
+	snap.uncacheable = snap.uncacheable || dbUncacheable
 
 	type sidecarTarget struct {
 		suffix  string
@@ -295,13 +290,10 @@ func assessSourceOwnership(
 		candidate := database + sc.suffix
 		member, uncacheable, perm, ok := inspectReadableMember(candidate, false)
 		if !ok {
-			if !perm {
+			if sc.journal || !perm {
 				return ownershipAssessment{status: ownershipUnavailable}
 			}
 			anyPermDenied = true
-			if sc.journal {
-				dbOrSidecarPermDenied = true
-			}
 			continue
 		}
 		if sc.suffix == "-journal" && member.present && member.size > 0 {
@@ -332,24 +324,18 @@ func assessSourceOwnership(
 		Database: database,
 		DataKey:  paths.DataKey,
 	}
-	if !dbOrSidecarPermDenied {
-		var extraRoots []upgradeservice.ScratchRoot
-		if mountSource {
-			extraRoots = []upgradeservice.ScratchRoot{
-				{Label: "the target root", Dir: parentDir(managerPaths.Database)},
-				{Label: "the Manager data key directory", Dir: parentDir(managerPaths.DataKey)},
-			}
-		} else {
-			extraRoots = []upgradeservice.ScratchRoot{
-				{Label: "the configured source root", Dir: sourceRoot},
-			}
+	var extraRoots []upgradeservice.ScratchRoot
+	if mountSource {
+		extraRoots = []upgradeservice.ScratchRoot{
+			{Label: "the target root", Dir: parentDir(managerPaths.Database)},
+			{Label: "the Manager data key directory", Dir: parentDir(managerPaths.DataKey)},
 		}
-		if upgradeservice.ProvenUnfenceableLegacySource(ctx, preserved, extraRoots...) {
-			return ownershipAssessment{status: ownershipDenied}
+	} else {
+		extraRoots = []upgradeservice.ScratchRoot{
+			{Label: "the configured source root", Dir: sourceRoot},
 		}
-		return ownershipAssessment{status: ownershipUnavailable}
 	}
-	if mountSource && upgradeservice.RecognizedUnreadableLegacyMountLayout(preserved) {
+	if upgradeservice.ProvenUnfenceableLegacySource(ctx, preserved, extraRoots...) {
 		return ownershipAssessment{status: ownershipDenied}
 	}
 	return ownershipAssessment{status: ownershipUnavailable}

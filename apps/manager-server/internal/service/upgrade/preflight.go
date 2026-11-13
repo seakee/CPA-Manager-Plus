@@ -886,11 +886,11 @@ func CredentialDatabase(legacyRoot, managerDatabase string) string {
 // non-symlink, single-link regular usage.sqlite denied read permission
 // (os.ErrPermission, such as a 0600 root-owned 1.x file before targeted
 // chown), the entry leaf still binds that mounted path rather than falling
-// back to the Manager store: requests while it remains unreadable report the
-// ownership verdict when the mount carries a recognized 1.x layout, and a
-// subsequent chown recovers in place without restarting the container. Absent,
-// empty, symlinked, hard-linked, or non-regular entries still fall back to
-// managerDatabase.
+// back to the Manager store: requests while the database itself remains
+// unreadable report generic 503 source_unavailable (never falling back to
+// managerDatabase), and a subsequent chown recovers in place without restarting
+// the container. Absent, empty, symlinked, hard-linked, or non-regular entries
+// still fall back to managerDatabase.
 func EntryCredentialDatabase(legacyRoot, managerDatabase string) string {
 	if database, _ := MountDatabase(legacyRoot); database != "" {
 		return database
