@@ -3,52 +3,43 @@
 package testutil
 
 import (
-	"os"
+	"fmt"
 	"testing"
+	"time"
 )
 
-// ageChangeStamp handles the platforms whose change stamp is the POSIX ctime.
-// No API sets ctime, so the helper cannot pin it into the past. It instead
-// proves the running file system advances ctime across a real in-place write
-// and fails with the reason when it cannot, so a fixture never relies on a
-// stamp that might not move.
+// rewriteDeadline bounds re-applying one idempotent rewrite while waiting for
+// the file system's change stamp to cross a tick. Coarse clocks stamp ctime
+// once per jiffy (about 1 ms on tmpfs, a few on ext4), so a handful of attempts
+// is enough; the deadline only exists so a file system that never advances the
+// stamp fails by name instead of looping.
+const rewriteDeadline = 2 * time.Second
+
+// applyDetectableRewrite re-applies write until the change stamp leaves before.
 //
-// The proof writes the file's own bytes back at offset 0 and restores its
-// mtime, which is exactly the mutation the admission fixtures apply: if ctime
-// survives that unchanged, the fixture cannot express a detectable change here
-// and the test says so instead of passing or failing on timing.
-func ageChangeStamp(t testing.TB, path string, stamp func(string) (string, error)) {
+// No API sets ctime, so this is the only way to make the difference real: each
+// attempt repeats the whole idempotent mutation (the fixture's write plus its
+// mtime restore), and every attempt is cheap, so the loop simply retries until
+// a write lands in the next tick. It never sleeps between attempts, because the
+// next attempt is itself the wait and sleeping would only lose ticks.
+func applyDetectableRewrite(t testing.TB, path string, before string, write func() error, stamp func(string) (string, error)) error {
 	t.Helper()
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s to age its change stamp: %v", path, err)
+	deadline := time.Now().Add(rewriteDeadline)
+	var attempts int
+	for {
+		attempts++
+		if err := write(); err != nil {
+			return err
+		}
+		after, err := stamp(path)
+		if err != nil {
+			return err
+		}
+		if after != before {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("change stamp of %s stayed %q across %d mtime-restored rewrites within %s: the file system does not advance ctime for this mutation", path, before, attempts, rewriteDeadline)
+		}
 	}
-	if len(content) == 0 {
-		t.Fatalf("%s is empty; a rewrite cannot be expressed", path)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatalf("stat %s to age its change stamp: %v", path, err)
-	}
-	before, err := stamp(path)
-	if err != nil {
-		t.Fatalf("read the change stamp of %s: %v", path, err)
-	}
-
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatalf("open %s to age its change stamp: %v", path, err)
-	}
-	if _, err := file.WriteAt(content[:min(len(content), 16)], 0); err != nil {
-		_ = file.Close()
-		t.Fatalf("rewrite %s to age its change stamp: %v", path, err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatalf("close %s to age its change stamp: %v", path, err)
-	}
-	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatalf("restore the mtime of %s: %v", path, err)
-	}
-
-	RequireChangeStampAdvanced(t, path, before, stamp)
 }

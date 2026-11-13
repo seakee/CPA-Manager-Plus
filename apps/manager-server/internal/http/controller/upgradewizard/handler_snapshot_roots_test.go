@@ -660,11 +660,18 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 		dbPath, handler := makeHandler(t)
 		// The preserved-evidence guard compares identity, size, mtime and change
 		// stamp, so a rewrite that restores its own bytes and mtime is only
-		// detectable through the change stamp. Pin that stamp into the past
-		// first: on Windows ChangeTime is file metadata, so every later write
-		// reports a strictly later one instead of relying on two writes landing
-		// in different clock ticks.
-		testutil.AgeChangeStamp(t, dbPath, copyinmarker.ChangeStamp)
+		// detectable through the change stamp. The helper makes that difference
+		// real: it pins the stamp into the past on Windows and re-applies the
+		// rewrite on the platforms whose change stamp only moves between coarse
+		// ticks, so the rejection never depends on two writes landing in
+		// different ticks.
+		// Adopt the precision this file system keeps, so the restored mtime the
+		// fixture asserts is the one the rewrite will actually leave behind.
+		seedInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testutil.CanonicalModTime(t, dbPath, seedInfo.ModTime())
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
@@ -688,30 +695,28 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 			rewrittenVersion++
 		}
 		binary.BigEndian.PutUint32(rewritten[userVersionOffset:], rewrittenVersion)
+		rewrite := func(target string) error {
+			f, err := os.OpenFile(target, os.O_WRONLY, 0)
+			if err != nil {
+				return err
+			}
+			if _, err := f.WriteAt(rewritten[userVersionOffset:userVersionOffset+4], userVersionOffset); err != nil {
+				_ = f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+		}
 
 		var hookErr error
 		origHook := afterPreservedEvidenceProbe
 		afterPreservedEvidenceProbe = func(target string) {
-			hookErr = func() error {
-				f, err := os.OpenFile(target, os.O_WRONLY, 0)
-				if err != nil {
-					return err
-				}
-				if _, err := f.WriteAt(rewritten[userVersionOffset:userVersionOffset+4], userVersionOffset); err != nil {
-					_ = f.Close()
-					return err
-				}
-				if err := f.Close(); err != nil {
-					return err
-				}
-				return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
-			}()
-			if hookErr != nil {
-				return
-			}
 			// Name a broken precondition here rather than reporting it as a
 			// guard failure below.
-			testutil.RequireChangeStampAdvanced(t, target, origStamp, copyinmarker.ChangeStamp)
+			hookErr = testutil.ApplyDetectableRewrite(t, target, origStamp,
+				func() error { return rewrite(target) }, copyinmarker.ChangeStamp)
 		}
 		defer func() { afterPreservedEvidenceProbe = origHook }()
 
