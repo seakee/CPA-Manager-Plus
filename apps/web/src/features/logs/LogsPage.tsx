@@ -496,6 +496,7 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
   const prevFileLogsAvailableRef = useRef(fileLogsAvailable);
 
   useEffect(() => {
+    if (config === null) return;
     const wasAvailable = prevFileLogsAvailableRef.current;
     prevFileLogsAvailableRef.current = fileLogsAvailable;
     if (wasAvailable && !fileLogsAvailable) {
@@ -508,7 +509,7 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
       setLoading(false);
       setError('');
       setAutoRefresh(false);
-    } else if (config !== null && !fileLogsAvailable && autoRefresh) {
+    } else if (!fileLogsAvailable && autoRefresh) {
       setAutoRefresh(false);
     }
   }, [autoRefresh, config, fileLogsAvailable, setAutoRefresh]);
