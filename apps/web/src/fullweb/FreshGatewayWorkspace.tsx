@@ -138,8 +138,9 @@ export function FreshGatewayWorkspace({
   const groups = useMemo(() => gatewayGroups(), [language]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const families = useMemo(() => gatewayFamilies(), [language]);
+  const capabilityMode = view?.capability.mode;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const owners = useMemo(() => gatewayOwners(), [language]);
+  const owners = useMemo(() => gatewayOwners(capabilityMode), [language, capabilityMode]);
 
   const handleError = useCallback(
     (error: unknown) => {
@@ -1215,14 +1216,14 @@ export function FreshGatewayWorkspace({
                 </button>
               </div>
             </section>
-            <section className="card" key="runtime">
+            <section className="card" key="runtime" data-testid="gateway-overview-runtime">
               <header className="card-head">
-                <h2>{c('ownerDetailRuntime')}</h2>
+                <h2>{r('runtime')}</h2>
                 <span className="badge">{c('independent')}</span>
               </header>
               <code>credentials.concurrency / credentials.in-flight</code>
               <p className="detail">{c('runtimeLinkHelp')}</p>
-              <OwnerTargetLink inRouter={inRouter} target="/system/runtime" />
+              <p className="detail">{c('ownerUnavailable')}</p>
             </section>
             {groups.map((group) => (
               <section className="card" key={group.id}>

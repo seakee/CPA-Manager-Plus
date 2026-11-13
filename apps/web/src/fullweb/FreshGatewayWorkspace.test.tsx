@@ -942,24 +942,25 @@ describe('FreshGatewayWorkspace', () => {
     expect(passthrough?.props.disabled).toBe(true);
   });
 
-  it('links ownership and runtime to Full Web routes instead of raw hrefs', async () => {
+  it('links ownership cards to Full Web routes and keeps overview runtime non-routed', async () => {
     const fake = fakeClient(buildView());
     await mount(fake.client);
     await openTab('owners');
-    // Every ownership link is a route of the Console, so it is rendered through
-    // the router when one is mounted and never as a bare raw href.
     const link = maybeTestId('gateway-owner-link-/api-keys');
     expect(link).toBeDefined();
-    // Outside a router the href carries the verified base path by hand, so the
-    // link cannot escape the Console mount.
     expect(link.props.href).toBe('/api-keys');
-    // The runtime card exists and points at the runtime page.
+
     await act(async () => {
       tab('overview').props.onClick();
     });
+    const overview = testId('gateway-overview');
     expect(
-      renderer.root.findAll((node) => node.props['data-testid'] === 'gateway-owner-link-/system/runtime')
-    ).toHaveLength(1);
+      overview.findAll(
+        (node) =>
+          typeof node.props['data-testid'] === 'string' &&
+          node.props['data-testid'].startsWith('gateway-owner-link-')
+      )
+    ).toHaveLength(0);
     void fake;
   });
 
@@ -980,6 +981,71 @@ describe('FreshGatewayWorkspace', () => {
       // React's duplicate-key warning, not just a longer list.
       expect(renderer.root.findAllByProps({ 'data-testid': `gateway-owner-${owner.path}` })).toHaveLength(1);
     }
+  });
+
+  it('renders ownership workspace links only for cards with a destination editor and switches usage link by mode', async () => {
+    const collectOwnerLinks = () => {
+      const grid = testId('gateway-owners');
+      const cards = grid.findAll(
+        (node) =>
+          node.type === 'section' &&
+          typeof node.props['data-testid'] === 'string' &&
+          node.props['data-testid'].startsWith('gateway-owner-')
+      );
+      const linksByOwner: Record<string, string | null> = {};
+      for (const card of cards) {
+        const ownerId = String(card.props['data-testid']).slice('gateway-owner-'.length);
+        const links = card.findAll(
+          (node) =>
+            typeof node.props['data-testid'] === 'string' &&
+            node.props['data-testid'].startsWith('gateway-owner-link-')
+        );
+        expect(links.length).toBeLessThanOrEqual(1);
+        linksByOwner[ownerId] = links[0]
+          ? String(links[0].props['data-testid']).slice('gateway-owner-link-'.length)
+          : null;
+      }
+      return linksByOwner;
+    };
+
+    await mount(fakeClient(buildView()).client);
+    await openTab('owners');
+
+    expect(collectOwnerLinks()).toEqual({
+      'access.api-keys': '/api-keys',
+      'api-keys.*': '/ai-providers',
+      'models.*': null,
+      'oauth.model-alias / oauth.excluded-models': '/accounts',
+      'oauth.auth-dir / oauth.auth-auto-refresh-workers / oauth.settings / oauth.request-scoped-errors':
+        null,
+      'oauth.providers.codex.live-media-relay.*': null,
+      'oauth.providers.codex.header-defaults.* / oauth.providers.aistudio.ws-auth': null,
+      'oauth.providers.antigravity.* / oauth.providers.devin.*': null,
+      'credentials.concurrency.* / credentials.in-flight.*': null,
+      'observability.logs.*': '/logs',
+      'observability.pprof.*': null,
+      'observability.usage.usage-statistics-enabled': null,
+      'observability.usage.redis-usage-queue-retention-seconds': null,
+      'server.* / management.*': null,
+      'plugins.enabled / plugins.configs.*': '/plugins',
+      'plugins.dir / plugins.store-sources / plugins.store-auth / plugins.auth-revision': null,
+      'config-version / quota-exceeded.switch-project / quota-exceeded.switch-preview-model': null,
+    });
+
+    await act(async () => renderer.unmount());
+    const externalView = buildView();
+    externalView.capability = {
+      mode: 'external',
+      readable: true,
+      writable: true,
+      rulesWritable: true,
+    };
+    await mount(fakeClient(externalView).client);
+    await openTab('owners');
+
+    const externalLinks = collectOwnerLinks();
+    expect(externalLinks['observability.usage.usage-statistics-enabled']).toBe('/api-keys');
+    expect(externalLinks['observability.usage.redis-usage-queue-retention-seconds']).toBeNull();
   });
 
   it('offers reconcile for a legacy field operation surfaced as the group operation', async () => {

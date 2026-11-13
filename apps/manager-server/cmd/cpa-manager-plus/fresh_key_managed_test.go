@@ -41,7 +41,11 @@ type managedKeyDestination struct {
 	authDir       string
 	pluginDir     string
 	extraRoots    map[string]any
-	loggingToFile bool
+	loggingToFile      bool
+	debug              bool
+	requestLog         bool
+	logsMaxTotalSizeMB *int
+	errorLogsMaxFiles  *int
 }
 
 func (d *managedKeyDestination) document() []byte {
@@ -67,13 +71,30 @@ func (d *managedKeyDestination) document() []byte {
 		"access":        map[string]any{"api-keys": keys},
 		"oauth":         map[string]any{"auth-dir": authDir},
 		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
-		"observability": map[string]any{"logs": map[string]any{"logging-to-file": d.loggingToFile}, "usage": map[string]any{"usage-statistics-enabled": true}},
+		"observability": map[string]any{"logs": d.observabilityLogs(), "usage": map[string]any{"usage-statistics-enabled": true}},
 	}
 	for k, v := range d.extraRoots {
 		doc[k] = v
 	}
 	body, _ := json.Marshal(doc)
 	return body
+}
+
+func (d *managedKeyDestination) observabilityLogs() map[string]any {
+	logs := map[string]any{"logging-to-file": d.loggingToFile}
+	if d.debug {
+		logs["debug"] = true
+	}
+	if d.requestLog {
+		logs["request-log"] = true
+	}
+	if d.logsMaxTotalSizeMB != nil {
+		logs["logs-max-total-size-mb"] = *d.logsMaxTotalSizeMB
+	}
+	if d.errorLogsMaxFiles != nil {
+		logs["error-logs-max-files"] = *d.errorLogsMaxFiles
+	}
+	return logs
 }
 
 // seed mirrors the destination CPA that was staged with exactly the Client Key
@@ -117,7 +138,7 @@ func (d *managedKeyDestination) serve(t *testing.T) *httptest.Server {
 			d.keys = slices.Clone(keys)
 			d.mu.Unlock()
 			_, _ = w.Write([]byte(`{}`))
-		case r.Method == http.MethodPut && r.URL.Path == "/v0/management/logging-to-file":
+		case r.Method == http.MethodPut && (r.URL.Path == "/v0/management/logging-to-file" || r.URL.Path == "/v0/management/debug" || r.URL.Path == "/v0/management/request-log"):
 			var body struct {
 				Value *bool `json:"value"`
 			}
@@ -126,7 +147,32 @@ func (d *managedKeyDestination) serve(t *testing.T) *httptest.Server {
 				return
 			}
 			d.mu.Lock()
-			d.loggingToFile = *body.Value
+			switch r.URL.Path {
+			case "/v0/management/logging-to-file":
+				d.loggingToFile = *body.Value
+			case "/v0/management/debug":
+				d.debug = *body.Value
+			case "/v0/management/request-log":
+				d.requestLog = *body.Value
+			}
+			d.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodPut && (r.URL.Path == "/v0/management/logs-max-total-size-mb" || r.URL.Path == "/v0/management/error-logs-max-files"):
+			var body struct {
+				Value *int `json:"value"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Value == nil || *body.Value < 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			val := *body.Value
+			d.mu.Lock()
+			if r.URL.Path == "/v0/management/logs-max-total-size-mb" {
+				d.logsMaxTotalSizeMB = &val
+			} else {
+				d.errorLogsMaxFiles = &val
+			}
 			d.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"ok"}`))

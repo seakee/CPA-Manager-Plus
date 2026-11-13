@@ -604,6 +604,106 @@ func (s *Service) ReadPlugins(ctx context.Context) (View, error) {
 	return s.read(ctx, pluginConfigScope)
 }
 
+// LogsCapability projects effective write capability for log settings on the
+// active installation profile. Unlike Read, External installations probe the
+// CPA version gate here so unsupported CPA versions fail closed on log writes.
+func (s *Service) LogsCapability(ctx context.Context) (Capability, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.store.Load(ctx)
+	if err != nil {
+		return Capability{}, err
+	}
+	auth, resolveErr := s.resolveProfile(ctx, r)
+	if errors.Is(resolveErr, cpa.ErrManagementRejected) ||
+		errors.Is(resolveErr, cpa.ErrExternalTargetMoved) ||
+		errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+		return Capability{}, resolveErr
+	}
+	if resolveErr != nil {
+		return Capability{
+			Mode:          auth.capable.Mode,
+			Readable:      auth.capable.Readable,
+			Writable:      false,
+			RulesWritable: false,
+			Reason:        auth.capable.Reason,
+		}, nil
+	}
+	switch auth.mode {
+	case ModePrivate:
+		return Capability{
+			Mode:          ModePrivate,
+			Readable:      auth.capable.Readable,
+			Writable:      false,
+			RulesWritable: false,
+			Reason:        ReasonPrivateFrozen,
+		}, nil
+	case ModeExternal:
+		if s.externalProbe == nil {
+			return Capability{
+				Mode:          ModeExternal,
+				Readable:      false,
+				Writable:      false,
+				RulesWritable: false,
+				Reason:        ReasonUnavailable,
+			}, nil
+		}
+		if err := s.externalWriteGate(ctx, auth); err != nil {
+			switch {
+			case errors.Is(err, cpa.ErrManagementRejected),
+				errors.Is(err, cpa.ErrExternalTargetMoved),
+				errors.Is(err, cpa.ErrExternalRejectionUnavailable):
+				return Capability{}, err
+			case errors.Is(err, cpa.ErrExternalVersionUnsupported):
+				return Capability{
+					Mode:          ModeExternal,
+					Readable:      true,
+					Writable:      false,
+					RulesWritable: false,
+					Reason:        ReasonVersionUnsupported,
+				}, nil
+			default:
+				return Capability{
+					Mode:          ModeExternal,
+					Readable:      false,
+					Writable:      false,
+					RulesWritable: false,
+					Reason:        ReasonUnavailable,
+				}, nil
+			}
+		}
+		return auth.capable, nil
+	case ModeManaged:
+		if auth.wire == nil {
+			return Capability{
+				Mode:          ModeManaged,
+				Readable:      false,
+				Writable:      false,
+				RulesWritable: false,
+				Reason:        ReasonUnavailable,
+			}, nil
+		}
+		if _, readErr := auth.wire.ReadConfigDocument(ctx, auth.secret); readErr != nil {
+			return Capability{
+				Mode:          ModeManaged,
+				Readable:      false,
+				Writable:      false,
+				RulesWritable: false,
+				Reason:        ReasonReadUnavailable,
+			}, nil
+		}
+		return auth.capable, nil
+	default:
+		return Capability{
+			Mode:          auth.mode,
+			Readable:      false,
+			Writable:      false,
+			RulesWritable: false,
+			Reason:        auth.capable.Reason,
+		}, nil
+	}
+}
+
 func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

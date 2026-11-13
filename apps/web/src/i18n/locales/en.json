@@ -3703,7 +3703,22 @@
     "lines": "lines",
     "removed": "Filtered",
     "upgrade_required_title": "Please Upgrade CLI Proxy API",
-    "upgrade_required_desc": "The current server version does not support the logs viewing feature. Please upgrade to the latest version of CLI Proxy API to use this feature."
+    "upgrade_required_desc": "The current server version does not support the logs viewing feature. Please upgrade to the latest version of CLI Proxy API to use this feature.",
+    "settings_tab": "Log Settings",
+    "enable_file_logging": "Enable File Logging",
+    "enabled_empty_desc": "File logging is enabled. New log entries will appear here.",
+    "settings_title": "Logging Configuration",
+    "settings_desc": "Manage file logging, debug level, request logging, and retention limits for the active gateway (observability.logs.*).",
+    "settings_logging_to_file_desc": "Write CPA runtime and request logs to disk so this page can view, filter, and download them.",
+    "settings_logs_max_size_hint": "Set to 0 for no total size limit; oldest log files are pruned automatically when exceeded.",
+    "settings_error_logs_max_files_hint": "Applies when request logging is off. Defaults to 10 retained files; set to 0 to disable cleanup.",
+    "settings_non_negative_integer": "Enter an integer greater than or equal to 0",
+    "settings_saved": "Log settings saved",
+    "settings_save_failed": "Failed to save log settings",
+    "readonly_badge": "Read-only",
+    "pprof_readonly_title": "Profiling Listener (pprof)",
+    "pprof_managed_posture_reason": "Managed and adopted installation posture keeps pprof disabled (observability.pprof.enable = false) so no unauthenticated debug listener is opened; shown read-only.",
+    "pprof_deployment_reason": "The pprof listener belongs to host deployment configuration and has no runtime management endpoint; update config.yaml on the host and restart CPA to change it."
   },
   "config_management": {
     "title": "Config Panel",
