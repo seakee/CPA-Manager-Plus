@@ -520,32 +520,6 @@
   overflow-wrap: anywhere;
 }
 
-.usageSummaryCardChart {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  z-index: 0;
-  width: calc(46% - 8px);
-  min-width: 72px;
-  height: 28px;
-  color: var(--summary-accent);
-  opacity: 0.5;
-  pointer-events: none;
-
-  svg {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-
-  path {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    opacity: 0.22;
-  }
-}
-
 .summaryAccentAmber {
   --summary-accent: var(--data-amber-base);
 }
@@ -2026,32 +2000,6 @@
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.heatmapDetailMetricChart {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  z-index: 0;
-  width: calc(48% - 8px);
-  min-width: 64px;
-  height: 26px;
-  color: var(--heatmap-detail-accent);
-  opacity: 0.5;
-  pointer-events: none;
-
-  svg {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-
-  path {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    opacity: 0.22;
-  }
 }
 
 .heatmapDetailMetricBlue {

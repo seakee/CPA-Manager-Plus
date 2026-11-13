@@ -10379,9 +10379,11 @@ describe('AccountsPage replacement flows', () => {
     expect(activitySummaryGrid.findAllByProps({ 'data-usage-summary-meta': 'true' })).toHaveLength(
       0
     );
-    expect(activitySummaryGrid.findAllByProps({ 'data-usage-summary-chart': 'true' })).toHaveLength(
-      0
-    );
+    expect(
+      activitySummaryGrid.findAll(
+        (node) => node.type === 'svg' && node.props.preserveAspectRatio === 'none'
+      )
+    ).toHaveLength(0);
     expect(activitySummaryGrid.findAllByProps({ role: 'tooltip' })).toHaveLength(0);
     expect(lastActiveMetric.props['data-overview-metric-kind']).toBe('timestamp');
     expect(readText(lastActiveMetric)).toContain('accounts.detail_overview_activity_last_active');
