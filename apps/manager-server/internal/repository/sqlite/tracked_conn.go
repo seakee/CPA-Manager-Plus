@@ -58,9 +58,10 @@ func NewConnector(path string) (driver.Connector, error) {
 }
 
 type connCloseTracker struct {
-	mu   sync.Mutex
-	cond *sync.Cond
-	open int
+	mu     sync.Mutex
+	cond   *sync.Cond
+	open   int
+	sealed bool
 }
 
 func newConnCloseTracker() *connCloseTracker {
@@ -69,10 +70,14 @@ func newConnCloseTracker() *connCloseTracker {
 	return t
 }
 
-func (t *connCloseTracker) onOpen() {
+func (t *connCloseTracker) tryOpen() bool {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sealed {
+		return false
+	}
 	t.open++
-	t.mu.Unlock()
+	return true
 }
 
 func (t *connCloseTracker) onClose() {
@@ -85,8 +90,9 @@ func (t *connCloseTracker) onClose() {
 	t.mu.Unlock()
 }
 
-func (t *connCloseTracker) waitZero() {
+func (t *connCloseTracker) sealAndWait() {
 	t.mu.Lock()
+	t.sealed = true
 	for t.open > 0 {
 		t.cond.Wait()
 	}
@@ -99,11 +105,23 @@ type trackedConnector struct {
 }
 
 func (c *trackedConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	if !c.tracker.tryOpen() {
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, driver.ErrBadConn
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			c.tracker.onClose()
+		}
+	}()
 	conn, err := c.base.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	c.tracker.onOpen()
+	handedOff = true
 	return &trackedDriverConn{
 		inner:   conn,
 		onClose: c.tracker.onClose,
@@ -114,15 +132,15 @@ func (c *trackedConnector) Driver() driver.Driver {
 	return c.base.Driver()
 }
 
-// WrapConnectorWithCloseWaiter wraps base so waitClosed blocks (via sync.Cond,
-// without polling or timeouts) until every opened driver.Conn has completed
-// Close().
+// WrapConnectorWithCloseWaiter wraps base so waitClosed seals future Connect
+// attempts and blocks (via sync.Cond, without polling or timeouts) until every
+// in-flight Connect and opened driver.Conn has completed Close().
 func WrapConnectorWithCloseWaiter(base driver.Connector) (driver.Connector, func()) {
 	tracker := newConnCloseTracker()
 	return &trackedConnector{
 		base:    base,
 		tracker: tracker,
-	}, tracker.waitZero
+	}, tracker.sealAndWait
 }
 
 type trackedDriverConn struct {
