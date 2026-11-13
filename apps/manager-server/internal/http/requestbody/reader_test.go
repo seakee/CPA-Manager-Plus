@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +299,9 @@ func TestHTTP11KeepAliveReusesSingleTCPConnAcrossSequentialPosts(t *testing.T) {
 	}
 }
 
+// TestSlowMultiChunkStreamingSucceedsNormallyAndAbortsOnCancel is a real-TCP
+// chunked-streaming smoke check; TestDefaultMiddlewareSetsNoReadDeadlineUntilContextCancel
+// below enforces the exact zero-default-deadline invariant without wall-clock sleeps.
 func TestSlowMultiChunkStreamingSucceedsNormallyAndAbortsOnCancel(t *testing.T) {
 	const referenceThreshold = 30 * time.Millisecond
 
@@ -521,6 +526,307 @@ func TestLargeResponseWithUnreadBodyPreservesKeepAliveWhenDrainedAndAbortsWhenSt
 		case <-handlerDone:
 		case <-time.After(2 * time.Second):
 			t.Fatal("deferred Reader.Close() did not unblock on context cancel")
+		}
+	})
+}
+
+type deadlineRecordingResponseWriter struct {
+	header     http.Header
+	status     int
+	mu         sync.Mutex
+	deadlines  []time.Time
+	fullDuplex bool
+	onDeadline func(time.Time)
+}
+
+func newDeadlineRecordingResponseWriter(onDeadline func(time.Time)) *deadlineRecordingResponseWriter {
+	return &deadlineRecordingResponseWriter{
+		header:     make(http.Header),
+		status:     http.StatusOK,
+		onDeadline: onDeadline,
+	}
+}
+
+func (w *deadlineRecordingResponseWriter) Header() http.Header { return w.header }
+
+func (w *deadlineRecordingResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func (w *deadlineRecordingResponseWriter) WriteHeader(status int) { w.status = status }
+
+func (w *deadlineRecordingResponseWriter) EnableFullDuplex() error {
+	w.mu.Lock()
+	w.fullDuplex = true
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *deadlineRecordingResponseWriter) SetReadDeadline(d time.Time) error {
+	w.mu.Lock()
+	w.deadlines = append(w.deadlines, d)
+	cb := w.onDeadline
+	w.mu.Unlock()
+	if cb != nil {
+		cb(d)
+	}
+	return nil
+}
+
+func (w *deadlineRecordingResponseWriter) recordedDeadlines() []time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]time.Time, len(w.deadlines))
+	copy(out, w.deadlines)
+	return out
+}
+
+type multiChunkSliceBody struct {
+	chunks [][]byte
+	idx    int
+}
+
+func (b *multiChunkSliceBody) Read(p []byte) (int, error) {
+	if b.idx >= len(b.chunks) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.chunks[b.idx])
+	b.idx++
+	return n, nil
+}
+
+func (b *multiChunkSliceBody) Close() error { return nil }
+
+type blockingDeadlineBody struct {
+	readEntered     chan struct{}
+	deadlineExpired <-chan struct{}
+	once            sync.Once
+}
+
+func (b *blockingDeadlineBody) Read(_ []byte) (int, error) {
+	b.once.Do(func() { close(b.readEntered) })
+	<-b.deadlineExpired
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (b *blockingDeadlineBody) Close() error { return nil }
+
+func TestDefaultMiddlewareSetsNoReadDeadlineUntilContextCancel(t *testing.T) {
+	t.Run("normal_reads_through_default_middleware_set_zero_read_deadlines", func(t *testing.T) {
+		rw := newDeadlineRecordingResponseWriter(nil)
+		var got string
+		h := middleware.RequestLogger(Middleware(DefaultReadIdleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("io.ReadAll: %v", err)
+			}
+			got = string(raw)
+			w.WriteHeader(http.StatusOK)
+		})))
+		req, err := http.NewRequest(http.MethodPost, "http://example.invalid/upload", &multiChunkSliceBody{
+			chunks: [][]byte{[]byte("chunk-1:"), []byte("chunk-2")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.ServeHTTP(rw, req)
+		if got != "chunk-1:chunk-2" {
+			t.Fatalf("body = %q, want %q", got, "chunk-1:chunk-2")
+		}
+		if deadlines := rw.recordedDeadlines(); len(deadlines) != 0 {
+			t.Fatalf("DefaultReadIdleTimeout middleware set read deadlines during normal Read: %v, want none", deadlines)
+		}
+	})
+
+	t.Run("cancelling_request_context_sets_expired_read_deadline", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+
+		deadlineExpired := make(chan struct{})
+		var expOnce sync.Once
+		rw := newDeadlineRecordingResponseWriter(func(d time.Time) {
+			if !d.IsZero() && !d.After(time.Now()) {
+				expOnce.Do(func() { close(deadlineExpired) })
+			}
+		})
+		body := &blockingDeadlineBody{
+			readEntered:     make(chan struct{}),
+			deadlineExpired: deadlineExpired,
+		}
+		readErrCh := make(chan error, 1)
+		h := middleware.RequestLogger(Middleware(DefaultReadIdleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			buf := make([]byte, 16)
+			_, rErr := r.Body.Read(buf)
+			readErrCh <- rErr
+			w.WriteHeader(http.StatusRequestTimeout)
+		})))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "http://example.invalid/stream", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serveDone := make(chan struct{})
+		go func() {
+			defer close(serveDone)
+			h.ServeHTTP(rw, req)
+		}()
+
+		<-body.readEntered
+		if deadlines := rw.recordedDeadlines(); len(deadlines) != 0 {
+			t.Fatalf("read deadlines set before context cancel = %v, want none", deadlines)
+		}
+
+		cancelReq()
+		select {
+		case rErr := <-readErrCh:
+			if !errors.Is(rErr, context.Canceled) {
+				t.Fatalf("canceled Read err = %v, want context.Canceled", rErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Read did not abort on context cancellation")
+		}
+		<-serveDone
+		deadlines := rw.recordedDeadlines()
+		if len(deadlines) == 0 || deadlines[0].IsZero() || deadlines[0].After(time.Now()) {
+			t.Fatalf("recorded deadlines after cancel = %v, want immediate expired deadline", deadlines)
+		}
+	})
+}
+
+type blockingCloseBody struct {
+	inInnerClose    chan struct{}
+	deadlineExpired <-chan struct{}
+	once            sync.Once
+}
+
+func (b *blockingCloseBody) Read(_ []byte) (int, error) {
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (b *blockingCloseBody) Close() error {
+	b.once.Do(func() { close(b.inInnerClose) })
+	<-b.deadlineExpired
+	return os.ErrDeadlineExceeded
+}
+
+func TestConcurrentReaderCloseKeepsCancelWatcherArmedUntilDrainFinishes(t *testing.T) {
+	t.Run("second_concurrent_close_waits_and_keeps_cancel_watcher_active", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+		reqCtx = WithEarlyCloseDrainTimeout(reqCtx, -1)
+
+		deadlineExpired := make(chan struct{})
+		var expOnce sync.Once
+		rw := newDeadlineRecordingResponseWriter(func(d time.Time) {
+			if !d.IsZero() && !d.After(time.Now()) {
+				expOnce.Do(func() { close(deadlineExpired) })
+			}
+		})
+		inner := &blockingCloseBody{
+			inInnerClose:    make(chan struct{}),
+			deadlineExpired: deadlineExpired,
+		}
+		wrapped, stopWrap := Wrap(reqCtx, inner, rw, DefaultReadIdleTimeout)
+		defer stopWrap()
+
+		firstErrCh := make(chan error, 1)
+		go func() {
+			firstErrCh <- wrapped.Close()
+		}()
+		<-inner.inInnerClose
+
+		secondStarted := make(chan struct{})
+		secondErrCh := make(chan error, 1)
+		go func() {
+			close(secondStarted)
+			secondErrCh <- wrapped.Close()
+		}()
+		<-secondStarted
+		for range 100 {
+			runtime.Gosched()
+		}
+		select {
+		case err := <-secondErrCh:
+			// Unblock inner so the leaked goroutine from the unfixed path exits cleanly.
+			expOnce.Do(func() { close(deadlineExpired) })
+			t.Fatalf("second concurrent Close() returned (%v) while inner.Close() was still draining", err)
+		default:
+		}
+
+		cancelReq()
+		select {
+		case err1 := <-firstErrCh:
+			select {
+			case err2 := <-secondErrCh:
+				if !errors.Is(err1, os.ErrDeadlineExceeded) || !errors.Is(err2, os.ErrDeadlineExceeded) {
+					t.Fatalf("Close errors = (%v, %v), want both os.ErrDeadlineExceeded", err1, err2)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("second concurrent Close() did not unblock after first Close() finished")
+			}
+		case <-time.After(time.Second):
+			expOnce.Do(func() { close(deadlineExpired) })
+			t.Fatal("first Close() did not unblock on context cancel after concurrent Close()")
+		}
+	})
+
+	t.Run("real_tcp_concurrent_close_aborts_promptly_on_cancel", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+		reqCtx = WithEarlyCloseDrainTimeout(reqCtx, -1)
+
+		firstCloseEntered := make(chan struct{})
+		var once sync.Once
+		reqCtx = WithNonEOFCloseObserver(reqCtx, func() {
+			once.Do(func() { close(firstCloseEntered) })
+		})
+
+		bothClosed := make(chan struct{})
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, stopBody := Wrap(reqCtx, r.Body, w, DefaultReadIdleTimeout)
+				defer stopBody()
+
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					_ = body.Close()
+				}()
+				<-firstCloseEntered
+				go func() {
+					defer wg.Done()
+					_ = body.Close()
+				}()
+				wg.Wait()
+				close(bothClosed)
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+			}),
+		}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		rawReq := fmt.Sprintf("POST /upload HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n", listener.Addr().String())
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		<-firstCloseEntered
+		for range 100 {
+			runtime.Gosched()
+		}
+		cancelReq()
+
+		select {
+		case <-bothClosed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("real-TCP concurrent Close() did not unblock on context cancel")
 		}
 	})
 }

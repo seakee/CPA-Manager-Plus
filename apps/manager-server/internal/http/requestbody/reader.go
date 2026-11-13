@@ -96,6 +96,8 @@ type Reader struct {
 	eof       bool
 	canceled  bool
 	closed    bool
+	closeDone chan struct{}
+	closeErr  error
 	stopWatch func() bool
 }
 
@@ -227,16 +229,20 @@ func (r *Reader) Close() error {
 	if r == nil {
 		return nil
 	}
-	// Keep stopWatch armed until inner.Close() finishes so context cancellation
-	// mid-Close immediately aborts net/http's early-close body drain.
-	defer r.stop()
 
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
-		return nil
+		<-done
+		r.mu.Lock()
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
 	}
 	r.closed = true
+	done := make(chan struct{})
+	r.closeDone = done
 	eof := r.eof
 	alreadyCanceled := r.canceled || r.ctx.Err() != nil
 	if !eof {
@@ -253,19 +259,27 @@ func (r *Reader) Close() error {
 	onClose := r.onBeforeNonEOFClose
 	r.mu.Unlock()
 
+	var err error
+	defer func() {
+		// Unregister stopWatch only after inner.Close() completes so concurrent
+		// Close() callers never disarm the active cancellation watcher early.
+		r.stop()
+		r.mu.Lock()
+		r.closing = false
+		r.closeErr = err
+		canceled := r.canceled || r.ctx.Err() != nil
+		if !eof && err == nil && !canceled && r.rc != nil && r.earlyCloseDrainTimeout > 0 {
+			// Remaining unread bytes arrived within the drain window and reached EOF;
+			// clear the temporary drain deadline so HTTP/1.1 keep-alive can reuse the conn.
+			_ = r.rc.SetReadDeadline(time.Time{})
+		}
+		close(done)
+		r.mu.Unlock()
+	}()
+
 	if !eof && onClose != nil {
 		onClose()
 	}
-	err := r.inner.Close()
-
-	r.mu.Lock()
-	r.closing = false
-	canceled := r.canceled || r.ctx.Err() != nil
-	if !eof && err == nil && !canceled && r.rc != nil && r.earlyCloseDrainTimeout > 0 {
-		// Remaining unread bytes arrived within the drain window and reached EOF;
-		// clear the temporary drain deadline so HTTP/1.1 keep-alive can reuse the conn.
-		_ = r.rc.SetReadDeadline(time.Time{})
-	}
-	r.mu.Unlock()
+	err = r.inner.Close()
 	return err
 }

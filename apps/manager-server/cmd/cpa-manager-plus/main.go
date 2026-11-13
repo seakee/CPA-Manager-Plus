@@ -655,6 +655,32 @@ func runServerWithOptions(options legacypreflight.Options) {
 		usageCacheAccountingMigrationWorker.Start(ctx)
 	}
 
+	shutdownLegacyRuntime(
+		ctx,
+		stop,
+		serverResult,
+		startupHandler,
+		codexInspectionWorker,
+		collectorWorker,
+		pprofServer,
+		server,
+		usageArchiveRetentionWorker,
+		serverApp.AppContext().UsageService,
+	)
+}
+
+func shutdownLegacyRuntime(
+	ctx context.Context,
+	stop context.CancelFunc,
+	serverResult <-chan error,
+	startupHandler *startupHTTPHandler,
+	codexInspectionWorker codexInspectionStopper,
+	collectorWorker interface{ Stop(context.Context) },
+	pprofServer *http.Server,
+	server *http.Server,
+	usageArchiveRetentionWorker codexInspectionStopper,
+	usageArchiveJobs interface{ WaitArchiveJobs(context.Context) error },
+) {
 	select {
 	case <-ctx.Done():
 		select {
@@ -670,27 +696,39 @@ func runServerWithOptions(options legacypreflight.Options) {
 		}
 		// Ensure every worker using the shared process context observes the same
 		// shutdown even when the HTTP listener, rather than a signal, initiated it.
-		stop()
+		if stop != nil {
+			stop()
+		}
+	}
+	if startupHandler != nil {
+		startupHandler.BeginShutdown()
 	}
 	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
-	collectorWorker.Stop(context.Background())
+	if collectorWorker != nil {
+		collectorWorker.Stop(context.Background())
+	}
 	if pprofServer != nil {
 		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown pprof: %v", err)
 		}
 	}
-	startupHandler.BeginShutdown()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown: %v", err)
-		_ = server.Close()
+	if server != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+			_ = server.Close()
+		}
 	}
-	if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
-		log.Printf("shutdown usage archive retention: %v", err)
+	if usageArchiveRetentionWorker != nil {
+		if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
+			log.Printf("shutdown usage archive retention: %v", err)
+		}
 	}
-	if err := serverApp.AppContext().UsageService.WaitArchiveJobs(shutdownCtx); err != nil {
-		log.Printf("shutdown usage archive jobs: %v", err)
+	if usageArchiveJobs != nil {
+		if err := usageArchiveJobs.WaitArchiveJobs(shutdownCtx); err != nil {
+			log.Printf("shutdown usage archive jobs: %v", err)
+		}
 	}
 }
 

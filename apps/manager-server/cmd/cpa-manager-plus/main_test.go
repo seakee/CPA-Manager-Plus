@@ -853,3 +853,119 @@ func readUsageEventsSummaryFromDB(t testing.TB, db *sql.DB) startupUsageEventsSu
 	}
 	return summary
 }
+
+type gatingCodexStopper struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *gatingCodexStopper) StopAndWait(ctx context.Context) error {
+	s.once.Do(func() { close(s.entered) })
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestLegacyShutdownAbortsNonFreshBodyBeforeCodexWorkerDrain(t *testing.T) {
+	startup := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	startup.earlyCloseDrainTimeout = -1
+
+	secondReadEntered := make(chan struct{})
+	var readOnce sync.Once
+	startup.onRequestBodyRead = func(r *http.Request, attempt int) {
+		if r != nil && r.URL != nil && r.URL.Path == "/usage-service/upload" && attempt >= 2 {
+			readOnce.Do(func() { close(secondReadEntered) })
+		}
+	}
+
+	readErrCh := make(chan error, 1)
+	startup.SetReady(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.ReadAll(r.Body)
+		readErrCh <- err
+		w.WriteHeader(http.StatusRequestTimeout)
+	}))
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		Handler:           startup,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	procCtx, stopProc := context.WithCancel(context.Background())
+	defer stopProc()
+	serverResult := make(chan error, 1)
+	go serveHTTPServer(server, listener, stopProc, serverResult)
+	t.Cleanup(func() { _ = server.Close() })
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Send 4 of 16 bytes so the handler blocks on attempt #2 inside r.Body.Read.
+	if _, err := fmt.Fprintf(conn, "POST /usage-service/upload HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\nabcd", listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondReadEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler never entered blocked second body Read")
+	}
+
+	releaseCodex := make(chan struct{})
+	codexStopper := &gatingCodexStopper{
+		entered: make(chan struct{}),
+		release: releaseCodex,
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		shutdownLegacyRuntime(
+			procCtx,
+			stopProc,
+			serverResult,
+			startup,
+			codexStopper,
+			nil,
+			nil,
+			server,
+			nil,
+			nil,
+		)
+	}()
+
+	stopProc()
+	select {
+	case <-codexStopper.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Legacy shutdown did not reach Codex worker stop")
+	}
+
+	// While Codex worker stop is STILL blocked on releaseCodex, BeginShutdown()
+	// must have already aborted the unfinished non-Fresh HTTP body Read.
+	select {
+	case rErr := <-readErrCh:
+		if !errors.Is(rErr, context.Canceled) {
+			close(releaseCodex)
+			t.Fatalf("aborted Legacy body Read = %v, want context.Canceled", rErr)
+		}
+	case <-time.After(300 * time.Millisecond):
+		close(releaseCodex)
+		<-shutdownDone
+		t.Fatal("unfinished non-Fresh body Read remained blocked while Codex worker stop was waiting")
+	}
+
+	close(releaseCodex)
+	select {
+	case <-shutdownDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdownLegacyRuntime did not complete after Codex gate released")
+	}
+}

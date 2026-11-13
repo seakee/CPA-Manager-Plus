@@ -2069,42 +2069,65 @@ func TestLifecycleContextUnregistersCallbacksAndReusesBoundContext(t *testing.T)
 	})
 
 	app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
-	bound := app.lifecycleContext(t.Context())
-	if got := app.lifecycleContext(bound); got != bound {
-		t.Fatal("lifecycleContext on an already-bound context did not reuse it")
-	}
 
-	// Warm up runtime and establish baseline goroutine count.
-	for range 10 {
-		c, cancel := context.WithCancel(t.Context())
-		lc := app.lifecycleContext(c)
-		cancel()
-		<-lc.Done()
-	}
-	runtime.GC()
-	runtime.Gosched()
-	baseGoroutines := runtime.NumGoroutine()
+	// Prove deterministically via runtime.AddCleanup that cancelling a derived
+	// lifecycleContext (including chained calls) unregisters its AfterFunc from
+	// the still-live a.closeCtx so neither the derived context nor values attached
+	// to its basis remain reachable from a.closeCtx.
+	type lifecycleCleanupKey struct{}
+	cleaned := make(chan struct{})
+	func() {
+		basisRoot, cancelBasis := context.WithCancel(context.Background())
+		token := new(int)
+		runtime.AddCleanup(token, func(ch chan struct{}) { close(ch) }, cleaned)
+		basis := context.WithValue(basisRoot, lifecycleCleanupKey{}, token)
 
-	for range 2000 {
-		c, cancel := context.WithCancel(t.Context())
-		lc := app.lifecycleContext(c)
-		cancel()
-		<-lc.Done()
-	}
-	runtime.GC()
-	runtime.Gosched()
-	if after := runtime.NumGoroutine(); after > baseGoroutines+20 {
-		t.Fatalf("goroutines grew from %d to %d across 2000 lifecycleContext cycles", baseGoroutines, after)
-	}
+		derived := app.lifecycleContext(basis)
+		chained := app.lifecycleContext(app.lifecycleContext(derived))
+		if derived.Err() != nil || chained.Err() != nil {
+			t.Fatalf("derived lifecycle contexts canceled prematurely: derived=%v chained=%v", derived.Err(), chained.Err())
+		}
 
-	// A still-live derived context must cancel promptly when opened.Close() runs.
+		cancelBasis()
+		select {
+		case <-derived.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("derived lifecycleContext did not cancel when basis canceled")
+		}
+		select {
+		case <-chained.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("chained lifecycleContext did not cancel when basis canceled")
+		}
+	}()
+
+	gcDeadline := time.Now().Add(2 * time.Second)
+	for {
+		runtime.GC()
+		runtime.Gosched()
+		select {
+		case <-cleaned:
+			goto unregistrationVerified
+		default:
+		}
+		if time.Now().After(gcDeadline) {
+			t.Fatal("canceled lifecycleContext remained retained by live closeCtx (AfterFunc callback was not unregistered)")
+		}
+	}
+unregistrationVerified:
+
+	// A still-live derived/chained context must cancel promptly when opened.Close() runs
+	// even while its caller-supplied basis remains uncancelled.
 	liveBasis, cancelLive := context.WithCancel(context.Background())
 	defer cancelLive()
-	liveDerived := app.lifecycleContext(liveBasis)
+	liveDerived := app.lifecycleContext(app.lifecycleContext(liveBasis))
 
 	closed = true
 	if err := opened.Close(); err != nil {
 		t.Fatalf("opened.Close(): %v", err)
+	}
+	if liveBasis.Err() != nil {
+		t.Fatalf("caller basis was unexpectedly canceled: %v", liveBasis.Err())
 	}
 	select {
 	case <-liveDerived.Done():
