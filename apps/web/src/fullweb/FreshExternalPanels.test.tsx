@@ -1142,4 +1142,188 @@ describe('External usage confirmation', () => {
     expect(parseExternalUsageState({ ...usageState, collector: 7 })).toBeNull();
     expect(parseExternalUsageState(usageState)).toEqual(usageState);
   });
+
+  it('retires an earlier read when confirmation starts so its failure cannot trap the panel on readError', async () => {
+    let settleRead2: (response: Response) => void = () => undefined;
+    let settlePost: (response: Response) => void = () => undefined;
+    let reads = 0;
+    const blockers: (string | null | undefined)[] = [];
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/external/usage')) {
+        reads += 1;
+        if (reads === 1) return Promise.resolve(Response.json(usageState));
+        return new Promise<Response>((resolve) => {
+          settleRead2 = resolve;
+        });
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        onBlocker={(code) => blockers.push(code)}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-enable' }).props.onClick();
+    });
+    // Rebind starts read #2 while the confirm modal is open, then operator confirms.
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    act(() => {
+      void renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' }).props.onClick();
+    });
+    // Earlier read #2 settles with 503 while confirm POST is in flight.
+    await act(async () => {
+      settleRead2(Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 }));
+    });
+    // Confirm succeeds afterwards: panel must show running state, not readError fallback.
+    await act(async () => {
+      settlePost(
+        Response.json({
+          ...usageState,
+          statisticsEnabled: true,
+          collector: 'running',
+          collectionStarted: true,
+        })
+      );
+    });
+    expect(renderer.root.findAllByProps({ 'data-testid': 'external-usage-reload' })).toHaveLength(0);
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+    expect(textOf(renderer, 'external-usage-notice')).toBe(x('usageConfirmed'));
+    expect(blockers[blockers.length - 1]).toBeNull();
+  });
+
+  it('discards a retired pre-rebind requestId when a new read supersedes the confirmation', async () => {
+    let nextByte = 0x10;
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => bytes.fill((nextByte += 1)),
+    });
+    const requestIds: string[] = [];
+    let settleFirstPost: (response: Response) => void = () => undefined;
+    let posts = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        posts += 1;
+        const parsed: unknown = JSON.parse(String(init.body));
+        if (parsed && typeof parsed === 'object' && 'requestId' in parsed && typeof parsed.requestId === 'string') {
+          requestIds.push(parsed.requestId);
+        }
+        if (posts === 1) {
+          return new Promise<Response>((resolve) => {
+            settleFirstPost = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageState,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(Response.json(usageState));
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    let renderer!: ReactTestRenderer;
+    const panel = (reloadToken: number) => (
+      <FreshExternalUsage
+        client={client}
+        credential="admin"
+        onUnauthorized={() => undefined}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(panel(0));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-enable' }).props.onClick();
+    });
+    act(() => {
+      void renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.update(panel(1));
+    });
+    await act(async () => {
+      settleFirstPost(Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 }));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-enable' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' }).props.onClick();
+    });
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[1]).not.toBe(requestIds[0]);
+  });
+
+  it('releases the confirmation lock when requestId generation throws synchronously', async () => {
+    const client = createPublicApiClient(
+      () => context,
+      vi.fn<typeof fetch>((input, init) => {
+        const url = String(input);
+        if (url.endsWith('/external/usage') && init?.method === 'POST') {
+          return Promise.resolve(
+            Response.json({
+              ...usageState,
+              statisticsEnabled: true,
+              collector: 'running',
+              collectionStarted: true,
+            })
+          );
+        }
+        if (url.endsWith('/external/usage')) {
+          return Promise.resolve(Response.json(usageState));
+        }
+        return Promise.reject(new Error('unexpected url: ' + url));
+      })
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshExternalUsage client={client} credential="admin" onUnauthorized={() => undefined} />
+      );
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-enable' }).props.onClick();
+    });
+    const entropySpy = vi.spyOn(crypto, 'getRandomValues').mockImplementationOnce(() => {
+      throw new Error('entropy unavailable');
+    });
+    try {
+      await act(async () => {
+        renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' }).props.onClick();
+      });
+    } finally {
+      entropySpy.mockRestore();
+    }
+    const retry = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm-retry' });
+    expect(retry.props.disabled).toBe(false);
+    await act(async () => {
+      retry.props.onClick();
+    });
+    expect(textOf(renderer, 'external-usage-collector')).toContain(x('usageCollectorRunning'));
+  });
 });

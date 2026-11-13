@@ -2272,4 +2272,183 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
     expect(view()).toContain(key.id);
   });
+
+  it('does not erase a post-rebind blocker or paint a stale error when a pre-rebind createKey fails', async () => {
+    let settlePost: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        return Promise.resolve(Response.json({ code: 'external_target_moved' }, { status: 409 }));
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind finishes and discovers external_target_moved while pre-rebind POST is still pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+
+    // Pre-rebind POST settles late with external_management_key_rejected.
+    await act(async () => {
+      settlePost(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(t('keysUnavailable'));
+  });
+
+  it('does not erase a post-rebind blocker or paint a stale error when a pre-rebind reconcile fails', async () => {
+    let settleReconcile: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.reject(new Error('lost reply'));
+      }
+      if (url.includes('/api-keys/requests/')) {
+        return new Promise<Response>((resolve) => {
+          settleReconcile = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        return Promise.resolve(Response.json({ code: 'external_target_moved' }, { status: 409 }));
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await click(t('keysCreate'));
+    act(() => {
+      void button(t('keysCheck')).props.onClick();
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+
+    await act(async () => {
+      settleReconcile(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-target_moved' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(view()).not.toContain(t('keysUnavailable'));
+  });
+
+  it('releases the mutation lock when createKey requestId generation throws synchronously', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    await mount(fetchMock);
+    await openCreate();
+    const entropySpy = vi.spyOn(crypto, 'getRandomValues').mockImplementationOnce(() => {
+      throw new Error('entropy unavailable');
+    });
+    try {
+      await act(async () => {
+        void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+      });
+    } finally {
+      entropySpy.mockRestore();
+    }
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+  });
 });
