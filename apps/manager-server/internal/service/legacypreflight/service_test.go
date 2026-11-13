@@ -889,26 +889,67 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 			t.Fatal(err)
 		}
 		origHook := beforeOperationEvidenceProbe
-		beforeOperationEvidenceProbe = func(target string) {
-			_ = os.WriteFile(target+"-wal", walBytes, 0o600)
-		}
 		defer func() { beforeOperationEvidenceProbe = origHook }()
 
+		var (
+			probeHookCalls int
+			probeHookErr   error
+		)
+		beforeOperationEvidenceProbe = func(target string) {
+			probeHookCalls++
+			beforeOperationEvidenceProbe = origHook
+			if _, statErr := os.Lstat(target + "-wal"); !os.IsNotExist(statErr) {
+				probeHookErr = fmt.Errorf("expected absent WAL before mid-probe write, got stat err = %v", statErr)
+				return
+			}
+			probeHookErr = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+
 		inFile, journalPending, err := RecordedOperationEvidence(context.Background(), dbPath)
+		if probeHookErr != nil {
+			t.Fatalf("write mid-probe WAL during RecordedOperationEvidence: %v", probeHookErr)
+		}
+		if probeHookCalls != 1 {
+			t.Fatalf("RecordedOperationEvidence mid-probe hook calls = %d, want 1", probeHookCalls)
+		}
 		if err != nil || !journalPending || inFile {
 			t.Fatalf("RecordedOperationEvidence = (inFile=%v, journalPending=%v, err=%v), want (false, true, nil)", inFile, journalPending, err)
 		}
 
-		// The replay below asks whether admission reads a WAL that appeared, not
-		// whether it survives a writer mid-flight: leaving the seam installed
-		// re-creates the WAL while admission is copying the source, and the copy
-		// then legitimately refuses a source it saw change. Front the WAL
-		// instead, so the step proves what it claims on every file system.
-		beforeOperationEvidenceProbe = nil
-		if err := os.WriteFile(dbPath+"-wal", walBytes, 0o600); err != nil {
+		// Verify DatabaseUpgradeAdmission.Admitted detects and replays a WAL
+		// created mid-probe (the after != before && after.wal.present branch in
+		// recordedOperationEvidenceWithBaseline, before CopySourceForRead runs).
+		// Use a fresh cold database in its own temp directory and a one-shot hook
+		// that disarms itself on first fire so no later probe re-writes the WAL and
+		// FUSE bind mounts never see an unlink+recreate synthetic inode change at
+		// the same -wal path.
+		admitPath := filepath.Join(t.TempDir(), "usage.sqlite")
+		if err := os.WriteFile(admitPath, coldBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background())
+		if _, statErr := os.Lstat(admitPath + "-wal"); !os.IsNotExist(statErr) {
+			t.Fatalf("pre-admission WAL stat error = %v, want not-exist", statErr)
+		}
+		var (
+			admitHookCalls int
+			admitHookErr   error
+		)
+		beforeOperationEvidenceProbe = func(target string) {
+			admitHookCalls++
+			beforeOperationEvidenceProbe = origHook
+			if _, statErr := os.Lstat(target + "-wal"); !os.IsNotExist(statErr) {
+				admitHookErr = fmt.Errorf("expected absent WAL before mid-probe write, got stat err = %v", statErr)
+				return
+			}
+			admitHookErr = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+		stage, err := (DatabaseUpgradeAdmission{DatabasePath: admitPath}).Admitted(context.Background())
+		if admitHookErr != nil {
+			t.Fatalf("write mid-probe WAL during Admitted: %v", admitHookErr)
+		}
+		if admitHookCalls != 1 {
+			t.Fatalf("Admitted mid-probe hook calls = %d, want 1", admitHookCalls)
+		}
 		if err != nil || stage != UpgradeStageInProgress {
 			t.Fatalf("Admitted with mid-probe WAL-only operation = (%q, %v), want (%q, nil)", stage, err, UpgradeStageInProgress)
 		}
