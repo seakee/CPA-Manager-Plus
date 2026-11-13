@@ -25,6 +25,7 @@ import (
 	updatecheckcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/updatecheck"
 	usagecontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
@@ -97,7 +98,7 @@ func New(appCtx *app.Context) http.Handler {
 	// dot-segment path never reaches the proxy as a plugin resource, so it must
 	// not skip the cross-site check either.
 	routes = middleware.RejectCrossSiteAdmin(routes, proxysvc.IsCanonicalPluginResourceRequest)
-	return middleware.Recovery(middleware.RequestLogger(routingdomain.ProtectFixedDiscovery(routes, routingdomain.DiscoveryHandler{})))
+	return middleware.Recovery(middleware.RequestLogger(requestbody.Middleware(requestbody.DefaultReadIdleTimeout, routingdomain.ProtectFixedDiscovery(routes, routingdomain.DiscoveryHandler{}))))
 }
 
 // refuseNonCanonicalV8APIKeysPath answers the v8 API-key subtree's dirty paths

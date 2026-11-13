@@ -19,6 +19,7 @@ import (
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -222,11 +223,11 @@ type freshApplication struct {
 	// gate waiting for the CPA's status. It exists for the hung CPA: a process that
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
-	credentialHeaderBudget time.Duration
+	credentialHeaderBudget          time.Duration
 	afterCredentialHoldBudgetExpiry func()
-	legacyCollector        *collectorservice.Service
-	collectorWorker        *worker.CollectorWorker
-	identityWorker         *identityreconcile.Worker
+	legacyCollector                 *collectorservice.Service
+	collectorWorker                 *worker.CollectorWorker
+	identityWorker                  *identityreconcile.Worker
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
@@ -278,18 +279,38 @@ type freshApplication struct {
 	// bans an address after five failed authentications, so a page that keeps
 	// presenting a key its own CPA already rejected is what turns a rotation into
 	// a thirty-minute outage.
-	rejection *externalRejection
+	rejection                      *externalRejection
+	closeCtx                       context.Context
+	closeCancel                    context.CancelFunc
+	bgMu                           sync.Mutex
+	closing                        bool
+	bgWG                           sync.WaitGroup
+	inflightWG                     sync.WaitGroup
+	closeOnce                      sync.Once
+	maintenanceMu                  sync.Mutex
+	maintenanceStopped             bool
+	beforeDatabaseMaintenanceStart func()
+	afterCloseMarked               func()
+	onRequestBodyRead              func(r *http.Request, attempt int)
+	onBeforeNonEOFBodyClose        func(r *http.Request)
+	bodyReadTimeout                time.Duration
+	earlyCloseDrainTimeout         time.Duration
+	shutdownWriteGrace             time.Duration
 }
 
 func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshrouting.Driver) *freshApplication {
 	st := freshstore.New(opened.DB)
 	settings := setting.New(opened.DB, opened.Protector)
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	a := &freshApplication{
 		cfg: cfg, store: st, authority: fresh.New(st), routing: freshrouting.New(st, driver),
 		protector:       opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
-		rejection: newExternalRejection(opened.DB),
+		rejection:   newExternalRejection(opened.DB),
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
 	}
+	opened.BeforeClose(a.Close)
 	// Fresh owns the SQLite admission and keeps the old app bootstrap bypassed,
 	// but the already-built CPAMP services remain the source of truth for Full
 	// Web's shared Dashboard/Config/System resources. This context reuses the
@@ -392,7 +413,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			if err != nil {
 				log.Printf("Fresh identity reconciliation unavailable: %v", err)
 			} else if worker := a.identityWorker; worker != nil {
-				a.startIdentityWorker = func(ctx context.Context) { go worker.Run(ctx) }
+				a.startIdentityWorker = func(ctx context.Context) {
+					a.launchBackground(func() { worker.Run(ctx) })
+				}
 			}
 		}
 	}
@@ -537,6 +560,259 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	return a
 }
 
+type freshRequestTrackedKey struct{}
+
+func (a *freshApplication) isClosing() bool {
+	if a == nil {
+		return true
+	}
+	a.bgMu.Lock()
+	closing := a.closing
+	a.bgMu.Unlock()
+	return closing
+}
+
+type freshLifecycleBoundKey struct{}
+
+// lifecycleContext binds basis to a.closeCtx so host-lived workers stop both
+// when basis cancels and when the application's database handle closes.
+func (a *freshApplication) lifecycleContext(basis context.Context) context.Context {
+	if basis == nil {
+		return nil
+	}
+	if a == nil || a.closeCtx == nil || basis == a.closeCtx {
+		return basis
+	}
+	if bound, _ := basis.Value(freshLifecycleBoundKey{}).(context.Context); bound == a.closeCtx {
+		return basis
+	}
+	if basis == context.Background() {
+		return a.closeCtx
+	}
+	baseCtx, cancel := context.WithCancel(basis)
+	stopCloseWatch := context.AfterFunc(a.closeCtx, cancel)
+	context.AfterFunc(baseCtx, func() {
+		stopCloseWatch()
+	})
+	return context.WithValue(baseCtx, freshLifecycleBoundKey{}, a.closeCtx)
+}
+
+func (a *freshApplication) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if a == nil || a.closeCtx == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stopAfter := context.AfterFunc(a.closeCtx, cancel)
+	return ctx, func() {
+		stopAfter()
+		cancel()
+	}
+}
+
+func (a *freshApplication) enterRequest(r *http.Request) (func(), bool) {
+	if a == nil {
+		return nil, false
+	}
+	if r != nil && r.Context().Value(freshRequestTrackedKey{}) != nil {
+		return func() {}, true
+	}
+	a.bgMu.Lock()
+	if a.closing {
+		a.bgMu.Unlock()
+		return nil, false
+	}
+	a.inflightWG.Add(1)
+	a.bgMu.Unlock()
+	return a.inflightWG.Done, true
+}
+
+func (a *freshApplication) launchBackground(fn func()) bool {
+	if a == nil || fn == nil {
+		return false
+	}
+	a.bgMu.Lock()
+	if a.closing {
+		a.bgMu.Unlock()
+		return false
+	}
+	a.bgWG.Add(1)
+	a.bgMu.Unlock()
+	go func() {
+		defer a.bgWG.Done()
+		fn()
+	}()
+	return true
+}
+
+func (a *freshApplication) effectiveBodyReadTimeout() time.Duration {
+	if a != nil && a.bodyReadTimeout > 0 {
+		return a.bodyReadTimeout
+	}
+	return requestbody.DefaultReadIdleTimeout
+}
+
+const freshDefaultShutdownWriteGrace = 2 * time.Second
+
+func (a *freshApplication) effectiveShutdownWriteGrace() time.Duration {
+	if a != nil && a.shutdownWriteGrace > 0 {
+		return a.shutdownWriteGrace
+	}
+	return freshDefaultShutdownWriteGrace
+}
+
+type freshRequestControlKey struct{}
+
+// freshRequestControl aborts response writes on ordinary handlers as soon as
+// closeCtx cancels, while deferring write-deadline expiry for accepted runtime
+// mutations until their durable SQLite writes have finished.
+type freshRequestControl struct {
+	rc         *http.ResponseController
+	writeGrace time.Duration
+
+	mu         sync.Mutex
+	inMutation bool
+	closing    bool
+	stopWatch  func() bool
+}
+
+func newFreshRequestControl(closeCtx context.Context, w http.ResponseWriter, writeGrace time.Duration) *freshRequestControl {
+	var rc *http.ResponseController
+	if w != nil {
+		rc = http.NewResponseController(w)
+	}
+	c := &freshRequestControl{rc: rc, writeGrace: writeGrace}
+	if closeCtx != nil {
+		c.stopWatch = context.AfterFunc(closeCtx, c.onClose)
+	}
+	return c
+}
+
+func (c *freshRequestControl) stop() {
+	if c != nil && c.stopWatch != nil {
+		c.stopWatch()
+	}
+}
+
+func (c *freshRequestControl) onClose() {
+	c.mu.Lock()
+	c.closing = true
+	if !c.inMutation && c.rc != nil {
+		_ = c.rc.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	}
+	c.mu.Unlock()
+}
+
+func enterFreshRequestMutation(ctx context.Context) func() {
+	if ctx == nil {
+		return func() {}
+	}
+	c, _ := ctx.Value(freshRequestControlKey{}).(*freshRequestControl)
+	if c == nil {
+		return func() {}
+	}
+	c.mu.Lock()
+	c.inMutation = true
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			c.inMutation = false
+			if c.closing && c.rc != nil {
+				_ = c.rc.SetWriteDeadline(time.Now().Add(c.writeGrace))
+			}
+			c.mu.Unlock()
+		})
+	}
+}
+
+func (a *freshApplication) startDatabaseMaintenance(ctx context.Context) {
+	if a == nil || a.isClosing() {
+		return
+	}
+	if hook := a.beforeDatabaseMaintenanceStart; hook != nil {
+		hook()
+	}
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+	if a.maintenanceStopped || a.isClosing() {
+		return
+	}
+	startFreshDatabaseMaintenance(ctx, a.cfg.DBPath)
+}
+
+func (a *freshApplication) stopDatabaseMaintenance() {
+	if a == nil {
+		return
+	}
+	a.maintenanceMu.Lock()
+	a.maintenanceStopped = true
+	dbPath := a.cfg.DBPath
+	defer a.maintenanceMu.Unlock()
+	stopFreshDatabaseMaintenance(dbPath)
+}
+
+// Close cancels and drains in-flight requests and background work owned by this
+// Fresh application in producer-before-consumer order before Opened.Close
+// closes SQLite and releases the process admission lock.
+func (a *freshApplication) Close() {
+	if a == nil {
+		return
+	}
+	a.closeOnce.Do(func() {
+		a.bgMu.Lock()
+		a.closing = true
+		a.bgMu.Unlock()
+		if hook := a.afterCloseMarked; hook != nil {
+			hook()
+		}
+		if a.closeCancel != nil {
+			a.closeCancel()
+		}
+		// 1. Drain in-flight HTTP handlers (including detached 40s runtime
+		// mutations and their durable journal/desired-state follow-ups).
+		a.inflightWG.Wait()
+		// 2. Drain ServeHTTP's plugin capability proof before closing rejection.
+		if p := a.pluginCapability; p != nil {
+			p.close()
+		}
+		// 3. Drain host-level background loops (adoption migration, reconciler,
+		// update checks, routing restore, runtime usage waiter, identity worker).
+		a.bgWG.Wait()
+		// 4. Drain legacy async jobs reachable through the Fresh router bridge.
+		if a.legacyApp != nil {
+			if a.legacyApp.CodexInspectionService != nil {
+				_ = a.legacyApp.CodexInspectionService.StopAndWait(context.Background())
+			}
+			if a.legacyApp.UsageService != nil {
+				_ = a.legacyApp.UsageService.StopAndWaitImportSessions(context.Background())
+			}
+		}
+		// 5. Stop and join the Collector without holding usageStartMu (the
+		// Collector's auth-rejection callback acquires usageStartMu and writes
+		// to rejection, and its usage handler wakes usageProjection).
+		a.usageStartMu.Lock()
+		a.stopUsageCollectionLocked(context.Background())
+		a.usageStartMu.Unlock()
+		if a.legacyCollector != nil {
+			_ = a.legacyCollector.StopAndWait(context.Background())
+		}
+		// 6. Now that no producer can wake usageProjection, wait for it.
+		if a.usageProjection != nil {
+			a.usageProjection.Wait()
+		}
+		// 7. Close WAL maintenance and its private SQLite connection.
+		a.stopDatabaseMaintenance()
+		// 8. Drain externalRejection last after all its callers have stopped.
+		if a.rejection != nil {
+			a.rejection.close()
+		}
+	})
+}
+
 func (a *freshApplication) current(ctx context.Context) (bootstrap.FreshOperation, error) {
 	r, err := a.store.Load(ctx)
 	return r.Operation, err
@@ -561,6 +837,52 @@ func writeFreshStrategyError(w http.ResponseWriter, err error) {
 }
 
 func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	release, ok := a.enterRequest(r)
+	if !ok {
+		if r != nil && r.Body != nil && r.Body != http.NoBody {
+			if w != nil {
+				_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+			}
+			_ = r.Body.Close()
+		}
+		w.Header().Set("Connection", "close")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+	if r != nil {
+		reqCtx, cancelReq := a.requestContext(r.Context())
+		defer cancelReq()
+		if obs := a.onRequestBodyRead; obs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithReadObserver(reqCtx, func(attempt int) {
+				obs(reqClone, attempt)
+			})
+		}
+		if closeObs := a.onBeforeNonEOFBodyClose; closeObs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithNonEOFCloseObserver(reqCtx, func() {
+				closeObs(reqClone)
+			})
+		}
+		if a.earlyCloseDrainTimeout != 0 {
+			reqCtx = requestbody.WithEarlyCloseDrainTimeout(reqCtx, a.earlyCloseDrainTimeout)
+		}
+		ctrl := newFreshRequestControl(a.closeCtx, w, a.effectiveShutdownWriteGrace())
+		defer ctrl.stop()
+		if r.Body != nil && r.Body != http.NoBody {
+			body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
+			if body != nil {
+				defer stopBody()
+				defer func() { _ = body.Close() }()
+				r.Body = body
+			}
+		}
+		reqCtx = context.WithValue(reqCtx, freshRequestTrackedKey{}, true)
+		reqCtx = context.WithValue(reqCtx, freshRequestControlKey{}, ctrl)
+		r = r.WithContext(reqCtx)
+	}
 	// The plugin capability is a claim about the saved connection, so it is
 	// announced only when that connection proves it; a route existing is not a
 	// capability.
@@ -1212,21 +1534,24 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	}
 	app := newFreshApplication(opened, cfg, freshDriver(cfg))
 	// Workers started by an in-process completion must use the host lifetime,
-	// not the request that triggered them.
-	app.runCtx = ctx
-	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
+	// not the request that triggered them, and must drain before opened.Close().
+	workerCtx := app.lifecycleContext(ctx)
+	app.runCtx = workerCtx
+	op := app.prepareCompletedStartup(workerCtx, opened.Record.Operation)
 	h.SetFreshHandler(app)
 	if app.runtime != nil && app.embeddedDesiredStateInner() != nil {
-		go app.runFreshEmbeddedReconciler(ctx, runtimeservice.DefaultReconcileInterval)
+		app.launchBackground(func() {
+			app.runFreshEmbeddedReconciler(workerCtx, runtimeservice.DefaultReconcileInterval)
+		})
 	}
 	if op.ProductComplete {
 		app.startUsageCollection(op)
 		if op.Strategy.Strategy == bootstrap.AdoptExisting {
-			go app.awaitCompletedAdoptionBackfill(ctx)
+			app.launchBackground(func() { app.awaitCompletedAdoptionBackfill(workerCtx) })
 		}
 	}
-	go restoreFreshRouting(ctx, app.routing)
-	go app.runFreshUpdateChecks(ctx)
+	app.launchBackground(func() { restoreFreshRouting(workerCtx, app.routing) })
+	app.launchBackground(func() { app.runFreshUpdateChecks(workerCtx) })
 	return opened, nil
 }
 
@@ -1237,24 +1562,44 @@ func validateFreshHostAuthority(cfg config.Config) error {
 	return nil
 }
 
-func awaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) func() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	awaitCtx, cancelAwait := context.WithCancel(ctx)
+	var (
+		opened *fresh.Opened
+		done   = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-awaitCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !freshMarkerPresent(paths.Database) {
+				continue
+			}
+			admitted, err := serveExistingFresh(awaitCtx, cfg, paths, h)
+			if err != nil {
+				continue
+			}
+			opened = admitted
 			return
-		case <-ticker.C:
 		}
-		if !freshMarkerPresent(paths.Database) {
-			continue
-		}
-		opened, err := serveExistingFresh(ctx, cfg, paths, h)
-		if err != nil {
-			continue
-		}
-		<-ctx.Done()
-		_ = opened.Close()
-		return
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancelAwait()
+			<-done
+			if opened != nil {
+				_ = opened.Close()
+			}
+		})
 	}
 }

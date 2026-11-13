@@ -105,14 +105,14 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 	if reconcileCtx == nil {
 		reconcileCtx = context.WithoutCancel(ctx)
 	}
-	if a.runCtx != nil && a.usageProjection != nil {
-		startFreshDatabaseMaintenance(a.runCtx, a.cfg.DBPath)
-	}
 	if hook := a.beforeUsageReconcileLock; hook != nil {
 		hook()
 	}
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
+	if a.runCtx != nil && a.usageProjection != nil && !a.isClosing() {
+		a.startDatabaseMaintenance(a.lifecycleContext(a.runCtx))
+	}
 	enabled, err := a.usageMonitoringEnabled(reconcileCtx)
 	if err != nil {
 		log.Printf("Fresh request monitoring switch unavailable: %v", err)
@@ -130,7 +130,7 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 		}
 	}
 	a.stopUsageCollectionLocked(reconcileCtx)
-	if a.runCtx == nil || a.usageProjection == nil {
+	if a.runCtx == nil || a.usageProjection == nil || a.isClosing() {
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
@@ -212,16 +212,19 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 	// with the host. The host installs that lifetime before serving this
 	// application; without one, hosting them would leak past the database.
 	runCtx := a.runCtx
-	if runCtx == nil {
+	if runCtx == nil || a.isClosing() {
 		log.Printf("Fresh usage workers not started: no host lifetime")
+		return
+	}
+	a.usageStartMu.Lock()
+	defer a.usageStartMu.Unlock()
+	if a.isClosing() {
 		return
 	}
 	// WAL maintenance is the other background owner of this installation's
 	// database. The legacy startup creates it in main(), which the Fresh service
 	// returns from earlier, so it starts here with the same host lifetime.
-	startFreshDatabaseMaintenance(runCtx, a.cfg.DBPath)
-	a.usageStartMu.Lock()
-	defer a.usageStartMu.Unlock()
+	a.startDatabaseMaintenance(a.lifecycleContext(runCtx))
 	if a.usageStarted {
 		return
 	}
@@ -248,11 +251,12 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	}
 	// The projection and identity workers maintain attribution independently of
 	// the Collector authority, so they start once the keys are attributable.
+	workerCtx := a.lifecycleContext(ctx)
 	if !a.usageWorkersStarted {
 		if a.startIdentityWorker != nil && !isCommittedExternalStrategy(checkpoint) {
-			a.startIdentityWorker(ctx)
+			a.startIdentityWorker(workerCtx)
 		}
-		a.usageProjection.Start(ctx)
+		a.usageProjection.Start(workerCtx)
 		a.usageWorkersStarted = true
 	}
 	// Starting the Collector is its own success-only step. A retry after a
@@ -283,12 +287,12 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		case a.privateCollector != nil:
 			// Only the explicit private profile owns a host-supplied Collector
 			// authority.
-			started = a.privateCollector(ctx)
+			started = a.privateCollector(workerCtx)
 		case isCommittedExternalStrategy(checkpoint) && a.externalSource != nil:
 			// An External installation collects from the user's own CPA through
 			// the committed connection. A refused start proves nothing, so no
 			// collection window is recorded for it.
-			outcome := a.startExternalUsageCollector(ctx)
+			outcome := a.startExternalUsageCollector(workerCtx)
 			a.setUsageStartReason(outcome.Reason)
 			if !outcome.Started {
 				return false
@@ -317,12 +321,12 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				status, statusErr := a.observeInstallationRuntime(ctx)
 				if statusErr != nil || status.State != model.RuntimeStateReady {
 					a.setUsageStartReason(usageStartReasonCollectorFailed)
-					a.armManagedUsageRuntimeWaiterLocked(ctx)
+					a.armManagedUsageRuntimeWaiterLocked(workerCtx)
 					return false
 				}
 			}
 			a.activeExternalGrant.Store(activeCollectorGrant{})
-			if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
+			if err := a.legacyCollector.StartRuntime(workerCtx, runtimeCfg); err != nil {
 				log.Printf("Fresh usage collection unavailable: %v", err)
 				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false
@@ -371,11 +375,14 @@ func (a *freshApplication) armManagedUsageRuntimeWaiterLocked(ctx context.Contex
 	if a.runtime == nil || a.store == nil || a.usageAwaitCancel != nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
-	waitCtx, cancel := context.WithCancel(ctx)
+	waitCtx, cancel := context.WithCancel(a.lifecycleContext(ctx))
 	a.usageAwaitID++
 	waiterID := a.usageAwaitID
 	a.usageAwaitCancel = cancel
-	go a.awaitManagedRuntimeForUsage(waitCtx, cancel, waiterID)
+	if !a.launchBackground(func() { a.awaitManagedRuntimeForUsage(waitCtx, cancel, waiterID) }) {
+		cancel()
+		a.usageAwaitCancel = nil
+	}
 }
 
 func (a *freshApplication) claimManagedUsageRuntimeWaiter(waiterID uint64) bool {

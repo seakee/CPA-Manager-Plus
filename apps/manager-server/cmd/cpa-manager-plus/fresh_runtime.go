@@ -1263,6 +1263,20 @@ func startFreshDatabaseMaintenance(ctx context.Context, dbPath string) {
 	freshDatabaseMaintenance.paths[key] = maintenance
 }
 
+func stopFreshDatabaseMaintenance(dbPath string) {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	maintenance := freshDatabaseMaintenance.paths[key]
+	delete(freshDatabaseMaintenance.paths, key)
+	freshDatabaseMaintenance.mu.Unlock()
+	if maintenance != nil {
+		_ = maintenance.Close()
+	}
+}
+
 func freshDatabaseMaintenanceFor(dbPath string) *sqliterepo.WALMaintenance {
 	key, ok := freshDatabaseMaintenanceKey(dbPath)
 	if !ok {
@@ -1711,6 +1725,12 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 }
 
 func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
+	release, ok := a.enterRequest(r)
+	if !ok {
+		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unreachable")
+		return
+	}
+	defer release()
 	var request struct {
 		Action    string `json:"action"`
 		RequestID string `json:"requestId"`
@@ -1816,6 +1836,8 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	// Detach the mutation and its durable follow-up from HTTP cancellation. The
 	// explicit budget leaves accepted Supervisor work bounded while giving the
 	// desired lifecycle and terminal journal writes time to complete.
+	finishMutation := enterFreshRequestMutation(r.Context())
+	defer finishMutation()
 	mutationContext, cancelMutation := context.WithTimeout(
 		context.WithoutCancel(r.Context()), freshRuntimeMutationBudget,
 	)
@@ -1844,6 +1866,7 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		// retry after store recovery re-executes instead of replaying a phantom
 		// accepted operation.
 		_ = a.abortReservedRuntimeOperation(mutationContext, reserved.RequestID)
+		finishMutation()
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
 		return
 	}
@@ -1888,14 +1911,17 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		}
 	}
 	if err := a.finalizeRuntimeOperation(mutationContext, outcome); err != nil {
+		finishMutation()
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
 		return
 	}
 	if desiredWriteFailed {
+		finishMutation()
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "desired_lifecycle_unavailable")
 		return
 	}
 	if preDispatchUnsupported {
+		finishMutation()
 		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
 		return
 	}
@@ -1903,9 +1929,11 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	if conflictCode != "" {
 		// Preserve the 409 contract for a Supervisor rejection while the durable
 		// entry already records the terminal outcome.
+		finishMutation()
 		freshRuntimeOperationError(w, http.StatusConflict, conflictCode)
 		return
 	}
+	finishMutation()
 	if outcome.State == freshRuntimeStateUnknown {
 		w.WriteHeader(http.StatusAccepted)
 	}
@@ -2186,15 +2214,6 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	gate.reconcilerCancel = cancel
 	gate.reconcilerDone = done
 	gate.mu.Unlock()
-	defer func() {
-		cancel()
-		gate.mu.Lock()
-		if gate.reconcilerDone == done {
-			gate.reconcilerCancel = nil
-			gate.reconcilerDone = nil
-		}
-		gate.mu.Unlock()
-	}()
 	reconciler := runtimeservice.NewReconciler(
 		client,
 		freshEmbeddedDesiredStateStore{app: a, inner: desired},
@@ -2204,6 +2223,16 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	go func() {
 		defer close(done)
 		reconciler.Run(workerCtx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+		gate.mu.Lock()
+		if gate.reconcilerDone == done {
+			gate.reconcilerCancel = nil
+			gate.reconcilerDone = nil
+		}
+		gate.mu.Unlock()
 	}()
 	externalCommitted := a.externalCommittedSignal()
 	watchInterval := interval

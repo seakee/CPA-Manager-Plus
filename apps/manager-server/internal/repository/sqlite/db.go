@@ -14,40 +14,57 @@ import (
 )
 
 func Open(path string) (*sql.DB, error) {
-	return OpenWithOptions(Options{Path: path})
+	db, _, err := OpenTracked(path)
+	return db, err
+}
+
+// OpenTracked opens and migrates the SQLite database at path and returns a
+// waitClosed function that blocks without polling or giving up until every
+// underlying driver.Conn opened by the pool has completed Close().
+func OpenTracked(path string) (*sql.DB, func(), error) {
+	return OpenTrackedWithOptions(Options{Path: path})
 }
 
 func OpenWithOptions(options Options) (*sql.DB, error) {
+	db, _, err := OpenTrackedWithOptions(options)
+	return db, err
+}
+
+func OpenTrackedWithOptions(options Options) (*sql.DB, func(), error) {
 	dbPath, err := filepath.Abs(options.Path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := ensureDatabaseParentDirectory(filepath.Dir(dbPath)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	precreated := preparePrivateDatabaseFile(dbPath)
-	db, err := sql.Open("sqlite", dataSourceName(dbPath))
+	baseConnector, err := NewConnector(dbPath)
 	if err != nil {
 		if precreated {
 			removeEmptyPrecreatedFile(dbPath)
 		}
-		return nil, enrichOpenError(dbPath, err)
+		return nil, nil, enrichOpenError(dbPath, err)
 	}
+	tracked, waitClosed := WrapConnectorWithCloseWaiter(baseConnector)
+	db := sql.OpenDB(tracked)
 	db.SetMaxOpenConns(options.maxOpenConns())
 	db.SetMaxIdleConns(options.maxIdleConns())
 	db.SetConnMaxIdleTime(options.connMaxIdleTime())
 	if err := Migrate(db); err != nil {
 		_ = db.Close()
+		waitClosed()
 		if precreated {
 			removeEmptyPrecreatedFile(dbPath)
 		}
-		return nil, enrichOpenError(dbPath, err)
+		return nil, nil, enrichOpenError(dbPath, err)
 	}
 	if err := enforcePrivateDatabaseFiles(dbPath); err != nil {
 		_ = db.Close()
-		return nil, err
+		waitClosed()
+		return nil, nil, err
 	}
-	return db, nil
+	return db, waitClosed, nil
 }
 
 func ensureDatabaseParentDirectory(dir string) error {

@@ -244,6 +244,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 		Handler:           startupHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	defer func() { _ = server.Close() }()
 	serverResult := make(chan error, 1)
 	log.Printf("cpa-manager-plus listening on %s", listener.Addr())
 	go serveHTTPServer(server, listener, stop, serverResult)
@@ -260,7 +261,8 @@ func runServerWithOptions(options legacypreflight.Options) {
 		// A competing host initializer may still hold this exact admission.
 		// Keep discovery unavailable and retry ownership validation after it
 		// releases the fence; never project this Fresh store as a legacy source.
-		go awaitFreshStore(ctx, cfg, paths, startupHandler)
+		stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
+		defer stopAwait()
 		waitForReadOnlyStartup(ctx, server, serverResult)
 		return
 	}
@@ -272,7 +274,8 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if !options.Initialize {
 		if _, statErr := os.Lstat(paths.Database); os.IsNotExist(statErr) {
 			startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
-			go awaitFreshStore(ctx, cfg, paths, startupHandler)
+			stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
+			defer stopAwait()
 			log.Printf("Manager source has no database; serving read-only Bootstrap discovery pending a later authorized initializer")
 			waitForReadOnlyStartup(ctx, server, serverResult)
 			return
@@ -652,6 +655,32 @@ func runServerWithOptions(options legacypreflight.Options) {
 		usageCacheAccountingMigrationWorker.Start(ctx)
 	}
 
+	shutdownLegacyRuntime(
+		ctx,
+		stop,
+		serverResult,
+		startupHandler,
+		codexInspectionWorker,
+		collectorWorker,
+		pprofServer,
+		server,
+		usageArchiveRetentionWorker,
+		serverApp.AppContext().UsageService,
+	)
+}
+
+func shutdownLegacyRuntime(
+	ctx context.Context,
+	stop context.CancelFunc,
+	serverResult <-chan error,
+	startupHandler *startupHTTPHandler,
+	codexInspectionWorker codexInspectionStopper,
+	collectorWorker interface{ Stop(context.Context) },
+	pprofServer *http.Server,
+	server *http.Server,
+	usageArchiveRetentionWorker codexInspectionStopper,
+	usageArchiveJobs interface{ WaitArchiveJobs(context.Context) error },
+) {
 	select {
 	case <-ctx.Done():
 		select {
@@ -667,25 +696,39 @@ func runServerWithOptions(options legacypreflight.Options) {
 		}
 		// Ensure every worker using the shared process context observes the same
 		// shutdown even when the HTTP listener, rather than a signal, initiated it.
-		stop()
+		if stop != nil {
+			stop()
+		}
+	}
+	if startupHandler != nil {
+		startupHandler.BeginShutdown()
 	}
 	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
-	collectorWorker.Stop(context.Background())
+	if collectorWorker != nil {
+		collectorWorker.Stop(context.Background())
+	}
 	if pprofServer != nil {
 		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown pprof: %v", err)
 		}
 	}
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown: %v", err)
+	if server != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+			_ = server.Close()
+		}
 	}
-	if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
-		log.Printf("shutdown usage archive retention: %v", err)
+	if usageArchiveRetentionWorker != nil {
+		if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
+			log.Printf("shutdown usage archive retention: %v", err)
+		}
 	}
-	if err := serverApp.AppContext().UsageService.WaitArchiveJobs(shutdownCtx); err != nil {
-		log.Printf("shutdown usage archive jobs: %v", err)
+	if usageArchiveJobs != nil {
+		if err := usageArchiveJobs.WaitArchiveJobs(shutdownCtx); err != nil {
+			log.Printf("shutdown usage archive jobs: %v", err)
+		}
 	}
 }
 
@@ -704,20 +747,34 @@ func serveHTTPServer(server *http.Server, listener net.Listener, stop context.Ca
 	stop()
 }
 
-// waitForReadOnlyStartup keeps a safely bound discovery/liveness listener alive
-// when the writable gate rejects the source or Store.Open fails. No worker or
-// mutation handler is constructed on this path.
+const freshHTTPShutdownTimeout = freshRuntimeMutationBudget + 5*time.Second
+
+func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
+	if server == nil {
+		return
+	}
+	if sh, ok := server.Handler.(*startupHTTPHandler); ok {
+		sh.BeginShutdown()
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("HTTP server shutdown timed out after %s; waiting for active database owners before closing store: %v", timeout, err)
+	}
+}
+
+// waitForReadOnlyStartup serves a Fresh or read-only discovery listener until
+// ctx cancels or server.Serve exits, then drains active HTTP handlers within
+// freshHTTPShutdownTimeout before callers close the admitted store.
 func waitForReadOnlyStartup(ctx context.Context, server *http.Server, result <-chan error) {
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = server.Shutdown(shutdownCtx)
-		cancel()
-		return
+		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 	case err := <-result:
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("read-only discovery server stopped: %v", err)
 		}
+		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 	}
 }
 

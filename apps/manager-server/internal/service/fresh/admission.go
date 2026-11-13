@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -100,23 +101,94 @@ func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr
 	}
 	return ErrStoreLockedInProgress, true
 }
+
 type Opened struct {
 	Admission *legacypreflight.Admission
 	DB        *sql.DB
 	Protector *security.Protector
 	Record    freshstore.Record
+
+	closeMu       sync.Mutex
+	closing       bool
+	closed        bool
+	closeDone     chan struct{}
+	closeErr      error
+	beforeClose   []func()
+	waitDBClosed  func()
+	afterDBClosed func()
+}
+
+// BeforeClose registers a teardown hook that Close runs in LIFO order before
+// closing DB and releasing the process admission lock. Hooks registered while
+// Close is still draining hooks execute in the same Close cycle; hooks
+// registered after hook drain finishes are ignored.
+func (o *Opened) BeforeClose(fn func()) {
+	if o == nil || fn == nil {
+		return
+	}
+	o.closeMu.Lock()
+	if !o.closed {
+		o.beforeClose = append(o.beforeClose, fn)
+	}
+	o.closeMu.Unlock()
 }
 
 func (o *Opened) Close() error {
 	if o == nil {
 		return nil
 	}
+	o.closeMu.Lock()
+	if o.closing {
+		done := o.closeDone
+		o.closeMu.Unlock()
+		<-done
+		return o.closeErr
+	}
+	o.closing = true
+	done := make(chan struct{})
+	o.closeDone = done
+	o.closeMu.Unlock()
+
+	defer close(done)
+	for {
+		o.closeMu.Lock()
+		n := len(o.beforeClose)
+		if n == 0 {
+			o.closed = true
+			o.beforeClose = nil
+			o.closeMu.Unlock()
+			break
+		}
+		fn := o.beforeClose[n-1]
+		o.beforeClose = o.beforeClose[:n-1]
+		o.closeMu.Unlock()
+		fn()
+	}
 	var err error
 	if o.DB != nil {
 		err = o.DB.Close()
+		if o.afterDBClosed != nil {
+			o.afterDBClosed()
+		}
+		if o.waitDBClosed != nil {
+			o.waitDBClosed()
+		} else {
+			waitForClosedDBConnections(o.DB)
+		}
 	}
-	return errors.Join(err, o.Admission.Close())
+	o.closeErr = errors.Join(err, o.Admission.Close())
+	return o.closeErr
 }
+
+// waitForClosedDBConnections is a fallback for manually constructed Opened
+// values in tests that did not open o.DB via sqlite.OpenTracked; it never
+// returns while OpenConnections > 0.
+func waitForClosedDBConnections(db *sql.DB) {
+	for db != nil && db.Stats().OpenConnections > 0 {
+		runtime.Gosched()
+	}
+}
+
 func checkpoint(opts OpenOptions, name string) error {
 	if opts.Hook != nil {
 		return opts.Hook(name)
@@ -218,7 +290,7 @@ func Open(ctx context.Context, paths sqlite.InspectionPaths, opts OpenOptions) (
 	if err != nil {
 		return nil, err
 	}
-	o.DB, err = sqlite.Open(paths.Database)
+	o.DB, o.waitDBClosed, err = sqlite.OpenTracked(paths.Database)
 	if err != nil {
 		return nil, err
 	}

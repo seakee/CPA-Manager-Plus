@@ -2,6 +2,7 @@ package resp
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -33,6 +34,13 @@ type ErrorReply struct {
 func (e *ErrorReply) Error() string { return e.Message }
 
 func Dial(rawURL string, skipTLSVerify bool) (*Client, error) {
+	return DialContext(context.Background(), rawURL, skipTLSVerify)
+}
+
+func DialContext(ctx context.Context, rawURL string, skipTLSVerify bool) (*Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	upstream, err := parseURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -49,13 +57,16 @@ func Dial(rawURL string, skipTLSVerify bool) (*Client, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	var conn net.Conn
 	if upstream.Scheme == "https" {
-		serverName := upstream.Hostname()
-		conn, err = tls.DialWithDialer(dialer, "tcp", host, &tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: skipTLSVerify,
-		})
+		tlsDialer := &tls.Dialer{
+			NetDialer: dialer,
+			Config: &tls.Config{
+				ServerName:         upstream.Hostname(),
+				InsecureSkipVerify: skipTLSVerify,
+			},
+		}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", host)
 	} else {
-		conn, err = dialer.Dial("tcp", host)
+		conn, err = dialer.DialContext(ctx, "tcp", host)
 	}
 	if err != nil {
 		return nil, err

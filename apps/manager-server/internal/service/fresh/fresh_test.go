@@ -3,6 +3,8 @@ package fresh
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -868,6 +870,455 @@ func TestClassifyInitializeRefusalFailsClosedOnDamagedOrNonFreshStoreUnderLock(t
 		classifiedComplete, okComplete := ClassifyInitializeRefusal(t.Context(), dbPath, processlock.ErrLocked)
 		if !okComplete || !errors.As(classifiedComplete, &wantComplete) || wantComplete.ControlBasePath != "/console" {
 			t.Fatalf("expected AlreadyCompleteError(/console) with readable receipt, got %v, %v", classifiedComplete, okComplete)
+		}
+	})
+}
+
+func TestOpenedCloseSerializesConcurrentCallersAndRunsInCloseHooks(t *testing.T) {
+	p := pathsFor(t.TempDir())
+	o, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hookEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	var (
+		lateHookRan      atomic.Bool
+		postCloseHookRan atomic.Bool
+		hookDBErr        atomic.Value
+	)
+	o.BeforeClose(func() {
+		close(hookEntered)
+		o.BeforeClose(func() {
+			var count int
+			if qErr := o.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM settings`).Scan(&count); qErr != nil {
+				hookDBErr.Store(qErr)
+			}
+			lateHookRan.Store(true)
+		})
+		<-releaseHook
+		var count int
+		if qErr := o.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM settings`).Scan(&count); qErr != nil {
+			hookDBErr.Store(qErr)
+		}
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- o.Close()
+	}()
+	<-hookEntered
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- o.Close()
+	}()
+	// Give the concurrent Close caller an opportunity to enter o.Close(); it must
+	// block on closeDone while both DB and the admission lock stay open.
+	select {
+	case prematureErr := <-secondDone:
+		t.Fatalf("concurrent Close() returned %v while first Close() was still draining hooks", prematureErr)
+	default:
+	}
+	if _, reopenErr := Open(t.Context(), p, OpenOptions{}); !errors.Is(reopenErr, processlock.ErrLocked) {
+		t.Fatalf("Open while Close() is draining hooks = %v, want processlock.ErrLocked", reopenErr)
+	}
+
+	close(releaseHook)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Close(): %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Close(): %v", err)
+	}
+	if v := hookDBErr.Load(); v != nil {
+		t.Fatalf("DB became unusable before BeforeClose hooks finished: %v", v)
+	}
+	if !lateHookRan.Load() {
+		t.Fatal("BeforeClose hook registered during Close() did not run before DB closed")
+	}
+
+	o.BeforeClose(func() {
+		postCloseHookRan.Store(true)
+	})
+	if err := o.Close(); err != nil {
+		t.Fatalf("post-close Close(): %v", err)
+	}
+	if postCloseHookRan.Load() {
+		t.Fatal("BeforeClose hook registered after Close() completed should be ignored")
+	}
+}
+
+type blockingRollbackConnector struct {
+	base    driver.Connector
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingRollbackConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackConn{inner: conn, parent: c}, nil
+}
+
+func (c *blockingRollbackConnector) Driver() driver.Driver {
+	return c.base.Driver()
+}
+
+type blockingRollbackConn struct {
+	inner  driver.Conn
+	parent *blockingRollbackConnector
+}
+
+func (c *blockingRollbackConn) Prepare(query string) (driver.Stmt, error) {
+	return c.inner.Prepare(query)
+}
+
+func (c *blockingRollbackConn) Close() error {
+	return c.inner.Close()
+}
+
+func (c *blockingRollbackConn) Begin() (driver.Tx, error) {
+	//nolint:staticcheck // required by driver.Conn interface
+	tx, err := c.inner.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackTx{inner: tx, parent: c.parent}, nil
+}
+
+func (c *blockingRollbackConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	var (
+		tx  driver.Tx
+		err error
+	)
+	if b, ok := c.inner.(driver.ConnBeginTx); ok {
+		tx, err = b.BeginTx(ctx, opts)
+	} else {
+		//nolint:staticcheck // fallback
+		tx, err = c.inner.Begin()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &blockingRollbackTx{inner: tx, parent: c.parent}, nil
+}
+
+type blockingRollbackTx struct {
+	inner  driver.Tx
+	parent *blockingRollbackConnector
+}
+
+func (t *blockingRollbackTx) Commit() error {
+	return t.inner.Commit()
+}
+
+func (t *blockingRollbackTx) Rollback() error {
+	t.parent.once.Do(func() { close(t.parent.entered) })
+	<-t.parent.release
+	return t.inner.Rollback()
+}
+
+func TestOpenedCloseHoldsAdmissionUntilAsyncTxRollbackClosesDriverConn(t *testing.T) {
+	p := pathsFor(t.TempDir())
+	o, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	rollbackEntered := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		if !closed {
+			_ = o.Close()
+		}
+	})
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseRollback) })
+	})
+
+	// Swap o.DB to a controlled connector over the same admitted SQLite database
+	// while o.Admission continues holding .manager.lock.
+	if err := o.DB.Close(); err != nil {
+		t.Fatalf("close initial DB handle: %v", err)
+	}
+	if o.waitDBClosed != nil {
+		o.waitDBClosed()
+	}
+	baseConnector, err := sqlite.NewConnector(p.Database)
+	if err != nil {
+		t.Fatalf("NewConnector: %v", err)
+	}
+	controlled := &blockingRollbackConnector{
+		base:    baseConnector,
+		entered: rollbackEntered,
+		release: releaseRollback,
+	}
+	tracked, waitClosed := sqlite.WrapConnectorWithCloseWaiter(controlled)
+	o.DB = sql.OpenDB(tracked)
+	o.waitDBClosed = waitClosed
+	dbCloseCalled := make(chan struct{})
+	o.afterDBClosed = func() {
+		close(dbCloseCalled)
+	}
+
+	txCtx, cancelTx := context.WithCancel(context.Background())
+	tx, err := o.DB.BeginTx(txCtx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	// Cancel txCtx so database/sql's internal go (*sql.Tx).awaitDone wins the
+	// tx.done CAS and enters driver.Tx.Rollback asynchronously.
+	cancelTx()
+	<-rollbackEntered
+	if rbErr := tx.Rollback(); !errors.Is(rbErr, sql.ErrTxDone) {
+		t.Fatalf("synchronous tx.Rollback() = %v, want sql.ErrTxDone while awaitDone owns Rollback", rbErr)
+	}
+
+	closeDone := make(chan error, 1)
+	closed = true
+	go func() {
+		closeDone <- o.Close()
+	}()
+	<-dbCloseCalled
+
+	select {
+	case prematureErr := <-closeDone:
+		t.Fatalf("Close() returned %v while async Tx.awaitDone Rollback still held connection", prematureErr)
+	default:
+	}
+	if _, reopenErr := Open(t.Context(), p, OpenOptions{}); !errors.Is(reopenErr, processlock.ErrLocked) {
+		t.Fatalf("Open while async Rollback still active = %v, want processlock.ErrLocked", reopenErr)
+	}
+
+	releaseOnce.Do(func() { close(releaseRollback) })
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil {
+			t.Fatalf("Close(): %v", closeErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not finish promptly after async Rollback completed")
+	}
+
+	reopened, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatalf("Open after Close() drained async Rollback: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("reopened.Close(): %v", err)
+	}
+}
+
+type gatedPostOpenConnector struct {
+	base             driver.Connector
+	connectCount     atomic.Int32
+	failOnConnect    int32
+	failErr          error
+	gateOnConnect    int32
+	innerOpened      chan struct{}
+	releaseInnerOpen chan struct{}
+	openedOnce       sync.Once
+}
+
+func (c *gatedPostOpenConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	n := c.connectCount.Add(1)
+	if c.failOnConnect > 0 && n == c.failOnConnect {
+		return nil, c.failErr
+	}
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if c.gateOnConnect > 0 && n == c.gateOnConnect {
+		c.openedOnce.Do(func() { close(c.innerOpened) })
+		<-c.releaseInnerOpen
+	}
+	return conn, nil
+}
+
+func (c *gatedPostOpenConnector) Driver() driver.Driver {
+	return c.base.Driver()
+}
+
+func TestOpenedCloseHoldsAdmissionAcrossBackgroundConnectionOpenerAndFailedConnect(t *testing.T) {
+	t.Run("background_connection_opener_gated_after_inner_sqlite_open", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		innerOpened := make(chan struct{})
+		releaseInnerOpen := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() {
+			if !closed {
+				_ = o.Close()
+			}
+		})
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(releaseInnerOpen) })
+		})
+
+		if err := o.DB.Close(); err != nil {
+			t.Fatalf("close initial DB handle: %v", err)
+		}
+		if o.waitDBClosed != nil {
+			o.waitDBClosed()
+		}
+		baseConnector, err := sqlite.NewConnector(p.Database)
+		if err != nil {
+			t.Fatalf("NewConnector: %v", err)
+		}
+		gated := &gatedPostOpenConnector{
+			base:             baseConnector,
+			gateOnConnect:    2,
+			innerOpened:      innerOpened,
+			releaseInnerOpen: releaseInnerOpen,
+		}
+		tracked, waitClosed := sqlite.WrapConnectorWithCloseWaiter(gated)
+		o.DB = sql.OpenDB(tracked)
+		o.DB.SetMaxOpenConns(1)
+		o.DB.SetMaxIdleConns(0)
+		o.waitDBClosed = waitClosed
+		dbCloseCalled := make(chan struct{})
+		o.afterDBClosed = func() {
+			close(dbCloseCalled)
+		}
+
+		// Borrow #1 occupies the single allowed slot (Connect #1).
+		conn1, err := o.DB.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("borrow #1: %v", err)
+		}
+
+		// Borrow #2 queues in db.connRequests behind MaxOpenConns=1.
+		waitCtx, cancelWait := context.WithCancel(context.Background())
+		borrow2ErrCh := make(chan error, 1)
+		go func() {
+			c2, bErr := o.DB.Conn(waitCtx)
+			if c2 != nil {
+				_ = c2.Close()
+			}
+			borrow2ErrCh <- bErr
+		}()
+		for o.DB.Stats().WaitCount < 1 {
+			runtime.Gosched()
+		}
+
+		// Discard conn1 as ErrBadConn so putConn decrements numOpen and wakes
+		// database/sql's background connectionOpener to open Connect #2.
+		_ = conn1.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn1.Close()
+
+		// Wait until connectionOpener has opened the real SQLite handle inside
+		// base.Connect and paused before returning to trackedConnector.
+		<-innerOpened
+
+		// Cancel the queued caller so nobody is waiting on the new connection.
+		cancelWait()
+		if bErr := <-borrow2ErrCh; !errors.Is(bErr, context.Canceled) {
+			t.Fatalf("queued borrow #2 = %v, want context.Canceled", bErr)
+		}
+
+		closeDone := make(chan error, 1)
+		closed = true
+		go func() {
+			closeDone <- o.Close()
+		}()
+		<-dbCloseCalled
+
+		select {
+		case prematureErr := <-closeDone:
+			t.Fatalf("Close() returned %v while connectionOpener still held live SQLite handle", prematureErr)
+		default:
+		}
+		if _, reopenErr := Open(t.Context(), p, OpenOptions{}); !errors.Is(reopenErr, processlock.ErrLocked) {
+			t.Fatalf("Open while connectionOpener still owns SQLite handle = %v, want processlock.ErrLocked", reopenErr)
+		}
+
+		// Release Connect #2: openNewConnection sees db.closed, closes the
+		// unwanted conn, decrements the tracker to 0, and unblocks Close().
+		releaseOnce.Do(func() { close(releaseInnerOpen) })
+		select {
+		case closeErr := <-closeDone:
+			if closeErr != nil {
+				t.Fatalf("Close(): %v", closeErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close() did not return promptly once connectionOpener closed unwanted conn")
+		}
+
+		reopened, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatalf("Open after connectionOpener drained: %v", err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened.Close(): %v", err)
+		}
+	})
+
+	t.Run("error_from_base_connect_does_not_strand_close", func(t *testing.T) {
+		p := pathsFor(t.TempDir())
+		o, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = o.Close()
+			}
+		})
+
+		if err := o.DB.Close(); err != nil {
+			t.Fatalf("close initial DB handle: %v", err)
+		}
+		if o.waitDBClosed != nil {
+			o.waitDBClosed()
+		}
+		baseConnector, err := sqlite.NewConnector(p.Database)
+		if err != nil {
+			t.Fatalf("NewConnector: %v", err)
+		}
+		wantErr := errors.New("simulated sqlite connect error")
+		gated := &gatedPostOpenConnector{
+			base:          baseConnector,
+			failOnConnect: 1,
+			failErr:       wantErr,
+		}
+		tracked, waitClosed := sqlite.WrapConnectorWithCloseWaiter(gated)
+		o.DB = sql.OpenDB(tracked)
+		o.waitDBClosed = waitClosed
+
+		if _, cErr := o.DB.Conn(context.Background()); !errors.Is(cErr, wantErr) {
+			t.Fatalf("DB.Conn on failing base.Connect = %v, want %v", cErr, wantErr)
+		}
+		closed = true
+		closeDone := make(chan error, 1)
+		go func() {
+			closeDone <- o.Close()
+		}()
+		select {
+		case closeErr := <-closeDone:
+			if closeErr != nil {
+				t.Fatalf("Close() after failed Connect: %v", closeErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close() hung after base.Connect returned error")
+		}
+		reopened, err := Open(t.Context(), p, OpenOptions{})
+		if err != nil {
+			t.Fatalf("Open after failed-Connect Close(): %v", err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened.Close(): %v", err)
 		}
 	})
 }

@@ -211,18 +211,25 @@ type pluginCapabilityProbe struct {
 	proving      bool
 	provingEpoch uint64
 	epoch        uint64
+	closed       bool
 	probe        func(context.Context) bool
 	now          func() time.Time
 	launch       func(func())
+	baseCtx      context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 }
 
 func newPluginCapabilityProbe(ttl, timeout time.Duration, probe func(context.Context) bool) *pluginCapabilityProbe {
+	baseCtx, cancel := context.WithCancel(context.Background())
 	return &pluginCapabilityProbe{
 		ttl:     ttl,
 		timeout: timeout,
 		probe:   probe,
 		now:     time.Now,
 		launch:  func(refresh func()) { go refresh() },
+		baseCtx: baseCtx,
+		cancel:  cancel,
 	}
 }
 
@@ -233,6 +240,10 @@ func (p *pluginCapabilityProbe) capable(context.Context) bool {
 		return false
 	}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return false
+	}
 	proven := p.proven
 	stale := p.at.IsZero() || p.now().Sub(p.at) >= p.ttl
 	inFlight := p.proving && p.provingEpoch == p.epoch
@@ -241,19 +252,27 @@ func (p *pluginCapabilityProbe) capable(context.Context) bool {
 	if start {
 		p.proving = true
 		p.provingEpoch = epoch
+		p.wg.Add(1)
 	}
 	p.mu.Unlock()
 	if start {
-		p.launch(func() { p.refresh(epoch) })
+		p.launch(func() {
+			defer p.wg.Done()
+			p.refresh(epoch)
+		})
 	}
 	return proven
 }
 
 // refresh performs one proof and stores its answer. It is the single place the
-// probe is called, so the detached context and the timeout are impossible to
+// probe is called, so the probe lifetime context and timeout are impossible to
 // forget.
 func (p *pluginCapabilityProbe) refresh(epoch uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	parent := p.baseCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, p.timeout)
 	defer cancel()
 	proven := false
 	defer func() {
@@ -303,14 +322,21 @@ func (p *pluginCapabilityProbe) reprove(ctx context.Context) {
 	}
 	done := make(chan struct{})
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	p.at = time.Time{}
 	p.proven = false
 	p.epoch++
 	epoch := p.epoch
 	p.proving = true
 	p.provingEpoch = epoch
+	baseCtx := p.baseCtx
+	p.wg.Add(1)
 	p.mu.Unlock()
 	p.launch(func() {
+		defer p.wg.Done()
 		defer close(done)
 		p.refresh(epoch)
 	})
@@ -319,10 +345,36 @@ func (p *pluginCapabilityProbe) reprove(ctx context.Context) {
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	if baseCtx != nil {
+		select {
+		case <-done:
+		case <-waitCtx.Done():
+		case <-baseCtx.Done():
+		}
+		return
+	}
 	select {
 	case <-done:
 	case <-waitCtx.Done():
 	}
+}
+
+// close cancels any in-flight capability proof, prevents new proofs from
+// starting, and waits until every launched refresh has returned so no SQLite
+// read or rejection write outlives the application's database handle.
+func (p *pluginCapabilityProbe) close() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.closed = true
+	p.epoch++
+	cancel := p.cancel
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	p.wg.Wait()
 }
 
 // v8PluginCapable runs one proof against the saved connection.
