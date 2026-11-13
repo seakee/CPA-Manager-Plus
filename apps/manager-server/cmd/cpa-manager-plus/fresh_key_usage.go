@@ -105,8 +105,8 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 	if reconcileCtx == nil {
 		reconcileCtx = context.WithoutCancel(ctx)
 	}
-	if a.runCtx != nil && a.usageProjection != nil {
-		startFreshDatabaseMaintenance(a.runCtx, a.cfg.DBPath)
+	if a.runCtx != nil && a.usageProjection != nil && !a.isClosing() {
+		startFreshDatabaseMaintenance(a.lifecycleContext(a.runCtx), a.cfg.DBPath)
 	}
 	if hook := a.beforeUsageReconcileLock; hook != nil {
 		hook()
@@ -130,7 +130,7 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 		}
 	}
 	a.stopUsageCollectionLocked(reconcileCtx)
-	if a.runCtx == nil || a.usageProjection == nil {
+	if a.runCtx == nil || a.usageProjection == nil || a.isClosing() {
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
@@ -212,17 +212,17 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 	// with the host. The host installs that lifetime before serving this
 	// application; without one, hosting them would leak past the database.
 	runCtx := a.runCtx
-	if runCtx == nil {
+	if runCtx == nil || a.isClosing() {
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
 	// WAL maintenance is the other background owner of this installation's
 	// database. The legacy startup creates it in main(), which the Fresh service
 	// returns from earlier, so it starts here with the same host lifetime.
-	startFreshDatabaseMaintenance(runCtx, a.cfg.DBPath)
+	startFreshDatabaseMaintenance(a.lifecycleContext(runCtx), a.cfg.DBPath)
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
-	if a.usageStarted {
+	if a.usageStarted || a.isClosing() {
 		return
 	}
 	if a.attemptUsageStart(runCtx, op) {
@@ -249,10 +249,11 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// The projection and identity workers maintain attribution independently of
 	// the Collector authority, so they start once the keys are attributable.
 	if !a.usageWorkersStarted {
+		workerCtx := a.lifecycleContext(ctx)
 		if a.startIdentityWorker != nil && !isCommittedExternalStrategy(checkpoint) {
-			a.startIdentityWorker(ctx)
+			a.startIdentityWorker(workerCtx)
 		}
-		a.usageProjection.Start(ctx)
+		a.usageProjection.Start(workerCtx)
 		a.usageWorkersStarted = true
 	}
 	// Starting the Collector is its own success-only step. A retry after a
@@ -371,11 +372,14 @@ func (a *freshApplication) armManagedUsageRuntimeWaiterLocked(ctx context.Contex
 	if a.runtime == nil || a.store == nil || a.usageAwaitCancel != nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
-	waitCtx, cancel := context.WithCancel(ctx)
+	waitCtx, cancel := context.WithCancel(a.lifecycleContext(ctx))
 	a.usageAwaitID++
 	waiterID := a.usageAwaitID
 	a.usageAwaitCancel = cancel
-	go a.awaitManagedRuntimeForUsage(waitCtx, cancel, waiterID)
+	if !a.launchBackground(func() { a.awaitManagedRuntimeForUsage(waitCtx, cancel, waiterID) }) {
+		cancel()
+		a.usageAwaitCancel = nil
+	}
 }
 
 func (a *freshApplication) claimManagedUsageRuntimeWaiter(waiterID uint64) bool {

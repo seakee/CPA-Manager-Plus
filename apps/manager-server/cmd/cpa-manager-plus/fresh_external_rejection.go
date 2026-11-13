@@ -89,6 +89,13 @@ type externalRejection struct {
 	clearSeq     uint64
 	pendingClear bool
 	localBlocked map[externalRejectionGrantKey]struct{}
+
+	closeMu    sync.Mutex
+	closed     bool
+	lifeOnce   sync.Once
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 type externalRejectionLoadResult struct {
@@ -108,6 +115,35 @@ func (r *externalRejection) slot() chan struct{} {
 	return r.dbSlot
 }
 
+func (r *externalRejection) ensureLifecycle() (context.Context, context.CancelFunc) {
+	r.lifeOnce.Do(func() {
+		r.lifeCtx, r.lifeCancel = context.WithCancel(context.Background())
+	})
+	return r.lifeCtx, r.lifeCancel
+}
+
+func (r *externalRejection) beginDBOp() bool {
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	if r.closed {
+		return false
+	}
+	r.wg.Add(1)
+	return true
+}
+
+func (r *externalRejection) close() {
+	if r == nil {
+		return
+	}
+	_, cancel := r.ensureLifecycle()
+	r.closeMu.Lock()
+	r.closed = true
+	r.closeMu.Unlock()
+	cancel()
+	r.wg.Wait()
+}
+
 func (r *externalRejection) withPersistDeadline(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -118,6 +154,8 @@ func (r *externalRejection) withPersistDeadline(parent context.Context) (context
 	}
 	if r != nil && r.newPersistTimer != nil {
 		ctx, cancel := context.WithCancel(parent)
+		lifeCtx, _ := r.ensureLifecycle()
+		stopLife := context.AfterFunc(lifeCtx, cancel)
 		ch, stop := r.newPersistTimer(budget)
 		done := make(chan struct{})
 		var stopOnce sync.Once
@@ -131,6 +169,7 @@ func (r *externalRejection) withPersistDeadline(parent context.Context) (context
 		}()
 		return ctx, func() {
 			stopOnce.Do(func() {
+				stopLife()
 				close(done)
 				if stop != nil {
 					stop()
@@ -139,7 +178,16 @@ func (r *externalRejection) withPersistDeadline(parent context.Context) (context
 			})
 		}
 	}
-	return context.WithTimeout(parent, budget)
+	ctx, cancel := context.WithTimeout(parent, budget)
+	if r == nil {
+		return ctx, cancel
+	}
+	lifeCtx, _ := r.ensureLifecycle()
+	stopLife := context.AfterFunc(lifeCtx, cancel)
+	return ctx, func() {
+		stopLife()
+		cancel()
+	}
 }
 
 func (r *externalRejection) currentEpoch() uint64 {
@@ -243,16 +291,21 @@ func (r *externalRejection) load(ctx context.Context) (externalRejectionRecord, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !r.beginDBOp() {
+		return externalRejectionRecord{}, false, errExternalRejectionUnavailable
+	}
 	loadCtx, cancel := r.withPersistDeadline(ctx)
 	defer cancel()
 	slot := r.slot()
 	select {
 	case slot <- struct{}{}:
 	case <-loadCtx.Done():
+		r.wg.Done()
 		return externalRejectionRecord{}, false, fmt.Errorf("%w: %w", errExternalRejectionUnavailable, loadCtx.Err())
 	}
 	done := make(chan externalRejectionLoadResult, 1)
 	go func() {
+		defer r.wg.Done()
 		defer func() {
 			_ = r.flushPendingClearUnderSlot(loadCtx)
 			<-slot
@@ -310,16 +363,21 @@ func (r *externalRejection) record(ctx context.Context, identity, credential str
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !r.beginDBOp() {
+		return errExternalRejectionUnavailable
+	}
 	persistCtx, cancel := r.withPersistDeadline(context.WithoutCancel(ctx))
 	defer cancel()
 	slot := r.slot()
 	select {
 	case slot <- struct{}{}:
 	case <-persistCtx.Done():
+		r.wg.Done()
 		return persistCtx.Err()
 	}
 	done := make(chan error, 1)
 	go func() {
+		defer r.wg.Done()
 		defer func() {
 			if r.hasPendingClear() {
 				cleanCtx := persistCtx
@@ -388,16 +446,21 @@ func (r *externalRejection) clear(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !r.beginDBOp() {
+		return errExternalRejectionUnavailable
+	}
 	clearCtx, cancel := r.withPersistDeadline(context.WithoutCancel(ctx))
 	defer cancel()
 	slot := r.slot()
 	select {
 	case slot <- struct{}{}:
 	case <-clearCtx.Done():
+		r.wg.Done()
 		return fmt.Errorf("%w: %w", errExternalRejectionUnavailable, clearCtx.Err())
 	}
 	done := make(chan error, 1)
 	go func() {
+		defer r.wg.Done()
 		defer func() { <-slot }()
 		done <- r.flushPendingClearUnderSlot(clearCtx)
 	}()

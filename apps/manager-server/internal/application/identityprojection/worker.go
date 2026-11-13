@@ -3,6 +3,7 @@ package identityprojection
 import (
 	"context"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,7 @@ type Worker struct {
 	maxBatches        int
 	checkInterval     time.Duration
 	continuationDelay time.Duration
+	wg                sync.WaitGroup
 }
 
 // NewWorker creates a new shadow projection worker.
@@ -56,8 +58,20 @@ func (w *Worker) Start(ctx context.Context) {
 	if w == nil || w.repo == nil {
 		return
 	}
-	go w.loop(ctx)
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.loop(ctx)
+	}()
 	w.Wake()
+}
+
+// Wait blocks until any started background loop has exited.
+func (w *Worker) Wait() {
+	if w == nil {
+		return
+	}
+	w.wg.Wait()
 }
 
 // Wake signals the worker to catch up immediately.

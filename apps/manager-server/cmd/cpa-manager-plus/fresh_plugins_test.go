@@ -9,13 +9,21 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
 
 func TestWithSupportPluginHeaderAnnouncesCapabilityOnSuccess(t *testing.T) {
@@ -796,4 +804,135 @@ func TestWithSupportPluginHeaderStatusAndDuplicateWriteHeaderBoundaries(t *testi
 			t.Fatalf("post-Hijack WriteHeader %s = %q (capable=%d), want empty/0", supportPluginHeader, got, capableCalls.Load())
 		}
 	})
+}
+
+func TestPluginCapabilityProbeCloseCancelsAndWaitsForInFlightRefresh(t *testing.T) {
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	var (
+		sawCancel atomic.Bool
+		calls     atomic.Int32
+	)
+	probe := newPluginCapabilityProbe(time.Hour, time.Minute, func(ctx context.Context) bool {
+		calls.Add(1)
+		close(entered)
+		<-ctx.Done()
+		sawCancel.Store(errors.Is(ctx.Err(), context.Canceled))
+		close(exited)
+		return true
+	})
+
+	if probe.capable(context.Background()) {
+		t.Fatal("probe reported capable before refresh completed")
+	}
+	<-entered
+
+	probe.close()
+	select {
+	case <-exited:
+	default:
+		t.Fatal("probe.close() returned before in-flight refresh exited")
+	}
+	if !sawCancel.Load() {
+		t.Fatal("probe.close() did not cancel in-flight refresh context")
+	}
+	if probe.capable(context.Background()) {
+		t.Fatal("closed probe reported capable")
+	}
+	probe.reprove(context.Background())
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("probe calls after close = %d, want 1", got)
+	}
+}
+
+func TestOpenedCloseDrainsInFlightPluginCapabilityRefreshBeforeClosingDB(t *testing.T) {
+	probeEntered := make(chan struct{})
+	var enterOnce sync.Once
+	externalCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.55")
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v8/management/config" {
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/data/auth"},"access":{"api-keys":["ext-key-1"]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(externalCPA.Close)
+
+	dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-db-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = opened.Close()
+		}
+	})
+
+	app := newFreshApplication(opened, config.Config{}, nil)
+	app.strategy = freshstrategy.New(freshstrategy.Options{
+		Protector:     opened.Protector,
+		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+	})
+	op := opened.Record.Operation
+	updated, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refreshExited := make(chan struct{})
+	var exitOnce sync.Once
+	origProbe := app.pluginCapability.probe
+	app.pluginCapability.probe = func(ctx context.Context) bool {
+		defer exitOnce.Do(func() { close(refreshExited) })
+		_ = origProbe(ctx)
+		enterOnce.Do(func() { close(probeEntered) })
+		<-ctx.Done()
+		return false
+	}
+	app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+	if res := a3Post(t, app, updated.Operation.Revision, externalCPA.URL, externalAuthorityManagement); res.Code != http.StatusOK {
+		t.Fatalf("ConnectExternal commit = %d %s, want 200", res.Code, res.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/control/api/v2/operation", nil)
+	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	opRes := httptest.NewRecorder()
+	app.ServeHTTP(opRes, req)
+	if opRes.Code != http.StatusOK {
+		t.Fatalf("GET /control/api/v2/operation = %d %s, want 200", opRes.Code, opRes.Body.String())
+	}
+	select {
+	case <-probeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("200 response did not launch background plugin capability refresh")
+	}
+
+	closed = true
+	if err := opened.Close(); err != nil {
+		t.Fatalf("opened.Close(): %v", err)
+	}
+	select {
+	case <-refreshExited:
+	default:
+		t.Fatal("opened.Close() returned while plugin capability refresh was still running")
+	}
+	if err := os.RemoveAll(dbDir); err != nil {
+		t.Fatalf("os.RemoveAll(dbDir) right after opened.Close(): %v", err)
+	}
 }

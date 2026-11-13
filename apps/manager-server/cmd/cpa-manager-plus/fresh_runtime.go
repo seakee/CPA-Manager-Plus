@@ -1263,6 +1263,20 @@ func startFreshDatabaseMaintenance(ctx context.Context, dbPath string) {
 	freshDatabaseMaintenance.paths[key] = maintenance
 }
 
+func stopFreshDatabaseMaintenance(dbPath string) {
+	key, ok := freshDatabaseMaintenanceKey(dbPath)
+	if !ok {
+		return
+	}
+	freshDatabaseMaintenance.mu.Lock()
+	maintenance := freshDatabaseMaintenance.paths[key]
+	delete(freshDatabaseMaintenance.paths, key)
+	freshDatabaseMaintenance.mu.Unlock()
+	if maintenance != nil {
+		_ = maintenance.Close()
+	}
+}
+
 func freshDatabaseMaintenanceFor(dbPath string) *sqliterepo.WALMaintenance {
 	key, ok := freshDatabaseMaintenanceKey(dbPath)
 	if !ok {

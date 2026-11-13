@@ -260,7 +260,8 @@ func runServerWithOptions(options legacypreflight.Options) {
 		// A competing host initializer may still hold this exact admission.
 		// Keep discovery unavailable and retry ownership validation after it
 		// releases the fence; never project this Fresh store as a legacy source.
-		go awaitFreshStore(ctx, cfg, paths, startupHandler)
+		stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
+		defer stopAwait()
 		waitForReadOnlyStartup(ctx, server, serverResult)
 		return
 	}
@@ -272,7 +273,8 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if !options.Initialize {
 		if _, statErr := os.Lstat(paths.Database); os.IsNotExist(statErr) {
 			startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
-			go awaitFreshStore(ctx, cfg, paths, startupHandler)
+			stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
+			defer stopAwait()
 			log.Printf("Manager source has no database; serving read-only Bootstrap discovery pending a later authorized initializer")
 			waitForReadOnlyStartup(ctx, server, serverResult)
 			return

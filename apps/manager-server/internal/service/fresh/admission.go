@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -100,16 +101,38 @@ func ClassifyInitializeRefusal(ctx context.Context, databasePath string, openErr
 	}
 	return ErrStoreLockedInProgress, true
 }
+
 type Opened struct {
 	Admission *legacypreflight.Admission
 	DB        *sql.DB
 	Protector *security.Protector
 	Record    freshstore.Record
+
+	beforeCloseMu sync.Mutex
+	beforeClose   []func()
+}
+
+// BeforeClose registers a teardown hook that Close runs in LIFO order before
+// closing DB and releasing the process admission lock.
+func (o *Opened) BeforeClose(fn func()) {
+	if o == nil || fn == nil {
+		return
+	}
+	o.beforeCloseMu.Lock()
+	o.beforeClose = append(o.beforeClose, fn)
+	o.beforeCloseMu.Unlock()
 }
 
 func (o *Opened) Close() error {
 	if o == nil {
 		return nil
+	}
+	o.beforeCloseMu.Lock()
+	hooks := o.beforeClose
+	o.beforeClose = nil
+	o.beforeCloseMu.Unlock()
+	for i := len(hooks) - 1; i >= 0; i-- {
+		hooks[i]()
 	}
 	var err error
 	if o.DB != nil {

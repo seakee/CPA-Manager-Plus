@@ -222,11 +222,11 @@ type freshApplication struct {
 	// gate waiting for the CPA's status. It exists for the hung CPA: a process that
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
-	credentialHeaderBudget time.Duration
+	credentialHeaderBudget          time.Duration
 	afterCredentialHoldBudgetExpiry func()
-	legacyCollector        *collectorservice.Service
-	collectorWorker        *worker.CollectorWorker
-	identityWorker         *identityreconcile.Worker
+	legacyCollector                 *collectorservice.Service
+	collectorWorker                 *worker.CollectorWorker
+	identityWorker                  *identityreconcile.Worker
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
@@ -278,18 +278,28 @@ type freshApplication struct {
 	// bans an address after five failed authentications, so a page that keeps
 	// presenting a key its own CPA already rejected is what turns a rotation into
 	// a thirty-minute outage.
-	rejection *externalRejection
+	rejection   *externalRejection
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+	bgMu        sync.Mutex
+	closing     bool
+	bgWG        sync.WaitGroup
+	closeOnce   sync.Once
 }
 
 func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshrouting.Driver) *freshApplication {
 	st := freshstore.New(opened.DB)
 	settings := setting.New(opened.DB, opened.Protector)
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	a := &freshApplication{
 		cfg: cfg, store: st, authority: fresh.New(st), routing: freshrouting.New(st, driver),
 		protector:       opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
-		rejection: newExternalRejection(opened.DB),
+		rejection:   newExternalRejection(opened.DB),
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
 	}
+	opened.BeforeClose(a.Close)
 	// Fresh owns the SQLite admission and keeps the old app bootstrap bypassed,
 	// but the already-built CPAMP services remain the source of truth for Full
 	// Web's shared Dashboard/Config/System resources. This context reuses the
@@ -392,7 +402,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			if err != nil {
 				log.Printf("Fresh identity reconciliation unavailable: %v", err)
 			} else if worker := a.identityWorker; worker != nil {
-				a.startIdentityWorker = func(ctx context.Context) { go worker.Run(ctx) }
+				a.startIdentityWorker = func(ctx context.Context) {
+					a.launchBackground(func() { worker.Run(ctx) })
+				}
 			}
 		}
 	}
@@ -535,6 +547,83 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		Adoption: http.HandlerFunc(a.fixedAdoption), Artifact: http.HandlerFunc(a.fixedArtifact),
 		Upgrade: a.upgradeWizard}
 	return a
+}
+
+func (a *freshApplication) isClosing() bool {
+	if a == nil {
+		return true
+	}
+	a.bgMu.Lock()
+	closing := a.closing
+	a.bgMu.Unlock()
+	return closing
+}
+
+// lifecycleContext binds basis to a.closeCtx so host-lived workers stop both
+// when basis cancels and when the application's database handle closes.
+func (a *freshApplication) lifecycleContext(basis context.Context) context.Context {
+	if basis == nil {
+		return nil
+	}
+	if a == nil || a.closeCtx == nil {
+		return basis
+	}
+	if basis == context.Background() {
+		return a.closeCtx
+	}
+	ctx, cancel := context.WithCancel(basis)
+	context.AfterFunc(a.closeCtx, cancel)
+	return ctx
+}
+
+func (a *freshApplication) launchBackground(fn func()) bool {
+	if a == nil || fn == nil {
+		return false
+	}
+	a.bgMu.Lock()
+	if a.closing {
+		a.bgMu.Unlock()
+		return false
+	}
+	a.bgWG.Add(1)
+	a.bgMu.Unlock()
+	go func() {
+		defer a.bgWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// Close cancels and drains background work owned by this Fresh application
+// before Opened.Close closes SQLite and releases the process admission lock.
+func (a *freshApplication) Close() {
+	if a == nil {
+		return
+	}
+	a.closeOnce.Do(func() {
+		a.bgMu.Lock()
+		a.closing = true
+		a.bgMu.Unlock()
+		if a.closeCancel != nil {
+			a.closeCancel()
+		}
+		if p := a.pluginCapability; p != nil {
+			p.close()
+		}
+		a.bgWG.Wait()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		a.usageStartMu.Lock()
+		a.stopUsageCollectionLocked(stopCtx)
+		a.usageStartMu.Unlock()
+		cancel()
+		if a.usageProjection != nil {
+			a.usageProjection.Wait()
+		}
+		stopFreshDatabaseMaintenance(a.cfg.DBPath)
+		if a.rejection != nil {
+			a.rejection.close()
+		}
+	})
 }
 
 func (a *freshApplication) current(ctx context.Context) (bootstrap.FreshOperation, error) {
@@ -1212,21 +1301,24 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	}
 	app := newFreshApplication(opened, cfg, freshDriver(cfg))
 	// Workers started by an in-process completion must use the host lifetime,
-	// not the request that triggered them.
-	app.runCtx = ctx
-	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
+	// not the request that triggered them, and must drain before opened.Close().
+	workerCtx := app.lifecycleContext(ctx)
+	app.runCtx = workerCtx
+	op := app.prepareCompletedStartup(workerCtx, opened.Record.Operation)
 	h.SetFreshHandler(app)
 	if app.runtime != nil && app.embeddedDesiredStateInner() != nil {
-		go app.runFreshEmbeddedReconciler(ctx, runtimeservice.DefaultReconcileInterval)
+		app.launchBackground(func() {
+			app.runFreshEmbeddedReconciler(workerCtx, runtimeservice.DefaultReconcileInterval)
+		})
 	}
 	if op.ProductComplete {
 		app.startUsageCollection(op)
 		if op.Strategy.Strategy == bootstrap.AdoptExisting {
-			go app.awaitCompletedAdoptionBackfill(ctx)
+			app.launchBackground(func() { app.awaitCompletedAdoptionBackfill(workerCtx) })
 		}
 	}
-	go restoreFreshRouting(ctx, app.routing)
-	go app.runFreshUpdateChecks(ctx)
+	app.launchBackground(func() { restoreFreshRouting(workerCtx, app.routing) })
+	app.launchBackground(func() { app.runFreshUpdateChecks(workerCtx) })
 	return opened, nil
 }
 
@@ -1237,24 +1329,39 @@ func validateFreshHostAuthority(cfg config.Config) error {
 	return nil
 }
 
-func awaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) func() {
+	var (
+		opened *fresh.Opened
+		done   = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !freshMarkerPresent(paths.Database) {
+				continue
+			}
+			admitted, err := serveExistingFresh(ctx, cfg, paths, h)
+			if err != nil {
+				continue
+			}
+			opened = admitted
 			return
-		case <-ticker.C:
 		}
-		if !freshMarkerPresent(paths.Database) {
-			continue
-		}
-		opened, err := serveExistingFresh(ctx, cfg, paths, h)
-		if err != nil {
-			continue
-		}
-		<-ctx.Done()
-		_ = opened.Close()
-		return
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			<-done
+			if opened != nil {
+				_ = opened.Close()
+			}
+		})
 	}
 }

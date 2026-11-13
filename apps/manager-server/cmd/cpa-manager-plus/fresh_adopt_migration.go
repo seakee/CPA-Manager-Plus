@@ -174,9 +174,8 @@ func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity 
 		basis = context.Background()
 	}
 	a.adoptMigrationRunning = true
-	deadline, cancel := context.WithTimeout(basis, adoptMigrationDeadline)
-	a.adoptMigrationMu.Unlock()
-	go func() {
+	deadline, cancel := context.WithTimeout(a.lifecycleContext(basis), adoptMigrationDeadline)
+	if !a.launchBackground(func() {
 		defer cancel()
 		defer func() {
 			a.adoptMigrationMu.Lock()
@@ -184,7 +183,13 @@ func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity 
 			a.adoptMigrationMu.Unlock()
 		}()
 		run(deadline, current)
-	}()
+	}) {
+		cancel()
+		a.adoptMigrationRunning = false
+		a.adoptMigrationMu.Unlock()
+		return ""
+	}
+	a.adoptMigrationMu.Unlock()
 	return adoptMigrationStateRunning
 }
 
