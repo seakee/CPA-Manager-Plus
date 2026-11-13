@@ -127,6 +127,10 @@ func Wrap(
 	var rc *http.ResponseController
 	if w != nil {
 		rc = http.NewResponseController(w)
+		// Prevent net/http's chunkWriter.writeHeader from auto-closing raw
+		// w.reqBody ahead of Reader.Close() when a handler flushes >2048 bytes
+		// without consuming r.Body (e.g. GET /favicon.ico with Content-Length > 0).
+		_ = rc.EnableFullDuplex()
 	}
 	obs, _ := ctx.Value(readObserverKey{}).(func(int))
 	closeObs, _ := ctx.Value(closeObserverKey{}).(func())
@@ -161,7 +165,7 @@ func (r *Reader) stop() {
 func (r *Reader) abortActiveRead() {
 	r.mu.Lock()
 	r.canceled = true
-	if (r.reading || (r.closing && !r.eof)) && r.rc != nil {
+	if !r.eof && (!r.closed || r.closing) && r.rc != nil {
 		_ = r.rc.SetReadDeadline(time.Unix(1, 0))
 	}
 	r.mu.Unlock()

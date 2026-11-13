@@ -3,18 +3,23 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"database/sql"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
@@ -1160,4 +1165,52 @@ func decodeRawObject(t *testing.T, raw json.RawMessage) map[string]json.RawMessa
 		t.Fatalf("decode %s: %v", raw, err)
 	}
 	return document
+}
+
+func TestHTTPAPINewWrapsBrandResourcesBeforeLargeFaviconFlush(t *testing.T) {
+	h := newTestHandler(t, "", false)
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+
+	nonEOFCloseEntered := make(chan struct{})
+	var once sync.Once
+	reqCtx = requestbody.WithEarlyCloseDrainTimeout(reqCtx, -1)
+	reqCtx = requestbody.WithNonEOFCloseObserver(reqCtx, func() {
+		once.Do(func() { close(nonEOFCloseEntered) })
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r.WithContext(reqCtx))
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, err := fmt.Fprintf(conn, "GET /favicon.ico HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n", listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-nonEOFCloseEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("httpapi.New /favicon.ico blocked before entering requestbody.Reader.Close()")
+	}
+
+	cancelReq()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("server.Shutdown timed out on httpapi.New /favicon.ico unread body: %v", err)
+	}
 }

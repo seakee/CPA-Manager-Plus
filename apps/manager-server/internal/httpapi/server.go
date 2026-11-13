@@ -8,6 +8,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -41,7 +42,7 @@ func New(cfg config.Config, store *store.Store, collector *collector.Manager, au
 		automationRuntimeService...,
 	)
 	return &Server{
-		handler: ProtectBrandResources(router.New(appCtx)),
+		handler: requestbody.Middleware(requestbody.DefaultReadIdleTimeout, ProtectBrandResources(router.New(appCtx))),
 		appCtx:  appCtx,
 	}
 }

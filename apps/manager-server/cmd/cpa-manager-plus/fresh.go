@@ -871,13 +871,17 @@ func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ctrl := newFreshRequestControl(a.closeCtx, w, a.effectiveShutdownWriteGrace())
 		defer ctrl.stop()
-		body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
-		defer stopBody()
-		defer func() { _ = body.Close() }()
+		if r.Body != nil && r.Body != http.NoBody {
+			body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
+			if body != nil {
+				defer stopBody()
+				defer func() { _ = body.Close() }()
+				r.Body = body
+			}
+		}
 		reqCtx = context.WithValue(reqCtx, freshRequestTrackedKey{}, true)
 		reqCtx = context.WithValue(reqCtx, freshRequestControlKey{}, ctrl)
 		r = r.WithContext(reqCtx)
-		r.Body = body
 	}
 	// The plugin capability is a claim about the saved connection, so it is
 	// announced only when that connection proves it; a route existing is not a

@@ -399,3 +399,128 @@ func TestSlowMultiChunkStreamingSucceedsNormallyAndAbortsOnCancel(t *testing.T) 
 		}
 	})
 }
+
+func TestLargeResponseWithUnreadBodyPreservesKeepAliveWhenDrainedAndAbortsWhenStalled(t *testing.T) {
+	largeAsset := strings.Repeat("F", 5542) // > 2048 B net/http bufio.Writer flush threshold
+
+	t.Run("small_unread_body_arriving_within_drain_window_reuses_keep_alive_conn", func(t *testing.T) {
+		var (
+			mu          sync.Mutex
+			remoteAddrs []string
+		)
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := middleware.RequestLogger(Middleware(DefaultReadIdleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Intentionally do NOT read r.Body before writing >2048 bytes.
+			mu.Lock()
+			remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "image/x-icon")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(largeAsset))
+		})))
+		server := &http.Server{Handler: handler}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		br := bufio.NewReader(conn)
+
+		// Request #1 includes a 16-byte body that the handler ignores.
+		req1 := fmt.Sprintf("GET /favicon.ico HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n0123456789abcdef", listener.Addr().String())
+		if _, err := conn.Write([]byte(req1)); err != nil {
+			t.Fatal(err)
+		}
+		parseReq, _ := http.NewRequest(http.MethodGet, "http://"+listener.Addr().String()+"/favicon.ico", nil)
+		resp1, err := http.ReadResponse(br, parseReq)
+		if err != nil {
+			t.Fatalf("GET #1 ReadResponse: %v", err)
+		}
+		body1, err := io.ReadAll(resp1.Body)
+		_ = resp1.Body.Close()
+		if err != nil || resp1.StatusCode != http.StatusOK || len(body1) != len(largeAsset) {
+			t.Fatalf("GET #1 = (%d, %d, %v), want (200, %d, nil)", resp1.StatusCode, len(body1), err, len(largeAsset))
+		}
+
+		// Request #2 reuses the exact same HTTP/1.1 TCP connection.
+		req2 := fmt.Sprintf("GET /favicon.ico HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String())
+		if _, err := conn.Write([]byte(req2)); err != nil {
+			t.Fatal(err)
+		}
+		resp2, err := http.ReadResponse(br, parseReq)
+		if err != nil {
+			t.Fatalf("GET #2 ReadResponse: %v", err)
+		}
+		body2, err := io.ReadAll(resp2.Body)
+		_ = resp2.Body.Close()
+		if err != nil || resp2.StatusCode != http.StatusOK || len(body2) != len(largeAsset) {
+			t.Fatalf("GET #2 = (%d, %d, %v), want (200, %d, nil)", resp2.StatusCode, len(body2), err, len(largeAsset))
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(remoteAddrs) != 2 || remoteAddrs[0] != remoteAddrs[1] {
+			t.Fatalf("RemoteAddrs across keep-alive GETs = %v, want 2 identical addrs", remoteAddrs)
+		}
+	})
+
+	t.Run("stalled_unread_body_on_large_response_aborts_on_context_cancel", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+
+		closeEntered := make(chan struct{})
+		handlerDone := make(chan struct{})
+		var once sync.Once
+		reqCtx = WithEarlyCloseDrainTimeout(reqCtx, -1)
+		reqCtx = WithNonEOFCloseObserver(reqCtx, func() {
+			once.Do(func() { close(closeEntered) })
+		})
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				body, stopBody := Wrap(reqCtx, r.Body, w, 0)
+				defer stopBody()
+				defer func() { _ = body.Close() }()
+				w.Header().Set("Content-Type", "image/x-icon")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(largeAsset))
+			}),
+		}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		rawReq := fmt.Sprintf("GET /favicon.ico HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n", listener.Addr().String())
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-closeEntered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("large response handler blocked before reaching deferred Reader.Close()")
+		}
+
+		cancelReq()
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("deferred Reader.Close() did not unblock on context cancel")
+		}
+	})
+}

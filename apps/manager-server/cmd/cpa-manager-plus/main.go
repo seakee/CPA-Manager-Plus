@@ -681,6 +681,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 			log.Printf("shutdown pprof: %v", err)
 		}
 	}
+	startupHandler.BeginShutdown()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 		_ = server.Close()
@@ -713,6 +714,9 @@ const freshHTTPShutdownTimeout = freshRuntimeMutationBudget + 5*time.Second
 func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
 	if server == nil {
 		return
+	}
+	if sh, ok := server.Handler.(*startupHTTPHandler); ok {
+		sh.BeginShutdown()
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

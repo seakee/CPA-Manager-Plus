@@ -14,6 +14,7 @@ import (
 	routingdomain "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -41,12 +42,17 @@ type startupHTTPHandler struct {
 	// discoveryObserver coalesces the concurrent unauthenticated observations of
 	// the one source this process is looking at, and remembers the projection it
 	// already proved for it while the source is unchanged.
-	discoveryObserver *discoveryObservation
-	cancelDiscovery   context.CancelFunc
-	next              atomic.Value // *startupHandlerTarget
-	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
-	ready             atomic.Bool
-	fresh             atomic.Pointer[startupHandlerTarget]
+	discoveryObserver       *discoveryObservation
+	cancelDiscovery         context.CancelFunc
+	shutdownCtx             context.Context
+	cancelShutdown          context.CancelFunc
+	onRequestBodyRead       func(r *http.Request, attempt int)
+	onBeforeNonEOFBodyClose func(r *http.Request)
+	earlyCloseDrainTimeout  time.Duration
+	next                    atomic.Value // *startupHandlerTarget
+	lifecycle               atomic.Value // routingdomain.DiscoveryLifecycle
+	ready                   atomic.Bool
+	fresh                   atomic.Pointer[startupHandlerTarget]
 }
 
 type startupHandlerTarget struct {
@@ -54,17 +60,20 @@ type startupHandlerTarget struct {
 }
 
 func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler {
+	shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
 	h := &startupHTTPHandler{
 		projection:        result,
 		readOnlyShell:     httpapi.BootstrapWebHandler(),
 		discoveryObserver: &discoveryObservation{},
+		shutdownCtx:       shutdownCtx,
+		cancelShutdown:    cancelShutdown,
 	}
-	h.lifecycle.Store(routingdomain.DiscoveryActive)
 	h.discovery = routingdomain.DiscoveryHandler{
 		Lifecycle: h.discoveryLifecycle,
 		Active:    http.HandlerFunc(h.serveDiscovery),
 	}
 	h.protected = httpapi.ProtectBrandResources(routingdomain.ProtectFixedDiscovery(http.HandlerFunc(h.serveNonDiscovery), http.HandlerFunc(h.serveFixedBootstrap)))
+	h.lifecycle.Store(routingdomain.DiscoveryActive)
 	h.next.Store(&startupHandlerTarget{handler: http.NotFoundHandler()})
 	return h
 }
@@ -620,10 +629,59 @@ func (h *startupHTTPHandler) SetCompleted() {
 	h.lifecycle.Store(routingdomain.DiscoveryCompleted)
 }
 
+func (h *startupHTTPHandler) BeginShutdown() {
+	if h != nil && h.cancelShutdown != nil {
+		h.cancelShutdown()
+	}
+}
+
+func (h *startupHTTPHandler) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if h == nil || h.shutdownCtx == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stopAfter := context.AfterFunc(h.shutdownCtx, cancel)
+	return ctx, func() {
+		stopAfter()
+		cancel()
+	}
+}
+
 func (h *startupHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if target := h.fresh.Load(); target != nil {
 		target.handler.ServeHTTP(w, r)
 		return
+	}
+	if r != nil {
+		reqCtx, cancelReq := h.requestContext(r.Context())
+		defer cancelReq()
+		if obs := h.onRequestBodyRead; obs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithReadObserver(reqCtx, func(attempt int) {
+				obs(reqClone, attempt)
+			})
+		}
+		if closeObs := h.onBeforeNonEOFBodyClose; closeObs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithNonEOFCloseObserver(reqCtx, func() {
+				closeObs(reqClone)
+			})
+		}
+		if h.earlyCloseDrainTimeout != 0 {
+			reqCtx = requestbody.WithEarlyCloseDrainTimeout(reqCtx, h.earlyCloseDrainTimeout)
+		}
+		if r.Body != nil && r.Body != http.NoBody {
+			body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, requestbody.DefaultReadIdleTimeout)
+			if body != nil {
+				defer stopBody()
+				defer func() { _ = body.Close() }()
+				r.Body = body
+			}
+		}
+		r = r.WithContext(reqCtx)
 	}
 	h.protected.ServeHTTP(w, r)
 }

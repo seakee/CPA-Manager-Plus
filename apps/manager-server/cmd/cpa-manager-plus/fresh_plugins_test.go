@@ -2112,3 +2112,225 @@ func TestLifecycleContextUnregistersCallbacksAndReusesBoundContext(t *testing.T)
 		t.Fatal("live lifecycleContext did not cancel on opened.Close()")
 	}
 }
+
+func TestFreshShutdownInterruptsLargeResponseWithUnreadBodyOnFavicon(t *testing.T) {
+	runCase := func(t *testing.T, drainTimeout time.Duration, viaReadOnlyStartup bool) {
+		t.Helper()
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-favicon-unread-close-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+		app.earlyCloseDrainTimeout = drainTimeout
+		nonEOFCloseEntered := make(chan struct{})
+		var closeOnce sync.Once
+		app.onBeforeNonEOFBodyClose = func(r *http.Request) {
+			if r != nil && r.URL != nil && r.URL.Path == "/favicon.ico" {
+				closeOnce.Do(func() { close(nonEOFCloseEntered) })
+			}
+		}
+
+		startup := newStartupHTTPHandler(bootstrap.PublicDiscovery{})
+		startup.SetFreshHandler(app)
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler:           startup,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		serverResult := make(chan error, 1)
+		go func() { serverResult <- server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		// Send GET /favicon.ico (5542 B > 2048 B flush threshold) with
+		// Content-Length: 16 and 0 body bytes sent, holding the TCP socket open.
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		rawReq := fmt.Sprintf(
+			"GET /favicon.ico HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n",
+			listener.Addr().String(),
+		)
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-nonEOFCloseEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("GET /favicon.ico blocked before reaching deferred Reader.Close()")
+		}
+
+		shutdownDone := make(chan error, 1)
+		closed = true
+		if viaReadOnlyStartup {
+			startupCtx, cancelStartup := context.WithCancel(context.Background())
+			cancelStartup()
+			go func() {
+				waitForReadOnlyStartup(startupCtx, server, serverResult)
+				shutdownDone <- opened.Close()
+			}()
+		} else {
+			shutdownHTTPServer(server, 20*time.Millisecond)
+			go func() {
+				shutdownDone <- opened.Close()
+			}()
+		}
+
+		select {
+		case closeErr := <-shutdownDone:
+			if closeErr != nil {
+				t.Fatalf("opened.Close(): %v", closeErr)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatal("Fresh shutdown deadlocked on GET /favicon.ico with unfinished Content-Length body")
+		}
+
+		reopened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatalf("fresh.Open failed to re-acquire .manager.lock after favicon shutdown: %v", err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened.Close(): %v", err)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	}
+
+	t.Run("closeCtx_interrupts_favicon_early_close_drain_immediately", func(t *testing.T) {
+		runCase(t, -1, false)
+	})
+	t.Run("waitForReadOnlyStartup_finishes_promptly_on_favicon_unread_body", func(t *testing.T) {
+		runCase(t, 0, true)
+	})
+}
+
+func TestStartupHTTPHandlerShutdownAbortsStalledNonFreshRequestsImmediately(t *testing.T) {
+	dbDir, err := os.MkdirTemp(t.TempDir(), "startup-nonfresh-shutdown-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+
+	startup := newStartupHTTPHandler(bootstrap.PublicDiscovery{})
+	startup.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 2*time.Second)
+	startup.earlyCloseDrainTimeout = -1 // prove BeginShutdown ctx cancel itself aborts the drain immediately
+
+	faviconCloseEntered := make(chan struct{})
+	discoveryCloseEntered := make(chan struct{})
+	var favOnce, discOnce sync.Once
+	startup.onBeforeNonEOFBodyClose = func(r *http.Request) {
+		if r == nil || r.URL == nil {
+			return
+		}
+		switch r.URL.Path {
+		case "/favicon.ico":
+			favOnce.Do(func() { close(faviconCloseEntered) })
+		case bootstrap.FixedBootstrapDiscoveryPath:
+			discOnce.Do(func() { close(discoveryCloseEntered) })
+		}
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		Handler:           startup,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	serverResult := make(chan error, 1)
+	go func() { serverResult <- server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	// 1. Stalled unread body on outer brand asset (/favicon.ico, >2048 B).
+	favConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = favConn.Close() })
+	if _, err := fmt.Fprintf(favConn, "GET /favicon.ico HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n", listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-faviconCloseEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startupHTTPHandler /favicon.ico never entered non-EOF Close")
+	}
+
+	// 2. Stalled unread body on outer discovery endpoint (/.well-known/cpamp-bootstrap).
+	discConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = discConn.Close() })
+	if _, err := fmt.Fprintf(discConn, "GET %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n", bootstrap.FixedBootstrapDiscoveryPath, listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-discoveryCloseEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startupHTTPHandler discovery never entered non-EOF Close")
+	}
+
+	startupCtx, cancelStartup := context.WithCancel(context.Background())
+	cancelStartup()
+	done := make(chan struct{})
+	go func() {
+		waitForReadOnlyStartup(startupCtx, server, serverResult)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForReadOnlyStartup burned shutdown budget on non-Fresh stalled requests")
+	}
+}
+
+func TestFreshServeHTTPNilRequestBodyDoesNotPanic(t *testing.T) {
+	dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-nil-body-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+	rec := httptest.NewRecorder()
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    &url.URL{Path: bootstrap.FixedLivenessPath},
+		Header: make(http.Header),
+		Body:   nil,
+	}
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ServeHTTP(Body=nil) status = %d, want 200", rec.Code)
+	}
+}
