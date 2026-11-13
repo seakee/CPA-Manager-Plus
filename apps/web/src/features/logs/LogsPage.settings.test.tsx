@@ -5,6 +5,9 @@ import '@/i18n';
 import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useConfigStore, useNotificationStore } from '@/stores';
+import { Button } from '@/components/ui/Button';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { IconDownload, IconTimer } from '@/components/ui/icons';
 import { LogsPage } from './LogsPage';
 import { useLogsConfigAuthority } from './useLogsConfigAuthority';
 import { LogsAuthorityClientContext } from './LogsAuthorityContext';
@@ -18,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   updateErrorLogsMaxFiles: vi.fn(),
   fetchLogs: vi.fn(),
   fetchErrorLogs: vi.fn(),
+  downloadBlob: vi.fn(),
   authState: {
     connectionStatus: 'connected',
     apiBase: '/console/api/v2/cpamp',
@@ -48,10 +52,9 @@ vi.mock('@/services/api/logs', () => ({
   },
 }));
 
-vi.mock('@/hooks/useLocalStorage', () => ({
-  useLocalStorage: (_key: string, initial: unknown) => [initial, vi.fn()],
+vi.mock('@/utils/download', () => ({
+  downloadBlob: mocks.downloadBlob,
 }));
-
 vi.mock('./hooks/useLogScroller', () => ({
   isNearBottom: () => true,
   useLogScroller: () => ({
@@ -117,15 +120,36 @@ function maybeTestId(root: ReactTestInstance, id: string): ReactTestInstance | u
   return root.findAllByProps({ 'data-testid': id })[0];
 }
 
+let storageMap: Map<string, string>;
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   dispatchWindowEvent.mockClear();
+  storageMap = new Map<string, string>();
+  const fakeLocalStorage = {
+    getItem: (key: string) => storageMap.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      storageMap.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      storageMap.delete(key);
+    },
+    clear: () => {
+      storageMap.clear();
+    },
+  };
+  vi.stubGlobal('localStorage', fakeLocalStorage);
   vi.stubGlobal('window', {
     dispatchEvent: dispatchWindowEvent,
-    setTimeout: globalThis.setTimeout.bind(globalThis),
-    clearTimeout: globalThis.clearTimeout.bind(globalThis),
-    setInterval: globalThis.setInterval.bind(globalThis),
-    clearInterval: globalThis.clearInterval.bind(globalThis),
+    localStorage: fakeLocalStorage,
+    setTimeout: (...args: Parameters<typeof globalThis.setTimeout>) =>
+      globalThis.setTimeout(...args),
+    clearTimeout: (...args: Parameters<typeof globalThis.clearTimeout>) =>
+      globalThis.clearTimeout(...args),
+    setInterval: (...args: Parameters<typeof globalThis.setInterval>) =>
+      globalThis.setInterval(...args),
+    clearInterval: (...args: Parameters<typeof globalThis.clearInterval>) =>
+      globalThis.clearInterval(...args),
   });
   mocks.authState.connectionStatus = 'connected';
   mocks.authState.apiBase = '/console/api/v2/cpamp';
@@ -152,9 +176,11 @@ beforeEach(() => {
   mocks.updateLogsMaxTotalSizeMb.mockResolvedValue({ ok: true });
   mocks.updateErrorLogsMaxFiles.mockResolvedValue({ ok: true });
   mocks.fetchLogs.mockResolvedValue({
-    lines: ['[2026-11-12 10:00:00] [info] [gin_logger.go:94] 200 | 12ms | 127.0.0.1 | GET "/v1/models"'],
+    lines: ['[2026-11-12 10:00:00] [info] [log_writer.go:1] file logging active'],
     'line-count': 1,
-    'latest-timestamp': 1794477600,
+    'latest-timestamp': 100,
+    latestAfter: 100,
+    nextCursor: 'cursor-1',
   });
   mocks.fetchErrorLogs.mockResolvedValue({ files: [] });
 });
@@ -171,48 +197,211 @@ afterEach(async () => {
 });
 
 describe('LogsPage settings and empty-state file logging control', () => {
-  it('enables file logging from the empty state, loads logs automatically, and returns to disabled state when turned off', async () => {
-    const client = buildAuthorityClient({ mode: 'managed', writable: true });
-    const mounted = await mountLogsPage(client, '/logs');
+  function findAutoRefreshSwitch(root: ReactTestInstance): ReactTestInstance {
+    const match = root.findAllByType(ToggleSwitch).find(
+      (node) => node.findAllByType(IconTimer).length > 0
+    );
+    if (!match) {
+      throw new Error('autoRefresh ToggleSwitch not found');
+    }
+    return match;
+  }
 
-    expect(mocks.fetchLogs).not.toHaveBeenCalled();
+  function findDownloadButton(root: ReactTestInstance): ReactTestInstance {
+    const match = root.findAllByType(Button).find(
+      (node) => node.findAllByType(IconDownload).length > 0
+    );
+    if (!match) {
+      throw new Error('download Button not found');
+    }
+    return match;
+  }
 
-    const enableButton = byTestId(mounted.root, 'logs-empty-enable-button');
-    expect(enableButton.props.disabled).toBe(false);
+  it('enables file logging from the empty state, loads logs, and clears buffer/cursor/autoRefresh when disabled on the page', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = buildAuthorityClient({ mode: 'managed', writable: true });
+      const mounted = await mountLogsPage(client, '/logs');
 
-    await act(async () => {
-      enableButton.props.onClick();
-    });
+      expect(mocks.fetchLogs).not.toHaveBeenCalled();
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
 
-    expect(mocks.updateLoggingToFile).toHaveBeenCalledWith(true);
-    expect(useConfigStore.getState().config?.loggingToFile).toBe(true);
-    expect(mocks.fetchLogs).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(mounted.toJSON())).toContain('/v1/models');
-    expect(maybeTestId(mounted.root, 'logs-empty-enable-button')).toBeUndefined();
+      const enableButton = byTestId(mounted.root, 'logs-empty-enable-button');
+      expect(enableButton.props.disabled).toBe(false);
 
-    await act(async () => {
-      byTestId(mounted.root, 'logs-tab-settings').props.onClick();
-    });
+      await act(async () => {
+        enableButton.props.onClick();
+      });
 
-    const loggingRow = byTestId(mounted.root, 'logs-setting-row-logging-to-file');
-    const loggingCheckbox = loggingRow.findByType('input');
-    expect(loggingCheckbox.props.checked).toBe(true);
+      expect(mocks.updateLoggingToFile).toHaveBeenCalledWith(true);
+      expect(useConfigStore.getState().config?.loggingToFile).toBe(true);
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(1);
+      expect(mocks.fetchLogs).toHaveBeenCalledWith({ limit: 10000 });
+      expect(maybeTestId(mounted.root, 'logs-empty-enable-button')).toBeUndefined();
+      const downloadBtn = findDownloadButton(mounted.root);
+      expect(downloadBtn.props.disabled).toBe(false);
+      await act(async () => {
+        downloadBtn.props.onClick();
+      });
+      expect(mocks.downloadBlob).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      loggingCheckbox.props.onChange({ target: { checked: false } });
-    });
+      await act(async () => {
+        findAutoRefreshSwitch(mounted.root).props.onChange(true);
+      });
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
 
-    expect(mocks.updateLoggingToFile).toHaveBeenLastCalledWith(false);
-    expect(useConfigStore.getState().config?.loggingToFile).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+      expect(mocks.fetchLogs).toHaveBeenLastCalledWith({
+        limit: 10000,
+        cursor: 'cursor-1',
+        after: 100,
+      });
 
-    await act(async () => {
-      byTestId(mounted.root, 'logs-tab-logs').props.onClick();
-    });
+      await act(async () => {
+        byTestId(mounted.root, 'logs-tab-settings').props.onClick();
+      });
 
-    expect(JSON.stringify(mounted.toJSON())).not.toContain('/v1/models');
-    expect(byTestId(mounted.root, 'logs-empty-enable-button').props.disabled).toBe(false);
+      const loggingRow = byTestId(mounted.root, 'logs-setting-row-logging-to-file');
+      const loggingCheckbox = loggingRow.findByType('input');
+      expect(loggingCheckbox.props.checked).toBe(true);
+
+      await act(async () => {
+        loggingCheckbox.props.onChange({ target: { checked: false } });
+      });
+
+      expect(mocks.updateLoggingToFile).toHaveBeenLastCalledWith(false);
+      expect(useConfigStore.getState().config?.loggingToFile).toBe(false);
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('false');
+
+      await act(async () => {
+        byTestId(mounted.root, 'logs-tab-logs').props.onClick();
+      });
+
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+      expect(byTestId(mounted.root, 'logs-empty-enable-button').props.disabled).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+
+      // Re-enabling from empty state resets query to full load (no stale cursor) and keeps autoRefresh off.
+      await act(async () => {
+        byTestId(mounted.root, 'logs-empty-enable-button').props.onClick();
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+      expect(mocks.fetchLogs).toHaveBeenLastCalledWith({ limit: 10000 });
+      expect(findAutoRefreshSwitch(mounted.root).props.checked).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
+  it('clears buffer, cursor, in-flight backfill, download and polling when file logging is turned off externally', async () => {
+    vi.useFakeTimers();
+    try {
+      useConfigStore.setState((state) => ({
+        ...state,
+        config: {
+          ...state.config!,
+          loggingToFile: true,
+        },
+      }));
+      const client = buildAuthorityClient({ mode: 'managed', writable: true });
+      const mounted = await mountLogsPage(client, '/logs');
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(1);
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(false);
+
+      await act(async () => {
+        findAutoRefreshSwitch(mounted.root).props.onChange(true);
+      });
+      expect(findAutoRefreshSwitch(mounted.root).props.checked).toBe(true);
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('true');
+
+      // Start an incremental poll and leave it in flight when external config flips false.
+      const stalePoll = createDeferred<{
+        lines: string[];
+        'line-count': number;
+        'latest-timestamp': number;
+        latestAfter: number;
+        nextCursor: string;
+      }>();
+      mocks.fetchLogs.mockReturnValueOnce(stalePoll.promise);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+      expect(mocks.fetchLogs).toHaveBeenLastCalledWith({
+        limit: 10000,
+        cursor: 'cursor-1',
+        after: 100,
+      });
+
+      // External config refresh observes loggingToFile: false.
+      mocks.getConfig.mockResolvedValueOnce({
+        ...useConfigStore.getState().config!,
+        loggingToFile: false,
+      });
+      await act(async () => {
+        useConfigStore.setState((state) => ({
+          ...state,
+          config: {
+            ...state.config!,
+            loggingToFile: false,
+          },
+        }));
+      });
+
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+      expect(byTestId(mounted.root, 'logs-empty-enable-button').props.disabled).toBe(false);
+      expect(storageMap.get('logsPage.autoRefresh')).toBe('false');
+
+      // Resolving the stale in-flight poll must NOT repopulate buffer or enable download.
+      await act(async () => {
+        stalePoll.resolve({
+          lines: ['[2026-11-12 10:01:00] [info] [log_writer.go:2] stale-after-disable'],
+          'line-count': 1,
+          'latest-timestamp': 200,
+          latestAfter: 200,
+          nextCursor: 'stale-cursor-2',
+        });
+        await stalePoll.promise;
+      });
+
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(2);
+
+      // Re-enabling file logging later must start a fresh load without stale cursor
+      // and must NOT resume the previous auto-refresh interval.
+      mocks.fetchLogs.mockResolvedValueOnce({
+        lines: [],
+        'line-count': 0,
+        'latest-timestamp': 0,
+      });
+      await act(async () => {
+        byTestId(mounted.root, 'logs-empty-enable-button').props.onClick();
+      });
+
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+      expect(mocks.fetchLogs).toHaveBeenLastCalledWith({ limit: 10000 });
+      expect(findAutoRefreshSwitch(mounted.root).props.checked).toBe(false);
+      expect(findDownloadButton(mounted.root).props.disabled).toBe(true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(24000);
+      });
+      expect(mocks.fetchLogs).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(['managed', 'external'] as const)(
     'edits all five observability.logs.* fields under %s capability while keeping observability.pprof.* read-only',
     async (mode) => {
@@ -604,12 +793,25 @@ describe('LogsPage settings and empty-state file logging control', () => {
     ).toBe(true);
   });
 
-  it('uses LogsAuthorityClientContext in Full Web and stays standalone in Panel when no provider is mounted', async () => {
-    const refusedClient = buildAuthorityClient({
-      mode: 'external',
-      writable: false,
-      reason: 'external_cpa_version_unsupported',
-    });
+  it('uses LogsAuthorityClientContext in Full Web and supports standalone Panel Lite editing with connection and write-refusal guards', async () => {
+    const getCalls: string[] = [];
+    const refusedClient: PublicApiClient = {
+      get: (async (resource: string) => {
+        getCalls.push(resource);
+        return {
+          capability: {
+            mode: 'external',
+            readable: true,
+            writable: false,
+            rulesWritable: false,
+            reason: 'external_cpa_version_unsupported',
+          },
+        };
+      }) as PublicApiClient['get'],
+      post: vi.fn() as PublicApiClient['post'],
+      put: vi.fn() as PublicApiClient['put'],
+      uploadArtifact: vi.fn() as PublicApiClient['uploadArtifact'],
+    };
 
     await act(async () => {
       renderer = create(
@@ -620,8 +822,25 @@ describe('LogsPage settings and empty-state file logging control', () => {
         </MemoryRouter>
       );
     });
+    expect(getCalls).toEqual(['gateway/config/logs-capability']);
     expect(byTestId(renderer!.root, 'logs-empty-enable-button').props.disabled).toBe(true);
 
+    // Panel Lite standalone: disconnected state keeps controls disabled and makes no authority request.
+    mocks.authState.connectionStatus = 'disconnected';
+    await act(async () => {
+      renderer!.unmount();
+      renderer = create(
+        <MemoryRouter initialEntries={['/logs?tab=settings']}>
+          <LogsPage />
+        </MemoryRouter>
+      );
+    });
+    expect(getCalls).toHaveLength(1);
+    expect(byTestId(renderer!.root, 'logs-setting-row-logging-to-file').findByType('input').props.disabled).toBe(true);
+
+    // Panel Lite standalone connected: edits CPA log settings directly and preserves state on write failure.
+    mocks.authState.connectionStatus = 'connected';
+    mocks.updateDebug.mockRejectedValueOnce(new Error('panel write refused'));
     await act(async () => {
       renderer!.unmount();
       renderer = create(
@@ -630,6 +849,25 @@ describe('LogsPage settings and empty-state file logging control', () => {
         </MemoryRouter>
       );
     });
+    expect(getCalls).toHaveLength(1);
     expect(byTestId(renderer!.root, 'logs-empty-enable-button').props.disabled).toBe(false);
+
+    await act(async () => {
+      byTestId(renderer!.root, 'logs-tab-settings').props.onClick();
+    });
+    await act(async () => {
+      byTestId(renderer!.root, 'logs-setting-row-debug').findByType('input').props.onChange({
+        target: { checked: true },
+      });
+    });
+    expect(useConfigStore.getState().config?.debug).toBe(false);
+    expect(byTestId(renderer!.root, 'logs-settings-error').props.role).toBe('alert');
+
+    await act(async () => {
+      byTestId(renderer!.root, 'logs-setting-row-debug').findByType('input').props.onChange({
+        target: { checked: true },
+      });
+    });
+    expect(useConfigStore.getState().config?.debug).toBe(true);
   });
 });

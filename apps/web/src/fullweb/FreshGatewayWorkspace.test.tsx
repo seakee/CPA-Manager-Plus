@@ -983,7 +983,7 @@ describe('FreshGatewayWorkspace', () => {
     }
   });
 
-  it('renders ownership workspace links only for cards whose destination edits the credited fields', async () => {
+  it('renders ownership workspace links only for cards with a destination editor and switches usage link by mode', async () => {
     const collectOwnerLinks = () => {
       const grid = testId('gateway-owners');
       const cards = grid.findAll(
@@ -1027,7 +1027,8 @@ describe('FreshGatewayWorkspace', () => {
       'observability.usage.usage-statistics-enabled': null,
       'observability.usage.redis-usage-queue-retention-seconds': null,
       'server.* / management.*': null,
-      'plugins.*': '/plugins',
+      'plugins.enabled / plugins.configs.*': '/plugins',
+      'plugins.dir / plugins.store-sources / plugins.store-auth / plugins.auth-revision': null,
       'config-version / quota-exceeded.switch-project / quota-exceeded.switch-preview-model': null,
     });
 

@@ -666,12 +666,13 @@ describe('Fresh installation and Console authority boundary', () => {
     expect(has('legacy-console')).toBe(false);
     expect(input().props.value).toBe('');
   });
-  it('propagates non-writable External capability through FreshConsolePage into LogsPage without passing authorityClient', async () => {
+  it('propagates non-writable External logs capability through FreshConsolePage into LogsPage without passing authorityClient', async () => {
     useConfigStore.getState().clearCache();
     vi.spyOn(configApi, 'getConfig').mockResolvedValue({ loggingToFile: false });
-    await mount(async () =>
-      Response.json({
-        ...gatewayViewFixture(),
+    const capabilityRequests: string[] = [];
+    await mount(async (url) => {
+      capabilityRequests.push(String(url));
+      return Response.json({
         capability: {
           mode: 'external',
           readable: true,
@@ -679,16 +680,83 @@ describe('Fresh installation and Console authority boundary', () => {
           rulesWritable: false,
           reason: 'external_cpa_version_unsupported',
         },
-      })
-    );
+      });
+    });
     await login();
     await navigate('/logs');
     await act(async () => {
       await vi.dynamicImportSettled();
     });
     await vi.waitFor(() => {
+      expect(capabilityRequests.some((url) => url.endsWith('/gateway/config/logs-capability'))).toBe(
+        true
+      );
       expect(find('logs-empty-enable-button').props.disabled).toBe(true);
       expect(has('logs-empty-authority-notice')).toBe(true);
     });
+  });
+  it('follows the Gateway observability.logs.* ownership link into LogsPage and writes a credited field', async () => {
+    useConfigStore.getState().clearCache();
+    vi.spyOn(configApi, 'getConfig').mockResolvedValue({
+      loggingToFile: false,
+      debug: false,
+      requestLog: false,
+      logsMaxTotalSizeMb: 0,
+      errorLogsMaxFiles: 10,
+    });
+    const updateDebugSpy = vi.spyOn(configApi, 'updateDebug').mockResolvedValue({ ok: true });
+    await mount(async (url) => {
+      if (String(url).endsWith('/gateway/config/logs-capability')) {
+        return Response.json({
+          capability: {
+            mode: 'managed',
+            readable: true,
+            writable: true,
+            rulesWritable: true,
+          },
+        });
+      }
+      return Response.json(gatewayViewFixture());
+    });
+    await login();
+    await navigate('/config');
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    await act(async () => {
+      find('gateway-tab-owners').props.onClick();
+    });
+    const ownerLink = find('gateway-owner-link-/logs').findByType('a');
+    expect(ownerLink.props.href).toBe('/console/logs');
+    await act(async () => {
+      ownerLink.props.onClick({
+        button: 0,
+        preventDefault: vi.fn(),
+        currentTarget: null,
+        target: null,
+        metaKey: false,
+        altKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+      });
+    });
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    await act(async () => {
+      find('logs-tab-settings').props.onClick();
+    });
+    await vi.waitFor(() => {
+      expect(
+        find('logs-setting-row-debug').findByType('input').props.disabled
+      ).toBe(false);
+    });
+    await act(async () => {
+      find('logs-setting-row-debug')
+        .findByType('input')
+        .props.onChange({ target: { checked: true } });
+    });
+    expect(updateDebugSpy).toHaveBeenCalledWith(true);
+    expect(useConfigStore.getState().config?.debug).toBe(true);
   });
 });
