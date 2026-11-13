@@ -116,7 +116,7 @@ async function probeAuthority(
   currentScope: string
 ): Promise<ProbeOutcome> {
   try {
-    const view = await targetClient.get<GatewayCapabilityPayload>('gateway/config', {
+    const view = await targetClient.get<GatewayCapabilityPayload>('gateway/config/logs-capability', {
       kind: 'admin',
       value: targetKey,
     });

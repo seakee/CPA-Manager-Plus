@@ -264,16 +264,6 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
       if (!scopeActiveRef.current) return;
       updateConfigValue?.(field, next);
       clearCache?.(field);
-      if (field === 'logging-to-file' && !next) {
-        logGenerationRef.current += 1;
-        logRequestInFlightRef.current = false;
-        pendingFullReloadRef.current = false;
-        resetLogPosition();
-        setLogState({ buffer: [], visibleFrom: 0 });
-        setLogsLoaded(false);
-        setError('');
-        setAutoRefresh(false);
-      }
       showNotification(t('logs.settings_saved'), 'success');
     } catch (err: unknown) {
       if (!scopeActiveRef.current) return;
@@ -441,6 +431,7 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
   };
 
   const downloadLogs = () => {
+    if (!fileLogsAvailable || logState.buffer.length === 0) return;
     const text = logState.buffer.join('\n');
     downloadBlob({ filename: 'logs.txt', blob: new Blob([text], { type: 'text/plain' }) });
     showNotification(t('logs.download_success'), 'success');
@@ -501,6 +492,26 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
     const tab = resolveTab(searchParams.get('tab'));
     setActiveTab((current) => (current === tab ? current : tab));
   }, [searchParams]);
+
+  const prevFileLogsAvailableRef = useRef(fileLogsAvailable);
+
+  useEffect(() => {
+    const wasAvailable = prevFileLogsAvailableRef.current;
+    prevFileLogsAvailableRef.current = fileLogsAvailable;
+    if (wasAvailable && !fileLogsAvailable) {
+      logGenerationRef.current += 1;
+      logRequestInFlightRef.current = false;
+      pendingFullReloadRef.current = false;
+      resetLogPosition();
+      setLogState({ buffer: [], visibleFrom: 0 });
+      setLogsLoaded(false);
+      setLoading(false);
+      setError('');
+      setAutoRefresh(false);
+    } else if (config !== null && !fileLogsAvailable && autoRefresh) {
+      setAutoRefresh(false);
+    }
+  }, [autoRefresh, config, fileLogsAvailable, setAutoRefresh]);
 
   useEffect(() => {
     if (connectionStatus !== 'connected') {
@@ -940,7 +951,8 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
                   variant="secondary"
                   size="sm"
                   onClick={downloadLogs}
-                  disabled={logState.buffer.length === 0}
+                  disabled={!fileLogsAvailable || logState.buffer.length === 0}
+                  data-testid="logs-download-button"
                   className={styles.actionButton}
                 >
                   <span className={styles.buttonContent}>

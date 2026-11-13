@@ -384,16 +384,29 @@ export function gatewayOwners(mode?: string): GatewayOwnerMeta[] {
       'management.panel-github-repository',
       'management.base-url',
     ]),
-    owner('plugins.*', 'plugins', 'ownerDetailPlugins', [
-      'plugins.enabled',
-      'plugins.dir',
-      'plugins.store-sources',
-      'plugins.store-auth',
-      'plugins.auth-revision',
-      'plugins.configs.<plugin>.enabled',
-      'plugins.configs.<plugin>.priority',
-      'plugins.configs.<plugin>.*',
-    ], '/plugins'),
+    owner(
+      'plugins.enabled / plugins.configs.*',
+      'plugins',
+      'ownerDetailPlugins',
+      [
+        'plugins.enabled',
+        'plugins.configs.<plugin>.enabled',
+        'plugins.configs.<plugin>.priority',
+        'plugins.configs.<plugin>.*',
+      ],
+      '/plugins'
+    ),
+    owner(
+      'plugins.dir / plugins.store-sources / plugins.store-auth / plugins.auth-revision',
+      'plugins',
+      'ownerDetailPluginsHost',
+      [
+        'plugins.dir',
+        'plugins.store-sources',
+        'plugins.store-auth',
+        'plugins.auth-revision',
+      ]
+    ),
     owner(
       'config-version / quota-exceeded.switch-project / quota-exceeded.switch-preview-model',
       'legacy',
