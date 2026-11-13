@@ -879,6 +879,33 @@ func CredentialDatabase(legacyRoot, managerDatabase string) string {
 	return CredentialDatabaseFrom(database, managerDatabase)
 }
 
+// EntryCredentialDatabase resolves the construction-time credential database
+// for the Upgrade authentication entry leaf. When MountDatabase accepts the
+// configured 1.x directory, that database is returned. When MountDatabase
+// refuses the configured directory solely because an existing, non-empty,
+// non-symlink, single-link regular usage.sqlite denied read permission
+// (os.ErrPermission, such as a 0600 root-owned 1.x file before targeted
+// chown), the entry leaf still binds that mounted path rather than falling
+// back to the Manager store: requests while it remains unreadable report the
+// ownership verdict when the mount carries a recognized 1.x layout, and a
+// subsequent chown recovers in place without restarting the container. Absent,
+// empty, symlinked, hard-linked, or non-regular entries still fall back to
+// managerDatabase.
+func EntryCredentialDatabase(legacyRoot, managerDatabase string) string {
+	if database, _ := MountDatabase(legacyRoot); database != "" {
+		return database
+	}
+	if root := strings.TrimSpace(legacyRoot); root != "" {
+		database := filepath.Join(root, databaseFileName)
+		if info, err := processlock.InspectRegularSingleLink(database); err == nil && info.Size() > 0 {
+			if _, inspectErr := inspectSourceDatabase(database); errors.Is(inspectErr, os.ErrPermission) {
+				return database
+			}
+		}
+	}
+	return strings.TrimSpace(managerDatabase)
+}
+
 // verifyAdminCredential reads the one credential row from the private copy,
 // proves the copy was taken from one stable source state (OpenSnapshot does that
 // while it copies), and compares the key. The copy and the comparison are one

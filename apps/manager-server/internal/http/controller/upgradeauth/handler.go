@@ -16,21 +16,22 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 const Path = "/.well-known/cpamp-bootstrap/upgrade/authenticate"
 const Contract = "cpamp.upgrade-auth.v1"
 
-// CodeSourceOwnershipUnavailable reports that the resolved 1.x source (for
-// example a root-owned 1.x volume mounted at /legacy:ro while Manager runs as
-// 10002:10002) has database, lock marker, journal, or data.key files that the
-// current Manager user does not have permission to read.
+// CodeSourceOwnershipUnavailable reports that the bound 1.x source (for example
+// a root-owned 1.x volume mounted at /legacy:ro while Manager runs as
+// 10002:10002) is a recognized 1.x installation whose database, lock marker,
+// journal sidecars, or data.key deny read permission to the current user.
 const CodeSourceOwnershipUnavailable = "source_ownership_unavailable"
-
 type Handler struct {
 	paths sqlite.InspectionPaths
 	// mountSource reports whether paths.Database is the configured 1.x source
@@ -48,29 +49,64 @@ type Handler struct {
 	sourceRoot           string
 	preserveManagerStore bool
 	managerPaths         sqlite.InspectionPaths
-	// InspectionTimeout bounds both the ownership probe and the inspection
-	// behind it. Zero uses legacypreflight.DiscoveryInspectionTimeout.
+	// InspectionTimeout bounds request waiting on both the ownership assessment
+	// and the inspection behind it. Zero uses
+	// legacypreflight.DiscoveryInspectionTimeout.
 	InspectionTimeout time.Duration
-	// probeOwnership is the test seam for sourceOwnershipUnavailable: a test
-	// substitutes a lookup that blocks on a channel to prove caller
-	// cancellation, deadline enforcement, and single-flight coalescing without
-	// sleeps. Production leaves it nil so sourceOwnershipUnavailable runs.
-	probeOwnership     func(paths sqlite.InspectionPaths, checkDataKey bool) bool
-	ownershipMu        sync.Mutex
-	ownershipFlight    *ownershipFlight
-	instance           [32]byte
-	mu                 sync.Mutex
-	observed           sqlite.LegacyInspection
-	encoded            string
-	credentialRevision string
-	publicOrigin       string
+	// probeOwnership, onOwnershipFlightJoined, and afterOwnershipProbe are
+	// deterministic test seams (nil in production) exercising blocked filesystem
+	// calls, simultaneous completion+cancellation, single-flight coalescing, and
+	// mid-request source permission/identity changes without sleeps.
+	probeOwnership          func(ctx context.Context, paths sqlite.InspectionPaths, checkDataKey bool) ownershipAssessment
+	onOwnershipFlightJoined func(flightDone <-chan struct{})
+	afterOwnershipProbe     func()
+	ownershipMu             sync.Mutex
+	ownershipFlight         *ownershipFlight
+	instance                [32]byte
+	mu                      sync.Mutex
+	observed                sqlite.LegacyInspection
+	encoded                 string
+	credentialRevision      string
+	publicOrigin            string
+}
+
+type ownershipStatus uint8
+
+const (
+	ownershipReadable ownershipStatus = iota
+	ownershipDenied
+	ownershipUnavailable
+)
+
+type memberSnapshot struct {
+	present     bool
+	device      uint64
+	inode       uint64
+	size        int64
+	mode        os.FileMode
+	modifiedNS  int64
+	changeStamp string
+}
+
+type sourceSnapshot struct {
+	database    memberSnapshot
+	lock        memberSnapshot
+	wal         memberSnapshot
+	shm         memberSnapshot
+	journal     memberSnapshot
+	dataKey     memberSnapshot
+	uncacheable bool
+}
+
+type ownershipAssessment struct {
+	status   ownershipStatus
+	baseline sourceSnapshot
 }
 
 type ownershipFlight struct {
 	done   chan struct{}
-	denied bool
+	result ownershipAssessment
 }
-
 // StatusObservationUnavailable is the entry's answer when the presented key is
 // proved but the public observation cannot describe the source — a WAL source
 // refuses it. It says exactly that: the credential is verified and nothing else.
@@ -143,20 +179,36 @@ func (h *Handler) inspectionTimeout() time.Duration {
 	return legacypreflight.DiscoveryInspectionTimeout
 }
 
-// resolveSourceOwnership inspects only the construction-time bound source
-// (h.paths) inside a single-flight bound that honours ctx cancellation and
-// deadline. A hung mount therefore leaves at most one blocked filesystem call
-// in flight and never holds the HTTP request past ctx.Done().
-func (h *Handler) resolveSourceOwnership(ctx context.Context) (denied bool, ok bool) {
+// resolveSourceOwnership assesses only the construction-time bound source
+// (h.paths) through a single-flight worker so HTTP callers honour ctx
+// cancellation and deadline without running unpreemptible filesystem calls on
+// the request goroutine. Note that kernel-level Lstat/Open syscalls on an
+// unresponsive network mount cannot be preempted by Go: single-flight bounds
+// blocked worker concurrency to at most one goroutine per Handler (and bounds
+// HTTP latency via ctx.Done()), whereas an indefinitely hung mount keeps that
+// one flight occupied until the filesystem answers or the container restarts.
+func (h *Handler) resolveSourceOwnership(ctx context.Context) (ownershipAssessment, bool) {
 	if ctx.Err() != nil {
-		return false, false
+		return ownershipAssessment{}, false
+	}
+	if !h.mountSource && !h.preserveManagerStore && h.probeOwnership == nil {
+		return ownershipAssessment{status: ownershipReadable}, true
 	}
 	flight := h.joinOwnershipFlight()
+	if h.onOwnershipFlightJoined != nil {
+		h.onOwnershipFlightJoined(flight.done)
+	}
 	select {
 	case <-flight.done:
-		return flight.denied, true
+		// Go's select chooses pseudorandomly when flight.done and ctx.Done() are
+		// ready together; re-check ctx.Err() so any cancelled or timed-out request
+		// deterministically answers generic source_unavailable.
+		if ctx.Err() != nil {
+			return ownershipAssessment{}, false
+		}
+		return flight.result, true
 	case <-ctx.Done():
-		return false, false
+		return ownershipAssessment{}, false
 	}
 }
 
@@ -169,15 +221,23 @@ func (h *Handler) joinOwnershipFlight() *ownershipFlight {
 	flight := &ownershipFlight{done: make(chan struct{})}
 	h.ownershipFlight = flight
 	paths := h.paths
-	checkDataKey := h.mountSource || h.preserveManagerStore
-	probe := sourceOwnershipUnavailable
-	if h.probeOwnership != nil {
-		probe = h.probeOwnership
-	}
+	mountSource := h.mountSource
+	preserveManagerStore := h.preserveManagerStore
+	managerPaths := h.managerPaths
+	sourceRoot := h.sourceRoot
+	timeout := h.inspectionTimeout()
+	customProbe := h.probeOwnership
 	go func() {
-		denied := probe(paths, checkDataKey)
+		probeCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		var result ownershipAssessment
+		if customProbe != nil {
+			result = customProbe(probeCtx, paths, mountSource || preserveManagerStore)
+		} else {
+			result = assessSourceOwnership(probeCtx, paths, mountSource, preserveManagerStore, managerPaths, sourceRoot)
+		}
 		h.ownershipMu.Lock()
-		flight.denied = denied
+		flight.result = result
 		if h.ownershipFlight == flight {
 			h.ownershipFlight = nil
 		}
@@ -187,52 +247,169 @@ func (h *Handler) joinOwnershipFlight() *ownershipFlight {
 	return flight
 }
 
-func sourceOwnershipUnavailable(paths sqlite.InspectionPaths, checkDataKey bool) bool {
+func assessSourceOwnership(
+	ctx context.Context,
+	paths sqlite.InspectionPaths,
+	mountSource bool,
+	preserveManagerStore bool,
+	managerPaths sqlite.InspectionPaths,
+	sourceRoot string,
+) ownershipAssessment {
+	if !mountSource && !preserveManagerStore {
+		return ownershipAssessment{status: ownershipReadable}
+	}
 	database := strings.TrimSpace(paths.Database)
 	if database == "" {
-		return false
+		return ownershipAssessment{status: ownershipUnavailable}
 	}
-	info, err := os.Lstat(database)
-	if err != nil {
-		return errors.Is(err, os.ErrPermission)
+
+	var (
+		snap                  sourceSnapshot
+		anyPermDenied         bool
+		dbOrSidecarPermDenied bool
+	)
+	dbMember, dbUncacheable, dbPerm, dbOK := inspectReadableMember(database, true)
+	if !dbOK {
+		if !dbPerm {
+			return ownershipAssessment{status: ownershipUnavailable}
+		}
+		anyPermDenied = true
+		dbOrSidecarPermDenied = true
+	} else {
+		snap.database = dbMember
+		snap.uncacheable = snap.uncacheable || dbUncacheable
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
-		return false
+
+	type sidecarTarget struct {
+		suffix  string
+		journal bool
+		dest    *memberSnapshot
 	}
-	if fileReadPermissionDenied(database) {
-		return true
+	sidecars := []sidecarTarget{
+		{suffix: ".manager.lock", journal: false, dest: &snap.lock},
+		{suffix: "-wal", journal: true, dest: &snap.wal},
+		{suffix: "-shm", journal: true, dest: &snap.shm},
+		{suffix: "-journal", journal: true, dest: &snap.journal},
 	}
-	for _, suffix := range []string{".manager.lock", "-wal", "-shm", "-journal"} {
-		if regularFilePermissionDenied(database + suffix) {
-			return true
+	for _, sc := range sidecars {
+		candidate := database + sc.suffix
+		member, uncacheable, perm, ok := inspectReadableMember(candidate, false)
+		if !ok {
+			if !perm {
+				return ownershipAssessment{status: ownershipUnavailable}
+			}
+			anyPermDenied = true
+			if sc.journal {
+				dbOrSidecarPermDenied = true
+			}
+			continue
+		}
+		if sc.suffix == "-journal" && member.present && member.size > 0 {
+			return ownershipAssessment{status: ownershipUnavailable}
+		}
+		*sc.dest = member
+		snap.uncacheable = snap.uncacheable || uncacheable
+	}
+
+	if dataKey := strings.TrimSpace(paths.DataKey); dataKey != "" {
+		member, uncacheable, perm, ok := inspectReadableMember(dataKey, false)
+		if !ok {
+			if !perm {
+				return ownershipAssessment{status: ownershipUnavailable}
+			}
+			anyPermDenied = true
+		} else {
+			snap.dataKey = member
+			snap.uncacheable = snap.uncacheable || uncacheable
 		}
 	}
-	if checkDataKey {
-		if dataKey := strings.TrimSpace(paths.DataKey); dataKey != "" && regularFilePermissionDenied(dataKey) {
-			return true
+
+	if !anyPermDenied {
+		return ownershipAssessment{status: ownershipReadable, baseline: snap}
+	}
+
+	preserved := upgradeservice.PreservedSource{
+		Database: database,
+		DataKey:  paths.DataKey,
+	}
+	if !dbOrSidecarPermDenied {
+		var extraRoots []upgradeservice.ScratchRoot
+		if mountSource {
+			extraRoots = []upgradeservice.ScratchRoot{
+				{Label: "the target root", Dir: parentDir(managerPaths.Database)},
+				{Label: "the Manager data key directory", Dir: parentDir(managerPaths.DataKey)},
+			}
+		} else {
+			extraRoots = []upgradeservice.ScratchRoot{
+				{Label: "the configured source root", Dir: sourceRoot},
+			}
 		}
+		if upgradeservice.ProvenUnfenceableLegacySource(ctx, preserved, extraRoots...) {
+			return ownershipAssessment{status: ownershipDenied}
+		}
+		return ownershipAssessment{status: ownershipUnavailable}
 	}
-	return false
+	if mountSource && upgradeservice.RecognizedUnreadableLegacyMountLayout(preserved) {
+		return ownershipAssessment{status: ownershipDenied}
+	}
+	return ownershipAssessment{status: ownershipUnavailable}
 }
 
-func regularFilePermissionDenied(path string) bool {
-	info, err := os.Lstat(path)
+// inspectReadableMember validates path as a non-symlink, single-link regular
+// file, opens it read-only to confirm descriptor identity and read permission,
+// and records its device/inode/size/mode/mtime/ChangeStamp snapshot.
+func inspectReadableMember(path string, required bool) (member memberSnapshot, uncacheable bool, permDenied bool, ok bool) {
+	info, err := processlock.InspectRegularSingleLink(path)
+	if os.IsNotExist(err) {
+		if required {
+			return memberSnapshot{}, false, false, false
+		}
+		return memberSnapshot{present: false}, false, false, true
+	}
 	if err != nil {
-		return errors.Is(err, os.ErrPermission)
+		return memberSnapshot{}, false, errors.Is(err, os.ErrPermission), false
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return false
+	if required && info.Size() == 0 {
+		return memberSnapshot{}, false, false, false
 	}
-	return fileReadPermissionDenied(path)
-}
-
-func fileReadPermissionDenied(path string) bool {
 	file, err := os.Open(path)
 	if err != nil {
-		return errors.Is(err, os.ErrPermission)
+		return memberSnapshot{}, false, errors.Is(err, os.ErrPermission), false
 	}
+	opened, statErr := file.Stat()
+	validateErr := processlock.OpenedDatabase(file, info)
 	_ = file.Close()
-	return false
+	if statErr != nil || validateErr != nil {
+		joined := errors.Join(statErr, validateErr)
+		return memberSnapshot{}, false, errors.Is(joined, os.ErrPermission), false
+	}
+	id, err := copyinmarker.Identity(path)
+	if err != nil {
+		return memberSnapshot{}, false, errors.Is(err, os.ErrPermission), false
+	}
+	stamp, stampErr := copyinmarker.ChangeStamp(path)
+	if stampErr != nil {
+		if errors.Is(stampErr, copyinmarker.ErrChangeStampUnavailable) {
+			return memberSnapshot{
+				present:    true,
+				device:     id.Device,
+				inode:      id.Inode,
+				size:       opened.Size(),
+				mode:       opened.Mode(),
+				modifiedNS: opened.ModTime().UnixNano(),
+			}, true, false, true
+		}
+		return memberSnapshot{}, false, errors.Is(stampErr, os.ErrPermission), false
+	}
+	return memberSnapshot{
+		present:     true,
+		device:      id.Device,
+		inode:       id.Inode,
+		size:        opened.Size(),
+		mode:        opened.Mode(),
+		modifiedNS:  opened.ModTime().UnixNano(),
+		changeStamp: stamp,
+	}, false, false, true
 }
 
 func parentDir(path string) string {
@@ -270,14 +447,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), h.inspectionTimeout())
 	defer cancel()
-	denied, ok := h.resolveSourceOwnership(ctx)
+	before, ok := h.resolveSourceOwnership(ctx)
 	if !ok {
 		write(w, http.StatusServiceUnavailable, "source_unavailable")
 		return
 	}
-	if denied {
+	switch before.status {
+	case ownershipDenied:
 		write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
 		return
+	case ownershipUnavailable:
+		write(w, http.StatusServiceUnavailable, "source_unavailable")
+		return
+	}
+	if h.afterOwnershipProbe != nil {
+		h.afterOwnershipProbe()
 	}
 	legacypreflight.WithAuthenticatedInspection(ctx, h.paths, key, func(report legacypreflight.Report, err error) {
 		// observedFile is the projection the entry can offer this caller. When the
@@ -285,24 +469,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// a proved key still answers authenticated, because only the observation is
 		// unavailable and a refused observation never becomes a credential verdict.
 		observedFile := true
+		unauthorized := false
 		switch {
 		case err == nil:
 		case errors.Is(err, os.ErrPermission):
-			write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+			h.writeSourceFault(ctx, w, err)
 			return
 		case errors.Is(err, sqlite.ErrLegacyAdminUnauthorized):
 			observedFile = false
 			verifyErr := h.verifyCredential(ctx, key)
 			if errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized) {
-				write(w, http.StatusUnauthorized, "admin_unauthorized")
-				return
-			}
-			if errors.Is(verifyErr, os.ErrPermission) {
-				write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
-				return
-			}
-			if verifyErr != nil {
-				write(w, http.StatusServiceUnavailable, "source_unavailable")
+				unauthorized = true
+			} else if verifyErr != nil {
+				h.writeSourceFault(ctx, w, verifyErr)
 				return
 			}
 		default:
@@ -313,13 +492,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// a credential verdict, so a wrong key stays 503 here rather than 401.
 			observedFile = false
 			if verifyErr := h.verifyCredential(ctx, key); verifyErr != nil {
-				if errors.Is(verifyErr, os.ErrPermission) {
-					write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
-					return
-				}
+				h.writeSourceFault(ctx, w, verifyErr)
+				return
+			}
+		}
+		// Confirm the preserved source's member identities, ctime stamps, and read
+		// permissions are unchanged before emitting any 401/200 verdict so a
+		// mid-request chmod or file replacement on data.key or sidecars fails
+		// closed instead of returning a credential comparison result.
+		if h.mountSource || h.preserveManagerStore || h.probeOwnership != nil {
+			after, afterOK := h.resolveSourceOwnership(ctx)
+			if !afterOK {
 				write(w, http.StatusServiceUnavailable, "source_unavailable")
 				return
 			}
+			if after.status == ownershipDenied {
+				write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+				return
+			}
+			if after.status != ownershipReadable || before.baseline.uncacheable || after.baseline.uncacheable || after.baseline != before.baseline {
+				write(w, http.StatusServiceUnavailable, "source_unavailable")
+				return
+			}
+		}
+		if unauthorized {
+			write(w, http.StatusUnauthorized, "admin_unauthorized")
+			return
 		}
 		// Only a proved credential learns whether this resource exists, whether it
 		// carries a query string, and which verb it takes.
@@ -365,6 +563,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeEntry(w, revision, string(projection.Status))
 	})
+}
+
+func (h *Handler) writeSourceFault(ctx context.Context, w http.ResponseWriter, faultErr error) {
+	if ctx.Err() != nil {
+		write(w, http.StatusServiceUnavailable, "source_unavailable")
+		return
+	}
+	if (h.mountSource || h.preserveManagerStore || h.probeOwnership != nil) && errors.Is(faultErr, os.ErrPermission) {
+		if after, ok := h.resolveSourceOwnership(ctx); ok && after.status == ownershipDenied {
+			write(w, http.StatusServiceUnavailable, CodeSourceOwnershipUnavailable)
+			return
+		}
+	}
+	write(w, http.StatusServiceUnavailable, "source_unavailable")
 }
 
 // answerUnobserved completes the entry for a proved credential whose source the
