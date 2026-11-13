@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -71,6 +72,26 @@ func externalLegacyReplacedWrite(path, method string) bool {
 		return method != http.MethodPatch
 	}
 	return false
+}
+
+// externalLegacyLogConfigWrite reports whether this legacy request mutates one
+// of the CPA log configuration settings through the compatibility bridge. On
+// External installations those writes require proving the CPA v8 version
+// contract before forwarding.
+func externalLegacyLogConfigWrite(path, method string) bool {
+	if method != http.MethodPut {
+		return false
+	}
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/logging-to-file",
+		"/v0/management/debug",
+		"/v0/management/request-log",
+		"/v0/management/logs-max-total-size-mb",
+		"/v0/management/error-logs-max-files":
+		return true
+	default:
+		return false
+	}
 }
 
 // legacyBridgePresentsSavedKey reports whether a legacy request ends up presenting
@@ -345,11 +366,14 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 			next.ServeHTTP(w, r)
 			return
 		}
-		var grant externalReadGrant
+		var (
+			grant   externalReadGrant
+			install freshkeyapply.ExternalInstall
+		)
 		snapshotCtx := withFreshRecordSnapshot(ctx, record)
 		snapshotCtx = app.withExternalSavedCredentialGate(snapshotCtx)
 		if app.externalSource != nil {
-			resolvedGrant, install, targetErr := app.externalReadTargetFor(snapshotCtx, record)
+			resolvedGrant, resolvedInstall, targetErr := app.externalReadTargetFor(snapshotCtx, record)
 			if targetErr != nil {
 				gate.release()
 				if ctx.Err() != nil {
@@ -368,6 +392,7 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 				return
 			}
 			grant = resolvedGrant
+			install = resolvedInstall
 			snapshotCtx = proxysvc.WithSavedSetupOverride(snapshotCtx, install.BaseURL, install.ManagementKey)
 		} else {
 			resolvedGrant, grantErr := app.externalReadGrantFor(snapshotCtx, record)
@@ -396,6 +421,36 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		// and keeps the tenure until its status arrives, exactly as the proxy
 		// itself bounds it.
 		hold, requestCtx := app.beginCredentialHold(markContext, app.externalCredentialHoldBudget(r.URL.Path))
+		if externalLegacyLogConfigWrite(r.URL.Path, r.Method) {
+			if app.externalSource == nil {
+				hold.finish()
+				writeExternalAuthorityUnavailable(w)
+				return
+			}
+			report, probeErr := cpa.ObserveExternalVersion(cpa.WithoutExternalHeaderRelease(requestCtx), install.BaseURL, install.ManagementKey)
+			if probeErr != nil {
+				app.noteExternalRejection(context.WithoutCancel(ctx), grant, probeErr)
+				hold.finish()
+				switch {
+				case errors.Is(probeErr, cpa.ErrManagementClientForbidden):
+					writeExternalManagementForbidden(w)
+				case errors.Is(probeErr, cpa.ErrManagementRejected):
+					writeExternalManagementRejected(w)
+				case errors.Is(probeErr, cpa.ErrExternalTargetMoved):
+					writeLegacyRefusal(w, freshconfig.ReasonTargetMoved)
+				case errors.Is(probeErr, errExternalCredentialWaitCancelled) || ctx.Err() != nil:
+					writeExternalCredentialWaitCancelled(w)
+				default:
+					writeExternalAuthorityUnavailable(w)
+				}
+				return
+			}
+			if report.WriteBlocked {
+				hold.finish()
+				writeLegacyRefusal(w, freshconfig.ReasonVersionUnsupported)
+				return
+			}
+		}
 		recorder := &externalLegacyRecorder{
 			ResponseWriter: w,
 			// The refusal is recorded against a context the caller cannot cancel: a

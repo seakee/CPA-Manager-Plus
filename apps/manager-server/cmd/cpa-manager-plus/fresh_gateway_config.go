@@ -221,6 +221,28 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		}
 		view, err := service.Read(a.withExternalSavedCredentialGate(r.Context()))
 		gatewayConfigReply(w, view, err)
+	case resource == "logs-capability":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		service := a.gatewayService(w)
+		if service == nil {
+			return
+		}
+		if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
+			gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+		}) {
+			return
+		}
+		capability, err := service.LogsCapability(a.withExternalSavedCredentialGate(r.Context()))
+		if err != nil {
+			gatewayConfigReply(w, nil, err)
+			return
+		}
+		gatewayConfigReply(w, struct {
+			Capability freshconfig.Capability `json:"capability"`
+		}{Capability: capability}, nil)
 	case parts[0] == "groups" && len(parts) == 2:
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
