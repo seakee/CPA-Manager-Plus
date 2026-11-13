@@ -514,6 +514,7 @@ func (h *Handler) writeImportSessionChunk(w http.ResponseWriter, r *http.Request
 	}
 	body, stopBody := requestbody.Wrap(r.Context(), r.Body, w, requestbody.DefaultReadIdleTimeout)
 	defer stopBody()
+	defer func() { _ = body.Close() }()
 	session, err := h.App.UsageService.WriteImportSessionChunk(
 		r.Context(),
 		id,

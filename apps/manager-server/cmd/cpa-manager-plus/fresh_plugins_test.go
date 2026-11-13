@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1882,4 +1884,231 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 			t.Fatalf("os.RemoveAll(dbDir): %v", err)
 		}
 	})
+}
+
+func TestFreshShutdownInterruptsEarlyBodyCloseOnProxyLimit(t *testing.T) {
+	const proxyAuthFileLimit = 10*1024*1024 + 64*1024
+
+	runCase := func(t *testing.T, drainTimeout time.Duration, viaReadOnlyStartup bool) {
+		t.Helper()
+		const artifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		upstreamCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(upstreamCPA.Close)
+
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-proxy-limit-close-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{
+			DataDir:        dbDir,
+			DBPath:         paths.Database,
+			CPAUpstreamURL: upstreamCPA.URL,
+			ManagementKey:  strings.Repeat("f", 64),
+		}, nil)
+		app.earlyCloseDrainTimeout = drainTimeout
+		nonEOFCloseEntered := make(chan struct{})
+		var closeOnce sync.Once
+		app.onBeforeNonEOFBodyClose = func(r *http.Request) {
+			if r != nil && r.URL != nil && strings.HasSuffix(r.URL.Path, "/auth-files/status") {
+				closeOnce.Do(func() { close(nonEOFCloseEntered) })
+			}
+		}
+
+		protected, err := opened.Protector.ProtectString(strings.Repeat("f", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		op := opened.Record.Operation
+		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              artifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(upstreamCPA.URL),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: upstreamCPA.URL, ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler:           app,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		serverResult := make(chan error, 1)
+		go func() { serverResult <- server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		// Declare Content-Length = limit+2, send exactly limit+1 bytes, and keep
+		// the socket open without sending the final byte.
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		reqHeader := fmt.Sprintf(
+			"PATCH /control/api/v2/cpamp/v0/management/auth-files/status HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Authorization: Bearer %s\r\n"+
+				"Content-Type: application/json\r\n"+
+				"Content-Length: %d\r\n\r\n",
+			listener.Addr().String(),
+			strategyTestAdmin,
+			proxyAuthFileLimit+2,
+		)
+		if _, err := conn.Write([]byte(reqHeader)); err != nil {
+			t.Fatal(err)
+		}
+		overLimitChunk := bytes.Repeat([]byte("a"), proxyAuthFileLimit+1)
+		// Write in 64 KiB slices in a goroutine while the server reads limit+1
+		// bytes so neither side blocks on loopback kernel socket buffers.
+		writeErrCh := make(chan error, 1)
+		go func() {
+			_, wErr := io.Copy(conn, bytes.NewReader(overLimitChunk))
+			writeErrCh <- wErr
+		}()
+
+		select {
+		case <-nonEOFCloseEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("proxy limit request never entered non-EOF r.Body.Close()")
+		}
+		if wErr := <-writeErrCh; wErr != nil {
+			t.Fatalf("client write limit+1 bytes: %v", wErr)
+		}
+
+		shutdownDone := make(chan error, 1)
+		closed = true
+		if viaReadOnlyStartup {
+			startupCtx, cancelStartup := context.WithCancel(context.Background())
+			cancelStartup()
+			go func() {
+				waitForReadOnlyStartup(startupCtx, server, serverResult)
+				shutdownDone <- opened.Close()
+			}()
+		} else {
+			shutdownHTTPServer(server, 20*time.Millisecond)
+			go func() {
+				shutdownDone <- opened.Close()
+			}()
+		}
+
+		select {
+		case closeErr := <-shutdownDone:
+			if closeErr != nil {
+				t.Fatalf("opened.Close(): %v", closeErr)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatal("shutdown hung on non-EOF proxy limit r.Body.Close() without client sending final byte")
+		}
+
+		reopened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatalf("fresh.Open failed to re-acquire .manager.lock after shutdown: %v", err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened.Close(): %v", err)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	}
+
+	t.Run("closeCtx_interrupts_active_proxy_limit_body_close_immediately", func(t *testing.T) {
+		runCase(t, -1, false)
+	})
+	t.Run("waitForReadOnlyStartup_finishes_promptly_on_stalled_proxy_limit_close", func(t *testing.T) {
+		runCase(t, 0, true)
+	})
+}
+
+func TestLifecycleContextUnregistersCallbacksAndReusesBoundContext(t *testing.T) {
+	dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-lifecycle-ctx-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = opened.Close()
+		}
+	})
+
+	app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+	bound := app.lifecycleContext(t.Context())
+	if got := app.lifecycleContext(bound); got != bound {
+		t.Fatal("lifecycleContext on an already-bound context did not reuse it")
+	}
+
+	// Warm up runtime and establish baseline goroutine count.
+	for range 10 {
+		c, cancel := context.WithCancel(t.Context())
+		lc := app.lifecycleContext(c)
+		cancel()
+		<-lc.Done()
+	}
+	runtime.GC()
+	runtime.Gosched()
+	baseGoroutines := runtime.NumGoroutine()
+
+	for range 2000 {
+		c, cancel := context.WithCancel(t.Context())
+		lc := app.lifecycleContext(c)
+		cancel()
+		<-lc.Done()
+	}
+	runtime.GC()
+	runtime.Gosched()
+	if after := runtime.NumGoroutine(); after > baseGoroutines+20 {
+		t.Fatalf("goroutines grew from %d to %d across 2000 lifecycleContext cycles", baseGoroutines, after)
+	}
+
+	// A still-live derived context must cancel promptly when opened.Close() runs.
+	liveBasis, cancelLive := context.WithCancel(context.Background())
+	defer cancelLive()
+	liveDerived := app.lifecycleContext(liveBasis)
+
+	closed = true
+	if err := opened.Close(); err != nil {
+		t.Fatalf("opened.Close(): %v", err)
+	}
+	select {
+	case <-liveDerived.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("live lifecycleContext did not cancel on opened.Close()")
+	}
 }

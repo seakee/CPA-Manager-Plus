@@ -31,9 +31,9 @@ import (
 )
 
 type Service struct {
-	managerConfigService *managerconfig.Service
-	store                *store.Store
-	authFileMutations    *cpaauthfiles.MutationCoordinator
+	managerConfigService     *managerconfig.Service
+	store                    *store.Store
+	authFileMutations        *cpaauthfiles.MutationCoordinator
 	apiKeyMutations          atomic.Pointer[identitymutation.Service]
 	apiKeyMutationMu         sync.Mutex
 	credentialDeletes        atomic.Pointer[credentialdeletemutation.Service]
@@ -1583,13 +1583,15 @@ func normalizeOwnershipProvider(value string) string {
 func readAndRestoreRequestBody(r *http.Request, limit int64) ([]byte, error) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
+		_ = r.Body.Close()
 		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		_ = r.Body.Close()
+		return nil, errAuthFileMutationBodyTooLarge
 	}
 	if errClose := r.Body.Close(); errClose != nil {
 		return nil, errClose
-	}
-	if int64(len(raw)) > limit {
-		return nil, errAuthFileMutationBodyTooLarge
 	}
 	restoreRequestBody(r, raw)
 	return raw, nil

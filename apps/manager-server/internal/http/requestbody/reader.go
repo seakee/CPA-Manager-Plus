@@ -9,13 +9,21 @@ import (
 	"time"
 )
 
-// DefaultReadIdleTimeout bounds how long a single Request.Body.Read may stall
-// waiting for bytes before failing. It applies only while actively reading the
-// request body, so handlers that have already finished reading their body (such
-// as long-running Supervisor mutations) keep an undisturbed connection.
-const DefaultReadIdleTimeout = 30 * time.Second
+// DefaultReadIdleTimeout is 0 (disabled) in normal operation so slow or
+// multi-chunk streaming uploads preserve the server's pre-existing unlimited
+// inter-chunk read behavior, while context cancellation on shutdown still
+// aborts active reads immediately via ResponseController.SetReadDeadline.
+const DefaultReadIdleTimeout time.Duration = 0
+
+// DefaultEarlyCloseDrainTimeout bounds net/http's opportunistic post-handler
+// HTTP/1.1 keep-alive body drain when a request body is closed before reaching
+// io.EOF (for example, an over-limit body rejection or auth failure). Normal
+// requests that read their body to io.EOF never enter this drain path.
+const DefaultEarlyCloseDrainTimeout = 250 * time.Millisecond
 
 type readObserverKey struct{}
+type closeObserverKey struct{}
+type earlyCloseDrainTimeoutKey struct{}
 
 // WithReadObserver attaches an observer invoked right before each underlying
 // socket Read attempt (1-based attempt index). Intended for deterministic tests.
@@ -29,7 +37,31 @@ func WithReadObserver(ctx context.Context, fn func(attempt int)) context.Context
 	return context.WithValue(ctx, readObserverKey{}, fn)
 }
 
-// Middleware wraps every incoming request body with Wrap(r.Context(), r.Body, w, idleTimeout).
+// WithNonEOFCloseObserver attaches an observer invoked right before inner.Close
+// runs on a body that has not yet reached io.EOF. Intended for deterministic tests.
+func WithNonEOFCloseObserver(ctx context.Context, fn func()) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, closeObserverKey{}, fn)
+}
+
+// WithEarlyCloseDrainTimeout overrides DefaultEarlyCloseDrainTimeout on bodies
+// wrapped with ctx. A negative value disables the normal-operation drain cap so
+// tests can isolate pure context-cancellation interruption during Close().
+func WithEarlyCloseDrainTimeout(ctx context.Context, d time.Duration) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, earlyCloseDrainTimeoutKey{}, d)
+}
+
+// Middleware wraps incoming non-empty request bodies with Wrap and ensures
+// body.Close() runs before ServeHTTP returns so net/http's finishRequest never
+// performs an unguarded post-handler body drain.
 func Middleware(idleTimeout time.Duration, next http.Handler) http.Handler {
 	if next == nil {
 		return http.NotFoundHandler()
@@ -38,25 +70,29 @@ func Middleware(idleTimeout time.Duration, next http.Handler) http.Handler {
 		if r != nil && r.Body != nil && r.Body != http.NoBody {
 			body, stopBody := Wrap(r.Context(), r.Body, w, idleTimeout)
 			defer stopBody()
+			defer func() { _ = body.Close() }()
 			r.Body = body
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// Reader wraps an HTTP request body so in-flight reads unblock immediately when
-// ctx cancels or Close is called, and each individual Read is bounded by
-// idleTimeout via http.ResponseController.SetReadDeadline.
+// Reader wraps an HTTP request body so in-flight reads and non-EOF early-close
+// drains unblock immediately when ctx cancels, while preserving normal slow
+// streaming reads and HTTP/1.1 keep-alive connection reuse on EOF.
 type Reader struct {
-	ctx         context.Context
-	inner       io.ReadCloser
-	rc          *http.ResponseController
-	idleTimeout time.Duration
-	onRead      func(attempt int)
+	ctx                    context.Context
+	inner                  io.ReadCloser
+	rc                     *http.ResponseController
+	idleTimeout            time.Duration
+	earlyCloseDrainTimeout time.Duration
+	onRead                 func(attempt int)
+	onBeforeNonEOFClose    func()
 
 	mu        sync.Mutex
 	reads     int
 	reading   bool
+	closing   bool
 	eof       bool
 	canceled  bool
 	closed    bool
@@ -93,12 +129,23 @@ func Wrap(
 		rc = http.NewResponseController(w)
 	}
 	obs, _ := ctx.Value(readObserverKey{}).(func(int))
+	closeObs, _ := ctx.Value(closeObserverKey{}).(func())
+	drainTimeout := DefaultEarlyCloseDrainTimeout
+	if custom, ok := ctx.Value(earlyCloseDrainTimeoutKey{}).(time.Duration); ok {
+		if custom < 0 {
+			drainTimeout = 0
+		} else {
+			drainTimeout = custom
+		}
+	}
 	r := &Reader{
-		ctx:         ctx,
-		inner:       body,
-		rc:          rc,
-		idleTimeout: idleTimeout,
-		onRead:      obs,
+		ctx:                    ctx,
+		inner:                  body,
+		rc:                     rc,
+		idleTimeout:            idleTimeout,
+		earlyCloseDrainTimeout: drainTimeout,
+		onRead:                 obs,
+		onBeforeNonEOFClose:    closeObs,
 	}
 	r.stopWatch = context.AfterFunc(ctx, r.abortActiveRead)
 	return r, r.stop
@@ -114,7 +161,7 @@ func (r *Reader) stop() {
 func (r *Reader) abortActiveRead() {
 	r.mu.Lock()
 	r.canceled = true
-	if r.reading && r.rc != nil {
+	if (r.reading || (r.closing && !r.eof)) && r.rc != nil {
 		_ = r.rc.SetReadDeadline(time.Unix(1, 0))
 	}
 	r.mu.Unlock()
@@ -173,14 +220,48 @@ func (r *Reader) Read(p []byte) (int, error) {
 }
 
 func (r *Reader) Close() error {
-	r.stop()
+	if r == nil {
+		return nil
+	}
+	// Keep stopWatch armed until inner.Close() finishes so context cancellation
+	// mid-Close immediately aborts net/http's early-close body drain.
+	defer r.stop()
+
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
 	r.closed = true
-	// Unblock any active net.Conn.Read before calling inner.Close(), because
-	// net/http's (*body).Close acquires the same mutex held by (*body).Read.
-	if r.reading && r.rc != nil {
-		_ = r.rc.SetReadDeadline(time.Unix(1, 0))
+	eof := r.eof
+	alreadyCanceled := r.canceled || r.ctx.Err() != nil
+	if !eof {
+		r.closing = true
+		if r.rc != nil {
+			switch {
+			case alreadyCanceled:
+				_ = r.rc.SetReadDeadline(time.Unix(1, 0))
+			case r.earlyCloseDrainTimeout > 0:
+				_ = r.rc.SetReadDeadline(time.Now().Add(r.earlyCloseDrainTimeout))
+			}
+		}
+	}
+	onClose := r.onBeforeNonEOFClose
+	r.mu.Unlock()
+
+	if !eof && onClose != nil {
+		onClose()
+	}
+	err := r.inner.Close()
+
+	r.mu.Lock()
+	r.closing = false
+	canceled := r.canceled || r.ctx.Err() != nil
+	if !eof && err == nil && !canceled && r.rc != nil && r.earlyCloseDrainTimeout > 0 {
+		// Remaining unread bytes arrived within the drain window and reached EOF;
+		// clear the temporary drain deadline so HTTP/1.1 keep-alive can reuse the conn.
+		_ = r.rc.SetReadDeadline(time.Time{})
 	}
 	r.mu.Unlock()
-	return r.inner.Close()
+	return err
 }

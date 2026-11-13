@@ -292,7 +292,9 @@ type freshApplication struct {
 	beforeDatabaseMaintenanceStart func()
 	afterCloseMarked               func()
 	onRequestBodyRead              func(r *http.Request, attempt int)
+	onBeforeNonEOFBodyClose        func(r *http.Request)
 	bodyReadTimeout                time.Duration
+	earlyCloseDrainTimeout         time.Duration
 	shutdownWriteGrace             time.Duration
 }
 
@@ -570,21 +572,29 @@ func (a *freshApplication) isClosing() bool {
 	return closing
 }
 
+type freshLifecycleBoundKey struct{}
+
 // lifecycleContext binds basis to a.closeCtx so host-lived workers stop both
 // when basis cancels and when the application's database handle closes.
 func (a *freshApplication) lifecycleContext(basis context.Context) context.Context {
 	if basis == nil {
 		return nil
 	}
-	if a == nil || a.closeCtx == nil {
+	if a == nil || a.closeCtx == nil || basis == a.closeCtx {
+		return basis
+	}
+	if bound, _ := basis.Value(freshLifecycleBoundKey{}).(context.Context); bound == a.closeCtx {
 		return basis
 	}
 	if basis == context.Background() {
 		return a.closeCtx
 	}
-	ctx, cancel := context.WithCancel(basis)
-	context.AfterFunc(a.closeCtx, cancel)
-	return ctx
+	baseCtx, cancel := context.WithCancel(basis)
+	stopCloseWatch := context.AfterFunc(a.closeCtx, cancel)
+	context.AfterFunc(baseCtx, func() {
+		stopCloseWatch()
+	})
+	return context.WithValue(baseCtx, freshLifecycleBoundKey{}, a.closeCtx)
 }
 
 func (a *freshApplication) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -829,6 +839,13 @@ func writeFreshStrategyError(w http.ResponseWriter, err error) {
 func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release, ok := a.enterRequest(r)
 	if !ok {
+		if r != nil && r.Body != nil && r.Body != http.NoBody {
+			if w != nil {
+				_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+			}
+			_ = r.Body.Close()
+		}
+		w.Header().Set("Connection", "close")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
@@ -843,10 +860,20 @@ func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				obs(reqClone, attempt)
 			})
 		}
+		if closeObs := a.onBeforeNonEOFBodyClose; closeObs != nil {
+			reqClone := r
+			reqCtx = requestbody.WithNonEOFCloseObserver(reqCtx, func() {
+				closeObs(reqClone)
+			})
+		}
+		if a.earlyCloseDrainTimeout != 0 {
+			reqCtx = requestbody.WithEarlyCloseDrainTimeout(reqCtx, a.earlyCloseDrainTimeout)
+		}
 		ctrl := newFreshRequestControl(a.closeCtx, w, a.effectiveShutdownWriteGrace())
 		defer ctrl.stop()
 		body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
 		defer stopBody()
+		defer func() { _ = body.Close() }()
 		reqCtx = context.WithValue(reqCtx, freshRequestTrackedKey{}, true)
 		reqCtx = context.WithValue(reqCtx, freshRequestControlKey{}, ctrl)
 		r = r.WithContext(reqCtx)

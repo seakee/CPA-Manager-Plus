@@ -1,6 +1,7 @@
 package requestbody
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,8 +29,9 @@ func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
 		}
 		server := &http.Server{
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, stopBody := Wrap(reqCtx, r.Body, w, 10*time.Second)
+				body, stopBody := Wrap(reqCtx, r.Body, w, 0)
 				defer stopBody()
+				defer func() { _ = body.Close() }()
 				buf := make([]byte, 8)
 				if _, rErr := io.ReadFull(body, buf); rErr != nil {
 					readErrCh <- fmt.Errorf("initial ReadFull: %w", rErr)
@@ -65,7 +68,7 @@ func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
 		}
 	})
 
-	t.Run("idle_timeout_bounds_stalled_body_without_context_cancel", func(t *testing.T) {
+	t.Run("idle_timeout_bounds_stalled_body_when_explicitly_configured", func(t *testing.T) {
 		readErrCh := make(chan error, 1)
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -75,6 +78,7 @@ func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, stopBody := Wrap(r.Context(), r.Body, w, 40*time.Millisecond)
 				defer stopBody()
+				defer func() { _ = body.Close() }()
 				_, rErr := io.ReadAll(body)
 				readErrCh <- rErr
 			}),
@@ -99,6 +103,62 @@ func TestReaderUnblocksStalledBodyOnContextCancelAndIdleTimeout(t *testing.T) {
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("stalled HTTP body read did not fail within idle timeout")
+		}
+	})
+
+	t.Run("context_cancel_interrupts_active_non_eof_body_close_drain", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+
+		closeEntered := make(chan struct{})
+		handlerDone := make(chan struct{})
+		var enterOnce sync.Once
+		reqCtx = WithEarlyCloseDrainTimeout(reqCtx, -1) // disable timer cap to prove ctx cancel itself unblocks Close
+		reqCtx = WithNonEOFCloseObserver(reqCtx, func() {
+			enterOnce.Do(func() { close(closeEntered) })
+		})
+
+		const limit = 32
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				body, stopBody := Wrap(reqCtx, r.Body, w, 0)
+				defer stopBody()
+				raw, rErr := io.ReadAll(io.LimitReader(body, limit+1))
+				if rErr != nil || len(raw) != limit+1 {
+					t.Errorf("LimitReader = (%d, %v), want (%d, nil)", len(raw), rErr, limit+1)
+					return
+				}
+				_ = body.Close()
+				w.Header().Set("Connection", "close")
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+			}),
+		}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		sent := strings.Repeat("x", limit+1)
+		rawReq := fmt.Sprintf("POST /limit HTTP/1.1\r\nHost: example\r\nContent-Length: %d\r\n\r\n%s", limit+2, sent)
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		<-closeEntered
+
+		cancelReq()
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("non-EOF Reader.Close() drain did not unblock on context cancellation")
 		}
 	})
 }
@@ -164,4 +224,178 @@ func TestPostEOFExtraBodyReadDoesNotCancelRequestContextOnLiveHandler(t *testing
 	if ctxErr := <-handlerCtxErrCh; ctxErr != nil {
 		t.Fatalf("r.Context().Err() after post-EOF Read and 4x idleTimeout = %v, want nil", ctxErr)
 	}
+}
+
+func TestHTTP11KeepAliveReusesSingleTCPConnAcrossSequentialPosts(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		remoteAddrs []string
+		bodies      []string
+	)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := middleware.RequestLogger(Middleware(DefaultReadIdleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, rErr := io.ReadAll(r.Body)
+		if rErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ack:" + string(raw)))
+	})))
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	// Dial a single raw TCP connection and send two sequential HTTP/1.1 POSTs.
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	br := bufio.NewReader(conn)
+
+	for i, payload := range []string{"first-keepalive-post", "second-keepalive-post"} {
+		rawReq := fmt.Sprintf(
+			"POST /seq HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n%s",
+			listener.Addr().String(),
+			len(payload),
+			payload,
+		)
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatalf("POST #%d write: %v", i+1, err)
+		}
+		reqForParse, _ := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/seq", nil)
+		resp, err := http.ReadResponse(br, reqForParse)
+		if err != nil {
+			t.Fatalf("POST #%d ReadResponse: %v", i+1, err)
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("POST #%d read body: %v", i+1, err)
+		}
+		if resp.StatusCode != http.StatusOK || string(respBody) != "ack:"+payload {
+			t.Fatalf("POST #%d = (%d, %q), want (200, %q)", i+1, resp.StatusCode, string(respBody), "ack:"+payload)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(remoteAddrs) != 2 || remoteAddrs[0] != remoteAddrs[1] {
+		t.Fatalf("server RemoteAddrs across sequential POSTs = %v, want 2 identical addrs on one TCP conn", remoteAddrs)
+	}
+	if len(bodies) != 2 || bodies[0] != "first-keepalive-post" || bodies[1] != "second-keepalive-post" {
+		t.Fatalf("recorded bodies = %v", bodies)
+	}
+}
+
+func TestSlowMultiChunkStreamingSucceedsNormallyAndAbortsOnCancel(t *testing.T) {
+	const referenceThreshold = 30 * time.Millisecond
+
+	t.Run("normal_operation_allows_inter_chunk_pauses_beyond_threshold", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := middleware.RequestLogger(Middleware(DefaultReadIdleTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, rErr := io.ReadAll(r.Body)
+			if rErr != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(raw)
+		})))
+		server := &http.Server{Handler: handler}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		header := fmt.Sprintf("POST /stream HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n", listener.Addr().String())
+		if _, err := conn.Write([]byte(header + "6\r\nchunk1\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		// Pause 4x referenceThreshold before sending the second chunk.
+		pause := time.NewTimer(4 * referenceThreshold)
+		<-pause.C
+		if _, err := conn.Write([]byte("6\r\nchunk2\r\n0\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+
+		reqForParse, _ := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/stream", nil)
+		resp, err := http.ReadResponse(bufio.NewReader(conn), reqForParse)
+		if err != nil {
+			t.Fatalf("ReadResponse: %v", err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK || string(got) != "chunk1chunk2" {
+			t.Fatalf("slow chunked upload = (%d, %q, %v), want (200, \"chunk1chunk2\", nil)", resp.StatusCode, string(got), err)
+		}
+	})
+
+	t.Run("context_cancellation_aborts_active_chunk_wait_immediately", func(t *testing.T) {
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+
+		secondReadAttempt := make(chan struct{})
+		readErrCh := make(chan error, 1)
+		var once sync.Once
+		reqCtx = WithReadObserver(reqCtx, func(attempt int) {
+			if attempt >= 2 {
+				once.Do(func() { close(secondReadAttempt) })
+			}
+		})
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, stopBody := Wrap(reqCtx, r.Body, w, DefaultReadIdleTimeout)
+				defer stopBody()
+				defer func() { _ = body.Close() }()
+				_, rErr := io.ReadAll(body)
+				readErrCh <- rErr
+			}),
+		}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		header := fmt.Sprintf("POST /stream HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nchunk1\r\n", listener.Addr().String())
+		if _, err := conn.Write([]byte(header)); err != nil {
+			t.Fatal(err)
+		}
+		<-secondReadAttempt
+
+		cancelReq()
+		select {
+		case rErr := <-readErrCh:
+			if !errors.Is(rErr, context.Canceled) {
+				t.Fatalf("aborted chunk read = %v, want context.Canceled", rErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("active chunk wait did not abort immediately on context cancel")
+		}
+	})
 }
