@@ -1,9 +1,11 @@
 package legacypreflight
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +18,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
 func sourceState(t *testing.T, root string) map[string]string {
@@ -885,21 +889,67 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 			t.Fatal(err)
 		}
 		origHook := beforeOperationEvidenceProbe
-		beforeOperationEvidenceProbe = func(target string) {
-			_ = os.WriteFile(target+"-wal", walBytes, 0o600)
-		}
 		defer func() { beforeOperationEvidenceProbe = origHook }()
 
+		var (
+			probeHookCalls int
+			probeHookErr   error
+		)
+		beforeOperationEvidenceProbe = func(target string) {
+			probeHookCalls++
+			beforeOperationEvidenceProbe = origHook
+			if _, statErr := os.Lstat(target + "-wal"); !os.IsNotExist(statErr) {
+				probeHookErr = fmt.Errorf("expected absent WAL before mid-probe write, got stat err = %v", statErr)
+				return
+			}
+			probeHookErr = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+
 		inFile, journalPending, err := RecordedOperationEvidence(context.Background(), dbPath)
+		if probeHookErr != nil {
+			t.Fatalf("write mid-probe WAL during RecordedOperationEvidence: %v", probeHookErr)
+		}
+		if probeHookCalls != 1 {
+			t.Fatalf("RecordedOperationEvidence mid-probe hook calls = %d, want 1", probeHookCalls)
+		}
 		if err != nil || !journalPending || inFile {
 			t.Fatalf("RecordedOperationEvidence = (inFile=%v, journalPending=%v, err=%v), want (false, true, nil)", inFile, journalPending, err)
 		}
 
-		// Reset to cold DB and verify DatabaseUpgradeAdmission.Admitted replays the newly created WAL.
-		if err := os.Remove(dbPath + "-wal"); err != nil {
+		// Verify DatabaseUpgradeAdmission.Admitted detects and replays a WAL
+		// created mid-probe (the after != before && after.wal.present branch in
+		// recordedOperationEvidenceWithBaseline, before CopySourceForRead runs).
+		// Use a fresh cold database in its own temp directory and a one-shot hook
+		// that disarms itself on first fire so no later probe re-writes the WAL and
+		// FUSE bind mounts never see an unlink+recreate synthetic inode change at
+		// the same -wal path.
+		admitPath := filepath.Join(t.TempDir(), "usage.sqlite")
+		if err := os.WriteFile(admitPath, coldBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		stage, err := (DatabaseUpgradeAdmission{DatabasePath: dbPath}).Admitted(context.Background())
+		if _, statErr := os.Lstat(admitPath + "-wal"); !os.IsNotExist(statErr) {
+			t.Fatalf("pre-admission WAL stat error = %v, want not-exist", statErr)
+		}
+		var (
+			admitHookCalls int
+			admitHookErr   error
+		)
+		beforeOperationEvidenceProbe = func(target string) {
+			admitHookCalls++
+			beforeOperationEvidenceProbe = origHook
+			if _, statErr := os.Lstat(target + "-wal"); !os.IsNotExist(statErr) {
+				admitHookErr = fmt.Errorf("expected absent WAL before mid-probe write, got stat err = %v", statErr)
+				return
+			}
+			admitHookErr = os.WriteFile(target+"-wal", walBytes, 0o600)
+		}
+		stage, err := (DatabaseUpgradeAdmission{DatabasePath: admitPath}).Admitted(context.Background())
+		if admitHookErr != nil {
+			t.Fatalf("write mid-probe WAL during Admitted: %v", admitHookErr)
+		}
+		if admitHookCalls != 1 {
+			t.Fatalf("Admitted mid-probe hook calls = %d, want 1", admitHookCalls)
+		}
 		if err != nil || stage != UpgradeStageInProgress {
 			t.Fatalf("Admitted with mid-probe WAL-only operation = (%q, %v), want (%q, nil)", stage, err, UpgradeStageInProgress)
 		}
@@ -932,23 +982,96 @@ func TestRecordedOperationEvidenceDetectsConcurrentJournalAndRewrites(t *testing
 		if err := os.WriteFile(dbPath, coldBytes, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// The detector compares identity, size, mtime and change stamp, so an
+		// in-place, same-size rewrite that restores mtime is only detectable
+		// through the change stamp. PrepareDetectableRewrite pins the baseline
+		// stamp into the past on Windows and normalizes stored mtime precision on
+		// Unix before origInfo, origStamp and the detector's baseline are read.
+		testutil.PrepareDetectableRewrite(t, dbPath, copyinmarker.ChangeStamp)
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+		origID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The rewrite must change bytes, not merely re-write the ones already
+		// there. Mutate the header's user-version field, which SQLite tolerates
+		// on read, so the probe still answers normally and only the before/after
+		// identity comparison can reject the change.
+		const userVersionOffset = 60
+		rewritten := append([]byte(nil), coldBytes...)
+		rewrittenVersion := binary.BigEndian.Uint32(coldBytes[userVersionOffset:]) ^ 0xa5a5a5a5
+		if rewrittenVersion == binary.BigEndian.Uint32(coldBytes[userVersionOffset:]) {
+			rewrittenVersion++
+		}
+		binary.BigEndian.PutUint32(rewritten[userVersionOffset:], rewrittenVersion)
+		rewrite := func(target string) error {
+			f, err := os.OpenFile(target, os.O_WRONLY, 0)
+			if err != nil {
+				return err
+			}
+			if _, err := f.WriteAt(rewritten[userVersionOffset:userVersionOffset+4], userVersionOffset); err != nil {
+				_ = f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+		}
 
+		var hookErr error
 		origHook := beforeOperationEvidenceProbe
 		beforeOperationEvidenceProbe = func(target string) {
-			if f, openErr := os.OpenFile(target, os.O_WRONLY, 0); openErr == nil {
-				_, _ = f.WriteAt(coldBytes[:16], 0)
-				_ = f.Close()
-				_ = os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
-			}
+			// Name a broken precondition here rather than reporting it as a
+			// detector failure below.
+			hookErr = testutil.ApplyDetectableRewrite(t, target, origStamp,
+				func() error { return rewrite(target) }, copyinmarker.ChangeStamp)
 		}
 		defer func() { beforeOperationEvidenceProbe = origHook }()
 
-		if _, _, err := RecordedOperationEvidence(context.Background(), dbPath); err == nil {
+		_, _, err = RecordedOperationEvidence(context.Background(), dbPath)
+		if hookErr != nil {
+			t.Fatalf("apply mid-probe rewrite: %v", hookErr)
+		}
+		if err == nil {
 			t.Fatal("RecordedOperationEvidence succeeded when database changed mid-probe")
+		}
+
+		// Prove the fixture exercised the invariant instead of assuming it: the
+		// file keeps its identity, size and restored mtime, while its content and
+		// kernel change stamp moved.
+		afterInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterID != origID || afterInfo.Size() != origInfo.Size() || afterInfo.ModTime().UnixNano() != origInfo.ModTime().UnixNano() {
+			t.Fatalf("fixture did not preserve inode/size/mtime: id %+v->%+v size %d->%d mtime %d->%d",
+				origID, afterID, origInfo.Size(), afterInfo.Size(), origInfo.ModTime().UnixNano(), afterInfo.ModTime().UnixNano())
+		}
+		if afterStamp == origStamp {
+			t.Fatalf("fixture did not advance change stamp: stayed %q", origStamp)
+		}
+		current, err := os.ReadFile(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(current[userVersionOffset:userVersionOffset+4], coldBytes[userVersionOffset:userVersionOffset+4]) {
+			t.Fatal("fixture rewrite left the user-version field unchanged; the mutation never reached the file")
 		}
 	})
 }

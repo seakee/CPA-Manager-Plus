@@ -1,9 +1,11 @@
 package upgradewizard
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
 // materializingManagerTarget copies a real 1.x source with a live WAL into a
@@ -655,23 +658,97 @@ func TestPreservedStatusDetectsConcurrentJournalAndRewritesOnFastPath(t *testing
 
 	t.Run("database-rewritten-with-restored-mtime-fails-closed", func(t *testing.T) {
 		dbPath, handler := makeHandler(t)
+		// The preserved-evidence guard compares identity, size, mtime and change
+		// stamp, so an in-place, same-size rewrite that restores mtime is only
+		// detectable through the change stamp. PrepareDetectableRewrite pins the
+		// baseline stamp into the past on Windows and normalizes stored mtime
+		// precision on Unix before origInfo, origStamp and the guard's baseline are
+		// read.
+		testutil.PrepareDetectableRewrite(t, dbPath, copyinmarker.ChangeStamp)
 		origInfo, err := os.Lstat(dbPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+		origID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The rewrite must change bytes, not merely re-write the ones already
+		// there. Mutate the header's user-version field, which SQLite tolerates
+		// on read, so the probe still answers normally and only the before/after
+		// identity comparison can reject the change.
+		const userVersionOffset = 60
+		rewritten := append([]byte(nil), cleanBytes...)
+		rewrittenVersion := binary.BigEndian.Uint32(cleanBytes[userVersionOffset:]) ^ 0xa5a5a5a5
+		if rewrittenVersion == binary.BigEndian.Uint32(cleanBytes[userVersionOffset:]) {
+			rewrittenVersion++
+		}
+		binary.BigEndian.PutUint32(rewritten[userVersionOffset:], rewrittenVersion)
+		rewrite := func(target string) error {
+			f, err := os.OpenFile(target, os.O_WRONLY, 0)
+			if err != nil {
+				return err
+			}
+			if _, err := f.WriteAt(rewritten[userVersionOffset:userVersionOffset+4], userVersionOffset); err != nil {
+				_ = f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			return os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
+		}
+
+		var hookErr error
 		origHook := afterPreservedEvidenceProbe
 		afterPreservedEvidenceProbe = func(target string) {
-			if f, openErr := os.OpenFile(target, os.O_WRONLY, 0); openErr == nil {
-				_, _ = f.WriteAt(cleanBytes[:16], 0)
-				_ = f.Close()
-				_ = os.Chtimes(target, origInfo.ModTime(), origInfo.ModTime())
-			}
+			// Name a broken precondition here rather than reporting it as a
+			// guard failure below.
+			hookErr = testutil.ApplyDetectableRewrite(t, target, origStamp,
+				func() error { return rewrite(target) }, copyinmarker.ChangeStamp)
 		}
 		defer func() { afterPreservedEvidenceProbe = origHook }()
 
 		status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+		if hookErr != nil {
+			t.Fatalf("apply mid-probe rewrite: %v", hookErr)
+		}
 		if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeOperationUnread) {
 			t.Fatalf("status = %d (%s), want 503 %s", status, body, CodeOperationUnread)
+		}
+
+		// Prove the fixture exercised the invariant instead of assuming it: the
+		// file keeps its identity, size and restored mtime, while its content and
+		// kernel change stamp moved.
+		afterInfo, err := os.Lstat(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterID, err := copyinmarker.Identity(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterStamp, err := copyinmarker.ChangeStamp(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterID != origID || afterInfo.Size() != origInfo.Size() || afterInfo.ModTime().UnixNano() != origInfo.ModTime().UnixNano() {
+			t.Fatalf("fixture did not preserve inode/size/mtime: id %+v->%+v size %d->%d mtime %d->%d",
+				origID, afterID, origInfo.Size(), afterInfo.Size(), origInfo.ModTime().UnixNano(), afterInfo.ModTime().UnixNano())
+		}
+		if afterStamp == origStamp {
+			t.Fatalf("fixture did not advance change stamp: stayed %q", origStamp)
+		}
+		current, err := os.ReadFile(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(current[userVersionOffset:userVersionOffset+4], cleanBytes[userVersionOffset:userVersionOffset+4]) {
+			t.Fatal("fixture rewrite left the user-version field unchanged; the mutation never reached the file")
 		}
 	})
 }
