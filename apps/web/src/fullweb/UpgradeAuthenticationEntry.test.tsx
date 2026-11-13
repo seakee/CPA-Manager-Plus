@@ -2,7 +2,11 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UpgradeAuthenticationEntry } from './UpgradeAuthenticationEntry';
 import { FullWebLoginPage } from './FullWebLoginPage';
-import { UPGRADE_AUTH_CONTRACT, type verifyUpgradeCredential } from './upgradeSession';
+import {
+  UPGRADE_AUTH_CONTRACT,
+  UpgradeAuthenticationError,
+  type verifyUpgradeCredential,
+} from './upgradeSession';
 import type { ConsoleLoginAdapter } from '../features/login/LoginPage';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import loginI18n from '../i18n';
@@ -616,12 +620,63 @@ describe('upgrade authentication lifecycle', () => {
     }
   });
 
-  it('parses real 503 source_ownership_unavailable responses and renders the ownership remedy across locales', async () => {
+  it('classifies 503 source_ownership_unavailable distinctly from generic 503 states and keeps unauthenticated alert state across locales', async () => {
     mocks.verify.mockImplementation((credential: string, signal: AbortSignal, source?: string) =>
       mocks.realVerify!(credential, signal, source)
     );
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
+
+    for (const tc of [
+      {
+        name: 'typed source_ownership_unavailable envelope',
+        response: () =>
+          Response.json(
+            {
+              contract_version: UPGRADE_AUTH_CONTRACT,
+              error: { code: 'source_ownership_unavailable' },
+            },
+            { status: 503 }
+          ),
+        expectedReason: 'source_ownership_unavailable',
+      },
+      {
+        name: 'generic source_unavailable envelope',
+        response: () =>
+          Response.json(
+            {
+              contract_version: UPGRADE_AUTH_CONTRACT,
+              error: { code: 'source_unavailable' },
+            },
+            { status: 503 }
+          ),
+        expectedReason: 'unavailable',
+      },
+      {
+        name: 'mismatched contract version on 503',
+        response: () =>
+          Response.json(
+            {
+              contract_version: 'unexpected.contract.v0',
+              error: { code: 'source_ownership_unavailable' },
+            },
+            { status: 503 }
+          ),
+        expectedReason: 'unavailable',
+      },
+      {
+        name: 'non-JSON 503 upstream body',
+        response: () => new Response('service unavailable', { status: 503 }),
+        expectedReason: 'unavailable',
+      },
+    ] as const) {
+      fetchMock.mockResolvedValueOnce(tc.response());
+      const pending = mocks.realVerify!('old-key', new AbortController().signal);
+      await expect(pending, tc.name).rejects.toBeInstanceOf(UpgradeAuthenticationError);
+      await expect(pending, tc.name).rejects.toMatchObject({
+        reason: tc.expectedReason,
+      });
+    }
 
     await act(async () => {
       renderer = create(<UpgradeAuthenticationEntry />);
@@ -636,9 +691,11 @@ describe('upgrade authentication lifecycle', () => {
         { status: 503 }
       )
     );
+    let ok = true;
     await act(async () => {
-      await adapter().authenticate('old-key', false);
+      ok = await adapter().authenticate('old-key', true);
     });
+    expect(ok).toBe(false);
     const genericUnavailableByLocale: Record<string, string | null> = {};
     for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
       await act(async () => {
@@ -651,25 +708,52 @@ describe('upgrade authentication lifecycle', () => {
       Response.json(
         {
           contract_version: UPGRADE_AUTH_CONTRACT,
+          error: { code: 'admin_unauthorized' },
+        },
+        { status: 401 }
+      )
+    );
+    await act(async () => {
+      ok = await adapter().authenticate('old-key', true);
+    });
+    expect(ok).toBe(false);
+    const invalidByLocale: Record<string, string | null> = {};
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
+      await act(async () => {
+        await loginI18n.changeLanguage(locale);
+      });
+      invalidByLocale[locale] = adapter().error;
+    }
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json(
+        {
+          contract_version: UPGRADE_AUTH_CONTRACT,
           error: { code: 'source_ownership_unavailable' },
         },
         { status: 503 }
       )
     );
     await act(async () => {
-      await adapter().authenticate('old-key', false);
+      ok = await adapter().authenticate('old-key', true);
     });
+    expect(ok).toBe(false);
+    expect(mocks.remember).not.toHaveBeenCalled();
+
+    const ownershipErrorByLocale: Record<string, string | null> = {};
     for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru'] as const) {
       await act(async () => {
         await loginI18n.changeLanguage(locale);
       });
-      expect(adapter().error).toContain('chown -h 10002:10002');
-      expect(adapter().error).toContain('usage.sqlite*');
-      expect(adapter().error).toContain('data.key');
-      expect(adapter().error).toContain('/legacy:ro');
-      expect(adapter().error).toContain('/data/runtime');
-      expect(adapter().error).toMatch(/restart|重启|重啟|перезапуст/i);
-      expect(adapter().error).not.toBe(genericUnavailableByLocale[locale]);
+      const message = adapter().error;
+      ownershipErrorByLocale[locale] = message;
+      expect(message).toBeTruthy();
+      expect(message).not.toBe(genericUnavailableByLocale[locale]);
+      expect(message).not.toBe(invalidByLocale[locale]);
+      expect(message).toContain('10002:10002');
+      expect(message).toContain('0:0');
     }
+    expect(ownershipErrorByLocale['zh-CN']).not.toBe(ownershipErrorByLocale['zh-TW']);
+    expect(ownershipErrorByLocale['ru']).toMatch(/[\u0400-\u04ff]/);
   });
 });

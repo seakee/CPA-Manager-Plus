@@ -351,6 +351,113 @@ func TestStartupUpgradeAuthenticationClassifiesPermissionDeniedLegacySource(t *t
 	}
 }
 
+// TestStartupUpgradeAuthenticationBindsPreConstructionUnreadableLegacyDatabase
+// pins P2-1: when /legacy/usage.sqlite (plus lock and data.key) is already
+// 0000/root-only BEFORE EnableReadOnlyDiscovery constructs the handler, the
+// entry leaf still binds /legacy (without relaxing symlink or hard-link
+// refusals), answers 503 source_ownership_unavailable for all keys, and
+// recovers in place after targeted chmod/chown without rebuilding the handler.
+func TestStartupUpgradeAuthenticationBindsPreConstructionUnreadableLegacyDatabase(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 file permissions")
+	}
+	const (
+		legacyKey  = "pre-chmod-legacy-admin-key-123456"
+		managerKey = "pre-chmod-manager-admin-key-123456"
+	)
+	_, managerPaths := upgradeAuthSource(t, managerKey)
+	legacyDir, legacyPaths := upgradeAuthSource(t, legacyKey)
+	t.Setenv(legacyRootEnvironment, legacyDir)
+
+	// Hard-link fail-closed check: an unreadable hard-linked usage.sqlite is NOT
+	// bound as a legacy source and falls back to managerPaths.
+	hardLinkAlias := filepath.Join(legacyDir, "usage-alias.sqlite")
+	if err := os.Link(legacyPaths.Database, hardLinkAlias); err != nil {
+		t.Fatalf("link %s: %v", hardLinkAlias, err)
+	}
+	if err := os.Chmod(legacyPaths.Database, 0o000); err != nil {
+		t.Fatalf("chmod 0000 hard-linked db: %v", err)
+	}
+	hardLinkedHandler := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	hardLinkedHandler.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+	{
+		r := httptest.NewRequest(http.MethodPost, upgradeauth.Path, nil)
+		r.Host = "manager.test"
+		r.Header.Set("Authorization", "Bearer "+managerKey)
+		w := httptest.NewRecorder()
+		hardLinkedHandler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"authenticated":true`) {
+			_ = os.Chmod(legacyPaths.Database, 0o644)
+			_ = os.Remove(hardLinkAlias)
+			t.Fatalf("unreadable hard-linked legacy db failed to fall back to manager store: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if err := os.Remove(hardLinkAlias); err != nil {
+		_ = os.Chmod(legacyPaths.Database, 0o644)
+		t.Fatalf("remove hard link alias: %v", err)
+	}
+
+	// Genuine single-link 1.x tree made completely unreadable BEFORE handler
+	// construction.
+	lockPath := legacyPaths.Database + ".manager.lock"
+	for _, p := range []string{legacyPaths.Database, legacyPaths.DataKey, lockPath} {
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatalf("chmod 0000 %s before construction: %v", p, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(legacyPaths.Database, 0o644)
+		_ = os.Chmod(legacyPaths.DataKey, 0o600)
+		_ = os.Chmod(lockPath, 0o600)
+	})
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(managerPaths, legacypreflight.Options{}, 5*time.Second)
+
+	postAuth := func(presentedKey string) (int, string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, upgradeauth.Path, nil)
+		r.Host = "manager.test"
+		r.Header.Set("Authorization", "Bearer "+presentedKey)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+
+	for _, candidate := range []string{"wrong-admin-key", managerKey, legacyKey} {
+		code, body := postAuth(candidate)
+		if code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"source_ownership_unavailable"`) {
+			t.Fatalf("pre-construction unreadable legacy tree with key %q = %d %s, want 503 source_ownership_unavailable", candidate, code, body)
+		}
+	}
+
+	// Restore read permissions (as after targeted chown) and verify recovery on
+	// the SAME handler instance without restart.
+	if err := os.Chmod(legacyPaths.Database, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(legacyPaths.DataKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyTree(t, legacyDir)
+	before := readSourceTree(t, legacyDir)
+
+	for _, rejected := range []string{"wrong-admin-key", managerKey} {
+		if code, body := postAuth(rejected); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"admin_unauthorized"`) {
+			t.Fatalf("rejected key %q after remedy without restart = %d %s, want 401 admin_unauthorized", rejected, code, body)
+		}
+	}
+	if code, body := postAuth(legacyKey); code != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("legacy key after remedy without restart = %d %s, want 200 authenticated", code, body)
+	}
+	if after := readSourceTree(t, legacyDir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("authentication mutated the read-only legacy tree: before %v after %v", before, after)
+	}
+}
+
 // TestStartupUpgradeAuthenticationKeepsBoundSourceWhenLegacyMountAppearsAfterConstruction
 // pins ADR-0004: the entry leaf binds its credential source once at construction
 // time. When the configured legacy root held no readable database at startup,

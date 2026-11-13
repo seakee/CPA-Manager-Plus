@@ -1328,9 +1328,8 @@ describe('FreshBootstrapPage product preview workflow', () => {
 
       const cardView = locateOwnershipGuidanceCard(renderer.root);
       const blocks = cardView.snapshot(locale);
-      expect(blocks.upgradeDetail).toContain('chown -h 10002:10002');
-      expect(blocks.upgradeDetail).toContain('usage.sqlite*');
-      expect(blocks.upgradeDetail).toContain('data.key');
+      expect(blocks.upgradeDetail).toContain('10002:10002');
+      expect(blocks.upgradeDetail).toContain('0:0');
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         '--entrypoint cpa-manager-plus'
       );
