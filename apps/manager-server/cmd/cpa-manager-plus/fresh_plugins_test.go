@@ -2078,7 +2078,7 @@ func TestLifecycleContextUnregistersCallbacksAndReusesBoundContext(t *testing.T)
 	cleaned := make(chan struct{})
 	func() {
 		basisRoot, cancelBasis := context.WithCancel(context.Background())
-		token := new(int)
+		token := new([32]byte)
 		runtime.AddCleanup(token, func(ch chan struct{}) { close(ch) }, cleaned)
 		basis := context.WithValue(basisRoot, lifecycleCleanupKey{}, token)
 
