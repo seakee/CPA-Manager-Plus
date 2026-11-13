@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -77,7 +78,8 @@ type Manager struct {
 	// starts counts how many runs this Manager has opened. It is the identity of
 	// the running Collector: every Start supersedes the previous run, so a caller
 	// that must not restart one can prove it did not by seeing this unchanged.
-	starts uint64
+	starts   uint64
+	inFlight map[uint64]chan struct{}
 }
 
 func NewManager(base config.Config, store *store.Store) *Manager {
@@ -91,6 +93,7 @@ func NewManager(base config.Config, store *store.Store) *Manager {
 			Mode:      collectorMode(base.CollectorMode),
 			Queue:     base.Queue,
 		},
+		inFlight: make(map[uint64]chan struct{}),
 	}
 }
 
@@ -114,10 +117,32 @@ func (m *Manager) Start(ctx context.Context, cfg RuntimeConfig) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
-	if runtimeHandler, ok := handler.(UsageRuntimeConfigHandler); ok {
-		go runtimeHandler.UpdateRuntimeConfig(runCtx, cfg)
+	if m.inFlight == nil {
+		m.inFlight = make(map[uint64]chan struct{})
 	}
-	go m.run(runCtx, cancel, cfg, runID)
+	runDone := make(chan struct{})
+	m.inFlight[runID] = runDone
+	var remaining atomic.Int32
+	remaining.Store(1)
+	finishPart := func() {
+		if remaining.Add(-1) == 0 {
+			m.mu.Lock()
+			delete(m.inFlight, runID)
+			m.mu.Unlock()
+			close(runDone)
+		}
+	}
+	if runtimeHandler, ok := handler.(UsageRuntimeConfigHandler); ok {
+		remaining.Add(1)
+		go func() {
+			defer finishPart()
+			runtimeHandler.UpdateRuntimeConfig(runCtx, cfg)
+		}()
+	}
+	go func() {
+		defer finishPart()
+		m.run(runCtx, cancel, cfg, runID)
+	}()
 }
 
 func (m *Manager) Stop() {
@@ -128,6 +153,41 @@ func (m *Manager) Stop() {
 		m.cancel = nil
 	}
 	m.status.Collector = "stopped"
+}
+
+// StopAndWait cancels the active run and blocks until every started Collector
+// goroutine (including superseded runs and auth-rejection callbacks) has exited
+// or ctx expires.
+func (m *Manager) StopAndWait(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		m.mu.Lock()
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.status.Collector = "stopped"
+		if len(m.inFlight) == 0 {
+			m.mu.Unlock()
+			return nil
+		}
+		var waitCh chan struct{}
+		for _, ch := range m.inFlight {
+			waitCh = ch
+			break
+		}
+		m.mu.Unlock()
+		select {
+		case <-waitCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // StartCount is the identity of the running Collector: one increment per Start.
@@ -327,7 +387,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 		if ctx.Err() != nil {
 			return true
 		}
-		client, err := resp.Dial(cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
+		client, err := resp.DialContext(ctx, cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
 		if err != nil {
 			if mode == "auto" && !subscribed {
 				return fallback()
@@ -337,7 +397,9 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		stopClose := context.AfterFunc(ctx, func() { _ = client.Close() })
 		if err := client.Auth(cfg.ManagementKey); err != nil {
+			stopClose()
 			_ = client.Close()
 			// A reply can land after a restart superseded this run. It says
 			// nothing about the Collector now running — and that one uses another
@@ -361,6 +423,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 			continue
 		}
 		if err := client.Subscribe(channel); err != nil {
+			stopClose()
 			_ = client.Close()
 			if mode == "auto" && !subscribed {
 				return fallback()
@@ -379,6 +442,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 		})
 
 		err = m.consumeSubscribe(ctx, cfg, client)
+		stopClose()
 		_ = client.Close()
 		if ctx.Err() != nil {
 			return true
@@ -395,15 +459,11 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 	const pingInterval = 30 * time.Second
 	const readWindow = pingInterval + 10*time.Second
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.SetReadDeadline(time.Now())
-		case <-done:
-		}
-	}()
+	stopDeadline := context.AfterFunc(ctx, func() {
+		_ = client.SetReadDeadline(time.Now())
+		_ = client.Close()
+	})
+	defer stopDeadline()
 
 	lastPing := time.Now()
 	for {
@@ -483,14 +543,16 @@ func (m *Manager) runRESP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 		if ctx.Err() != nil {
 			return
 		}
-		client, err := resp.Dial(cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
+		client, err := resp.DialContext(ctx, cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
 		if err != nil {
 			m.markError("connect", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		stopClose := context.AfterFunc(ctx, func() { _ = client.Close() })
 		if err := client.Auth(cfg.ManagementKey); err != nil {
+			stopClose()
 			_ = client.Close()
 			// A superseded run's late reply is not about the Collector running
 			// now: the run ends without stopping it or recording its blocker.
@@ -514,6 +576,7 @@ func (m *Manager) runRESP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 		})
 
 		err = m.consumeRESP(ctx, cfg, client, queue, popSide)
+		stopClose()
 		_ = client.Close()
 		if ctx.Err() != nil {
 			return

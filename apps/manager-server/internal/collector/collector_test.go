@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1457,5 +1458,51 @@ func TestManagerKeepsAnEarlierErrorWhenTheCredentialIsRefused(t *testing.T) {
 	last := manager.Status().LastError
 	if !strings.HasPrefix(last, "consume: connection reset; ") || !strings.Contains(last, "NOAUTH") {
 		t.Fatalf("last error = %q, want both causes", last)
+	}
+}
+
+func TestManagerStopAndWaitDrainsSupersededAndAuthRejectionRuns(t *testing.T) {
+	upstream1 := newScriptedCPA(t, "ERR invalid management key")
+	gate1 := upstream1.gate(0)
+	upstream2 := newScriptedCPA(t, "ERR invalid management key")
+
+	manager := NewManager(testConfig(t, "resp"), newTestStore(t))
+	rejectionEntered := make(chan struct{})
+	releaseRejection := make(chan struct{})
+	var enterOnce sync.Once
+	manager.SetAuthRejectionHandler(func() {
+		enterOnce.Do(func() { close(rejectionEntered) })
+		<-releaseRejection
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream1.URL(), ManagementKey: "old-key"})
+	waitFor(t, func() bool { return upstream1.accepted.Load() == 1 })
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream2.URL(), ManagementKey: "bad-key"})
+	<-rejectionEntered
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- manager.StopAndWait(context.Background())
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("StopAndWait returned %v while superseded run and rejection callback were active", err)
+	default:
+	}
+
+	close(gate1)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("StopAndWait returned %v while auth-rejection callback was still running", err)
+	default:
+	}
+
+	close(releaseRejection)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("StopAndWait: %v", err)
 	}
 }

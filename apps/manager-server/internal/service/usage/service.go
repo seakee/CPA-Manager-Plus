@@ -252,6 +252,13 @@ func (s *Service) CleanupExpiredImportSessions(ctx context.Context) (int, error)
 	return manager.CleanupExpired(ctx)
 }
 
+func (s *Service) StopAndWaitImportSessions(ctx context.Context) error {
+	if s == nil || s.importSessions == nil {
+		return nil
+	}
+	return s.importSessions.StopAndWait(ctx)
+}
+
 func (s *Service) requireImportSessionManager() (*importSessionManager, error) {
 	if s.importSessions == nil {
 		return nil, newImportSessionError(

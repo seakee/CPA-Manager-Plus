@@ -181,6 +181,10 @@ type importSessionManager struct {
 	initErr        error
 	started        bool
 	rootCtx        context.Context
+	stopping       bool
+	stopCtx        context.Context
+	stopCancel     context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 type importSessionImporter func(context.Context, io.Reader) (ImportResult, error)
@@ -194,16 +198,33 @@ func newImportSessionManager(config ImportSessionConfig) *importSessionManager {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	return &importSessionManager{
 		config:         config,
 		sessions:       make(map[string]*importSessionState),
 		cleanupPending: make(map[string]struct{}),
+		stopCtx:        stopCtx,
+		stopCancel:     stopCancel,
 	}
+}
+
+func (m *importSessionManager) checkAcceptingLocked() error {
+	if m.stopping {
+		return newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"usage import sessions are shutting down",
+			nil,
+		)
+	}
+	return nil
 }
 
 func (m *importSessionManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.checkAcceptingLocked(); err != nil {
+		return err
+	}
 	if err := m.ensureInitializedLocked(); err != nil {
 		return err
 	}
@@ -219,8 +240,57 @@ func (m *importSessionManager) Start(ctx context.Context) error {
 	if interval < time.Second {
 		interval = time.Second
 	}
-	go m.cleanupLoop(ctx, interval)
+	loopCtx, loopCancel := context.WithCancel(ctx)
+	stopAfter := context.AfterFunc(m.stopCtx, loopCancel)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer stopAfter()
+		defer loopCancel()
+		m.cleanupLoop(loopCtx, interval)
+	}()
 	return nil
+}
+
+func (m *importSessionManager) StopAndWait(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	m.stopping = true
+	stopCancel := m.stopCancel
+	cancels := make([]context.CancelFunc, 0, len(m.sessions))
+	for _, state := range m.sessions {
+		if state != nil && state.cancel != nil {
+			cancels = append(cancels, state.cancel)
+		}
+	}
+	m.mu.Unlock()
+
+	if stopCancel != nil {
+		stopCancel()
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	if ctx.Done() == nil {
+		m.wg.Wait()
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *importSessionManager) cleanupLoop(ctx context.Context, interval time.Duration) {
@@ -249,6 +319,9 @@ func (m *importSessionManager) Create(
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.checkAcceptingLocked(); err != nil {
+		return ImportSession{}, err
+	}
 	if err := m.ensureInitializedLocked(); err != nil {
 		return ImportSession{}, err
 	}
@@ -590,6 +663,10 @@ func (m *importSessionManager) WriteChunk(
 		return ImportSession{}, err
 	}
 	m.mu.Lock()
+	if err := m.checkAcceptingLocked(); err != nil {
+		m.mu.Unlock()
+		return ImportSession{}, err
+	}
 	if err := m.ensureInitializedLocked(); err != nil {
 		m.mu.Unlock()
 		return ImportSession{}, err
@@ -841,6 +918,9 @@ func (m *importSessionManager) Complete(
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.checkAcceptingLocked(); err != nil {
+		return ImportSession{}, err
+	}
 	if err := m.ensureInitializedLocked(); err != nil {
 		return ImportSession{}, err
 	}
@@ -926,13 +1006,19 @@ func (m *importSessionManager) Complete(
 	}
 	rootCtx := m.rootCtx
 	if rootCtx == nil {
-		rootCtx = context.Background()
+		rootCtx = m.stopCtx
 	}
 	processingCtx, cancel := context.WithCancel(rootCtx)
+	stopAfter := context.AfterFunc(m.stopCtx, cancel)
 	state.session = next
 	state.cancel = cancel
 	state.cancelRequested = false
-	go m.runImport(id, dataPath, processingCtx, importer)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer stopAfter()
+		m.runImport(id, dataPath, processingCtx, importer)
+	}()
 	return cloneImportSession(next), nil
 }
 

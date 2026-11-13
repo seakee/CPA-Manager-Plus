@@ -310,7 +310,7 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		grant: grant,
 		runID: expectedRunID,
 	})
-	if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
+	if err := a.legacyCollector.StartRuntime(a.lifecycleContext(ctx), runtimeCfg); err != nil {
 		a.activeExternalGrant.Store(activeCollectorGrant{})
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}

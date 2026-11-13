@@ -108,38 +108,68 @@ type Opened struct {
 	Protector *security.Protector
 	Record    freshstore.Record
 
-	beforeCloseMu sync.Mutex
-	beforeClose   []func()
+	closeMu     sync.Mutex
+	closing     bool
+	closed      bool
+	closeDone   chan struct{}
+	closeErr    error
+	beforeClose []func()
 }
 
 // BeforeClose registers a teardown hook that Close runs in LIFO order before
-// closing DB and releasing the process admission lock.
+// closing DB and releasing the process admission lock. Hooks registered while
+// Close is still draining hooks execute in the same Close cycle; hooks
+// registered after hook drain finishes are ignored.
 func (o *Opened) BeforeClose(fn func()) {
 	if o == nil || fn == nil {
 		return
 	}
-	o.beforeCloseMu.Lock()
-	o.beforeClose = append(o.beforeClose, fn)
-	o.beforeCloseMu.Unlock()
+	o.closeMu.Lock()
+	if !o.closed {
+		o.beforeClose = append(o.beforeClose, fn)
+	}
+	o.closeMu.Unlock()
 }
 
 func (o *Opened) Close() error {
 	if o == nil {
 		return nil
 	}
-	o.beforeCloseMu.Lock()
-	hooks := o.beforeClose
-	o.beforeClose = nil
-	o.beforeCloseMu.Unlock()
-	for i := len(hooks) - 1; i >= 0; i-- {
-		hooks[i]()
+	o.closeMu.Lock()
+	if o.closing {
+		done := o.closeDone
+		o.closeMu.Unlock()
+		<-done
+		return o.closeErr
+	}
+	o.closing = true
+	done := make(chan struct{})
+	o.closeDone = done
+	o.closeMu.Unlock()
+
+	defer close(done)
+	for {
+		o.closeMu.Lock()
+		n := len(o.beforeClose)
+		if n == 0 {
+			o.closed = true
+			o.beforeClose = nil
+			o.closeMu.Unlock()
+			break
+		}
+		fn := o.beforeClose[n-1]
+		o.beforeClose = o.beforeClose[:n-1]
+		o.closeMu.Unlock()
+		fn()
 	}
 	var err error
 	if o.DB != nil {
 		err = o.DB.Close()
 	}
-	return errors.Join(err, o.Admission.Close())
+	o.closeErr = errors.Join(err, o.Admission.Close())
+	return o.closeErr
 }
+
 func checkpoint(opts OpenOptions, name string) error {
 	if opts.Hook != nil {
 		return opts.Hook(name)

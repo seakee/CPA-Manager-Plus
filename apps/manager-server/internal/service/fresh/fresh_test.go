@@ -871,3 +871,79 @@ func TestClassifyInitializeRefusalFailsClosedOnDamagedOrNonFreshStoreUnderLock(t
 		}
 	})
 }
+
+func TestOpenedCloseSerializesConcurrentCallersAndRunsInCloseHooks(t *testing.T) {
+	p := pathsFor(t.TempDir())
+	o, err := Open(t.Context(), p, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hookEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	var (
+		lateHookRan      atomic.Bool
+		postCloseHookRan atomic.Bool
+		hookDBErr        atomic.Value
+	)
+	o.BeforeClose(func() {
+		close(hookEntered)
+		o.BeforeClose(func() {
+			var count int
+			if qErr := o.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM settings`).Scan(&count); qErr != nil {
+				hookDBErr.Store(qErr)
+			}
+			lateHookRan.Store(true)
+		})
+		<-releaseHook
+		var count int
+		if qErr := o.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM settings`).Scan(&count); qErr != nil {
+			hookDBErr.Store(qErr)
+		}
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- o.Close()
+	}()
+	<-hookEntered
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- o.Close()
+	}()
+	// Give the concurrent Close caller an opportunity to enter o.Close(); it must
+	// block on closeDone while both DB and the admission lock stay open.
+	select {
+	case prematureErr := <-secondDone:
+		t.Fatalf("concurrent Close() returned %v while first Close() was still draining hooks", prematureErr)
+	default:
+	}
+	if _, reopenErr := Open(t.Context(), p, OpenOptions{}); !errors.Is(reopenErr, processlock.ErrLocked) {
+		t.Fatalf("Open while Close() is draining hooks = %v, want processlock.ErrLocked", reopenErr)
+	}
+
+	close(releaseHook)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Close(): %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Close(): %v", err)
+	}
+	if v := hookDBErr.Load(); v != nil {
+		t.Fatalf("DB became unusable before BeforeClose hooks finished: %v", v)
+	}
+	if !lateHookRan.Load() {
+		t.Fatal("BeforeClose hook registered during Close() did not run before DB closed")
+	}
+
+	o.BeforeClose(func() {
+		postCloseHookRan.Store(true)
+	})
+	if err := o.Close(); err != nil {
+		t.Fatalf("post-close Close(): %v", err)
+	}
+	if postCloseHookRan.Load() {
+		t.Fatal("BeforeClose hook registered after Close() completed should be ignored")
+	}
+}

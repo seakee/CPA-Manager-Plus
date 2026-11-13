@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -19,11 +20,17 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
+	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 )
 
 func TestWithSupportPluginHeaderAnnouncesCapabilityOnSuccess(t *testing.T) {
@@ -935,4 +942,394 @@ func TestOpenedCloseDrainsInFlightPluginCapabilityRefreshBeforeClosingDB(t *test
 	if err := os.RemoveAll(dbDir); err != nil {
 		t.Fatalf("os.RemoveAll(dbDir) right after opened.Close(): %v", err)
 	}
+}
+
+func TestOpenedCloseDrainsCollectorAuthRejectionWithoutDeadlockAndBeforeRejectionClose(t *testing.T) {
+	fake := newExternalUsageCPA(t, externalAuthorityManagement)
+	t.Cleanup(fake.server.Close)
+	fake.enabled.Store(true)
+	normalized, err := cpa.NormalizeV8BaseURL(fake.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-collector-close-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = opened.Close()
+		}
+	})
+
+	app := newFreshApplication(opened, config.Config{
+		CollectorMode: "http",
+		PollInterval:  10 * time.Millisecond,
+	}, nil)
+	app.runCtx = t.Context()
+	quietProjection(app)
+	protected, err := opened.Protector.ProtectString(externalAuthorityManagement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := opened.Record.Operation
+	updated, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+		}
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed",
+			TargetIdentity: freshkeyapply.ExternalIdentity(normalized), TargetGeneration: 1,
+		}
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: normalized, ManagementKey: protected}
+		r.Operation.ProductComplete = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.externalSource = externalInstallSource(app.store, opened.Protector)
+
+	callbackEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	callbackFinished := make(chan struct{})
+	var enterOnce, finishOnce sync.Once
+	app.beforeCollectorAuthRejectionLock = func(uint64) {
+		enterOnce.Do(func() { close(callbackEntered) })
+		<-releaseCallback
+	}
+	app.afterCollectorAuthRejection = func(uint64) {
+		finishOnce.Do(func() { close(callbackFinished) })
+	}
+
+	app.startUsageCollection(updated.Operation)
+	fake.rejects.Store(true)
+	select {
+	case <-callbackEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Collector did not enter auth-rejection callback after upstream 401")
+	}
+
+	closeDone := make(chan error, 1)
+	closed = true
+	go func() {
+		closeDone <- opened.Close()
+	}()
+	// Release the rejection callback once opened.Close() is running; Close() must
+	// not hold usageStartMu across StopAndWait and must keep rejection open until
+	// the callback finishes.
+	close(releaseCallback)
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil {
+			t.Fatalf("opened.Close(): %v", closeErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("opened.Close() deadlocked against Collector auth-rejection callback")
+	}
+	select {
+	case <-callbackFinished:
+	default:
+		t.Fatal("opened.Close() returned before Collector auth-rejection callback finished")
+	}
+	if err := os.RemoveAll(dbDir); err != nil {
+		t.Fatalf("os.RemoveAll(dbDir) after Collector rejection close: %v", err)
+	}
+}
+
+func TestOpenedCloseDrainsUpdateChecksAndLegacyImportSessions(t *testing.T) {
+	dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-updates-import-close-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+	paths.Config = filepath.Join(dbDir, "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = opened.Close()
+		}
+	})
+
+	codexEntered := make(chan struct{})
+	codexCanceled := make(chan struct{})
+	var codexEnterOnce, codexCancelOnce sync.Once
+	blockingCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" {
+			codexEnterOnce.Do(func() { close(codexEntered) })
+			<-r.Context().Done()
+			codexCancelOnce.Do(func() { close(codexCanceled) })
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(blockingCPA.Close)
+
+	app := newFreshApplication(opened, config.Config{
+		DataDir:                   dbDir,
+		DBPath:                    paths.Database,
+		CPAUpstreamURL:            blockingCPA.URL,
+		ManagementKey:             "test-codex-mgmt-key",
+		UsageImportChunkBytes:     64 * 1024,
+		UsageImportDiskQuotaBytes: 1024 * 1024,
+		UsageImportMaxSessions:    2,
+		UsageImportSessionTTL:     time.Hour,
+	}, nil)
+	op := opened.Record.Operation
+	if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+		r.Operation.GatewayPending = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	updateEntered := make(chan struct{})
+	updateExited := make(chan struct{})
+	app.launchBackground(func() {
+		app.runFreshUpdateChecksWith(app.lifecycleContext(t.Context()), func(workerCtx context.Context) {
+			close(updateEntered)
+			<-workerCtx.Done()
+			close(updateExited)
+		})
+	})
+	<-updateEntered
+	if _, err := app.legacyApp.CodexInspectionService.Start(t.Context(), codexinspectionsvc.RunRequest{}); err != nil {
+		t.Fatalf("CodexInspectionService.Start: %v", err)
+	}
+	select {
+	case <-codexEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CodexInspectionService did not enter upstream auth-files fetch")
+	}
+
+	var lines strings.Builder
+	for i := range 200 {
+		lines.WriteString(`{"event_hash":"h-`)
+		lines.WriteString(strings.Repeat("a", 8))
+		lines.WriteByte(byte('0' + (i % 10)))
+		lines.WriteByte(byte('0' + ((i / 10) % 10)))
+		lines.WriteByte(byte('0' + ((i / 100) % 10)))
+		lines.WriteString(`","timestamp_ms":1,"timestamp":"2026-01-01T00:00:00Z","model":"gpt-test"}` + "\n")
+	}
+	payload := lines.String()
+	sess, err := app.legacyApp.UsageService.CreateImportSession(t.Context(), "events.jsonl", int64(len(payload)), "")
+	if err != nil {
+		t.Fatalf("CreateImportSession: %v", err)
+	}
+	if _, err := app.legacyApp.UsageService.WriteImportSessionChunk(t.Context(), sess.ID, 0, int64(len(payload)), strings.NewReader(payload)); err != nil {
+		t.Fatalf("WriteImportSessionChunk: %v", err)
+	}
+	if _, err := app.legacyApp.UsageService.CompleteImportSession(t.Context(), sess.ID); err != nil {
+		t.Fatalf("CompleteImportSession: %v", err)
+	}
+
+	closed = true
+	if err := opened.Close(); err != nil {
+		t.Fatalf("opened.Close(): %v", err)
+	}
+	select {
+	case <-updateExited:
+	default:
+		t.Fatal("opened.Close() returned before runFreshUpdateChecks inner worker exited")
+	}
+	select {
+	case <-codexCanceled:
+	default:
+		t.Fatal("opened.Close() returned before CodexInspectionService canceled in-flight run")
+	}
+	if _, codexLateErr := app.legacyApp.CodexInspectionService.Start(context.Background(), codexinspectionsvc.RunRequest{}); !errors.Is(codexLateErr, codexinspectionsvc.ErrServiceStopping) {
+		t.Fatalf("CodexInspectionService.Start after Close() = %v, want ErrServiceStopping", codexLateErr)
+	}
+	_, lateErr := app.legacyApp.UsageService.CreateImportSession(context.Background(), "late.jsonl", 16, "")
+	var importErr *usagesvc.ImportSessionError
+	if !errors.As(lateErr, &importErr) || importErr.Code != usagesvc.ImportSessionErrorUnavailable {
+		t.Fatalf("CreateImportSession after Close() = %v, want ImportSessionErrorUnavailable", lateErr)
+	}
+	if err := os.RemoveAll(dbDir); err != nil {
+		t.Fatalf("os.RemoveAll(dbDir): %v", err)
+	}
+}
+
+func TestFreshShutdownPreservesDBAcrossLongRuntimeMutationAndEarlyServerExit(t *testing.T) {
+	t.Run("runtime_mutation_exceeding_short_http_shutdown_completes_before_db_close", func(t *testing.T) {
+		const artifactID = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+		startEntered := make(chan struct{})
+		releaseStart := make(chan struct{})
+		var startOnce sync.Once
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/runtime/status":
+				_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"offline","cpaObservedVersion":"v8.0.55","capabilities":["start","stop"],"activeGatewayArtifact":{"engine":"cpa","artifactId":"` + artifactID + `","version":"v8.0.55"},"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+			case "/v1/runtime/operations/start":
+				var reqBody struct {
+					OperationID string `json:"operationId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&reqBody)
+				startOnce.Do(func() { close(startEntered) })
+				<-releaseStart
+				_, _ = w.Write([]byte(`{"operationId":"` + reqBody.OperationID + `","operationType":"start","runtimeIdentity":"runtime-01","runtimeGeneration":1,"state":"succeeded"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(supervisor.Close)
+
+		tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(tokenPath, []byte("shutdown-runtime-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dbDir, err := os.MkdirTemp(t.TempDir(), "fresh-runtime-shutdown-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+		opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				_ = opened.Close()
+			}
+		})
+
+		app := newFreshApplication(opened, config.Config{
+			RuntimeURL:       supervisor.URL,
+			RuntimeTokenFile: tokenPath,
+			CPAUpstreamURL:   "http://127.0.0.1:8317",
+		}, nil)
+		protected, err := opened.Protector.ProtectString(strings.Repeat("f", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		op := opened.Record.Operation
+		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			}
+			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy:                      bootstrap.NewManaged,
+				Stage:                         "committed",
+				TargetIdentity:                "runtime-01",
+				TargetGeneration:              1,
+				TargetArtifactID:              artifactID,
+				DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity("http://127.0.0.1:8317"),
+			}
+			r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:8317", ManagementKey: protected}
+			r.Operation.ProductComplete = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+		if _, err := app.runtimeSettings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(t.Context(), model.EmbeddedRuntimeDesiredStopped); err != nil {
+			t.Fatal(err)
+		}
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{Handler: app}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		type httpOutcome struct {
+			status int
+			err    error
+		}
+		respCh := make(chan httpOutcome, 1)
+		go func() {
+			req, reqErr := http.NewRequest(
+				http.MethodPost,
+				"http://"+listener.Addr().String()+"/control/api/v2/runtime/operations",
+				strings.NewReader(`{"action":"start","requestId":"77777777-7777-4777-8777-777777777777"}`),
+			)
+			if reqErr != nil {
+				respCh <- httpOutcome{err: reqErr}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			req.Header.Set("Content-Type", "application/json")
+			resp, doErr := http.DefaultClient.Do(req)
+			if doErr != nil {
+				respCh <- httpOutcome{err: doErr}
+				return
+			}
+			_ = resp.Body.Close()
+			respCh <- httpOutcome{status: resp.StatusCode}
+		}()
+		<-startEntered
+
+		// Force server.Shutdown to time out while the runtime mutation is still in
+		// flight, then start opened.Close() immediately. opened.Close() must NOT
+		// close SQLite or release .manager.lock until the mutation finishes.
+		shutdownHTTPServer(server, 5*time.Millisecond)
+		closeDone := make(chan error, 1)
+		closed = true
+		go func() {
+			closeDone <- opened.Close()
+		}()
+		select {
+		case prematureErr := <-closeDone:
+			t.Fatalf("opened.Close() returned %v while runtime mutation was still writing journal/desired state", prematureErr)
+		default:
+		}
+
+		close(releaseStart)
+		out := <-respCh
+		if out.err != nil || out.status != http.StatusOK {
+			t.Fatalf("in-flight runtime operation across shutdown = (%d, %v), want (200, nil)", out.status, out.err)
+		}
+		if closeErr := <-closeDone; closeErr != nil {
+			t.Fatalf("opened.Close(): %v", closeErr)
+		}
+		if err := os.RemoveAll(dbDir); err != nil {
+			t.Fatalf("os.RemoveAll(dbDir): %v", err)
+		}
+	})
+
+	t.Run("early_server_result_cancels_await_fresh_store_without_parent_cancel", func(t *testing.T) {
+		parentCtx := context.Background()
+		paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "missing.sqlite"))
+		startup := newStartupHTTPHandler(bootstrap.PublicDiscovery{})
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := &http.Server{Handler: startup}
+		go func() { _ = server.Serve(listener) }()
+
+		stopAwait := startAwaitFreshStore(parentCtx, config.Config{}, paths, startup)
+		serverResult := make(chan error, 1)
+		serverResult <- http.ErrServerClosed
+
+		done := make(chan struct{})
+		go func() {
+			waitForReadOnlyStartup(parentCtx, server, serverResult)
+			stopAwait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("waitForReadOnlyStartup + stopAwait hung when serverResult fired without parentCtx cancellation")
+		}
+		_ = runtimeservice.DefaultReconcileInterval
+	})
 }

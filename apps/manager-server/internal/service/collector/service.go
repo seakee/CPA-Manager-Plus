@@ -33,6 +33,13 @@ func (s *Service) Stop(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) StopAndWait(ctx context.Context) error {
+	if s == nil || s.manager == nil {
+		return nil
+	}
+	return s.manager.StopAndWait(ctx)
+}
+
 // SetAuthRejectionHandler installs the report of a CPA that refused the
 // management credential this Collector runs with. The Collector stops itself
 // before it reports, so the handler only records the blocker and the latch.

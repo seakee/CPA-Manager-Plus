@@ -1725,6 +1725,12 @@ func (a *freshApplication) runtimeOperations(w http.ResponseWriter, r *http.Requ
 }
 
 func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation) {
+	release, ok := a.enterRequest(r)
+	if !ok {
+		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unreachable")
+		return
+	}
+	defer release()
 	var request struct {
 		Action    string `json:"action"`
 		RequestID string `json:"requestId"`
@@ -2200,15 +2206,6 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	gate.reconcilerCancel = cancel
 	gate.reconcilerDone = done
 	gate.mu.Unlock()
-	defer func() {
-		cancel()
-		gate.mu.Lock()
-		if gate.reconcilerDone == done {
-			gate.reconcilerCancel = nil
-			gate.reconcilerDone = nil
-		}
-		gate.mu.Unlock()
-	}()
 	reconciler := runtimeservice.NewReconciler(
 		client,
 		freshEmbeddedDesiredStateStore{app: a, inner: desired},
@@ -2218,6 +2215,16 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 	go func() {
 		defer close(done)
 		reconciler.Run(workerCtx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+		gate.mu.Lock()
+		if gate.reconcilerDone == done {
+			gate.reconcilerCancel = nil
+			gate.reconcilerDone = nil
+		}
+		gate.mu.Unlock()
 	}()
 	externalCommitted := a.externalCommittedSignal()
 	watchInterval := interval

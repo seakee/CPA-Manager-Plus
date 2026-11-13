@@ -706,20 +706,31 @@ func serveHTTPServer(server *http.Server, listener net.Listener, stop context.Ca
 	stop()
 }
 
-// waitForReadOnlyStartup keeps a safely bound discovery/liveness listener alive
-// when the writable gate rejects the source or Store.Open fails. No worker or
-// mutation handler is constructed on this path.
+const freshHTTPShutdownTimeout = freshRuntimeMutationBudget + 5*time.Second
+
+func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
+	if server == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("HTTP server shutdown timed out after %s; waiting for active database owners before closing store: %v", timeout, err)
+	}
+}
+
+// waitForReadOnlyStartup serves a Fresh or read-only discovery listener until
+// ctx cancels or server.Serve exits, then drains active HTTP handlers within
+// freshHTTPShutdownTimeout before callers close the admitted store.
 func waitForReadOnlyStartup(ctx context.Context, server *http.Server, result <-chan error) {
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = server.Shutdown(shutdownCtx)
-		cancel()
-		return
+		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 	case err := <-result:
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("read-only discovery server stopped: %v", err)
 		}
+		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 	}
 }
 

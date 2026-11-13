@@ -284,6 +284,7 @@ type freshApplication struct {
 	bgMu        sync.Mutex
 	closing     bool
 	bgWG        sync.WaitGroup
+	inflightWG  sync.WaitGroup
 	closeOnce   sync.Once
 }
 
@@ -549,6 +550,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	return a
 }
 
+type freshRequestTrackedKey struct{}
+
 func (a *freshApplication) isClosing() bool {
 	if a == nil {
 		return true
@@ -576,6 +579,38 @@ func (a *freshApplication) lifecycleContext(basis context.Context) context.Conte
 	return ctx
 }
 
+func (a *freshApplication) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if a == nil || a.closeCtx == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stopAfter := context.AfterFunc(a.closeCtx, cancel)
+	return ctx, func() {
+		stopAfter()
+		cancel()
+	}
+}
+
+func (a *freshApplication) enterRequest(r *http.Request) (func(), bool) {
+	if a == nil {
+		return nil, false
+	}
+	if r != nil && r.Context().Value(freshRequestTrackedKey{}) != nil {
+		return func() {}, true
+	}
+	a.bgMu.Lock()
+	if a.closing {
+		a.bgMu.Unlock()
+		return nil, false
+	}
+	a.inflightWG.Add(1)
+	a.bgMu.Unlock()
+	return a.inflightWG.Done, true
+}
+
 func (a *freshApplication) launchBackground(fn func()) bool {
 	if a == nil || fn == nil {
 		return false
@@ -594,8 +629,9 @@ func (a *freshApplication) launchBackground(fn func()) bool {
 	return true
 }
 
-// Close cancels and drains background work owned by this Fresh application
-// before Opened.Close closes SQLite and releases the process admission lock.
+// Close cancels and drains in-flight requests and background work owned by this
+// Fresh application in producer-before-consumer order before Opened.Close
+// closes SQLite and releases the process admission lock.
 func (a *freshApplication) Close() {
 	if a == nil {
 		return
@@ -607,19 +643,41 @@ func (a *freshApplication) Close() {
 		if a.closeCancel != nil {
 			a.closeCancel()
 		}
+		// 1. Drain in-flight HTTP handlers (including detached 40s runtime
+		// mutations and their durable journal/desired-state follow-ups).
+		a.inflightWG.Wait()
+		// 2. Drain ServeHTTP's plugin capability proof before closing rejection.
 		if p := a.pluginCapability; p != nil {
 			p.close()
 		}
+		// 3. Drain host-level background loops (adoption migration, reconciler,
+		// update checks, routing restore, runtime usage waiter, identity worker).
 		a.bgWG.Wait()
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 4. Drain legacy async jobs reachable through the Fresh router bridge.
+		if a.legacyApp != nil {
+			if a.legacyApp.CodexInspectionService != nil {
+				_ = a.legacyApp.CodexInspectionService.StopAndWait(context.Background())
+			}
+			if a.legacyApp.UsageService != nil {
+				_ = a.legacyApp.UsageService.StopAndWaitImportSessions(context.Background())
+			}
+		}
+		// 5. Stop and join the Collector without holding usageStartMu (the
+		// Collector's auth-rejection callback acquires usageStartMu and writes
+		// to rejection, and its usage handler wakes usageProjection).
 		a.usageStartMu.Lock()
-		a.stopUsageCollectionLocked(stopCtx)
+		a.stopUsageCollectionLocked(context.Background())
 		a.usageStartMu.Unlock()
-		cancel()
+		if a.legacyCollector != nil {
+			_ = a.legacyCollector.StopAndWait(context.Background())
+		}
+		// 6. Now that no producer can wake usageProjection, wait for it.
 		if a.usageProjection != nil {
 			a.usageProjection.Wait()
 		}
+		// 7. Close WAL maintenance and its private SQLite connection.
 		stopFreshDatabaseMaintenance(a.cfg.DBPath)
+		// 8. Drain externalRejection last after all its callers have stopped.
 		if a.rejection != nil {
 			a.rejection.close()
 		}
@@ -650,6 +708,18 @@ func writeFreshStrategyError(w http.ResponseWriter, err error) {
 }
 
 func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	release, ok := a.enterRequest(r)
+	if !ok {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+	if r != nil {
+		reqCtx, cancelReq := a.requestContext(r.Context())
+		defer cancelReq()
+		r = r.WithContext(context.WithValue(reqCtx, freshRequestTrackedKey{}, true))
+	}
 	// The plugin capability is a claim about the saved connection, so it is
 	// announced only when that connection proves it; a route existing is not a
 	// capability.
@@ -1330,6 +1400,10 @@ func validateFreshHostAuthority(cfg config.Config) error {
 }
 
 func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) func() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	awaitCtx, cancelAwait := context.WithCancel(ctx)
 	var (
 		opened *fresh.Opened
 		done   = make(chan struct{})
@@ -1340,14 +1414,14 @@ func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqlitere
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-awaitCtx.Done():
 				return
 			case <-ticker.C:
 			}
 			if !freshMarkerPresent(paths.Database) {
 				continue
 			}
-			admitted, err := serveExistingFresh(ctx, cfg, paths, h)
+			admitted, err := serveExistingFresh(awaitCtx, cfg, paths, h)
 			if err != nil {
 				continue
 			}
@@ -1358,6 +1432,7 @@ func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqlitere
 	var stopOnce sync.Once
 	return func() {
 		stopOnce.Do(func() {
+			cancelAwait()
 			<-done
 			if opened != nil {
 				_ = opened.Close()

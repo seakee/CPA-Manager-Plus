@@ -248,8 +248,8 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	}
 	// The projection and identity workers maintain attribution independently of
 	// the Collector authority, so they start once the keys are attributable.
+	workerCtx := a.lifecycleContext(ctx)
 	if !a.usageWorkersStarted {
-		workerCtx := a.lifecycleContext(ctx)
 		if a.startIdentityWorker != nil && !isCommittedExternalStrategy(checkpoint) {
 			a.startIdentityWorker(workerCtx)
 		}
@@ -284,12 +284,12 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		case a.privateCollector != nil:
 			// Only the explicit private profile owns a host-supplied Collector
 			// authority.
-			started = a.privateCollector(ctx)
+			started = a.privateCollector(workerCtx)
 		case isCommittedExternalStrategy(checkpoint) && a.externalSource != nil:
 			// An External installation collects from the user's own CPA through
 			// the committed connection. A refused start proves nothing, so no
 			// collection window is recorded for it.
-			outcome := a.startExternalUsageCollector(ctx)
+			outcome := a.startExternalUsageCollector(workerCtx)
 			a.setUsageStartReason(outcome.Reason)
 			if !outcome.Started {
 				return false
@@ -318,12 +318,12 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 				status, statusErr := a.observeInstallationRuntime(ctx)
 				if statusErr != nil || status.State != model.RuntimeStateReady {
 					a.setUsageStartReason(usageStartReasonCollectorFailed)
-					a.armManagedUsageRuntimeWaiterLocked(ctx)
+					a.armManagedUsageRuntimeWaiterLocked(workerCtx)
 					return false
 				}
 			}
 			a.activeExternalGrant.Store(activeCollectorGrant{})
-			if err := a.legacyCollector.StartRuntime(ctx, runtimeCfg); err != nil {
+			if err := a.legacyCollector.StartRuntime(workerCtx, runtimeCfg); err != nil {
 				log.Printf("Fresh usage collection unavailable: %v", err)
 				a.setUsageStartReason(usageStartReasonCollectorFailed)
 				return false

@@ -64,6 +64,10 @@ func (a *freshApplication) updateChannel(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *freshApplication) runFreshUpdateChecks(ctx context.Context) {
+	a.runFreshUpdateChecksWith(ctx, a.updates.Run)
+}
+
+func (a *freshApplication) runFreshUpdateChecksWith(ctx context.Context, run func(context.Context)) {
 	// The private Console can precede CPA staging. Manager software discovery
 	// consumes the setting already; it never requires or changes CPA state.
 	// Retire this worker if the installation leaves the admitted New slice.
@@ -72,11 +76,14 @@ func (a *freshApplication) runFreshUpdateChecks(ctx context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	done := make(chan struct{})
+	defer func() {
+		cancel()
+		<-done
+	}()
 	go func() {
 		defer close(done)
-		a.updates.Run(workerCtx)
+		run(workerCtx)
 	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

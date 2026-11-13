@@ -1414,3 +1414,53 @@ func TestImportSessionAcceptsLegacyNoncanonicalEventHash(t *testing.T) {
 		t.Fatalf("completed session result = %#v", completed)
 	}
 }
+
+func TestImportSessionStopAndWaitCancelsAndDrainsActiveImport(t *testing.T) {
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      filepath.Join(t.TempDir(), "imports"),
+		ChunkSizeBytes: 256,
+		DiskQuotaBytes: 1024 * 1024,
+		MaxSessions:    2,
+		TTL:            time.Hour,
+	})
+	payload := `{"event_hash":"h1","timestamp_ms":1,"timestamp":"2026-01-01T00:00:00Z","model":"gpt-test"}` + "\n"
+	session, err := manager.Create(context.Background(), "history.jsonl", int64(len(payload)), "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := manager.WriteChunk(context.Background(), session.ID, 0, int64(len(payload)), strings.NewReader(payload)); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+
+	importEntered := make(chan struct{})
+	importCancelled := make(chan struct{})
+	allowExit := make(chan struct{})
+	if _, err := manager.Complete(context.Background(), session.ID, func(importCtx context.Context, _ io.Reader) (ImportResult, error) {
+		close(importEntered)
+		<-importCtx.Done()
+		close(importCancelled)
+		<-allowExit
+		return ImportResult{}, importCtx.Err()
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	<-importEntered
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- manager.StopAndWait(context.Background())
+	}()
+	<-importCancelled
+	select {
+	case stopErr := <-stopDone:
+		t.Fatalf("StopAndWait returned %v before active importer finished unwinding", stopErr)
+	default:
+	}
+	_, createErr := manager.Create(context.Background(), "late.jsonl", 10, "")
+	requireImportSessionErrorCode(t, createErr, ImportSessionErrorUnavailable)
+
+	close(allowExit)
+	if stopErr := <-stopDone; stopErr != nil {
+		t.Fatalf("StopAndWait: %v", stopErr)
+	}
+}
