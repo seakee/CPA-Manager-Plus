@@ -14,7 +14,7 @@ const en = {
     'Database lock or key files under /data are owned by root (0:0). v2 Manager runs as unprivileged user 10002:10002 and never upgrades a 1.x volume in place. Startup stopped safely in read-only guidance mode and did not modify the 1.x database and key files.',
   ownershipUpgradeTitle: 'Option 1 (Recommended): Upgrade from 1.x v1.14.10 using a separate v2 /data volume',
   ownershipUpgradeDesc:
-    'Stop this container, keep the original 1.x volume untouched and mounted read-only at /legacy:ro, mount a new empty volume at /data, and run the offline preflight and upgrade on the host:',
+    'Stop this container, keep the original 1.x volume mounted read-only at /legacy:ro, mount a new empty volume at /data, and run the offline preflight and upgrade on the host (if you also open the web Upgrade entry in the running v2 container: to keep the original 1.x volume completely untouched, copy the stopped 1.x volume, set 10002:10002 on usage.sqlite* and data.key in that copy, and mount the copy at /legacy:ro; or, if updating file owner metadata on the stopped 1.x volume is acceptable, first mount that volume writable in a one-off root container as -v <1x_volume>:/mnt to run chown -h 10002:10002 /mnt/usage.sqlite* /mnt/data.key while keeping runtime 0:0, then mount it at /legacy:ro):',
   ownershipChownTitle:
     'Option 2: Open the read-only Upgrade entry on this stopped volume — fix only the Manager file ownership',
   ownershipChownDesc:
@@ -44,7 +44,7 @@ const zh: typeof en = {
     '当前 /data 中的数据库锁或密钥文件属于 root (0:0)，v2 Manager 以非特权用户 10002:10002 运行且绝不原地升级 1.x 数据卷。服务已安全停留在只读引导模式，未修改 1.x 数据库与密钥文件。',
   ownershipUpgradeTitle: '方式一（推荐）：使用独立新 /data 卷并将原 1.x 卷只读挂到 /legacy 升级',
   ownershipUpgradeDesc:
-    '停止当前容器，保持原 1.x（v1.14.10）数据卷只读不变并挂载到 /legacy:ro，为 /data 挂载全新空卷后，在宿主机执行离线预检与升级：',
+    '停止当前容器，将原 1.x（v1.14.10）数据卷只读挂载到 /legacy:ro，为 /data 挂载全新空卷后，在宿主机执行离线预检与升级（若同时在运行中的 v2 容器使用网页端升级入口：如需保持原 1.x 卷完全不改，请先复制已停止的 1.x 卷并在副本中将 usage.sqlite* 与 data.key 设为 10002:10002 后挂载到 /legacy:ro；如接受调整已停止原卷的文件属主元数据，请先用一次性容器将该卷可写挂载到 /mnt 执行 chown -h 10002:10002，仅限 /mnt/usage.sqlite* 与 /mnt/data.key，切勿改动保持 0:0 的 runtime，再只读挂载到 /legacy:ro）：',
   ownershipChownTitle: '方式二：仅修复已停止数据卷上的数据库文件属主，进入只读升级入口',
   ownershipChownDesc:
     '若需在该卷上验证原 1.x 管理员密钥并查看升级状态：先停止 v2 容器，用一个一次性容器挂载该卷、仅修改 usage.sqlite* 与 data.key 的属主（切勿改动 /data/runtime，它必须保持 0:0），再启动 v2 容器并点击下方重新检查：',
@@ -71,7 +71,7 @@ const tw: typeof en = {
     '目前 /data 中的資料庫鎖或金鑰檔案屬於 root (0:0)，v2 Manager 以非特權使用者 10002:10002 執行且絕不原地升級 1.x 資料卷。服務已安全停留在唯讀引導模式，未修改 1.x 資料庫與金鑰檔案。',
   ownershipUpgradeTitle: '方式一（推薦）：使用獨立新 /data 卷並將原 1.x 卷唯讀掛載至 /legacy 升級',
   ownershipUpgradeDesc:
-    '停止目前容器，保持原 1.x（v1.14.10）資料卷唯讀不變並掛載至 /legacy:ro，為 /data 掛載全新空卷後，在主機執行離線預檢與升級：',
+    '停止目前容器，將原 1.x（v1.14.10）資料卷唯讀掛載至 /legacy:ro，為 /data 掛載全新空卷後，在主機執行離線預檢與升級（若同時在執行中的 v2 容器使用網頁端升級入口：如需保持原 1.x 資料卷完全不改，請先複製已停止的 1.x 資料卷並在副本中將 usage.sqlite* 與 data.key 設為 10002:10002 後掛載至 /legacy:ro；如接受調整已停止原卷的檔案擁有者中繼資料，請先用一次性容器將該卷可寫掛載至 /mnt 執行 chown -h 10002:10002，僅限 /mnt/usage.sqlite* 與 /mnt/data.key，切勿改動維持 0:0 的 runtime，再唯讀掛載至 /legacy:ro）：',
   ownershipChownTitle: '方式二：僅修復已停止資料卷上的資料庫檔案擁有者，進入唯讀升級入口',
   ownershipChownDesc:
     '若需在該資料卷上驗證原 1.x 管理員金鑰並檢視升級狀態：先停止 v2 容器，用一個一次性容器掛載該資料卷、僅修改 usage.sqlite* 與 data.key 的擁有者（切勿改動 /data/runtime，它必須維持 0:0），再啟動 v2 容器並點擊下方重新檢查：',
@@ -100,7 +100,7 @@ const ru: typeof en = {
   ownershipUpgradeTitle:
     'Вариант 1 (рекомендуется): обновление с 1.x v1.14.10 через отдельный новый том /data',
   ownershipUpgradeDesc:
-    'Остановите этот контейнер, оставьте исходный том 1.x неизменным в режиме только чтения (/legacy:ro), подключите новый пустой том к /data и выполните предварительную проверку и обновление на хосте:',
+    'Остановите этот контейнер, смонтируйте исходный том 1.x только для чтения (/legacy:ro), подключите новый пустой том к /data и выполните предварительную проверку и обновление на хосте (если веб-вход обновления используется в запущенном контейнере v2: чтобы оставить исходный том 1.x полностью неизменным, скопируйте остановленный том, назначьте владельца 10002:10002 файлам usage.sqlite* и data.key в копии и смонтируйте её в /legacy:ro; либо, если изменение метаданных владельца на остановленном томе допустимо, временно смонтируйте этот том для записи в разовый контейнер как -v <том_1x>:/mnt и выполните chown -h 10002:10002 для /mnt/usage.sqlite* и /mnt/data.key, не затрагивая каталог runtime с владельцем 0:0, после чего оставьте /legacy:ro):',
   ownershipChownTitle:
     'Вариант 2: открыть вход обновления только для чтения на остановленном томе — исправьте только владельца файлов Manager',
   ownershipChownDesc:

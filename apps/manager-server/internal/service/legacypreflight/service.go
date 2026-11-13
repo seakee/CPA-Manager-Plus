@@ -141,6 +141,10 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 		return
 	}
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			consume(Report{}, errors.Join(errors.New("source inventory unavailable"), err))
+			return
+		}
 		consume(Report{}, errors.New("source inventory unavailable"))
 		return
 	}
@@ -151,6 +155,10 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 
 	lock, err := fenceSource(paths.Database, options.ObserveOnly)
 	if err != nil && !errors.Is(err, processlock.ErrNoExistingLock) {
+		if errors.Is(err, os.ErrPermission) {
+			consume(Report{}, errors.Join(errors.New("source ownership unavailable"), err))
+			return
+		}
 		consume(Report{}, errors.New("source ownership unavailable"))
 		return
 	}

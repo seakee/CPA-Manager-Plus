@@ -139,7 +139,7 @@ func InspectReadOnlyLegacySource(
 			// An unfenceable verdict is never marked reusable: cachedProjection
 			// requires ProbeExisting to prove quiescence, which an unreadable
 			// marker fails by definition.
-			verdict := classifyUnfenceableSource(ctx, source, extraExcludedRoot, info)
+			verdict := classifyUnfenceableSource(ctx, source, info, ScratchRoot{Label: "the configured source root", Dir: extraExcludedRoot})
 			consume(verdict)
 			return verdict, false
 		}
@@ -215,7 +215,7 @@ func SetAfterUnfenceableSnapshotOpenForTest(hook func(databasePath string)) func
 // either the main file or the WAL), or the Fresh operation marker is never
 // presented as a 1.x source; only an intact 1.x store whose marker alone is
 // root-owned yields the host ownership recovery condition.
-func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extraExcludedRoot string, inspected os.FileInfo) LegacyDiscoveryObservation {
+func classifyUnfenceableSource(ctx context.Context, source PreservedSource, inspected os.FileInfo, extraRoots ...ScratchRoot) LegacyDiscoveryObservation {
 	databasePath := strings.TrimSpace(source.Database)
 	if databasePath == "" || ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
 		return LegacyDiscoveryNone
@@ -239,7 +239,7 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
 			return LegacyDiscoveryNone
 		}
-		if err := ValidatePreservedScratchDir("", source, ScratchRoot{Label: "the configured source root", Dir: extraExcludedRoot}); err != nil {
+		if err := ValidatePreservedScratchDir("", source, extraRoots...); err != nil {
 			return LegacyDiscoveryNone
 		}
 		snapshot, err := OpenSnapshot(ctx, databasePath, "")
@@ -283,6 +283,21 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, extr
 		return LegacyDiscoveryNone
 	}
 	return verdict
+}
+
+// ProvenUnfenceableLegacySource reports whether source names an intact,
+// sidecar-clean 1.x Manager SQLite database (excluding native v2 and Fresh
+// installations) without taking a process lock or writing beside the source.
+func ProvenUnfenceableLegacySource(ctx context.Context, source PreservedSource, extraRoots ...ScratchRoot) bool {
+	databasePath := strings.TrimSpace(source.Database)
+	if databasePath == "" || ctx.Err() != nil {
+		return false
+	}
+	info, err := processlock.InspectRegularSingleLink(databasePath)
+	if err != nil || info.Size() <= 0 {
+		return false
+	}
+	return classifyUnfenceableSource(ctx, source, info, extraRoots...) == LegacyDiscoveryOwnershipUnavailable
 }
 
 func classifyUnfenceableDatabase(ctx context.Context, db *sql.DB, verifyIntegrity bool) LegacyDiscoveryObservation {

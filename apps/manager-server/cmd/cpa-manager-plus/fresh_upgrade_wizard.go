@@ -41,21 +41,27 @@ func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 	}
 }
 
-// upgradeCredentialDatabase is the Upgrade surface's one credential rule applied
-// at startup: the configured 1.x database when the mount holds one the shared
-// database file policy accepts, otherwise the Manager's own store. A mount whose
-// usage.sqlite is a link (or otherwise fails the policy) counts as no mount, so
-// the surface stays reachable and the preflight can name the condition.
+// upgradeCredentialDatabase is the Upgrade surface's construction-time
+// credential rule for the authentication entry leaf: the configured 1.x
+// database when MountDatabase accepts it or when an existing, non-empty,
+// single-link regular usage.sqlite failed solely with os.ErrPermission (such as
+// a 0600 root-owned 1.x file before targeted chown), otherwise the Manager's
+// own store. Absent, empty, symlinked, hard-linked, or non-regular entries
+// still fall back to the Manager store so the surface stays reachable and the
+// preflight can name the condition.
 //
 // Only the entry leaf resolves through this function, and it resolves once, when
 // it is constructed. The wizard's two reads inspect the mount per request and
-// apply the same rule (upgradeservice.CredentialDatabaseFrom), so a key the entry
-// page accepted is the key the reads accept as long as the mount is unchanged; a
-// mount that appears, disappears or is repointed after startup is seen by the
-// reads first, and the entry leaf keeps its startup resolution until it is
-// rebuilt.
+// apply upgradeservice.CredentialDatabaseFrom: while a proven 1.x database's
+// lock or data.key denies read permission, the entry leaf reports the ownership
+// remedy (or generic source_unavailable while the database itself is
+// unreadable), and once the operator runs targeted chown both the already-bound
+// entry leaf and the per-request wizard reads agree on the mounted 1.x database
+// without restarting the container. A mount that
+// appears, disappears, or is repointed after startup is seen by the reads first,
+// and the entry leaf keeps its startup resolution until it is rebuilt.
 func upgradeCredentialDatabase(legacyRoot, managerDatabase string) string {
-	return upgradeservice.CredentialDatabase(legacyRoot, managerDatabase)
+	return upgradeservice.EntryCredentialDatabase(legacyRoot, managerDatabase)
 }
 
 // upgradeCredentialPaths is the surface's one credential resolution expressed as

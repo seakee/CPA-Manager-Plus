@@ -200,6 +200,32 @@ func InspectSourceFile(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
+// InspectRegularSingleLink verifies via path metadata (without opening file
+// contents) that path names a regular, non-symlink file with link count 1. It
+// enforces the same non-symlink, regular-file, and single-link rules as
+// InspectSourceFile while succeeding on a 0600 file owned by another user when
+// the parent directory is searchable.
+func InspectRegularSingleLink(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlinkedDatabase, filepath.Base(path))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
+	}
+	multiple, err := hasMultipleLinksPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if multiple {
+		return nil, fmt.Errorf("%w for %s; replace hard-link aliases with one canonical database path", ErrHardLinked, path)
+	}
+	return info, nil
+}
+
 // openedMarker re-checks that the opened descriptor is still the marker the
 // target named, and that no second hard link reaches it.
 func openedMarker(file *os.File, marker os.FileInfo) error {
@@ -286,6 +312,9 @@ func rejectHardLinkedDatabase(databasePath string) error {
 	// Opening a FIFO can block before preflight gets to its context or inventory.
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("manager database is not a regular file: %s", databasePath)
+	}
+	if multiple, linkErr := hasMultipleLinksPath(databasePath); linkErr == nil && multiple {
+		return fmt.Errorf("%w for %s; replace hard-link aliases with one canonical database path", ErrHardLinked, databasePath)
 	}
 	file, err := os.Open(databasePath)
 	if os.IsNotExist(err) {

@@ -407,6 +407,8 @@
 
 .upgrade-check-detail {
   flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--text-tertiary);
   font-size: 13px;
   line-height: 1.6;
@@ -416,6 +418,9 @@
 .upgrade-notice code,
 .upgrade-days code,
 .upgrade-stage code {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 1px 7px;
   border-radius: var(--app-radius-xs);
   background: var(--bg-code, var(--bg-subtle));
@@ -440,6 +445,7 @@
 
 .upgrade-notice ul li {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 10px;
 }

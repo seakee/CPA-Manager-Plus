@@ -59,3 +59,11 @@ func hasMultipleLinks(file *os.File) (bool, error) {
 	}
 	return stat.Nlink > 1, nil
 }
+
+func hasMultipleLinksPath(path string) (bool, error) {
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return false, err
+	}
+	return stat.Nlink > 1, nil
+}

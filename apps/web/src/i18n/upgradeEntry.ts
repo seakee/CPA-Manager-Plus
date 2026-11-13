@@ -28,6 +28,8 @@ const en = {
     'The existing Manager administrator key could not be verified. Enter it again. CPA management keys cannot be used here.',
   unavailable:
     'This source cannot be verified safely. Check the stopped installation on its host; do not initialize it again.',
+  source_ownership_unavailable:
+    'The 1.x source files (usage.sqlite* and data.key) are owned by root (0:0) and cannot be read by the v2 Manager user (10002:10002). To keep the original 1.x volume completely untouched, copy the stopped 1.x volume, set 10002:10002 on usage.sqlite* and data.key in that copy, and mount the copy at /legacy:ro. Or, to update file owner metadata on the stopped 1.x volume itself, mount that volume writable in a one-off root container (for example -v <1x_volume>:/mnt, not against a :ro mount) and run chown -h 10002:10002 /mnt/usage.sqlite* /mnt/data.key (never chown -R; runtime must stay 0:0), keep /legacy:ro on v2, and sign in again.',
   changed:
     'The source or Manager process has changed. Sign in again to verify the current installation.',
   network: 'Authentication could not be confirmed. Check the connection and sign in again.',
@@ -64,6 +66,8 @@ const zh: typeof en = {
   footer: 'CPA Manager Plus · 安装与升级',
   invalid: '无法验证原 Manager 管理员密钥，请重新输入。此处不能使用 CPA 管理密钥。',
   unavailable: '当前来源无法安全验证。请在宿主机停机检查原安装，不要重新初始化。',
+  source_ownership_unavailable:
+    '当前 1.x 来源文件（usage.sqlite* 与 data.key）仍属 root (0:0)，v2 Manager 运行用户（10002:10002）无权读取。若要保持原 1.x 数据卷完全不改，请复制已停止的 1.x 数据卷，在副本中将 usage.sqlite* 与 data.key 设为 10002:10002 后只读挂载到 /legacy:ro；若接受调整已停止原卷的文件属主元数据，请在宿主机用一次性 root 容器将该卷可写挂载（如 -v <1x_volume>:/mnt，勿对 :ro 只读挂载执行）并运行 chown -h 10002:10002 /mnt/usage.sqlite* /mnt/data.key（切勿 chown -R，runtime 必须保持 0:0），保持 v2 上的 /legacy:ro 后重新登录验证。',
   changed: '来源或 Manager 进程已变化，请重新登录以验证当前安装。',
   network: '身份验证结果未确认，请检查连接后重新登录。',
   expired: '身份验证已过期，请重新登录。',
@@ -99,6 +103,8 @@ const tw: typeof en = {
   footer: 'CPA Manager Plus · 安裝與升級',
   invalid: '無法驗證原 Manager 管理員金鑰，請重新輸入。此處不能使用 CPA 管理金鑰。',
   unavailable: '目前來源無法安全驗證。請在主機停機檢查原安裝，不要重新初始化。',
+  source_ownership_unavailable:
+    '目前 1.x 來源檔案（usage.sqlite* 與 data.key）仍屬 root (0:0)，v2 Manager 執行使用者（10002:10002）無權讀取。若要保持原 1.x 資料卷完全不改，請複製已停止的 1.x 資料卷，在副本中將 usage.sqlite* 與 data.key 設為 10002:10002 後唯讀掛載至 /legacy:ro；若接受調整已停止原卷的檔案擁有者中繼資料，請在主機用一次性 root 容器將該卷可寫掛載（如 -v <1x_volume>:/mnt，勿對 :ro 唯讀掛載執行）並執行 chown -h 10002:10002 /mnt/usage.sqlite* /mnt/data.key（切勿 chown -R，runtime 必須維持 0:0），維持 v2 上的 /legacy:ro 後重新登入驗證。',
   changed: '來源或 Manager 程序已變更，請重新登入以驗證目前安裝。',
   network: '身分驗證結果未確認，請檢查連線後重新登入。',
   expired: '身分驗證已過期，請重新登入。',
@@ -138,6 +144,8 @@ const ru: typeof en = {
     'Не удалось проверить ключ администратора существующего Manager. Введите его ещё раз. Ключи управления CPA здесь не принимаются.',
   unavailable:
     'Этот источник нельзя безопасно проверить. Проверьте остановленную установку на её хосте; не инициализируйте её заново.',
+  source_ownership_unavailable:
+    'Файлы источника 1.x (usage.sqlite* и data.key) принадлежат root (0:0) и недоступны для чтения пользователю v2 Manager (10002:10002). Чтобы оставить исходный том 1.x полностью неизменным, скопируйте остановленный том 1.x, назначьте владельца 10002:10002 файлам usage.sqlite* и data.key в копии и смонтируйте её в /legacy:ro. Либо, если изменение метаданных владельца на остановленном томе 1.x допустимо, временно смонтируйте этот том для записи в разовый контейнер от root (например -v <том_1x>:/mnt, а не поверх :ro) и выполните chown -h 10002:10002 /mnt/usage.sqlite* /mnt/data.key (без chown -R, каталог runtime должен принадлежать 0:0), сохраните /legacy:ro в v2 и войдите снова.',
   changed:
     'Источник или процесс Manager изменились. Войдите снова, чтобы проверить текущую установку.',
   network: 'Не удалось подтвердить проверку личности. Проверьте соединение и войдите снова.',
