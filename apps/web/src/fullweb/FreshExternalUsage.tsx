@@ -68,15 +68,12 @@ export function FreshExternalUsage({
   // user's CPA: the first to answer would then claim the generation and the other
   // real outcome would be dropped. The claim is synchronous, before any await.
   const confirmingNow = useRef(false);
-  // The publication rule above must cover `busy` as well, but a confirmation the
-  // operator can no longer see settled the panel once already: it still has to
-  // release the button, so the release is counted instead of claimed by a ticket.
-  const pendingConfirm = useRef(0);
 
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      generation.current += 1;
     };
   }, []);
 
@@ -93,6 +90,9 @@ export function FreshExternalUsage({
       if (!parsed) throw new Error('invalid usage state');
       setState(parsed);
       setReadError('');
+      setConfirmFailed(false);
+      setConfirming(false);
+      setNotice('');
       if (
         !parsed.blockedReason ||
         parsed.blockedReason === 'usage_monitoring_disabled' ||
@@ -123,11 +123,8 @@ export function FreshExternalUsage({
     confirmingNow.current = true;
     const startOnly = startOnlyRef.current;
     // A confirmation outlives a read request: it writes to the CPA, so the state
-    // it returns is the newest fact this panel holds. The `busy` release is
-    // counted rather than reported, because a confirmation the operator can no
-    // longer see was already settled by the reload that retired it.
+    // it returns is the newest fact this panel holds.
     const ticket = generation.current;
-    pendingConfirm.current += 1;
     setBusy(true);
     setNotice('');
     setConfirmFailed(false);
@@ -140,9 +137,8 @@ export function FreshExternalUsage({
           { kind: 'admin', value: credential }
         )
       );
-      if (!alive.current) return;
+      if (!alive.current || generation.current !== ticket) return;
       if (!parsed) throw new Error('invalid usage state');
-      if (generation.current !== ticket) return;
       // This answer is newer than any read still waiting on the pre-confirmation
       // installation, so publishing it retires them.
       generation.current += 1;
@@ -178,8 +174,7 @@ export function FreshExternalUsage({
       setConfirmFailed(true);
     } finally {
       confirmingNow.current = false;
-      pendingConfirm.current -= 1;
-      if (alive.current && pendingConfirm.current === 0) setBusy(false);
+      if (alive.current) setBusy(false);
     }
   }
 

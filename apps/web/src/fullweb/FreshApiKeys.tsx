@@ -78,17 +78,21 @@ export function FreshApiKeys({
   const creationPendingRef = useRef(false);
   const operationPendingRef = useRef(false);
   const alive = useRef(true);
-  const inFlight = useRef(false);
-  // One ownership rule for the page's whole read chain. A rebind bumps
-  // `reloadToken`, and the answer `refresh()` is still waiting on describes the
-  // installation before that fix: publishing it would repaint the blocker the
-  // rebind resolved, or end a session the rebind already proved works.
-  const reloadEpoch = useRef(0);
-  // A read's key list is a snapshot of the moment the Manager answered it. A key
-  // this page just created is newer than any read that started before that write,
-  // so a snapshot opened earlier can only be applied if no mutation has published
-  // since. Without this, an older list would erase the key the operator just made.
-  const mutationSeq = useRef(0);
+  // Disjoint ownership for reads vs key mutations so overlapping operations
+  // never clear each other's lock, while `busy` reflects whether either owns
+  // the page. Only the read matching `activeReadEpoch` owns the read lock.
+  const readEpoch = useRef(0);
+  const activeReadEpoch = useRef<number | null>(null);
+  const activeMutation = useRef(false);
+  // Coalesces at most one pending refresh requested while a read or mutation
+  // was open, or after a read observed a concurrent key-list mutation.
+  const pendingRefresh = useRef(false);
+  // Tracks rebinds so pre-rebind mutation errors cannot paint stale blockers.
+  const rebindSeq = useRef(0);
+  // Bumped on every local key-list write (`createKey` POST and name PUT,
+  // `retryCreateName` GET/PUT, `reconcile`, `FreshKeyDetails` `onSaved`) so a
+  // read that started earlier re-reads instead of overwriting or dropping it.
+  const mutationRev = useRef(0);
   const copyAttempt = useRef(0);
   const secretPendingRef = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
@@ -97,12 +101,12 @@ export function FreshApiKeys({
     alive.current = true;
     return () => {
       alive.current = false;
-      // A read that outlives the page can answer nothing, and the in-flight guard
-      // it held would otherwise refuse the next mount's first read.
-      inFlight.current = false;
+      readEpoch.current += 1;
+      activeReadEpoch.current = null;
+      activeMutation.current = false;
+      pendingRefresh.current = false;
     };
   }, []);
-
   // Multiple Key operations share the Console exit lock; a completed read in
   // one panel must not release another panel's unresolved write.
   function reportPending() {
@@ -114,11 +118,26 @@ export function FreshApiKeys({
     );
   }
 
-  function failure(err: unknown) {
+  function syncBusy() {
+    if (alive.current) setBusy(activeReadEpoch.current !== null || activeMutation.current);
+  }
+
+  function finishMutation() {
+    activeMutation.current = false;
+    if (alive.current && pendingRefresh.current && activeReadEpoch.current === null) {
+      pendingRefresh.current = false;
+      void refresh(true);
+    } else {
+      syncBusy();
+    }
+  }
+
+  function failure(err: unknown, allowExternalBlocker = true) {
     if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
     else {
       // A typed External code is a state the page names, not a generic outage.
-      const typed = err instanceof PublicApiError ? blockerOf(err.code) : null;
+      const typed =
+        allowExternalBlocker && err instanceof PublicApiError ? blockerOf(err.code) : null;
       setBlocker(
         typed && err instanceof PublicApiError
           ? typed.kind === 'key_rejected'
@@ -131,15 +150,25 @@ export function FreshApiKeys({
   }
 
   async function refresh(forced = false) {
-    // A rebind reload forces a new read even when one is in flight: the older
-    // answer is the state before the rebind and retires below, so skipping the
-    // read would leave the page without any current statement of the
-    // installation. An ordinary refresh still shares one request.
-    if ((inFlight.current && !forced) || selected || detailPendingRef.current) return;
-    inFlight.current = true;
-    const epoch = ++reloadEpoch.current;
-    const mutationsAtStart = mutationSeq.current;
-    setBusy(true);
+    // Forced refreshes (rebind, committed revocation, explicit blocker reload)
+    // retire pre-existing reads immediately and run even if details are open.
+    // An unforced refresh coalesces behind any open operation rather than being dropped.
+    if (
+      !forced &&
+      (activeReadEpoch.current !== null ||
+        activeMutation.current ||
+        selected ||
+        detailPendingRef.current)
+    ) {
+      if (activeReadEpoch.current !== null || activeMutation.current) pendingRefresh.current = true;
+      return;
+    }
+    pendingRefresh.current = false;
+    const epoch = ++readEpoch.current;
+    activeReadEpoch.current = epoch;
+    const mutationsAtStart = mutationRev.current;
+    let authenticatedFailure = false;
+    syncBusy();
     setError('');
     setUsage(null);
     try {
@@ -148,7 +177,7 @@ export function FreshApiKeys({
         gatewayPending: boolean;
         revocationAvailable: boolean;
       }>('api-keys', auth);
-      if (!alive.current || reloadEpoch.current !== epoch) return;
+      if (!alive.current || readEpoch.current !== epoch) return;
       if (
         !Array.isArray(result.keys) ||
         !result.keys.every(validKey) ||
@@ -157,43 +186,60 @@ export function FreshApiKeys({
         typeof result.revocationAvailable !== 'boolean'
       )
         throw new Error();
-      // A mutation that published while this read was open has a newer statement
-      // of the key list: keep it instead of the snapshot this read started from.
-      if (mutationSeq.current === mutationsAtStart) setKeys(result.keys);
+      // A mutation committed while this read was open: skip this snapshot and
+      // re-read once settled so neither the write nor the full list is lost.
+      if (mutationRev.current !== mutationsAtStart) {
+        pendingRefresh.current = true;
+        return;
+      }
+      setKeys(result.keys);
       setGatewayPending(result.gatewayPending);
       setRevocationAvailable(result.revocationAvailable);
       setBlocker(null);
       try {
         const parsed = parseUsageSummary(await client.get<unknown>('api-keys/usage-summary', auth));
         if (!parsed) throw new Error('Invalid usage summary response');
-        if (alive.current && reloadEpoch.current === epoch) setUsage(parsed);
+        if (alive.current && readEpoch.current === epoch) setUsage(parsed);
       } catch (usageErr) {
-        if (!alive.current || reloadEpoch.current !== epoch) return;
-        if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') onUnauthorized();
+        if (!alive.current || readEpoch.current !== epoch) return;
+        if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
+          authenticatedFailure = true;
+          onUnauthorized();
+        }
         setUsage(null);
       }
       // Usage is intentionally best-effort; a failed read leaves the key list usable.
     } catch (err) {
-      if (alive.current && reloadEpoch.current === epoch) failure(err);
+      if (alive.current && readEpoch.current === epoch) {
+        if (err instanceof PublicApiError && err.kind === 'authentication') {
+          authenticatedFailure = true;
+        }
+        failure(err);
+      }
     } finally {
-      // A read that no longer owns the page releases nothing: the newer read is
-      // the one holding `inFlight` and `busy`, and clearing them here would let a
-      // mutation start while that read is still pending.
-      if (reloadEpoch.current === epoch) {
-        inFlight.current = false;
-        if (alive.current) setBusy(false);
+      if (activeReadEpoch.current === epoch) {
+        activeReadEpoch.current = null;
+        if (authenticatedFailure) pendingRefresh.current = false;
+        if (alive.current && pendingRefresh.current && !activeMutation.current) {
+          pendingRefresh.current = false;
+          void refresh(true);
+        } else {
+          syncBusy();
+        }
       }
     }
   }
 
   // No credential, secret or request journal enters persistent browser storage.
-  // A successful rebind changes `reloadToken`, so the blocker this page is
-  // showing is re-read instead of outliving the fix that resolved it.
+  // A successful rebind changes `reloadToken`, clearing stale blockers
+  // immediately and retiring pre-rebind reads even while details are open.
   useEffect(() => {
+    rebindSeq.current += 1;
     setUsageBlocker(null);
+    setBlocker(null);
+    setError('');
     void refresh(true);
   }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
-
   async function copyCreatedSecret() {
     if (!secret) return;
     const attempt = ++copyAttempt.current;
@@ -218,7 +264,8 @@ export function FreshApiKeys({
 
   async function createKey() {
     if (
-      inFlight.current ||
+      activeReadEpoch.current !== null ||
+      activeMutation.current ||
       selected ||
       detailPendingRef.current ||
       secret ||
@@ -229,8 +276,9 @@ export function FreshApiKeys({
       return;
     const desiredName = createName.trim();
     if ([...desiredName].length > 120) return;
-    inFlight.current = true;
-    setBusy(true);
+    activeMutation.current = true;
+    const rebindAtStart = rebindSeq.current;
+    syncBusy();
     setError('');
     setConfirmed(false);
     setRetryAllowed(false);
@@ -260,9 +308,7 @@ export function FreshApiKeys({
             result.key.maskedPreview !== maskedPreviewOf(result.createdSecret)))
       )
         throw new Error();
-      // This key is a fact newer than any list read still open: a snapshot that
-      // started before it must not erase it when it answers.
-      mutationSeq.current += 1;
+      mutationRev.current += 1;
       setKeys((previous) => [
         ...(previous || []).filter((key) => key.id !== result.key.id),
         result.key,
@@ -286,6 +332,7 @@ export function FreshApiKeys({
             namedKey.nameRevision !== result.key.nameRevision + 1
           )
             throw new Error();
+          mutationRev.current += 1;
           setKeys((previous) =>
             (previous || []).map((item) => (item.id === namedKey.id ? namedKey : item))
           );
@@ -296,6 +343,7 @@ export function FreshApiKeys({
         } catch (nameErr) {
           if (!alive.current) return;
           if (nameErr instanceof PublicApiError && nameErr.kind === 'authentication') {
+            pendingRefresh.current = false;
             creationPendingRef.current = false;
             reportPending();
             onUnauthorized();
@@ -322,6 +370,7 @@ export function FreshApiKeys({
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
+        pendingRefresh.current = false;
         creationPendingRef.current = false;
         reportPending();
         onUnauthorized();
@@ -332,19 +381,18 @@ export function FreshApiKeys({
       // the result is reconciled instead of replayed blindly.
       setPending(requestId);
       // HTTP errors are also reconciled: a proxy failure can lose a committed reply.
-      failure(err);
+      failure(err, rebindAtStart === rebindSeq.current);
     } finally {
-      inFlight.current = false;
-      if (alive.current) setBusy(false);
+      finishMutation();
     }
   }
 
   async function retryCreateName(discard = false) {
-    if (!failedCreateName || inFlight.current) return;
+    if (!failedCreateName || activeReadEpoch.current !== null || activeMutation.current) return;
     const desiredName = createName.trim();
     if (!discard && [...desiredName].length > 120) return;
-    inFlight.current = true;
-    setBusy(true);
+    activeMutation.current = true;
+    syncBusy();
     setError('');
     creationPendingRef.current = true;
     reportPending();
@@ -352,6 +400,7 @@ export function FreshApiKeys({
       const current = await client.get<Key>('api-keys/' + failedCreateName.id, auth);
       if (!alive.current) return;
       if (!validKey(current) || current.id !== failedCreateName.id) throw new Error();
+      mutationRev.current += 1;
       setKeys((previous) =>
         (previous || []).map((item) => (item.id === current.id ? current : item))
       );
@@ -376,6 +425,7 @@ export function FreshApiKeys({
         saved.nameRevision !== current.nameRevision + 1
       )
         throw new Error();
+      mutationRev.current += 1;
       setKeys((previous) => (previous || []).map((item) => (item.id === saved.id ? saved : item)));
       setFailedCreateName(null);
       setCreateName('');
@@ -384,6 +434,7 @@ export function FreshApiKeys({
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
+        pendingRefresh.current = false;
         creationPendingRef.current = false;
         reportPending();
         onUnauthorized();
@@ -405,14 +456,14 @@ export function FreshApiKeys({
           : null
       );
     } finally {
-      inFlight.current = false;
-      if (alive.current) setBusy(false);
+      finishMutation();
     }
   }
 
   function openRevocationFor(keyId: string, desiredMode: 'revoke' | 'replace') {
     if (
-      inFlight.current ||
+      activeReadEpoch.current !== null ||
+      activeMutation.current ||
       detailPendingRef.current ||
       creationPendingRef.current ||
       operationPendingRef.current
@@ -428,15 +479,16 @@ export function FreshApiKeys({
   }
 
   async function reconcile() {
-    if (!pending || inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true);
+    if (!pending || activeReadEpoch.current !== null || activeMutation.current) return;
+    activeMutation.current = true;
+    const rebindAtStart = rebindSeq.current;
+    syncBusy();
     setError('');
     try {
       const key = await client.get<Key>('api-keys/requests/' + pending, auth);
       if (!alive.current) return;
       if (!validKey(key) || key.requestId !== pending) throw new Error();
-      mutationSeq.current += 1;
+      mutationRev.current += 1;
       setKeys((previous) => [...(previous || []).filter((item) => item.id !== key.id), key]);
       setConfirmed(true);
       setPending('');
@@ -454,11 +506,15 @@ export function FreshApiKeys({
     } catch (err) {
       if (alive.current) {
         if (err instanceof PublicApiError && err.status === 404) setRetryAllowed(true);
-        else failure(err);
+        else {
+          if (err instanceof PublicApiError && err.kind === 'authentication') {
+            pendingRefresh.current = false;
+          }
+          failure(err, rebindAtStart === rebindSeq.current);
+        }
       }
     } finally {
-      inFlight.current = false;
-      if (alive.current) setBusy(false);
+      finishMutation();
     }
   }
 
@@ -545,7 +601,7 @@ export function FreshApiKeys({
         <FreshExternalBlocker
           state={(blocker ?? usageBlocker)!}
           onRebind={onRebind}
-          onReload={() => void refresh()}
+          onReload={() => void refresh(true)}
           onDismiss={() => {
             if (blocker) setBlocker(null);
             else setUsageBlocker(null);
@@ -583,7 +639,7 @@ export function FreshApiKeys({
         className="key-create-modal"
         closeDisabled={busy || !!pending || !!failedCreateName}
         onClose={() => {
-          if (inFlight.current || pending || failedCreateName) return;
+          if (activeReadEpoch.current !== null || activeMutation.current || pending || failedCreateName) return;
           dismissCreatedSecret();
           setCreateName('');
           setCreateOpen(false);
@@ -1058,9 +1114,10 @@ export function FreshApiKeys({
             setDetailPending(value);
             reportPending();
           }}
-          onSaved={(key) =>
-            setKeys((previous) => (previous || []).map((item) => (item.id === key.id ? key : item)))
-          }
+          onSaved={(key) => {
+            mutationRev.current += 1;
+            setKeys((previous) => (previous || []).map((item) => (item.id === key.id ? key : item)));
+          }}
           onClose={() => setSelected('')}
           onRequestOperation={
             revocationAvailable
@@ -1091,7 +1148,7 @@ export function FreshApiKeys({
             setOperationPending(value);
             reportPending();
           }}
-          onChanged={() => void refresh()}
+          onChanged={() => void refresh(true)}
         />
       )}
     </section>
