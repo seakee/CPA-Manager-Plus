@@ -114,17 +114,6 @@ function UsageSummaryCardView({
           </span>
         ) : null}
       </div>
-      {!isCompact ? (
-        <div
-          data-usage-summary-chart="true"
-          className={styles.usageSummaryCardChart}
-          aria-hidden="true"
-        >
-          <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-            <path d="M0,25 Q15,5 30,20 T60,10 T100,25" />
-          </svg>
-        </div>
-      ) : null}
     </div>
   );
 }
