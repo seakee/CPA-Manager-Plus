@@ -154,6 +154,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         case 'logs-max-total-size-mb':
           nextConfig.logsMaxTotalSizeMb = value as Config['logsMaxTotalSizeMb'];
           break;
+        case 'error-logs-max-files':
+          nextConfig.errorLogsMaxFiles = value as Config['errorLogsMaxFiles'];
+          break;
         case 'ws-auth':
           nextConfig.wsAuth = value as Config['wsAuth'];
           break;

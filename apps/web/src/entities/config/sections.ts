@@ -8,6 +8,7 @@ export const CONFIG_SECTION_KEYS: RawConfigSection[] = [
   'request-log',
   'logging-to-file',
   'logs-max-total-size-mb',
+  'error-logs-max-files',
   'plugins',
   'ws-auth',
   'force-model-prefix',
@@ -40,6 +41,8 @@ export const extractConfigSectionValue = (config: Config | null, section?: RawCo
       return config.loggingToFile;
     case 'logs-max-total-size-mb':
       return config.logsMaxTotalSizeMb;
+    case 'error-logs-max-files':
+      return config.errorLogsMaxFiles;
     case 'plugins':
       return config.pluginsEnabled === undefined
         ? config.raw?.plugins

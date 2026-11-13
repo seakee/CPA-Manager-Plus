@@ -3701,7 +3701,22 @@
     "lines": "行",
     "removed": "已过滤",
     "upgrade_required_title": "需要升级 CLI Proxy API",
-    "upgrade_required_desc": "当前服务器版本不支持日志查看功能，请升级到最新版本的 CLI Proxy API 以使用此功能。"
+    "upgrade_required_desc": "当前服务器版本不支持日志查看功能，请升级到最新版本的 CLI Proxy API 以使用此功能。",
+    "settings_tab": "日志设置",
+    "enable_file_logging": "启用写入日志文件",
+    "enabled_empty_desc": "已启用写入日志文件，新产生的日志将显示在这里",
+    "settings_title": "日志配置",
+    "settings_desc": "管理当前网关的日志写入、调试级别、请求日志与保留策略（observability.logs.*）。",
+    "settings_logging_to_file_desc": "启用后，CPA 将运行与请求日志写入日志文件，供本页查看、筛选与下载。",
+    "settings_logs_max_size_hint": "设为 0 表示不限制总大小；超出上限时自动清理最旧日志。",
+    "settings_error_logs_max_files_hint": "未开启请求日志时生效，默认保留 10 个文件，设为 0 表示不自动清理。",
+    "settings_non_negative_integer": "请输入大于或等于 0 的整数",
+    "settings_saved": "日志设置已保存",
+    "settings_save_failed": "保存日志设置失败",
+    "readonly_badge": "只读",
+    "pprof_readonly_title": "性能分析监听（pprof）",
+    "pprof_managed_posture_reason": "受管与接管安装基线要求保持 pprof 关闭（observability.pprof.enable = false），避免暴露未认证的调试监听端口，因此此项仅作只读展示。",
+    "pprof_deployment_reason": "pprof 监听属于宿主机部署配置，CPA 管理接口不提供运行时修改端点；如需调整请在宿主机配置文件中修改并重启实例。"
   },
   "config_management": {
     "title": "配置面板",

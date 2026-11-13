@@ -79,6 +79,22 @@ export const configApi = {
     apiClient.put('/logs-max-total-size-mb', { value }),
 
   /**
+   * 获取错误日志保留文件数上限
+   */
+  async getErrorLogsMaxFiles(): Promise<number> {
+    const data = await apiClient.get<Record<string, unknown>>('/error-logs-max-files');
+    const value = data?.['error-logs-max-files'] ?? data?.errorLogsMaxFiles ?? 10;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 10;
+  },
+
+  /**
+   * 更新错误日志保留文件数上限
+   */
+  updateErrorLogsMaxFiles: (value: number) =>
+    apiClient.put('/error-logs-max-files', { value }),
+
+  /**
    * WebSocket 鉴权开关
    */
   updateWsAuth: (enabled: boolean) => apiClient.put('/ws-auth', { value: enabled }),

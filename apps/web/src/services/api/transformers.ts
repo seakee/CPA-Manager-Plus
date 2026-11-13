@@ -418,7 +418,13 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
     return config;
   }
 
-  config.debug = normalizeBoolean(raw.debug);
+  const observability = isRecord(raw.observability) ? raw.observability : null;
+  const observabilityLogs =
+    observability && isRecord(observability.logs) ? observability.logs : null;
+  const observabilityPprof =
+    observability && isRecord(observability.pprof) ? observability.pprof : null;
+
+  config.debug = normalizeBoolean(raw.debug ?? observabilityLogs?.debug);
   const proxyUrl = raw['proxy-url'] ?? raw.proxyUrl;
   config.proxyUrl =
     typeof proxyUrl === 'string'
@@ -497,9 +503,16 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
   config.redisUsageQueueRetentionSeconds = normalizeNumber(
     raw['redis-usage-queue-retention-seconds'] ?? raw.redisUsageQueueRetentionSeconds
   );
-  config.requestLog = normalizeBoolean(raw['request-log'] ?? raw.requestLog);
-  config.loggingToFile = normalizeBoolean(raw['logging-to-file'] ?? raw.loggingToFile);
-  const logsMaxTotalSizeMb = raw['logs-max-total-size-mb'] ?? raw.logsMaxTotalSizeMb;
+  config.requestLog = normalizeBoolean(
+    raw['request-log'] ?? raw.requestLog ?? observabilityLogs?.['request-log']
+  );
+  config.loggingToFile = normalizeBoolean(
+    raw['logging-to-file'] ?? raw.loggingToFile ?? observabilityLogs?.['logging-to-file']
+  );
+  const logsMaxTotalSizeMb =
+    raw['logs-max-total-size-mb'] ??
+    raw.logsMaxTotalSizeMb ??
+    observabilityLogs?.['logs-max-total-size-mb'];
   if (typeof logsMaxTotalSizeMb === 'number' && Number.isFinite(logsMaxTotalSizeMb)) {
     config.logsMaxTotalSizeMb = logsMaxTotalSizeMb;
   } else if (typeof logsMaxTotalSizeMb === 'string' && logsMaxTotalSizeMb.trim() !== '') {
@@ -507,6 +520,16 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
     if (Number.isFinite(parsed)) {
       config.logsMaxTotalSizeMb = parsed;
     }
+  }
+  config.errorLogsMaxFiles = normalizeNumber(
+    raw['error-logs-max-files'] ??
+      raw.errorLogsMaxFiles ??
+      observabilityLogs?.['error-logs-max-files']
+  );
+  const pprof = isRecord(raw.pprof) ? raw.pprof : observabilityPprof;
+  if (pprof) {
+    config.pprofEnable = normalizeBoolean(pprof.enable);
+    config.pprofAddr = normalizeString(pprof.addr);
   }
   const plugins = raw.plugins;
   if (isRecord(plugins)) {

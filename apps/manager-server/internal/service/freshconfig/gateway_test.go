@@ -977,6 +977,136 @@ func TestExternalWritesAreRefusedForAnUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestLogsCapabilityEnforcesExternalVersionAndProfileBoundaries(t *testing.T) {
+	for _, version := range []string{"v7.2.130", "", "latest"} {
+		t.Run("external unsupported "+version, func(t *testing.T) {
+			wire := &fakeWire{document: map[string]any{"routing": map[string]any{"strategy": "round-robin"}}}
+			store := &memoryStore{record: managedRecord()}
+			store.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+				Strategy: bootstrap.ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
+			}
+			store.record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope"}
+			service := New(store, nil, externalTargets())
+			service.EnableExternal(func(context.Context, uint64) (string, string, error) {
+				return "https://external.test", "management-test-only", nil
+			})
+			service.externalWire = func(string) configWire { return wire }
+			service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				return cpa.ClassifyExternalVersion(version), nil
+			}
+			cap, err := service.LogsCapability(context.Background())
+			if err != nil {
+				t.Fatalf("LogsCapability = %v", err)
+			}
+			if cap.Mode != ModeExternal || cap.Writable || cap.Reason != ReasonVersionUnsupported {
+				t.Fatalf("got capability %+v, want non-writable %q", cap, ReasonVersionUnsupported)
+			}
+		})
+	}
+
+	t.Run("external v8 supported", func(t *testing.T) {
+		store := &memoryStore{record: managedRecord()}
+		store.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
+		}
+		store.record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope"}
+		service := New(store, nil, externalTargets())
+		service.EnableExternal(func(context.Context, uint64) (string, string, error) {
+			return "https://external.test", "management-test-only", nil
+		})
+		service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+		}
+		cap, err := service.LogsCapability(context.Background())
+		if err != nil {
+			t.Fatalf("LogsCapability = %v", err)
+		}
+		if cap.Mode != ModeExternal || !cap.Writable {
+			t.Fatalf("got capability %+v, want writable external", cap)
+		}
+	})
+
+	t.Run("external probe failure fails closed", func(t *testing.T) {
+		store := &memoryStore{record: managedRecord()}
+		store.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
+		}
+		store.record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope"}
+		service := New(store, nil, externalTargets())
+		service.EnableExternal(func(context.Context, uint64) (string, string, error) {
+			return "https://external.test", "management-test-only", nil
+		})
+		service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+			return cpa.ExternalVersionReport{}, cpa.ErrProofUnavailable
+		}
+		cap, err := service.LogsCapability(context.Background())
+		if err != nil {
+			t.Fatalf("LogsCapability = %v", err)
+		}
+		if cap.Mode != ModeExternal || cap.Writable || cap.Reason != ReasonUnavailable {
+			t.Fatalf("got capability %+v, want non-writable %q", cap, ReasonUnavailable)
+		}
+	})
+
+	t.Run("external refusal propagates typed error", func(t *testing.T) {
+		store := &memoryStore{record: managedRecord()}
+		store.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed", TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
+		}
+		store.record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope"}
+		service := New(store, nil, externalTargets())
+		service.EnableExternal(func(context.Context, uint64) (string, string, error) {
+			return "https://external.test", "management-test-only", nil
+		})
+		service.externalProbe = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+			return cpa.ExternalVersionReport{}, cpa.ErrManagementRejected
+		}
+		if _, err := service.LogsCapability(context.Background()); !errors.Is(err, cpa.ErrManagementRejected) {
+			t.Fatalf("LogsCapability err = %v, want ErrManagementRejected", err)
+		}
+	})
+
+	t.Run("private H1 is frozen read-only", func(t *testing.T) {
+		rec := managedRecord()
+		rec.Operation.Strategy.TargetIdentity = cpa.PrivateKeyRuntime
+		rec.Operation.Strategy.TargetArtifactID = cpa.PrivateKeyArtifact
+		rec.Operation.Strategy.DestinationConnectionIdentity = ""
+		store := &memoryStore{record: rec}
+		service := New(store, func(context.Context, uint64) (string, error) {
+			return "secret", nil
+		}, privateTargets)
+		service.wire = &fakeWire{document: map[string]any{}}
+		cap, err := service.LogsCapability(context.Background())
+		if err != nil {
+			t.Fatalf("LogsCapability = %v", err)
+		}
+		if cap.Mode != ModePrivate || cap.Writable || cap.Reason != ReasonPrivateFrozen {
+			t.Fatalf("got capability %+v, want private frozen read-only", cap)
+		}
+	})
+
+	t.Run("managed reports writable when CPA config is readable", func(t *testing.T) {
+		wire := &fakeWire{document: map[string]any{}}
+		service, _ := managedService(t, wire)
+		cap, err := service.LogsCapability(context.Background())
+		if err != nil {
+			t.Fatalf("LogsCapability = %v", err)
+		}
+		if cap.Mode != ModeManaged || !cap.Writable {
+			t.Fatalf("got capability %+v, want writable managed", cap)
+		}
+
+		wire.documentErr = cpa.ErrProofUnavailable
+		cap, err = service.LogsCapability(context.Background())
+		if err != nil {
+			t.Fatalf("LogsCapability readErr = %v", err)
+		}
+		if cap.Mode != ModeManaged || cap.Writable || cap.Reason != ReasonReadUnavailable {
+			t.Fatalf("got capability %+v, want non-writable %q", cap, ReasonReadUnavailable)
+		}
+	})
+}
+
 // baselineOf is the rendered baseline of one group in an already-read view.
 func baselineOf(t *testing.T, view View, groupID string) string {
 	t.Helper()

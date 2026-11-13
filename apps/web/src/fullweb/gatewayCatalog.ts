@@ -261,7 +261,7 @@ export function gatewayFamilies(): GatewayFamilyMeta[] {
   ];
 }
 
-export function gatewayOwners(): GatewayOwnerMeta[] {
+export function gatewayOwners(mode?: string): GatewayOwnerMeta[] {
   const owner = (
     path: string,
     ownerKey: ReferenceTextKey,
@@ -288,17 +288,19 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       ],
       '/ai-providers'
     ),
-    owner('models.* / oauth.model-alias / oauth.excluded-models', 'models', 'ownerDetailModels', [
-      'models',
-      'oauth.model-alias',
-      'oauth.excluded-models',
-    ]),
+    owner('models.*', 'models', 'ownerDetailModels', ['models']),
+    owner(
+      'oauth.model-alias / oauth.excluded-models',
+      'auth',
+      'ownerDetailOauthModels',
+      ['oauth.model-alias', 'oauth.excluded-models'],
+      '/accounts'
+    ),
     owner(
       'oauth.auth-dir / oauth.auth-auto-refresh-workers / oauth.settings / oauth.request-scoped-errors',
       'auth',
       'ownerDetailAuth',
-      ['oauth.auth-dir', 'oauth.auth-auto-refresh-workers', 'oauth.settings', 'oauth.request-scoped-errors'],
-      '/accounts'
+      ['oauth.auth-dir', 'oauth.auth-auto-refresh-workers', 'oauth.settings', 'oauth.request-scoped-errors']
     ),
     owner('oauth.providers.codex.live-media-relay.*', 'live', 'ownerDetailLive', [
       'oauth.providers.codex.live-media-relay.enabled',
@@ -335,19 +337,30 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       'credentials.concurrency',
       'credentials.in-flight',
     ]),
-    owner('observability.logs.* / observability.pprof.*', 'logs', 'ownerDetailLogs', [
+    owner('observability.logs.*', 'logs', 'ownerDetailLogs', [
       'observability.logs.debug',
       'observability.logs.logging-to-file',
       'observability.logs.logs-max-total-size-mb',
       'observability.logs.error-logs-max-files',
       'observability.logs.request-log',
+    ], '/logs'),
+    owner('observability.pprof.*', 'deployment', 'ownerDetailPprof', [
       'observability.pprof.enable',
       'observability.pprof.addr',
-    ], '/logs'),
-    owner('observability.usage.*', 'usage', 'ownerDetailUsage', [
+    ]),
+    owner(
       'observability.usage.usage-statistics-enabled',
+      'usage',
+      'ownerDetailUsageStats',
+      ['observability.usage.usage-statistics-enabled'],
+      mode === 'external' ? '/api-keys' : undefined
+    ),
+    owner(
       'observability.usage.redis-usage-queue-retention-seconds',
-    ], '/monitoring'),
+      'usage',
+      'ownerDetailUsageRetention',
+      ['observability.usage.redis-usage-queue-retention-seconds']
+    ),
     owner('server.* / management.*', 'deployment', 'ownerDetailDeployment', [
       'server.host',
       'server.port',
@@ -370,17 +383,30 @@ export function gatewayOwners(): GatewayOwnerMeta[] {
       'management.disable-auto-update-panel',
       'management.panel-github-repository',
       'management.base-url',
-    ], '/system'),
-    owner('plugins.*', 'plugins', 'ownerDetailPlugins', [
-      'plugins.enabled',
-      'plugins.dir',
-      'plugins.store-sources',
-      'plugins.store-auth',
-      'plugins.auth-revision',
-      'plugins.configs.<plugin>.enabled',
-      'plugins.configs.<plugin>.priority',
-      'plugins.configs.<plugin>.*',
-    ], '/plugins'),
+    ]),
+    owner(
+      'plugins.enabled / plugins.configs.*',
+      'plugins',
+      'ownerDetailPlugins',
+      [
+        'plugins.enabled',
+        'plugins.configs.<plugin>.enabled',
+        'plugins.configs.<plugin>.priority',
+        'plugins.configs.<plugin>.*',
+      ],
+      '/plugins'
+    ),
+    owner(
+      'plugins.dir / plugins.store-sources / plugins.store-auth / plugins.auth-revision',
+      'plugins',
+      'ownerDetailPluginsHost',
+      [
+        'plugins.dir',
+        'plugins.store-sources',
+        'plugins.store-auth',
+        'plugins.auth-revision',
+      ]
+    ),
     owner(
       'config-version / quota-exceeded.switch-project / quota-exceeded.switch-preview-model',
       'legacy',
