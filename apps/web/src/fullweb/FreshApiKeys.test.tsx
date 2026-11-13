@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshApiKeys } from './FreshApiKeys';
 import { createPublicApiClient } from './publicApi';
@@ -1170,7 +1170,6 @@ describe('Fresh client key persistence UI', () => {
   // reports itself idle and lets a mutation interleave with a pending read whose
   // older snapshot would then erase the key it just created.
   it('keeps the page busy when a superseded read settles first', async () => {
-    const created = { ...key, id: 'f'.repeat(32), requestId: '1'.repeat(32) };
     let settleFirstRead: (response: Response) => void = () => undefined;
     let settleSecondRead: (response: Response) => void = () => undefined;
     let keyReads = 0;
@@ -1195,9 +1194,6 @@ describe('Fresh client key persistence UI', () => {
             items: [],
           })
         );
-      }
-      if (url.endsWith('/api-keys') && init?.method === 'POST') {
-        return Promise.resolve(Response.json({ key: created, createdSecret: secret }));
       }
       return Promise.reject(new Error('unexpected url: ' + url));
     });
@@ -1476,5 +1472,804 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).not.toContain(x('rebindUnavailableHelp'));
     // The read that replaced it is what the page reports from.
     expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
+  it('keeps the page busy when createKey settles while a rebind read is still open', async () => {
+    const created = {
+      ...key,
+      id: 'f'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…cccc',
+    };
+    let settlePost: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, created], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+
+    // Mutation settles while rebind read is still open: busy lock must stay held.
+    await act(async () => {
+      settlePost(Response.json({ key: created, createdSecret: secret }, { status: 201 }));
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+    expect(button(t('keysCreate')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, created], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(key.id);
+    expect(view()).toContain(created.id);
+  });
+
+  it('keeps the page busy when a rebind read settles while createKey is still open', async () => {
+    const created = {
+      ...key,
+      id: 'f'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…cccc',
+    };
+    let settlePost: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          settlePost = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await openCreate();
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind read settles immediately while POST is still pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+    expect(renderer.root.findByProps({ 'aria-busy': true })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(true);
+
+    await act(async () => {
+      settlePost(Response.json({ key: created, createdSecret: secret }, { status: 201 }));
+    });
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(button(t('refresh')).props.disabled).toBe(false);
+    expect(view()).toContain(created.id);
+  });
+
+  it('re-reads and keeps the full post-rebind key list when reconcile resolves during a rebind read', async () => {
+    const reconciled = {
+      ...key,
+      id: 'c'.repeat(32),
+      requestId: 'b'.repeat(32),
+      name: 'Recovered Key',
+    };
+    const postRebindPeer = {
+      ...key,
+      id: 'd'.repeat(32),
+      requestId: 'e'.repeat(32),
+      name: 'Post-Rebind Peer',
+    };
+    let settleReconcile: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.reject(new Error('lost reply'));
+      }
+      if (url.includes('/api-keys/requests/')) {
+        return new Promise<Response>((resolve) => {
+          settleReconcile = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            keys: [key, postRebindPeer, reconciled],
+            gatewayPending: false,
+            revocationAvailable: false,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await click(t('keysCreate'));
+    act(() => {
+      void button(t('keysCheck')).props.onClick();
+    });
+    // Rebind starts while reconcile is pending.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Reconcile resolves first, bumping mutation revision while rebind read is open.
+    await act(async () => {
+      settleReconcile(Response.json(reconciled));
+    });
+    // Rebind read settles with the full post-rebind list.
+    await act(async () => {
+      settleRebindRead(
+        Response.json({
+          keys: [key, postRebindPeer, reconciled],
+          gatewayPending: false,
+          revocationAvailable: false,
+        })
+      );
+    });
+    expect(view()).toContain(key.id);
+    expect(view()).toContain(postRebindPeer.id);
+    expect(view()).toContain(reconciled.id);
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+  });
+
+  it('does not let an overlapping list snapshot overwrite a saved creation name', async () => {
+    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1 };
+    const named = { ...unnamed, name: 'Prod CLI', nameRevision: 2 };
+    let settleNamePut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
+        return new Promise<Response>((resolve) => {
+          settleNamePut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await setCreateName('Prod CLI');
+    await act(async () => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    // Rebind read starts while name PUT is in flight.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Name PUT resolves first, then the pre-PUT list snapshot arrives.
+    await act(async () => {
+      settleNamePut(Response.json(named));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(view()).toContain('Prod CLI');
+  });
+
+  it('does not let an overlapping list snapshot overwrite a key name saved in details', async () => {
+    const renamed = { ...key, name: 'Renamed Key', nameRevision: 2 };
+    let settleRenamePut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/' + key.id) && init?.method === 'PUT') {
+        return new Promise<Response>((resolve) => {
+          settleRenamePut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/' + key.id) && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json(key));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/usage')) {
+        return Promise.resolve(
+          Response.json({
+            keyId: key.id,
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [renamed], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+    });
+    await click(k('rename'));
+    await act(async () => {
+      renderer.root
+        .findByProps({ id: 'key-name' })
+        .props.onChange({ target: { value: 'Renamed Key' } });
+    });
+    act(() => {
+      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    expect(keyReads).toBe(2);
+    await act(async () => {
+      settleRenamePut(Response.json(renamed));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    await click(t('keysCloseDetails'));
+    expect(view()).toContain('Renamed Key');
+  });
+
+  it('refreshes the key list when revocation commits while a read is in flight', async () => {
+    const second = { ...key, id: 'd'.repeat(32), requestId: 'e'.repeat(32), name: 'Keeper Key' };
+    const superseded = { ...key, lifecycle: 'superseded' as const };
+    let revokeRequestId = '';
+    let settleRevoke: (response: Response) => void = () => undefined;
+    let settleInFlightRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    let revoked = false;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/operations/latest')) {
+        return Promise.resolve(
+          Response.json({
+            operation: null,
+            nextStep: '',
+            runtimeState: 'effect_unknown',
+            expiresAtMs: 0,
+          })
+        );
+      }
+      if (url.includes('/revocation/') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json({ ready: true, reason: '' }));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/revocation') && init?.method === 'POST') {
+        const parsed: unknown = JSON.parse(String(init.body));
+        if (parsed && typeof parsed === 'object' && 'requestId' in parsed && typeof parsed.requestId === 'string') {
+          revokeRequestId = parsed.requestId;
+        }
+        return new Promise<Response>((resolve) => {
+          settleRevoke = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key, second], gatewayPending: false, revocationAvailable: true })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleInFlightRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            keys: revoked ? [superseded, second] : [key, second],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={client}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+        />
+      );
+    });
+    await act(async () => {
+      renderer.root
+        .findAllByType(DropdownMenu)[0]
+        .props.items.find((item: { key: string }) => item.key === 'revoke')
+        .onClick();
+    });
+    act(() => {
+      void button(k('confirmOperation')).props.onClick();
+    });
+    // An unforced read opens while the revocation request is in flight.
+    act(() => {
+      void button(t('refresh')).props.onClick();
+    });
+    expect(keyReads).toBe(2);
+
+    // Revocation commits and fires onChanged() while read #2 is still open.
+    revoked = true;
+    await act(async () => {
+      settleRevoke(
+        Response.json({
+          operation: {
+            id: revokeRequestId,
+            targetId: key.id,
+            keeperId: second.id,
+            mode: 'revoke',
+            outcome: 'committed',
+            revision: 1,
+            steps: [{ name: 'revoke', state: 'observed', returned: true }],
+          },
+          runtimeState: 'effective_observed',
+          expiresAtMs: 0,
+          nextStep: '',
+        })
+      );
+    });
+    await act(async () => {
+      settleInFlightRead(
+        Response.json({ keys: [key, second], gatewayPending: false, revocationAvailable: true })
+      );
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong').children
+    ).toEqual(['1']);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-summary-replaced' }).findByType('strong')
+        .children
+    ).toEqual(['1']);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-row-' + key.id })).toHaveLength(0);
+  });
+
+  it('clears stale blockers, retires pre-rebind reads, and reloads keys on rebind even while the details drawer is open', async () => {
+    const postRebind = { ...key, id: 'c'.repeat(32), requestId: 'd'.repeat(32), name: 'Post Rebind' };
+    let settlePreRebindUsage: (response: Response) => void = () => undefined;
+    let usageReads = 0;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/' + key.id)) {
+        return Promise.resolve(Response.json(key));
+      }
+      if (url.endsWith('/api-keys/' + key.id + '/usage')) {
+        return Promise.resolve(
+          Response.json({
+            keyId: key.id,
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        keyReads += 1;
+        return Promise.resolve(
+          Response.json({
+            keys: keyReads === 1 ? [key] : [key, postRebind],
+            gatewayPending: false,
+            revocationAvailable: false,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        usageReads += 1;
+        if (usageReads === 1) {
+          return Promise.resolve(
+            Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+          );
+        }
+        if (usageReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settlePreRebindUsage = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        externalUsage={true}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(1);
+
+    // Open details drawer, click reload on the usage panel so a pre-rebind read stays open,
+    // then complete a rebind while the drawer remains open.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'external-usage-reload' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    // Pre-rebind read #2 settles late with a key rejection while drawer is still open.
+    await act(async () => {
+      settlePreRebindUsage(
+        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
+    ).toHaveLength(0);
+    expect(keyReads).toBe(2);
+
+    await click(t('keysCloseDetails'));
+    expect(view()).toContain(postRebind.id);
+    expect(view()).toContain(x('usageCollectorRunning'));
+  });
+
+  it('does not let an overlapping list snapshot overwrite a retried creation name', async () => {
+    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1 };
+    const named = { ...unnamed, name: 'Retried Name', nameRevision: 2 };
+    let settleRetryPut: (response: Response) => void = () => undefined;
+    let settleRebindRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && init?.method === 'POST') {
+        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
+        const body: unknown = JSON.parse(String(init.body));
+        if (body && typeof body === 'object' && 'name' in body && body.name === 'Initial Fail') {
+          return Promise.resolve(new Response('', { status: 503 }));
+        }
+        return new Promise<Response>((resolve) => {
+          settleRetryPut = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/' + unnamed.id) && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(Response.json(unnamed));
+      }
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return Promise.resolve(
+            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+          );
+        }
+        if (keyReads === 2) {
+          return new Promise<Response>((resolve) => {
+            settleRebindRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const page = (reloadToken: number) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+        reloadToken={reloadToken}
+      />
+    );
+    await act(async () => {
+      renderer = create(page(0));
+    });
+    await setCreateName('Initial Fail');
+    await click(t('keysCreate'));
+    await setCreateName('Retried Name');
+    act(() => {
+      void renderer.root.findByProps({ 'data-testid': 'retry-create-name' }).props.onClick();
+    });
+    // Rebind starts while retryCreateName PUT is in flight.
+    await act(async () => {
+      renderer.update(page(1));
+    });
+    await act(async () => {
+      settleRetryPut(Response.json(named));
+    });
+    await act(async () => {
+      settleRebindRead(
+        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
+      );
+    });
+    expect(view()).toContain('Retried Name');
+  });
+
+  it('retires the discarded StrictMode mount read so its late 401/blocker cannot affect the page', async () => {
+    let settleFirstRead: (response: Response) => void = () => undefined;
+    let keyReads = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        keyReads += 1;
+        if (keyReads === 1) {
+          return new Promise<Response>((resolve) => {
+            settleFirstRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'known', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <StrictMode>
+          <FreshApiKeys
+            client={client}
+            credential="admin-test-only"
+            onUnauthorized={unauthorized}
+            onCreationPending={vi.fn()}
+          />
+        </StrictMode>
+      );
+    });
+    expect(keyReads).toBe(2);
+    await act(async () => {
+      settleFirstRead(Response.json({ code: 'unauthorized' }, { status: 401 }));
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
+    expect(view()).toContain(key.id);
   });
 });
