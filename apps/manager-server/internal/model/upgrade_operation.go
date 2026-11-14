@@ -316,9 +316,16 @@ type UpgradeOperation struct {
 	Revision int64 `json:"revision"`
 	// Rollback is the evidence recorded with the rolled_back verdict, and nil
 	// for every other stage.
-	Rollback    *RollbackEvidence `json:"rollback,omitempty"`
-	CreatedAtMS int64             `json:"createdAtMs"`
-	UpdatedAtMS int64             `json:"updatedAtMs"`
+	Rollback                   *RollbackEvidence `json:"rollback,omitempty"`
+	ControlBasePath            string            `json:"controlBasePath,omitempty"`
+	InferenceBasePath          string            `json:"inferenceBasePath,omitempty"`
+	SharedEntry                bool              `json:"sharedEntry,omitempty"`
+	RoutingCommitted           bool              `json:"routingCommitted,omitempty"`
+	InferenceCommitted         bool              `json:"inferenceCommitted,omitempty"`
+	SuggestedControlBasePath   string            `json:"suggestedControlBasePath,omitempty"`
+	SuggestedInferenceBasePath string            `json:"suggestedInferenceBasePath,omitempty"`
+	CreatedAtMS                int64             `json:"createdAtMs"`
+	UpdatedAtMS                int64             `json:"updatedAtMs"`
 }
 
 // Normalize fills the zero values that the schema requires. It never removes,
@@ -473,6 +480,9 @@ func (o UpgradeOperation) Validate() error {
 		if err := evidence.Validate(); err != nil {
 			return fmt.Errorf("complete upgrade operation verification is incomplete: %w", err)
 		}
+		if evidence.TargetMode == UpgradeTargetExternal && (o.InferenceBasePath != "" || o.SharedEntry || o.InferenceCommitted) {
+			return errors.New("an External complete upgrade operation cannot carry a managed inference prefix")
+		}
 	}
 	// A rolled_back operation is terminal, so it can never be re-proven. It must
 	// carry the observation that justified it: a terminal verdict without
@@ -484,6 +494,23 @@ func (o UpgradeOperation) Validate() error {
 	// reader believe a verdict was observed when only its shape survived.
 	if o.Rollback != nil && !o.Rollback.Complete() {
 		return errors.New("upgrade operation rollback evidence must name the image, its source and form, the health endpoint, the observed fingerprint and when it was observed")
+	}
+	if o.RoutingCommitted && strings.TrimSpace(o.ControlBasePath) == "" {
+		return errors.New("upgrade operation routingCommitted requires controlBasePath")
+	}
+	if o.InferenceCommitted && (!o.RoutingCommitted || strings.TrimSpace(o.InferenceBasePath) == "") {
+		return errors.New("upgrade operation inferenceCommitted requires routingCommitted and inferenceBasePath")
+	}
+	if o.InferenceBasePath == "" && o.SharedEntry {
+		return errors.New("upgrade operation sharedEntry requires inferenceBasePath")
+	}
+	if o.ControlBasePath != "" && o.InferenceBasePath != "" {
+		if o.ControlBasePath == o.InferenceBasePath && !o.SharedEntry {
+			return errors.New("identical upgrade control and inference paths require sharedEntry")
+		}
+		if o.ControlBasePath != o.InferenceBasePath && o.SharedEntry {
+			return errors.New("distinct upgrade control and inference paths cannot set sharedEntry")
+		}
 	}
 	return nil
 }

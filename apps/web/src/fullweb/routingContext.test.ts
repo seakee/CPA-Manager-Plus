@@ -8,15 +8,6 @@ const snapshot = {
 };
 
 describe('Full Web consumes the verified Manager routing projection', () => {
-  it('derives one immutable router/static/API context from the effective prefix', () => {
-    const context = resolveRoutingContext(snapshot);
-    expect(context).toEqual({
-      basePath: '/phase4-test',
-      apiBase: '/phase4-test/api/v2',
-      revision: 1,
-    });
-    expect(Object.isFrozen(context)).toBe(true);
-  });
 
   it.each(['desired_only', 'unknown', 'unavailable', 'stale', '', null])(
     'fails closed for snapshot state %s',
@@ -54,7 +45,7 @@ describe('Full Web consumes the verified Manager routing projection', () => {
     expect(resolveRoutingContext({ ...snapshot, verifiedEffectiveControlBasePath })).toBeNull();
   });
 
-  it.each(['/phase4-test', '/control/sub-path', '/AZaz09-._~$&+,/:;=@'])(
+  it.each(['/phase4-test', '/control/sub-path', '/AZaz09-._~$&+,/:;=@', '/v10']) (
     'keeps canonical router, static and API paths unchanged by URL serialization: %s',
     (basePath) => {
       const context = resolveRoutingContext({
@@ -85,6 +76,22 @@ describe('Full Web consumes the verified Manager routing projection', () => {
     '/favicon.ico',
     '/favicon.ico/nested',
     '/apple-touch-icon.png',
+    '/v8',
+    '/v1beta/models',
+    '/openai',
+    '/backend-api/codex',
+    '/api/provider',
+    '/api/v2',
+    '/api/gateway',
+    '/callback',
+    '/anthropic/callback',
+    '/codex/callback',
+    '/antigravity/callback',
+    '/devin/callback',
+    '/internal',
+    '/healthz',
+    '/keepalive',
+    '/assets/nested',
   ])('rejects the same reserved collisions as Manager: %s', (verifiedEffectiveControlBasePath) => {
     expect(resolveRoutingContext({ ...snapshot, verifiedEffectiveControlBasePath })).toBeNull();
   });

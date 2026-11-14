@@ -64,7 +64,7 @@ func TestManagedCompletionCASMirrorsManagerConfigAndSetup(t *testing.T) {
 		t.Fatalf("pending managed install wrote setup mirror: rows=%d err=%v", setupRows, err)
 	}
 	completed, err := st.Update(t.Context(), id, pending.Operation.Revision, func(r *Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 		r.Operation.ProductComplete = true
 		return nil
 	})

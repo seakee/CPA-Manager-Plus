@@ -18,12 +18,15 @@ import (
 
 func freshAuthorityJSON(state ingress.FreshRouteState, admission string) string {
 	body := map[string]any{
-		"installationId": state.InstallationID,
-		"generation":     state.Generation,
-		"operationId":    state.OperationID,
-		"revision":       state.Revision,
-		"target":         state.Target,
-		"committed":      state.Committed,
+		"installationId":     state.InstallationID,
+		"generation":         state.Generation,
+		"operationId":        state.OperationID,
+		"revision":           state.Revision,
+		"target":             state.Target,
+		"committed":          state.Committed,
+		"inferenceTarget":    state.InferenceTarget,
+		"sharedEntry":        state.SharedEntry,
+		"inferenceCommitted": state.InferenceCommitted,
 	}
 	if admission != "" {
 		body["gatewayAdmission"] = json.RawMessage(admission)
@@ -110,7 +113,7 @@ func TestFreshAuthorityClientDecodesAdmissionAndRejectsUnknownShape(t *testing.T
 }
 
 func TestFreshGatewayAdmissionClientIntegration(t *testing.T) {
-	state := ingress.FreshRouteState{InstallationID: "install-one", Generation: "generation-one", OperationID: "fresh-operation", Revision: 3, Target: "/control", Committed: true}
+	state := ingress.FreshRouteState{InstallationID: "install-one", Generation: "generation-one", OperationID: "fresh-operation", Revision: 3, Target: "/control", InferenceTarget: "/inference", Committed: true, InferenceCommitted: true}
 	admitted := `{"installationId":"install-one","generation":"generation-one","admitted":true}`
 	foreignGeneration := `{"installationId":"install-one","generation":"generation-two","admitted":true}`
 	denied := `{"installationId":"install-one","generation":"generation-one","admitted":false}`
@@ -161,7 +164,7 @@ func TestFreshGatewayAdmissionClientIntegration(t *testing.T) {
 	handler.EnableFreshGatewayAdmission(ingress.NewGatewayAdmitter(routes, authority, ingress.DefaultGatewayAdmissionTTL).Admitted)
 	request := func() int {
 		response := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		req := httptest.NewRequest(http.MethodPost, "/inference/v1/responses", nil)
 		req.Header.Set("Authorization", "Bearer cpamp_sk_client")
 		handler.ServeHTTP(response, req)
 		return response.Code

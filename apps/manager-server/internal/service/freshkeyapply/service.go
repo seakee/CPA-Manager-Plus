@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -52,8 +54,8 @@ type Service struct {
 	keys               *freshkeys.Service
 	runtime            runtimeservice.RuntimeClient
 	wire               wire
-	permit             func() (Permit, error)
-	registrationPermit func() (Permit, error)
+	permit             func(context.Context) (Permit, error)
+	registrationPermit func(context.Context) (Permit, error)
 	keyPermit          func(context.Context, string, string) (KeyPermit, error)
 	source             ManagedSource
 	externalSource     ExternalSource
@@ -76,6 +78,7 @@ type Service struct {
 	startedAtMS            int64
 	selectFor              func(bootstrap.FreshOperation) *Service
 	loadOp                 func() (bootstrap.FreshOperation, bool)
+	authCache              authProofCache
 }
 
 // NewStrategySelector delegates installation-authority calls to the profile
@@ -120,12 +123,12 @@ func (s *Service) ForOperation(op bootstrap.FreshOperation) *Service {
 }
 
 func New(r *repo.Repository, keys *freshkeys.Service, runtime runtimeservice.RuntimeClient) *Service {
-	s := &Service{repo: r, keys: keys, runtime: runtime, wire: cpa.NewTransport(), permit: loadPermit,
+	s := &Service{repo: r, keys: keys, runtime: runtime, wire: cpa.NewTransport(), permit: func(context.Context) (Permit, error) { return loadPermit() },
 		keyPermit:     func(context.Context, string, string) (KeyPermit, error) { return loadKeyPermit() },
 		profile:       ProfilePrivate,
 		keyOperations: os.Getenv("CPAMP_PRIVATE_KEY_OPERATIONS") == "1", startedAtMS: time.Now().UnixMilli()}
 	if os.Getenv("CPAMP_PRIVATE_S2B_CHAT") == "1" {
-		s.wire = cpa.NewPrivateS2BTransport(func() (cpa.PrivateProviderSeed, error) { p, err := s.permit(); return p.S2B, err })
+		s.wire = cpa.NewPrivateS2BTransport(func() (cpa.PrivateProviderSeed, error) { p, err := s.permit(context.Background()); return p.S2B, err })
 	}
 	return s
 }
@@ -179,6 +182,10 @@ func (s *Service) target(ctx context.Context, p Permit) (model.RuntimeObservedSt
 		if v.Validate() != nil || v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil {
 			return v, ErrUnavailable
 		}
+		if p.runtimeGeneration != 0 && uint64(v.Generation) != p.runtimeGeneration ||
+			p.runtimeArtifact != "" && string(v.ActiveGatewayArtifact.ArtifactID) != p.runtimeArtifact {
+			return v, ErrGeneration
+		}
 		return v, nil
 	}
 	if string(v.Identity) != cpa.PrivateKeyRuntime || strconv.FormatUint(uint64(v.Generation), 10) != p.Generation {
@@ -206,7 +213,7 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 	}
 	result := State{KeyID: id, RuntimeState: "effect_unknown"}
 	if s.registrationPermit != nil {
-		if rp, rpErr := s.registrationPermit(); rpErr == nil && rp.Strategy == string(bootstrap.AdoptExisting) {
+		if rp, rpErr := s.registrationPermit(ctx); rpErr == nil && rp.Strategy == string(bootstrap.AdoptExisting) {
 			return result, repo.ErrConflict
 		}
 	}
@@ -231,7 +238,7 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 			return s.observe(ctx, id, generation)
 		}
 	}
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -244,6 +251,10 @@ func (s *Service) Apply(ctx context.Context, id string, generation uint64) (Stat
 	target, err := s.target(ctx, p)
 	if err != nil {
 		return result, err
+	}
+	if s.profile == ProfileManaged {
+		p.runtimeGeneration = uint64(target.Generation)
+		p.runtimeArtifact = string(target.ActiveGatewayArtifact.ArtifactID)
 	}
 	err = s.keys.WithStagedSecret(ctx, id, func(secret string) error {
 		result.ManagerStaged = true
@@ -327,9 +338,16 @@ func (s *Service) EnsureInitialInstall(ctx context.Context, runID string, genera
 	}
 	return key, nil
 }
-func (s *Service) observe(ctx context.Context, id string, generation uint64) (State, error) {
+func (s *Service) observe(ctx context.Context, id string, generation uint64) (state State, err error) {
+	defer func(callerCtx context.Context) {
+		if callerCtx.Err() != nil {
+			state.RuntimeState, state.ExpiresAtMS = "effect_unknown", 0
+			state.ObservedFromMS, state.ObservedUntilMS, err = 0, 0, callerCtx.Err()
+		}
+	}(ctx)
 	result := State{KeyID: id, RuntimeState: "effect_unknown"}
-	if _, err := s.keys.Detail(ctx, id); err != nil {
+	key, err := s.keys.Detail(ctx, id)
+	if err != nil {
 		return result, err
 	}
 	result.ManagerStaged = true
@@ -341,30 +359,54 @@ func (s *Service) observe(ctx context.Context, id string, generation uint64) (St
 	// the single S1 journal must still block future installs, not resolve this
 	// Key's UNKNOWN response.
 	result.Attempted = attempt != nil && attempt.KeyID == id
-	p, err := s.permit()
+	if key.Lifecycle == identity.LifecycleSuperseded {
+		return result, nil
+	}
+	if s.profile == ProfileManaged {
+		latest, err := s.repo.LatestOperation(ctx)
+		if err != nil {
+			return result, err
+		}
+		if latest != nil && !latest.IsTerminal() && (latest.TargetID == id || latest.KeeperID == id) {
+			return result, nil
+		}
+	}
+	p, err := s.permit(ctx)
 	if err != nil {
+		if !unavailableObservationAuthority(err) {
+			return result, err
+		}
 		return result, nil
 	}
 	if p.Generation != strconv.FormatUint(generation, 10) {
 		return result, ErrGeneration
 	}
-	if _, err = s.target(ctx, p); err != nil {
+	target, err := s.target(ctx, p)
+	if err != nil {
 		return result, err
+	}
+	if s.profile == ProfileManaged {
+		p.runtimeGeneration = uint64(target.Generation)
+		p.runtimeArtifact = string(target.ActiveGatewayArtifact.ArtifactID)
 	}
 	result.RuntimeGeneration = p.Generation
 	result.InstallAvailable = attempt == nil
 	if attempt == nil {
 		return result, nil
 	}
-	installedID, err := s.installedKey(ctx)
-	if err != nil {
+	if s.profile != ProfileManaged {
+		installedID, err := s.installedKey(ctx)
+		if err != nil {
+			return result, err
+		}
+		if installedID != id {
+			return result, nil
+		}
+		if attempt.Generation != p.Generation || attempt.RunID != p.RunID || attempt.ProviderSeedSHA256 != p.S2B.Binding() {
+			return result, ErrGeneration
+		}
+	} else if err := s.requireInstallJournal(ctx, p); err != nil {
 		return result, err
-	}
-	if installedID != id {
-		return result, nil
-	}
-	if attempt.Generation != p.Generation || attempt.RunID != p.RunID || attempt.ProviderSeedSHA256 != p.S2B.Binding() {
-		return result, ErrGeneration
 	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
@@ -376,6 +418,23 @@ func (s *Service) observe(ctx context.Context, id string, generation uint64) (St
 		result.CPAConfigured = configured
 		if !configured {
 			return nil
+		}
+		var initial cpa.KeySnapshot
+		var observer keyWire
+		if s.profile == ProfileManaged {
+			var ok bool
+			observer, ok = s.wire.(keyWire)
+			if !ok {
+				return ErrUnavailable
+			}
+			var err error
+			initial, err = observer.KeySnapshot(ctx, p.ManagementKey)
+			if err != nil {
+				return err
+			}
+			if !slices.Contains(initial.Keys, secret) {
+				return nil
+			}
 		}
 		from := time.Now()
 		for i := 0; i < 3; i++ {
@@ -394,7 +453,11 @@ func (s *Service) observe(ctx context.Context, id string, generation uint64) (St
 				}
 			}
 		}
-		if _, err := s.target(ctx, p); err != nil {
+		if s.profile == ProfileManaged {
+			if err := s.managedObservationHeld(ctx, p, observer, initial); err != nil {
+				return err
+			}
+		} else if _, err := s.target(ctx, p); err != nil {
 			return err
 		}
 		now := time.Now()

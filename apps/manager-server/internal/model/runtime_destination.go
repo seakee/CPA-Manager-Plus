@@ -26,7 +26,7 @@ func (r RuntimeDestinationRequest) Validate() error {
 	if !managed && r.SourceClass != "network_existing" && r.SourceClass != "legacy_managed" {
 		return errors.New("invalid destination source class")
 	}
-	if !r.ExpectedActiveArtifactID.IsValid() || r.SourceIdentity == "" || r.APIKeys == nil || len(r.APIKeys) > 128 || len(r.ManagementKey) < 32 || len(r.ManagementKey) > 128 {
+	if !r.ExpectedActiveArtifactID.IsValid() || r.SourceIdentity == "" || r.APIKeys == nil || len(r.ManagementKey) < 32 || len(r.ManagementKey) > 128 {
 		return errors.New("invalid destination")
 	}
 	if managed && (len(r.APIKeys) != 1 || !ValidInitialClientKey(r.APIKeys[0]) || len(r.SourceIdentity) < len("managed:sha256:")) || !managed && len(r.APIKeys) == 0 {

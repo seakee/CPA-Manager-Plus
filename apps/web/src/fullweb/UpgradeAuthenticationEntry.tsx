@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FullWebLoginPage, FullWebUpgradeHeader } from './FullWebLoginPage';
 import { FullWebIcon } from './FullWebIcon';
-import { createUpgradeWizardRead, createUpgradeWizardVerify, FreshUpgradeFlow } from './FreshUpgradeFlow';
+import {
+  createUpgradeWizardRead,
+  createUpgradeWizardSaveRouting,
+  createUpgradeWizardVerify,
+  FreshUpgradeFlow,
+} from './FreshUpgradeFlow';
 import { upgradeEntryText as text } from '../i18n/upgradeEntry';
 import { BOOTSTRAP_UI } from './bootstrapTransport';
 import './upgradeEntry.css';
@@ -59,6 +64,7 @@ export function UpgradeAuthenticationEntry() {
     },
     []
   );
+
 
   const authenticate = useCallback(
     async (key: string, remember: boolean, source?: string) => {
@@ -141,6 +147,10 @@ export function UpgradeAuthenticationEntry() {
   // the same getter: it is a POST to the one verification route, so the page
   // holds no credential of its own and no second way to write.
   const wizardRead = useMemo(() => createUpgradeWizardRead(() => credential.current), []);
+  const wizardSaveRouting = useMemo(
+    () => createUpgradeWizardSaveRouting(() => credential.current),
+    []
+  );
   const wizardVerify = useMemo(() => createUpgradeWizardVerify(() => credential.current), []);
   const wizardArtifact = useMemo(
     () =>
@@ -182,13 +192,13 @@ export function UpgradeAuthenticationEntry() {
     const visible = () => {
       if (document.visibilityState === 'visible') refresh();
     };
-    const pagehide = () => revoke();
     document.addEventListener('visibilitychange', visible);
-    window.addEventListener('pagehide', pagehide);
+    const hide = () => revoke();
+    window.addEventListener('pagehide', hide);
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', visible);
-      window.removeEventListener('pagehide', pagehide);
+      window.removeEventListener('pagehide', hide);
     };
   }, [authenticate, checking, revision, revoke]);
 
@@ -242,10 +252,16 @@ export function UpgradeAuthenticationEntry() {
                     checking
                       ? 'checkingHelp'
                       : observation === 'observation_unavailable'
-                        ? recorded
+                        ? // The help sentence above asserts that nothing was
+                          // written. A wizard read that found a recorded
+                          // operation contradicts it, so that state gets the
+                          // sentence that names the record instead of both.
+                          recorded
                           ? 'recordedObservationHelp'
                           : 'observationUnavailableHelp'
-                        : 'boundary',
+                        : recorded
+                          ? 'recordedBlockedHelp'
+                          : 'boundary',
                     language
                   )}
                 </p>
@@ -274,6 +290,7 @@ export function UpgradeAuthenticationEntry() {
             and it reads nothing but the two upgrade routes. */}
         <FreshUpgradeFlow
           read={wizardRead}
+          saveRouting={wizardSaveRouting}
           verify={wizardVerify}
           artifact={wizardArtifact}
           language={language}

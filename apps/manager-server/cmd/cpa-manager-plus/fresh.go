@@ -1016,7 +1016,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	// Non-secret identity is the bounded real-public-entry verification leaf.
 	// It authenticates no browser and cannot mutate the pending installation.
 	if resource == "bootstrap/identity" && r.Method == http.MethodGet {
-		writeFreshJSON(w, freshrouting.StateFor(op))
+		writeFreshJSON(w, freshrouting.PublicIdentityFor(op))
 		return
 	}
 	// The Upgrade reads own their credential. They are neither the installation
@@ -1035,7 +1035,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	if freshAuth {
 		// The existing claim may finish its own installation after route
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
-		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
+		allowed := (resource == "operation" || resource == "api-keys/access-info") && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
 				// The per-item migration summary is the progress read of an
 				// adoption's own run, so the session that committed the
@@ -1067,6 +1067,16 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.pluginRuntime(w, r, strings.TrimPrefix(strings.TrimPrefix(resource, "plugins/runtime"), "/"))
 	case resource == "settings/update-channel":
 		a.updateChannel(w, r, op)
+	case resource == "api-keys/access-info":
+		a.clientAccessInfo(w, r, record)
+	case resource == "installation/access/completion":
+		bearer := security.ExtractBearerToken(r.Header.Get("Authorization"))
+		a.routing.ServeAccessCompletion(w, r, record, func(cur freshstore.Record) error {
+			if !cur.Operation.Routing.Committed || cur.Admin == nil || !security.VerifyAdminKey(*cur.Admin, bearer) {
+				return fresh.ErrAuthority
+			}
+			return nil
+		})
 	case resource == "api-keys" || strings.HasPrefix(resource, "api-keys/"):
 		a.clientKeys(w, r, op, resource)
 	case resource == "external/usage" || strings.HasPrefix(resource, "external/usage/"):
@@ -1080,7 +1090,12 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "runtime/operations" || strings.HasPrefix(resource, "runtime/operations/"):
 		a.runtimeOperations(w, r, op, resource)
 	case resource == "operation" && r.Method == http.MethodGet:
-		writeFreshJSON(w, op)
+		doc, err := a.routing.OperationView(r.Context(), op)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeFreshJSON(w, doc)
 	case strings.HasPrefix(resource, "cpamp/"):
 		a.legacyResource(w, r, op, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:

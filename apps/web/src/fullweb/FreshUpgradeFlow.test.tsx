@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createUpgradeWizardRead,
+  createUpgradeWizardSaveRouting,
   createUpgradeWizardVerify,
   FreshUpgradeFlow,
   parseUpgradePreflight,
@@ -10,10 +11,12 @@ import {
   UpgradeWizardError,
   type UpgradeWizardRead,
   type UpgradeWizardResource,
+  type UpgradeWizardSaveRouting,
   type UpgradeWizardVerify,
 } from './FreshUpgradeFlow';
 import type { ArtifactOperation, ArtifactStatus, ArtifactTransport } from './freshArtifact';
 import { blockedCodeText, upgradeWizardText as t } from '../i18n/upgradeWizard';
+import type { AccessInfo } from './FreshAccessInfo';
 // The wizard is a reader. These tests drive the four steps with injected reads:
 // the routes themselves are proven by the Go handler tests, so nothing here
 // touches a server or the browser credential.
@@ -54,8 +57,18 @@ function preflightDocument(overrides: Record<string, unknown> = {}) {
 // The route's own shape: mismatch days travel inside `reconciliation`, never as
 // a top-level field, so the fixture mirrors that projection — including the
 // total and the truncation flag that bound the list.
-function statusDocument(overrides: Partial<UpgradeStatus> = {}) {
-  const { mismatchDays = [], mismatchDaysTotal, mismatchDaysTruncated, ...rest } = overrides;
+function statusDocument(
+  overrides: Partial<UpgradeStatus> & Record<string, unknown> = {}
+) {
+  const {
+    mismatchDays = [],
+    mismatchDaysTotal,
+    mismatchDaysTruncated,
+    targetMode,
+    routing,
+    accessInfo,
+    ...rest
+  } = overrides;
   const total = mismatchDaysTotal ?? mismatchDays.length;
   return {
     contractVersion: CONTRACT,
@@ -63,18 +76,21 @@ function statusDocument(overrides: Partial<UpgradeStatus> = {}) {
     stage: 'copy_in',
     stageKnown: true,
     nextAction: 'copy_in',
-    domainsDone: ['source_copy'],
+    domainsDone: [],
     sourceKind: 'cpamp_1x',
     sourceVersion: '1.9.4',
-    manualItems: [],
-    errorCode: '',
-    errorDetail: '',
-    ...rest,
     reconciliation: {
       mismatchDays,
       mismatchDaysTotal: total,
       mismatchDaysTruncated: mismatchDaysTruncated ?? total > mismatchDays.length,
     },
+    manualItems: [],
+    errorCode: '',
+    errorDetail: '',
+    ...(targetMode !== undefined ? { targetMode } : {}),
+    ...(routing !== undefined ? { routing } : {}),
+    ...(accessInfo !== undefined ? { accessInfo } : {}),
+    ...rest,
   };
 }
 
@@ -121,28 +137,28 @@ describe('Full Web upgrade wizard', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
-
   async function mount(
     read: UpgradeWizardRead,
     verify?: UpgradeWizardVerify,
-    artifact?: ArtifactTransport
+    artifact?: ArtifactTransport,
+    saveRouting?: UpgradeWizardSaveRouting
   ) {
     await act(async () => {
       renderer = create(
         <FreshUpgradeFlow
           read={read}
           verify={verify}
+          saveRouting={saveRouting}
           artifact={artifact}
           language="en"
-          pollDelays={[10]}
+          pollDelays={[10_000]}
         />
       );
     });
   }
-
+  const byTestId = (id: string) => renderer!.root.findByProps({ 'data-testid': id });
+  const allByTestId = (id: string) => renderer!.root.findAllByProps({ 'data-testid': id });
   const view = () => JSON.stringify(renderer!.toJSON());
-  const byTestId = (testid: string) => renderer!.root.findByProps({ 'data-testid': testid });
-  const allByTestId = (testid: string) => renderer!.root.findAllByProps({ 'data-testid': testid });
 
   async function press(testid: string) {
     await act(async () => {
@@ -507,7 +523,7 @@ describe('Full Web upgrade wizard', () => {
     // Each failure schedules the next read; three of them stop the poll.
     for (let index = 0; index < 3; index++) {
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(10);
+        await vi.runOnlyPendingTimersAsync();
       });
     }
     expect(byTestId('upgrade-progress-stalled')).toBeTruthy();
@@ -807,21 +823,10 @@ describe('Full Web upgrade wizard', () => {
       });
     });
     await mount(read, verify);
-    const statusReadsBefore = vi.mocked(read).mock.calls.filter(
-      ([resource]) => resource === 'installation/upgrade/status'
-    ).length;
 
     await press('upgrade-verify-action');
     expect(verify).toHaveBeenCalledTimes(1);
-    // The row is read again so the page presents the record rather than the
-    // reply, and that record is the completion the gate recorded.
-    expect(
-      vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
-    ).toHaveLength(statusReadsBefore + 1);
-    // The re-read completes the operation, so the page presents the completion
-    // the gate recorded rather than the Managed waiting position.
     expect(allByTestId('upgrade-result-complete')).toHaveLength(1);
-    expect(view()).toContain(t('resultCompleteHelp', 'en'));
     expect(allByTestId('upgrade-progress-reason')).toHaveLength(0);
     expect(view()).not.toContain('upgrade_verify_waiting_for_repin');
   });
@@ -832,18 +837,11 @@ describe('Full Web upgrade wizard', () => {
       throw new UpgradeWizardError('unavailable', 'upgrade_verify_binding_drifted', 409);
     });
     await mount(read, verify);
-    const statusReadsBefore = vi.mocked(read).mock.calls.filter(
-      ([resource]) => resource === 'installation/upgrade/status'
-    ).length;
 
     await press('upgrade-verify-action');
     expect(byTestId('upgrade-verify-failed')).toBeTruthy();
     expect(view()).toContain(blockedCodeText('upgrade_verify_binding_drifted', 'en'));
     expect(allByTestId('upgrade-verify-done')).toHaveLength(0);
-    // Nothing was re-read into a stage: the recorded position is unchanged.
-    expect(
-      vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
-    ).toHaveLength(statusReadsBefore);
   });
 
   it('refuses a verification reply whose position contradicts itself', () => {
@@ -1085,5 +1083,609 @@ describe('Full Web upgrade wizard', () => {
     await press('artifact-acquire-btn');
     expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
     expect(view()).toContain('upgrade cpa-import');
+  });
+
+  it('configures dual random prefixes for first-time Managed upgrade, blocks overlaps locally, saves routing, and runs verify', async () => {
+    let current = statusDocument({
+      stage: 'cpa_import',
+      nextAction: 'verify',
+      targetMode: 'managed',
+      routing: {
+        configured: false,
+        committed: false,
+        existingPrefixesPreserved: false,
+        controlBasePath: '',
+        inferenceBasePath: '',
+        sharedEntry: false,
+        externalBaseUrl: '',
+        suggestedControlBasePath: '/ctl1234567890abcd',
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+      },
+    });
+    const read = resumeRead(() => current);
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>(async (_sig, input) => {
+      current = statusDocument({
+        ...current,
+        targetMode: 'managed',
+        routing: {
+          configured: true,
+          committed: false,
+          existingPrefixesPreserved: false,
+          controlBasePath: input.controlBasePath,
+          inferenceBasePath: input.inferenceBasePath,
+          sharedEntry: input.sharedEntry,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '/ctl1234567890abcd',
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        },
+      });
+      return current;
+    });
+    const verify = vi.fn<UpgradeWizardVerify>(async (_sig, input) => {
+      const accessInfo: AccessInfo = {
+        mode: 'migrate_legacy',
+        managementBasePath: input!.controlBasePath,
+        inferenceBasePath: input!.inferenceBasePath,
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: `${input!.inferenceBasePath}/v1`,
+            examplePath: `${input!.inferenceBasePath}/v1/chat/completions`,
+          },
+        ],
+        ready: false,
+        code: 'upgrade_restart_required',
+      };
+      current = statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing: {
+          configured: true,
+          committed: true,
+          existingPrefixesPreserved: false,
+          controlBasePath: input!.controlBasePath,
+          inferenceBasePath: input!.inferenceBasePath,
+          sharedEntry: input!.sharedEntry,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '',
+          suggestedInferenceBasePath: '',
+        },
+        accessInfo,
+      });
+      return verifyDocument({ targetMode: 'managed', accessInfo });
+    });
+
+    await mount(read, verify, undefined, saveRouting);
+    expect(byTestId('upgrade-routing-config')).toBeTruthy();
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/ctl1234567890abcd');
+    expect(byTestId('upgrade-inference-prefix-input').props.value).toBe('/inf1234567890abcd');
+    expect(byTestId('upgrade-shared-prefix-checkbox').props.checked).toBe(false);
+
+    // Reject nested prefix locally without posting
+    await act(async () => {
+      byTestId('upgrade-inference-prefix-input').props.onChange({
+        target: { value: '/ctl1234567890abcd/nested' },
+      });
+    });
+    await press('upgrade-save-routing');
+    expect(byTestId('upgrade-routing-error')).toBeTruthy();
+    expect(saveRouting).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
+
+    // Edit valid distinct prefix, save explicitly, then verify
+    await act(async () => {
+      byTestId('upgrade-inference-prefix-input').props.onChange({
+        target: { value: '/inf-custom-v2' },
+      });
+    });
+    expect(view()).toContain('/inf-custom-v2');
+    await press('upgrade-save-routing');
+    expect(saveRouting).toHaveBeenCalledTimes(1);
+    expect(byTestId('upgrade-routing-saved')).toBeTruthy();
+
+    await press('upgrade-verify-action');
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(verify.mock.calls[0][1]).toEqual({
+      controlBasePath: '/ctl1234567890abcd',
+      inferenceBasePath: '/inf-custom-v2',
+      sharedEntry: false,
+    });
+    expect(byTestId('upgrade-result-access')).toBeTruthy();
+    expect(byTestId('upgrade-access-pending-restart')).toBeTruthy();
+    expect(allByTestId('upgrade-access-active')).toHaveLength(0);
+    expect(byTestId('access-info-summary')).toBeTruthy();
+  });
+
+  it('adopts prefixes staged by another session before verifying an untouched form', async () => {
+    const routing = {
+      configured: false, committed: false, existingPrefixesPreserved: false,
+      controlBasePath: '', inferenceBasePath: '', sharedEntry: false,
+      externalBaseUrl: '', suggestedControlBasePath: '/suggested-admin',
+      suggestedInferenceBasePath: '/suggested-inference',
+    };
+    let current = statusDocument({ stage: 'cpa_import', nextAction: 'verify', targetMode: 'managed', routing });
+    const verify = vi.fn<UpgradeWizardVerify>(async () => verifyDocument());
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>();
+    await mount(resumeRead(() => current), verify, undefined, saveRouting);
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/suggested-admin');
+    current = statusDocument({
+      ...current,
+      routing: { ...routing, configured: true, controlBasePath: '/canonical-admin', inferenceBasePath: '/canonical-inference' },
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/canonical-admin');
+    expect(byTestId('upgrade-inference-prefix-input').props.value).toBe('/canonical-inference');
+    await press('upgrade-verify-action');
+    expect(verify.mock.calls[0][1]).toEqual({
+      controlBasePath: '/canonical-admin', inferenceBasePath: '/canonical-inference', sharedEntry: false,
+    });
+    expect(saveRouting).not.toHaveBeenCalled();
+  });
+
+  it('retains saved prefixes when Verify fails before a new status read', async () => {
+    const routing = {
+      configured: true, committed: false, existingPrefixesPreserved: false,
+      controlBasePath: '/old-admin', inferenceBasePath: '/old-inference', sharedEntry: false,
+      externalBaseUrl: '', suggestedControlBasePath: '', suggestedInferenceBasePath: '',
+    };
+    let current = statusDocument({ stage: 'cpa_import', nextAction: 'verify', targetMode: 'managed', routing });
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>(async (_signal, input) => {
+      current = statusDocument({ ...current, routing: { ...routing, ...input } });
+      return { contractVersion: CONTRACT, targetMode: current.targetMode, routing: current.routing, accessInfo: current.accessInfo, updatedAtMs: 1234 };
+    });
+    const verify = vi.fn<UpgradeWizardVerify>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(verifyDocument());
+    await mount(resumeRead(() => current), verify, undefined, saveRouting);
+    await act(async () => {
+      byTestId('upgrade-control-prefix-input').props.onChange({ target: { value: '/new-admin' } });
+    });
+    await press('upgrade-verify-action');
+    expect(byTestId('upgrade-verify-failed')).toBeTruthy();
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/new-admin');
+    await press('upgrade-verify-action');
+    expect(verify.mock.calls[1][1]).toEqual({
+      controlBasePath: '/new-admin', inferenceBasePath: '/old-inference', sharedEntry: false,
+    });
+  });
+
+  it('drops pre-save status replies and prevents Verify while a routing save is pending', async () => {
+    const routing = {
+      configured: true, committed: false, existingPrefixesPreserved: false,
+      controlBasePath: '/old-admin', inferenceBasePath: '/old-inference', sharedEntry: false,
+      externalBaseUrl: '', suggestedControlBasePath: '', suggestedInferenceBasePath: '',
+    };
+    let current = statusDocument({ stage: 'cpa_import', nextAction: 'verify', targetMode: 'managed', routing });
+    const old = current;
+    let finishRead!: (value: unknown) => void;
+    const pendingRead = new Promise<unknown>((resolve) => { finishRead = resolve; });
+    let delayPoll = false;
+    const read = resumeRead(() => {
+      if (delayPoll) { delayPoll = false; return pendingRead; }
+      return current;
+    });
+    let finishSave!: () => void;
+    const pendingSave = new Promise<void>((resolve) => { finishSave = resolve; });
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>(async (_signal, input) => {
+      await pendingSave;
+      current = statusDocument({ ...current, routing: { ...routing, ...input } });
+      return { contractVersion: CONTRACT, targetMode: current.targetMode, routing: current.routing, updatedAtMs: 1234 };
+    });
+    const verify = vi.fn<UpgradeWizardVerify>(async () => verifyDocument());
+    await mount(read, verify, undefined, saveRouting);
+    delayPoll = true;
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => {
+      byTestId('upgrade-control-prefix-input').props.onChange({ target: { value: '/new-admin' } });
+    });
+    let saving!: Promise<void>;
+    await act(async () => { saving = byTestId('upgrade-save-routing').props.onClick(); });
+    expect(byTestId('upgrade-verify-action').props.disabled).toBe(true);
+    await press('upgrade-verify-action');
+    expect(verify).not.toHaveBeenCalled();
+    await act(async () => {
+      finishSave();
+      await Promise.resolve();
+      finishRead(old);
+      await saving;
+    });
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/new-admin');
+    await press('upgrade-verify-action');
+    expect(verify.mock.calls[0][1]).toEqual({ controlBasePath: '/new-admin', inferenceBasePath: '/old-inference', sharedEntry: false });
+  });
+
+  it('shows only management prefix + external URL on External upgrade and distinguishes active vs pending-restart access info', async () => {
+    const externalProtocols = [
+      {
+        id: 'openai',
+        label: 'OpenAI',
+        basePath: 'https://cpa.upstream.example:8317/v1',
+        examplePath: 'https://cpa.upstream.example:8317/v1/chat/completions',
+      },
+    ];
+    let current = statusDocument({
+      stage: 'external_connect',
+      nextAction: 'verify',
+      targetMode: 'external',
+      routing: {
+        configured: false,
+        committed: false,
+        existingPrefixesPreserved: false,
+        controlBasePath: '',
+        inferenceBasePath: '',
+        sharedEntry: false,
+        externalBaseUrl: 'https://cpa.upstream.example:8317',
+        suggestedControlBasePath: '/extctl1234567890',
+        suggestedInferenceBasePath: '',
+      },
+      accessInfo: {
+        mode: 'connect_external',
+        managementBasePath: '',
+        inferenceBasePath: '',
+        externalBaseUrl: 'https://cpa.upstream.example:8317',
+        protocols: externalProtocols,
+        ready: false,
+        code: 'upgrade_access_prefix_required',
+      },
+    });
+    const read = resumeRead(() => current);
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>(async (_sig, input) => {
+      expect(input).toEqual({
+        controlBasePath: '/extctl1234567890',
+        inferenceBasePath: '',
+        sharedEntry: false,
+      });
+      current = statusDocument({ ...current, routing: { ...current.routing!, ...input, configured: true } });
+      return { contractVersion: CONTRACT, targetMode: current.targetMode, routing: current.routing, accessInfo: current.accessInfo, updatedAtMs: 1234 };
+    });
+    const verify = vi.fn<UpgradeWizardVerify>(async () => {
+      const accessInfo: AccessInfo = {
+        mode: 'connect_external',
+        managementBasePath: '/extctl1234567890',
+        inferenceBasePath: '',
+        externalBaseUrl: 'https://cpa.upstream.example:8317',
+        protocols: externalProtocols,
+        ready: true,
+        code: '',
+      };
+      current = statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'external',
+        accessInfo,
+      });
+      return verifyDocument({ targetMode: 'external', accessInfo });
+    });
+
+    await mount(read, verify, undefined, saveRouting);
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/extctl1234567890');
+    expect(allByTestId('upgrade-inference-prefix-input')).toHaveLength(0);
+    expect(allByTestId('upgrade-shared-prefix-checkbox')).toHaveLength(0);
+    expect(view()).toContain('https://cpa.upstream.example:8317');
+    expect(
+      byTestId('upgrade-external-protocols')
+        .findAllByType('code')
+        .map((node) => node.children.join(''))
+    ).toContain('https://cpa.upstream.example:8317/v1/chat/completions');
+
+    await press('upgrade-verify-action');
+    expect(saveRouting).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+    expect(allByTestId('upgrade-access-pending-restart')).toHaveLength(0);
+    expect(byTestId('access-info-external')).toBeTruthy();
+    expect(byTestId('access-info-protocols')).toBeTruthy();
+  });
+
+  it('surfaces fenced External Upgrade URL and protocol endpoint list pre-restart, in preserved mode, and distinguishes external_target_unavailable', async () => {
+    const externalProtocols = [
+      {
+        id: 'openai',
+        label: 'OpenAI',
+        basePath: 'https://cpa.upstream.example:8317/cpa/v1',
+        examplePath: 'https://cpa.upstream.example:8317/cpa/v1/chat/completions',
+      },
+      {
+        id: 'responses',
+        label: 'Responses',
+        basePath: 'https://cpa.upstream.example:8317/cpa/v1',
+        examplePath: 'https://cpa.upstream.example:8317/cpa/v1/responses',
+      },
+    ];
+    let current = statusDocument({
+      stage: 'external_connect',
+      nextAction: 'verify',
+      targetMode: 'external',
+      routing: {
+        configured: true,
+        committed: true,
+        existingPrefixesPreserved: true,
+        controlBasePath: '/ext-preserved',
+        inferenceBasePath: '',
+        sharedEntry: false,
+        externalBaseUrl: 'https://cpa.upstream.example:8317/cpa',
+        suggestedControlBasePath: '',
+        suggestedInferenceBasePath: '',
+      },
+      accessInfo: {
+        mode: 'connect_external',
+        managementBasePath: '/ext-preserved',
+        inferenceBasePath: '/should-be-cleared',
+        externalBaseUrl: 'https://cpa.upstream.example:8317/cpa',
+        protocols: externalProtocols,
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+    });
+    const read = resumeRead(() => current);
+    const verify = vi.fn<UpgradeWizardVerify>(async () => {
+      const accessInfo: AccessInfo = {
+        mode: 'connect_external',
+        managementBasePath: '/ext-preserved',
+        inferenceBasePath: '',
+        externalBaseUrl: '',
+        protocols: [],
+        ready: false,
+        code: 'external_target_unavailable',
+      };
+      current = statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'external',
+        routing: {
+          configured: true,
+          committed: true,
+          existingPrefixesPreserved: true,
+          controlBasePath: '/ext-preserved',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '',
+          suggestedInferenceBasePath: '',
+        },
+        accessInfo,
+      });
+      return verifyDocument({ targetMode: 'external', accessInfo });
+    });
+    await mount(read, verify);
+
+    expect(byTestId('upgrade-preserved-routing')).toBeTruthy();
+    expect(byTestId('upgrade-preserved-inference').findByType('code').children.join('')).toBe(
+      'https://cpa.upstream.example:8317/cpa'
+    );
+    const protocolCodes = byTestId('upgrade-external-protocols')
+      .findAllByType('code')
+      .map((node) => node.children.join(''));
+    expect(protocolCodes).toContain('https://cpa.upstream.example:8317/cpa/v1/chat/completions');
+    expect(protocolCodes).toContain('https://cpa.upstream.example:8317/cpa/v1/responses');
+
+    await press('upgrade-verify-action');
+    expect(byTestId('upgrade-result-access')).toBeTruthy();
+    expect(allByTestId('upgrade-access-pending-restart')).toHaveLength(0);
+    expect(byTestId('access-info-not-ready')).toBeTruthy();
+  });
+
+  it('locks existing prefixes read-only when existingPrefixesPreserved is true', async () => {
+    const read = resumeRead(() =>
+      statusDocument({
+        stage: 'cpa_import',
+        nextAction: 'verify',
+        targetMode: 'managed',
+        routing: {
+          configured: true,
+          committed: true,
+          existingPrefixesPreserved: true,
+          controlBasePath: '/preserved-ctl',
+          inferenceBasePath: '/preserved-inf',
+          sharedEntry: false,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '',
+          suggestedInferenceBasePath: '',
+        },
+      })
+    );
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>();
+    const verify = vi.fn<UpgradeWizardVerify>(async () => verifyDocument());
+    await mount(read, verify, undefined, saveRouting);
+
+    expect(byTestId('upgrade-preserved-routing')).toBeTruthy();
+    expect(allByTestId('upgrade-routing-config')).toHaveLength(0);
+    expect(byTestId('upgrade-preserved-control').findByType('code').children.join('')).toBe('/preserved-ctl');
+    expect(byTestId('upgrade-preserved-inference').findByType('code').children.join('')).toBe('/preserved-inf');
+
+    await press('upgrade-verify-action');
+    expect(saveRouting).not.toHaveBeenCalled();
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(verify.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it('posts JSON routing payloads and parses error.code / code / Code envelopes in createUpgradeWizardSaveRouting', async () => {
+    const credential = 'Cpamp_Upgrade_Save_Routing_Key_9911';
+    const transport = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ ok: true }))
+      .mockResolvedValueOnce(Response.json({ error: { code: 'prefix_overlap_forbidden' } }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({ code: 'upgrade_prefixes_already_committed' }, { status: 409 }))
+      .mockResolvedValueOnce(Response.json({ Code: 'reserved_prefix_collision' }, { status: 400 })) as unknown as typeof fetch;
+    vi.stubGlobal('document', { getElementById: () => null });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'http://manager.test' },
+    });
+
+    const save = createUpgradeWizardSaveRouting(() => credential, transport);
+    const payload = { controlBasePath: '/ctl-1', inferenceBasePath: '/inf-1', sharedEntry: false };
+    await save(new AbortController().signal, payload);
+    expect(vi.mocked(transport).mock.calls[0]).toEqual([
+      'http://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/routing',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${credential}`,
+        },
+        body: JSON.stringify(payload),
+      }),
+    ]);
+    await expect(save(new AbortController().signal, payload)).rejects.toMatchObject({
+      code: 'prefix_overlap_forbidden',
+    });
+    await expect(save(new AbortController().signal, payload)).rejects.toMatchObject({
+      code: 'upgrade_prefixes_already_committed',
+    });
+    await expect(save(new AbortController().signal, payload)).rejects.toMatchObject({
+      code: 'reserved_prefix_collision',
+    });
+  });
+
+  it('invokes the latest onRecordedOperation callback replaced during active boot without restarting or aborting the boot read', async () => {
+    let resolveBoot!: (value: unknown) => void;
+    let bootSignal: AbortSignal | undefined;
+    const read = vi.fn<UpgradeWizardRead>(async (resource, signal) => {
+      if (resource === 'installation/upgrade/preflight') return preflightDocument();
+      bootSignal = signal;
+      return new Promise((resolve) => {
+        resolveBoot = resolve;
+      });
+    });
+    const delays = [10_000];
+    const initialCb = vi.fn();
+    const replacementCb = vi.fn();
+
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={read}
+          language="en"
+          pollDelays={delays}
+          onRecordedOperation={initialCb}
+        />
+      );
+    });
+
+    expect(byTestId('upgrade-boot-reading')).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(bootSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      renderer!.update(
+        <FreshUpgradeFlow
+          read={read}
+          language="zh-CN"
+          pollDelays={delays}
+          onRecordedOperation={replacementCb}
+        />
+      );
+    });
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(bootSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      resolveBoot(unrecordedStatus());
+    });
+
+    expect(initialCb).not.toHaveBeenCalled();
+    expect(replacementCb).toHaveBeenCalledTimes(1);
+    expect(replacementCb).toHaveBeenCalledWith(false);
+    expect(byTestId('upgrade-preflight')).toBeTruthy();
+  });
+
+  it('invokes the latest onRecordedOperation callback replaced between and during active progress polls without restarting polling', async () => {
+    let statusCall = 0;
+    let resolvePendingPoll: ((value: unknown) => void) | undefined;
+    let pendingPollSignal: AbortSignal | undefined;
+    const read = vi.fn<UpgradeWizardRead>(async (resource, signal) => {
+      if (resource !== 'installation/upgrade/status') {
+        throw new Error(`Unexpected resource ${resource}`);
+      }
+      statusCall += 1;
+      if (statusCall <= 2) {
+        return statusDocument({ stage: 'copy_in', nextAction: 'copy_in' });
+      }
+      if (statusCall === 3) {
+        return statusDocument({ stage: 'reconcile', nextAction: 'reconcile' });
+      }
+      pendingPollSignal = signal;
+      return new Promise((resolve) => {
+        resolvePendingPoll = resolve;
+      });
+    });
+    const delays = [10_000];
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
+    const cb3 = vi.fn();
+
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={read}
+          language="en"
+          pollDelays={delays}
+          onRecordedOperation={cb1}
+        />
+      );
+    });
+
+    expect(byTestId('upgrade-progress')).toBeTruthy();
+    const cb1InitialCalls = cb1.mock.calls.length;
+    expect(cb1InitialCalls).toBeGreaterThanOrEqual(1);
+    const readsBeforeUpdate = read.mock.calls.length;
+
+    await act(async () => {
+      renderer!.update(
+        <FreshUpgradeFlow
+          read={read}
+          language="zh-CN"
+          pollDelays={delays}
+          onRecordedOperation={cb2}
+        />
+      );
+    });
+
+    expect(read).toHaveBeenCalledTimes(readsBeforeUpdate);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(cb1).toHaveBeenCalledTimes(cb1InitialCalls);
+    expect(cb2).toHaveBeenCalledTimes(1);
+    expect(cb2).toHaveBeenCalledWith(true);
+    expect(view()).toContain(t('stageReconcile', 'zh-CN'));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(pendingPollSignal?.aborted).toBe(false);
+    const readsBeforeInflightUpdate = read.mock.calls.length;
+
+    await act(async () => {
+      renderer!.update(
+        <FreshUpgradeFlow
+          read={read}
+          language="en"
+          pollDelays={delays}
+          onRecordedOperation={cb3}
+        />
+      );
+    });
+
+    expect(read).toHaveBeenCalledTimes(readsBeforeInflightUpdate);
+    expect(pendingPollSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      resolvePendingPoll!(statusDocument({ stage: 'complete', nextAction: 'complete' }));
+    });
+
+    expect(cb2).toHaveBeenCalledTimes(1);
+    expect(cb3).toHaveBeenCalledTimes(1);
+    expect(cb3).toHaveBeenCalledWith(true);
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
   });
 });

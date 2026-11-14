@@ -1730,7 +1730,13 @@ func TestImportCPAThenVerifyCompletesTheManagedOperation(t *testing.T) {
 		t.Fatalf("recorded server fingerprint = %q, want the destination's own %q", result.ServerFingerprint, after)
 	}
 
-	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
+	verified, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot:        fixture.volume.root,
+		TargetRoot:        fixture.target,
+		Runtime:           runtime,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
+	})
 	if err != nil {
 		t.Fatalf("verify the imported operation: %v", err)
 	}
@@ -1767,7 +1773,13 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 	destination.config["ampcode"] = map[string]any{"upstream-url": "https://amp.example"}
 	destination.mu.Unlock()
 
-	_, err = Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
+	_, err = Verify(context.Background(), VerifyOptions{
+		LegacyRoot:        fixture.volume.root,
+		TargetRoot:        fixture.target,
+		Runtime:           runtime,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
+	})
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyBindingDrifted {
 		t.Fatalf("a moved destination produced %v (code %q), want %s", err, code, UpgradeErrorVerifyBindingDrifted)
 	}
@@ -1786,7 +1798,13 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 		t.Fatalf("replay result = %+v, want the destination and source identity of the first run", replayed)
 	}
 
-	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
+	verified, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot:        fixture.volume.root,
+		TargetRoot:        fixture.target,
+		Runtime:           runtime,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
+	})
 	if err != nil {
 		t.Fatalf("verify after the refresh: %v", err)
 	}
@@ -2367,9 +2385,11 @@ openai-compatibility:
 		t.Fatalf("persisted destination config must strip auth_index/auth-index: %s", stored)
 	}
 	verified, err := Verify(context.Background(), VerifyOptions{
-		LegacyRoot: fixture.volume.root,
-		TargetRoot: fixture.target,
-		Runtime:    runtime,
+		LegacyRoot:        fixture.volume.root,
+		TargetRoot:        fixture.target,
+		Runtime:           runtime,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
 	})
 	if err != nil {
 		t.Fatalf("verify with empty /v1/models list failed: %v", err)

@@ -7,6 +7,7 @@ import { sameIdentity, type FreshOperation } from './bootstrapTransport';
 import { parseAdoptionSummary } from './freshAdoption';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
+import { AccessInfoSummary } from './FreshAccessInfo';
 import { parseRuntimeJSON, validRuntimeGeneration } from './runtimeGeneration';
 
 // Host observation is a fence for the existing strategy, never qualification
@@ -384,14 +385,11 @@ export function FreshManagedRuntime({
         operation={operation}
         carrier={adoptCarrier}
         onOperation={onOperation}
-        onComplete={(completed) => {
-          // A clean copy enters the console. Manual or failed items keep this
-          // journey on screen with its groups and next steps until the operator
-          // has read them; the footer then offers the console.
-          if (completed.counts.manual === 0 && completed.counts.failed === 0) onContinue?.();
-        }}
         onEnterConsole={() => onContinue?.()}
         onPending={onPending}
+        accessInfoClient={client}
+        accessInfoAuth={auth}
+        onUnauthorized={onUnauthorized}
         // Choosing Adopt must be reversible until the record holds an attempt:
         // the tile is a choice, and a choice with no way back is a trap. Once an
         // adopt checkpoint exists the record decides, so no exit is offered.
@@ -611,6 +609,11 @@ export function FreshManagedRuntime({
                 </dl>
                 {complete ? (
                   <>
+                    <AccessInfoSummary
+                      client={client}
+                      auth={auth}
+                      onUnauthorized={onUnauthorized}
+                    />
                     <p className="journey-quiet">
                       <FullWebIcon name="info" size={20} />
                       {journey('bookmark')}
@@ -859,6 +862,9 @@ export function FreshManagedRuntime({
             rows={5}
           />
         </label>
+      )}
+      {operation.productComplete && (
+        <AccessInfoSummary client={client} auth={auth} onUnauthorized={onUnauthorized} />
       )}
       <div className="wizard-card-footer">
         {!operation.productComplete && !foreign && (

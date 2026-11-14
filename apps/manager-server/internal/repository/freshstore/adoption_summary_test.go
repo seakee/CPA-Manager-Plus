@@ -209,6 +209,8 @@ func TestAdoptionSummaryFinishedIsMonotoneAfterCompletion(t *testing.T) {
 		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
 			OperationID: r.Operation.Identity.OperationID, Revision: 1,
 			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
+			SuggestedControlBasePath:   r.Operation.Routing.SuggestedControlBasePath,
+			SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath,
 		}
 		r.Operation.ProductComplete = true
 		return nil

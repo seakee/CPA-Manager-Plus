@@ -119,6 +119,9 @@ func recordCompletedOperation(t *testing.T, database string, domains ...string) 
 	}); err != nil {
 		t.Fatalf("record the fixture binding: %v", err)
 	}
+	if _, err := upgradeoperation.RecordRoutingTx(ctx, tx, "/test-control", "", false, "", ""); err != nil {
+		t.Fatalf("record the fixture routing: %v", err)
+	}
 	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
 		t.Fatalf("record the fixture verdict: %v", err)
 	}
@@ -307,8 +310,14 @@ func TestVerifyActionReportsTheRecordedVerdict(t *testing.T) {
 	if document.TargetMode != model.UpgradeTargetExternal {
 		t.Fatalf("target mode = %q, want external", document.TargetMode)
 	}
-	// No observation of the record reaches the browser.
-	for _, forbidden := range []string{"sha256:", before.SourceFingerprintAfter, "https://cpa.example", before.SourceRoot} {
+	if document.Routing == nil || document.AccessInfo == nil {
+		t.Fatalf("missing routing/accessInfo projection: %+v", document)
+	}
+	if document.Routing.ExternalBaseURL != actionFixtureAddress || document.AccessInfo.ExternalBaseURL != actionFixtureAddress || document.AccessInfo.InferenceBasePath != "" || len(document.AccessInfo.Protocols) != 4 {
+		t.Fatalf("unexpected External routing/accessInfo projection: routing=%+v accessInfo=%+v", document.Routing, document.AccessInfo)
+	}
+	// Secrets, digests, and host filesystem paths never reach the browser.
+	for _, forbidden := range []string{"sha256:", before.SourceFingerprintAfter, before.SourceRoot, actionFixtureManagementKey, actionFixtureIdentity} {
 		if forbidden != "" && strings.Contains(w.Body.String(), forbidden) {
 			t.Fatalf("the action leaked %q: %s", forbidden, w.Body.String())
 		}
@@ -459,4 +468,138 @@ func readRecordedOperation(t *testing.T, database string) model.UpgradeOperation
 		t.Fatalf("read the fixture operation: found=%t err=%v", found, err)
 	}
 	return operation
+}
+
+func TestExternalUpgradeRoutingAndStatusExposeFencedExternalBaseURL(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	recordOperation(t, database, model.UpgradeOperation{
+		Stage:       model.UpgradeStageExternalConnect,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig},
+	})
+	protector := actionFixtureProtector(t, database)
+	sealedKey, err := protector.ProtectString(actionFixtureManagementKey)
+	if err != nil {
+		t.Fatalf("seal fixture management key: %v", err)
+	}
+	const rawExternalURL = "https://cpa.example:8317/custom/"
+	const wantExternalURL = "https://cpa.example:8317/custom"
+	extIdentity := freshkeyapply.ExternalIdentity(wantExternalURL)
+	db, err := managersqlite.Open(database)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
+		BaseURL:       rawExternalURL,
+		Identity:      extIdentity,
+		Generation:    extIdentity,
+		ManagementKey: sealedKey,
+		ObservedAtMS:  1_700_000_000_000,
+	}); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatalf("record external binding: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatalf("commit external binding: %v", err)
+	}
+	_ = db.Close()
+
+	handler := handlerFor(t, database)
+
+	// 1. POST /installation/upgrade/routing exposes normalized External URL + protocol URLs, never Manager inference prefix.
+	req := httptest.NewRequest(http.MethodPost, testPrefix+RoutingSuffix, strings.NewReader(`{"controlBasePath":"/ext-console"}`))
+	req.Host = "manager.test"
+	req.Header.Set("Authorization", bearer(testAdminKey))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST routing = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var routeResp routingActionDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &routeResp); err != nil {
+		t.Fatalf("decode routing response: %v", err)
+	}
+	if routeResp.Routing.ExternalBaseURL != wantExternalURL || routeResp.Routing.InferenceBasePath != "" {
+		t.Fatalf("unexpected routing document: %+v", routeResp.Routing)
+	}
+	if routeResp.AccessInfo.ExternalBaseURL != wantExternalURL || routeResp.AccessInfo.InferenceBasePath != "" || len(routeResp.AccessInfo.Protocols) != 4 || routeResp.AccessInfo.Protocols[0].BasePath != wantExternalURL+"/v1" {
+		t.Fatalf("unexpected accessInfo document: %+v", routeResp.AccessInfo)
+	}
+
+	// 2. Completed External store whose binding drifts from VerificationEvidence fails closed.
+	completedDB := filepath.Join(t.TempDir(), "completed.sqlite")
+	recordOperation(t, completedDB, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	recordCompletedOperation(t, completedDB, model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig)
+	cdb, err := managersqlite.Open(completedDB)
+	if err != nil {
+		t.Fatalf("open completed database: %v", err)
+	}
+	if _, err := cdb.ExecContext(ctx, `update upgrade_external_connect set identity = 'drifted-id', generation = 'drifted-id' where id = 1`); err != nil {
+		_ = cdb.Close()
+		t.Fatalf("drift external binding identity: %v", err)
+	}
+	_ = cdb.Close()
+
+	_, statusBody := request(t, handlerFor(t, completedDB), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var statusDoc statusDocument
+	if err := json.Unmarshal([]byte(statusBody), &statusDoc); err != nil {
+		t.Fatalf("decode status document: %v", err)
+	}
+	if statusDoc.Routing == nil || statusDoc.AccessInfo == nil {
+		t.Fatalf("missing status routing/accessInfo: %+v", statusDoc)
+	}
+	if statusDoc.Routing.ExternalBaseURL != "" || statusDoc.AccessInfo.ExternalBaseURL != "" || len(statusDoc.AccessInfo.Protocols) != 0 || statusDoc.AccessInfo.Code != "external_target_unavailable" {
+		t.Fatalf("drifted External binding did not fail closed: routing=%+v accessInfo=%+v", statusDoc.Routing, statusDoc.AccessInfo)
+	}
+
+	// 3. Drifting base_url away from binding.Identity or corrupting management_key envelope also blanks ExternalBaseURL.
+	completedDB2 := filepath.Join(t.TempDir(), "completed-url-drift.sqlite")
+	recordOperation(t, completedDB2, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	recordCompletedOperation(t, completedDB2, model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig)
+	cdb2, err := managersqlite.Open(completedDB2)
+	if err != nil {
+		t.Fatalf("open completed database 2: %v", err)
+	}
+	if _, err := cdb2.ExecContext(ctx, `update upgrade_external_connect set base_url = 'https://other-host.example:8317' where id = 1`); err != nil {
+		_ = cdb2.Close()
+		t.Fatalf("drift external binding base_url: %v", err)
+	}
+	_ = cdb2.Close()
+	_, driftBody := request(t, handlerFor(t, completedDB2), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var driftDoc statusDocument
+	if err := json.Unmarshal([]byte(driftBody), &driftDoc); err != nil {
+		t.Fatalf("decode url-drift status: %v", err)
+	}
+	if driftDoc.Routing == nil || driftDoc.AccessInfo == nil || driftDoc.Routing.ExternalBaseURL != "" || driftDoc.AccessInfo.ExternalBaseURL != "" || driftDoc.AccessInfo.Ready {
+		t.Fatalf("base_url drift did not blank ExternalBaseURL: routing=%+v accessInfo=%+v", driftDoc.Routing, driftDoc.AccessInfo)
+	}
+
+	completedDB3 := filepath.Join(t.TempDir(), "completed-envelope-drift.sqlite")
+	recordOperation(t, completedDB3, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	recordCompletedOperation(t, completedDB3, model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig)
+	cdb3, err := managersqlite.Open(completedDB3)
+	if err != nil {
+		t.Fatalf("open completed database 3: %v", err)
+	}
+	if _, err := cdb3.ExecContext(ctx, `update upgrade_external_connect set management_key = 'unsealed-raw-secret' where id = 1`); err != nil {
+		_ = cdb3.Close()
+		t.Fatalf("corrupt external binding envelope: %v", err)
+	}
+	_ = cdb3.Close()
+	_, envBody := request(t, handlerFor(t, completedDB3), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var envDoc statusDocument
+	if err := json.Unmarshal([]byte(envBody), &envDoc); err != nil {
+		t.Fatalf("decode envelope-drift status: %v", err)
+	}
+	if envDoc.Routing == nil || envDoc.AccessInfo == nil || envDoc.Routing.ExternalBaseURL != "" || envDoc.AccessInfo.ExternalBaseURL != "" || envDoc.AccessInfo.Ready {
+		t.Fatalf("unsealed management_key did not blank ExternalBaseURL: routing=%+v accessInfo=%+v", envDoc.Routing, envDoc.AccessInfo)
+	}
 }

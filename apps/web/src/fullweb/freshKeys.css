@@ -279,6 +279,11 @@
   background: var(--data-badge-info-bg);
   border-color: var(--data-badge-info-border);
 }
+.key-state-pill.is-effective {
+  color: var(--data-badge-success-text);
+  background: var(--data-badge-success-bg);
+  border-color: var(--data-badge-success-border);
+}
 .key-state-pill.is-muted {
   color: var(--data-badge-neutral-text);
   background: var(--data-badge-neutral-bg);
@@ -288,6 +293,22 @@
   color: var(--data-badge-warning-text);
   background: var(--data-badge-warning-bg);
   border-color: var(--data-badge-warning-border);
+}
+.fresh-keys-access-panel {
+  margin-bottom: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface);
+}
+.fresh-keys-access-panel h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.key-create-access-panel {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--app-border);
 }
 .key-table-footer {
   border-top: 1px solid var(--app-border);

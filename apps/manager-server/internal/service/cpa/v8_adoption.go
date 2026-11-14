@@ -18,10 +18,14 @@ func VerifyV8Adoption(ctx context.Context, baseURL, managementKey string, keys [
 	if err != nil {
 		return err
 	}
-	if len(keys) == 0 || len(keys) > 128 || managementKey == "" {
+	if len(keys) == 0 || managementKey == "" {
 		return V8InvalidConfig
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	budget := 5 * time.Second
+	if extra := time.Duration(len(keys)/16) * time.Second; extra > 0 {
+		budget = min(budget+extra, 30*time.Second)
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	client, closeClient, err := directReadClient(ctx, baseURL)
 	if err != nil {

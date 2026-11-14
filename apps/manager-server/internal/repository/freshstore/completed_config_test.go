@@ -51,7 +51,7 @@ func TestConfigCompatibilityRequiresCompletedFreshOperation(t *testing.T) {
 				}
 				if complete {
 					record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-						r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+						r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 						r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 						r.Operation.ProductComplete = true
 						return nil
@@ -186,7 +186,7 @@ func TestCompletedExternalAllowsExistingConfigConnectionEdits(t *testing.T) {
 	}
 	digest := sha256.Sum256([]byte("http://original-cpa:8317"))
 	record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal, TargetIdentity: "external:sha256:" + hex.EncodeToString(digest[:]), TargetGeneration: 1, Stage: "committed"}
 		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://original-cpa:8317", ManagementKey: secret}
 		return nil
@@ -253,7 +253,7 @@ func TestCompletionEnablesRequestMonitoring(t *testing.T) {
 	}
 	connection := &model.ManagerCPAConnectionConfig{CPABaseURL: "http://cpa:8317", ManagementKey: secret}
 	record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 		r.Connection = connection
 		return nil
@@ -332,7 +332,7 @@ func TestCompletedConnectionMigrationEnablesDefaultMonitoringAndPreservesOperato
 		}
 		// Legacy completed start-only NewManaged store: ProductComplete=true, Connection=nil.
 		record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 			r.Operation.ProductComplete = true
 			return nil
@@ -384,7 +384,7 @@ func TestCompletedConnectionMigrationEnablesDefaultMonitoringAndPreservesOperato
 			t.Fatal(err)
 		}
 		record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 			r.Operation.ProductComplete = true
 			return nil

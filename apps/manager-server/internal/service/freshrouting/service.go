@@ -19,6 +19,22 @@ var ErrUnverified = errors.New("initial routing public identity verification fai
 // State is an internal, non-secret projection of the existing Fresh routing
 // checkpoint. Ingress keeps it in memory only and never reads Manager SQLite.
 type State struct {
+	InstallationID     string                `json:"installationId"`
+	Generation         string                `json:"generation"`
+	OperationID        bootstrap.OperationID `json:"operationId"`
+	Revision           uint64                `json:"revision"`
+	Target             string                `json:"target"`
+	InferenceTarget    string                `json:"inferenceTarget,omitempty"`
+	SharedEntry        bool                  `json:"sharedEntry,omitempty"`
+	Committed          bool                  `json:"committed"`
+	InferenceCommitted bool                  `json:"inferenceCommitted,omitempty"`
+}
+
+// PublicIdentity is the minimal non-secret verification leaf exposed at
+// GET <controlBasePath>/api/v2/bootstrap/identity. It intentionally omits
+// InferenceTarget, SharedEntry, and InferenceCommitted so unauthenticated
+// callers who know controlBasePath cannot discover the peer inference prefix.
+type PublicIdentity struct {
 	InstallationID string                `json:"installationId"`
 	Generation     string                `json:"generation"`
 	OperationID    bootstrap.OperationID `json:"operationId"`
@@ -27,11 +43,42 @@ type State struct {
 	Committed      bool                  `json:"committed"`
 }
 
-func (s State) Matches(o bootstrap.FreshOperation) bool { return s == StateFor(o) }
-func StateFor(o bootstrap.FreshOperation) State {
-	return State{o.Identity.InstallationID, o.Identity.Generation, o.Identity.OperationID, o.Routing.Revision, o.Routing.Target, o.Routing.Committed}
+func PublicIdentityForState(s State) PublicIdentity {
+	return PublicIdentity{
+		InstallationID: s.InstallationID,
+		Generation:     s.Generation,
+		OperationID:    s.OperationID,
+		Revision:       s.Revision,
+		Target:         s.Target,
+		Committed:      s.Committed,
+	}
 }
 
+func PublicIdentityFor(o bootstrap.FreshOperation) PublicIdentity {
+	return PublicIdentityForState(StateFor(o))
+}
+
+func (s State) Matches(o bootstrap.FreshOperation) bool { return s == StateFor(o) }
+func StateFor(o bootstrap.FreshOperation) State {
+	return State{
+		InstallationID:     o.Identity.InstallationID,
+		Generation:         o.Identity.Generation,
+		OperationID:        o.Identity.OperationID,
+		Revision:           o.Routing.Revision,
+		Target:             o.Routing.Target,
+		InferenceTarget:    o.Routing.InferenceTarget,
+		SharedEntry:        o.Routing.SharedEntry,
+		Committed:          o.Routing.Committed,
+		InferenceCommitted: o.Routing.InferenceCommitted,
+	}
+}
+
+// AccessIntent describes a two-prefix (or external control-only) routing submission.
+type AccessIntent struct {
+	Target          string `json:"target"`
+	InferenceTarget string `json:"inferenceTarget,omitempty"`
+	SharedEntry     bool   `json:"sharedEntry,omitempty"`
+}
 type Driver interface {
 	Inspect(context.Context) (State, error)
 	Apply(context.Context, State) error
@@ -48,19 +95,96 @@ func New(store freshstore.Store, driver Driver) *Service {
 }
 
 func (s *Service) Prepare(ctx context.Context, id bootstrap.FreshIdentity, target string) (bootstrap.FreshOperation, error) {
-	return s.prepare(ctx, id, target, nil)
+	return s.prepareAccess(ctx, id, AccessIntent{Target: target}, nil)
 }
 func (s *Service) PrepareAuthorized(ctx context.Context, id bootstrap.FreshIdentity, target string, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
 	if validate == nil {
 		return bootstrap.FreshOperation{}, freshstore.ErrConflict
 	}
-	return s.prepare(ctx, id, target, validate)
+	return s.prepareAccess(ctx, id, AccessIntent{Target: target}, validate)
 }
-func (s *Service) prepare(ctx context.Context, id bootstrap.FreshIdentity, target string, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
+func (s *Service) PrepareAccess(ctx context.Context, id bootstrap.FreshIdentity, intent AccessIntent) (bootstrap.FreshOperation, error) {
+	return s.prepareAccess(ctx, id, intent, nil)
+}
+func (s *Service) PrepareAccessAuthorized(ctx context.Context, id bootstrap.FreshIdentity, intent AccessIntent, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
+	if validate == nil {
+		return bootstrap.FreshOperation{}, freshstore.ErrConflict
+	}
+	return s.prepareAccess(ctx, id, intent, validate)
+}
+
+// SaveDraftAuthorized persists operator-edited prefix inputs before routing/prepare
+// locks the immutable checkpoint, allowing wizard refreshes to recover draft inputs.
+func (s *Service) SaveDraftAuthorized(ctx context.Context, id bootstrap.FreshIdentity, draft AccessIntent, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
+	if validate == nil {
+		return bootstrap.FreshOperation{}, freshstore.ErrConflict
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if (routing.RoutingSnapshot{State: routing.SnapshotDesiredOnly, DesiredControlBasePath: target}).Validate() != nil {
+	if draft.Target != "" && (!routing.ValidControlBasePath(draft.Target) || routing.ReservedNamespaceCollision(draft.Target)) {
+		if draft.Target != "" && !routing.ValidControlBasePath(draft.Target) {
+			return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeInvalidAccessPrefix, Detail: "draft target is not canonical"}
+		}
+		return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeReservedPrefixCollision, Detail: "draft target collides with reserved route"}
+	}
+	if draft.InferenceTarget != "" && (!routing.ValidInferenceBasePath(draft.InferenceTarget) || routing.ReservedNamespaceCollision(draft.InferenceTarget)) {
+		if !routing.ValidInferenceBasePath(draft.InferenceTarget) {
+			return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeInvalidAccessPrefix, Detail: "draft inferenceTarget is not canonical"}
+		}
+		return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeReservedPrefixCollision, Detail: "draft inferenceTarget collides with reserved route"}
+	}
+	r, err := s.store.Load(ctx)
+	if err != nil {
+		return bootstrap.FreshOperation{}, err
+	}
+	if r.Operation.Identity != id || !r.Operation.AdminInitialized {
+		return bootstrap.FreshOperation{}, freshstore.ErrConflict
+	}
+	if err := validate(r); err != nil {
+		return r.Operation, err
+	}
+	if r.Operation.Routing.OperationID != "" {
+		if r.Operation.Routing.Target == draft.Target &&
+			r.Operation.Routing.InferenceTarget == draft.InferenceTarget &&
+			r.Operation.Routing.SharedEntry == draft.SharedEntry {
+			return r.Operation, nil
+		}
 		return bootstrap.FreshOperation{}, ErrConflict
+	}
+	r, err = s.store.Update(ctx, id, r.Operation.Revision, func(cur *freshstore.Record) error {
+		if err := validate(*cur); err != nil {
+			return err
+		}
+		cur.Operation.Routing.DraftControlBasePath = draft.Target
+		cur.Operation.Routing.DraftInferenceBasePath = draft.InferenceTarget
+		cur.Operation.Routing.DraftSharedEntry = draft.SharedEntry
+		return nil
+	})
+	return r.Operation, err
+}
+
+func validateIntentForStrategy(strategy bootstrap.CPAStrategy, intent AccessIntent) error {
+	switch strategy {
+	case bootstrap.NewManaged, bootstrap.AdoptExisting:
+		return routing.ValidateAccessPrefixPair(intent.Target, intent.InferenceTarget, intent.SharedEntry, false)
+	case bootstrap.ConnectExternal:
+		return routing.ValidateAccessPrefixPair(intent.Target, intent.InferenceTarget, intent.SharedEntry, true)
+	default:
+		if intent.InferenceTarget != "" || intent.SharedEntry {
+			return routing.ValidateAccessPrefixPair(intent.Target, intent.InferenceTarget, intent.SharedEntry, false)
+		}
+		return routing.ValidateAccessPrefixPair(intent.Target, "", false, true)
+	}
+}
+
+func (s *Service) prepareAccess(ctx context.Context, id bootstrap.FreshIdentity, intent AccessIntent, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if intent.Target == "" || !routing.ValidControlBasePath(intent.Target) {
+		return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeInvalidAccessPrefix, Detail: "controlBasePath is missing or not canonical"}
+	}
+	if routing.ReservedNamespaceCollision(intent.Target) {
+		return bootstrap.FreshOperation{}, &bootstrap.AccessPrefixError{Code: bootstrap.CodeReservedPrefixCollision, Detail: "controlBasePath collides with reserved route"}
 	}
 	r, err := s.store.Load(ctx)
 	if err != nil {
@@ -74,9 +198,12 @@ func (s *Service) prepare(ctx context.Context, id bootstrap.FreshIdentity, targe
 			return r.Operation, err
 		}
 	}
+	if err := validateIntentForStrategy(r.Operation.Strategy.Strategy, intent); err != nil {
+		return bootstrap.FreshOperation{}, err
+	}
 	cp := r.Operation.Routing
 	if cp.OperationID != "" {
-		if cp.OperationID != id.OperationID || cp.Target != target {
+		if cp.OperationID != id.OperationID || cp.Target != intent.Target || cp.InferenceTarget != intent.InferenceTarget || cp.SharedEntry != intent.SharedEntry {
 			return bootstrap.FreshOperation{}, ErrConflict
 		}
 		return r.Operation, nil
@@ -90,18 +217,38 @@ func (s *Service) prepare(ctx context.Context, id bootstrap.FreshIdentity, targe
 	if err != nil {
 		return r.Operation, err
 	}
-	wanted := State{InstallationID: id.InstallationID, Generation: id.Generation,
-		OperationID: id.OperationID, Revision: 1, Target: target}
+	wanted := State{
+		InstallationID:  id.InstallationID,
+		Generation:      id.Generation,
+		OperationID:     id.OperationID,
+		Revision:        1,
+		Target:          intent.Target,
+		InferenceTarget: intent.InferenceTarget,
+		SharedEntry:     intent.SharedEntry,
+	}
 	if actual != (State{}) && actual != wanted {
 		return r.Operation, ErrConflict
 	}
-	r, err = s.store.Update(ctx, id, r.Operation.Revision, func(r *freshstore.Record) error {
+	r, err = s.store.Update(ctx, id, r.Operation.Revision, func(cur *freshstore.Record) error {
 		if validate != nil {
-			if err := validate(*r); err != nil {
+			if err := validate(*cur); err != nil {
 				return err
 			}
 		}
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: target, Stage: bootstrap.PrefixIntentPersisted}
+		prev := cur.Operation.Routing
+		cur.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+			OperationID:                id.OperationID,
+			Revision:                   1,
+			Target:                     intent.Target,
+			InferenceTarget:            intent.InferenceTarget,
+			SharedEntry:                intent.SharedEntry,
+			SuggestedControlBasePath:   prev.SuggestedControlBasePath,
+			SuggestedInferenceBasePath: prev.SuggestedInferenceBasePath,
+			DraftControlBasePath:       intent.Target,
+			DraftInferenceBasePath:     intent.InferenceTarget,
+			DraftSharedEntry:           intent.SharedEntry,
+			Stage:                      bootstrap.PrefixIntentPersisted,
+		}
 		return nil
 	})
 	return r.Operation, err
@@ -144,7 +291,7 @@ func (s *Service) activate(ctx context.Context, id bootstrap.FreshIdentity, vali
 	if err != nil {
 		return r.Operation, err
 	}
-	if actual.OperationID != "" && (actual.OperationID != wanted.OperationID || actual.InstallationID != wanted.InstallationID || actual.Generation != wanted.Generation || actual.Revision != wanted.Revision || actual.Target != wanted.Target || actual.Committed && !wanted.Committed) {
+	if actual.OperationID != "" && (actual.OperationID != wanted.OperationID || actual.InstallationID != wanted.InstallationID || actual.Generation != wanted.Generation || actual.Revision != wanted.Revision || actual.Target != wanted.Target || actual.InferenceTarget != wanted.InferenceTarget || actual.SharedEntry != wanted.SharedEntry || actual.Committed && !wanted.Committed || actual.InferenceCommitted && !wanted.InferenceCommitted) {
 		return r.Operation, ErrConflict
 	}
 	if actual != wanted {
@@ -190,11 +337,14 @@ func (s *Service) activate(ctx context.Context, id bootstrap.FreshIdentity, vali
 				return err
 			}
 		}
-		if r.Operation.Routing.OperationID != id.OperationID || r.Operation.Routing.Target != wanted.Target {
+		if r.Operation.Routing.OperationID != id.OperationID || r.Operation.Routing.Target != wanted.Target || r.Operation.Routing.InferenceTarget != wanted.InferenceTarget || r.Operation.Routing.SharedEntry != wanted.SharedEntry {
 			return ErrConflict
 		}
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true
+		if r.Operation.Routing.InferenceTarget != "" {
+			r.Operation.Routing.InferenceCommitted = true
+		}
 		return nil
 	})
 	if err == nil { // DB commit is the auth cutover; losing this ack cannot reopen fixed routes.
@@ -205,10 +355,48 @@ func (s *Service) activate(ctx context.Context, id bootstrap.FreshIdentity, vali
 
 func (s *Service) Snapshot(ctx context.Context) routing.RoutingSnapshot {
 	r, err := s.store.Load(ctx)
-	if err != nil || r.Operation.Validate() != nil || !r.Operation.Routing.Committed {
+	if err != nil {
 		return routing.RoutingSnapshot{State: routing.SnapshotUnavailable}
 	}
-	return routing.RoutingSnapshot{State: routing.SnapshotVerifiedEffective, DesiredControlBasePath: r.Operation.Routing.Target, VerifiedEffectiveControlBasePath: r.Operation.Routing.Target, Revision: r.Operation.Routing.Revision}
+	return SnapshotForRecord(r)
+}
+
+// SnapshotForRecord derives the read-only RoutingSnapshot from an already
+// loaded freshstore.Record without rereading storage.
+func SnapshotForRecord(r freshstore.Record) routing.RoutingSnapshot {
+	return SnapshotForOperation(r.Operation)
+}
+
+// SnapshotForOperation derives the read-only RoutingSnapshot directly from a
+// validated FreshOperation without rereading storage.
+func SnapshotForOperation(op bootstrap.FreshOperation) routing.RoutingSnapshot {
+	if op.Validate() != nil || !op.Routing.Committed {
+		return routing.RoutingSnapshot{State: routing.SnapshotUnavailable}
+	}
+	snap := routing.RoutingSnapshot{
+		State:                              routing.SnapshotVerifiedEffective,
+		DesiredControlBasePath:             op.Routing.Target,
+		VerifiedEffectiveControlBasePath:   op.Routing.Target,
+		MissingInferenceCompletionRequired: op.MissingInferenceCompletionRequired(),
+		Revision:                           op.Routing.Revision,
+	}
+	switch {
+	case op.Routing.InferenceCommitted && op.Routing.InferenceTarget != "":
+		snap.DesiredInferenceBasePath = op.Routing.InferenceTarget
+		snap.VerifiedEffectiveInferenceBasePath = op.Routing.InferenceTarget
+		snap.InferenceState = routing.SnapshotVerifiedEffective
+		snap.SharedEntry = op.Routing.SharedEntry
+	case op.Routing.InferenceTarget != "":
+		snap.DesiredInferenceBasePath = op.Routing.InferenceTarget
+		snap.InferenceState = routing.SnapshotDesiredOnly
+		snap.SharedEntry = op.Routing.SharedEntry
+	case op.MissingInferenceCompletionRequired():
+		snap.InferenceState = routing.SnapshotUnavailable
+	}
+	if snap.Validate() != nil {
+		return routing.RoutingSnapshot{State: routing.SnapshotUnavailable}
+	}
+	return snap
 }
 
 // Restore republishes only the original durable route owner after Ingress
@@ -232,7 +420,7 @@ func (s *Service) Restore(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if actual.OperationID != "" && (actual.OperationID != wanted.OperationID || actual.InstallationID != wanted.InstallationID || actual.Generation != wanted.Generation || actual.Revision != wanted.Revision || actual.Target != wanted.Target || actual.Committed && !wanted.Committed) {
+	if actual.OperationID != "" && (actual.OperationID != wanted.OperationID || actual.InstallationID != wanted.InstallationID || actual.Generation != wanted.Generation || actual.Revision > wanted.Revision || actual.Target != wanted.Target || (actual.InferenceTarget != "" && actual.InferenceTarget != wanted.InferenceTarget) || actual.Committed && !wanted.Committed || actual.InferenceCommitted && !wanted.InferenceCommitted) {
 		return ErrConflict
 	}
 	if actual == wanted {

@@ -59,13 +59,11 @@ func commitArtifactTestRouting(t *testing.T, app *freshApplication) {
 		t.Fatal(err)
 	}
 	_, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID,
-			Revision:    1,
-			Target:      "/control",
-			Stage:       bootstrap.PrefixCommitted,
-			Committed:   true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -175,7 +173,7 @@ func TestFreshArtifactAuthorizationOnBothCarriersAndBeforeCPAExists(t *testing.T
 			t.Fatalf("committed fixed carrier %s %s = %d, want 404", route.method, route.resource, rec.Code)
 		}
 
-		canonicalPath := "/control/api/v2/" + route.resource
+		canonicalPath := currentInstallManagementAPIV2Prefix + "" + route.resource
 		for _, badAuth := range []string{"", "Fresh invalid-session", "Bearer invalid-admin", "Bearer " + session, "Fresh " + strategyTestAdmin} {
 			before := supervisorCalls.Load()
 			rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), route.method, canonicalPath, badAuth, route.contentType, strings.NewReader(route.body), int64(len(route.body)))
@@ -205,7 +203,7 @@ func TestFreshArtifactAuthorizationOnBothCarriersAndBeforeCPAExists(t *testing.T
 		t.Fatal(err)
 	}
 	for _, route := range routes {
-		canonicalPath := "/control/api/v2/" + route.resource
+		canonicalPath := currentInstallManagementAPIV2Prefix + "" + route.resource
 		if rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), route.method, canonicalPath, "Fresh "+session, route.contentType, strings.NewReader(route.body), int64(len(route.body))); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("completed canonical carrier %s %s with Fresh session = %d, want 401", route.method, route.resource, rec.Code)
 		}
@@ -228,7 +226,7 @@ func TestFreshArtifactStatusPassthroughAndCDNPresets(t *testing.T) {
 	app, _ := newArtifactTestSetup(t, supervisor.URL)
 	commitArtifactTestRouting(t, app)
 
-	rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, "/control/api/v2/runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
+	rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET runtime/artifact = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -252,7 +250,7 @@ func TestFreshArtifactStatusPassthroughAndCDNPresets(t *testing.T) {
 	}
 
 	statusJSON.Store(`{"schemaVersion":1,"pinned":{"version":"8.0.55","artifactId":"` + artifactTestPinnedID + `"},"active":{"artifactId":"` + artifactTestPinnedID + `","origin":"acquired"},"required":false,"operation":{"id":"op-9","source":"cdn","phase":"succeeded","receivedBytes":12345,"totalBytes":12345,"code":""}}`)
-	rec = doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, "/control/api/v2/runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
+	rec = doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET runtime/artifact acquired = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -415,7 +413,7 @@ func TestFreshArtifactAcquireValidationTable(t *testing.T) {
 				t,
 				http.HandlerFunc(app.canonicalAPI),
 				http.MethodPost,
-				"/control/api/v2/runtime/artifact/acquire",
+				currentInstallManagementAPIV2Prefix+"runtime/artifact/acquire",
 				"Bearer "+strategyTestAdmin,
 				"application/json",
 				strings.NewReader(tc.body),
@@ -480,7 +478,7 @@ func TestFreshArtifactUploadStreamsExactBytesAndEnforces64MiBCap(t *testing.T) {
 
 	// 1. Wrong or missing Content-Type is rejected with 400 invalid_request without contacting Supervisor.
 	for _, ct := range []string{"", "application/octet-stream", "application/json"} {
-		rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodPut, "/control/api/v2/runtime/artifact/upload", "Bearer "+strategyTestAdmin, ct, strings.NewReader("data"), 4)
+		rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodPut, currentInstallManagementAPIV2Prefix+"runtime/artifact/upload", "Bearer "+strategyTestAdmin, ct, strings.NewReader("data"), 4)
 		if rec.Code != http.StatusBadRequest || supervisorUploadCalls.Load() != 0 {
 			t.Fatalf("upload with Content-Type %q = %d (calls=%d), want 400", ct, rec.Code, supervisorUploadCalls.Load())
 		}
@@ -493,7 +491,7 @@ func TestFreshArtifactUploadStreamsExactBytesAndEnforces64MiBCap(t *testing.T) {
 		t,
 		http.HandlerFunc(app.canonicalAPI),
 		http.MethodPut,
-		"/control/api/v2/runtime/artifact/upload",
+		currentInstallManagementAPIV2Prefix+"runtime/artifact/upload",
 		"Bearer "+strategyTestAdmin,
 		"application/gzip",
 		bytes.NewReader(archive),
@@ -519,7 +517,7 @@ func TestFreshArtifactUploadStreamsExactBytesAndEnforces64MiBCap(t *testing.T) {
 		t,
 		http.HandlerFunc(app.canonicalAPI),
 		http.MethodPut,
-		"/control/api/v2/runtime/artifact/upload",
+		currentInstallManagementAPIV2Prefix+"runtime/artifact/upload",
 		"Bearer "+strategyTestAdmin,
 		"application/gzip",
 		io.LimitReader(zeroReader{}, oversizedLength),
@@ -544,7 +542,7 @@ func TestFreshArtifactUploadStreamsExactBytesAndEnforces64MiBCap(t *testing.T) {
 		t,
 		http.HandlerFunc(app.canonicalAPI),
 		http.MethodPut,
-		"/control/api/v2/runtime/artifact/upload",
+		currentInstallManagementAPIV2Prefix+"runtime/artifact/upload",
 		"Bearer "+strategyTestAdmin,
 		"application/gzip",
 		io.LimitReader(zeroReader{}, oversizedLength),
@@ -608,7 +606,7 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 			t,
 			http.HandlerFunc(app.canonicalAPI),
 			http.MethodPost,
-			"/control/api/v2/runtime/artifact/acquire",
+			currentInstallManagementAPIV2Prefix+"runtime/artifact/acquire",
 			"Bearer "+strategyTestAdmin,
 			"application/json",
 			strings.NewReader(`{"source":"github"}`),
@@ -649,7 +647,7 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 				t,
 				http.HandlerFunc(app.canonicalAPI),
 				route.method,
-				"/control/api/v2/"+route.resource,
+				currentInstallManagementAPIV2Prefix+""+route.resource,
 				"Bearer "+strategyTestAdmin,
 				route.contentType,
 				strings.NewReader(route.body),
@@ -682,7 +680,7 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 			t,
 			http.HandlerFunc(app.canonicalAPI),
 			route.method,
-			"/control/api/v2/"+route.resource,
+			currentInstallManagementAPIV2Prefix+""+route.resource,
 			"Bearer "+strategyTestAdmin,
 			route.contentType,
 			strings.NewReader(route.body),
@@ -699,7 +697,7 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 
 	// Unconfigured artifact client (nil) also returns 503 runtime_unavailable.
 	app.artifact = nil
-	rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, "/control/api/v2/runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
+	rec := doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/artifact", "Bearer "+strategyTestAdmin, "", nil, 0)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"runtime_unavailable"`) {
 		t.Fatalf("nil artifact client = %d %s, want 503 runtime_unavailable", rec.Code, rec.Body.String())
 	}

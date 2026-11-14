@@ -1271,6 +1271,13 @@ func Migrate(db *sql.DB) error {
 			rollback_status_url text,
 			rollback_source_fingerprint text,
 			rollback_observed_at_ms integer,
+			control_base_path text not null default '',
+			inference_base_path text not null default '',
+			shared_entry integer not null default 0,
+			routing_committed integer not null default 0,
+			inference_committed integer not null default 0,
+			suggested_control_base_path text not null default '',
+			suggested_inference_base_path text not null default '',
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
@@ -1330,6 +1337,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationRoutingColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUpgradeExternalConnectColumns(db); err != nil {
@@ -3200,6 +3210,58 @@ func ensureUpgradeOperationRollbackColumns(db *sql.DB) error {
 			continue
 		}
 		if _, err := db.Exec(`alter table upgrade_operations add column ` + column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureUpgradeOperationRoutingColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(upgrade_operations)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	_, hadInferenceCommitted := existing["inference_committed"]
+	for _, column := range []string{
+		"control_base_path text not null default ''",
+		"inference_base_path text not null default ''",
+		"shared_entry integer not null default 0",
+		"routing_committed integer not null default 0",
+		"inference_committed integer not null default 0",
+		"suggested_control_base_path text not null default ''",
+		"suggested_inference_base_path text not null default ''",
+	} {
+		if _, ok := existing[strings.Fields(column)[0]]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table upgrade_operations add column ` + column); err != nil {
+			return err
+		}
+	}
+	if !hadInferenceCommitted {
+		if _, err := db.Exec(`update upgrade_operations
+			set inference_committed = 1
+			where stage = 'complete' and routing_committed = 1 and inference_base_path <> ''`); err != nil {
 			return err
 		}
 	}

@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
 )
 
 const (
@@ -35,7 +34,7 @@ func NewHTTPDriver(c HTTPConfig) (*HTTPDriver, error) {
 		u, e := url.Parse(s)
 		return e == nil && u.Host != "" && u.User == nil && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == "" && (u.Scheme == "http" || (!internal && u.Scheme == "https"))
 	}
-	if !validOrigin(c.IngressControlURL, true) || !validOrigin(c.PublicOrigin, false) {
+	if !validOrigin(c.IngressControlURL, true) || (c.PublicOrigin != "" && !validOrigin(c.PublicOrigin, false)) {
 		return nil, ErrBlocked
 	}
 	client := c.Client
@@ -91,6 +90,9 @@ func (d *HTTPDriver) Apply(ctx context.Context, s State) error {
 var initialAsset = regexp.MustCompile(`(?:src|href)=["']([^"']+/assets/[^"']+-[A-Za-z0-9_-]{8,}\.(?:js|css))["']`)
 
 func (d *HTTPDriver) get(ctx context.Context, p string, html bool) (*http.Response, []byte, error) {
+	if d.public == "" {
+		return nil, nil, ErrBlocked
+	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, d.public+p, nil)
 	if e != nil {
 		return nil, nil, ErrUnverified
@@ -110,6 +112,9 @@ func (d *HTTPDriver) get(ctx context.Context, p string, html bool) (*http.Respon
 	return res, body, nil
 }
 func (d *HTTPDriver) Verify(ctx context.Context, s State) error {
+	if d.public == "" {
+		return ErrBlocked
+	}
 	res, body, e := d.get(ctx, s.Target, true)
 	if e != nil || res.StatusCode != 200 || res.Header.Get("X-CPAMP-Route-Owner") != "manager" || !strings.Contains(res.Header.Get("Content-Type"), "text/html") || !bytes.Contains(body, []byte(`id="root"`)) {
 		return ErrUnverified
@@ -132,19 +137,48 @@ func (d *HTTPDriver) Verify(ctx context.Context, s State) error {
 	if e != nil || res.StatusCode != 200 || res.Header.Get("X-CPAMP-Route-Owner") != "manager" {
 		return ErrUnverified
 	}
-	var identity State
-	if json.Unmarshal(body, &identity) != nil {
+	var identity PublicIdentity
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&identity) != nil || dec.Decode(new(any)) != io.EOF {
 		return ErrUnverified
 	}
 	identity.Committed = s.Committed
-	if identity != s {
+	if identity != PublicIdentityForState(s) {
 		return ErrUnverified
 	}
 	// A segment lookalike must retain Gateway ownership, with its model path
-	// closed while Fresh has not proved data-plane configuration.
+	// closed while Fresh has not proved data-plane configuration or outside the
+	// configured inference prefix.
 	res, _, e = d.get(ctx, s.Target+"-gateway-probe/v1/models", false)
+	if e != nil || res.Header.Get("X-CPAMP-Route-Owner") != "gateway" {
+		return ErrUnverified
+	}
+	if s.InferenceTarget == "" {
+		if res.StatusCode != http.StatusServiceUnavailable {
+			return ErrUnverified
+		}
+		return nil
+	}
+	if res.StatusCode != http.StatusServiceUnavailable && res.StatusCode != http.StatusNotFound {
+		return ErrUnverified
+	}
+	// Unprefixed /v1/models must remain strictly closed and never open at root.
+	res, _, e = d.get(ctx, "/v1/models", false)
+	if e != nil || res.Header.Get("X-CPAMP-Route-Owner") != "gateway" || (res.StatusCode != http.StatusServiceUnavailable && res.StatusCode != http.StatusNotFound) {
+		return ErrUnverified
+	}
+	// Configured inference prefix must resolve to Gateway ownership while
+	// keeping pre-commit model access closed (503) and blocking CPA management.
+	res, _, e = d.get(ctx, s.InferenceTarget+"/v1/models", false)
 	if e != nil || res.StatusCode != http.StatusServiceUnavailable || res.Header.Get("X-CPAMP-Route-Owner") != "gateway" {
 		return ErrUnverified
+	}
+	for _, blocked := range []string{"/v0/management/config", "/v8/management/config"} {
+		res, _, e = d.get(ctx, s.InferenceTarget+blocked, false)
+		if e != nil || res.StatusCode != http.StatusNotFound {
+			return ErrUnverified
+		}
 	}
 	return nil
 }

@@ -29,21 +29,33 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory the operation copied (required; the fingerprint proves it was not written)")
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
+	controlBasePath := flags.String("control-base-path", "", "CPAMP control base path prefix (for example /cpamp-admin)")
+	inferenceBasePath := flags.String("inference-base-path", "", "CPAMP managed inference base path prefix (for example /cpamp-api)")
+	sharedEntry := flags.Bool("shared-entry", false, "explicitly confirm sharing a single prefix for both control and inference")
 	asJSON := flags.Bool("json", false, "print the result as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
+	if flags.NArg() != 0 {
 		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
 	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
 	}
+	legacyRoot := strings.TrimSpace(*legacy)
 	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
-		LegacyRoot: strings.TrimSpace(*legacy),
-		TargetRoot: targetRoot,
+		LegacyRoot:        legacyRoot,
+		TargetRoot:        targetRoot,
+		ControlBasePath:   strings.TrimSpace(*controlBasePath),
+		InferenceBasePath: strings.TrimSpace(*inferenceBasePath),
+		SharedEntry:       *sharedEntry,
 	})
+	if err != nil && legacyRoot == "" {
+		if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && code == upgradeservice.UpgradeErrorVerifySourceUnavailable {
+			return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
+		}
+	}
 	if err != nil {
 		// A refusal records nothing, so it reports nothing about the operation:
 		// the code and the message are the whole answer.

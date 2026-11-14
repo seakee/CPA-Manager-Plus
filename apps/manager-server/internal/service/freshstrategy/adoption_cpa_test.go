@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -129,7 +130,10 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			sourceAddr, targetAddr, runtimeAddr := freeTestAddress(t), destinationAddress, freeTestAddress(t)
 			sourceURL := "http://" + sourceAddr
 			sourceKey := "isolated-source-management-key"
-			clientKeys := []string{"isolated-client-one", "isolated-client-two"}
+			clientKeys := make([]string, 133)
+			for i := range clientKeys {
+				clientKeys[i] = "isolated-client-" + strconv.Itoa(i)
+			}
 			var source *exec.Cmd
 			if class == bootstrap.AdoptLegacyManaged {
 				if legacyCPAPath == "" {
@@ -510,7 +514,7 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				writeLegacyTransitionEvidence(t, record, finalStatus, expectedArtifact, legacyBytes)
 			} else {
 				keys, err := cpa.ReadV8AdoptionKeys(t.Context(), sourceURL, sourceKey)
-				if err != nil || len(keys) != 2 || keys[0] != clientKeys[0] || keys[1] != clientKeys[1] {
+				if err != nil || !slices.Equal(keys, clientKeys) {
 					t.Fatal("qualified staging source no longer usable")
 				}
 			}

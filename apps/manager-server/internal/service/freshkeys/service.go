@@ -44,10 +44,11 @@ type Key struct {
 	Lifecycle     identity.Lifecycle `json:"lifecycle"`
 	// Origin is "workspace" for a Key the workspace created, "installer" for the
 	// single Key the default installation minted so CPA never starts with client
-	// authentication disabled, and "adopted" for a Key an adopted destination
-	// already carried when the adoption completed. It is display metadata, not
-	// authority.
-	Origin string `json:"origin"`
+	// authentication disabled, and "adopted" for a Key an adopted or upgraded
+	// destination already carried. It is display metadata, not authority.
+	Origin      string `json:"origin"`
+	OperationID string `json:"operationId,omitempty"`
+	EffectCode  string `json:"effectCode,omitempty"`
 }
 
 // InitialKey is the installation-minted Client Key. The secret is returned only
@@ -153,7 +154,7 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 // A digest that resolves to a superseded record is refused instead: that identity
 // is retired history, so the installation can neither own it nor revive it.
 func (s *Service) PrepareAdopted(secrets []string) ([]repo.Record, error) {
-	if s == nil || s.repo == nil || s.protector == nil || len(secrets) == 0 || len(secrets) > maxAdoptedSecrets {
+	if s == nil || s.repo == nil || s.protector == nil || len(secrets) == 0 {
 		return nil, ErrRequest
 	}
 	// The whole list is validated and encrypted before the first SQLite write:
@@ -251,13 +252,9 @@ func publicKeys(records []repo.Record) []Key {
 	return keys
 }
 
-// Bounds of one adoption's client key list. The destination proof already
-// refuses a list outside them; they are repeated here so this write path never
-// depends on the caller having proved anything.
-const (
-	maxAdoptedSecrets      = 128
-	maxAdoptedSecretLength = 4096
-)
+// maxAdoptedSecretLength bounds one imported client credential to CPA v8's
+// maximum token length without imposing any cap on total key count.
+const maxAdoptedSecretLength = 4096
 
 // stagedSecretMatches validates one stored record against its decrypted secret.
 // Two origins have a canonical shape and the preview that shape owns; an adopted
@@ -336,10 +333,17 @@ func digest(secret string) string {
 // list against without carrying the secret anywhere it is not already read.
 func SecretDigest(secret string) string { return digest(secret) }
 
-// AllStaged reports whether every secret is one of this installation's active
-// staged Client Keys. It answers membership without returning any secret, which
-// is what a whole-list write needs: a destination key this Manager cannot name is
-// one it must not overwrite.
+// nonRetiredLifecycle reports whether a canonical identity remains non-retired.
+// Passive runtime reconciliation marks a previously observed key LifecycleMissing
+// when absent from CPA; only LifecycleSuperseded is terminal retirement.
+func nonRetiredLifecycle(lifecycle identity.Lifecycle) bool {
+	return lifecycle == identity.LifecycleActive || lifecycle == identity.LifecycleMissing
+}
+
+// AllStaged reports whether every secret is one of this installation's
+// non-retired staged Client Keys. It answers membership without returning any
+// secret, which is what a whole-list write needs: a destination key this
+// Manager cannot name is one it must not overwrite.
 func (s *Service) AllStaged(ctx context.Context, secrets []string) (bool, error) {
 	if s == nil || s.repo == nil || len(secrets) == 0 {
 		return false, ErrRequest
@@ -352,7 +356,7 @@ func (s *Service) AllStaged(ctx context.Context, secrets []string) (bool, error)
 		if err != nil {
 			return false, err
 		}
-		if record == nil || record.Identity.Lifecycle != identity.LifecycleActive {
+		if record == nil || !nonRetiredLifecycle(record.Identity.Lifecycle) {
 			return false, nil
 		}
 	}
@@ -385,11 +389,17 @@ func (s *Service) List(ctx context.Context) ([]Key, error) {
 		if v.Identity.Lifecycle == identity.LifecycleSuperseded {
 			key.RuntimeState = "effect_unknown"
 		}
-		if attempt != nil && attempt.KeyID == string(key.ID) {
+		if attempt != nil && attempt.KeyID == string(key.ID) || operation != nil && operation.Outcome != repo.OutcomeAborted && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
 			key.RuntimeState = "effect_unknown"
 		}
-		if operation != nil && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
-			key.RuntimeState = "effect_unknown"
+		if operation != nil && !operation.IsTerminal() && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
+			key.OperationID = operation.ID
+			if operation.Outcome == "pending" && nonRetiredLifecycle(key.Lifecycle) &&
+				((operation.Mode == "add" && operation.TargetID == string(key.ID)) || (operation.Mode == "replace" && operation.KeeperID == string(key.ID))) {
+				key.RuntimeState = "applying"
+			} else {
+				key.RuntimeState = "effect_unknown"
+			}
 		}
 		keys = append(keys, key)
 	}
@@ -579,7 +589,7 @@ func (s *Service) MatchStagedSecret(ctx context.Context, candidate string) (bool
 		if err != nil || len(stored) != len(sum) {
 			return false, errors.New("staged client key digest invalid")
 		}
-		if record.Identity.Lifecycle == identity.LifecycleActive {
+		if nonRetiredLifecycle(record.Identity.Lifecycle) {
 			matched |= subtle.ConstantTimeCompare(sum[:], stored)
 		}
 	}
@@ -597,24 +607,76 @@ func (s *Service) WithStagedSecret(ctx context.Context, rawID string, consume fu
 func (s *Service) WithRetainedSecret(ctx context.Context, rawID string, consume func(string) error) error {
 	return s.withSecret(ctx, rawID, false, consume)
 }
-func (s *Service) withSecret(ctx context.Context, rawID string, active bool, consume func(string) error) error {
-	key, err := s.Detail(ctx, rawID)
+func (s *Service) withSecret(ctx context.Context, rawID string, nonRetired bool, consume func(string) error) error {
+	id, err := identity.ParseAPIKeyID(rawID)
+	if err != nil {
+		return ErrRequest
+	}
+	if s == nil || s.repo == nil || s.protector == nil {
+		return errors.New("staged client secret unavailable")
+	}
+	record, err := s.repo.ByID(ctx, id)
 	if err != nil {
 		return err
+	}
+	if record == nil {
+		return ErrNotFound
+	}
+	secret, err := s.protector.UnprotectString(record.Ciphertext)
+	if err != nil || !stagedSecretMatches(*record, secret) || nonRetired && !nonRetiredLifecycle(record.Identity.Lifecycle) {
+		return errors.New("staged client secret unavailable")
+	}
+	return consume(secret)
+}
+
+// ActiveSecretMap decrypts all non-retired staged keys once and maps
+// secret -> Key, avoiding repeated table scans and decryptions during multi-key
+// observations and operations. Any corrupt row fails closed.
+func (s *Service) ActiveSecretMap(ctx context.Context) (keys []Key, bySecret map[string]Key, secretByID map[string]string, err error) {
+	if s == nil || s.repo == nil || s.protector == nil {
+		return nil, nil, nil, errors.New("secret protection unavailable")
 	}
 	records, err := s.repo.List(ctx)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	for _, record := range records {
-		if record.Identity.ID != key.ID {
-			continue
-		}
-		secret, err := s.protector.UnprotectString(record.Ciphertext)
-		if err != nil || digest(secret) != record.Hash || active && record.Identity.Lifecycle != identity.LifecycleActive {
-			return errors.New("staged client secret unavailable")
-		}
-		return consume(secret)
+	attempt, err := s.repo.InitialInstall(ctx)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	return ErrNotFound
+	operation, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	keys = make([]Key, 0, len(records))
+	bySecret = make(map[string]Key, len(records))
+	secretByID = make(map[string]string, len(records))
+	for _, v := range records {
+		secret, decErr := s.protector.UnprotectString(v.Ciphertext)
+		if decErr != nil || !stagedSecretMatches(v, secret) {
+			return nil, nil, nil, errors.New("staged client secret unavailable")
+		}
+		key := public(v)
+		if v.Identity.Lifecycle == identity.LifecycleSuperseded {
+			key.RuntimeState = "effect_unknown"
+		}
+		if attempt != nil && attempt.KeyID == string(key.ID) || operation != nil && operation.Outcome != repo.OutcomeAborted && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
+			key.RuntimeState = "effect_unknown"
+		}
+		if operation != nil && !operation.IsTerminal() && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
+			key.OperationID = operation.ID
+			if operation.Outcome == "pending" && nonRetiredLifecycle(key.Lifecycle) &&
+				((operation.Mode == "add" && operation.TargetID == string(key.ID)) || (operation.Mode == "replace" && operation.KeeperID == string(key.ID))) {
+				key.RuntimeState = "applying"
+			} else {
+				key.RuntimeState = "effect_unknown"
+			}
+		}
+		keys = append(keys, key)
+		if nonRetiredLifecycle(v.Identity.Lifecycle) {
+			bySecret[secret] = key
+			secretByID[string(key.ID)] = secret
+		}
+	}
+	return keys, bySecret, secretByID, nil
 }

@@ -241,9 +241,6 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 		if len(clientKeys) == 0 {
 			return V8ConfigObservation{}, V8AdoptionSourceEmpty
 		}
-		if len(clientKeys) > 128 {
-			return V8ConfigObservation{}, V8InvalidConfig
-		}
 		keys := make([]string, 0, len(clientKeys))
 		seen := map[string]bool{}
 		for _, raw := range clientKeys {

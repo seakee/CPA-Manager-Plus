@@ -3,10 +3,14 @@ package freshkeyapply
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -43,6 +47,73 @@ func ObserveExternalRebindCredential(ctx context.Context, baseURL string, manage
 type externalRebindStore interface {
 	freshstore.Store
 	freshstore.ConnectionRebinder
+}
+
+// CheckRebindJournalFence verifies that no attempted or partially-applied key
+// operation owns the journal before an External management credential rotation.
+// Entirely unattempted operations pass this fence and are aborted once the
+// replacement credential has been proven.
+func (s *Service) CheckRebindJournalFence(ctx context.Context, identity, generation string) error {
+	s = s.active()
+	if s == nil {
+		return ErrExternalUnavailable
+	}
+	if s.repo == nil {
+		return nil
+	}
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return ErrExternalUnavailable
+	}
+	if latest == nil || latest.IsTerminal() {
+		return nil
+	}
+	if latest.RunID != identity || latest.Generation != generation {
+		return ErrGeneration
+	}
+	if !latest.AllStepsUnattempted() {
+		return fmt.Errorf("%w: %w", ErrRebindRefused, repo.ErrConflict)
+	}
+	return nil
+}
+
+// AbortUnattemptedLatestForRebind transitions a proven never-attempted
+// LatestOperation to the terminal "aborted" state immediately before persisting
+// a rotated External management credential, preventing an old unattempted
+// destructive intent from either deadlocking recovery or executing against a
+// newly rebound CPA. Attempted or partially-applied operations remain fenced.
+func (s *Service) AbortUnattemptedLatestForRebind(ctx context.Context, identity, generation string) error {
+	s = s.active()
+	if s == nil {
+		return ErrExternalUnavailable
+	}
+	if s.repo == nil {
+		return nil
+	}
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return ErrExternalUnavailable
+	}
+	if latest == nil || latest.IsTerminal() {
+		return nil
+	}
+	if latest.RunID != identity || latest.Generation != generation {
+		return ErrGeneration
+	}
+	if !latest.AllStepsUnattempted() {
+		return fmt.Errorf("%w: %w", ErrRebindRefused, repo.ErrConflict)
+	}
+	aborted := *latest
+	aborted.Steps = slices.Clone(latest.Steps)
+	aborted.Outcome = repo.OutcomeAborted
+	aborted.CompletedAtMS = max(time.Now().UnixMilli(), latest.CreatedAtMS, 1)
+	if err := s.repo.SaveOperation(ctx, aborted); err != nil {
+		if errors.Is(err, repo.ErrConflict) {
+			return fmt.Errorf("%w: %w", ErrRebindRefused, repo.ErrConflict)
+		}
+		return ErrExternalUnavailable
+	}
+	return nil
 }
 
 // Rebind replaces the management credential of the committed External
@@ -103,6 +174,11 @@ func (s *Service) Rebind(ctx context.Context, store externalRebindStore, admin *
 	if record.Operation.Strategy.Strategy != bootstrap.ConnectExternal {
 		return ExternalRebindResult{}, ErrExternalUnavailable
 	}
+	if managementKey != install.ManagementKey {
+		if err := s.CheckRebindJournalFence(ctx, install.Identity, install.Generation()); err != nil {
+			return ExternalRebindResult{}, err
+		}
+	}
 	verify := s.externalRebindVerifier
 	if verify == nil {
 		verify = ObserveExternalRebindCredential
@@ -150,6 +226,18 @@ func (s *Service) Rebind(ctx context.Context, store externalRebindStore, admin *
 	if err != nil {
 		return ExternalRebindResult{}, ErrExternalUnavailable
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	currentRecord, err := store.Load(ctx)
+	if err != nil {
+		return ExternalRebindResult{}, err
+	}
+	if currentRecord.Operation.Identity != record.Operation.Identity || currentRecord.Operation.Revision != record.Operation.Revision {
+		return ExternalRebindResult{}, ErrGeneration
+	}
+	if err := s.AbortUnattemptedLatestForRebind(ctx, install.Identity, install.Generation()); err != nil {
+		return ExternalRebindResult{}, err
+	}
 	next := model.ManagerCPAConnectionConfig{CPABaseURL: install.BaseURL, ManagementKey: ciphertext}
 	rebound, err := store.RebindConnection(ctx, record.Operation.Identity, record.Operation.Revision, next)
 	if err != nil {
@@ -163,7 +251,7 @@ func (s *Service) Rebind(ctx context.Context, store externalRebindStore, admin *
 		if errors.Is(err, freshstore.ErrRebindRefused) {
 			return ExternalRebindResult{}, ErrRebindRefused
 		}
-		return ExternalRebindResult{}, ErrExternalUnavailable
+		return ExternalRebindResult{}, err
 	}
 	return ExternalRebindResult{Record: rebound}, nil
 }

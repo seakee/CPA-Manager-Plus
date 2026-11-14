@@ -3,18 +3,25 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
 
 // The preflight is the question the drawer asks before it offers the submit. It
 // answers with the same verdict and the same code vocabulary the prepare would,
-// and it never journals or writes anything.
+// and it answers without writing to the destination. Ordinary creation now
+// applies the key to CPA, so the install is never pristine by the time the page
+// asks: every no-mutation assertion compares the destination's actual write
+// count before and after the preflight.
 func TestKeyOperationPreflightNamesEveryLimitBeforeSubmit(t *testing.T) {
 	preflight := func(t *testing.T, harness *managedInstallHarness, target, keeper, mode string) (bool, string) {
 		t.Helper()
-		response := harness.call(t, http.MethodGet,
-			"api-keys/"+target+"/revocation/"+keeper+"/"+mode, "")
+		resource := "api-keys/" + target + "/revocation/" + mode
+		if keeper != "" {
+			resource = "api-keys/" + target + "/revocation/" + keeper + "/" + mode
+		}
+		response := harness.call(t, http.MethodGet, resource, "")
 		if response.Code != http.StatusOK {
 			t.Fatalf("preflight = %d %s", response.Code, response.Body.String())
 		}
@@ -28,33 +35,95 @@ func TestKeyOperationPreflightNamesEveryLimitBeforeSubmit(t *testing.T) {
 		return reply.Ready, reply.Reason
 	}
 
+	// revokeThroughCPA performs the real keeperless revocation an operator
+	// submits, so the next preflight reads the destination CPA's actual list
+	// instead of an assumption about what creation left behind.
+	revokeThroughCPA := func(t *testing.T, harness *managedInstallHarness, target, requestID string) {
+		t.Helper()
+		prepare := harness.call(t, http.MethodPost, "api-keys/"+target+"/revocation",
+			`{"requestId":"`+requestID+`","mode":"revoke"}`)
+		if prepare.Code != http.StatusOK {
+			t.Fatalf("revoke prepare = %d %s", prepare.Code, prepare.Body.String())
+		}
+		cont := harness.call(t, http.MethodPost, "api-keys/operations/"+requestID+"/continue", `{}`)
+		if cont.Code != http.StatusOK {
+			t.Fatalf("revoke continue = %d %s", cont.Code, cont.Body.String())
+		}
+	}
+
 	t.Run("accepted selection is ready", func(t *testing.T) {
 		harness := newManagedInstallHarness(t)
 		keeper := harness.createKey(t, strings.Repeat("6", 32))
+		// Creation is a real installation: the keeper is effective and CPA now
+		// holds both client keys, so this accepted replace is already multi-key.
+		if keeper.Key.RuntimeState != "effective_observed" {
+			t.Fatalf("created keeper state = %q", keeper.Key.RuntimeState)
+		}
+		if got := harness.destination.installed(); len(got) != 2 ||
+			got[0] != harness.installKey.Secret || got[1] != keeper.CreatedSecret {
+			t.Fatalf("destination keys after creation = %v", got)
+		}
+		writesBefore := harness.destination.writes
 		if ready, reason := preflight(t, harness, string(harness.installKey.ID), string(keeper.Key.ID), "replace"); !ready {
 			t.Fatalf("accepted selection = %v %q", ready, reason)
 		}
-		if harness.destination.writes != 0 {
-			t.Fatalf("preflight wrote the destination (%d writes)", harness.destination.writes)
+		if harness.destination.writes != writesBefore {
+			t.Fatalf("preflight wrote the destination (%d -> %d writes)", writesBefore, harness.destination.writes)
 		}
 	})
 
 	t.Run("the last effective key is named", func(t *testing.T) {
 		harness := newManagedInstallHarness(t)
 		keeper := harness.createKey(t, strings.Repeat("7", 32))
-		ready, reason := preflight(t, harness, string(harness.installKey.ID), string(keeper.Key.ID), "revoke")
+		// Revoke the install key for real, leaving exactly one client key in
+		// CPA: that lone key is the boundary the preflight must name.
+		revokeThroughCPA(t, harness, string(harness.installKey.ID), strings.Repeat("4", 32))
+		if got := harness.destination.installed(); len(got) != 1 || got[0] != keeper.CreatedSecret {
+			t.Fatalf("destination keys after the real revocation = %v", got)
+		}
+		writesBefore := harness.destination.writes
+		ready, reason := preflight(t, harness, string(keeper.Key.ID), "", "revoke")
 		if ready || reason != "last_effective_key" {
 			t.Fatalf("last key = %v %q", ready, reason)
 		}
+		if harness.destination.writes != writesBefore {
+			t.Fatalf("preflight wrote the destination (%d -> %d writes)", writesBefore, harness.destination.writes)
+		}
+		// The prediction and the submit are the same verdict, so a page that
+		// ignored the preflight still learns the boundary without an attempt.
+		blocked := harness.call(t, http.MethodPost, "api-keys/"+string(keeper.Key.ID)+"/revocation",
+			`{"requestId":"`+strings.Repeat("d", 32)+`","mode":"revoke"}`)
+		if blocked.Code != http.StatusConflict || errorCode(t, blocked) != "last_effective_key" {
+			t.Fatalf("submit = %d %s", blocked.Code, blocked.Body.String())
+		}
+		if harness.destination.writes != writesBefore {
+			t.Fatalf("the refused revoke wrote %d times (%d -> %d)", harness.destination.writes-writesBefore, writesBefore, harness.destination.writes)
+		}
+		if got := harness.destination.installed(); len(got) != 1 || got[0] != keeper.CreatedSecret {
+			t.Fatalf("destination keys after the refused revoke = %v", got)
+		}
 	})
 
-	t.Run("the installation fence is named", func(t *testing.T) {
+	t.Run("a key staged but never installed is refused", func(t *testing.T) {
 		harness := newManagedInstallHarness(t)
-		target := harness.createKey(t, strings.Repeat("8", 32))
 		keeper := harness.createKey(t, strings.Repeat("9", 32))
-		ready, reason := preflight(t, harness, string(target.Key.ID), string(keeper.Key.ID), "revoke")
-		if ready || reason != "key_operation_conflict" {
-			t.Fatalf("installation fence = %v %q", ready, reason)
+		// Staging is not installing: the underlying service mints the record
+		// without touching CPA, so the destination never carries this key.
+		staged, created, err := harness.app.keys.Create(t.Context(), strings.Repeat("8", 32))
+		if err != nil || !created || staged.CreatedSecret == "" {
+			t.Fatalf("stage key = %v (created=%t secret=%t)", err, created, staged.CreatedSecret != "")
+		}
+		got := harness.destination.installed()
+		if len(got) != 2 || slices.Contains(got, staged.CreatedSecret) {
+			t.Fatalf("staged key reached the destination = %v", got)
+		}
+		writesBefore := harness.destination.writes
+		ready, reason := preflight(t, harness, string(staged.Key.ID), string(keeper.Key.ID), "revoke")
+		if ready || reason != "key_operation_source_conflict" {
+			t.Fatalf("uninstalled staged key = %v %q", ready, reason)
+		}
+		if harness.destination.writes != writesBefore {
+			t.Fatalf("preflight wrote the destination (%d -> %d writes)", writesBefore, harness.destination.writes)
 		}
 	})
 
@@ -62,41 +131,13 @@ func TestKeyOperationPreflightNamesEveryLimitBeforeSubmit(t *testing.T) {
 		harness := newManagedInstallHarness(t)
 		keeper := harness.createKey(t, strings.Repeat("a", 32))
 		harness.destination.seed("unknown-client-key")
+		writesBefore := harness.destination.writes
 		ready, reason := preflight(t, harness, string(harness.installKey.ID), string(keeper.Key.ID), "revoke")
 		if ready || reason != "key_operation_source_conflict" {
 			t.Fatalf("unknown destination key = %v %q", ready, reason)
 		}
-	})
-
-	// A whole-list write can only state a list the destination holds. The managed
-	// posture takes two keys, so replacing one of two would have to send three:
-	// the write itself would be refused before it left the Manager, after the
-	// attempt had already been journaled. The preflight must therefore answer the
-	// same conflict the prepare does, and nothing may reach the destination.
-	t.Run("a list past the destination's bound is named", func(t *testing.T) {
-		harness := newManagedInstallHarness(t)
-		spare := harness.createKey(t, strings.Repeat("b", 32))
-		harness.destination.seed(harness.installKey.Secret, spare.CreatedSecret)
-		next := harness.createKey(t, strings.Repeat("c", 32))
-		ready, reason := preflight(t, harness, string(harness.installKey.ID), string(next.Key.ID), "replace")
-		if ready || reason != "key_operation_source_conflict" {
-			t.Fatalf("bound = %v %q", ready, reason)
-		}
-		if harness.destination.writes != 0 {
-			t.Fatalf("preflight wrote the destination (%d writes)", harness.destination.writes)
-		}
-		// The prediction and the submit are the same verdict, so a page that
-		// ignored the preflight still learns the limit without an attempt.
-		blocked := harness.call(t, http.MethodPost, "api-keys/"+string(harness.installKey.ID)+"/revocation",
-			`{"requestId":"`+strings.Repeat("d", 32)+`","keeperId":"`+string(next.Key.ID)+`","mode":"replace"}`)
-		if blocked.Code != http.StatusConflict || errorCode(t, blocked) != "key_operation_source_conflict" {
-			t.Fatalf("submit = %d %s", blocked.Code, blocked.Body.String())
-		}
-		if harness.destination.writes != 0 {
-			t.Fatalf("the refused replace wrote %d times", harness.destination.writes)
-		}
-		if got := harness.destination.installed(); len(got) != 2 {
-			t.Fatalf("destination keys after the refused replace = %v", got)
+		if harness.destination.writes != writesBefore {
+			t.Fatalf("preflight wrote the destination (%d -> %d writes)", writesBefore, harness.destination.writes)
 		}
 	})
 }

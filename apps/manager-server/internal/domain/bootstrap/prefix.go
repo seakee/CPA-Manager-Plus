@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"path"
@@ -72,6 +73,117 @@ func ValidControlBasePath(value string) bool {
 		}
 	}
 	return path.Clean(value) == value
+}
+
+// ValidInferenceBasePath enforces the exact same canonical prefix grammar as
+// ValidControlBasePath for public inference ingress prefixes.
+func ValidInferenceBasePath(value string) bool {
+	return ValidControlBasePath(value)
+}
+
+// SameOrNestedBasePath reports whether two canonical prefixes are equal or one
+// is a strict segment ancestor of the other.
+func SameOrNestedBasePath(left, right string) bool {
+	return left == right || strings.HasPrefix(left, right+"/") || strings.HasPrefix(right, left+"/")
+}
+
+// AccessPrefixCode names a deterministic validation or state refusal for
+// control/inference prefix configuration.
+type AccessPrefixCode string
+
+const (
+	CodeInvalidAccessPrefix              AccessPrefixCode = "invalid_access_prefix"
+	CodeInferencePrefixRequired          AccessPrefixCode = "inference_prefix_required"
+	CodeExternalInferencePrefixForbidden AccessPrefixCode = "external_inference_prefix_forbidden"
+	CodeSharedPrefixMismatch             AccessPrefixCode = "shared_prefix_mismatch"
+	CodeSharedPrefixConfirmationRequired AccessPrefixCode = "shared_prefix_confirmation_required"
+	CodePrefixOverlapForbidden           AccessPrefixCode = "prefix_overlap_forbidden"
+	CodeReservedPrefixCollision          AccessPrefixCode = "reserved_prefix_collision"
+	CodeRoutingConflict                  AccessPrefixCode = "routing_conflict"
+	CodeInferencePrefixAlreadyCommitted  AccessPrefixCode = "inference_prefix_already_committed"
+)
+
+// AccessPrefixError carries a typed AccessPrefixCode for HTTP controllers.
+type AccessPrefixError struct {
+	Code   AccessPrefixCode
+	Detail string
+}
+
+func (e *AccessPrefixError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Detail != "" {
+		return string(e.Code) + ": " + e.Detail
+	}
+	return string(e.Code)
+}
+
+// AccessPrefixCodeOf extracts a typed AccessPrefixCode when present.
+func AccessPrefixCodeOf(err error) (AccessPrefixCode, bool) {
+	var target *AccessPrefixError
+	if errors.As(err, &target) && target != nil && target.Code != "" {
+		return target.Code, true
+	}
+	return "", false
+}
+
+const (
+	suggestedFirstAlphabet = "abcdefghijklmnopqrstuvwxyz"
+	suggestedRestAlphabet  = "abcdefghijklmnopqrstuvwxyz0123456789"
+	suggestedPrefixLength  = 16
+)
+
+// GenerateSuggestedPrefix generates one 16-character CSPRNG canonical prefix
+// (/[a-z][a-z0-9]{15}) suitable as an explicit UI input suggestion. It is never
+// implicitly applied without operator submission.
+func GenerateSuggestedPrefix() (string, error) {
+	var raw [suggestedPrefixLength]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.Grow(1 + suggestedPrefixLength)
+	b.WriteByte('/')
+	b.WriteByte(suggestedFirstAlphabet[int(raw[0])%len(suggestedFirstAlphabet)])
+	for i := 1; i < suggestedPrefixLength; i++ {
+		b.WriteByte(suggestedRestAlphabet[int(raw[i])%len(suggestedRestAlphabet)])
+	}
+	candidate := b.String()
+	if !ValidControlBasePath(candidate) {
+		return "", errors.New("generated prefix failed canonical validation")
+	}
+	return candidate, nil
+}
+
+// GenerateSuggestedPrefixPair returns two distinct CSPRNG canonical prefix
+// suggestions avoiding any caller-supplied collision check.
+func GenerateSuggestedPrefixPair(collides func(string) bool) (string, string, error) {
+	next := func(exclude string) (string, error) {
+		for range 32 {
+			candidate, err := GenerateSuggestedPrefix()
+			if err != nil {
+				return "", err
+			}
+			if candidate == exclude {
+				continue
+			}
+			if collides != nil && collides(candidate) {
+				continue
+			}
+			return candidate, nil
+		}
+		return "", errors.New("unable to generate collision-free suggested prefix")
+	}
+	control, err := next("")
+	if err != nil {
+		return "", "", err
+	}
+	inference, err := next(control)
+	if err != nil {
+		return "", "", err
+	}
+	return control, inference, nil
 }
 
 func validPrefixStage(stage PrefixOperationStage) bool {
@@ -170,17 +282,17 @@ func PrefixActionAfterOperation(p PrefixOperation) (PrefixRecoveryAction, error)
 }
 
 type PrefixRecoveryObservation struct {
-	CurrentInstallationID            string
-	CurrentRoutingRevision           uint64
-	CurrentEffectivePath             string
-	CurrentOperationOwnerQualified   bool
-	CurrentCollisionFree             bool
-	CurrentSourceQualified           bool
-	PreviousSnapshotQualified        bool
-	PreviousSnapshotEffectivePath    string
-	PublicIdentityHealthy            bool
-	StaticAssetsHealthy              bool
-	APIAuthenticationHealthy         bool
+	CurrentInstallationID          string
+	CurrentRoutingRevision         uint64
+	CurrentEffectivePath           string
+	CurrentOperationOwnerQualified bool
+	CurrentCollisionFree           bool
+	CurrentSourceQualified         bool
+	PreviousSnapshotQualified      bool
+	PreviousSnapshotEffectivePath  string
+	PublicIdentityHealthy          bool
+	StaticAssetsHealthy            bool
+	APIAuthenticationHealthy       bool
 }
 
 func (o PrefixRecoveryObservation) valid() bool {

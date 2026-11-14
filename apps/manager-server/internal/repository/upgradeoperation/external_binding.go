@@ -3,9 +3,11 @@ package upgradeoperation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -145,6 +147,107 @@ func RecordExternalBindingTx(ctx context.Context, tx Tx, binding ExternalBinding
 // writer can return the row it just wrote instead of re-reading it after commit
 // and reporting a stamp another writer has already moved on.
 func GetTx(ctx context.Context, tx Tx) (model.UpgradeOperation, bool, error) {
-	return scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	return getInTx(ctx, tx)
+}
+
+// RebindCompletedExternalConnectionTx replaces the sealed management credential
+// of a completed External Upgrade operation's committed CPA address behind an
+// observation-checkpoint CAS, advancing both upgrade_external_connect.observed_at_ms
+// and upgrade_operations.verification.bindingObservedAtMs together so startup
+// admission and verification replay remain consistent.
+func RebindCompletedExternalConnectionTx(
+	ctx context.Context,
+	tx Tx,
+	expectedObservedAtMS int64,
+	sealedManagementKey string,
+	cpaVersion string,
+	support string,
+) (model.UpgradeOperation, ExternalBinding, error) {
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	current, found, err := GetTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	if !found || current.Stage != model.UpgradeStageComplete {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrInvalidRow
+	}
+	evidence, err := current.VerificationEvidence()
+	if err != nil || !evidence.Complete() || evidence.TargetMode != model.UpgradeTargetExternal {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrInvalidRow
+	}
+	binding, hasBinding, err := ExternalBindingTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	if !hasBinding ||
+		binding.Identity != evidence.BindingIdentity ||
+		binding.Generation != evidence.BindingGeneration ||
+		binding.ObservedAtMS != evidence.BindingObservedAtMS {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrInvalidRow
+	}
+	if binding.ObservedAtMS != expectedObservedAtMS {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrConflict
+	}
+	if strings.TrimSpace(sealedManagementKey) == "" {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrExternalBindingInvalid
+	}
+	nextObserved := now
+	if nextObserved <= binding.ObservedAtMS {
+		nextObserved = binding.ObservedAtMS + 1
+	}
+	binding.ManagementKey = strings.TrimSpace(sealedManagementKey)
+	if strings.TrimSpace(cpaVersion) != "" {
+		binding.CPAVersion = strings.TrimSpace(cpaVersion)
+	}
+	if strings.TrimSpace(support) != "" {
+		binding.Support = strings.TrimSpace(support)
+	}
+	binding.ObservedAtMS = nextObserved
+	if err := binding.Validate(); err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	evidence.BindingObservedAtMS = nextObserved
+	if err := evidence.Validate(); err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	encodedEvidence, err := json.Marshal(evidence)
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	prevRevision := current.Revision
+	current.Verification = encodedEvidence
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	current.Revision = prevRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	bindRes, err := tx.ExecContext(ctx, `update `+externalBindingTableName+`
+		set management_key = ?, cpa_version = ?, support = ?, observed_at_ms = ?
+		where id = 1 and identity = ? and generation = ? and observed_at_ms = ?`,
+		binding.ManagementKey, binding.CPAVersion, binding.Support, binding.ObservedAtMS,
+		binding.Identity, binding.Generation, expectedObservedAtMS)
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	affected, err := bindRes.RowsAffected()
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	if affected != 1 {
+		return model.UpgradeOperation{}, ExternalBinding{}, ErrConflict
+	}
+	opRes, err := tx.ExecContext(ctx, `update `+tableName+`
+		set verification = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		string(current.Verification), current.Revision, current.UpdatedAtMS, prevRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	if err := revisionGuard(opRes, prevRevision); err != nil {
+		return model.UpgradeOperation{}, ExternalBinding{}, err
+	}
+	return current, binding, nil
 }

@@ -109,7 +109,11 @@ func TestFreshCommittedStrategyReplayChecksTargetsWithoutUpdating(t *testing.T) 
 			assertFreshAuthority(http.StatusNotFound)
 			_, err = app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
 				r.Operation.Strategy = checkpoint
-				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+				r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+				r.Operation.Routing.Revision = 1
+				r.Operation.Routing.Target = "/cpamp-admin"
+				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				r.Operation.Routing.Committed = true
 				r.Connection = connection
 				return nil
 			})
@@ -142,7 +146,7 @@ func TestFreshCommittedStrategyReplayChecksTargetsWithoutUpdating(t *testing.T) 
 							t.Fatal(err)
 						}
 						calls := sourceCalls.Load()
-						httpRequest := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+						httpRequest := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 						httpRequest.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 						response := httptest.NewRecorder()
 						app.canonicalAPI(response, httpRequest)
@@ -164,7 +168,7 @@ func TestFreshCommittedStrategyReplayChecksTargetsWithoutUpdating(t *testing.T) 
 							t.Fatalf("replay changed durable state or restarted Runtime: %v", err)
 						}
 					}
-					req := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+					req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 					req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 					response := httptest.NewRecorder()
 					app.canonicalAPI(response, req)
@@ -201,7 +205,11 @@ func TestFreshCompleteRejectsMalformedStrategyCheckpoint(t *testing.T) {
 			}
 			defer opened.Close()
 			op := opened.Record.Operation
-			op.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+			op.Routing.OperationID = op.Identity.OperationID
+			op.Routing.Revision = 1
+			op.Routing.Target = "/cpamp-admin"
+			op.Routing.Stage = bootstrap.PrefixCommitted
+			op.Routing.Committed = true
 			op.Strategy.Stage = "committed"
 			if kind != "shape" {
 				digest := sha256.Sum256([]byte("http://accepted-source:8317"))
@@ -235,7 +243,7 @@ func TestFreshCompleteRejectsMalformedStrategyCheckpoint(t *testing.T) {
 			if pending.Code == http.StatusNoContent {
 				t.Fatal("pending startup acknowledged legacy mode")
 			}
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			response := httptest.NewRecorder()
 			app.canonicalAPI(response, req)

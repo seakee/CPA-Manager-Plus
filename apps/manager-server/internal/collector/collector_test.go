@@ -1506,3 +1506,206 @@ func TestManagerStopAndWaitDrainsSupersededAndAuthRejectionRuns(t *testing.T) {
 		t.Fatalf("StopAndWait: %v", err)
 	}
 }
+
+func TestManagerRunningHandlerRequiresSuccessfulHTTPPollAndFiresAcrossRestarts(t *testing.T) {
+	var failQueue atomic.Bool
+	failQueue.Store(true)
+	var queueCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/usage-queue" {
+			http.NotFound(w, r)
+			return
+		}
+		queueCalls.Add(1)
+		if failQueue.Load() {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	manager := NewManager(testConfig(t, "http"), newTestStore(t))
+	var runningCalls atomic.Int32
+	var seenStatusRunningDuringCallback atomic.Bool
+	manager.SetRunningRunHandler(func(ctx context.Context, _ uint64, cfg RuntimeConfig) bool {
+		if ctx == nil || cfg.CPAUpstreamURL != upstream.URL {
+			return false
+		}
+		if manager.Status().Collector == "running" {
+			seenStatusRunningDuringCallback.Store(true)
+		}
+		runningCalls.Add(1)
+		return true
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key"})
+	waitFor(t, func() bool { return queueCalls.Load() >= 1 && manager.Status().Collector == "error" })
+	if got := runningCalls.Load(); got != 0 {
+		t.Fatalf("running callback fired during failed HTTP polls: got %d, want 0", got)
+	}
+
+	failQueue.Store(false)
+	waitFor(t, func() bool { return manager.Status().Collector == "running" })
+	if got := runningCalls.Load(); got != 1 {
+		t.Fatalf("running callback count after recovery = %d, want 1", got)
+	}
+	if seenStatusRunningDuringCallback.Load() {
+		t.Fatal("status transitioned to running before running callback finished")
+	}
+
+	callsAtReady := queueCalls.Load()
+	waitFor(t, func() bool { return queueCalls.Load() >= callsAtReady+2 })
+	if got := runningCalls.Load(); got != 1 {
+		t.Fatalf("running callback fired redundantly across steady polls: got %d, want 1", got)
+	}
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key"})
+	waitFor(t, func() bool { return runningCalls.Load() == 2 && manager.Status().Collector == "running" })
+	if err := manager.StopAndWait(context.Background()); err != nil {
+		t.Fatalf("StopAndWait: %v", err)
+	}
+}
+
+func TestManagerRunningHandlerStaysSilentOnAuthRejection(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/usage-queue" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	manager := NewManager(testConfig(t, "http"), newTestStore(t))
+	var runningCalls atomic.Int32
+	manager.SetRunningHandler(func(context.Context, RuntimeConfig) {
+		runningCalls.Add(1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream.URL, ManagementKey: "bad-key"})
+	waitFor(t, func() bool { return manager.Status().Collector == "stopped" })
+	if err := manager.StopAndWait(context.Background()); err != nil {
+		t.Fatalf("StopAndWait: %v", err)
+	}
+	if got := runningCalls.Load(); got != 0 {
+		t.Fatalf("running callback fired on auth rejection: got %d, want 0", got)
+	}
+}
+
+func TestManagerRunningHandlerRetriesBoundedPollsUntilProvenAndFencesStaleRun(t *testing.T) {
+	var queueCalls atomic.Int32
+	var nonEmptyBurst atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/usage-queue" {
+			http.NotFound(w, r)
+			return
+		}
+		queueCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if nonEmptyBurst.Add(-1) >= 0 {
+			_, _ = w.Write([]byte(`["{\"request_id\":\"burst\",\"timestamp\":\"1700000000000\",\"model\":\"gpt-4\",\"api_key\":\"k1\",\"total_tokens\":1}"]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	baseCfg := testConfig(t, "http")
+	baseCfg.PollInterval = 40 * time.Millisecond
+	manager := NewManager(baseCfg, newTestStore(t))
+
+	var (
+		allowAck       atomic.Bool
+		run1Calls      atomic.Int32
+		run2Calls      atomic.Int32
+		holdRun1       atomic.Bool
+		run1Entered    = make(chan struct{})
+		run1EnteredOne sync.Once
+		releaseRun1    = make(chan struct{})
+		staleObserved  atomic.Bool
+	)
+	nonEmptyBurst.Store(5)
+	manager.SetRunningRunHandler(func(ctx context.Context, runID uint64, cfg RuntimeConfig) bool {
+		// Status() and ActiveRunConfig() must never deadlock inside callback.
+		_ = manager.Status()
+		if runID == 1 {
+			run1Calls.Add(1)
+			if holdRun1.Load() {
+				run1EnteredOne.Do(func() { close(run1Entered) })
+				<-releaseRun1
+				_, active := manager.ActiveRunConfig(runID)
+				if ctx.Err() != nil && !active {
+					staleObserved.Store(true)
+				}
+				return true
+			}
+			return allowAck.Load() && cfg.CPAUpstreamURL == upstream.URL
+		}
+		if runID == 2 {
+			run2Calls.Add(1)
+			return true
+		}
+		return false
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key"})
+	// Non-empty burst drains back-to-back, but unacknowledged proof retries stay bounded by PollInterval
+	// while Collector itself reaches "running" and keeps retrying across subsequent healthy ticks.
+	waitFor(t, func() bool { return manager.Status().Collector == "running" && queueCalls.Load() >= 6 })
+	waitFor(t, func() bool { return run1Calls.Load() >= 2 })
+
+	allowAck.Store(true)
+	waitFor(t, func() bool { return !manager.needsRunningProof(1) })
+	ackedCalls := run1Calls.Load()
+	pollsAtAck := queueCalls.Load()
+	waitFor(t, func() bool { return queueCalls.Load() >= pollsAtAck+2 })
+	if got := run1Calls.Load(); got != ackedCalls {
+		t.Fatalf("running callback fired after acknowledgement: got %d, want %d", got, ackedCalls)
+	}
+
+	// Reset acknowledgement and hold run 1 inside callback while superseding with run 2.
+	allowAck.Store(false)
+	holdRun1.Store(true)
+	manager.SetRunningRunHandler(func(ctx context.Context, runID uint64, cfg RuntimeConfig) bool {
+		_ = manager.Status()
+		if runID == 1 {
+			run1EnteredOne.Do(func() { close(run1Entered) })
+			<-releaseRun1
+			_, active := manager.ActiveRunConfig(runID)
+			if ctx.Err() != nil && !active {
+				staleObserved.Store(true)
+			}
+			return true
+		}
+		if runID == 2 {
+			if _, active := manager.ActiveRunConfig(runID); !active || cfg.ManagementKey != "management-key-2" {
+				return false
+			}
+			run2Calls.Add(1)
+			return true
+		}
+		return false
+	})
+	<-run1Entered
+	manager.Start(ctx, RuntimeConfig{CPAUpstreamURL: upstream.URL, ManagementKey: "management-key-2"})
+	close(releaseRun1)
+
+	waitFor(t, func() bool { return run2Calls.Load() == 1 && !manager.needsRunningProof(2) })
+	if !staleObserved.Load() {
+		t.Fatal("superseded run 1 callback did not observe cancelled context and inactive runID")
+	}
+	if err := manager.StopAndWait(context.Background()); err != nil {
+		t.Fatalf("StopAndWait: %v", err)
+	}
+}

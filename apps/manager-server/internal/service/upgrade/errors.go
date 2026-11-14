@@ -257,7 +257,9 @@ const (
 	// the verdict, so the revision check refused it. Nothing was written: the
 	// verdict this run held was about a row that no longer exists, and re-running
 	// the verification re-proves the current one.
-	UpgradeErrorVerifyConflict UpgradeErrorCode = "upgrade_verify_conflict"
+	UpgradeErrorVerifyConflict             UpgradeErrorCode = "upgrade_verify_conflict"
+	UpgradeErrorVerifyAccessPrefixRequired UpgradeErrorCode = "upgrade_access_prefix_required"
+	UpgradeErrorPrefixesAlreadyCommitted   UpgradeErrorCode = "upgrade_prefixes_already_committed"
 
 	// UpgradeErrorStoreLocked reports that the Manager store's process lock is
 	// held, so an offline migration cannot run. The lock is the proof that the

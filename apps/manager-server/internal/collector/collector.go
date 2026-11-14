@@ -75,6 +75,13 @@ type Manager struct {
 	// Collector is running with. The Collector stops itself first: resending a
 	// refused credential is what turns a rotation into an IP ban.
 	authRejected func(runID uint64)
+	// running notifies a consumer on healthy Collector polls until it
+	// acknowledges readiness for runID by returning true.
+	running             func(ctx context.Context, runID uint64, cfg RuntimeConfig) bool
+	runningAckRunID     uint64
+	runningAckZero      bool
+	runningAttemptRunID uint64
+	runningLastAttempt  time.Time
 	// starts counts how many runs this Manager has opened. It is the identity of
 	// the running Collector: every Start supersedes the previous run, so a caller
 	// that must not restart one can prove it did not by seeing this unchanged.
@@ -107,6 +114,9 @@ func (m *Manager) Start(ctx context.Context, cfg RuntimeConfig) {
 	m.runtimeCfg = cfg
 	m.starts++
 	runID := m.starts
+	m.runningAckZero = false
+	m.runningAttemptRunID = 0
+	m.runningLastAttempt = time.Time{}
 	handler := m.usageEventHandler
 	m.status.Collector = "starting"
 	m.status.Upstream = cfg.CPAUpstreamURL
@@ -217,6 +227,20 @@ func (m *Manager) ActiveRuntimeConfig() (RuntimeConfig, bool) {
 	return m.runtimeCfg, true
 }
 
+// ActiveRunConfig reports the configuration of runID when runID is the
+// currently active, non-stopped Collector run.
+func (m *Manager) ActiveRunConfig(runID uint64) (RuntimeConfig, bool) {
+	if m == nil || runID == 0 {
+		return RuntimeConfig{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.starts != runID || m.cancel == nil || m.status.Collector == "stopped" {
+		return RuntimeConfig{}, false
+	}
+	return m.runtimeCfg, true
+}
+
 func (m *Manager) SetUsageEventHandler(handler UsageEventHandler) {
 	m.mu.Lock()
 	m.usageEventHandler = handler
@@ -255,6 +279,107 @@ func (m *Manager) SetAuthRejectionRunHandler(handler func(runID uint64)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.authRejected = handler
+}
+
+// SetRunningHandler installs a callback invoked once when a Collector run
+// proves transport readiness and transitions into "running".
+func (m *Manager) SetRunningHandler(handler func(ctx context.Context, cfg RuntimeConfig)) {
+	if handler == nil {
+		m.SetRunningRunHandler(nil)
+		return
+	}
+	m.SetRunningRunHandler(func(ctx context.Context, _ uint64, cfg RuntimeConfig) bool {
+		handler(ctx, cfg)
+		return true
+	})
+}
+
+// SetRunningRunHandler installs a run-scoped readiness callback invoked on
+// healthy Collector polls until it acknowledges readiness for runID by
+// returning true.
+func (m *Manager) SetRunningRunHandler(handler func(ctx context.Context, runID uint64, cfg RuntimeConfig) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.running = handler
+	m.runningAckRunID = 0
+	m.runningAckZero = false
+	m.runningAttemptRunID = 0
+	m.runningLastAttempt = time.Time{}
+}
+
+func (m *Manager) setRunStatus(ctx context.Context, runID uint64, update func(*Status)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if (ctx != nil && ctx.Err() != nil) || (runID != 0 && m.starts != runID) {
+		return
+	}
+	update(&m.status)
+}
+
+func (m *Manager) needsRunningProof(runID uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel == nil || m.status.Collector == "stopped" || (runID != 0 && m.starts != runID) {
+		return false
+	}
+	if m.running == nil {
+		return false
+	}
+	if runID != 0 {
+		return m.runningAckRunID != runID
+	}
+	return !m.runningAckZero
+}
+
+func (m *Manager) markRunning(ctx context.Context, runID uint64, cfg RuntimeConfig, transport string) {
+	m.markRunningPoll(ctx, runID, cfg, transport, true)
+}
+
+func (m *Manager) markRunningPoll(ctx context.Context, runID uint64, cfg RuntimeConfig, transport string, cadenceElapsed bool) {
+	m.mu.Lock()
+	if (ctx != nil && ctx.Err() != nil) || m.cancel == nil || m.status.Collector == "stopped" || (runID != 0 && m.starts != runID) {
+		m.mu.Unlock()
+		return
+	}
+	notify := m.running
+	acked := notify == nil || (runID != 0 && m.runningAckRunID == runID) || (runID == 0 && m.runningAckZero)
+	now := time.Now()
+	if !acked && !cadenceElapsed && m.runningAttemptRunID == runID && !m.runningLastAttempt.IsZero() &&
+		now.Sub(m.runningLastAttempt) < m.pollInterval(cfg) {
+		m.status.Collector = "running"
+		m.status.Transport = transport
+		m.status.LastError = ""
+		m.mu.Unlock()
+		return
+	}
+	if acked {
+		m.status.Collector = "running"
+		m.status.Transport = transport
+		m.status.LastError = ""
+		m.mu.Unlock()
+		return
+	}
+	m.runningAttemptRunID = runID
+	m.runningLastAttempt = now
+	m.mu.Unlock()
+
+	proven := notify(ctx, runID, cfg)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if (ctx != nil && ctx.Err() != nil) || m.cancel == nil || m.status.Collector == "stopped" || (runID != 0 && m.starts != runID) {
+		return
+	}
+	if proven {
+		if runID != 0 {
+			m.runningAckRunID = runID
+		} else {
+			m.runningAckZero = true
+		}
+	}
+	m.status.Collector = "running"
+	m.status.Transport = transport
+	m.status.LastError = ""
 }
 
 // refuseAuth stops one run and reports the refusal. It acts only on the run that
@@ -375,7 +500,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 	subscribed := false
 
 	fallback := func() bool {
-		m.setStatus(func(status *Status) {
+		m.setRunStatus(ctx, runID, func(status *Status) {
 			status.Collector = "starting"
 			status.Transport = "http"
 			status.LastError = ""
@@ -392,7 +517,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 			if mode == "auto" && !subscribed {
 				return fallback()
 			}
-			m.markError("connect", err)
+			m.markRunError(ctx, runID, "connect", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
@@ -417,7 +542,7 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 			if mode == "auto" && !subscribed {
 				return fallback()
 			}
-			m.markError("auth", err)
+			m.markRunError(ctx, runID, "auth", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
@@ -428,34 +553,30 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 			if mode == "auto" && !subscribed {
 				return fallback()
 			}
-			m.markError("subscribe", err)
+			m.markRunError(ctx, runID, "subscribe", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
 		}
 		subscribed = true
 		backoff = time.Second
-		m.setStatus(func(status *Status) {
-			status.Collector = "running"
-			status.Transport = "subscribe"
-			status.LastError = ""
-		})
+		m.markRunning(ctx, runID, cfg, "subscribe")
 
-		err = m.consumeSubscribe(ctx, cfg, client)
+		err = m.consumeSubscribe(ctx, cfg, client, runID)
 		stopClose()
 		_ = client.Close()
 		if ctx.Err() != nil {
 			return true
 		}
 		if err != nil {
-			m.markError("subscribe", err)
+			m.markRunError(ctx, runID, "subscribe", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 		}
 	}
 }
 
-func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, client *resp.Client) error {
+func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, client *resp.Client, runID uint64) error {
 	const pingInterval = 30 * time.Second
 	const readWindow = pingInterval + 10*time.Second
 
@@ -470,7 +591,13 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := client.SetReadDeadline(time.Now().Add(readWindow)); err != nil {
+		window := readWindow
+		if m.needsRunningProof(runID) {
+			if poll := m.pollInterval(cfg); poll < window {
+				window = poll
+			}
+		}
+		if err := client.SetReadDeadline(time.Now().Add(window)); err != nil {
 			return err
 		}
 		_, payload, err := client.ReadMessage()
@@ -486,9 +613,15 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 					}
 					lastPing = time.Now()
 				}
+				if m.needsRunningProof(runID) {
+					m.markRunningPoll(ctx, runID, cfg, "subscribe", true)
+				}
 				continue
 			}
 			return err
+		}
+		if m.needsRunningProof(runID) {
+			m.markRunningPoll(ctx, runID, cfg, "subscribe", false)
 		}
 		if strings.TrimSpace(payload) == "" {
 			continue
@@ -507,12 +640,12 @@ func (m *Manager) runHTTP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 		if ctx.Err() != nil {
 			return true
 		}
-		err := m.consumeHTTP(ctx, cfg, client)
+		err := m.consumeHTTP(ctx, cfg, client, runID)
 		if ctx.Err() != nil {
 			return true
 		}
 		if errors.Is(err, httpqueue.ErrUnsupported) && mode == "auto" {
-			m.setStatus(func(status *Status) {
+			m.setRunStatus(ctx, runID, func(status *Status) {
 				status.Collector = "starting"
 				status.Transport = "resp"
 				status.LastError = ""
@@ -527,7 +660,7 @@ func (m *Manager) runHTTP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 			return true
 		}
 		if err != nil {
-			m.markError("http", err)
+			m.markRunError(ctx, runID, "http", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 		}
@@ -545,7 +678,7 @@ func (m *Manager) runRESP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 		}
 		client, err := resp.DialContext(ctx, cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
 		if err != nil {
-			m.markError("connect", err)
+			m.markRunError(ctx, runID, "connect", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
@@ -563,47 +696,41 @@ func (m *Manager) runRESP(ctx context.Context, cancel context.CancelFunc, cfg Ru
 				m.refuseAuthRun(ctx, cancel, runID, err)
 				return
 			}
-			m.markError("auth", err)
+			m.markRunError(ctx, runID, "auth", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
 		}
 		backoff = time.Second
-		m.setStatus(func(status *Status) {
-			status.Collector = "running"
-			status.Transport = "resp"
-			status.LastError = ""
-		})
-
-		err = m.consumeRESP(ctx, cfg, client, queue, popSide)
+		err = m.consumeRESP(ctx, cfg, client, queue, popSide, runID)
 		stopClose()
 		_ = client.Close()
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			m.markError("consume", err)
+			m.markRunError(ctx, runID, "consume", err)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 		}
 	}
 }
 
-func (m *Manager) consumeHTTP(ctx context.Context, cfg RuntimeConfig, client *httpqueue.Client) error {
+func (m *Manager) consumeHTTP(ctx context.Context, cfg RuntimeConfig, client *httpqueue.Client, runID uint64) error {
 	ticker := time.NewTicker(m.pollInterval(cfg))
 	defer ticker.Stop()
 
+	cadenceElapsed := true
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		m.setStatus(func(status *Status) {
-			status.Collector = "running"
-			status.Transport = "http"
-			status.LastError = ""
-		})
 		items, err := client.Pop(ctx, m.batchSize(cfg))
 		if err != nil {
+			return err
+		}
+		m.markRunningPoll(ctx, runID, cfg, "http", cadenceElapsed)
+		if err := m.processItems(ctx, cfg, items); err != nil {
 			return err
 		}
 		if len(items) == 0 {
@@ -611,19 +738,19 @@ func (m *Manager) consumeHTTP(ctx context.Context, cfg RuntimeConfig, client *ht
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-ticker.C:
+				cadenceElapsed = true
 				continue
 			}
 		}
-		if err := m.processItems(ctx, cfg, items); err != nil {
-			return err
-		}
+		cadenceElapsed = false
 	}
 }
 
-func (m *Manager) consumeRESP(ctx context.Context, cfg RuntimeConfig, client *resp.Client, queue string, popSide string) error {
+func (m *Manager) consumeRESP(ctx context.Context, cfg RuntimeConfig, client *resp.Client, queue string, popSide string, runID uint64) error {
 	ticker := time.NewTicker(m.pollInterval(cfg))
 	defer ticker.Stop()
 
+	cadenceElapsed := true
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -632,17 +759,20 @@ func (m *Manager) consumeRESP(ctx context.Context, cfg RuntimeConfig, client *re
 		if err != nil {
 			return err
 		}
+		m.markRunningPoll(ctx, runID, cfg, "resp", cadenceElapsed)
+		if err := m.processItems(ctx, cfg, items); err != nil {
+			return err
+		}
 		if len(items) == 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-ticker.C:
+				cadenceElapsed = true
 				continue
 			}
 		}
-		if err := m.processItems(ctx, cfg, items); err != nil {
-			return err
-		}
+		cadenceElapsed = false
 	}
 }
 
@@ -883,7 +1013,11 @@ func codexSnapshotCanEnrichEvent(event usage.Event, snapshot authSnapshot) bool 
 }
 
 func (m *Manager) markError(stage string, err error) {
-	m.setStatus(func(status *Status) {
+	m.markRunError(context.Background(), 0, stage, err)
+}
+
+func (m *Manager) markRunError(ctx context.Context, runID uint64, stage string, err error) {
+	m.setRunStatus(ctx, runID, func(status *Status) {
 		status.Collector = "error"
 		status.LastError = stage + ": " + err.Error()
 	})

@@ -226,6 +226,59 @@ const en = {
   errorNetwork: 'The upgrade service could not be reached. Check the connection and try again.',
   errorResponse: 'The reply could not be verified and was not shown. Try again.',
   errorUnavailable: 'The upgrade service is not available right now.',
+
+  routingTitle: 'Access prefixes',
+  routingHelpManaged:
+    'Set independent management and inference prefixes for this first v2 upgrade, or explicitly enable shared mode. Defaults are random 16-character prefixes persisted for this operation.',
+  routingHelpExternal:
+    'Set the CPAMP management prefix for this external-target upgrade. External CPA inference continues using the configured external address.',
+  routingPreservedTitle: 'Committed access prefixes preserved',
+  routingPreservedHelp:
+    'This installation already committed its v2 access prefixes. Subsequent upgrades preserve these routes unchanged.',
+  routingControlLabel: 'Management entry prefix',
+  routingControlHelp: 'Path beginning with / for the CPAMP Console and management API.',
+  routingInferenceLabel: 'Inference entry prefix',
+  routingInferenceHelp:
+    'Independent path beginning with / for model protocol endpoints. Must not nest with the management prefix.',
+  routingExternalInferenceLabel: 'External CPA inference address',
+  routingExternalInferenceHelp:
+    'Traffic goes directly to this validated external CPA address rather than a local inference prefix.',
+  routingRandomize: 'Regenerate random',
+  routingSharedToggle: 'Use the same prefix for management and inference (shared mode)',
+  routingSharedHelp: 'Off by default. Enable explicitly only when both entries intentionally share one path.',
+  routingSharedLabel: 'Shared prefix mode',
+  routingIndependentLabel: 'Independent dual prefixes',
+  routingPreviewTitle: 'Final URL preview',
+  routingPreviewConsole: 'Management Console URL',
+  routingPreviewApi: 'Management API base',
+  routingPreviewInference: 'Inference entry base',
+  routingPreviewExternal: 'External inference URL',
+  routingSave: 'Save access prefixes',
+  routingSaving: 'Saving access prefixes…',
+  routingSavedNotice: 'Access prefixes saved to the upgrade record.',
+  resultAccessTitle: 'Access and protocol endpoints',
+  resultAccessPendingRestart:
+    'Access prefixes are saved to the upgrade record, but routes are pending Manager restart and are not active yet.',
+  resultAccessActive: 'Access routes are verified and active.',
+  codeInvalidAccessPrefix:
+    'Enter a canonical path starting with /, without trailing slash, spaces, percent encoding, or dot segments.',
+  codeInferencePrefixRequired: 'An inference entry prefix is required for Managed upgrades.',
+  codeExternalInferencePrefixForbidden:
+    'External mode does not use a local inference prefix or shared mode.',
+  codeSharedPrefixMismatch: 'In shared mode, management and inference prefixes must be identical.',
+  codeSharedPrefixConfirmationRequired:
+    'Management and inference prefixes are equal. Enable shared mode explicitly or use distinct prefixes.',
+  codePrefixOverlapForbidden: 'Management and inference prefixes cannot be nested inside each other.',
+  codeReservedPrefixCollision:
+    'This prefix collides with a reserved system or protocol route. Choose another path.',
+  codeUpgradeAccessPrefixRequired:
+    'Save valid access prefixes for this target mode before completing upgrade verification.',
+  codeUpgradePrefixesAlreadyCommitted:
+    'Committed v2 access prefixes are already locked and cannot be overwritten during upgrade.',
+  codeUpgradeRestartRequired:
+    'Upgrade changes are saved and pending Manager restart before new routes serve traffic.',
+  codeRoutingConflict: 'Routing state conflicted with another operation state. Refresh and retry.',
+  codeRoutingVerificationFailed: 'Published routes could not be verified. Check host routing and retry.',
 };
 
 const zh: typeof en = {
@@ -423,6 +476,48 @@ const zh: typeof en = {
   errorNetwork: '无法连接升级服务，请检查连接后重试。',
   errorResponse: '返回内容无法核验，已不予显示。请重试。',
   errorUnavailable: '升级服务当前不可用。',
+
+  routingTitle: '访问入口前缀',
+  routingHelpManaged:
+    '请为首次升级至 v2 的托管安装配置管理与推理前缀；默认使用服务端为本操作持久化的 16 位随机前缀，也可自定义或显式勾选共用模式。',
+  routingHelpExternal:
+    '请为外部 CPA 升级设置 CPAMP 管理入口前缀；模型推理仍直接使用已绑定的外部 CPA 地址。',
+  routingPreservedTitle: '已保留原 v2 提交前缀',
+  routingPreservedHelp: '当前安装已锁定提交过 v2 访问前缀，后续常规升级将原样保留管理与推理入口。',
+  routingControlLabel: '管理入口前缀',
+  routingControlHelp: '以 / 开头的规范路径，用于 CPAMP 控制台与管理 API。',
+  routingInferenceLabel: '推理入口前缀',
+  routingInferenceHelp: '以 / 开头的独立模型协议推理前缀；不得与管理前缀形成嵌套包含关系。',
+  routingExternalInferenceLabel: '外部 CPA 推理地址',
+  routingExternalInferenceHelp: 'External 模式不配置本地推理前缀，流量继续使用已校验的外部 CPA 实际地址。',
+  routingRandomize: '重新随机生成',
+  routingSharedToggle: '管理与推理使用同一前缀（显式共用模式）',
+  routingSharedHelp: '默认关闭。仅当需要管理与推理共用同一路径前缀时显式勾选。',
+  routingSharedLabel: '共用前缀模式',
+  routingIndependentLabel: '独立双前缀',
+  routingPreviewTitle: '最终访问地址预览',
+  routingPreviewConsole: '管理控制台地址',
+  routingPreviewApi: '管理 API 基路径',
+  routingPreviewInference: '推理入口地址',
+  routingPreviewExternal: '外部推理地址',
+  routingSave: '保存前缀配置',
+  routingSaving: '正在保存前缀配置…',
+  routingSavedNotice: '访问前缀已保存至当前升级记录，刷新页面后仍会恢复。',
+  resultAccessTitle: '访问入口与协议端点',
+  resultAccessPendingRestart: '访问前缀已保存至升级记录，需重启 Manager 后才正式接管生效（当前尚未激活）。',
+  resultAccessActive: '访问路由已验证并生效。',
+  codeInvalidAccessPrefix: '请输入以 / 开头的规范路径，不能包含末尾斜杠、空白、百分号编码或点段。',
+  codeInferencePrefixRequired: '托管模式升级必须配置推理入口前缀。',
+  codeExternalInferencePrefixForbidden: 'External 模式不允许配置本地推理前缀或开启共用模式。',
+  codeSharedPrefixMismatch: '开启共用模式时，管理前缀与推理前缀必须完全一致。',
+  codeSharedPrefixConfirmationRequired: '管理前缀与推理前缀相同，请显式勾选共用模式或改为不同路径。',
+  codePrefixOverlapForbidden: '管理前缀与推理前缀不得互为嵌套包含关系。',
+  codeReservedPrefixCollision: '该路径与系统保留路由或协议路径冲突，请更换前缀。',
+  codeUpgradeAccessPrefixRequired: '完成升级验证前，请先保存有效的访问入口前缀。',
+  codeUpgradePrefixesAlreadyCommitted: '已有 v2 访问前缀已锁定提交，升级时不得覆盖修改。',
+  codeUpgradeRestartRequired: '升级配置已保存，重启 Manager 后新入口与协议路由才会生效。',
+  codeRoutingConflict: '路由状态与已记录操作冲突，请重新读取状态后再试。',
+  codeRoutingVerificationFailed: '新路由核验未通过，请检查宿主机路由状态后重试。',
 };
 
 const tw: typeof en = {
@@ -619,6 +714,48 @@ const tw: typeof en = {
   errorNetwork: '無法連線升級服務，請檢查連線後重試。',
   errorResponse: '回傳內容無法核驗，已不予顯示。請重試。',
   errorUnavailable: '升級服務目前無法使用。',
+
+  routingTitle: '存取入口前綴',
+  routingHelpManaged:
+    '請為首次升級至 v2 的託管安裝設定管理與推論前綴；預設使用伺服器為本操作持久化的 16 位元隨機前綴，也可自訂或明確勾選共用模式。',
+  routingHelpExternal:
+    '請為外部 CPA 升級設定 CPAMP 管理入口前綴；模型推論仍直接使用已綁定的外部 CPA 位址。',
+  routingPreservedTitle: '已保留原 v2 提交前綴',
+  routingPreservedHelp: '目前安裝已鎖定提交過 v2 存取前綴，後續常規升級將原樣保留管理與推論入口。',
+  routingControlLabel: '管理入口前綴',
+  routingControlHelp: '以 / 開頭的規範路徑，用於 CPAMP 控制台與管理 API。',
+  routingInferenceLabel: '推論入口前綴',
+  routingInferenceHelp: '以 / 開頭的獨立模型協定推論前綴；不得與管理前綴形成巢狀包含關係。',
+  routingExternalInferenceLabel: '外部 CPA 推論位址',
+  routingExternalInferenceHelp: 'External 模式不設定本機推論前綴，流量繼續使用已校驗的外部 CPA 實際位址。',
+  routingRandomize: '重新隨機產生',
+  routingSharedToggle: '管理與推論使用同一前綴（明確共用模式）',
+  routingSharedHelp: '預設關閉。僅當需要管理與推論共用同一路徑前綴時明確勾選。',
+  routingSharedLabel: '共用前綴模式',
+  routingIndependentLabel: '獨立雙前綴',
+  routingPreviewTitle: '最終存取位址預覽',
+  routingPreviewConsole: '管理控制台位址',
+  routingPreviewApi: '管理 API 基路徑',
+  routingPreviewInference: '推論入口位址',
+  routingPreviewExternal: '外部推論位址',
+  routingSave: '儲存前綴設定',
+  routingSaving: '正在儲存前綴設定…',
+  routingSavedNotice: '存取前綴已儲存至目前升級記錄，重新整理頁面後仍會恢復。',
+  resultAccessTitle: '存取入口與協定端點',
+  resultAccessPendingRestart: '存取前綴已儲存至升級記錄，需重新啟動 Manager 後才正式接管生效（目前尚未啟用）。',
+  resultAccessActive: '存取路由已驗證並生效。',
+  codeInvalidAccessPrefix: '請輸入以 / 開頭的規範路徑，不能包含結尾斜線、空白、百分比編碼或點區段。',
+  codeInferencePrefixRequired: '託管模式升級必須設定推論入口前綴。',
+  codeExternalInferencePrefixForbidden: 'External 模式不允許設定本機推論前綴或啟用共用模式。',
+  codeSharedPrefixMismatch: '啟用共用模式時，管理前綴與推論前綴必須完全一致。',
+  codeSharedPrefixConfirmationRequired: '管理前綴與推論前綴相同，請明確勾選共用模式或改為不同路徑。',
+  codePrefixOverlapForbidden: '管理前綴與推論前綴不得互為巢狀包含關係。',
+  codeReservedPrefixCollision: '此路徑與系統保留路由或協定路徑衝突，請更換前綴。',
+  codeUpgradeAccessPrefixRequired: '完成升級驗證前，請先儲存有效的存取入口前綴。',
+  codeUpgradePrefixesAlreadyCommitted: '已有 v2 存取前綴已鎖定提交，升級時不得覆寫修改。',
+  codeUpgradeRestartRequired: '升級設定已儲存，重新啟動 Manager 後新入口與協定路由才會生效。',
+  codeRoutingConflict: '路由狀態與已記錄操作衝突，請重新讀取狀態後再試。',
+  codeRoutingVerificationFailed: '新路由核驗未通過，請檢查主機路由狀態後重試。',
 };
 
 const ru: typeof en = {
@@ -836,6 +973,59 @@ const ru: typeof en = {
   errorNetwork: 'Служба обновления недоступна. Проверьте соединение и повторите.',
   errorResponse: 'Ответ не удалось проверить, он не показан. Повторите попытку.',
   errorUnavailable: 'Служба обновления сейчас недоступна.',
+
+  routingTitle: 'Префиксы доступа',
+  routingHelpManaged:
+    'Настройте независимые префиксы управления и инференса для первого обновления до v2 или явно включите общий режим. По умолчанию используются случайные 16-символьные префиксы, сохранённые в операции.',
+  routingHelpExternal:
+    'Задайте префикс управления CPAMP для обновления с внешним CPA. Трафик инференса продолжит идти по настроенному внешнему адресу.',
+  routingPreservedTitle: 'Зафиксированные префиксы v2 сохранены',
+  routingPreservedHelp:
+    'Эта установка уже зафиксировала префиксы доступа v2. Последующие обновления сохраняют эти маршруты без изменений.',
+  routingControlLabel: 'Префикс входа управления',
+  routingControlHelp: 'Канонический путь с /, обслуживающий консоль CPAMP и API управления.',
+  routingInferenceLabel: 'Префикс входа инференса',
+  routingInferenceHelp:
+    'Независимый путь с / для протокольных эндпоинтов моделей. Не может вкладываться в префикс управления.',
+  routingExternalInferenceLabel: 'Внешний адрес инференса CPA',
+  routingExternalInferenceHelp:
+    'Запросы моделей идут напрямую на этот проверенный внешний адрес CPA, без локального префикса инференса.',
+  routingRandomize: 'Сгенерировать новый',
+  routingSharedToggle: 'Использовать один префикс для управления и инференса (общий режим)',
+  routingSharedHelp: 'По умолчанию выключено. Включайте только при намеренном совмещении на одном префиксе.',
+  routingSharedLabel: 'Общий префикс',
+  routingIndependentLabel: 'Раздельные префиксы',
+  routingPreviewTitle: 'Предпросмотр итоговых URL',
+  routingPreviewConsole: 'Адрес консоли управления',
+  routingPreviewApi: 'Базовый путь API управления',
+  routingPreviewInference: 'Базовый адрес инференса',
+  routingPreviewExternal: 'Внешний URL инференса',
+  routingSave: 'Сохранить префиксы',
+  routingSaving: 'Сохранение префиксов…',
+  routingSavedNotice: 'Префиксы доступа сохранены в операции обновления и восстановятся при обновлении страницы.',
+  resultAccessTitle: 'Точки доступа и протоколы',
+  resultAccessPendingRestart:
+    'Префиксы доступа сохранены в операции обновления, но маршруты ожидают перезапуска Manager и ещё не активны.',
+  resultAccessActive: 'Маршруты доступа проверены и активны.',
+  codeInvalidAccessPrefix:
+    'Введите канонический путь, начинающийся с /, без конечного слэша, пробелов, процентного кодирования и сегментов с точками.',
+  codeInferencePrefixRequired: 'Для управляемого обновления требуется префикс входа инференса.',
+  codeExternalInferencePrefixForbidden:
+    'В режиме External нельзя указывать локальный префикс инференса или общий режим.',
+  codeSharedPrefixMismatch: 'В общем режиме префиксы управления и инференса должны совпадать.',
+  codeSharedPrefixConfirmationRequired:
+    'Префиксы управления и инференса совпадают. Явно включите общий режим или выберите разные префиксы.',
+  codePrefixOverlapForbidden: 'Префиксы управления и инференса не могут вкладываться друг в друга.',
+  codeReservedPrefixCollision:
+    'Этот префикс конфликтует с зарезервированным системным или протокольным маршрутом. Выберите другой путь.',
+  codeUpgradeAccessPrefixRequired:
+    'Перед завершением проверки обновления сохраните корректные префиксы доступа для целевого режима.',
+  codeUpgradePrefixesAlreadyCommitted:
+    'Зафиксированные префиксы доступа v2 уже заблокированы и не могут быть перезаписаны при обновлении.',
+  codeUpgradeRestartRequired:
+    'Настройки обновления сохранены; новые маршруты активируются только после перезапуска Manager.',
+  codeRoutingConflict: 'Состояние маршрутизации конфликтует с другой операцией. Перечитайте статус и повторите.',
+  codeRoutingVerificationFailed: 'Не удалось подтвердить опубликованные маршруты. Проверьте маршрутизацию на хосте и повторите.',
 };
 
 export type UpgradeWizardKey = keyof typeof en;
@@ -944,6 +1134,30 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
       return upgradeWizardText('codeUpgradeVerifyFailed', language);
     case 'upgrade_request_invalid':
       return upgradeWizardText('codeUpgradeRequestInvalid', language);
+    case 'invalid_access_prefix':
+      return upgradeWizardText('codeInvalidAccessPrefix', language);
+    case 'inference_prefix_required':
+      return upgradeWizardText('codeInferencePrefixRequired', language);
+    case 'external_inference_prefix_forbidden':
+      return upgradeWizardText('codeExternalInferencePrefixForbidden', language);
+    case 'shared_prefix_mismatch':
+      return upgradeWizardText('codeSharedPrefixMismatch', language);
+    case 'shared_prefix_confirmation_required':
+      return upgradeWizardText('codeSharedPrefixConfirmationRequired', language);
+    case 'prefix_overlap_forbidden':
+      return upgradeWizardText('codePrefixOverlapForbidden', language);
+    case 'reserved_prefix_collision':
+      return upgradeWizardText('codeReservedPrefixCollision', language);
+    case 'upgrade_access_prefix_required':
+      return upgradeWizardText('codeUpgradeAccessPrefixRequired', language);
+    case 'upgrade_prefixes_already_committed':
+      return upgradeWizardText('codeUpgradePrefixesAlreadyCommitted', language);
+    case 'upgrade_restart_required':
+      return upgradeWizardText('codeUpgradeRestartRequired', language);
+    case 'routing_conflict':
+      return upgradeWizardText('codeRoutingConflict', language);
+    case 'routing_verification_failed':
+      return upgradeWizardText('codeRoutingVerificationFailed', language);
     default:
       return upgradeWizardText('codeUnknown', language);
   }

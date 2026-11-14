@@ -411,6 +411,7 @@ async function adoptServer(
     pluginChecked?: boolean;
     summaries?: AdoptionSummary[];
     completions?: { status: number; body: Record<string, unknown> }[];
+    routeRefusal?: { status: number; code: string };
     // The next N progress reads answer a plain 500, which is what a lost route or a
     // refused credential looks like to the page: no bounded refusal envelope.
     readFailures?: number;
@@ -487,8 +488,12 @@ async function adoptServer(
           installationId: identity.installationId,
           generation: identity.generation,
           operationId: identity.operationId,
-          revision: 1,
-          target: '/console',
+          // The canonical leaf answers for the route the record holds, so a
+          // committed route verifies against its own revision and target. A
+          // fixed answer here would be a verification the real Manager never
+          // gives: it verifies what it prepared.
+          revision: operation.routing.revision ?? 1,
+          target: operation.routing.target ?? '/console',
           committed: operation.routing.committed,
         },
         { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
@@ -527,6 +532,21 @@ async function adoptServer(
     if (resource === 'admin/commit') {
       if (body.key !== admin) violations.push('admin key');
       operation = { ...operation, adminInitialized: true, revision: operation.revision + 1 };
+      return Response.json(operation);
+    }
+    if (resource === 'routing/draft') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          draftControlBasePath: String(body.target ?? '/console'),
+          ...(typeof body.inferenceTarget === 'string'
+            ? { draftInferenceBasePath: body.inferenceTarget }
+            : {}),
+          ...(body.sharedEntry !== undefined ? { draftSharedEntry: Boolean(body.sharedEntry) } : {}),
+        },
+      };
       return Response.json(operation);
     }
     if (resource === 'operation') {
@@ -631,13 +651,20 @@ async function adoptServer(
       return Response.json(summary);
     }
     if (resource === 'routing/prepare') {
+      if (options.routeRefusal) {
+        return Response.json({ Code: options.routeRefusal.code }, { status: options.routeRefusal.status });
+      }
       operation = {
         ...operation,
         revision: operation.revision + 1,
         routing: {
           operationId: identity.operationId,
           revision: 1,
-          target: '/console',
+          target: String(body.target ?? '/console'),
+          ...(typeof body.inferenceTarget === 'string'
+            ? { inferenceTarget: body.inferenceTarget }
+            : {}),
+          ...(body.sharedEntry !== undefined ? { sharedEntry: Boolean(body.sharedEntry) } : {}),
           stage: 'intent_persisted',
           committed: false,
         },
@@ -648,15 +675,49 @@ async function adoptServer(
       operation = {
         ...operation,
         revision: operation.revision + 1,
-        routing: { ...operation.routing, stage: 'committed', committed: true },
+        routing: {
+          ...operation.routing,
+          stage: 'committed',
+          committed: true,
+          // The activation is where the inference route becomes durable: the
+          // adapter refuses the reply that omits it, so the fake has to commit
+          // both prefixes the prepare recorded, exactly like the real route.
+          ...(operation.routing.inferenceTarget ? { inferenceCommitted: true } : {}),
+        },
       };
       return Response.json(operation);
     }
     if (resource === 'complete') {
       const refusal = completions.shift();
       if (refusal) return Response.json(refusal.body, { status: refusal.status });
-      operation = { ...operation, revision: operation.revision + 1, productComplete: true };
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        productComplete: true,
+        routing: {
+          ...operation.routing,
+          ...(operation.routing.inferenceTarget ? { inferenceCommitted: true } : {}),
+        },
+      };
       return Response.json(operation);
+    }
+    if (resource === 'api-keys/access-info') {
+      const inferenceBase = operation.routing.inferenceTarget || '/infer-adopt';
+      return Response.json({
+        mode: 'adopt_existing',
+        managementBasePath: operation.routing.target || '/console',
+        inferenceBasePath: inferenceBase,
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: `${inferenceBase}/v1`,
+            examplePath: `${inferenceBase}/v1/chat/completions`,
+          },
+        ],
+        ready: true,
+        code: '',
+      });
     }
     throw new Error('unexpected resource ' + resource);
   });
@@ -723,6 +784,22 @@ it('walks source, inventory, migration and completion without writing the commit
   expect(byID('enter-console').props.href).toBe('/console');
   expect(localStorage.setItem).not.toHaveBeenCalled();
   expect(sessionStorage.setItem).not.toHaveBeenCalled();
+});
+
+it.each([
+  { status: 503, code: 'routing_verification_failed', message: 'prefixErrorVerificationFailed' as const },
+  { status: 409, code: 'routing_conflict', message: 'prefixErrorRoutingConflict' as const },
+])('keeps adoption resumable and names route refusal $code', async ({ status, code, message }) => {
+  const server = await adoptServer({ routeRefusal: { status, code } });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  expect(text()).toContain(j(message));
+  expect(maybe('enter-console')).toHaveLength(0);
+  expect(server.posts('complete')).toHaveLength(0);
+  expect(byID('adopt-complete').props.disabled).toBe(false);
 });
 
 it('never turns a re-read of a staged inventory into the committing POST', async () => {
@@ -1443,7 +1520,11 @@ it('counts only copies as migrated and gives source-absent items their own group
 });
 
 it('offers a resume, not a completion, when a settled run left planned items unprocessed', async () => {
-  const server = await adoptServer({ summaries: [shortfallRun] });
+  const server = await adoptServer({
+    summaries: [shortfallRun],
+    // The real refusal for a run that settled short of its own plan.
+    completions: [{ status: 409, body: { code: 'adopt_migration_incomplete' } }],
+  });
   await click('adopt-read-inventory');
   await input('adopt-confirm-inventory', true);
   await click('adopt-confirm-migrate');
@@ -1455,8 +1536,14 @@ it('offers a resume, not a completion, when a settled run left planned items unp
   );
   expect(text()).toContain(adoptText('remainingItems', { count: 2 }));
   expect(maybe('adopt-resume')).toHaveLength(1);
-  expect(byID('adopt-complete').props.disabled).toBe(true);
+  // Completion cannot succeed over the shortfall, and the screen says so with
+  // the server's own answer rather than by guessing at it: the ask is sent and
+  // refused as an unfinished migration. Resume is the action that works.
+  await click('adopt-complete');
+  await settle();
+  expect(text()).toContain(adoptText('incompleteRefusal'));
   expect(text()).not.toContain(adoptText('done'));
+  expect(maybe('enter-console')).toHaveLength(0);
   // The next action works: a replay with the same body, not a dead button.
   await click('adopt-resume');
   await settle();
@@ -1832,9 +1919,20 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
       },
       strategy: { ...adoptCheckpoint, stage: 'committed' },
     };
-    const get = vi.fn(async (resource: string) =>
-      resource === 'installation/adoption' ? finishedRun : done
-    );
+    const get = vi.fn(async (resource: string) => {
+      if (resource === 'installation/adoption') return finishedRun;
+      if (resource === 'api-keys/access-info') {
+        return {
+          mode: 'adopt_existing',
+          managementBasePath: '/console',
+          inferenceBasePath: '/infer',
+          protocols: [],
+          ready: true,
+          code: '',
+        };
+      }
+      return done;
+    });
     await mountManaged(done, get);
     await settle();
     expect(text()).toContain(adoptText('partialTitle'));
@@ -1871,9 +1969,20 @@ it('shows the success headline only for a settled, clean, completed installation
     },
     strategy: { ...adoptCheckpoint, stage: 'committed' },
   };
-  const get = vi.fn(async (resource: string) =>
-    resource === 'installation/adoption' ? cleanRun : done
-  );
+  const get = vi.fn(async (resource: string) => {
+    if (resource === 'installation/adoption') return cleanRun;
+    if (resource === 'api-keys/access-info') {
+      return {
+        mode: 'adopt_existing',
+        managementBasePath: '/console',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: true,
+        code: '',
+      };
+    }
+    return done;
+  });
   await mountManaged(done, get);
   await settle();
   expect(text()).toContain(adoptText('done'));
@@ -1903,9 +2012,20 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
       },
       strategy: { ...adoptCheckpoint, stage: 'committed' },
     };
-    const get = vi.fn(async (resource: string) =>
-      resource === 'installation/adoption' ? allOutcomes : done
-    );
+    const get = vi.fn(async (resource: string) => {
+      if (resource === 'installation/adoption') return allOutcomes;
+      if (resource === 'api-keys/access-info') {
+        return {
+          mode: 'adopt_existing',
+          managementBasePath: '/console',
+          inferenceBasePath: '/infer',
+          protocols: [],
+          ready: true,
+          code: '',
+        };
+      }
+      return done;
+    });
     await mountManaged(done, get);
     await settle();
     expect(text()).toContain(adoptText('partialTitle'));
@@ -1932,9 +2052,20 @@ it('states that failed items remain after the installation completes', async () 
     },
     strategy: { ...adoptCheckpoint, stage: 'committed' },
   };
-  const get = vi.fn(async (resource: string) =>
-    resource === 'installation/adoption' ? failedInstallation : done
-  );
+  const get = vi.fn(async (resource: string) => {
+    if (resource === 'installation/adoption') return failedInstallation;
+    if (resource === 'api-keys/access-info') {
+      return {
+        mode: 'adopt_existing',
+        managementBasePath: '/console',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: true,
+        code: '',
+      };
+    }
+    return done;
+  });
   await mountManaged(done, get);
   await settle();
   expect(text()).toContain(adoptText('partialTitle'));
@@ -2071,9 +2202,20 @@ it('keeps the partial adoption groups on the Console after completion', async ()
     strategy: { ...adoptCheckpoint, stage: 'committed' },
   };
   const done: FreshOperation = { ...committed, revision: 10, productComplete: true };
-  const get = vi.fn(async (resource: string) =>
-    resource === 'installation/adoption' ? allOutcomes : done
-  );
+  const get = vi.fn(async (resource: string) => {
+    if (resource === 'installation/adoption') return allOutcomes;
+    if (resource === 'api-keys/access-info') {
+      return {
+        mode: 'adopt_existing',
+        managementBasePath: '/console',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: true,
+        code: '',
+      };
+    }
+    return done;
+  });
   const { post } = await mountManaged(committed, get);
   post.mockResolvedValue(done);
   await settle();
@@ -2178,4 +2320,58 @@ it('renders the persisted plugin opt-in unchecked and locked when the draft was 
   // persisted value instead of keeping the tick the page happened to hold.
   expect(byID('plugin-optin-checkbox').props.disabled).toBe(true);
   expect(byID('plugin-optin-checkbox').props.checked).toBe(false);
+});
+
+it('renders AccessInfoSummary after standalone Adopt completion in FreshManagedRuntime', async () => {
+  const done: FreshOperation = {
+    identity,
+    revision: 12,
+    adminInitialized: true,
+    productComplete: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/ctl-adopt',
+      inferenceTarget: '/inf-adopt',
+      sharedEntry: false,
+      inferenceCommitted: true,
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  const get = vi.fn(async (resource: string) => {
+    if (resource === 'installation/adoption') return cleanRun;
+    if (resource === 'api-keys/access-info') {
+      return {
+        mode: 'adopt_existing',
+        managementBasePath: '/ctl-adopt',
+        inferenceBasePath: '/inf-adopt',
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: '/inf-adopt/v1',
+            examplePath: '/inf-adopt/v1/chat/completions',
+          },
+        ],
+        ready: true,
+        code: '',
+      };
+    }
+    return done;
+  });
+  await mountManaged(done, get);
+  await settle();
+  // The operator is still on this screen: the completion does not depart on its
+  // own, and the endpoints it just published are readable here, before the
+  // console is a click away.
+  expect(maybe('adopt-enter-console')).toHaveLength(1);
+  expect(maybe('access-info-summary')).toHaveLength(1);
+  expect(text()).toContain('/inf-adopt/v1');
+  // Both live in the migration body, and the summary is not behind the entry
+  // action: it is above it in the same stage.
+  expect(maybe('adopt-migration')).toHaveLength(1);
+  expect(get.mock.calls.map(([resource]) => resource)).toContain('api-keys/access-info');
 });

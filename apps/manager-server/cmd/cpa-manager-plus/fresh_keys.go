@@ -11,6 +11,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
@@ -19,29 +20,35 @@ import (
 
 const freshKeysGatewayAdmissionTimeout = 1500 * time.Millisecond
 
+type clientKeyCreateResponse struct {
+	Key           freshkeys.Key   `json:"key"`
+	CreatedSecret string          `json:"createdSecret,omitempty"`
+	Operation     *repo.Operation `json:"operation,omitempty"`
+}
+
+type clientKeyCreateErrorResponse struct {
+	Code   string                         `json:"code"`
+	Detail string                         `json:"detail,omitempty"`
+	Key    *freshkeys.Key                 `json:"key,omitempty"`
+	Result *freshkeyapply.OperationResult `json:"result,omitempty"`
+}
+
 // Called only after canonical routing and the existing Admin verifier succeed.
 func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
-	// Staging is available while the installation has not selected a strategy.
-	// Once one is committed, the installation authority answers for it: New
-	// Managed, the private profile and External each answer through their own
-	// profile, so a key route can never accept a checkpoint the surface
-	// discriminator refuses.
 	if !op.GatewayPending {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
-	// The staging routes (list, create, rename) are Manager-local and existed
-	// before any CPA authority did, so they keep serving a Manager-owned
-	// checkpoint exactly as before: New Managed, and now Adopt, whose committed
-	// destination this Manager staged itself. Every other strategy must be
-	// admitted by the installation authority: External answers through its own
-	// committed connection, and an incomplete checkpoint answers nothing.
 	authority := a.keyApply.ForOperation(op)
 	if op.Strategy.Strategy != "" && !freshkeyapply.ManagerOwnedStrategy(op.Strategy) &&
 		(authority == nil || !authority.Targets(op, freshkeyapply.SurfaceKeyOperation)) {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
+	activeTarget := authority != nil && authority.KeyOperationsEnabled() &&
+		authority.Targets(op, freshkeyapply.SurfaceKeyOperation) &&
+		authority.Profile() != freshkeyapply.ProfilePrivate
+
 	switch {
 	case strings.HasPrefix(resource, "api-keys/operations/"):
 		a.clientKeyOperation(w, r, op, resource)
@@ -50,11 +57,14 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 	case strings.HasSuffix(resource, "/usage") && strings.Count(resource, "/") == 2 && r.Method == http.MethodGet:
 		a.keyUsage(w, r, op, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/usage"))
 	case r.Method == http.MethodGet && strings.Count(resource, "/") == 4:
-		// GET api-keys/<target>/revocation/<keeper>/<mode> answers the same verdict
-		// the matching POST would, before the page offers the submit. The selection
-		// travels in the path because a client resource may not select a query.
 		if parts := strings.Split(resource, "/"); parts[0] == "api-keys" && parts[2] == "revocation" {
 			a.preflightClientKeyOperation(w, r, op, parts[1], parts[3], parts[4])
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	case r.Method == http.MethodGet && strings.Count(resource, "/") == 3:
+		if parts := strings.Split(resource, "/"); parts[0] == "api-keys" && parts[2] == "revocation" {
+			a.preflightClientKeyOperation(w, r, op, parts[1], "", parts[3])
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -65,28 +75,20 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 	case strings.HasSuffix(resource, "/initial-install") && strings.Count(resource, "/") == 2:
 		a.initialClientKey(w, r, op, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/initial-install"))
 	case resource == "api-keys" && r.Method == http.MethodGet:
-		keys, err := a.keys.List(r.Context())
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		// An External installation reports the presence the user's CPA answers,
-		// not the effect this Manager intended. Any other profile is unchanged, and
-		// a checkpoint the External discriminator refuses is never contacted.
-		unverified := false
-		if authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
-			authority.Targets(op, freshkeyapply.SurfaceKeyOperation) {
-			// A credential the user's CPA already refused is not presented again:
-			// five failed authentications ban the address for thirty minutes, and
-			// a page that refreshes is enough to reach that. The blocker is
-			// answered here, before any request leaves this process.
+		var (
+			keys       []freshkeys.Key
+			unverified bool
+			listErr    error
+		)
+		switch {
+		case authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
+			authority.Targets(op, freshkeyapply.SurfaceKeyOperation):
 			if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
 				writeExternalManagementRejected(w)
 			}) {
 				return
 			}
-			var listErr error
-			keys, unverified, listErr = a.keyApply.ExternalKeyList(a.withExternalSavedCredentialGate(r.Context()), keys)
+			keys, unverified, listErr = authority.ObservedKeyList(a.withExternalSavedCredentialGate(r.Context()), op.Strategy.TargetGeneration)
 			switch {
 			case errors.Is(listErr, errExternalCredentialWaitCancelled):
 				writeExternalCredentialWaitCancelled(w)
@@ -95,21 +97,32 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 				writeExternalAuthorityUnavailable(w)
 				return
 			case errors.Is(listErr, cpa.ErrExternalTargetMoved):
-				// The connection no longer names the committed target. The staged
-				// keys are not an effect of any CPA, so the list is a typed blocker
-				// rather than a stale 200.
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusConflict)
 				writeFreshJSON(w, struct {
 					Code string `json:"code"`
 				}{freshconfig.ReasonTargetMoved})
 				return
+			case errors.Is(listErr, cpa.ErrManagementClientForbidden):
+				writeExternalManagementForbidden(w)
+				return
 			case errors.Is(listErr, cpa.ErrManagementRejected):
-				// The user's CPA refused the stored management credential. The
-				// page must not offer a retry: only a rebind resolves it.
 				writeExternalManagementRejected(w)
 				return
 			case listErr != nil:
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		case authority != nil && authority.Profile() == freshkeyapply.ProfileManaged &&
+			authority.Targets(op, freshkeyapply.SurfaceKeyOperation):
+			keys, unverified, listErr = authority.ObservedKeyList(r.Context(), op.Strategy.TargetGeneration)
+			if listErr != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		default:
+			keys, listErr = a.keys.List(r.Context())
+			if listErr != nil {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
@@ -124,10 +137,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			Keys                []freshkeys.Key `json:"keys"`
 			GatewayPending      bool            `json:"gatewayPending"`
 			RevocationAvailable bool            `json:"revocationAvailable"`
-			// PresenceUnverified marks a list the user's CPA could not be read
-			// for: the keys are the Manager's own records, and none of them
-			// claims an observed effect.
-			PresenceUnverified bool `json:"presenceUnverified"`
+			PresenceUnverified  bool            `json:"presenceUnverified"`
 		}{keys, gatewayPending, authority.KeyOperationsEnabled(), unverified})
 	case strings.HasPrefix(resource, "api-keys/requests/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(resource, "api-keys/requests/")
@@ -142,6 +152,14 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		}
 		if err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if activeTarget {
+			key, ok := a.observeKeyForRead(w, r.Context(), authority, key, op.Strategy.TargetGeneration)
+			if !ok {
+				return
+			}
+			writeFreshJSON(w, key)
 			return
 		}
 		writeFreshJSON(w, key)
@@ -172,61 +190,231 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		switch {
 		case errors.Is(err, freshkeys.ErrRequest):
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		case errors.Is(err, freshkeys.ErrNotFound):
 			w.WriteHeader(http.StatusNotFound)
+			return
 		case errors.Is(err, freshkeys.ErrConflict):
 			w.WriteHeader(http.StatusConflict)
+			return
 		case err != nil:
 			w.WriteHeader(http.StatusServiceUnavailable)
-		default:
-			writeFreshJSON(w, key)
-		}
-	case resource == "api-keys" && r.Method == http.MethodPost:
-		if r.Header.Get("Content-Type") != "application/json" {
-			w.WriteHeader(http.StatusUnsupportedMediaType)
 			return
 		}
-		var request struct {
-			RequestID string `json:"requestId"`
-		}
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
-		d.DisallowUnknownFields()
-		if d.Decode(&request) != nil || !freshkeys.ValidRequestID(request.RequestID) {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var trailing any
-		if d.Decode(&trailing) != io.EOF {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		result, created, err := a.keys.Create(r.Context(), request.RequestID)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if created {
-			w.WriteHeader(http.StatusCreated)
-			if a.usageProjection != nil {
-				a.usageProjection.Wake()
+		if activeTarget && r.Method == http.MethodGet {
+			observed, ok := a.observeKeyForRead(w, r.Context(), authority, key, op.Strategy.TargetGeneration)
+			if !ok {
+				return
 			}
+			key = observed
 		}
-		writeFreshJSON(w, result)
+		writeFreshJSON(w, key)
+	case resource == "api-keys" && r.Method == http.MethodPost:
+		a.createAndApplyClientKey(w, r, authority, activeTarget, op.Strategy.TargetGeneration)
 	default:
-		// Including the final staged key: no delete/replace route exists, and a
-		// saved secret is never part of a list or detail response.
 		w.Header().Set("Allow", "GET, POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
+func (a *freshApplication) observeKeyForRead(
+	w http.ResponseWriter,
+	ctx context.Context,
+	authority *freshkeyapply.Service,
+	key freshkeys.Key,
+	generation uint64,
+) (freshkeys.Key, bool) {
+	if authority == nil {
+		return key, true
+	}
+	var err error
+	if authority.Profile() == freshkeyapply.ProfileExternal {
+		err = a.checkExternalSavedCredentialPrecheck(ctx)
+		ctx = a.withExternalSavedCredentialGate(ctx)
+	}
+	observed := key
+	if err == nil {
+		observed, err = authority.ObserveKey(ctx, key, generation)
+	}
+	if err == nil {
+		return observed, true
+	}
+	switch {
+	case errors.Is(err, errExternalCredentialWaitCancelled):
+		writeExternalCredentialWaitCancelled(w)
+	case errors.Is(err, errExternalRejectionUnavailable), errors.Is(err, cpa.ErrExternalRejectionUnavailable):
+		writeExternalAuthorityUnavailable(w)
+	case errors.Is(err, cpa.ErrManagementClientForbidden):
+		writeExternalManagementForbidden(w)
+	case errors.Is(err, cpa.ErrManagementRejected):
+		writeExternalManagementRejected(w)
+	default:
+		status, code := keyOperationCode(err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		writeFreshJSON(w, struct {
+			Code string `json:"code"`
+		}{code})
+	}
+	return key, false
+}
+
+func (a *freshApplication) createAndApplyClientKey(
+	w http.ResponseWriter,
+	r *http.Request,
+	authority *freshkeyapply.Service,
+	activeTarget bool,
+	generation uint64,
+) {
+	if r.Header.Get("Content-Type") != "application/json" {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return
+	}
+	var request struct {
+		RequestID string `json:"requestId"`
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	d.DisallowUnknownFields()
+	if d.Decode(&request) != nil || !freshkeys.ValidRequestID(request.RequestID) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if d.Decode(&trailing) != io.EOF {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	result, created, err := a.keys.Create(r.Context(), request.RequestID)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if created && a.usageProjection != nil {
+		a.usageProjection.Wake()
+	}
+	if !activeTarget {
+		w.Header().Set("Content-Type", "application/json")
+		if created {
+			w.WriteHeader(http.StatusCreated)
+		}
+		writeFreshJSON(w, result)
+		return
+	}
+
+	key := result.Key
+	if authority.Profile() == freshkeyapply.ProfileExternal {
+		preErr := a.checkExternalSavedCredentialPrecheck(r.Context())
+		switch {
+		case errors.Is(preErr, errExternalCredentialWaitCancelled):
+			writeExternalCredentialWaitCancelled(w)
+			return
+		case errors.Is(preErr, errExternalRejectionUnavailable):
+			writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", &key, nil)
+			return
+		case errors.Is(preErr, cpa.ErrManagementClientForbidden):
+			writeCreateKeyError(w, http.StatusConflict, freshconfig.ReasonManagementRejected, "client_forbidden", &key, nil)
+			return
+		case errors.Is(preErr, cpa.ErrManagementRejected):
+			writeCreateKeyError(w, http.StatusConflict, freshconfig.ReasonManagementRejected, "", &key, nil)
+			return
+		}
+	}
+
+	applyCtx := r.Context()
+	if authority.Profile() == freshkeyapply.ProfileExternal {
+		applyCtx = a.withExternalSavedCredentialGate(applyCtx)
+	}
+	opRes, applyErr := authority.ApplyAdd(applyCtx, request.RequestID, string(key.ID), generation)
+	if applyErr == nil && opRes.RuntimeState != "effective_observed" {
+		applyErr = cpa.ErrApplyUnknown
+	}
+	if refreshed, detailErr := a.keys.Detail(r.Context(), string(key.ID)); detailErr == nil {
+		key = refreshed
+	}
+	if applyErr != nil {
+		if errors.Is(applyErr, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
+		if errors.Is(applyErr, cpa.ErrExternalRejectionUnavailable) {
+			writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", &key, &opRes)
+			return
+		}
+		status, code := keyOperationCode(applyErr)
+		detail := ""
+		if errors.Is(applyErr, cpa.ErrManagementClientForbidden) {
+			detail = "client_forbidden"
+		}
+		if opRes.Operation != nil && opRes.Operation.TargetID == string(key.ID) {
+			if !opRes.Operation.IsTerminal() {
+				key.OperationID = opRes.Operation.ID
+			}
+			switch opRes.Operation.Outcome {
+			case "pending":
+				key.RuntimeState = "applying"
+			case "unknown":
+				key.RuntimeState = "effect_unknown"
+			case "aborted":
+				key.RuntimeState = "not_applied"
+				key.OperationID = ""
+			}
+			if opRes.Operation.Outcome == "committed" {
+				key.RuntimeState = opRes.RuntimeState
+			}
+		}
+		key.EffectCode = code
+		var resPtr *freshkeyapply.OperationResult
+		if opRes.Operation != nil {
+			resPtr = &opRes
+		}
+		writeCreateKeyError(w, status, code, detail, &key, resPtr)
+		return
+	}
+
+	key.RuntimeState = "effective_observed"
+	key.OperationID = ""
+	key.EffectCode = ""
+	w.Header().Set("Content-Type", "application/json")
+	if created {
+		w.WriteHeader(http.StatusCreated)
+	}
+	resp := clientKeyCreateResponse{
+		Key:       key,
+		Operation: opRes.Operation,
+	}
+	if created {
+		resp.CreatedSecret = result.CreatedSecret
+	}
+	writeFreshJSON(w, resp)
+}
+
+func writeCreateKeyError(
+	w http.ResponseWriter,
+	status int,
+	code, detail string,
+	key *freshkeys.Key,
+	result *freshkeyapply.OperationResult,
+) {
+	for _, name := range proxiedEntityHeaders {
+		w.Header().Del(name)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	writeFreshJSON(w, clientKeyCreateErrorResponse{
+		Code:   code,
+		Detail: detail,
+		Key:    key,
+		Result: result,
+	})
+}
+
 // clientKeySecret is the authenticated on-demand copy of one saved Client Key.
-// The interaction is fixed: lists and details show only the masked preview, and
-// the full value is decrypted for this response alone. It is never logged,
-// journaled, cached or stored in the browser.
-func (a *freshApplication) clientKeySecret(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, id string) {
-	if a.keys == nil {
+func (a *freshApplication) clientKeySecret(w http.ResponseWriter, r *http.Request, _ bootstrap.FreshOperation, id string) {
+	serveClientKeySecret(w, r, a.keys, id)
+}
+
+func serveClientKeySecret(w http.ResponseWriter, r *http.Request, keysSvc *freshkeys.Service, id string) {
+	if keysSvc == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
@@ -242,7 +430,7 @@ func (a *freshApplication) clientKeySecret(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	key, err := a.keys.Detail(r.Context(), id)
+	key, err := keysSvc.Detail(r.Context(), id)
 	if errors.Is(err, freshkeys.ErrRequest) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -255,14 +443,12 @@ func (a *freshApplication) clientKeySecret(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	// A superseded record is retained history: it can no longer authenticate, so
-	// there is nothing to copy.
-	if key.Lifecycle != identity.LifecycleActive {
+	if key.Lifecycle == identity.LifecycleSuperseded {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
 	var secret string
-	if err := a.keys.WithStagedSecret(r.Context(), id, func(value string) error {
+	if err := keysSvc.WithStagedSecret(r.Context(), id, func(value string) error {
 		secret = value
 		return nil
 	}); err != nil {

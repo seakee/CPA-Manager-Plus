@@ -149,7 +149,7 @@ func TestWindowsAggregatesOnlyAttributedEventsInRange(t *testing.T) {
 	insertEvent(t, db, 4, hash, 1500, 5, 0)
 	insertProjection(t, db, 4, "stale", "", hash, 1500)
 
-	windows, err := repo.Windows(ctx, []identity.APIKeyID{testKeyID}, 500, 5000)
+	windows, err := repo.Windows(ctx, []ports.KeyRange{{APIKeyID: testKeyID, FromMS: 500}}, 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,8 @@ func TestWindowsAggregatesEveryBatchBeyondOneStatement(t *testing.T) {
 	// instead of silently truncating the list.
 	const keyCount = maxIdentityPlaceholders + 50
 	ids := make([]identity.APIKeyID, 0, keyCount)
-	for i := 0; i < keyCount; i++ {
+	ranges := make([]ports.KeyRange, 0, keyCount)
+	for i := range keyCount {
 		id := fmt.Sprintf("%032x", i+1)
 		hash := sha256Hex("batched-secret-" + id)
 		insertIdentity(t, db, id, "active")
@@ -274,10 +275,12 @@ func TestWindowsAggregatesEveryBatchBeyondOneStatement(t *testing.T) {
 		insertBinding(t, db, id, hash, 100, nil)
 		insertEvent(t, db, int64(i+1), hash, 1000+int64(i), 10, 0)
 		insertProjection(t, db, int64(i+1), "mapped", id, hash, 1000+int64(i))
-		ids = append(ids, identity.APIKeyID(id))
+		keyID := identity.APIKeyID(id)
+		ids = append(ids, keyID)
+		ranges = append(ranges, ports.KeyRange{APIKeyID: keyID, FromMS: 500 + int64(i%3)*100})
 	}
 
-	windows, err := repo.Windows(ctx, ids, 500, 5000)
+	windows, err := repo.Windows(ctx, ranges, 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,5 +291,55 @@ func TestWindowsAggregatesEveryBatchBeyondOneStatement(t *testing.T) {
 		if window := windows[id]; window.Totals.Calls != 1 || window.Totals.TotalTokens != 10 {
 			t.Fatalf("window %s = %+v, want its own single call", id, window)
 		}
+	}
+}
+
+func TestWindowsRespectsPerKeyFloorsInSingleBoundedBatch(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+
+	hashA := sha256Hex("secret-a")
+	hashB := sha256Hex("secret-b")
+	insertIdentity(t, db, testKeyID, "active")
+	insertStagedKey(t, db, testKeyID, hashA)
+	insertBinding(t, db, testKeyID, hashA, 1000, nil)
+
+	insertIdentity(t, db, otherKeyID, "active")
+	insertStagedKey(t, db, otherKeyID, hashB)
+	insertBinding(t, db, otherKeyID, hashB, 3000, nil)
+
+	// Key A floor=1000: mapped event at 1500 and unmapped event at 2000 both fall inside [1000, 5000).
+	insertEvent(t, db, 1, hashA, 1500, 12, 0)
+	insertProjection(t, db, 1, "mapped", testKeyID, hashA, 1500)
+	insertEvent(t, db, 2, hashA, 2000, 8, 0)
+	insertProjection(t, db, 2, "stale", "", hashA, 2000)
+
+	// Key B floor=3000: pre-floor mapped event at 1500 and pre-floor stale event at 2000 must be excluded,
+	// while events at 3000 (inclusive lower bound) and 4000 are counted.
+	insertEvent(t, db, 3, hashB, 1500, 99, 1)
+	insertProjection(t, db, 3, "mapped", otherKeyID, hashB, 1500)
+	insertEvent(t, db, 4, hashB, 2000, 77, 0)
+	insertProjection(t, db, 4, "stale", "", hashB, 2000)
+	insertEvent(t, db, 5, hashB, 3000, 20, 0)
+	insertProjection(t, db, 5, "mapped", otherKeyID, hashB, 3000)
+	insertEvent(t, db, 6, hashB, 4000, 30, 0)
+	insertProjection(t, db, 6, "mapped", otherKeyID, hashB, 4000)
+
+	windows, err := repo.Windows(ctx, []ports.KeyRange{
+		{APIKeyID: testKeyID, FromMS: 1000},
+		{APIKeyID: otherKeyID, FromMS: 3000},
+	}, 5000)
+	if err != nil {
+		t.Fatalf("Windows per-key floors: %v", err)
+	}
+	winA := windows[testKeyID]
+	if winA.Totals.Calls != 1 || winA.Totals.TotalTokens != 12 || winA.UnmappedEvents != 1 ||
+		winA.Totals.LastUsedAtMS == nil || *winA.Totals.LastUsedAtMS != 1500 {
+		t.Fatalf("Key A window = %+v, want calls=1 tokens=12 unmapped=1 lastUsed=1500", winA)
+	}
+	winB := windows[otherKeyID]
+	if winB.Totals.Calls != 2 || winB.Totals.Failure != 0 || winB.Totals.TotalTokens != 50 || winB.UnmappedEvents != 0 ||
+		winB.Totals.LastUsedAtMS == nil || *winB.Totals.LastUsedAtMS != 4000 {
+		t.Fatalf("Key B window = %+v, want calls=2 failures=0 tokens=50 unmapped=0 lastUsed=4000", winB)
 	}
 }

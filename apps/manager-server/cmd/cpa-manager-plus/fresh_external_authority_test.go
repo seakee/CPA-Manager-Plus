@@ -197,7 +197,7 @@ func TestExternalKeyListWithoutACommittedCheckpointNeedsNoCPA(t *testing.T) {
 	app, closeApp := newA3TestApp(t)
 	t.Cleanup(closeApp)
 	created := app.keyApplyKeys(t, strings.Repeat("a", 32))
-	request := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
+	request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"api-keys", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, request)
@@ -254,7 +254,7 @@ func TestExternalSurfacesReportAMovedTarget(t *testing.T) {
 	created := app.keyApplyKeys(t, strings.Repeat("a", 32))
 	call := func(method, resource, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+		request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		if body != "" {
 			request.Header.Set("Content-Type", "application/json")
@@ -288,7 +288,7 @@ func TestExternalKeyListRouteAnswersWithoutACPA(t *testing.T) {
 	created := app.keyApplyKeys(t, strings.Repeat("a", 32))
 	call := func() *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
+		request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"api-keys", nil)
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)
@@ -312,7 +312,7 @@ func TestExternalKeyListRouteAnswersWithoutACPA(t *testing.T) {
 	app2, cpa2 := externalAuthorityApp(t, "")
 	app2.keyApplyKeys(t, strings.Repeat("b", 32))
 	cpa2.reject.Store(true)
-	request := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
+	request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"api-keys", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app2.canonicalAPI(response, request)
@@ -421,7 +421,7 @@ func TestExternalSurfacesReportAnUnsupportedVersion(t *testing.T) {
 			keeper := app.keyApplyKeys(t, strings.Repeat("b", 32))
 			call := func(method, resource, body string) *httptest.ResponseRecorder {
 				t.Helper()
-				request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+				request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 				request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				if body != "" {
 					request.Header.Set("Content-Type", "application/json")

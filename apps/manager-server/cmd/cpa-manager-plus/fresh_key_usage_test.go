@@ -73,7 +73,11 @@ func newFreshUsageHarness(t *testing.T) *freshUsageHarness {
 	}
 	app := newFreshApplication(opened, config.Config{}, nil)
 	if _, err = app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -91,11 +95,11 @@ func newFreshUsageHarness(t *testing.T) *freshUsageHarness {
 		freshkeys.WithClock(func() int64 { return harnessKeyCreatedAtMS }))
 	harness.call = func(method, resource, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+		request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
-		httpapi.InitialFullWebHandler("/control", http.HandlerFunc(app.canonicalAPI)).ServeHTTP(response, request)
+		httpapi.InitialFullWebHandler(currentInstallControlPrefix, http.HandlerFunc(app.canonicalAPI)).ServeHTTP(response, request)
 		if response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("usage read weakened API cache control")
 		}
@@ -256,7 +260,7 @@ func TestFreshKeyUsageRequiresACompletedInstall(t *testing.T) {
 	external.Strategy.Strategy = bootstrap.ConnectExternal
 	for _, resource := range []string{"api-keys/usage-summary", detailPath} {
 		response := httptest.NewRecorder()
-		harness.app.clientKeys(response, httptest.NewRequest("GET", "/control/api/v2/"+resource, nil), external, resource)
+		harness.app.clientKeys(response, httptest.NewRequest("GET", currentInstallManagementAPIV2Prefix+""+resource, nil), external, resource)
 		if response.Code != http.StatusConflict || response.Body.Len() != 0 {
 			t.Fatalf("external %s = %d", resource, response.Code)
 		}
@@ -415,7 +419,11 @@ func TestFreshCompleteStartsUsageOnceAndBackfillsStagedKeys(t *testing.T) {
 	app.runCtx = ctx
 	quietProjection(app)
 	if _, err := app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -424,7 +432,7 @@ func TestFreshCompleteStartsUsageOnceAndBackfillsStagedKeys(t *testing.T) {
 	// Stage the key before the installation commits: it has no attribution yet.
 	installManagedCheckpoint(t, app, "staged")
 	created := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/api-keys", strings.NewReader(`{"requestId":"`+strings.Repeat("c", 32)+`"}`))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(`{"requestId":"`+strings.Repeat("c", 32)+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	app.canonicalAPI(created, request)
@@ -588,7 +596,11 @@ func newUsageCompletionApplication(t *testing.T, ctx context.Context, cfg config
 	app.runCtx = ctx
 	quietProjection(app)
 	if _, err = app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -598,7 +610,7 @@ func newUsageCompletionApplication(t *testing.T, ctx context.Context, cfg config
 
 func stageClientKey(t *testing.T, app *freshApplication) freshkeys.Result {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/api-keys", strings.NewReader(`{"requestId":"`+strings.Repeat("f", 32)+`"}`))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(`{"requestId":"`+strings.Repeat("f", 32)+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
@@ -1610,7 +1622,7 @@ func TestUsageRuntimeConfigPreservesProcessTLSSkipVerifyUntilWholeConfigPut(t *t
 		} else {
 			reader = bytes.NewReader([]byte(body))
 		}
-		req := httptest.NewRequest(method, "/control/api/v2/"+resource, reader)
+		req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, reader)
 		req = req.WithContext(cpa.WithTrustedCARoots(req.Context(), tlsCPA.roots))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		if contentType != "" {

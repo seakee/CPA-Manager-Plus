@@ -66,8 +66,8 @@ func operationFixture(t *testing.T) (*Service, *operationWire, string, string, s
 	t.Helper()
 	t.Setenv("CPAMP_PRIVATE_KEY_OPERATIONS", "1")
 	s, _, _, oldID := fixture(t)
-	p, _ := s.permit()
-	s.permit = func() (Permit, error) { return p, nil }
+	p, _ := s.permit(context.Background())
+	s.permit = func(context.Context) (Permit, error) { return p, nil }
 	if err := s.repo.ClaimInitialInstall(t.Context(), repo.InitialInstall{KeyID: oldID, RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func operationFixture(t *testing.T) (*Service, *operationWire, string, string, s
 	return s, w, oldID, string(next.Key.ID), old, next.CreatedSecret
 }
 func grantStep(s *Service, id, step string) {
-	p, _ := s.permit()
+	p, _ := s.permit(context.Background())
 	grant := KeyPermit{OperationID: id, Step: step, RunID: p.RunID, Generation: p.Generation, SourceSHA256: strings.Repeat("a", 64), IssuedAtMS: time.Now().UnixMilli(), ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli()}
 	s.keyPermit = func(context.Context, string, string) (KeyPermit, error) { return grant, nil }
 }
@@ -403,7 +403,7 @@ func TestRevokedHistoryDoesNotBecomeNeverAppliedAfterLaterOperations(t *testing.
 	if _, err = s.ContinueOperation(t.Context(), first, 7); !errors.Is(err, repo.ErrConflict) {
 		t.Fatal("old operation continued after another commit", err)
 	}
-	s.permit = func() (Permit, error) { return Permit{}, ErrUnavailable }
+	s.permit = func(context.Context) (Permit, error) { return Permit{}, ErrUnavailable }
 	if history, e := s.CheckOperation(t.Context(), first, 7); e != nil || history.Operation == nil || history.RuntimeState != "effect_unknown" {
 		t.Fatal("historical read required current host grant", history, e)
 	}

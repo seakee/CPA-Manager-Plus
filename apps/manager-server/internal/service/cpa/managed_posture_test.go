@@ -2,6 +2,7 @@ package cpa
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -312,23 +313,48 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 
 	keyOne := "cpamp_sk_" + strings.Repeat("a", 64)
 	keyTwo := "cpamp_sk_" + strings.Repeat("b", 64)
-	for name, keys := range map[string][]string{
-		"single canonical key":           {keyOne},
-		"replacement pair canonical key": {keyOne, keyTwo},
-	} {
-		if !managedProofPosture.validKeys(keys) {
-			t.Fatalf("valid managed client keys %q rejected", name)
+	keyThree := "cpamp_sk_" + strings.Repeat("c", 64)
+	installKey := "sk-" + strings.Repeat("Z", 64)
+	// The product keeps every client key the operator holds: nothing counts them,
+	// so both canonical shapes and a list far past the retired 128-entry
+	// boundary must stay accepted.
+	manyKeys := make([]string, 0, 200)
+	for index := range 200 {
+		manyKeys = append(manyKeys, fmt.Sprintf("cpamp_sk_%064x", index+1))
+	}
+	allowedKeyLists := []struct {
+		name string
+		keys []string
+	}{
+		{name: "single canonical key", keys: []string{keyOne}},
+		{name: "replacement pair of canonical keys", keys: []string{keyOne, keyTwo}},
+		{name: "three canonical keys", keys: []string{keyOne, keyTwo, keyThree}},
+		{name: "both canonical key shapes", keys: []string{keyOne, installKey}},
+		{name: "two hundred canonical keys", keys: manyKeys},
+	}
+	for _, tc := range allowedKeyLists {
+		if !managedProofPosture.validKeys(tc.keys) {
+			t.Fatalf("valid managed client keys %q rejected", tc.name)
 		}
 	}
-	for name, keys := range map[string][]string{
-		"empty client key list":   nil,
-		"zero client keys":        {},
-		"foreign client key":      {"sk-user-defined"},
-		"duplicate canonical key": {keyOne, keyOne},
-		"three canonical keys":    {keyOne, keyTwo, "cpamp_sk_" + strings.Repeat("c", 64)},
-	} {
-		if managedProofPosture.validKeys(keys) {
-			t.Fatalf("unsafe managed client keys %q permitted", name)
+
+	duplicatedMany := append(append([]string{}, manyKeys...), manyKeys[0])
+	rejectedKeyLists := []struct {
+		name string
+		keys []string
+	}{
+		{name: "empty client key list", keys: nil},
+		{name: "zero client keys", keys: []string{}},
+		{name: "foreign client key", keys: []string{"sk-user-defined"}},
+		{name: "truncated canonical key", keys: []string{keyOne[:len(keyOne)-1]}},
+		{name: "management secret as client key", keys: []string{"plaintext-management-key"}},
+		{name: "management digest as client key", keys: []string{"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12"}},
+		{name: "duplicate canonical key", keys: []string{keyOne, keyOne}},
+		{name: "duplicate inside a large key list", keys: duplicatedMany},
+	}
+	for _, tc := range rejectedKeyLists {
+		if managedProofPosture.validKeys(tc.keys) {
+			t.Fatalf("unsafe managed client keys %q permitted", tc.name)
 		}
 	}
 }

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,8 +20,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
@@ -122,7 +122,7 @@ func TestRuntimeStopKeepsTheManagerLoadableAndQueryable(t *testing.T) {
 	}
 
 	// The canonical resource reloads the same store before answering.
-	query := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/operations/runtime-ui/v1:stop-after-complete", nil)
+	query := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/operations/runtime-ui/v1:stop-after-complete", nil)
 	query.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, query)
@@ -185,7 +185,7 @@ func TestUnreadableDesiredLifecycleLocksOnlyTheRuntimeDomain(t *testing.T) {
 	if health.Code != http.StatusOK {
 		t.Fatalf("Manager health with a damaged desired lifecycle = %d", health.Code)
 	}
-	keys := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
+	keys := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"api-keys", nil)
 	keys.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	keysResponse := httptest.NewRecorder()
 	app.canonicalAPI(keysResponse, keys)
@@ -1113,10 +1113,11 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec, err = app0.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -1223,7 +1224,7 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
@@ -1339,10 +1340,11 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1386,7 +1388,7 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
@@ -1509,10 +1511,11 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 			t.Fatal(err)
 		}
 		updated, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -1553,7 +1556,7 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 		go func() {
 			req := httptest.NewRequest(
 				http.MethodPost,
-				"/control/api/v2/runtime/operations",
+				currentInstallManagementAPIV2Prefix+"runtime/operations",
 				strings.NewReader(`{"action":"stop","requestId":"66666666-6666-4666-8666-666666666666"}`),
 			)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -1591,7 +1594,7 @@ func TestReconcilerAutoStartAndOperatorStopObservableInvariants(t *testing.T) {
 		if got := startsAfterStop.Load(); got != 0 {
 			t.Fatalf("Supervisor Start RPCs after operator Stop completed = %d, want 0", got)
 		}
-		statusReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		statusReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil)
 		statusReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		statusRes := httptest.NewRecorder()
 		app.ServeHTTP(statusRes, statusReq)

@@ -21,8 +21,10 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identitymutation"
 	identityprojectionapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
+	usageapp "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 
+	identityusagerepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/cpaconnection"
@@ -474,7 +476,6 @@ func runServerWithOptions(options legacypreflight.Options) {
 	})
 	automationRuntime := worker.NewAutomationRuntime(
 		automationSettingsService,
-		manager,
 		rateLimitAutoDisableWorker,
 		accountActionWorker,
 	)
@@ -547,6 +548,40 @@ func runServerWithOptions(options legacypreflight.Options) {
 	// routes become reachable. The fixed discovery path remains captured by the
 	// outer handler for its independent Bootstrap lifecycle. Graph readiness
 	// grants no Completed authority; the invalidated projection stays unavailable.
+	upgradeUsageSvc := usageapp.New(identityusagerepo.New(db.SQLDB()), func() usageapp.CollectionPhase { return collectionPhaseFor(manager.Status().Collector) })
+	upgradeKeysHandler, closeUpgradeKeys, err := newUpgradeAPIKeysHandler(upgradeAPIKeysConfig{
+		DB: db.SQLDB(), Protector: protector, Runtime: runtimeClient,
+		SupervisorRoots: cfg.TrustedSupervisorRoots(),
+		Usage:           upgradeUsageSvc,
+		WakeProjection:  identityProjectionWorker.Wake,
+	})
+	if err != nil {
+		log.Fatalf("initialize upgraded key workspace failed: %v", err)
+	}
+	defer closeUpgradeKeys()
+	defer func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelStop()
+		_ = manager.StopAndWait(stopCtx)
+	}()
+	attachUpgradeUsageStartupObserver(manager, upgradeUsageStartupConfig{
+		DB:                   db.SQLDB(),
+		Store:                db,
+		Protector:            protector,
+		Runtime:              runtimeClient,
+		ManagerConfigService: serverApp.AppContext().ManagerConfigService,
+		Usage:                upgradeUsageSvc,
+		Rejection:            upgradeKeysHandler.rejection,
+		CollectorWorker:      collectorWorker,
+	})
+	serverApp.SetUpgradeAPIKeys(upgradeKeysHandler.serveHTTP)
+	if err := attachCompletedUpgradeRouting(ctx, cfg, db, serverApp, upgradeKeysHandler.gatewayAdmitted, upgradeCanonicalDependencies{Protector: protector, Workspace: upgradeKeysHandler, Runtime: runtimeClient}); err != nil {
+		if ctx.Err() != nil {
+			shutdownHTTPServer(server, freshHTTPShutdownTimeout)
+			return
+		}
+		failStartup("attach completed upgrade routing: %v", err)
+	}
 	startupHandler.SetReady(serverApp.Handler())
 	if cfg.EmbeddedRuntimeConfigured() {
 		runtimeReconciler := runtimeservice.NewReconciler(

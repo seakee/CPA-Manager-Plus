@@ -23,9 +23,9 @@ import (
 const maxUsageWindowQueryMS = int64(31 * 24 * time.Hour / time.Millisecond)
 
 // installedRuntimeIdentity is the runtime identity staged keys bind their
-// source hash to. It comes from the committed installation checkpoint and is
-// empty while no managed install is committed, which defers the binding to the
-// startup backfill instead of guessing a runtime.
+// source hash to. It derives exclusively from a committed, verified checkpoint
+// (manager-owned runtime identity or persisted verified External identity) and
+// returns empty while no verified target is committed.
 func (a *freshApplication) installedRuntimeIdentity(ctx context.Context) (string, error) {
 	if a == nil || a.store == nil {
 		return "", errors.New("Fresh store unavailable")
@@ -35,10 +35,23 @@ func (a *freshApplication) installedRuntimeIdentity(ctx context.Context) (string
 		return "", err
 	}
 	checkpoint := record.Operation.Strategy
-	if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" {
+	if checkpoint.Stage != "committed" {
 		return "", nil
 	}
-	return checkpoint.TargetIdentity, nil
+	if freshkeyapply.ManagerOwnedStrategy(checkpoint) {
+		return checkpoint.TargetIdentity, nil
+	}
+	if checkpoint.Strategy == bootstrap.ConnectExternal {
+		if a.protector == nil {
+			return "", freshkeyapply.ErrUnavailable
+		}
+		install, err := externalInstallFromRecord(record, a.protector)
+		if err != nil {
+			return "", err
+		}
+		return install.Identity, nil
+	}
+	return "", nil
 }
 
 // collectionPhase reports the live Collector state without exposing any CPA
@@ -47,7 +60,11 @@ func (a *freshApplication) collectionPhase() usageapp.CollectionPhase {
 	if a == nil || a.legacyCollector == nil {
 		return usageapp.PhaseStarting
 	}
-	switch a.legacyCollector.Status().Collector {
+	return collectionPhaseFor(a.legacyCollector.Status().Collector)
+}
+
+func collectionPhaseFor(status string) usageapp.CollectionPhase {
+	switch status {
 	case "running":
 		return usageapp.PhaseRunning
 	case "starting":
@@ -243,8 +260,11 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 	// event may be collected before its key is attributable, so a failed backfill
 	// fails the whole attempt instead of starting a Collector that loses history.
 	checkpoint := op.Strategy
+	var bound int64
 	if freshkeyapply.ManagerOwnedStrategy(checkpoint) && checkpoint.Stage == "committed" && checkpoint.TargetIdentity != "" {
-		if _, err := a.keyRepo.BindFreshKeySources(ctx, checkpoint.TargetIdentity, time.Now().UnixMilli()); err != nil {
+		var err error
+		bound, err = a.keyRepo.BindFreshKeySources(ctx, checkpoint.TargetIdentity, time.Now().UnixMilli())
+		if err != nil {
 			log.Printf("Fresh key usage bindings unavailable: %v", err)
 			return false
 		}
@@ -258,6 +278,9 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		}
 		a.usageProjection.Start(workerCtx)
 		a.usageWorkersStarted = true
+	}
+	if bound > 0 && a.usageProjection != nil {
+		a.usageProjection.Wake()
 	}
 	// Starting the Collector is its own success-only step. A retry after a
 	// durable marker failure only retries the marker: StartRuntime cancels the

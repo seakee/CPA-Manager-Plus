@@ -392,6 +392,32 @@ func (t *Transport) ExternalModelSurface(ctx context.Context, clientKey string) 
 	return ErrProofUnavailable
 }
 
+// ExternalSampleKeySet proves live client-key authentication on the External
+// CPA's /v1/models surface through the validated direct Transport without
+// presenting or gating on any management credential. Anonymous and invalid
+// tokens must return 401, accepted client keys must return 200, and rejected
+// client keys must return 401.
+func (t *Transport) ExternalSampleKeySet(ctx context.Context, accepted, rejected []string) (bool, error) {
+	if t == nil || t.client == nil {
+		return false, ErrProofUnavailable
+	}
+	normalized, err := NormalizeV8BaseURL(t.endpoint)
+	if err != nil || normalized != t.endpoint {
+		return false, ErrProofUnavailable
+	}
+	for _, key := range accepted {
+		if !validExternalKey(key) {
+			return false, ErrSourceConflict
+		}
+	}
+	for _, key := range rejected {
+		if !validExternalKey(key) {
+			return false, ErrSourceConflict
+		}
+	}
+	return t.sampleClientModels(withoutExternalCredentialHooks(ctx), accepted, rejected)
+}
+
 // ManagedModelSurface proves a Managed CPA destination serves a well-formed
 // /v1/models list to an imported client credential, mirroring the empty-allowed
 // list predicate in VerifyV8Adoption (v8_adoption.go:57-65). An empty model

@@ -8,6 +8,8 @@ const en = {
   blocked: 'Migration is not available for this source yet.',
   boundary:
     'Authentication is complete. Backup, migration, CPA changes and management entry changes have not started.',
+  recordedBlockedHelp:
+    'Authentication is complete. The read-only operation view below shows what this installation recorded, and it is the record this page acts on.',
   observationUnavailable: 'The source cannot be summarized publicly.',
   observationUnavailableHelp:
     'Your administrator identity is verified, but this source keeps recent writes in a log its recovery path owns, so the public summary is unavailable. Nothing was written and migration is not available; the read-only operation view below still shows what this installation recorded.',
@@ -49,6 +51,8 @@ const zh: typeof en = {
   retained: '沿用现有管理员密钥，无需重新设置。',
   blocked: '当前来源尚无可执行的迁移路径。',
   boundary: '身份验证已完成；备份、迁移、CPA 变更和管理入口变更均未开始。',
+  recordedBlockedHelp:
+    '身份验证已完成。下方只读操作视图会显示本安装已记录的内容，本页面的操作只依据这条记录。',
   observationUnavailable: '当前来源无法生成公开摘要。',
   observationUnavailableHelp:
     '管理员身份已验证，但该来源将最近写入保留在由恢复流程掌管的日志中，因此公开摘要不可用。没有写入任何数据，也没有可执行的迁移；下方只读操作视图仍会显示本安装已记录的内容。',
@@ -86,6 +90,8 @@ const tw: typeof en = {
   retained: '沿用現有管理員金鑰，無需重新設定。',
   blocked: '目前來源尚無可執行的移轉路徑。',
   boundary: '身分驗證已完成；備份、移轉、CPA 變更與管理入口變更均未開始。',
+  recordedBlockedHelp:
+    '身分驗證已完成。下方唯讀操作檢視會顯示本安裝已記錄的內容，本頁面的操作只依據這筆記錄。',
   observationUnavailable: '目前來源無法產生公開摘要。',
   observationUnavailableHelp:
     '管理員身分已驗證，但此來源將最近寫入保留在由復原流程掌管的日誌中，因此公開摘要不可用。沒有寫入任何資料，也沒有可執行的移轉；下方唯讀操作檢視仍會顯示本安裝已記錄的內容。',
@@ -124,6 +130,8 @@ const ru: typeof en = {
   blocked: 'Для этого источника пока нет поддерживаемого пути миграции.',
   boundary:
     'Проверка личности завершена. Резервное копирование, миграция, изменения CPA и точки входа управления не начаты.',
+  recordedBlockedHelp:
+    'Проверка личности завершена. Ниже показано, что записала эта установка, и действия страницы опираются только на эту запись.',
   observationUnavailable: 'Источник нельзя описать публично.',
   observationUnavailableHelp:
     'Личность администратора подтверждена, но этот источник хранит последние записи в журнале, которым владеет путь восстановления, поэтому публичная сводка недоступна. Ничего не записано, миграция недоступна; доступный только для чтения обзор операции ниже по-прежнему показывает, что записала эта установка.',

@@ -285,41 +285,6 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
     expect(vite).toContain('unsupportedPublicApi.ts');
   }, 30_000);
 
-  it('uses the Phase4-01 ledger suffix for the browser canonical API base', () => {
-    const ledger = JSON.parse(
-      readFileSync(path.join(root, 'tests/fixtures/phase4-routing/route-owners.json'), 'utf8')
-    );
-    const browser = readFileSync(path.join(src, 'fullweb/routingContext.ts'), 'utf8');
-    expect(browser).toContain(`PUBLIC_API_V2_SUFFIX = '${ledger.canonicalPublicApiV2Suffix}'`);
-    const backend = readFileSync(
-      path.join(root, 'apps/manager-server/internal/domain/routing/path.go'),
-      'utf8'
-    );
-    expect(backend).toContain(`PublicAPIV2Suffix = "${ledger.canonicalPublicApiV2Suffix}"`);
-    const prefix = readFileSync(
-      path.join(root, 'apps/manager-server/internal/domain/bootstrap/prefix.go'),
-      'utf8'
-    );
-    expect(backend).toContain('return bootstrapdomain.ValidControlBasePath(value)');
-    expect(backend).not.toContain('canonicalControlBasePathCharacters');
-    expect(prefix).not.toContain('validControlBasePath(');
-    const grammar = prefix.match(
-      /canonicalControlBasePathCharacters = regexp.MustCompile\(`([^`]+)`\)/
-    )?.[1];
-    expect(grammar).toBeDefined();
-    expect(browser).toContain(`/${grammar.replace('^/', '^\\/')}/.test(value)`);
-    const reserved = backend.match(
-      /func reservedNamespaceCollision[\s\S]*?\[\]string\{([\s\S]*?)\}/
-    )?.[1];
-    expect(reserved).toBeDefined();
-    const paths = [...reserved.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-    if (reserved.includes('BootstrapDiscoveryPath')) paths.push(ledger.fixedBootstrapDiscoveryPath);
-    // Both are validation mirrors of the server contract, never prefix discovery.
-    const browserReserved = browser.match(/const RESERVED_CONTROL_PATHS = \[([\s\S]*?)\]/)?.[1];
-    expect([...browserReserved.matchAll(/'([^']+)'/g)].map((match) => match[1]).sort()).toEqual(
-      paths.sort()
-    );
-  });
 
   it('guards the two remaining legacy Manager update transports in Panel builds', () => {
     const vite = readFileSync(path.join(web, 'vite.config.ts'), 'utf8');

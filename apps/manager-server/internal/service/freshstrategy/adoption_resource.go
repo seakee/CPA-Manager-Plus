@@ -258,7 +258,7 @@ func verifyAdoptionResourceEvidence(files fs.FS, record productionRecord, consum
 		switch expectedScope[caseRef] {
 		case adoptionResourceProofRead:
 			if json.Unmarshal(traceData, &readTrace) != nil || !validAdoptionResourceTraceBase(readTrace.SchemaVersion, readTrace.RunID, readTrace.CaseRef, readTrace.SourceClass, readTrace.ConsumerImplementationSHA256, report.Run.ID, caseRef, class) ||
-				!readTrace.ReadVerified || readTrace.ClientKeyCount < 1 || readTrace.ClientKeyCount > 128 {
+				!readTrace.ReadVerified || readTrace.ClientKeyCount < 1 {
 				return nil, errProductionQualification
 			}
 			switch class {

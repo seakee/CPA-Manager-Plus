@@ -235,6 +235,9 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 		return DetailResponse{}, err
 	}
 	in.binding, in.bindingErr = s.repo.Binding(ctx, id)
+	if in.bindingErr != nil && !errors.Is(in.bindingErr, ports.ErrBindingNotFound) && !errors.Is(in.bindingErr, ports.ErrBindingConflict) {
+		return DetailResponse{}, in.bindingErr
+	}
 	// Manager can only prove a window from the later of the proven collection
 	// start and the key's own attribution start.
 	if in.collectingAt > in.windowFromMS {
@@ -254,7 +257,7 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 	if in.collectingAt > 0 && in.bindingErr == nil {
 		in.projection, in.projectionOK = s.projection(ctx)
 		if in.windowFromMS < toMS {
-			windows, err := s.repo.Windows(ctx, []identity.APIKeyID{id}, in.windowFromMS, toMS)
+			windows, err := s.repo.Windows(ctx, []ports.KeyRange{{APIKeyID: id, FromMS: in.windowFromMS}}, toMS)
 			if err != nil {
 				return DetailResponse{}, err
 			}
@@ -330,59 +333,84 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 	}
 	bindings := make(map[identity.APIKeyID]ports.Binding, len(ids))
 	bindingErrs := make(map[identity.APIKeyID]error, len(ids))
-	attributable := make([]identity.APIKeyID, 0, len(ids))
+	windowFromByID := make(map[identity.APIKeyID]int64, len(ids))
+	ranges := make([]ports.KeyRange, 0, len(ids))
+	var earliestWindowFromMS int64
 	for _, id := range ids {
 		binding, err := s.repo.Binding(ctx, id)
+		if err != nil && !errors.Is(err, ports.ErrBindingNotFound) && !errors.Is(err, ports.ErrBindingConflict) {
+			return SummaryResponse{}, err
+		}
 		bindings[id], bindingErrs[id] = binding, err
-		if err == nil {
-			attributable = append(attributable, id)
-		}
-	}
-	windows := map[identity.APIKeyID]ports.Window{}
-	rawDeleted := false
-	var incompleteDays []ports.IncompleteDay
-	if len(attributable) > 0 && collectingAt > 0 {
-		if windows, err = s.repo.Windows(ctx, attributable, fromMS, toMS); err != nil {
-			return SummaryResponse{}, err
-		}
-		if rawDeleted, err = s.repo.RawDeletedIn(ctx, fromMS, toMS); err != nil {
-			return SummaryResponse{}, err
-		}
-		if incompleteDays, err = s.repo.IncompleteDaysIn(ctx, fromMS, toMS); err != nil {
-			return SummaryResponse{}, err
-		}
-		response.IncompleteDays = incompleteDaysView(incompleteDays)
-	}
-	items := make([]SummaryItem, 0, len(ids))
-	for _, id := range ids {
-		item := SummaryItem{KeyID: string(id)}
-		if err := bindingErrs[id]; err != nil {
-			item.Coverage = CoverageState{State: string(ports.StateUnavailable), Reason: bindingReason(err)}
-			items = append(items, item)
+		if err != nil {
 			continue
 		}
 		windowFromMS := fromMS
 		if collectingAt > windowFromMS {
 			windowFromMS = collectingAt
 		}
-		if bindings[id].FirstSeenAtMS > windowFromMS {
-			windowFromMS = bindings[id].FirstSeenAtMS
+		if binding.FirstSeenAtMS > windowFromMS {
+			windowFromMS = binding.FirstSeenAtMS
+		}
+		windowFromByID[id] = windowFromMS
+		if collectingAt > 0 && windowFromMS < toMS {
+			if len(ranges) == 0 || windowFromMS < earliestWindowFromMS {
+				earliestWindowFromMS = windowFromMS
+			}
+			ranges = append(ranges, ports.KeyRange{APIKeyID: id, FromMS: windowFromMS})
+		}
+	}
+	windows := map[identity.APIKeyID]ports.Window{}
+	rawDeleted := false
+	var incompleteDays []ports.IncompleteDay
+	if len(ranges) > 0 && collectingAt > 0 {
+		if windows, err = s.repo.Windows(ctx, ranges, toMS); err != nil {
+			return SummaryResponse{}, err
+		}
+		if rawDeleted, err = s.repo.RawDeletedIn(ctx, earliestWindowFromMS, toMS); err != nil {
+			return SummaryResponse{}, err
+		}
+		if incompleteDays, err = s.repo.IncompleteDaysIn(ctx, earliestWindowFromMS, toMS); err != nil {
+			return SummaryResponse{}, err
+		}
+	}
+	items := make([]SummaryItem, 0, len(ids))
+	var publishedFromMS int64
+	hasPublished := false
+	for _, id := range ids {
+		item := SummaryItem{KeyID: string(id)}
+		windowFromMS := windowFromByID[id]
+		if windowFromMS == 0 {
+			windowFromMS = fromMS
 		}
 		window := windows[id]
-		in := evidence{phase: phase, collectingAt: collectingAt, binding: bindings[id],
+		in := evidence{
+			phase: phase, collectingAt: collectingAt,
+			binding: bindings[id], bindingErr: bindingErrs[id],
 			window: window, rawDeleted: rawDeleted,
 			// Only the days inside this key's provable window bound it: a mark
 			// before the key existed says nothing about its numbers.
-			incompleteDays: daysWithin(incompleteDays, windowFromMS, toMS), projection: projection,
-			projectionOK: projectionOK, requestedFromMS: fromMS,
-			windowFromMS: windowFromMS, windowToMS: toMS}
+			incompleteDays:  daysWithin(incompleteDays, windowFromMS, toMS),
+			projection:      projection,
+			projectionOK:    projectionOK,
+			requestedFromMS: fromMS,
+			windowFromMS:    windowFromMS,
+			windowToMS:      toMS,
+		}
 		state, reason := evaluate(in)
 		item.Coverage = CoverageState{State: string(state), Reason: reason}
 		if state == ports.StateComplete || state == ports.StatePartial {
 			item.Calls = window.Totals.Calls
 			item.LastUsedAtMS = window.Totals.LastUsedAtMS
+			if windowFromMS < toMS && (!hasPublished || windowFromMS < publishedFromMS) {
+				publishedFromMS = windowFromMS
+				hasPublished = true
+			}
 		}
 		items = append(items, item)
+	}
+	if hasPublished {
+		response.IncompleteDays = incompleteDaysView(daysWithin(incompleteDays, publishedFromMS, toMS))
 	}
 	response.Items = items
 	// The list header sums these items, so its coverage is the weakest per-key
@@ -550,13 +578,6 @@ func incompleteDaysView(days []ports.IncompleteDay) []IncompleteDay {
 		view = append(view, IncompleteDay{Day: day.Day, Reason: day.Reason})
 	}
 	return view
-}
-
-func bindingReason(err error) string {
-	if errors.Is(err, ports.ErrBindingConflict) {
-		return "binding_conflict"
-	}
-	return "binding_missing"
 }
 
 func bucketFor(windowMS int64) int64 {

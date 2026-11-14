@@ -55,6 +55,12 @@ func seedCopiedStore(t *testing.T, databasePath string) {
 // fixture proves and the Manager itself stores.
 const admissionFixtureManagementKey = "fixture-management-key"
 
+// admissionFixtureControlBasePath is the control prefix the completed fixture
+// commits with its verdict: a real completion records the prefixes the
+// operation serves, and the startup path that wraps a completed store needs it.
+// An External operation has no inference prefix.
+const admissionFixtureControlBasePath = "/test-control"
+
 // admissionFixtureProtector loads the Manager data key beside the fixture store,
 // creating it when the fixture has none: a completed store always holds the key
 // its sealed secrets were written with.
@@ -166,6 +172,13 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 			ObservedAtMS:  verification.BindingObservedAtMS,
 		}); err != nil {
 			t.Fatalf("record fixture binding: %v", err)
+		}
+		// The verdict carries the access routing the operation serves: the gate
+		// commits the operator's control prefix in the same transaction, and a
+		// completed store without it cannot be served by the canonical surface.
+		if _, err := upgradeoperation.RecordRoutingTx(ctx, tx,
+			admissionFixtureControlBasePath, "", false, "", ""); err != nil {
+			t.Fatalf("record fixture access routing: %v", err)
 		}
 		if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
 			t.Fatalf("record fixture completion: %v", err)

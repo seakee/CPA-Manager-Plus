@@ -16,7 +16,7 @@ import (
 // rebindCall posts one rebind request through the canonical API.
 func rebindCall(t *testing.T, app *freshApplication, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", bytes.NewBufferString(body))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/rebind", bytes.NewBufferString(body))
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -247,7 +247,7 @@ func TestExternalRebindExplainsAForbiddenAnswer(t *testing.T) {
 func TestExternalRebindIsAdminOnlyAndRefusesStaleGenerations(t *testing.T) {
 	app, cpaServer := externalAuthorityApp(t, "")
 	// An unauthenticated caller never reaches the authority.
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", bytes.NewBufferString(rebindBody("", externalAuthorityManagement)))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/rebind", bytes.NewBufferString(rebindBody("", externalAuthorityManagement)))
 	request.Header.Set("Content-Type", "application/json")
 	unauthorized := httptest.NewRecorder()
 	app.canonicalAPI(unauthorized, request)

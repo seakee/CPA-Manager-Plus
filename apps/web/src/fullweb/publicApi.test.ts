@@ -235,6 +235,97 @@ describe('canonical Full Web Public API transport', () => {
     expect(pending.operationResult).toEqual({ operationId: 'operation-1', status: 'pending' });
   });
 
+  it('parses structured code, detail, and operation result for POST operations continue 409 and 503', async () => {
+    browserOrigin();
+    const opSnapshot = {
+      operation: {
+        id: 'a'.repeat(32),
+        targetId: 'b'.repeat(32),
+        keeperId: 'c'.repeat(32),
+        mode: 'replace',
+        outcome: 'unknown',
+        revision: 2,
+        steps: [
+          { name: 'add', state: 'attempted', returned: true },
+          { name: 'revoke', state: 'unattempted', returned: false },
+        ],
+      },
+      runtimeState: 'effect_unknown',
+      expiresAtMs: 0,
+      nextStep: '',
+    };
+    const unknownTransport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        {
+          code: 'key_operation_unknown',
+          detail: 'gateway write uncertain',
+          result: opSnapshot,
+        },
+        { status: 503 }
+      )
+    );
+    const unknownErr = (await createPublicApiClient(() => context, unknownTransport)
+      .post('api-keys/operations/' + 'a'.repeat(32) + '/continue', {}, credential)
+      .catch((value) => value)) as Error & {
+      kind?: string;
+      status?: number;
+      code?: string;
+      detail?: string;
+      operationResult?: unknown;
+    };
+    expect(unknownErr).toMatchObject({
+      kind: 'http',
+      status: 503,
+      code: 'key_operation_unknown',
+      detail: 'gateway write uncertain',
+      operationResult: opSnapshot,
+    });
+
+    const rejectedTransport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        {
+          code: 'external_management_key_rejected',
+          detail: 'client_forbidden',
+          result: { ...opSnapshot, operation: { ...opSnapshot.operation, outcome: 'pending' } },
+        },
+        { status: 409 }
+      )
+    );
+    const rejectedErr = (await createPublicApiClient(() => context, rejectedTransport)
+      .post('api-keys/operations/' + 'a'.repeat(32) + '/continue', {}, credential)
+      .catch((value) => value)) as Error & {
+      kind?: string;
+      status?: number;
+      code?: string;
+      detail?: string;
+      operationResult?: unknown;
+    };
+    expect(rejectedErr).toMatchObject({
+      kind: 'http',
+      status: 409,
+      code: 'external_management_key_rejected',
+      detail: 'client_forbidden',
+      operationResult: { ...opSnapshot, operation: { ...opSnapshot.operation, outcome: 'pending' } },
+    });
+
+    const untrustedTransport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        { code: 'unrecognised_upstream', message: 'raw html proxy leak' },
+        { status: 503 }
+      )
+    );
+    const untrustedErr = (await createPublicApiClient(() => context, untrustedTransport)
+      .post('api-keys/operations/' + 'a'.repeat(32) + '/continue', {}, credential)
+      .catch((value) => value)) as Error & {
+      code?: string;
+      detail?: string;
+      operationResult?: unknown;
+    };
+    expect(untrustedErr.code).toBeUndefined();
+    expect(untrustedErr.detail).toBeUndefined();
+    expect(untrustedErr.operationResult).toBeUndefined();
+  });
+
   it('keeps a zero leaf a number in the gateway projection', async () => {
     browserOrigin();
     const transport = vi.fn<typeof fetch>().mockResolvedValue(
@@ -624,6 +715,41 @@ describe('canonical Full Web Public API transport', () => {
       await expect(pending).resolves.toEqual({ operation: { id: 'op-slow' } });
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('preserves bounded installation/access/completion error codes including routing_unavailable and external_inference_prefix_forbidden without leaking messages', async () => {
+    browserOrigin();
+    const cases: Array<[number, string, string | undefined]> = [
+      [503, 'routing_unavailable', 'routing_unavailable'],
+      [400, 'external_inference_prefix_forbidden', 'external_inference_prefix_forbidden'],
+      [503, 'routing_verification_failed', 'routing_verification_failed'],
+      [409, 'routing_conflict', 'routing_conflict'],
+      [503, 'unrecognised_completion_code', undefined],
+    ];
+    for (const [status, serverCode, expectedCode] of cases) {
+      const transport = vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json(
+          { code: serverCode, message: 'internal ingress detail secret' },
+          { status }
+        )
+      );
+      const error = (await createPublicApiClient(() => context, transport)
+        .post('installation/access/completion', { inferenceBasePath: '/inf-1', sharedEntry: false }, credential)
+        .catch((value: unknown) => value)) as Error & {
+        kind?: string;
+        status?: number;
+        code?: string;
+        detail?: string;
+      };
+      expect(error).toMatchObject({
+        kind: 'http',
+        status,
+        code: expectedCode,
+        detail: undefined,
+        message: 'Public API http',
+      });
+      expect(JSON.stringify(error)).not.toContain('internal ingress detail secret');
     }
   });
 });

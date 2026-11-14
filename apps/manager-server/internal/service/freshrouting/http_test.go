@@ -2,6 +2,7 @@ package freshrouting
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,9 +115,14 @@ func TestHTTPDriverSafePublicIdentityVerificationAndRedirectRejection(t *testing
 			}
 		})
 	}
-	for _, origin := range []string{"", "http://user:secret@example.com", "http://example.com/path", "http://example.com?query", "ftp://example.com"} {
+	for _, origin := range []string{" ", "http://user:secret@example.com", "http://example.com/path", "http://example.com?query", "ftp://example.com"} {
 		if _, e := NewHTTPDriver(HTTPConfig{IngressControlURL: "http://localhost:9082", PublicOrigin: origin}); e == nil {
 			t.Fatal("unsafe public authority", origin)
+		}
+	}
+	for _, control := range []string{"", " ", "https://localhost:9082", "http://user:secret@localhost:9082", "http://localhost:9082/path"} {
+		if _, e := NewHTTPDriver(HTTPConfig{IngressControlURL: control}); !errors.Is(e, ErrBlocked) {
+			t.Fatal("unsafe control authority", control, e)
 		}
 	}
 }
@@ -133,5 +139,62 @@ func TestHTTPDriverInternalControlCarriesNoCredentialAndKeepsErrorsOpaque(t *tes
 	_, e := d.Inspect(t.Context())
 	if e == nil || strings.Contains(e.Error(), "private-internal-detail") {
 		t.Fatal(e)
+	}
+}
+
+func TestHTTPDriverOptionalPublicOriginAllowsControlPlaneAndFailsVerifyClosed(t *testing.T) {
+	var current State
+	var controlHits atomic.Int32
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/routing/fresh" {
+			t.Errorf("unexpected non-control path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		controlHits.Add(1)
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(current)
+		case http.MethodPut:
+			if err := json.NewDecoder(r.Body).Decode(&current); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(current)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer control.Close()
+
+	d, err := NewHTTPDriver(HTTPConfig{IngressControlURL: control.URL})
+	if err != nil {
+		t.Fatalf("NewHTTPDriver without optional PublicOrigin: %v", err)
+	}
+	wanted := State{
+		InstallationID:     "upgrade:fp",
+		Generation:         "upgrade:fp",
+		OperationID:        "upgrade:fp",
+		Revision:           2,
+		Target:             "/upg-console",
+		InferenceTarget:    "/upg-api",
+		Committed:          true,
+		InferenceCommitted: true,
+	}
+	if err := d.Apply(t.Context(), wanted); err != nil {
+		t.Fatalf("Apply without PublicOrigin: %v", err)
+	}
+	got, err := d.Inspect(t.Context())
+	if err != nil || got != wanted {
+		t.Fatalf("Inspect without PublicOrigin = %+v, %v, want %+v", got, err, wanted)
+	}
+	hitsBeforeVerify := controlHits.Load()
+	if err := d.Verify(t.Context(), wanted); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Verify without PublicOrigin = %v, want ErrBlocked", err)
+	}
+	if controlHits.Load() != hitsBeforeVerify {
+		t.Fatalf("Verify without PublicOrigin made %d unexpected requests", controlHits.Load()-hitsBeforeVerify)
 	}
 }

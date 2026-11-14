@@ -112,7 +112,7 @@ func TestRealIngressInitialRoutingAuthenticationCutoverAndRestart(t *testing.T) 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(freshrouting.StateFor(op))
+		json.NewEncoder(w).Encode(freshrouting.PublicIdentityFor(op))
 	})
 	manager := httptest.NewServer(routing.ProtectFixedBootstrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == freshrouting.AuthorityPath && r.URL.EscapedPath() == r.URL.Path && r.URL.RawQuery == "" {

@@ -24,8 +24,16 @@ func TestContinuationRetainsOriginalExpiryGenerationAndRouteScope(t *testing.T) 
 	if authority.ValidateContinuation(before, session.Token) == nil {
 		t.Fatal("canonical continuation accepted before route commit")
 	}
+	// A current install commits both prefixes: the immutable created suggestions
+	// stay in place and the inference half is its own verified target.
 	after, err := st.Update(t.Context(), before.Operation.Identity, before.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/control"
+		r.Operation.Routing.InferenceTarget = "/access-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		return nil
 	})
 	if err != nil {
@@ -64,7 +72,13 @@ func TestCompletedInstallationRestartDoesNotReinitializeOnOrdinaryUpdate(t *test
 		t.Fatal(err)
 	}
 	completed, err := st.Update(t.Context(), before.Operation.Identity, before.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/control"
+		r.Operation.Routing.InferenceTarget = "/access-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 		r.Operation.ProductComplete = true
 		return nil

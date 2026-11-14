@@ -73,7 +73,7 @@ func (r *Repository) H1Idle(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	if k != nil && k.Outcome != "committed" {
+	if k != nil && !k.IsTerminal() {
 		return ErrConflict
 	}
 	// Every allowlisted config field keeps its own journal entry. A new H1 claim

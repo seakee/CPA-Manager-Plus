@@ -133,8 +133,8 @@ func NewExternal(r *repo.Repository, keys *freshkeys.Service, source ExternalSou
 // generation would invalidate every later step. The configuration digest is a
 // per-step CAS instead, read immediately before each PUT and compared there (see
 // externalKeyGrant and externalContinue).
-func (s *Service) externalPermit() (Permit, error) {
-	install, err := s.externalAuthority(context.Background())
+func (s *Service) externalPermit(ctx context.Context) (Permit, error) {
+	install, err := s.externalAuthority(ctx)
 	if err != nil {
 		return Permit{}, err
 	}
@@ -155,21 +155,7 @@ func (s *Service) externalAuthority(ctx context.Context) (ExternalInstall, error
 	}
 	install, err := s.externalSource(ctx)
 	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) {
-			return ExternalInstall{}, cpa.ErrManagementRejected
-		}
-		// A moved target is the committed installation's own blocker: it is
-		// reported as such on every surface instead of as a missing proof.
-		if errors.Is(err, cpa.ErrExternalTargetMoved) {
-			return ExternalInstall{}, cpa.ErrExternalTargetMoved
-		}
-		if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
-			return ExternalInstall{}, cpa.ErrExternalRejectionUnavailable
-		}
-		if errors.Is(err, ErrGeneration) || errors.Is(err, cpa.ErrSourceConflict) || errors.Is(err, cpa.ErrApplyUnknown) {
-			return ExternalInstall{}, err
-		}
-		return ExternalInstall{}, ErrExternalUnavailable
+		return ExternalInstall{}, err
 	}
 	if install.Checkpoint == 0 || install.BaseURL == "" || !cpa.ValidV8ManagementKey(install.ManagementKey) ||
 		!validExternalIdentity(install.Identity) || install.Identity != ExternalIdentity(install.BaseURL) {
@@ -275,50 +261,6 @@ func (s *Service) ExternalKeyPresence(ctx context.Context, ids []identity.APIKey
 	return present, nil
 }
 
-// ExternalKeyList is the key list as the user's CPA answers it. Every staged key
-// carries the presence read back from that CPA, so the page never reports an
-// effect this Manager merely intended: a key the CPA does not carry stays
-// "not_applied" until its install is proven.
-//
-// The Manager's own records are the list either way. A CPA that cannot be read is
-// not a blocker — it is reported as unverified, so an outage never hides the keys
-// the Manager staged. A credential the CPA refuses and a target it no longer names
-// are blockers: no read can settle them, and only a rebind resolves them. The list
-// of another profile is returned unchanged.
-func (s *Service) ExternalKeyList(ctx context.Context, keys []freshkeys.Key) ([]freshkeys.Key, bool, error) {
-	if s == nil {
-		return keys, false, nil
-	}
-	s = s.active()
-	if s == nil {
-		return nil, true, ErrExternalUnavailable
-	}
-	if s.profile != ProfileExternal {
-		return keys, false, nil
-	}
-	ids := make([]identity.APIKeyID, 0, len(keys))
-	for _, key := range keys {
-		ids = append(ids, key.ID)
-	}
-	present, err := s.ExternalKeyPresence(ctx, ids)
-	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
-			return nil, true, err
-		}
-		return keys, true, nil
-	}
-	annotated := make([]freshkeys.Key, 0, len(keys))
-	for _, key := range keys {
-		// A revoked or finalized record keeps its own state: presence only
-		// refines a key that is still meant to be live.
-		if present[key.ID] && key.Lifecycle == identity.LifecycleActive {
-			key.RuntimeState = "effective_observed"
-		}
-		annotated = append(annotated, key)
-	}
-	return annotated, false, nil
-}
-
 // ExternalKeyPresenceOf is ExternalKeyPresence for one key, for the routes that
 // answer about exactly one record.
 func (s *Service) ExternalKeyPresenceOf(ctx context.Context, id identity.APIKeyID) (bool, error) {
@@ -330,42 +272,59 @@ func (s *Service) ExternalKeyPresenceOf(ctx context.Context, id identity.APIKeyI
 	return present[id], nil
 }
 
-// externalSecretPresent reports whether the staged secret is one of the client
-// credentials the user's CPA currently carries.
-func (s *Service) externalSecretPresent(ctx context.Context, rawID string, snapshot cpa.ExternalKeySnapshot) (bool, error) {
-	if _, err := identity.ParseAPIKeyID(rawID); err != nil {
-		return false, freshkeys.ErrRequest
-	}
-	present := false
-	err := s.keys.WithStagedSecret(ctx, rawID, func(secret string) error {
-		present = slices.Contains(snapshot.Keys, secret)
-		return nil
-	})
-	return present, err
-}
-
-// externalApply makes one staged key a client credential of the user's CPA and
-// proves it by reading the list back. A key the CPA already carries is not
-// written again, so a replay never duplicates a credential; the write itself is
-// sent exactly once, and a refused management credential is the typed blocker,
-// never a retry reason.
-//
-// The write replaces the CPA's whole list, so it never builds that list from a
-// read the user has since edited: the document digest and the membership are read
-// again immediately before the PUT and a change there is a source conflict with no
-// write at all. A journaled operation owns the key set until it settles, exactly as
-// the managed Apply is bound by its own journal.
+// externalApply executes or reconciles a durable journaled "add" operation for
+// one staged Client Key on the user's External CPA and requires live /v1/models
+// authentication plus a post-sample checkpoint/source/config fence before
+// reporting effective_observed. Because the operation journal is written before
+// any PUT, an attempted unknown write is never resent on retry.
 func (s *Service) externalApply(ctx context.Context, id string, generation uint64) (State, error) {
 	result := State{KeyID: id, RuntimeState: "effect_unknown"}
-	if _, err := s.keys.Detail(ctx, id); err != nil {
+	key, err := s.keys.Detail(ctx, id)
+	if err != nil {
 		return result, err
 	}
-	if latest, err := s.repo.LatestOperation(ctx); err != nil {
-		return result, err
-	} else if latest != nil && latest.Outcome != "committed" {
+	if key.Lifecycle == identity.LifecycleSuperseded {
 		return result, freshkeys.ErrConflict
 	}
+	if s.repo == nil {
+		return result, ErrExternalUnavailable
+	}
 	result.ManagerStaged = true
+
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return result, err
+	}
+	if latest != nil && !latest.IsTerminal() {
+		checkRes, checkErr := s.externalCheckOperation(ctx, latest, generation)
+		latestAfter, latestErr := s.repo.LatestOperation(ctx)
+		if latestErr != nil {
+			return result, latestErr
+		}
+		latest = latestAfter
+		if latest != nil && !latest.IsTerminal() {
+			if latest.TargetID != id || latest.Mode != "add" || latest.KeeperID != "" {
+				if checkErr != nil && !errors.Is(checkErr, cpa.ErrApplyUnknown) && !errors.Is(checkErr, cpa.ErrSourceConflict) && !errors.Is(checkErr, repo.ErrConflict) {
+					return result, checkErr
+				}
+				return result, freshkeys.ErrConflict
+			}
+			result.Attempted = !latest.AllStepsUnattempted()
+			if checkErr != nil {
+				return result, checkErr
+			}
+			if checkRes.NextStep == "add" && len(latest.Steps) == 1 && latest.Steps[0].State == "unattempted" {
+				contRes, contErr := s.externalContinue(ctx, latest, 0, generation)
+				result.Attempted = contRes.Operation != nil && !contRes.Operation.AllStepsUnattempted()
+				if contErr != nil {
+					return result, contErr
+				}
+				return s.externalStateFromOperationResult(id, generation, true, contRes), nil
+			}
+			return result, cpa.ErrApplyUnknown
+		}
+	}
+
 	install, err := s.externalTarget(ctx, generation)
 	if err != nil {
 		return result, err
@@ -374,19 +333,40 @@ func (s *Service) externalApply(ctx context.Context, id string, generation uint6
 	if w == nil {
 		return result, ErrExternalUnavailable
 	}
+
+	opID, replayCommitted, err := s.resolveExternalApplyOperationID(ctx, key, latest)
+	if err != nil {
+		return result, err
+	}
+	if replayCommitted {
+		return s.externalObserve(ctx, id, generation)
+	}
+
+	var op repo.Operation
+	var alreadySettled bool
 	err = s.keys.WithStagedSecret(ctx, id, func(secret string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
 		}
 		if slices.Contains(snapshot.Keys, secret) {
+			op = repo.Operation{
+				ID: opID, TargetID: id, Mode: "add",
+				RunID: install.Identity, Generation: install.Generation(),
+				Revision: 1, Outcome: repo.OutcomePending,
+				Steps:       []repo.KeyStep{{Name: "add", State: "unattempted"}},
+				CreatedAtMS: time.Now().UnixMilli(),
+			}
+			if err := s.repo.BeginOperation(ctx, op); err != nil {
+				return err
+			}
+			alreadySettled = true
 			return nil
 		}
-		after := append(slices.Clone(snapshot.Keys), secret)
-		// The list was built from this one read. The read that gates the write must
-		// show the same document and the same membership, or the user changed their
-		// CPA under it — a credential they revoked directly on the CPA is never
-		// added back by a stale list.
+		after := externalKeysAfterStep(snapshot.Keys, "add", "add", secret, "")
+		if len(after) == 0 {
+			return cpa.ErrSourceConflict
+		}
 		again, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
@@ -394,57 +374,233 @@ func (s *Service) externalApply(ctx context.Context, id string, generation uint6
 		if again.SourceSHA256 != snapshot.SourceSHA256 || !sameKeys(again.Keys, snapshot.Keys) {
 			return cpa.ErrSourceConflict
 		}
-		// The version is asked here, once, immediately before the single PUT: the
-		// wire itself carries no gate, so this is the only probe this write costs
-		// and a refusal leaves nothing attempted.
 		if err = s.externalWriteGate(ctx, install); err != nil {
 			return err
 		}
+		op = repo.Operation{
+			ID: opID, TargetID: id, Mode: "add",
+			RunID: install.Identity, Generation: install.Generation(),
+			Revision: 1, Outcome: repo.OutcomeUnknown,
+			Steps:       []repo.KeyStep{{Name: "add", State: "attempted"}},
+			CreatedAtMS: time.Now().UnixMilli(),
+		}
+		if err = s.repo.BeginOperation(ctx, op); err != nil {
+			return err
+		}
 		result.Attempted = true
-		if err = w.ExternalWriteKeySet(ctx, install.ManagementKey, after); err != nil {
-			return err
+		writeErr := w.ExternalWriteKeySet(ctx, install.ManagementKey, after)
+		if errors.Is(writeErr, cpa.ErrManagementRejected) ||
+			errors.Is(writeErr, cpa.ErrExternalRejectionUnavailable) ||
+			errors.Is(writeErr, cpa.ErrExternalTargetMoved) {
+			op.Steps[0].Returned = false
+			op.Steps[0].State = "unattempted"
+			op.Outcome = repo.OutcomePending
+			result.Attempted = false
+		} else {
+			op.Steps[0].Returned = true
 		}
-		back, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
-		if err != nil {
-			return err
+		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if saveErr := s.repo.SaveOperation(saveCtx, op); saveErr != nil {
+			return saveErr
 		}
-		if slices.Contains(back.Keys, secret) {
-			return nil
-		}
-		return cpa.ErrApplyUnknown
+		op.Revision++
+		return writeErr
 	})
 	if err != nil {
 		return result, err
 	}
-	return s.externalObserve(ctx, id, generation)
+	if alreadySettled {
+		result.CPAConfigured = true
+	}
+	opRes, checkErr := s.externalCheckOperation(ctx, &op, generation)
+	if checkErr != nil {
+		return result, checkErr
+	}
+	if opRes.Operation == nil || opRes.Operation.Outcome != repo.OutcomeCommitted {
+		return result, cpa.ErrApplyUnknown
+	}
+	return s.externalStateFromOperationResult(id, generation, true, opRes), nil
 }
 
-// externalObserve reads the user's CPA and reports the presence of this key. It
-// claims no window this Manager cannot renew, so its evidence expires with the
-// observation itself.
+func (s *Service) resolveExternalApplyOperationID(ctx context.Context, key freshkeys.Key, latest *repo.Operation) (string, bool, error) {
+	id := string(key.ID)
+	if latest != nil && latest.TargetID == id && latest.Mode == "add" && latest.KeeperID == "" && latest.Outcome == repo.OutcomeCommitted {
+		return latest.ID, true, nil
+	}
+	opID := key.RequestID
+	if !freshkeys.ValidRequestID(opID) {
+		opID = id
+	}
+	latestAdd, err := s.repo.LatestAddOperation(ctx, id, opID)
+	if err != nil {
+		return "", false, err
+	}
+	if latestAdd != nil {
+		if latestAdd.Outcome == repo.OutcomeCommitted {
+			return latestAdd.ID, true, nil
+		}
+		if latestAdd.Outcome != repo.OutcomeAborted {
+			return "", false, freshkeys.ErrConflict
+		}
+	}
+	byReq, err := s.repo.Operation(ctx, opID)
+	if err != nil {
+		return "", false, err
+	}
+	if byReq == nil {
+		return opID, false, nil
+	}
+	if byReq.TargetID != id || byReq.Mode != "add" || byReq.KeeperID != "" {
+		return "", false, freshkeys.ErrConflict
+	}
+	if byReq.Outcome == repo.OutcomeCommitted {
+		return byReq.ID, true, nil
+	}
+	if byReq.Outcome == repo.OutcomeAborted {
+		nextID, genErr := identity.NewAPIKeyID()
+		if genErr != nil {
+			return "", false, ErrExternalUnavailable
+		}
+		return string(nextID), false, nil
+	}
+	return "", false, freshkeys.ErrConflict
+}
+
+func (s *Service) externalStateFromOperationResult(id string, generation uint64, attempted bool, opRes OperationResult) State {
+	now := time.Now().UnixMilli()
+	expires := opRes.ExpiresAtMS
+	if expires <= 0 {
+		expires = now + int64(5*time.Second/time.Millisecond)
+	}
+	return State{
+		KeyID:             id,
+		ManagerStaged:     true,
+		CPAConfigured:     true,
+		RuntimeState:      "effective_observed",
+		RuntimeGeneration: strconv.FormatUint(generation, 10),
+		ObservedFromMS:    now,
+		ObservedUntilMS:   now,
+		ExpiresAtMS:       expires,
+		Attempted:         attempted,
+	}
+}
+
+// externalObserve reads the user's CPA and verifies live /v1/models client
+// authentication plus a post-sample checkpoint/source/config fence before
+// reporting effective_observed. Management config echo alone never certifies an
+// External Client Key as effective.
 func (s *Service) externalObserve(ctx context.Context, id string, generation uint64) (State, error) {
 	result := State{KeyID: id, RuntimeState: "effect_unknown"}
-	if _, err := s.keys.Detail(ctx, id); err != nil {
-		return result, err
-	}
-	result.ManagerStaged = true
-	present, err := s.ExternalKeyPresenceOf(ctx, identity.APIKeyID(id))
+	key, err := s.keys.Detail(ctx, id)
 	if err != nil {
 		return result, err
 	}
-	if _, err = s.externalTarget(ctx, generation); err != nil {
+	result.ManagerStaged = true
+
+	var latest *repo.Operation
+	if s.repo != nil {
+		latest, err = s.repo.LatestOperation(ctx)
+		if err != nil {
+			return result, err
+		}
+		if latest != nil && !latest.IsTerminal() && (latest.TargetID == id || latest.KeeperID == id) {
+			if _, reconcileErr := s.externalCheckOperation(ctx, latest, generation); reconcileErr != nil &&
+				!errors.Is(reconcileErr, cpa.ErrApplyUnknown) &&
+				!errors.Is(reconcileErr, cpa.ErrSourceConflict) &&
+				!errors.Is(reconcileErr, repo.ErrConflict) {
+				return result, reconcileErr
+			}
+			latest, err = s.repo.LatestOperation(ctx)
+			if err != nil {
+				return result, err
+			}
+		}
+	}
+
+	install, err := s.externalTarget(ctx, generation)
+	if err != nil {
 		return result, err
 	}
-	result.Attempted = present
-	result.InstallAvailable = !present
+	w := s.externalKeyWire(install)
+	if w == nil {
+		return result, ErrExternalUnavailable
+	}
+	snap, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
+	if err != nil {
+		return result, err
+	}
 	result.RuntimeGeneration = strconv.FormatUint(generation, 10)
+
+	key, err = s.keys.Detail(ctx, id)
+	if err != nil {
+		return result, err
+	}
+	if key.Lifecycle == identity.LifecycleSuperseded {
+		return result, nil
+	}
+
+	var secret string
+	if err := s.keys.WithStagedSecret(ctx, id, func(val string) error {
+		secret = val
+		return nil
+	}); err != nil {
+		return result, err
+	}
+
+	present := slices.Contains(snap.Keys, secret)
+	attempted := present
+	if s.repo != nil {
+		if op, opErr := s.repo.LatestAddOperation(ctx, id, key.RequestID); opErr != nil {
+			return result, opErr
+		} else if op != nil && !op.AllStepsUnattempted() {
+			attempted = true
+		}
+		if latest != nil && (latest.TargetID == id || latest.KeeperID == id) && !latest.AllStepsUnattempted() {
+			attempted = true
+		}
+	}
+	result.CPAConfigured = present
+	result.Attempted = attempted
+	result.InstallAvailable = !present && !attempted
 	if !present {
 		return result, nil
 	}
+	if latest != nil && !latest.IsTerminal() && (latest.TargetID == id || latest.KeeperID == id) {
+		return result, nil
+	}
+
+	sampler, ok := w.(externalAuthWire)
+	if !ok {
+		return result, nil
+	}
+	from := time.Now()
+	authOK, authErr := sampler.ExternalSampleKeySet(ctx, []string{secret}, nil)
+	if authErr != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, nil
+	}
+	if !authOK {
+		return result, nil
+	}
+	if err := s.externalObservationHeld(ctx, install, w, snap); err != nil {
+		if errors.Is(err, cpa.ErrApplyUnknown) {
+			return result, nil
+		}
+		return result, err
+	}
 	now := time.Now()
-	result.CPAConfigured = true
+	s.authCache.recordProven(authProofVersion{
+		profile:      ProfileExternal,
+		target:       install.Identity,
+		runID:        install.Generation(),
+		sourceSHA256: snap.SourceSHA256,
+		keysSHA256:   orderedKeysDigest(snap.Keys),
+	}, snap.Keys, []string{secret})
 	result.RuntimeState = "effective_observed"
-	result.ObservedFromMS = now.UnixMilli()
+	result.ObservedFromMS = from.UnixMilli()
 	result.ObservedUntilMS = now.UnixMilli()
 	result.ExpiresAtMS = now.Add(5 * time.Second).UnixMilli()
 	return result, nil

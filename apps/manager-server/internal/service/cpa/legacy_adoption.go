@@ -207,7 +207,7 @@ func legacyClientAPIKeys(raw json.RawMessage) ([]string, error) {
 		return nil, LegacyInvalidConfig
 	}
 	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil || len(entries) == 0 || len(entries) > 128 {
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil || len(entries) == 0 {
 		return nil, LegacyInvalidConfig
 	}
 	keys := make([]string, 0, len(entries))

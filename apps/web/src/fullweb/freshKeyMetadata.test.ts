@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { keyDisplayName, maskedPreviewFor, validKey, validSavedSecret, type Key } from './freshKeyMetadata';
-
+import {
+  effectBlockerTextKey,
+  isTerminalKeyOperationOutcome,
+  keyDisplayName,
+  keyLifecyclePillClass,
+  keyLifecycleTextKey,
+  keyRuntimePillClass,
+  keyRuntimeTextKey,
+  maskedPreviewFor,
+  validKey,
+  validKeyOperationResult,
+  validSavedSecret,
+  type Key,
+  type KeyOperationResult,
+} from './freshKeyMetadata';
 // The installation's Key and the keys an adopted CPA already carried are the
 // same canonical record, so the page must accept both — and it must accept the
 // mask each shape can produce, never a mask the other origin owns.
@@ -45,6 +58,36 @@ describe('validKey', () => {
 
   it('refuses an origin outside the closed set', () => {
     expect(validKey({ ...adoptedKey, origin: 'external' as Key['origin'] })).toBe(false);
+  });
+
+  it('accepts all five backend runtimeState values and validates optional operationId and effectCode', () => {
+    for (const runtimeState of [
+      'not_applied',
+      'applying',
+      'effective_observed',
+      'effect_unknown',
+      'revoked_observed',
+    ] as const) {
+      expect(validKey({ ...workspaceKey, runtimeState })).toBe(true);
+    }
+    expect(validKey({ ...workspaceKey, runtimeState: 'invalid' as Key['runtimeState'] })).toBe(false);
+    expect(validKey({ ...workspaceKey, operationId: 'c'.repeat(32) })).toBe(true);
+    expect(validKey({ ...workspaceKey, operationId: 'bad-id' })).toBe(false);
+    expect(validKey({ ...workspaceKey, effectCode: 'key_operation_unknown' })).toBe(true);
+    expect(validKey({ ...workspaceKey, effectCode: 'bad code with spaces' })).toBe(false);
+  });
+
+  it('accepts missing lifecycle as valid non-retired and rejects unknown lifecycles', () => {
+    expect(validKey({ ...workspaceKey, lifecycle: 'missing' })).toBe(true);
+    expect(validKey({ ...workspaceKey, lifecycle: 'superseded' })).toBe(true);
+    expect(validKey({ ...workspaceKey, lifecycle: undefined })).toBe(true);
+    expect(validKey({ ...workspaceKey, lifecycle: 'retired' as Key['lifecycle'] })).toBe(false);
+    expect(keyLifecycleTextKey('active')).toBe('saved');
+    expect(keyLifecyclePillClass('active')).toBe('is-saved');
+    expect(keyLifecycleTextKey('missing')).toBe('missingLifecycle');
+    expect(keyLifecyclePillClass('missing')).toBe('is-pending');
+    expect(keyLifecycleTextKey('superseded')).toBe('replaced');
+    expect(keyLifecyclePillClass('superseded')).toBe('is-muted');
   });
 });
 
@@ -98,5 +141,142 @@ describe('keyDisplayName', () => {
     expect(keyDisplayName(workspaceKey, 'Installation key', 'Adopted key', 'Unnamed')).toBe(
       'Unnamed'
     );
+  });
+});
+
+describe('validKeyOperationResult and status helpers', () => {
+  it('validates add, keeperless revoke, keeper revoke, and replace operations', () => {
+    const base: KeyOperationResult = {
+      operation: {
+        id: '1'.repeat(32),
+        targetId: 'a'.repeat(32),
+        keeperId: '',
+        mode: 'add',
+        outcome: 'committed',
+        revision: 2,
+        steps: [{ name: 'add', state: 'observed', returned: true }],
+      },
+      runtimeState: 'effective_observed',
+      expiresAtMs: 0,
+      nextStep: '',
+    };
+    expect(validKeyOperationResult(base)).toBe(true);
+    expect(validKeyOperationResult({ ...base, runtimeState: 'not_applied' })).toBe(true);
+    expect(
+      validKeyOperationResult({ ...base, runtimeState: 'not_applied', nextStep: 'add' })
+    ).toBe(false);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        runtimeState: 'not_applied',
+        operation: { ...base.operation!, outcome: 'pending' },
+      })
+    ).toBe(false);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        operation: {
+          ...base.operation!,
+          mode: 'revoke',
+          steps: [{ name: 'revoke', state: 'observed', returned: true }],
+        },
+      })
+    ).toBe(true);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        operation: {
+          ...base.operation!,
+          mode: 'revoke',
+          keeperId: 'b'.repeat(32),
+          steps: [{ name: 'revoke', state: 'observed', returned: true }],
+        },
+      })
+    ).toBe(true);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        operation: {
+          ...base.operation!,
+          mode: 'replace',
+          keeperId: 'b'.repeat(32),
+          steps: [
+            { name: 'add', state: 'observed', returned: true },
+            { name: 'revoke', state: 'observed', returned: true },
+          ],
+        },
+      })
+    ).toBe(true);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        operation: {
+          ...base.operation!,
+          keeperId: 'b'.repeat(32),
+        },
+      })
+    ).toBe(false);
+    expect(
+      validKeyOperationResult({
+        ...base,
+        operation: {
+          ...base.operation!,
+          outcome: 'committed',
+          steps: [{ name: 'add', state: 'unattempted', returned: false }],
+        },
+      })
+    ).toBe(false);
+  });
+
+  it('validates aborted operation as strictly unattempted and never effective', () => {
+    const abortedBase: KeyOperationResult = {
+      operation: {
+        id: '1'.repeat(32),
+        targetId: 'a'.repeat(32),
+        keeperId: 'b'.repeat(32),
+        mode: 'replace',
+        outcome: 'aborted',
+        revision: 2,
+        steps: [
+          { name: 'add', state: 'unattempted', returned: false },
+          { name: 'revoke', state: 'unattempted', returned: false },
+        ],
+      },
+      runtimeState: 'not_applied',
+      expiresAtMs: 0,
+      nextStep: '',
+    };
+    expect(validKeyOperationResult(abortedBase)).toBe(true);
+    expect(validKeyOperationResult({ ...abortedBase, runtimeState: 'effect_unknown' })).toBe(true);
+    expect(validKeyOperationResult({ ...abortedBase, runtimeState: 'effective_observed' })).toBe(false);
+    expect(validKeyOperationResult({ ...abortedBase, nextStep: 'add' })).toBe(false);
+    expect(
+      validKeyOperationResult({
+        ...abortedBase,
+        operation: {
+          ...abortedBase.operation!,
+          steps: [
+            { name: 'add', state: 'attempted', returned: true },
+            { name: 'revoke', state: 'unattempted', returned: false },
+          ],
+        },
+      })
+    ).toBe(false);
+    expect(isTerminalKeyOperationOutcome('committed')).toBe(true);
+    expect(isTerminalKeyOperationOutcome('aborted')).toBe(true);
+    expect(isTerminalKeyOperationOutcome('pending')).toBe(false);
+    expect(isTerminalKeyOperationOutcome('unknown')).toBe(false);
+  });
+
+  it('maps runtime states and effect blocker codes accurately', () => {
+    expect(keyRuntimeTextKey('effective_observed')).toBe('runtimeEffectiveObserved');
+    expect(keyRuntimePillClass('effective_observed')).toBe('is-effective');
+    expect(keyRuntimeTextKey('effect_unknown')).toBe('runtimeEffectUnknown');
+    expect(keyRuntimePillClass('effect_unknown')).toBe('is-pending');
+    expect(effectBlockerTextKey('external_management_key_rejected')).toBe(
+      'effectBlockerExternalRejected'
+    );
+    expect(effectBlockerTextKey('last_effective_key')).toBe('effectBlockerLastKey');
+    expect(effectBlockerTextKey('unrecognized')).toBe('effectBlockerUnknown');
   });
 });

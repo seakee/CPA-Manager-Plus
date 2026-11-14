@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -47,13 +48,10 @@ type keyWire interface {
 	WriteKeySet(context.Context, string, []string) error
 	SampleKeySet(context.Context, []string, []string) (bool, error)
 	// ValidKeySet reports whether this destination would accept one client-key
-	// list as its own. It is the policy `WriteKeySet` applies before it sends
-	// anything, asked ahead of the attempt: a step whose end state the destination
-	// could never hold must be refused while nothing is journaled, because after
-	// the attempt is recorded the refusal leaves an unknown effect that blocks
-	// every later operation of the installation.
+	// list as its own.
 	ValidKeySet([]string) bool
 }
+
 type OperationResult struct {
 	Operation    *repo.Operation `json:"operation"`
 	RuntimeState string          `json:"runtimeState"`
@@ -67,15 +65,11 @@ func (s *Service) KeyOperationsEnabled() bool {
 		return false
 	}
 	if s.profile == ProfileExternal {
-		// The External journal is the Manager's own; the private profile's
-		// source-file fence describes a config authority External never has.
 		return true
 	}
 	if s.h1 != nil {
 		return os.Getenv("CPAMP_PRIVATE_CONFIG_AUTHORITY") == "1"
 	}
-	// A config-owned source can never use this independent K/U journal. This
-	// additional fail-closed fence does NOT attest Host lifecycle exclusivity.
 	_, e := os.Lstat("/run/cpamp-config/source.json")
 	return os.IsNotExist(e) && os.Getenv("CPAMP_PRIVATE_CONFIG_AUTHORITY") == ""
 }
@@ -117,6 +111,130 @@ func (s *Service) installedKey(ctx context.Context) (string, error) {
 	return a.KeyID, nil
 }
 
+func validOperationRequestShape(target, keeper, mode string) bool {
+	if !freshkeys.ValidRequestID(target) {
+		return false
+	}
+	switch mode {
+	case "add":
+		return keeper == ""
+	case "revoke":
+		if keeper == "" {
+			return true
+		}
+		return freshkeys.ValidRequestID(keeper) && target != keeper
+	case "replace":
+		return freshkeys.ValidRequestID(keeper) && target != keeper
+	default:
+		return false
+	}
+}
+
+// reconcileUnsettledLatestLocked performs a read-only check on an unsettled
+// LatestOperation so an operation whose HTTP reply was lost after CPA committed
+// does not block subsequent operations. It never sends a PUT.
+func (s *Service) reconcileUnsettledLatestLocked(ctx context.Context, generation uint64) (*repo.Operation, error) {
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil || latest == nil || latest.IsTerminal() {
+		return latest, err
+	}
+	if _, err := s.check(ctx, latest, generation); err != nil && !errors.Is(err, cpa.ErrApplyUnknown) && !errors.Is(err, cpa.ErrSourceConflict) && !errors.Is(err, repo.ErrConflict) {
+		return latest, err
+	}
+	return s.repo.LatestOperation(ctx)
+}
+
+// ApplyAdd executes or recovers the journaled single-step CPA addition and live
+// client-auth confirmation for an active Manager-staged canonical Key.
+//
+// Invariants:
+//   - If an operation already exists for id, read-only reconciliation runs
+//     first; an "attempted" unknown step is NEVER resent, while an
+//     "unattempted" pending step executes its single PUT + confirmation.
+//   - On a legacy unseeded NewManaged destination with no InitialInstall row
+//     yet, ApplyAdd delegates to the one-shot initial-install path so the
+//     empty-list seed transitions cleanly to [target].
+func (s *Service) ApplyAdd(ctx context.Context, id, target string, generation uint64) (OperationResult, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
+	s = s.active()
+	if s == nil || s.repo == nil {
+		return result, ErrUnavailable
+	}
+	if !freshkeys.ValidRequestID(id) || !freshkeys.ValidRequestID(target) {
+		return result, freshkeys.ErrRequest
+	}
+	if !s.KeyOperationsEnabled() {
+		return result, ErrUnavailable
+	}
+	if s.profile == ProfileExternal {
+		return s.externalApplyAdd(ctx, id, target, generation)
+	}
+	key, err := s.keys.Detail(ctx, target)
+	if err != nil {
+		return result, err
+	}
+	if key.Lifecycle == identity.LifecycleSuperseded {
+		return result, repo.ErrConflict
+	}
+
+	if s.profile == ProfileManaged {
+		p, err := s.permit(ctx)
+		if err != nil {
+			return result, err
+		}
+		if p.Strategy == string(bootstrap.NewManaged) {
+			attempt, err := s.repo.InitialInstall(ctx)
+			if err != nil {
+				return result, err
+			}
+			if attempt != nil && (attempt.RunID != p.RunID || attempt.Generation != p.Generation) {
+				return result, ErrGeneration
+			}
+			observeInitial := attempt != nil && attempt.KeyID == target
+			if observeInitial {
+				key, err := s.keys.Detail(ctx, target)
+				if err != nil {
+					return result, err
+				}
+				// The installer record reserves a key before destination staging;
+				// it is not an attempted one-shot InstallOne mutation.
+				observeInitial = key.Origin != freshkeys.OriginInstaller
+			}
+			if attempt == nil || observeInitial {
+				var state State
+				var applyErr error
+				if attempt == nil {
+					state, applyErr = s.Apply(ctx, target, generation)
+				} else {
+					state, applyErr = s.Observe(ctx, target, generation)
+				}
+				if applyErr != nil {
+					return OperationResult{RuntimeState: state.RuntimeState}, applyErr
+				}
+				if state.RuntimeState != "effective_observed" {
+					return OperationResult{RuntimeState: state.RuntimeState}, cpa.ErrApplyUnknown
+				}
+				return OperationResult{
+					RuntimeState: "effective_observed",
+					ExpiresAtMS:  state.ExpiresAtMS,
+				}, nil
+			}
+		}
+	}
+
+	prepared, err := s.Prepare(ctx, id, target, "", "add", generation)
+	if err != nil {
+		return prepared, err
+	}
+	if prepared.Operation != nil && prepared.Operation.Outcome == "committed" {
+		return s.observeCommittedAdd(ctx, prepared, key, generation)
+	}
+	if prepared.NextStep == "add" {
+		return s.ContinueOperation(ctx, id, generation)
+	}
+	return prepared, cpa.ErrApplyUnknown
+}
+
 // Prepare persists an immutable selection before any upstream write. Missing
 // step authority never causes an attempted mutation or a new operation retry.
 func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
@@ -130,12 +248,7 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	if !s.KeyOperationsEnabled() {
 		return result, ErrUnavailable
 	}
-	for _, v := range []string{id, target, keeper} {
-		if !freshkeys.ValidRequestID(v) {
-			return result, freshkeys.ErrRequest
-		}
-	}
-	if target == keeper || (mode != "revoke" && mode != "replace") {
+	if !freshkeys.ValidRequestID(id) || !validOperationRequestShape(target, keeper, mode) {
 		return result, freshkeys.ErrRequest
 	}
 	if previous, err := s.repo.Operation(ctx, id); err != nil {
@@ -146,19 +259,49 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 		}
 		return s.check(ctx, previous, generation)
 	}
-	if s.profile == ProfileExternal {
-		return s.externalPrepare(ctx, id, target, keeper, mode, generation)
-	}
-	p, snapshot, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	latest, err := s.reconcileUnsettledLatestLocked(ctx, generation)
 	if err != nil {
 		return result, err
 	}
-	steps := []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
-	if mode == "replace" {
-		steps = append([]repo.KeyStep{{Name: "add", State: "unattempted"}}, steps...)
+	if latest != nil && !latest.IsTerminal() {
+		return OperationResult{Operation: latest, RuntimeState: "effect_unknown"}, repo.ErrConflict
 	}
-	o := repo.Operation{ID: id, TargetID: target, KeeperID: keeper, Mode: mode, RunID: p.RunID, Generation: p.Generation, ProviderSeedSHA256: p.S2B.Binding(), SnapshotSHA256: snapshot, Revision: 1, Outcome: "pending", Steps: steps, CreatedAtMS: time.Now().UnixMilli()}
+	if s.profile == ProfileExternal {
+		return s.externalPrepare(ctx, id, target, keeper, mode, generation)
+	}
+	p, snapshot, alreadyHeld, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	if err != nil {
+		return result, err
+	}
+	var steps []repo.KeyStep
+	switch mode {
+	case "add":
+		state := "unattempted"
+		if alreadyHeld {
+			state = "observed"
+		}
+		steps = []repo.KeyStep{{Name: "add", State: state}}
+	case "revoke":
+		steps = []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
+	case "replace":
+		steps = []repo.KeyStep{{Name: "add", State: "unattempted"}, {Name: "revoke", State: "unattempted"}}
+	}
+	outcome := "pending"
+	var completedAt int64
+	if mode == "add" && alreadyHeld {
+		outcome = "committed"
+		completedAt = time.Now().UnixMilli()
+	}
+	o := repo.Operation{
+		ID: id, TargetID: target, KeeperID: keeper, Mode: mode,
+		RunID: p.RunID, Generation: p.Generation, ProviderSeedSHA256: p.S2B.Binding(),
+		SnapshotSHA256: snapshot, Revision: 1, Outcome: outcome, Steps: steps,
+		CreatedAtMS: time.Now().UnixMilli(), CompletedAtMS: completedAt,
+	}
 	if s.h1 != nil {
+		if mode == "add" || keeper == "" {
+			return result, ErrUnavailable
+		}
 		err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
 			t, ok := s.wire.(*cpa.Transport)
 			if !ok {
@@ -186,64 +329,40 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	if err = s.repo.BeginOperation(ctx, o); err != nil {
 		return result, err
 	}
+	if o.Outcome == "committed" {
+		return OperationResult{
+			Operation:    &o,
+			RuntimeState: "effective_observed",
+			ExpiresAtMS:  min(time.Now().Add(5*time.Second).UnixMilli(), p.ExpiresAtMS),
+		}, nil
+	}
 	return s.checkOperation(ctx, &o, generation)
 }
 
-// keyOperationPrerequisites is Prepare's authority and destination proof, and the
-// snapshot digests it validated. It journals and writes nothing, so the page can
-// ask the same question — and get the same answer — before it offers the
-// operation instead of discovering a limit as a conflict after a submit.
-func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper, mode string, generation uint64) (Permit, []string, error) {
+func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper, mode string, generation uint64) (Permit, []string, bool, error) {
 	p, err := s.operationTarget(ctx, generation)
 	if err != nil {
-		return p, nil, err
+		return p, nil, false, err
 	}
-	installed, err := s.installedKey(ctx)
-	if err != nil || installed != target && (mode != "revoke" || installed != keeper) {
-		return p, nil, repo.ErrConflict
+	if s.profile == ProfilePrivate {
+		if mode == "add" || keeper == "" {
+			return p, nil, false, repo.ErrConflict
+		}
+		installed, err := s.installedKey(ctx)
+		if err != nil || installed != target && (mode != "revoke" || installed != keeper) {
+			return p, nil, false, repo.ErrConflict
+		}
 	}
 	w, ok := s.wire.(keyWire)
 	if !ok {
-		return p, nil, ErrUnavailable
+		return p, nil, false, ErrUnavailable
 	}
 	var snapshot []string
-	err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
+	alreadyHeld := false
+	err = s.operationSecrets(ctx, mode, target, keeper, false, func(old, next string) error {
 		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 		if e != nil {
 			return e
-		}
-		if mode == "revoke" && len(snap.Keys) == 1 {
-			return ErrLastKey
-		}
-		// Both keys the operation names must be carried by the destination, and the
-		// replacement of a replace must not be. The write replaces the whole list,
-		// so the rest of that list is authority this step is about to consume: every
-		// other key must be one this Manager stages and still keeps. A credential it
-		// never registered, or one it already retired, is the operator's change at
-		// the destination and is never silently dropped by a whole-list write.
-		if !slices.Contains(snap.Keys, old) || (mode == "revoke" && !slices.Contains(snap.Keys, next)) {
-			return cpa.ErrSourceConflict
-		}
-		if mode == "replace" && slices.Contains(snap.Keys, next) {
-			return cpa.ErrSourceConflict
-		}
-		// The write replaces the whole list, so the list each step leaves behind is a
-		// fact this Manager states before anything is journaled. Walk the steps in
-		// the order they will run — a replace adds before it revokes — and ask the
-		// destination's own policy, the same one `WriteKeySet` applies, whether that
-		// end state can exist. Otherwise the attempt would be recorded first, the
-		// write refused before it was sent, and the journal would hold an unknown
-		// effect no read-back can settle.
-		steps := []string{"revoke"}
-		if mode == "replace" {
-			steps = []string{"add", "revoke"}
-		}
-		live := snap.Keys
-		for _, step := range steps {
-			live = keySetAfter(live, step, old, next)
-			if !w.ValidKeySet(live) {
-				return cpa.ErrSourceConflict
-			}
 		}
 		known, e := s.keys.AllStaged(ctx, snap.Keys)
 		if e != nil {
@@ -252,25 +371,113 @@ func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper,
 		if !known {
 			return cpa.ErrSourceConflict
 		}
-		// The destination is the set this step is allowed to rewrite, so it is the
-		// set that must authenticate before anything is journaled.
-		ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
-		if e != nil {
-			return e
+
+		if mode == "add" {
+			if slices.Contains(snap.Keys, old) {
+				authOK, authErr := w.SampleKeySet(ctx, []string{old}, nil)
+				if authErr != nil {
+					return authErr
+				}
+				if !authOK {
+					return cpa.ErrApplyUnknown
+				}
+				if s.profile == ProfileManaged {
+					if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+						return err
+					}
+				}
+				s.authCache.recordProven(authProofVersion{
+					profile:           s.profile,
+					target:            p.Identity,
+					runID:             p.RunID,
+					runtimeGeneration: p.runtimeGeneration,
+					runtimeArtifact:   p.runtimeArtifact,
+					sourceSHA256:      snap.SourceSHA256,
+					keysSHA256:        orderedKeysDigest(snap.Keys),
+				}, snap.Keys, []string{old})
+				snapshot = keyDigests(snap.Keys)
+				alreadyHeld = true
+				return nil
+			}
+			after := keySetAfter(mode, snap.Keys, "add", old, "")
+			if !w.ValidKeySet(after) {
+				return cpa.ErrSourceConflict
+			}
+			if err := s.verifyPreStepManagedAuth(ctx, w, p, snap, snap.Keys[0]); err != nil {
+				return err
+			}
+			snapshot = keyDigests(snap.Keys)
+			return nil
 		}
-		if !ok {
+
+		if mode == "revoke" && len(snap.Keys) <= 1 {
+			return ErrLastKey
+		}
+		if !slices.Contains(snap.Keys, old) || (mode == "revoke" && next != "" && !slices.Contains(snap.Keys, next)) {
 			return cpa.ErrSourceConflict
+		}
+		if mode == "replace" && s.profile == ProfilePrivate && slices.Contains(snap.Keys, next) {
+			return cpa.ErrSourceConflict
+		}
+		steps := []string{"revoke"}
+		if mode == "replace" {
+			steps = []string{"add", "revoke"}
+		}
+		live := snap.Keys
+		for _, step := range steps {
+			live = keySetAfter(mode, live, step, old, next)
+			if !w.ValidKeySet(live) {
+				return cpa.ErrSourceConflict
+			}
+		}
+		if s.profile == ProfilePrivate {
+			ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				return cpa.ErrSourceConflict
+			}
+		} else {
+			if err := s.verifyPreStepManagedAuth(ctx, w, p, snap, old); err != nil {
+				return err
+			}
 		}
 		snapshot = keyDigests(snap.Keys)
 		return nil
 	})
-	return p, snapshot, err
+	return p, snapshot, alreadyHeld, err
+}
+
+func (s *Service) verifyPreStepManagedAuth(ctx context.Context, w keyWire, p Permit, snap cpa.KeySnapshot, probeSecret string) error {
+	version := authProofVersion{
+		profile:           s.profile,
+		target:            p.Identity,
+		runID:             p.RunID,
+		runtimeGeneration: p.runtimeGeneration,
+		runtimeArtifact:   p.runtimeArtifact,
+		sourceSHA256:      snap.SourceSHA256,
+		keysSHA256:        orderedKeysDigest(snap.Keys),
+	}
+	if s.authCache.isVerified(version, probeSecret) {
+		return nil
+	}
+	ok, err := w.SampleKeySet(ctx, []string{probeSecret}, nil)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return cpa.ErrSourceConflict
+	}
+	if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+		return err
+	}
+	s.authCache.recordProven(version, snap.Keys, []string{probeSecret})
+	return nil
 }
 
 // Preflight answers whether one revoke or replace would pass Prepare right now,
-// with the same authority, the same destination proof and nothing written. Every
-// remaining limit is a fact about the destination or the installation, so the
-// page can name it where the operator is choosing instead of after a submit.
+// with the same authority, the same destination proof and nothing written.
 func (s *Service) Preflight(ctx context.Context, target, keeper, mode string, generation uint64) error {
 	s = s.active()
 	if s == nil {
@@ -281,43 +488,58 @@ func (s *Service) Preflight(ctx context.Context, target, keeper, mode string, ge
 	if !s.KeyOperationsEnabled() {
 		return ErrUnavailable
 	}
-	for _, v := range []string{target, keeper} {
-		if !freshkeys.ValidRequestID(v) {
-			return freshkeys.ErrRequest
-		}
-	}
-	if target == keeper || (mode != "revoke" && mode != "replace") {
+	if (mode != "revoke" && mode != "replace") || !validOperationRequestShape(target, keeper, mode) {
 		return freshkeys.ErrRequest
+	}
+	latest, err := s.reconcileUnsettledLatestLocked(ctx, generation)
+	if err != nil {
+		return err
+	}
+	if latest != nil && !latest.IsTerminal() {
+		return repo.ErrConflict
 	}
 	if s.profile == ProfileExternal {
 		return s.externalPreflight(ctx, target, keeper, mode, generation)
 	}
-	_, _, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	_, _, _, err = s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
 	return err
 }
 
 func (s *Service) operationTarget(ctx context.Context, generation uint64) (Permit, error) {
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return p, err
 	}
 	if p.Generation != strconv.FormatUint(generation, 10) {
 		return p, ErrGeneration
 	}
-	if _, err = s.target(ctx, p); err != nil {
+	target, err := s.target(ctx, p)
+	if err != nil {
 		return p, err
+	}
+	if s.profile == ProfileManaged {
+		p.runtimeGeneration = uint64(target.Generation)
+		p.runtimeArtifact = string(target.ActiveGatewayArtifact.ArtifactID)
 	}
 	if err = s.requireInstallJournal(ctx, p); err != nil {
 		return p, err
 	}
 	return p, nil
 }
+
 func (s *Service) keyPair(ctx context.Context, target, keeper string, retained bool, consume func(string, string) error) error {
-	read := s.keys.WithStagedSecret
-	if retained {
-		read = s.keys.WithRetainedSecret
+	return s.operationSecrets(ctx, "replace", target, keeper, retained, consume)
+}
+
+func (s *Service) operationSecrets(ctx context.Context, mode, target, keeper string, retained bool, consume func(string, string) error) error {
+	readTarget := s.keys.WithStagedSecret
+	if retained && mode != "add" {
+		readTarget = s.keys.WithRetainedSecret
 	}
-	return read(ctx, target, func(old string) error {
+	return readTarget(ctx, target, func(old string) error {
+		if keeper == "" {
+			return consume(old, "")
+		}
 		return s.keys.WithStagedSecret(ctx, keeper, func(next string) error {
 			if old == next {
 				return cpa.ErrSourceConflict
@@ -326,6 +548,7 @@ func (s *Service) keyPair(ctx context.Context, target, keeper string, retained b
 		})
 	})
 }
+
 func sameKeys(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -338,10 +561,6 @@ func sameKeys(a, b []string) bool {
 	return true
 }
 
-// keyDigests is the canonical comparison form of a destination's Client Key list:
-// the sorted digests of its secrets. A whole-list write may only replace a set this
-// Manager can name, so the set — not the secrets — is what the journal carries and
-// what every later read is compared against.
 func keyDigests(keys []string) []string {
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -351,24 +570,23 @@ func keyDigests(keys []string) []string {
 	return out
 }
 
-// keyOperationSets derives the digest set a step reads and the one it leaves
-// behind, from the single snapshot the journal proved at Prepare. An add step
-// keeps every destination key and introduces the replacement; a revoke step removes
-// exactly the target and keeps every other key, including keys this Manager did not
-// mint but does stage — an adopted destination carries its own list.
-//
-// A journal written before the snapshot was recorded described each step as exactly
-// the keys it named, so a pending one still reconciles by that same rule.
 func keyOperationSets(o *repo.Operation, step, old, next string) (before, after []string) {
 	before = slices.Clone(o.SnapshotSHA256)
 	if len(before) == 0 {
+		if o.Mode == "add" {
+			return nil, []string{freshkeys.SecretDigest(old)}
+		}
 		before = []string{freshkeys.SecretDigest(old)}
-		if o.Mode == "revoke" {
+		if o.Mode == "revoke" && next != "" {
 			before = insertDigest(before, freshkeys.SecretDigest(next))
 		}
 	}
 	if step == "add" {
-		return before, insertDigest(before, freshkeys.SecretDigest(next))
+		added := next
+		if o.Mode == "add" {
+			added = old
+		}
+		return before, insertDigest(before, freshkeys.SecretDigest(added))
 	}
 	if o.Mode == "replace" {
 		before = insertDigest(before, freshkeys.SecretDigest(next))
@@ -378,19 +596,27 @@ func keyOperationSets(o *repo.Operation, step, old, next string) (before, after 
 	return before, after
 }
 
-// insertDigest adds one digest to a sorted set.
 func insertDigest(set []string, digest string) []string {
+	if slices.Contains(set, digest) {
+		out := slices.Clone(set)
+		slices.Sort(out)
+		return out
+	}
 	out := append(slices.Clone(set), digest)
 	slices.Sort(out)
 	return out
 }
 
-// keySetAfter is the destination list one step leaves behind: the live list it
-// proved, with the replacement appended for an add step, or the target removed for
-// a revoke step. Every other key survives untouched, in its original order.
-func keySetAfter(keys []string, step, old, next string) []string {
+func keySetAfter(mode string, keys []string, step, old, next string) []string {
 	if step == "add" {
-		return append(slices.Clone(keys), next)
+		added := next
+		if mode == "add" {
+			added = old
+		}
+		if slices.Contains(keys, added) {
+			return slices.Clone(keys)
+		}
+		return append(slices.Clone(keys), added)
 	}
 	return slices.DeleteFunc(slices.Clone(keys), func(key string) bool { return key == old })
 }
@@ -423,8 +649,6 @@ func (s *Service) CheckOperation(ctx context.Context, id string, generation uint
 	return s.check(ctx, o, generation)
 }
 
-// check dispatches one journaled operation to the profile that wrote it. Both
-// loops reconcile by reading their target and neither ever resends a step.
 func (s *Service) check(ctx context.Context, o *repo.Operation, generation uint64) (OperationResult, error) {
 	if s.profile == ProfileExternal {
 		return s.externalCheckOperation(ctx, o, generation)
@@ -437,7 +661,8 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 	if s.h1 != nil && o.ParentID == "" {
 		return r, ErrUnavailable
 	}
-	if o.Outcome == "committed" {
+	historical := false
+	if o.Outcome == repo.OutcomeCommitted {
 		latest, err := s.repo.LatestOperation(ctx)
 		if err != nil {
 			return r, err
@@ -449,9 +674,10 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 			if o.RunID != latest.RunID || o.Generation != latest.Generation || o.ProviderSeedSHA256 != latest.ProviderSeedSHA256 || o.Generation != strconv.FormatUint(generation, 10) {
 				return r, ErrGeneration
 			}
-			// Historical committed operations are durable records, not live
-			// effectiveness claims. Their former keeper may now be revoked.
-			return r, nil
+			historical = true
+			if s.profile != ProfileManaged {
+				return r, nil
+			}
 		}
 	}
 	p, err := s.operationTarget(ctx, generation)
@@ -460,6 +686,13 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 	}
 	if o.RunID != p.RunID || o.Generation != p.Generation || o.ProviderSeedSHA256 != p.S2B.Binding() {
 		return r, ErrGeneration
+	}
+	if o.Outcome == repo.OutcomeAborted {
+		r.RuntimeState = "not_applied"
+		return r, nil
+	}
+	if historical {
+		return r, nil
 	}
 	if s.h1 != nil && o.Outcome == "committed" {
 		if err = s.finishH1(ctx, o); err != nil {
@@ -471,8 +704,8 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 		if e != nil {
 			return r, e
 		}
-		p := v.H1.Parent
-		if p.SourceID != o.SourceID || p.Generation != o.Generation || p.ClaimSHA256 != o.ClaimSHA256 || p.ClaimRevision != o.ClaimRevision || cpa.H1Terminal(p.Intent) != o.IntentDigest || p.Intent.RequestID != o.ID || p.Intent.TargetID != o.TargetID || p.Intent.KeeperID != o.KeeperID || p.Intent.Mode != o.Mode {
+		parent := v.H1.Parent
+		if parent.SourceID != o.SourceID || parent.Generation != o.Generation || parent.ClaimSHA256 != o.ClaimSHA256 || parent.ClaimRevision != o.ClaimRevision || cpa.H1Terminal(parent.Intent) != o.IntentDigest || parent.Intent.RequestID != o.ID || parent.Intent.TargetID != o.TargetID || parent.Intent.KeeperID != o.KeeperID || parent.Intent.Mode != o.Mode {
 			return r, cpa.ErrSourceConflict
 		}
 	}
@@ -482,6 +715,58 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 	}
 	for i, step := range o.Steps {
 		if step.State == "unattempted" {
+			// A matching live add can settle without resending a PUT. Standalone
+			// add commits here; replace still requires its revoke step.
+			if s.h1 == nil && s.profile == ProfileManaged && (o.Mode == "replace" || o.Mode == "add") && step.Name == "add" {
+				alreadyAdded := false
+				err := s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
+					_, after := keyOperationSets(o, "add", old, next)
+					snap, err := w.KeySnapshot(ctx, p.ManagementKey)
+					if err != nil {
+						return err
+					}
+					if !slices.Equal(keyDigests(snap.Keys), after) {
+						return nil
+					}
+					accepted := next
+					if o.Mode == "add" {
+						accepted = old
+					}
+					authOK, err := w.SampleKeySet(ctx, []string{accepted}, nil)
+					if err != nil {
+						return err
+					}
+					if !authOK {
+						return cpa.ErrApplyUnknown
+					}
+					if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+						return err
+					}
+					s.authCache.recordProven(authProofVersion{
+						profile: s.profile, target: p.Identity, runID: p.RunID,
+						runtimeGeneration: p.runtimeGeneration, runtimeArtifact: p.runtimeArtifact,
+						sourceSHA256: snap.SourceSHA256, keysSHA256: orderedKeysDigest(snap.Keys),
+					}, snap.Keys, []string{accepted})
+					alreadyAdded = true
+					return nil
+				})
+				if err != nil {
+					return r, err
+				}
+				if alreadyAdded {
+					o.Steps[i].State = "observed"
+					o.Outcome = "pending"
+					if o.Mode == "add" {
+						o.Outcome = "committed"
+						o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
+					}
+					if err = s.repo.SaveOperation(ctx, *o); err != nil {
+						return r, err
+					}
+					o.Revision++
+					continue
+				}
+			}
 			r.NextStep = step.Name
 			return r, nil
 		}
@@ -508,16 +793,15 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 				o.Revision++
 			}
 		}
-		err = s.keyPair(ctx, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
+		err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
 			_, after := keyOperationSets(o, step.Name, old, next)
 			var reject []string
 			if step.Name != "add" {
 				reject = []string{old}
 			}
-			// Require multiple spaced live sweeps; a config save is never an ack. The
-			// expected set is the transformation the journal proved, so a key that
-			// appeared or went missing is reported as unknown effect, never as success.
-			for n := 0; n < 3; n++ {
+			var finalSnap cpa.KeySnapshot
+			var provenSecrets []string
+			for n := range 3 {
 				snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 				if e != nil {
 					return e
@@ -525,13 +809,28 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 				if !slices.Equal(keyDigests(snap.Keys), after) {
 					return cpa.ErrApplyUnknown
 				}
-				ok, e := w.SampleKeySet(ctx, snap.Keys, reject)
+				accepted := snap.Keys
+				if s.profile == ProfileManaged {
+					switch {
+					case step.Name == "add" && o.Mode == "add":
+						accepted = []string{old}
+					case step.Name == "add":
+						accepted = []string{next}
+					case next != "":
+						accepted = []string{next}
+					case len(snap.Keys) > 0:
+						accepted = []string{snap.Keys[0]}
+					}
+				}
+				ok, e := w.SampleKeySet(ctx, accepted, reject)
 				if e != nil {
 					return e
 				}
 				if !ok {
 					return cpa.ErrApplyUnknown
 				}
+				finalSnap = snap
+				provenSecrets = accepted
 				if n < 2 {
 					select {
 					case <-ctx.Done():
@@ -548,6 +847,22 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 			if e != nil || !slices.Equal(keyDigests(snap.Keys), after) {
 				return cpa.ErrApplyUnknown
 			}
+			if s.profile == ProfileManaged {
+				if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+					return err
+				}
+			}
+			if s.profile == ProfileManaged && snap.SourceSHA256 == finalSnap.SourceSHA256 {
+				s.authCache.recordProven(authProofVersion{
+					profile:           s.profile,
+					target:            p.Identity,
+					runID:             p.RunID,
+					runtimeGeneration: p.runtimeGeneration,
+					runtimeArtifact:   p.runtimeArtifact,
+					sourceSHA256:      snap.SourceSHA256,
+					keysSHA256:        orderedKeysDigest(snap.Keys),
+				}, snap.Keys, provenSecrets)
+			}
 			return nil
 		})
 		if err != nil {
@@ -556,9 +871,9 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 		if o.Outcome != "committed" {
 			o.Steps[i].State = "observed"
 			o.Outcome = "pending"
-			if step.Name == "revoke" {
+			if step.Name == "revoke" || o.Mode == "add" {
 				o.Outcome = "committed"
-				o.CompletedAtMS = time.Now().UnixMilli()
+				o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
 			}
 			if err = s.repo.SaveOperation(ctx, *o); err != nil {
 				return r, err
@@ -602,6 +917,9 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 	if err != nil {
 		return r, err
 	}
+	if o.Outcome == repo.OutcomeAborted {
+		return r, repo.ErrConflict
+	}
 	latest, err := s.repo.LatestOperation(ctx)
 	if err != nil || latest == nil || latest.ID != id {
 		return r, repo.ErrConflict
@@ -642,11 +960,7 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 	if !ok {
 		return r, ErrUnavailable
 	}
-	err = s.keyPair(ctx, o.TargetID, o.KeeperID, false, func(old, next string) error {
-		// The set this step reads is the one the journal proved at Prepare,
-		// transformed by the steps that settled since. A destination that no longer
-		// holds exactly that set — a key added, removed or retired out of band — is a
-		// source conflict with nothing written, whatever its size.
+	err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
 		before, _ := keyOperationSets(o, grant.Step, old, next)
 		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 		if e != nil {
@@ -655,12 +969,22 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 		if snap.SourceSHA256 != grant.SourceSHA256 || !slices.Equal(keyDigests(snap.Keys), before) {
 			return cpa.ErrSourceConflict
 		}
-		ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
-		if e != nil {
-			return e
-		}
-		if !ok {
-			return cpa.ErrSourceConflict
+		if s.profile == ProfilePrivate {
+			ok, e := w.SampleKeySet(ctx, snap.Keys, nil)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				return cpa.ErrSourceConflict
+			}
+		} else if len(snap.Keys) > 0 {
+			probe := snap.Keys[0]
+			if o.Mode != "add" {
+				probe = old
+			}
+			if err := s.verifyPreStepManagedAuth(ctx, w, p, snap, probe); err != nil {
+				return err
+			}
 		}
 		if !s.keyGrantHeld(ctx, grant, o.ID, step) {
 			return ErrUnavailable
@@ -681,16 +1005,14 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 			return e
 		}
 		o.Revision++
-		// Recheck authority after intent, immediately before the single PUT.
 		if !s.keyGrantHeld(ctx, grant, o.ID, step) || time.Now().UnixMilli() >= grant.ExpiresAtMS {
 			return ErrUnavailable
 		}
 		if _, e = s.target(ctx, p); e != nil {
 			return e
 		}
-		writeErr := w.WriteKeySet(ctx, p.ManagementKey, keySetAfter(snap.Keys, grant.Step, old, next))
+		writeErr := w.WriteKeySet(ctx, p.ManagementKey, keySetAfter(o.Mode, snap.Keys, grant.Step, old, next))
 		o.Steps[index].Returned = true
-		// Use a bounded independent context to retain the attempt on client loss.
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		if e = s.repo.SaveOperation(saveCtx, *o); e != nil {

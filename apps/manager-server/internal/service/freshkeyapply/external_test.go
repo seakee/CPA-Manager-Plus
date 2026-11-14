@@ -8,11 +8,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
-
-	"path/filepath"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
@@ -30,11 +30,15 @@ const externalManagement = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 // client-key list and one management credential, and it answers exactly the
 // three v8 routes this Manager drives.
 type fakeExternalCPA struct {
-	keys        []string
-	management  string
-	rejectOnce  bool
-	rejectEvery bool
-	writes      int
+	mu            sync.Mutex
+	keys          []string
+	authKeys      []string
+	holdHotReload bool
+	management    string
+	rejectOnce    bool
+	rejectEvery   bool
+	writes        int
+	modelHits     int
 	// onKeyRead runs before each client-key read, so a test can act as the user
 	// editing their own CPA between the reads of one write.
 	onKeyRead func(f *fakeExternalCPA)
@@ -56,10 +60,32 @@ func (f *fakeExternalCPA) config() []byte {
 func newFakeExternalCPA(t *testing.T, keys ...string) *fakeExternalCPA {
 	t.Helper()
 	f := &fakeExternalCPA{
-		keys:       keys,
+		keys:       slices.Clone(keys),
+		authKeys:   slices.Clone(keys),
 		management: externalManagement,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" && r.Method == http.MethodGet {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			f.mu.Lock()
+			f.modelHits++
+			active := f.keys
+			if f.holdHotReload {
+				active = f.authKeys
+			}
+			accepted := token != "" && r.Header.Get("Authorization") == "Bearer "+token && slices.Contains(active, token)
+			f.mu.Unlock()
+			if !accepted {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"test-model"}]}`))
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
 		if f.rejectEvery || (r.Header.Get("Authorization") != "Bearer "+f.management) {
 			// A rotated management credential refuses every route, read included:
 			// that is what makes it a blocker rather than an unavailable proof.
@@ -87,6 +113,9 @@ func newFakeExternalCPA(t *testing.T, keys ...string) *fakeExternalCPA {
 				return
 			}
 			f.keys = next
+			if !f.holdHotReload {
+				f.authKeys = slices.Clone(next)
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -573,11 +602,7 @@ func TestExternalKeyListReportsTheCPAsPresence(t *testing.T) {
 	harness.cpa.keys = slices.DeleteFunc(harness.cpa.keys, func(key string) bool { return key == appliedSecret })
 	harness.cpa.keys = append(harness.cpa.keys, appliedSecret)
 
-	keys, err := harness.keys.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	listed, unverified, err := harness.service.ExternalKeyList(ctx, keys)
+	listed, unverified, err := harness.service.ObservedKeyList(ctx, 0)
 	if err != nil || unverified {
 		t.Fatalf("listed %d keys, unverified=%v, err=%v", len(listed), unverified, err)
 	}
@@ -591,7 +616,7 @@ func TestExternalKeyListReportsTheCPAsPresence(t *testing.T) {
 	}
 	// A key the CPA no longer carries is not claimed.
 	harness.cpa.keys = slices.DeleteFunc(harness.cpa.keys, func(key string) bool { return key == appliedSecret })
-	listed, _, err = harness.service.ExternalKeyList(ctx, keys)
+	listed, _, err = harness.service.ObservedKeyList(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,12 +624,6 @@ func TestExternalKeyListReportsTheCPAsPresence(t *testing.T) {
 		if string(key.ID) == applied && key.RuntimeState == "effective_observed" {
 			t.Fatal("a key the CPA does not carry was reported as applied")
 		}
-	}
-	// Another profile's list is returned untouched.
-	private := New(nil, harness.keys, nil)
-	same, unverified, err := private.ExternalKeyList(ctx, keys)
-	if err != nil || unverified || len(same) != len(keys) {
-		t.Fatalf("non-external list = %d unverified=%v %v", len(same), unverified, err)
 	}
 }
 
@@ -652,14 +671,9 @@ func TestExternalKeyListSurvivesACPAOutage(t *testing.T) {
 	if _, err := harness.service.Apply(ctx, id, 1); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := harness.keys.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The CPA is unreachable: the list still answers with the Manager's keys and
 	// marks their presence unverified.
 	harness.cpa.server.Close()
-	listed, unverified, err := harness.service.ExternalKeyList(ctx, keys)
+	listed, unverified, err := harness.service.ObservedKeyList(ctx, 0)
 	if err != nil {
 		t.Fatalf("an unreachable CPA failed the list: %v", err)
 	}
@@ -677,12 +691,8 @@ func TestExternalKeyListReportsARejectedCredential(t *testing.T) {
 	harness := newExternalHarness(t)
 	ctx := context.Background()
 	harness.staged(t, strings.Repeat("a", 32))
-	keys, err := harness.keys.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
 	harness.cpa.rejectEvery = true
-	if _, _, err = harness.service.ExternalKeyList(ctx, keys); !errors.Is(err, cpa.ErrManagementRejected) {
+	if _, _, err := harness.service.ObservedKeyList(ctx, 0); !errors.Is(err, cpa.ErrManagementRejected) {
 		t.Fatalf("list on a rejected credential = %v", err)
 	}
 	// A moved target is the other blocker: the keys are not an effect of the CPA
@@ -690,13 +700,209 @@ func TestExternalKeyListReportsARejectedCredential(t *testing.T) {
 	moved := NewExternal(nil, harness.keys, func(context.Context) (ExternalInstall, error) {
 		return ExternalInstall{}, cpa.ErrExternalTargetMoved
 	})
-	if _, _, err = moved.ExternalKeyList(ctx, keys); !errors.Is(err, cpa.ErrExternalTargetMoved) {
+	if _, _, err := moved.ObservedKeyList(ctx, 0); !errors.Is(err, cpa.ErrExternalTargetMoved) {
 		t.Fatalf("list on a moved target = %v", err)
 	}
 }
 
-// Apply replaces the CPA's whole list, so it never builds that list from a read the
-// user has since edited: a credential they revoked directly on their CPA is not
+// The operation journal is optional state, not a precondition. A service built
+// without one has no operation to reconcile and must still answer the list from
+// the user's CPA alone, rather than failing on a journal it does not have.
+func TestExternalKeyListWithoutAJournalStillReadsTheCPA(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	secret := "credential-installed-outside-this-installation"
+	harness.cpa.keys = []string{secret}
+
+	journalFree := NewExternal(nil, harness.keys, harness.cpa.source())
+	journalFree.externalProbe = supportedExternalVersion
+	// The fake CPA authenticates /v1/models for exactly what it carries, so the
+	// key is proven by client auth and not by the configuration echo.
+	listed, unverified, err := journalFree.ObservedKeyList(ctx, 0)
+	if err != nil {
+		t.Fatalf("a journal-free list = %v", err)
+	}
+	if unverified || len(listed) != 0 {
+		t.Fatalf("journal-free list = %d keys, unverified=%v", len(listed), unverified)
+	}
+
+	// A staged key the CPA carries is the observable case: the projection must
+	// reach the CPA, not return early because no journal exists.
+	id, stagedSecret := harness.staged(t, strings.Repeat("7", 32))
+	harness.cpa.keys = []string{secret, stagedSecret}
+	listed, unverified, err = journalFree.ObservedKeyList(ctx, 0)
+	if err != nil || unverified {
+		t.Fatalf("journal-free list = %d keys, unverified=%v, err=%v", len(listed), unverified, err)
+	}
+	if len(listed) != 1 || string(listed[0].ID) != id || listed[0].RuntimeState != "effective_observed" {
+		t.Fatalf("journal-free list = %+v", listed)
+	}
+}
+
+// A fail-closed read keeps its typed blocker: nil local state must never turn the
+// CPA's refusal into a list this Manager cannot justify.
+func TestExternalKeyListKeepsTheTypedBlockerWithoutAJournal(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	harness.staged(t, strings.Repeat("8", 32))
+
+	for _, refused := range []error{cpa.ErrManagementRejected, cpa.ErrExternalTargetMoved, cpa.ErrExternalRejectionUnavailable} {
+		blocked := NewExternal(nil, harness.keys, func(context.Context) (ExternalInstall, error) {
+			return ExternalInstall{}, refused
+		})
+		if _, unverified, err := blocked.ObservedKeyList(ctx, 0); !errors.Is(err, refused) || !unverified {
+			t.Fatalf("journal-free list on %v = unverified %v, err %v", refused, unverified, err)
+		}
+	}
+}
+
+// An unreadable client-auth state is not a proven client-auth state. Without the
+// sampler that would answer /v1/models the projection stays unknown; it never
+// falls back to the configuration echo of the management read.
+func TestExternalKeyListStaysUnverifiedWithoutAnAuthSampler(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	id, secret := harness.staged(t, strings.Repeat("9", 32))
+	harness.cpa.keys = []string{secret}
+
+	unproven := NewExternal(nil, harness.keys, harness.cpa.source())
+	unproven.externalProbe = supportedExternalVersion
+	// A wire that reads configuration but exposes no client-auth proof at all.
+	unproven.externalWire = func(string) externalWire {
+		return configOnlyExternalWire{inner: cpa.NewTransportForEndpoint(harness.cpa.server.URL)}
+	}
+
+	listed, unverified, err := unproven.ObservedKeyList(ctx, 0)
+	if err != nil {
+		t.Fatalf("list without an auth sampler = %v", err)
+	}
+	if !unverified || len(listed) != 1 || string(listed[0].ID) != id {
+		t.Fatalf("list without an auth sampler = %+v, unverified=%v", listed, unverified)
+	}
+	if listed[0].RuntimeState == "effective_observed" {
+		t.Fatal("a configuration echo was reported as a proven client auth")
+	}
+	if harness.cpa.modelHits != 0 {
+		t.Fatalf("a wire without the sampler reached /v1/models %d times", harness.cpa.modelHits)
+	}
+
+	// The single-key read agrees: the configuration alone is not an effect.
+	observed, err := unproven.ObserveKey(ctx, listed[0], 0)
+	if err != nil {
+		t.Fatalf("observe without an auth sampler = %v", err)
+	}
+	if observed.RuntimeState == "effective_observed" {
+		t.Fatal("the single-key read claimed a client auth it never sampled")
+	}
+
+	// A sampler that refuses its probe is the other unknown: the same projection
+	// holds, and no proof is cached for the next read.
+	refused := NewExternal(nil, harness.keys, harness.cpa.source())
+	refused.externalProbe = supportedExternalVersion
+	refused.externalWire = func(string) externalWire {
+		return refusingAuthExternalWire{configOnlyExternalWire{inner: cpa.NewTransportForEndpoint(harness.cpa.server.URL)}}
+	}
+	listed, unverified, err = refused.ObservedKeyList(ctx, 0)
+	if err != nil || !unverified || len(listed) != 1 || listed[0].RuntimeState != "effect_unknown" {
+		t.Fatalf("list with a refused sample = %+v, unverified=%v, err=%v", listed, unverified, err)
+	}
+	if listed[0].EffectCode != "" {
+		t.Fatalf("a refused sample invented an operation code: %q", listed[0].EffectCode)
+	}
+	observed, err = refused.ObserveKey(ctx, listed[0], 0)
+	if err != nil {
+		t.Fatalf("observe with a refused sample = %v", err)
+	}
+	if observed.RuntimeState == "effective_observed" {
+		t.Fatal("a refused sample was recorded as a proven client auth")
+	}
+}
+
+// configOnlyExternalWire is a user CPA surface that can read and write the key
+// list but exposes no /v1/models sampler, so it proves configuration membership
+// and nothing about live client authentication.
+type configOnlyExternalWire struct{ inner *cpa.Transport }
+
+func (w configOnlyExternalWire) ExternalKeySnapshot(ctx context.Context, management string) (cpa.ExternalKeySnapshot, error) {
+	return w.inner.ExternalKeySnapshot(ctx, management)
+}
+
+func (w configOnlyExternalWire) ExternalWriteKeySet(ctx context.Context, management string, keys []string) error {
+	return w.inner.ExternalWriteKeySet(ctx, management, keys)
+}
+
+// refusingAuthExternalWire keeps the configuration read and answers every
+// client-auth sample with a refusal, which is what a CPA whose model surface
+// cannot be read reports.
+type refusingAuthExternalWire struct{ configOnlyExternalWire }
+
+func (refusingAuthExternalWire) ExternalSampleKeySet(context.Context, []string, []string) (bool, error) {
+	return false, cpa.ErrExternalRejectionUnavailable
+}
+
+// Managed authentication cannot replace the durable installation authority.
+// Losing its journal keeps both list and detail unverified even for a live key.
+func TestManagedKeyReadsWithoutAJournalCannotCertifyTheDestination(t *testing.T) {
+	service, destination, _, id := managedFixture(t)
+	ctx := context.Background()
+	if _, err := service.Apply(ctx, id, 9); err != nil {
+		t.Fatal(err)
+	}
+	destination.mu.Lock()
+	carried := slices.Clone(destination.keys)
+	destination.mu.Unlock()
+	if len(carried) != 1 {
+		t.Fatalf("destination carries %d keys", len(carried))
+	}
+
+	service.repo = nil
+	listed, unverified, err := service.ObservedKeyList(ctx, 9)
+	if err != nil {
+		t.Fatalf("journal-free managed list = %v", err)
+	}
+	if !unverified || len(listed) != 1 || string(listed[0].ID) != id {
+		t.Fatalf("journal-free managed list = %+v, unverified=%v", listed, unverified)
+	}
+	if listed[0].RuntimeState != "effect_unknown" {
+		t.Fatalf("missing installation authority certified a key: %q", listed[0].RuntimeState)
+	}
+	observed, err := service.ObserveKey(ctx, listed[0], 9)
+	if err != nil {
+		t.Fatalf("journal-free single-key read = %v", err)
+	}
+	if observed.RuntimeState != "effect_unknown" {
+		t.Fatalf("journal-free single-key read = %q", observed.RuntimeState)
+	}
+}
+
+// A destination this authority cannot address is still unknown when no journal
+// exists: neither applied nor rejected, and never an error that hides the list.
+func TestManagedKeyListWithoutAJournalKeepsTheDestinationBlocker(t *testing.T) {
+	service, destination, _, id := managedFixture(t)
+	ctx := context.Background()
+	if _, err := service.Apply(ctx, id, 9); err != nil {
+		t.Fatal(err)
+	}
+	destination.setKeys(nil)
+
+	service.repo = nil
+	listed, unverified, err := service.ObservedKeyList(ctx, 9)
+	if err != nil {
+		t.Fatalf("journal-free managed list = %v", err)
+	}
+	if !unverified || len(listed) != 1 || string(listed[0].ID) != id {
+		t.Fatalf("journal-free managed list = %+v, unverified=%v", listed, unverified)
+	}
+	if listed[0].RuntimeState == "effective_observed" {
+		t.Fatal("a key the destination does not carry was reported as applied")
+	}
+	// The generation fence is the same with or without a journal.
+	listed, unverified, err = service.ObservedKeyList(ctx, 8)
+	if err != nil || !unverified || len(listed) != 1 || listed[0].EffectCode != "key_operation_generation_mismatch" {
+		t.Fatalf("journal-free list on a stale generation = %+v, unverified=%v, err=%v", listed, unverified, err)
+	}
+}
+
 // added back by the read this Manager took before that edit.
 func TestExternalApplyRefusesAConcurrentExternalEdit(t *testing.T) {
 	harness := newExternalHarness(t)
@@ -799,11 +1005,7 @@ func TestExternalWritesAreRefusedForAnUnsupportedVersion(t *testing.T) {
 	}
 
 	// Reads are untouched: the list still reports the presence the CPA answers.
-	keys, err := harness.keys.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	listed, unverified, err := harness.service.ExternalKeyList(ctx, keys)
+	listed, unverified, err := harness.service.ObservedKeyList(ctx, 0)
 	if err != nil || unverified {
 		t.Fatalf("list on an unsupported CPA = %d keys, unverified=%v, %v", len(listed), unverified, err)
 	}
@@ -1030,4 +1232,350 @@ func TestExternalApplyRefusesAnUnsupportedVersionBeforeItsPut(t *testing.T) {
 	if len(harness.cpa.keys) != 0 {
 		t.Fatalf("the CPA's credentials changed: %v", harness.cpa.keys)
 	}
+}
+
+// TestExternalRevokeDuplicateKeyEntriesRejectsZeroAfterSetWithoutWrites verifies
+// that duplicate copies of the revoked key in External CPA config (e.g. [old, old])
+// never pass last-key checks to write an empty api-keys slice or wedge the journal.
+func TestExternalRevokeDuplicateKeyEntriesRejectsZeroAfterSetWithoutWrites(t *testing.T) {
+	harness := newExternalHarness(t)
+	ctx := context.Background()
+	target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+	_, keeperSecret := harness.staged(t, strings.Repeat("3", 32))
+
+	harness.cpa.mu.Lock()
+	harness.cpa.keys = []string{targetSecret, targetSecret}
+	harness.cpa.authKeys = []string{targetSecret}
+	harness.cpa.mu.Unlock()
+
+	if err := harness.service.Preflight(ctx, target, "", "revoke", 1); !errors.Is(err, ErrLastKey) {
+		t.Fatalf("Preflight(revoke [old, old]) = %v, want ErrLastKey", err)
+	}
+	if _, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, "", "revoke", 1); !errors.Is(err, ErrLastKey) {
+		t.Fatalf("Prepare(revoke [old, old]) = %v, want ErrLastKey", err)
+	}
+	if harness.cpa.writes != 0 {
+		t.Fatalf("writes after duplicate-key revoke refusal = %d, want 0", harness.cpa.writes)
+	}
+	if latest, err := harness.service.repo.LatestOperation(ctx); err != nil || latest != nil {
+		t.Fatalf("LatestOperation = %+v (%v), want nil (rejected before BeginOperation)", latest, err)
+	}
+
+	// Prepare while a distinct third key exists, then External operator collapses
+	// config to [old, old] before ContinueOperation: ContinueOperation must reject
+	// with ErrLastKey BEFORE SaveOperation(attempted) or ExternalWriteKeySet.
+	harness.cpa.mu.Lock()
+	harness.cpa.keys = []string{targetSecret, targetSecret, "transient-third-key"}
+	harness.cpa.authKeys = slices.Clone(harness.cpa.keys)
+	harness.cpa.mu.Unlock()
+
+	prepared, err := harness.service.Prepare(ctx, strings.Repeat("5", 32), target, "", "revoke", 1)
+	if err != nil {
+		t.Fatalf("Prepare with distinct key: %v", err)
+	}
+	harness.cpa.mu.Lock()
+	harness.cpa.keys = []string{targetSecret, targetSecret}
+	harness.cpa.authKeys = []string{targetSecret}
+	harness.cpa.mu.Unlock()
+
+	if _, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1); !errors.Is(err, ErrLastKey) {
+		t.Fatalf("ContinueOperation([old, old]) = %v, want ErrLastKey", err)
+	}
+	if harness.cpa.writes != 0 {
+		t.Fatalf("writes after ContinueOperation([old, old]) = %d, want 0", harness.cpa.writes)
+	}
+	stored, err := harness.service.repo.Operation(ctx, prepared.Operation.ID)
+	if err != nil || stored == nil || stored.Outcome != repo.OutcomePending || !stored.AllStepsUnattempted() {
+		t.Fatalf("stored operation after pre-write ErrLastKey = %+v (%v), want pending + all unattempted", stored, err)
+	}
+
+	// Restoring [old, old, keeper, keeper] allows ContinueOperation to remove all
+	// copies of old and write the deduplicated unique survivor [keeper].
+	harness.cpa.mu.Lock()
+	harness.cpa.keys = []string{targetSecret, targetSecret, keeperSecret, keeperSecret}
+	harness.cpa.authKeys = []string{targetSecret, keeperSecret}
+	harness.cpa.mu.Unlock()
+
+	settled, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1)
+	if err != nil {
+		t.Fatalf("ContinueOperation([old, old, keeper, keeper]): %v", err)
+	}
+	if settled.Operation == nil || settled.Operation.Outcome != repo.OutcomeCommitted {
+		t.Fatalf("settled operation = %+v, want committed", settled.Operation)
+	}
+	if harness.cpa.writes != 1 || !slices.Equal(harness.cpa.keys, []string{keeperSecret}) {
+		t.Fatalf("cpa writes=%d keys=%v, want 1 write of [%s]", harness.cpa.writes, harness.cpa.keys, keeperSecret)
+	}
+}
+
+// TestExternalPreSettledRevokeAndReplaceRequireHotReloadWithoutRedundantWrites
+// proves unattempted operations whose config step already landed out-of-band
+// require live /v1/models hot-reload (returning ErrApplyUnknown while pending)
+// and settle read-only without redundant PUTs once hot-reload completes.
+func TestExternalPreSettledRevokeAndReplaceRequireHotReloadWithoutRedundantWrites(t *testing.T) {
+	t.Run("pre_settled_revoke_waits_for_hot_reload_and_settles_readonly", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+		keeper, keeperSecret := harness.staged(t, strings.Repeat("3", 32))
+		harness.cpa.keys = []string{targetSecret, keeperSecret}
+		harness.cpa.authKeys = []string{targetSecret, keeperSecret}
+
+		prepared, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, keeper, "revoke", 1)
+		if err != nil {
+			t.Fatalf("Prepare(revoke): %v", err)
+		}
+
+		// User removes targetSecret in config.yaml, while CPA hot-reload has not run yet.
+		harness.cpa.mu.Lock()
+		harness.cpa.keys = []string{keeperSecret}
+		harness.cpa.holdHotReload = true
+		harness.cpa.authKeys = []string{targetSecret, keeperSecret}
+		harness.cpa.mu.Unlock()
+
+		if _, err := harness.service.CheckOperation(ctx, prepared.Operation.ID, 1); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("CheckOperation before hot-reload = %v, want ErrApplyUnknown", err)
+		}
+		if _, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("ContinueOperation before hot-reload = %v, want ErrApplyUnknown (never pending-success)", err)
+		}
+		if harness.cpa.writes != 0 {
+			t.Fatalf("writes during pre-settled hot-reload wait = %d, want 0", harness.cpa.writes)
+		}
+
+		harness.cpa.mu.Lock()
+		harness.cpa.holdHotReload = false
+		harness.cpa.authKeys = []string{keeperSecret}
+		harness.cpa.mu.Unlock()
+
+		settled, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1)
+		if err != nil {
+			t.Fatalf("ContinueOperation after hot-reload: %v", err)
+		}
+		if harness.cpa.writes != 0 {
+			t.Fatalf("writes on read-only settlement = %d, want 0", harness.cpa.writes)
+		}
+		if settled.Operation == nil || settled.Operation.Outcome != repo.OutcomeCommitted || settled.RuntimeState != "effective_observed" {
+			t.Fatalf("settled = %+v, want committed effective_observed", settled)
+		}
+	})
+
+	t.Run("pre_settled_replace_add_step_waits_for_hot_reload_and_executes_only_revoke_put", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		target, targetSecret := harness.staged(t, strings.Repeat("2", 32))
+		replacement, replacementSecret := harness.staged(t, strings.Repeat("3", 32))
+		harness.cpa.keys = []string{targetSecret}
+		harness.cpa.authKeys = []string{targetSecret}
+
+		prepared, err := harness.service.Prepare(ctx, strings.Repeat("4", 32), target, replacement, "replace", 1)
+		if err != nil {
+			t.Fatalf("Prepare(replace): %v", err)
+		}
+
+		// Replacement key is added out-of-band in config, while /v1/models has not hot-reloaded yet.
+		harness.cpa.mu.Lock()
+		harness.cpa.keys = []string{targetSecret, replacementSecret}
+		harness.cpa.holdHotReload = true
+		harness.cpa.authKeys = []string{targetSecret}
+		harness.cpa.mu.Unlock()
+
+		if _, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("ContinueOperation(replace add before hot-reload) = %v, want ErrApplyUnknown", err)
+		}
+		if harness.cpa.writes != 0 {
+			t.Fatalf("writes while add hot-reload pending = %d, want 0 (no redundant PUT)", harness.cpa.writes)
+		}
+
+		harness.cpa.mu.Lock()
+		harness.cpa.holdHotReload = false
+		harness.cpa.authKeys = []string{targetSecret, replacementSecret}
+		harness.cpa.mu.Unlock()
+
+		// Now step 0 (add) settles read-only and ContinueOperation sends only the single PUT for step 1 (revoke).
+		settled, err := harness.service.ContinueOperation(ctx, prepared.Operation.ID, 1)
+		if err != nil {
+			t.Fatalf("ContinueOperation(replace after add hot-reload): %v", err)
+		}
+		if harness.cpa.writes != 1 {
+			t.Fatalf("writes for replace after pre-settled add = %d, want exactly 1 (revoke only)", harness.cpa.writes)
+		}
+		if settled.Operation == nil || settled.Operation.Outcome != repo.OutcomeCommitted || !slices.Equal(harness.cpa.keys, []string{replacementSecret}) {
+			t.Fatalf("settled replace = %+v, keys = %v", settled, harness.cpa.keys)
+		}
+	})
+}
+
+// TestExternalPostAuthCheckpointAndSourceDriftFenceCommit verifies that
+// externalStepHeld rechecks externalObservationHeld after /v1/models sampling
+// and refuses to cache proof or commit the journal if checkpoint, target/credential,
+// or config source drifted mid-sample.
+func TestExternalPostAuthCheckpointAndSourceDriftFenceCommit(t *testing.T) {
+	t.Run("checkpoint_drift_after_models_sample_returns_ErrGeneration_without_commit", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		target, _ := harness.staged(t, strings.Repeat("2", 32))
+
+		checkpoint := uint64(1)
+		harness.service.externalSource = func(context.Context) (ExternalInstall, error) {
+			return ExternalInstall{
+				Identity:      ExternalIdentity(harness.cpa.server.URL),
+				Checkpoint:    checkpoint,
+				BaseURL:       harness.cpa.server.URL,
+				ManagementKey: harness.cpa.management,
+			}, nil
+		}
+		baseWire := harness.service.externalWire
+		harness.service.externalWire = func(baseURL string) externalWire {
+			inner := baseWire(baseURL)
+			return &authorityLossAfterExternalSample{
+				externalWire: inner,
+				sampler:      inner.(externalAuthWire),
+				after:        func() { checkpoint = 2 },
+			}
+		}
+
+		if _, err := harness.service.ApplyAdd(ctx, strings.Repeat("3", 32), target, 1); !errors.Is(err, ErrGeneration) {
+			t.Fatalf("ApplyAdd on post-auth checkpoint drift = %v, want ErrGeneration", err)
+		}
+		op, err := harness.service.repo.Operation(ctx, strings.Repeat("3", 32))
+		if err != nil || op == nil || op.Outcome == repo.OutcomeCommitted {
+			t.Fatalf("operation after post-auth checkpoint drift = %+v (%v), must not commit", op, err)
+		}
+	})
+
+	t.Run("config_source_drift_after_models_sample_returns_ErrApplyUnknown_without_commit", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		target, _ := harness.staged(t, strings.Repeat("4", 32))
+
+		baseWire := harness.service.externalWire
+		drifted := false
+		harness.service.externalWire = func(baseURL string) externalWire {
+			inner := baseWire(baseURL)
+			return &authorityLossAfterExternalSample{
+				externalWire: inner,
+				sampler:      inner.(externalAuthWire),
+				after: func() {
+					if !drifted {
+						drifted = true
+						harness.cpa.mu.Lock()
+						harness.cpa.keys = append(harness.cpa.keys, "concurrent-external-key")
+						harness.cpa.authKeys = slices.Clone(harness.cpa.keys)
+						harness.cpa.mu.Unlock()
+					}
+				},
+			}
+		}
+
+		if _, err := harness.service.ApplyAdd(ctx, strings.Repeat("5", 32), target, 1); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("ApplyAdd on post-auth config drift = %v, want ErrApplyUnknown", err)
+		}
+		op, err := harness.service.repo.Operation(ctx, strings.Repeat("5", 32))
+		if err != nil || op == nil || op.Outcome == repo.OutcomeCommitted {
+			t.Fatalf("operation after post-auth config drift = %+v (%v), must not commit", op, err)
+		}
+	})
+}
+
+// TestExternalObserveRequiresLiveModelsAuthAndJournaledApplyNeverReplaysUnknownPut
+// verifies that External Observe never reports effective_observed from config echo
+// alone, and External Apply journals attempted writes before PUT so an unknown
+// write is never resent on retry.
+func TestExternalObserveRequiresLiveModelsAuthAndJournaledApplyNeverReplaysUnknownPut(t *testing.T) {
+	t.Run("externalObserve_rejects_config_echo_until_live_models_auth_and_fence_hold", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		keyID, keySecret := harness.staged(t, strings.Repeat("2", 32))
+
+		harness.cpa.mu.Lock()
+		harness.cpa.keys = []string{keySecret}
+		harness.cpa.holdHotReload = true
+		harness.cpa.authKeys = nil
+		harness.cpa.mu.Unlock()
+
+		obs, err := harness.service.Observe(ctx, keyID, 1)
+		if err != nil {
+			t.Fatalf("Observe during hot-reload lag: %v", err)
+		}
+		if !obs.CPAConfigured || obs.RuntimeState != "effect_unknown" {
+			t.Fatalf("Observe from config echo = %+v, want CPAConfigured=true RuntimeState=effect_unknown", obs)
+		}
+
+		// Config-only wire (without externalAuthWire) also never reports effective_observed.
+		realWire := harness.service.externalWire
+		harness.service.externalWire = func(baseURL string) externalWire {
+			return configOnlyExternalWire{inner: cpa.NewTransportForEndpoint(baseURL)}
+		}
+		harness.cpa.mu.Lock()
+		harness.cpa.holdHotReload = false
+		harness.cpa.authKeys = []string{keySecret}
+		harness.cpa.mu.Unlock()
+
+		configOnlyObs, err := harness.service.Observe(ctx, keyID, 1)
+		if err != nil {
+			t.Fatalf("Observe on config-only wire: %v", err)
+		}
+		if !configOnlyObs.CPAConfigured || configOnlyObs.RuntimeState != "effect_unknown" {
+			t.Fatalf("Observe on config-only wire = %+v, want effect_unknown", configOnlyObs)
+		}
+
+		harness.service.externalWire = realWire
+		liveObs, err := harness.service.Observe(ctx, keyID, 1)
+		if err != nil {
+			t.Fatalf("Observe with live /v1/models auth: %v", err)
+		}
+		if !liveObs.CPAConfigured || liveObs.RuntimeState != "effective_observed" {
+			t.Fatalf("Observe with live /v1/models auth = %+v, want effective_observed", liveObs)
+		}
+	})
+
+	t.Run("externalApply_journals_before_put_and_never_resends_unknown_write", func(t *testing.T) {
+		harness := newExternalHarness(t)
+		ctx := context.Background()
+		keyID, _ := harness.staged(t, strings.Repeat("6", 32))
+
+		putCalls := 0
+		baseWire := harness.service.externalWire
+		harness.service.externalWire = func(baseURL string) externalWire {
+			return &unknownPutOnceExternalWire{
+				externalWire:     baseWire(baseURL),
+				externalAuthWire: baseWire(baseURL).(externalAuthWire),
+				puts:             &putCalls,
+			}
+		}
+
+		firstState, err := harness.service.Apply(ctx, keyID, 1)
+		if !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("first Apply = %v, want ErrApplyUnknown", err)
+		}
+		if !firstState.Attempted || putCalls != 1 {
+			t.Fatalf("after first Apply: Attempted=%v putCalls=%d, want true and 1", firstState.Attempted, putCalls)
+		}
+		latest, err := harness.service.repo.LatestOperation(ctx)
+		if err != nil || latest == nil || latest.Outcome != repo.OutcomeUnknown || latest.AllStepsUnattempted() {
+			t.Fatalf("journal after unknown Apply = %+v (%v), want OutcomeUnknown attempted", latest, err)
+		}
+
+		// External operator did not keep the key in config; retrying Apply must reconcile
+		// read-only and never send a second PUT.
+		secondState, err := harness.service.Apply(ctx, keyID, 1)
+		if !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("second Apply = %v, want ErrApplyUnknown", err)
+		}
+		if !secondState.Attempted || putCalls != 1 {
+			t.Fatalf("after second Apply: Attempted=%v putCalls=%d, want true and still 1 PUT", secondState.Attempted, putCalls)
+		}
+	})
+}
+
+type unknownPutOnceExternalWire struct {
+	externalWire
+	externalAuthWire
+	puts *int
+}
+
+func (w *unknownPutOnceExternalWire) ExternalWriteKeySet(_ context.Context, _ string, _ []string) error {
+	*w.puts++
+	return cpa.ErrApplyUnknown
 }

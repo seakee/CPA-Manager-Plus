@@ -37,6 +37,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
@@ -376,24 +377,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
-	var preflight, verify bool
+	var preflight, verify, routingAction bool
 	switch {
 	case strings.HasSuffix(path, PreflightSuffix) && path != PreflightSuffix:
 		preflight = true
 	case strings.HasSuffix(path, StatusSuffix) && path != StatusSuffix:
 	case strings.HasSuffix(path, VerifySuffix) && path != VerifySuffix:
 		verify = true
+	case strings.HasSuffix(path, RoutingSuffix) && path != RoutingSuffix:
+		routingAction = true
 	default:
 		http.NotFound(w, r)
 		return
 	}
-	// The two reads stay reads: GET and HEAD only. The action takes POST and
-	// nothing else, so a browser prefetch, a link or a bookmark of the action's
-	// address can never advance the operation.
-	if verify {
+	// The two reads stay reads: GET and HEAD only. The actions take POST and
+	// nothing else, so a browser prefetch, a link or a bookmark of an action's
+	// address can never advance or mutate the operation.
+	if verify || routingAction {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if routingAction {
+			h.serveRouting(w, r)
 			return
 		}
 		h.serveVerify(w, r, mount)
@@ -934,15 +941,18 @@ type statusDocument struct {
 	// available here and is refused by the preflight, which is the step that
 	// actually qualifies the source. The projection never requires the mount; the
 	// stage does not promise a step that needs it can run.
-	SourceRoot     string                 `json:"sourceRoot"`
-	DomainsDone    []string               `json:"domainsDone"`
-	SourceKind     string                 `json:"sourceKind,omitempty"`
-	SourceVersion  string                 `json:"sourceVersion,omitempty"`
-	Reconciliation reconciliationDocument `json:"reconciliation"`
-	ManualItems    []string               `json:"manualItems"`
-	ErrorCode      string                 `json:"errorCode,omitempty"`
-	ErrorDetail    string                 `json:"errorDetail,omitempty"`
-	UpdatedAtMS    int64                  `json:"updatedAtMs"`
+	SourceRoot     string                     `json:"sourceRoot"`
+	TargetMode     string                     `json:"targetMode,omitempty"`
+	DomainsDone    []string                   `json:"domainsDone"`
+	SourceKind     string                     `json:"sourceKind,omitempty"`
+	SourceVersion  string                     `json:"sourceVersion,omitempty"`
+	Reconciliation reconciliationDocument     `json:"reconciliation"`
+	ManualItems    []string                   `json:"manualItems"`
+	ErrorCode      string                     `json:"errorCode,omitempty"`
+	ErrorDetail    string                     `json:"errorDetail,omitempty"`
+	Routing        *upgradeRoutingDocument    `json:"routing,omitempty"`
+	AccessInfo     *upgradeAccessInfoDocument `json:"accessInfo,omitempty"`
+	UpdatedAtMS    int64                      `json:"updatedAtMs"`
 }
 
 func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
@@ -998,19 +1008,21 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 // no backup digest, no connection secret and no filesystem path. The evidence is
 // in the operation row, and this route reports the decision it supports.
 type verifyDocument struct {
-	ContractVersion string   `json:"contractVersion"`
-	Recorded        bool     `json:"recorded"`
-	Stage           string   `json:"stage"`
-	StageKnown      bool     `json:"stageKnown"`
-	NextAction      string   `json:"nextAction"`
-	Complete        bool     `json:"complete"`
-	TargetMode      string   `json:"targetMode"`
-	DomainsDone     []string `json:"domainsDone"`
-	ReasonCode      string   `json:"reasonCode,omitempty"`
-	Reason          string   `json:"reason,omitempty"`
-	ManualItems     []string `json:"manualItems"`
-	AlreadyVerified bool     `json:"alreadyVerified"`
-	UpdatedAtMS     int64    `json:"updatedAtMs"`
+	ContractVersion string                     `json:"contractVersion"`
+	Recorded        bool                       `json:"recorded"`
+	Stage           string                     `json:"stage"`
+	StageKnown      bool                       `json:"stageKnown"`
+	NextAction      string                     `json:"nextAction"`
+	Complete        bool                       `json:"complete"`
+	TargetMode      string                     `json:"targetMode"`
+	DomainsDone     []string                   `json:"domainsDone"`
+	ReasonCode      string                     `json:"reasonCode,omitempty"`
+	Reason          string                     `json:"reason,omitempty"`
+	ManualItems     []string                   `json:"manualItems"`
+	AlreadyVerified bool                       `json:"alreadyVerified"`
+	Routing         *upgradeRoutingDocument    `json:"routing,omitempty"`
+	AccessInfo      *upgradeAccessInfoDocument `json:"accessInfo,omitempty"`
+	UpdatedAtMS     int64                      `json:"updatedAtMs"`
 }
 
 // serveVerify runs the one completion gate the CLI runs.
@@ -1028,10 +1040,8 @@ type verifyDocument struct {
 // check. A request whose lookup never answered is refused with the deadline's
 // own code instead of verifying a source nobody named.
 func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount mountResolution) {
-	// The action takes no input. A body would be a caller's attempt to name the
-	// source, the target or the authority, and none of those is this caller's to
-	// state; it is refused rather than ignored.
-	if r.ContentLength != 0 {
+	routeReq, hasRouteInput, validBody := decodeOptionalRoutingBody(w, r)
+	if !validBody {
 		writeError(w, http.StatusBadRequest, CodeRequestInvalid)
 		return
 	}
@@ -1047,26 +1057,34 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount moun
 		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
 		return
 	}
-	if mount.database == "" {
-		// The mount holds no database the shared file policy accepts, so the
-		// volume the operation copied cannot be observed. The gate refuses a
-		// verification that skipped the fingerprint; this route names the mount
-		// condition the preflight names for the same tree.
-		writeError(w, http.StatusServiceUnavailable, mount.state())
-		return
-	}
 	timeout := h.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
-		LegacyRoot: mount.root,
+	legacyRoot := mount.root
+	if mount.database == "" {
+		legacyRoot = ""
+	}
+	verifyOpts := upgradeservice.VerifyOptions{
+		LegacyRoot: legacyRoot,
 		TargetRoot: filepath.Dir(target),
 		Runtime:    h.Runtime,
-	})
+	}
+	if hasRouteInput {
+		verifyOpts.ControlBasePath = routeReq.ControlBasePath
+		verifyOpts.InferenceBasePath = routeReq.InferenceBasePath
+		verifyOpts.SharedEntry = routeReq.SharedEntry
+	}
+	result, err := upgradeservice.Verify(ctx, verifyOpts)
 	if err != nil {
+		if mount.database == "" {
+			if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && code == upgradeservice.UpgradeErrorVerifySourceUnavailable {
+				writeError(w, http.StatusServiceUnavailable, mount.state())
+				return
+			}
+		}
 		writeError(w, actionFailureStatus(err), actionFailureCode(err))
 		return
 	}
@@ -1088,6 +1106,18 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount moun
 		UpdatedAtMS:     result.UpdatedAtMS,
 	}
 	document.NextAction = nextActionForRecordedStage(document.Stage, document.ReasonCode, document.DomainsDone)
+	routeDoc, accessDoc := buildUpgradeRoutingAndAccessInfo(model.UpgradeOperation{
+		Stage:              result.Stage,
+		DomainsDone:        result.DomainsDone,
+		ControlBasePath:    result.ControlBasePath,
+		InferenceBasePath:  result.InferenceBasePath,
+		SharedEntry:        result.SharedEntry,
+		RoutingCommitted:   result.RoutingCommitted,
+		InferenceCommitted: result.InferenceCommitted,
+		UpdatedAtMS:        result.UpdatedAtMS,
+	}, result.TargetMode, result.ExternalBaseURL)
+	document.Routing = &routeDoc
+	document.AccessInfo = &accessDoc
 	writeJSON(w, http.StatusOK, document)
 }
 
@@ -1109,6 +1139,11 @@ func actionFailureStatus(err error) int {
 		upgradeservice.UpgradeErrorVerifySourceUnavailable,
 		upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy):
 		return http.StatusServiceUnavailable
+	case upgradeservice.UpgradeErrorCode("invalid_access_prefix"),
+		upgradeservice.UpgradeErrorCode("inference_prefix_required"),
+		upgradeservice.UpgradeErrorCode("external_inference_prefix_forbidden"),
+		upgradeservice.UpgradeErrorCode("shared_prefix_mismatch"):
+		return http.StatusBadRequest
 	default:
 		return http.StatusConflict
 	}
@@ -1459,6 +1494,16 @@ func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDo
 	document.ErrorDetail = scrubError(row.ErrorDetail.String)
 	document.UpdatedAtMS = row.UpdatedAtMS
 	document.Reconciliation = reconciliation
+	enrichedOp, targetMode, extURL := readRoutingStatusColumns(ctx, db, model.UpgradeOperation{
+		Stage:       model.UpgradeStage(row.Stage),
+		DomainsDone: domains,
+		CreatedAtMS: row.CreatedAtMS,
+		UpdatedAtMS: row.UpdatedAtMS,
+	})
+	routeDoc, accessDoc := buildUpgradeRoutingAndAccessInfo(enrichedOp, targetMode, extURL)
+	document.TargetMode = targetMode
+	document.Routing = &routeDoc
+	document.AccessInfo = &accessDoc
 	return document, true, nil
 }
 
@@ -1653,6 +1698,10 @@ func decodeStringColumn(raw string, column string) ([]string, error) {
 		return []string{}, nil
 	}
 	return values, nil
+}
+
+func contextWithTimeout(r *http.Request, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), timeout)
 }
 
 // scrubList applies the content scrubber to every item and keeps the list shape.

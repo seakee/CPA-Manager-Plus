@@ -29,6 +29,9 @@ type Permit struct {
 	Identity      string                  `json:"-"`
 	ArtifactID    string                  `json:"-"`
 	Strategy      string                  `json:"-"`
+	// Captured only from authenticated Runtime status for one bounded operation.
+	runtimeGeneration uint64
+	runtimeArtifact   string
 }
 
 func loadPermit() (Permit, error) {

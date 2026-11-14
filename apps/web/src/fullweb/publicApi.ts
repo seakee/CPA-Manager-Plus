@@ -114,11 +114,42 @@ const isArtifactResource = (resource: string) =>
   resource === 'runtime/artifact/acquire' ||
   resource === 'runtime/artifact/upload';
 
+const ACCESS_COMPLETION_ERROR_CODES: Record<string, true> = {
+  invalid_access_prefix: true,
+  inference_prefix_required: true,
+  external_inference_prefix_forbidden: true,
+  shared_prefix_mismatch: true,
+  shared_prefix_confirmation_required: true,
+  prefix_overlap_forbidden: true,
+  reserved_prefix_collision: true,
+  inference_prefix_already_committed: true,
+  routing_verification_failed: true,
+  routing_conflict: true,
+  routing_unavailable: true,
+};
+
+const KEY_OPERATION_ERROR_CODES: Record<string, true> = {
+  key_operation_invalid: true,
+  key_operation_not_found: true,
+  last_effective_key: true,
+  key_operation_conflict: true,
+  key_operation_generation_mismatch: true,
+  key_operation_host_proof_required: true,
+  key_operation_source_conflict: true,
+  key_operation_unknown: true,
+  config_authority_unavailable: true,
+};
+
 // Every resource whose failure carries a typed code the page must act on. The
 // payload is parsed for exactly these; every other failure stays a bare HTTP
 // error, because a page must never guess a cause from a status alone.
 const isTypedErrorResource = (resource: string) =>
-  isGatewayConfigResource(resource) || isExternalResource(resource) || isArtifactResource(resource);
+  isGatewayConfigResource(resource) ||
+  isExternalResource(resource) ||
+  isArtifactResource(resource) ||
+  resource === 'installation/access/completion' ||
+  resource === 'api-keys' ||
+  resource.startsWith('api-keys/');
 export class PublicApiError extends Error {
   constructor(
     readonly kind: PublicApiErrorKind,
@@ -131,7 +162,9 @@ export class PublicApiError extends Error {
     // The item count of an `adopt_migration_retryable` completion refusal.
     readonly retryable?: number,
     // The bounded capability list an Adopt strategy blocker names.
-    readonly unsupported?: readonly string[]
+    readonly unsupported?: readonly string[],
+    // A saved Key may accompany an unconfirmed creation, but is not a success.
+    readonly key?: unknown
   ) {
     super(`Public API ${kind}`);
     this.name = 'PublicApiError';
@@ -190,7 +223,9 @@ export function createPublicApiClient(
     }
     const isGzipUpload = resource === 'runtime/artifact/upload' && method === 'PUT';
     const headers: Record<string, string> = { Accept: 'application/json' };
-    if (credential) headers.Authorization = `Bearer ${credential.value}`;
+    if (credential) {
+      headers.Authorization = `${credential.kind === 'session' ? 'Fresh' : 'Bearer'} ${credential.value}`;
+    }
     if (body !== undefined) {
       headers['Content-Type'] = isGzipUpload ? 'application/gzip' : 'application/json';
     }
@@ -243,6 +278,7 @@ export function createPublicApiClient(
         // Failed operation reads may still carry a durable journal; they must
         // retain their original 409/503 status and cannot authorize writes.
         let operationResult: unknown;
+        let key: unknown;
         let code: string | undefined;
         let field: string | undefined;
         let detail: string | undefined;
@@ -259,22 +295,30 @@ export function createPublicApiClient(
           // revoking and replacing one are written through the same credential, and
           // the operation journal keeps its own answer below.
           (resource.startsWith('api-keys/') && !resource.startsWith('api-keys/operations/'));
-        const operationResource = method === 'GET' && resource.startsWith('api-keys/operations/');
+        const operationResource =
+          resource.startsWith('api-keys/operations/') &&
+          (method === 'GET' ||
+            (method === 'POST' && /^api-keys\/operations\/[^/]+\/continue$/.test(resource)));
+        const keyResource = resource === 'api-keys' || resource.startsWith('api-keys/');
         // The completion refusals are the only coded answers a POST can carry
         // about an adoption's own run, so they are read for both statuses the
         // server uses: a 409 for "not yet" and a 503 for "cannot be proven".
         const completeResource = resource === 'complete';
         const artifactResource = isArtifactResource(resource);
+        const accessCompletionResource = resource === 'installation/access/completion';
         if (
           artifactResource ||
           ((retryResource ||
             externalResource ||
             operationResource ||
             completeResource ||
+            accessCompletionResource ||
             (resource === 'strategy' && response.status === 409)) &&
             (response.status === 409 ||
               response.status === 503 ||
-              (retryResource && (response.status === 400 || response.status === 422))))
+              ((retryResource || accessCompletionResource || keyResource) && response.status === 400) ||
+              (retryResource && response.status === 422) ||
+              (keyResource && response.status === 404)))
         ) {
           try {
             const payload = (await response.json()) as Record<string, unknown>;
@@ -282,12 +326,24 @@ export function createPublicApiClient(
               if (typeof payload.code === 'string' && ARTIFACT_ERROR_CODES[payload.code] === true) {
                 code = payload.code;
               }
-            } else if (retryResource || externalResource) {
+            } else if (accessCompletionResource) {
+              if (
+                typeof payload.code === 'string' &&
+                ACCESS_COMPLETION_ERROR_CODES[payload.code] === true
+              ) {
+                code = payload.code;
+              }
+            } else if (retryResource || externalResource || operationResource) {
               // Only a recognised code unlocks the diagnostic: an unrecognised
               // upstream payload must not smuggle its message into the UI.
               const known = retryResource ? GATEWAY_ERROR_CODES : EXTERNAL_ERROR_CODES;
-              if (typeof payload.code === 'string' && known[payload.code] === true)
+              if (
+                typeof payload.code === 'string' &&
+                (known[payload.code] === true ||
+                  (keyResource && KEY_OPERATION_ERROR_CODES[payload.code] === true))
+              ) {
                 code = payload.code;
+              }
               if (code) {
                 if (typeof payload.field === 'string') field = payload.field;
                 if (typeof payload.message === 'string') detail = payload.message;
@@ -299,9 +355,17 @@ export function createPublicApiClient(
                 (response.status === 409 || response.status === 503) &&
                 'result' in payload &&
                 payload.result &&
-                typeof payload.result === 'object'
+                typeof payload.result === 'object' &&
+                !Array.isArray(payload.result)
               )
                 operationResult = payload.result;
+              if (
+                keyResource && code &&
+                (response.status === 409 || response.status === 503) &&
+                payload.key && typeof payload.key === 'object' && !Array.isArray(payload.key)
+              ) {
+                key = payload.key;
+              }
             } else if (resource === 'strategy') {
               // Only bounded CPA-source errors are actionable to this UI. Admin
               // authentication errors remain separate 401/403 responses. An
@@ -334,12 +398,6 @@ export function createPublicApiClient(
                 if (Number.isSafeInteger(payload.retryable) && (payload.retryable as number) > 0)
                   retryable = payload.retryable as number;
               }
-            } else if (
-              typeof payload.code === 'string' &&
-              payload.code.startsWith('key_operation_') &&
-              'result' in payload
-            ) {
-              operationResult = payload.result;
             }
           } catch {
             // A malformed failed response does not provide a journal snapshot.
@@ -353,7 +411,8 @@ export function createPublicApiClient(
           field,
           detail,
           retryable,
-          unsupported
+          unsupported,
+          key
         );
       }
       // The gateway projection carries family rules, whose wide integers must not

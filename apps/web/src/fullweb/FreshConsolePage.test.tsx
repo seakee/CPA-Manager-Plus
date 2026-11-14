@@ -6,6 +6,7 @@ import { apiKeysApi } from '../services/api/apiKeys';
 import { configApi } from '../services/api/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshConsolePage } from './FreshConsolePage';
+import { FreshInferencePrefixCompletion } from './FreshInferencePrefixCompletion';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import { createPublicApiClient } from './publicApi';
@@ -155,13 +156,13 @@ describe('Fresh installation and Console authority boundary', () => {
       .find((button) =>
         [t('logout'), 'Logout', '登出', 'Выйти'].includes(button.props['aria-label'])
       )!;
-  async function mount(retryTransport?: typeof fetch) {
+  async function mount(retryTransport?: typeof fetch, mountContext = context) {
     await act(async () => {
       renderer = create(
         <FreshConsolePage
-          context={context}
+          context={mountContext}
           client={createPublicApiClient(
-            () => context,
+            () => mountContext,
             async (url, init) => {
               const target = String(url);
               if (target.endsWith('/api-keys'))
@@ -758,5 +759,303 @@ describe('Fresh installation and Console authority boundary', () => {
     });
     expect(updateDebugSpy).toHaveBeenCalledWith(true);
     expect(useConfigStore.getState().config?.debug).toBe(true);
+  });
+  it('gates an installed v2 session with missingInferenceCompletionRequired through FreshInferencePrefixCompletion before entering LegacyConsolePage', async () => {
+    const incompleteInferenceOp: FreshOperation = {
+      ...operation,
+      productComplete: true,
+      routing: {
+        ...operation.routing,
+        inferenceTarget: '',
+        sharedEntry: false,
+        inferenceCommitted: false,
+        missingInferenceCompletionRequired: true,
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+      },
+    };
+    let currentOp = incompleteInferenceOp;
+    read.mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('/api/v2/operation')) {
+        return Response.json(currentOp);
+      }
+      if (target.endsWith('/api/v2/installation/access/completion')) {
+        if (init?.method === 'POST') {
+          const payload = JSON.parse(String(init.body));
+          currentOp = {
+            ...incompleteInferenceOp,
+            revision: incompleteInferenceOp.revision + 1,
+            routing: {
+              ...incompleteInferenceOp.routing,
+              inferenceTarget: payload.inferenceBasePath,
+              sharedEntry: Boolean(payload.sharedEntry),
+              inferenceCommitted: true,
+              missingInferenceCompletionRequired: false,
+            },
+          };
+          return Response.json({
+            required: true,
+            mode: 'new_managed',
+            controlBasePath: '/console',
+            inferenceBasePath: payload.inferenceBasePath,
+            sharedEntry: Boolean(payload.sharedEntry),
+            inferenceCommitted: true,
+          });
+        }
+        return Response.json({
+          required: true,
+          mode: 'new_managed',
+          controlBasePath: '/console',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          inferenceCommitted: false,
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        });
+      }
+      if (target.endsWith('/api/v2/api-keys/access-info')) {
+        return Response.json({
+          mode: 'new_managed',
+          managementBasePath: '/console',
+          inferenceBasePath: currentOp.routing.inferenceTarget || '/inf1234567890abcd',
+          protocols: [
+            {
+              id: 'openai',
+              label: 'OpenAI',
+              basePath: '/inf1234567890abcd/v1',
+              examplePath: '/inf1234567890abcd/v1/chat/completions',
+            },
+          ],
+          ready: true,
+          code: '',
+        });
+      }
+      return Response.json(currentOp);
+    });
+
+    await mount();
+    await login();
+
+    expect(has('legacy-console')).toBe(false);
+    expect(renderer.root.findByType(FreshInferencePrefixCompletion)).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-submit' })).toBeTruthy();
+    });
+
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-submit' })
+        .props.onClick();
+    });
+
+    // Stays on the completion summary so the user can review AccessInfoSummary before entering.
+    expect(has('legacy-console')).toBe(false);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'inference-completion-enter-console' })
+    ).toBeTruthy();
+    expect(renderer.root.findByProps({ 'data-testid': 'access-info-summary' })).toBeTruthy();
+
+    const history = window.history;
+    Object.defineProperty(window, 'history', {
+      value: { ...history, replaceState: vi.fn() },
+      configurable: true,
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-enter-console' })
+        .props.onClick();
+      Object.defineProperty(window, 'history', { value: history, configurable: true });
+    });
+    expect(has('legacy-console')).toBe(true);
+  });
+  it('accepts Upgrade canonical operation lacking Fresh-only admissionId/databasePath while rejecting partial identity', async () => {
+    const upgradeOp: FreshOperation = {
+      version: 1,
+      identity: {
+        admissionId: '',
+        installationId: 'upgrade-installation-1',
+        generation: 'upgrade-generation-1',
+        databasePath: '',
+        operationId: 'upgrade:sha256:1234',
+      },
+      revision: 3,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: false,
+      routing: {
+        operationId: 'upgrade:sha256:1234',
+        target: '/console',
+        revision: 1,
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: {
+        strategy: 'migrate_legacy',
+        stage: 'committed',
+      },
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(upgradeOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    await act(async () => renderer.unmount());
+    const omittedFreshFieldsOp: FreshOperation = {
+      ...upgradeOp,
+      identity: {
+        installationId: upgradeOp.identity.installationId,
+        generation: upgradeOp.identity.generation,
+        operationId: upgradeOp.identity.operationId,
+      } as FreshOperation['identity'],
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(omittedFreshFieldsOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    await act(async () => renderer.unmount());
+    const halfFreshOp: FreshOperation = {
+      ...upgradeOp,
+      identity: {
+        ...upgradeOp.identity,
+        admissionId: 'stray-admission',
+        databasePath: '',
+      },
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(halfFreshOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(false);
+  });
+  it('allows verified monotonic routing revision after one-time completion (including re-login against older HTML) and blocks owner drift or regression', async () => {
+    const upgradeIncomplete: FreshOperation = {
+      version: 1,
+      identity: {
+        admissionId: '',
+        installationId: 'upgrade-installation-2',
+        generation: 'upgrade-generation-2',
+        databasePath: '',
+        operationId: 'upgrade:sha256:5678',
+      },
+      revision: 5,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: false,
+      routing: {
+        operationId: 'upgrade:sha256:5678',
+        target: '/console',
+        revision: 1,
+        inferenceTarget: '',
+        sharedEntry: false,
+        inferenceCommitted: false,
+        missingInferenceCompletionRequired: true,
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: {
+        strategy: 'migrate_legacy',
+        stage: 'committed',
+      },
+    };
+    let currentOp = upgradeIncomplete;
+    read.mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('/api/v2/operation')) return Response.json(currentOp);
+      if (target.endsWith('/api/v2/installation/access/completion')) {
+        if (init?.method === 'POST') {
+          const payload = JSON.parse(String(init.body));
+          currentOp = {
+            ...upgradeIncomplete,
+            revision: upgradeIncomplete.revision + 1,
+            routing: {
+              ...upgradeIncomplete.routing,
+              revision: 2,
+              inferenceTarget: payload.inferenceBasePath,
+              sharedEntry: Boolean(payload.sharedEntry),
+              inferenceCommitted: true,
+              missingInferenceCompletionRequired: false,
+              suggestedInferenceBasePath: '',
+            },
+          };
+          return Response.json({
+            required: true,
+            mode: 'migrate_legacy',
+            controlBasePath: '/console',
+            inferenceBasePath: payload.inferenceBasePath,
+            sharedEntry: Boolean(payload.sharedEntry),
+            inferenceCommitted: true,
+          });
+        }
+        return Response.json({
+          required: true,
+          mode: 'migrate_legacy',
+          controlBasePath: '/console',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          inferenceCommitted: false,
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        });
+      }
+      if (target.endsWith('/api/v2/api-keys/access-info')) {
+        return Response.json({
+          mode: 'migrate_legacy',
+          managementBasePath: '/console',
+          inferenceBasePath: currentOp.routing.inferenceTarget || '/inf1234567890abcd',
+          protocols: [],
+          ready: true,
+          code: '',
+        });
+      }
+      return Response.json(currentOp);
+    });
+
+    await mount();
+    await login();
+    await vi.waitFor(() => {
+      expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-submit' })).toBeTruthy();
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-submit' })
+        .props.onClick();
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-enter-console' })).toBeTruthy();
+
+    // Foreign owner callback cannot mutate the accepted Console operation.
+    await act(async () => {
+      const rejected = renderer.root
+        .findByType(FreshInferencePrefixCompletion)
+        .props.onOperation({
+          ...currentOp,
+          identity: { ...currentOp.identity, installationId: 'foreign-installation' },
+        });
+      expect(rejected).toBe(false);
+    });
+
+    const history = window.history;
+    Object.defineProperty(window, 'history', {
+      value: { ...history, replaceState: vi.fn() },
+      configurable: true,
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-enter-console' })
+        .props.onClick();
+      Object.defineProperty(window, 'history', { value: history, configurable: true });
+    });
+    expect(has('legacy-console')).toBe(true);
+
+    // Re-logging in against older HTML context.revision === 1 succeeds when backend routing.revision === 2 after completion.
+    await act(async () => logout().props.onClick());
+    expect(hasLogin()).toBe(true);
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    // Regressive routing revision below HTML context.revision is rejected even after completion.
+    await act(async () => renderer.unmount());
+    read.mockImplementation(async () => Response.json(currentOp));
+    await mount(undefined, { ...context, revision: 3 });
+    await login();
+    expect(has('legacy-console')).toBe(false);
   });
 });

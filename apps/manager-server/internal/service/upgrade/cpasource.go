@@ -590,10 +590,6 @@ func openManagedCPASource(options cpaSourceOptions) (*cpaManagedSource, error) {
 		return nil, newUpgradeError(UpgradeErrorCPAClientKeysMissing,
 			"the 1.x CPA holds no client API key, so the destination could not be verified with the keys the import would install", nil)
 	}
-	if len(source.clientKeys) > 128 {
-		return nil, newUpgradeError(UpgradeErrorCPAClientKeysMissing,
-			"the 1.x CPA holds more client API keys than a destination accepts, so none were installed", nil)
-	}
 	if err := source.readCredentials(options.CPAAuthDirectory); err != nil {
 		return nil, err
 	}

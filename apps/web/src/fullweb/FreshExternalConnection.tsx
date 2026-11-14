@@ -6,6 +6,7 @@ import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
+import { AccessInfoSummary } from './FreshAccessInfo';
 
 // Normalize only harmless whitespace/trailing slashes. The server validates the
 // target and reads CPA safely; this input is never an authority assertion.
@@ -352,6 +353,9 @@ export function FreshExternalConnection({
             <FullWebIcon name="info" size={20} />
             {t('externalBoundary')}
           </p>
+          {complete && (
+            <AccessInfoSummary client={client} auth={auth} onUnauthorized={onUnauthorized} />
+          )}
           <details className="journey-disclosure installation-diagnostics">
             <summary>{s('technical')}</summary>
             <dl className="console-state">

@@ -111,7 +111,11 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 			cfg := config.Config{RuntimeURL: runtime.URL, RuntimeTokenFile: tokenFile, CPAUpstreamURL: upstream.URL, ManagementKey: "bridge-management-key"}
 			application := newFreshApplication(opened, cfg, nil)
 			if _, err = application.store.Update(t.Context(), opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(record *freshstore.Record) error {
-				record.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: record.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+				record.Operation.Routing.OperationID = record.Operation.Identity.OperationID
+				record.Operation.Routing.Revision = 1
+				record.Operation.Routing.Target = "/cpamp-admin"
+				record.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				record.Operation.Routing.Committed = true
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -130,8 +134,8 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rotation := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/v0/management/api-keys", strings.NewReader(`{"old":"bridge-old-key","new":"bridge-new-key"}`))
-			deletion := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=shared.json", nil)
+			rotation := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/api-keys", strings.NewReader(`{"old":"bridge-old-key","new":"bridge-new-key"}`))
+			deletion := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=shared.json", nil)
 			deletion.Header.Set("X-CPAMP-Auth-File-Physical-Name", "shared.json")
 			deletion.Header.Set("X-CPAMP-Auth-File-Delete-Identities", url.QueryEscape(`[{"name":"shared.json","runtimeId":"source-one","authIndex":"idx-one","provider":"codex","accountId":"account-one"}]`))
 			for _, request := range []*http.Request{rotation, deletion} {

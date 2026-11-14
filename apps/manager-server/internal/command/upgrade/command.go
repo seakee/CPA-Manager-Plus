@@ -179,6 +179,15 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorVerifyBindingMissing,
 	upgradeservice.UpgradeErrorVerifyBindingDrifted,
 	upgradeservice.UpgradeErrorVerifyConnectionUnproven,
+	upgradeservice.UpgradeErrorVerifyAccessPrefixRequired,
+	upgradeservice.UpgradeErrorPrefixesAlreadyCommitted,
+	upgradeservice.UpgradeErrorCode("invalid_access_prefix"),
+	upgradeservice.UpgradeErrorCode("inference_prefix_required"),
+	upgradeservice.UpgradeErrorCode("external_inference_prefix_forbidden"),
+	upgradeservice.UpgradeErrorCode("shared_prefix_mismatch"),
+	upgradeservice.UpgradeErrorCode("shared_prefix_confirmation_required"),
+	upgradeservice.UpgradeErrorCode("prefix_overlap_forbidden"),
+	upgradeservice.UpgradeErrorCode("reserved_prefix_collision"),
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }
@@ -242,7 +251,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA state into the")
 	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it")
-	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--json]")
+	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--control-base-path </prefix>] [--inference-base-path </prefix>] [--shared-entry] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      verify the recorded operation and record the one verdict the")
 	_, _ = fmt.Fprintln(w, "                                      target supports: complete for both a Managed destination and")
 	_, _ = fmt.Fprintln(w, "                                      an External CPA")

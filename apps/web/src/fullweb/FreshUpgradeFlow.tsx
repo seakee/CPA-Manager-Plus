@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { fullWebLanguage } from '../i18n/fullweb';
 import {
   blockedCodeText,
@@ -11,12 +11,26 @@ import {
   stageText,
   upgradeWizardText as t,
 } from '../i18n/upgradeWizard';
+import {
+  buildPrefixPreviewUrls,
+  generateRandomAccessPrefix,
+  isCanonicalPrefix,
+  isSameOrNestedPrefix,
+  resolveBrowserOrigin,
+  validatePrefixPair,
+} from './accessPrefix';
 import { BOOTSTRAP_ROOT } from './bootstrapTransport';
+import {
+  AccessInfoSummary,
+  type AccessInfo,
+  type AccessMode,
+  type AccessProtocol,
+} from './FreshAccessInfo';
 import { FreshArtifactStep } from './FreshArtifactStep';
 import type { ArtifactTransportLike } from './freshArtifact';
 import { FullWebIcon } from './FullWebIcon';
+import { PublicApiError, type PublicApiClient } from './publicApi';
 import { readRoutingContext } from './routingContext';
-// The wizard reads the operation and runs the one action that can advance it.
 // The reads only report what the operation recorded: the read-only preflight
 // report and the operation row projection. The action is the same completion gate
 // the command line runs, so the page can never declare the upgrade finished on
@@ -51,9 +65,37 @@ export type UpgradeWizardRead = (
   signal: AbortSignal
 ) => Promise<unknown>;
 
+// Routing input submitted either to save the draft prefixes or together with verification.
+export interface UpgradeRoutingInput {
+  controlBasePath: string;
+  inferenceBasePath: string;
+  sharedEntry: boolean;
+}
+
+export interface UpgradeRoutingState {
+  configured: boolean;
+  committed: boolean;
+  existingPrefixesPreserved: boolean;
+  controlBasePath: string;
+  inferenceBasePath: string;
+  sharedEntry: boolean;
+  externalBaseUrl: string;
+  suggestedControlBasePath: string;
+  suggestedInferenceBasePath: string;
+}
+
+// Save route for first-upgrade access prefixes (`POST installation/upgrade/routing`).
+export type UpgradeWizardSaveRouting = (
+  signal: AbortSignal,
+  input: UpgradeRoutingInput
+) => Promise<unknown>;
+
 // The action takes no resource argument: this surface has exactly one, and a
 // caller that could name its own path could post somewhere nothing proves.
-export type UpgradeWizardVerify = (signal: AbortSignal) => Promise<unknown>;
+export type UpgradeWizardVerify = (
+  signal: AbortSignal,
+  input?: UpgradeRoutingInput
+) => Promise<unknown>;
 
 export type UpgradeWizardFailure = 'authentication' | 'network' | 'unavailable' | 'response';
 
@@ -117,6 +159,9 @@ export interface UpgradeStatus {
   manualItems: string[];
   errorCode: string;
   errorDetail: string;
+  targetMode?: string;
+  routing?: UpgradeRoutingState;
+  accessInfo?: AccessInfo;
 }
 
 const PREFLIGHT_TIMEOUT_MS = 45_000;
@@ -144,6 +189,71 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+function parseUpgradeRouting(value: unknown): UpgradeRoutingState | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const doc = value as Record<string, unknown>;
+  return {
+    configured: doc.configured === true,
+    committed: doc.committed === true,
+    existingPrefixesPreserved: doc.existingPrefixesPreserved === true,
+    controlBasePath: text(doc.controlBasePath),
+    inferenceBasePath: text(doc.inferenceBasePath),
+    sharedEntry: doc.sharedEntry === true,
+    externalBaseUrl: text(doc.externalBaseUrl),
+    suggestedControlBasePath: text(doc.suggestedControlBasePath),
+    suggestedInferenceBasePath: text(doc.suggestedInferenceBasePath),
+  };
+}
+
+function normalizeUpgradeAccessMode(rawMode: string, targetMode: string): AccessMode {
+  if (rawMode === 'managed' || rawMode === 'migrate_legacy') return 'migrate_legacy';
+  if (rawMode === 'external' || rawMode === 'connect_external') return 'connect_external';
+  if (rawMode === 'new_managed' || rawMode === 'adopt_existing') return rawMode;
+  if (targetMode === 'external') return 'connect_external';
+  if (targetMode === 'managed') return 'migrate_legacy';
+  return '';
+}
+
+function parseUpgradeAccessInfo(value: unknown, targetMode: string): AccessInfo | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const doc = value as Record<string, unknown>;
+  const mode = normalizeUpgradeAccessMode(text(doc.mode), targetMode);
+  const externalBaseUrl = text(doc.externalBaseUrl);
+  const rawProtocols: AccessProtocol[] = Array.isArray(doc.protocols)
+    ? doc.protocols
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        .map((item) => ({
+          id: text(item.id),
+          label: text(item.label),
+          basePath: text(item.basePath),
+          examplePath: text(item.examplePath),
+        }))
+        .filter((item) => item.id !== '' || item.basePath !== '' || item.examplePath !== '')
+    : [];
+  const protocols = mode === 'connect_external' && !externalBaseUrl ? [] : rawProtocols;
+  return {
+    mode,
+    managementBasePath: text(doc.managementBasePath),
+    inferenceBasePath: mode === 'connect_external' ? '' : text(doc.inferenceBasePath),
+    ...(mode !== 'connect_external' && doc.sharedEntry === true ? { sharedEntry: true } : {}),
+    ...(externalBaseUrl ? { externalBaseUrl } : {}),
+    protocols,
+    ready: doc.ready === true,
+    code: text(doc.code),
+  };
+}
+
+const FAIL_CLOSED_ACCESS_CLIENT: PublicApiClient = {
+  get: async () => {
+    throw new PublicApiError('routing_unavailable');
+  },
+  post: async () => {
+    throw new PublicApiError('routing_unavailable');
+  },
+  put: async () => {
+    throw new PublicApiError('routing_unavailable');
+  },
+};
 // Only a document this build can read is rendered. A reply that carries the
 // wrong contract, a contradictory readiness flag or missing fields is a read
 // failure, never a page built from guesses.
@@ -239,6 +349,9 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
   // reply that contradicts this is not a history this build can present.
   if (mismatchDaysTotal < mismatchDays.length) return null;
   if (mismatchDaysTruncated !== mismatchDaysTotal > mismatchDays.length) return null;
+  const targetMode = text(document.targetMode);
+  const routing = parseUpgradeRouting(document.routing);
+  const accessInfo = parseUpgradeAccessInfo(document.accessInfo, targetMode);
   return {
     recorded: document.recorded,
     stage: document.stage,
@@ -253,6 +366,9 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
     manualItems: strings(document.manualItems),
     errorCode: text(document.errorCode),
     errorDetail: text(document.errorDetail),
+    ...(targetMode ? { targetMode } : {}),
+    ...(routing ? { routing } : {}),
+    ...(accessInfo ? { accessInfo } : {}),
   };
 }
 
@@ -270,6 +386,8 @@ export interface UpgradeVerifyOutcome {
   manualItems: string[];
   alreadyVerified: boolean;
   updatedAtMs: number;
+  routing?: UpgradeRoutingState;
+  accessInfo?: AccessInfo;
 }
 
 // Only a document this build can read is presented. The action wrote something
@@ -296,6 +414,8 @@ export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null 
   // Both target modes complete through the gate, and this build has no waiting
   // position: a reply that is not a completion is a position it never records.
   if (!document.complete) return null;
+  const routing = parseUpgradeRouting(document.routing);
+  const accessInfo = parseUpgradeAccessInfo(document.accessInfo, targetMode);
   return {
     stage: document.stage,
     stageKnown: document.stageKnown,
@@ -307,6 +427,8 @@ export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null 
     manualItems: strings(document.manualItems),
     alreadyVerified: document.alreadyVerified,
     updatedAtMs: count(document.updatedAtMs),
+    ...(routing ? { routing } : {}),
+    ...(accessInfo ? { accessInfo } : {}),
   };
 }
 
@@ -326,7 +448,15 @@ function upgradeAPIBase(): string {
 // The credential is a getter so the entry keeps it in its own ref: the wizard
 // never stores, renders or copies the key.
 function createUpgradeWizardRequest(credential: () => string, transport: typeof fetch) {
-  return async (resource: UpgradeWizardResource | 'installation/upgrade/verify', method: 'GET' | 'POST', signal: AbortSignal) => {
+  return async (
+    resource:
+      | UpgradeWizardResource
+      | 'installation/upgrade/verify'
+      | 'installation/upgrade/routing',
+    method: 'GET' | 'POST',
+    signal: AbortSignal,
+    body?: unknown
+  ) => {
     const base = upgradeAPIBase();
     const target = new URL(`${base}/${resource}`, window.location.origin);
     if (target.origin !== window.location.origin || target.pathname !== `${base}/${resource}`) {
@@ -350,10 +480,18 @@ function createUpgradeWizardRequest(credential: () => string, transport: typeof 
     );
     try {
       let response: Response;
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        Authorization: `Bearer ${key}`,
+      };
+      if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+      }
       try {
         response = await transport(target.href, {
           method,
-          headers: { Accept: 'application/json', Authorization: `Bearer ${key}` },
+          headers,
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
           signal: controller.signal,
           mode: 'same-origin',
           credentials: 'omit',
@@ -371,8 +509,14 @@ function createUpgradeWizardRequest(credential: () => string, transport: typeof 
         // bounded envelope is read; any other body keeps the status alone.
         let code = '';
         try {
-          const payload = (await response.json()) as { error?: { code?: unknown } };
+          const payload = (await response.json()) as {
+            error?: { code?: unknown };
+            code?: unknown;
+            Code?: unknown;
+          };
           if (typeof payload?.error?.code === 'string') code = payload.error.code;
+          else if (typeof payload?.code === 'string') code = payload.code;
+          else if (typeof payload?.Code === 'string') code = payload.Code;
         } catch {
           /* A failure without an envelope stays a plain status failure. */
         }
@@ -401,12 +545,20 @@ export function createUpgradeWizardRead(
 // The action's transport. It is a POST to the one verification route: the route
 // refuses every other verb, so a bookmark or a prefetch of this address cannot
 // record anything.
+export function createUpgradeWizardSaveRouting(
+  credential: () => string,
+  transport: typeof fetch = globalThis.fetch
+): UpgradeWizardSaveRouting {
+  const request = createUpgradeWizardRequest(credential, transport);
+  return (signal, input) => request('installation/upgrade/routing', 'POST', signal, input);
+}
+
 export function createUpgradeWizardVerify(
   credential: () => string,
   transport: typeof fetch = globalThis.fetch
 ): UpgradeWizardVerify {
   const request = createUpgradeWizardRequest(credential, transport);
-  return (signal) => request('installation/upgrade/verify', 'POST', signal);
+  return (signal, input) => request('installation/upgrade/verify', 'POST', signal, input);
 }
 
 function asWizardError(error: unknown): UpgradeWizardError {
@@ -495,6 +647,7 @@ type BootState =
 export function FreshUpgradeFlow({
   read,
   verify,
+  saveRouting,
   artifact,
   language = fullWebLanguage(),
   pollDelays = DEFAULT_POLL_DELAYS,
@@ -505,6 +658,7 @@ export function FreshUpgradeFlow({
   // wizard without it offers no way to advance the operation and the page stays
   // a reader.
   verify?: UpgradeWizardVerify;
+  saveRouting?: UpgradeWizardSaveRouting;
   artifact?: ArtifactTransportLike;
   language?: string;
   pollDelays?: number[];
@@ -521,11 +675,22 @@ export function FreshUpgradeFlow({
   const [verification, setVerification] = useState<VerifyState>({ phase: 'idle' });
   const [artifactReady, setArtifactReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const routingInitializedRef = useRef(false);
+  const routingWriteEpochRef = useRef(0);
+  const routingWritePendingRef = useRef(false);
+  const onRecordedOperationRef = useRef(onRecordedOperation);
+  onRecordedOperationRef.current = onRecordedOperation;
+  const [controlPrefix, setControlPrefix] = useState('');
+  const [inferencePrefix, setInferencePrefix] = useState('');
+  const [sharedPrefix, setSharedPrefix] = useState(false);
+  const [routingDirty, setRoutingDirty] = useState(false);
+  const [routingSaving, setRoutingSaving] = useState(false);
+  const [routingSaved, setRoutingSaved] = useState(false);
+  const [routingError, setRoutingError] = useState('');
   const delayFor = useCallback(
     (index: number) => pollDelays[Math.min(index, pollDelays.length - 1)] ?? 15_000,
     [pollDelays]
   );
-
   // Boot reads the recorded operation once, before any preflight. A recorded
   // operation is resumed where it stands; only an empty record asks for
   // preflight. The read is left in `reading` until it answers, so a retry is one
@@ -540,7 +705,7 @@ export function FreshUpgradeFlow({
         const parsed = parseUpgradeStatus(raw);
         if (stopped) return;
         if (!parsed) throw new UpgradeWizardError('response');
-        onRecordedOperation?.(parsed.recorded);
+        onRecordedOperationRef.current?.(parsed.recorded);
         if (parsed.recorded) {
           // The first answer is the resume: the poll effect continues from it
           // instead of asking the operator to qualify the source again.
@@ -557,7 +722,7 @@ export function FreshUpgradeFlow({
       stopped = true;
       controller.abort();
     };
-  }, [boot.phase, read, onRecordedOperation]);
+  }, [boot.phase, read]);
 
   // The preflight runs for a source that has no operation yet, and only then. A
   // retry resets the observation to `idle`, which is what re-runs this effect.
@@ -590,18 +755,28 @@ export function FreshUpgradeFlow({
     let failures = 0;
     const controller = new AbortController();
     const tick = async () => {
+      const routingEpoch = routingWriteEpochRef.current;
       try {
         const raw = await read('installation/upgrade/status', controller.signal);
         const parsed = parseUpgradeStatus(raw);
         if (stopped) return;
+        if (routingWritePendingRef.current || routingEpoch !== routingWriteEpochRef.current) {
+          timer = window.setTimeout(tick, delayFor(0));
+          return;
+        }
         if (!parsed) throw new UpgradeWizardError('response');
         failures = 0;
         delayIndex = 0;
         setStatus({ phase: 'live', value: parsed, failures: 0 });
+        onRecordedOperationRef.current?.(parsed.recorded);
         if (operationSettled(parsed)) return;
         timer = window.setTimeout(tick, delayFor(delayIndex++));
       } catch (error) {
         if (stopped) return;
+        if (routingWritePendingRef.current || routingEpoch !== routingWriteEpochRef.current) {
+          timer = window.setTimeout(tick, delayFor(0));
+          return;
+        }
         failures += 1;
         const failure = asWizardError(error);
         setStatus((current) => ({
@@ -634,9 +809,118 @@ export function FreshUpgradeFlow({
       setArtifactReady(false);
     }
   }, [showArtifactStep]);
+  useEffect(() => {
+    if (!record?.recorded) return;
+    const routing = record.routing;
+    const mode = record.targetMode ?? '';
+    if (!routing && mode !== 'managed' && mode !== 'external') return;
+    if (!routingInitializedRef.current) {
+      routingInitializedRef.current = true;
+      if (routing && (routing.configured || routing.committed || routing.existingPrefixesPreserved)) {
+        setControlPrefix(routing.controlBasePath);
+        setInferencePrefix(routing.inferenceBasePath);
+        setSharedPrefix(mode === 'managed' && routing.sharedEntry);
+        return;
+      }
+      const initialControl =
+        routing && isCanonicalPrefix(routing.controlBasePath)
+          ? routing.controlBasePath
+          : routing && isCanonicalPrefix(routing.suggestedControlBasePath)
+            ? routing.suggestedControlBasePath
+            : generateRandomAccessPrefix();
+      const initialInference =
+        mode === 'external'
+          ? ''
+          : routing && isCanonicalPrefix(routing.inferenceBasePath)
+            ? routing.inferenceBasePath
+            : routing && isCanonicalPrefix(routing.suggestedInferenceBasePath)
+              ? routing.suggestedInferenceBasePath
+              : generateRandomAccessPrefix([initialControl]);
+      setControlPrefix(initialControl);
+      setInferencePrefix(initialInference);
+      setSharedPrefix(mode === 'managed' && Boolean(routing?.sharedEntry));
+      return;
+    }
+    if (routing && (routing.configured || routing.committed || routing.existingPrefixesPreserved) && !routingDirty) {
+      setControlPrefix(routing.controlBasePath);
+      setInferencePrefix(routing.inferenceBasePath);
+      setSharedPrefix(mode === 'managed' && routing.sharedEntry);
+    }
+  }, [record, routingDirty]);
+
+  const hasEditableTargetMode =
+    record?.targetMode === 'managed' || record?.targetMode === 'external';
+  const preservedRouting = record?.routing?.existingPrefixesPreserved === true;
+  const committedRouting = record?.routing?.committed === true;
+  const showPreservedRouting = Boolean(record?.recorded && preservedRouting);
+  const showRoutingEditor = Boolean(
+    record?.recorded &&
+      !preservedRouting &&
+      !committedRouting &&
+      hasEditableTargetMode &&
+      (record?.nextAction === 'verify' || saveRouting)
+  );
+  const isManagedTarget = record?.targetMode === 'managed';
+  const effectiveShared = isManagedTarget && sharedPrefix;
+  const effectiveInference = isManagedTarget
+    ? effectiveShared
+      ? controlPrefix
+      : inferencePrefix
+    : '';
+  const currentRoutingPayload: UpgradeRoutingInput = {
+    controlBasePath: controlPrefix.trim(),
+    inferenceBasePath: effectiveInference.trim(),
+    sharedEntry: effectiveShared,
+  };
+  const verifiedAccessInfo =
+    record?.accessInfo ??
+    (verification.phase === 'done' ? verification.value.accessInfo : undefined);
+  const effectiveExternalBaseUrl = verifiedAccessInfo
+    ? verifiedAccessInfo.externalBaseUrl ?? ''
+    : record?.routing?.externalBaseUrl ||
+      (verification.phase === 'done' ? verification.value.routing?.externalBaseUrl || '' : '');
+  const externalProtocols =
+    record?.targetMode === 'external' &&
+    verifiedAccessInfo?.mode === 'connect_external' &&
+    effectiveExternalBaseUrl
+      ? verifiedAccessInfo.protocols
+      : [];
+  const previewOrigin = resolveBrowserOrigin();
+  const previewUrls = buildPrefixPreviewUrls(
+    previewOrigin,
+    currentRoutingPayload.controlBasePath,
+    currentRoutingPayload.inferenceBasePath,
+    effectiveExternalBaseUrl
+  );
+  const resultAccessInfo = verifiedAccessInfo;
   const reread = () => {
-    setStatus({ phase: 'idle', failures: 0 });
+    setStatus((current) => ({ phase: 'idle', value: current.value, failures: 0 }));
     setAttempt((current) => current + 1);
+  };
+
+  const saveRoutingSnapshot = async (signal: AbortSignal) => {
+    const raw = await saveRouting!(signal, currentRoutingPayload);
+    if (!raw || typeof raw !== 'object') throw new UpgradeWizardError('response');
+    const document = raw as Record<string, unknown>;
+    const saved = parseUpgradeRouting(document.routing);
+    const targetMode = text(document.targetMode) || record?.targetMode || '';
+    if (
+      document.contractVersion !== UPGRADE_WIZARD_CONTRACT ||
+      !saved?.configured || targetMode !== record?.targetMode ||
+      !validatePrefixPair({
+        controlBasePath: saved.controlBasePath,
+        inferenceBasePath: saved.inferenceBasePath,
+        sharedEntry: saved.sharedEntry,
+        requireInference: targetMode === 'managed',
+      }).valid
+    ) throw new UpgradeWizardError('response');
+    const accessInfo = parseUpgradeAccessInfo(document.accessInfo, targetMode);
+    setStatus((current) => current.value ? {
+      phase: 'live', failures: 0,
+      value: { ...current.value, targetMode, routing: saved, accessInfo },
+    } : current);
+    setRoutingDirty(false);
+    setRoutingSaved(true);
   };
 
   // The action runs once per press and never retries itself: a verification
@@ -644,16 +928,74 @@ export function FreshUpgradeFlow({
   // not ask for twice. Its answer is presented as the action's own result, and
   // the recorded row is re-read afterwards so the page shows what the store
   // holds instead of what this reply happened to say.
-  const runVerification = async () => {
-    if (!verify || verification.phase === 'running') return;
-    setVerification({ phase: 'running' });
+  const saveUpgradeRouting = async () => {
+    if (!saveRouting || routingWritePendingRef.current || routingSaving || verification.phase === 'running' || showPreservedRouting || committedRouting) return;
+    const check = validatePrefixPair({
+      controlBasePath: currentRoutingPayload.controlBasePath,
+      inferenceBasePath: currentRoutingPayload.inferenceBasePath,
+      sharedEntry: currentRoutingPayload.sharedEntry,
+      requireInference: isManagedTarget,
+    });
+    if (!check.valid) {
+      const code = check.controlError || check.inferenceError || check.pairError || 'invalid_access_prefix';
+      setRoutingSaved(false);
+      setRoutingError(blockedCodeText(code, language));
+      return;
+    }
+    setRoutingSaving(true);
+    setRoutingError('');
+    setRoutingSaved(false);
+    routingWritePendingRef.current = true;
+    routingWriteEpochRef.current += 1;
     try {
-      const parsed = parseUpgradeVerify(await verify(new AbortController().signal));
+      await saveRoutingSnapshot(new AbortController().signal);
+    } catch (error) {
+      setRoutingError(errorText(asWizardError(error), language));
+    } finally {
+      routingWritePendingRef.current = false;
+      routingWriteEpochRef.current += 1;
+      reread();
+      setRoutingSaving(false);
+    }
+  };
+
+  const runVerification = async () => {
+    if (!verify || routingWritePendingRef.current || routingSaving || verification.phase === 'running') return;
+    if (showRoutingEditor) {
+      const check = validatePrefixPair({
+        controlBasePath: currentRoutingPayload.controlBasePath,
+        inferenceBasePath: currentRoutingPayload.inferenceBasePath,
+        sharedEntry: currentRoutingPayload.sharedEntry,
+        requireInference: isManagedTarget,
+      });
+      if (!check.valid) {
+        const code = check.controlError || check.inferenceError || check.pairError || 'invalid_access_prefix';
+        setRoutingSaved(false);
+        setRoutingError(blockedCodeText(code, language));
+        return;
+      }
+    }
+    setRoutingError('');
+    setVerification({ phase: 'running' });
+    routingWritePendingRef.current = true;
+    routingWriteEpochRef.current += 1;
+    try {
+      const signal = new AbortController().signal;
+      if (showRoutingEditor && saveRouting && (!record?.routing?.configured || routingDirty)) {
+        await saveRoutingSnapshot(signal);
+      }
+      const raw = showRoutingEditor
+        ? await verify(signal, currentRoutingPayload)
+        : await verify(signal);
+      const parsed = parseUpgradeVerify(raw);
       if (!parsed) throw new UpgradeWizardError('response');
       setVerification({ phase: 'done', value: parsed });
-      reread();
     } catch (error) {
       setVerification({ phase: 'failed', error: asWizardError(error) });
+    } finally {
+      routingWritePendingRef.current = false;
+      routingWriteEpochRef.current += 1;
+      reread();
     }
   };
 
@@ -1002,6 +1344,251 @@ export function FreshUpgradeFlow({
               )}
             </div>
           )}
+          {showPreservedRouting && record?.routing && (
+            <div className="upgrade-notice" data-testid="upgrade-preserved-routing">
+              <FullWebIcon name="shield" size={24} />
+              <div>
+                <h3>{t('routingPreservedTitle', language)}</h3>
+                <p>{t('routingPreservedHelp', language)}</p>
+                <dl className="upgrade-facts">
+                  <div>
+                    <dt>{t('routingControlLabel', language)}</dt>
+                    <dd data-testid="upgrade-preserved-control">
+                      <code>{record.routing.controlBasePath}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>
+                      {record.targetMode === 'external'
+                        ? t('routingExternalInferenceLabel', language)
+                        : t('routingInferenceLabel', language)}
+                    </dt>
+                    <dd data-testid="upgrade-preserved-inference">
+                      <code>
+                        {record.targetMode === 'external'
+                          ? effectiveExternalBaseUrl || t('preflightUnknown', language)
+                          : record.routing.inferenceBasePath}
+                      </code>
+                    </dd>
+                  </div>
+                  {record.targetMode === 'managed' && (
+                    <div>
+                      <dt>{t('routingSharedToggle', language)}</dt>
+                      <dd data-testid="upgrade-preserved-mode">
+                        {record.routing.sharedEntry
+                          ? t('routingSharedLabel', language)
+                          : t('routingIndependentLabel', language)}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+                {record.targetMode === 'external' && externalProtocols.length > 0 && (
+                  <ul className="access-protocol-list" data-testid="upgrade-external-protocols">
+                    {externalProtocols.map((protocol) => (
+                      <li key={protocol.id || protocol.label || protocol.basePath}>
+                        <span>{protocol.label || protocol.id}</span>{' '}
+                        <code>{protocol.basePath}</code>{' '}
+                        {protocol.examplePath && <code>{protocol.examplePath}</code>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+          {showRoutingEditor && (
+            <div className="info-card" data-testid="upgrade-routing-config">
+              <h3>{t('routingTitle', language)}</h3>
+              <p className="upgrade-step-help">
+                {isManagedTarget ? t('routingHelpManaged', language) : t('routingHelpExternal', language)}
+              </p>
+              <div className="form-group">
+                <div className="form-label">
+                  <label htmlFor="upgrade-control-prefix">{t('routingControlLabel', language)}</label>
+                </div>
+                <div className="input-wrap">
+                  <input
+                    id="upgrade-control-prefix"
+                    className="form-input"
+                    data-testid="upgrade-control-prefix-input"
+                    value={controlPrefix}
+                    onChange={(event) => {
+                      setControlPrefix(event.target.value);
+                      setRoutingDirty(true);
+                      setRoutingSaved(false);
+                      setRoutingError('');
+                    }}
+                    disabled={routingSaving || verification.phase === 'running'}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    data-testid="upgrade-randomize-control-prefix"
+                    disabled={routingSaving || verification.phase === 'running'}
+                    onClick={() => {
+                      const avoid =
+                        isManagedTarget && !effectiveShared && inferencePrefix
+                          ? [inferencePrefix]
+                          : [];
+                      setControlPrefix(generateRandomAccessPrefix(avoid));
+                      setRoutingDirty(true);
+                      setRoutingSaved(false);
+                      setRoutingError('');
+                    }}
+                  >
+                    {t('routingRandomize', language)}
+                  </button>
+                </div>
+                <p className="upgrade-step-help">{t('routingControlHelp', language)}</p>
+              </div>
+              {isManagedTarget ? (
+                <>
+                  <label className="upgrade-ack" htmlFor="upgrade-shared-prefix">
+                    <input
+                      id="upgrade-shared-prefix"
+                      type="checkbox"
+                      data-testid="upgrade-shared-prefix-checkbox"
+                      checked={sharedPrefix}
+                      disabled={routingSaving || verification.phase === 'running'}
+                      onChange={(event) => {
+                        const nextShared = event.target.checked;
+                        setSharedPrefix(nextShared);
+                        if (!nextShared && (!isCanonicalPrefix(inferencePrefix) || isSameOrNestedPrefix(inferencePrefix, controlPrefix))) {
+                          setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                        }
+                        setRoutingDirty(true);
+                        setRoutingSaved(false);
+                        setRoutingError('');
+                      }}
+                    />
+                    <span>
+                      <strong>{t('routingSharedToggle', language)}</strong>
+                      <br />
+                      {t('routingSharedHelp', language)}
+                    </span>
+                  </label>
+                  <div className="form-group">
+                    <div className="form-label">
+                      <label htmlFor="upgrade-inference-prefix">{t('routingInferenceLabel', language)}</label>
+                    </div>
+                    <div className="input-wrap">
+                      <input
+                        id="upgrade-inference-prefix"
+                        className="form-input"
+                        data-testid="upgrade-inference-prefix-input"
+                        value={effectiveShared ? controlPrefix : inferencePrefix}
+                        onChange={(event) => {
+                          setInferencePrefix(event.target.value);
+                          setRoutingDirty(true);
+                          setRoutingSaved(false);
+                          setRoutingError('');
+                        }}
+                        disabled={effectiveShared || routingSaving || verification.phase === 'running'}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        data-testid="upgrade-randomize-inference-prefix"
+                        disabled={effectiveShared || routingSaving || verification.phase === 'running'}
+                        onClick={() => {
+                          setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                          setRoutingDirty(true);
+                          setRoutingSaved(false);
+                          setRoutingError('');
+                        }}
+                      >
+                        {t('routingRandomize', language)}
+                      </button>
+                    </div>
+                    <p className="upgrade-step-help">{t('routingInferenceHelp', language)}</p>
+                  </div>
+                </>
+              ) : (
+                <div data-testid="upgrade-external-inference-info">
+                  <dl className="upgrade-facts">
+                    <div>
+                      <dt>{t('routingExternalInferenceLabel', language)}</dt>
+                      <dd>
+                        <code>{effectiveExternalBaseUrl || t('preflightUnknown', language)}</code>
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="upgrade-step-help">{t('routingExternalInferenceHelp', language)}</p>
+                  {externalProtocols.length > 0 && (
+                    <ul className="access-protocol-list" data-testid="upgrade-external-protocols">
+                      {externalProtocols.map((protocol) => (
+                        <li key={protocol.id || protocol.label || protocol.basePath}>
+                          <span>{protocol.label || protocol.id}</span>{' '}
+                          <code>{protocol.basePath}</code>{' '}
+                          {protocol.examplePath && <code>{protocol.examplePath}</code>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <div className="upgrade-notice" data-testid="upgrade-prefix-url-preview">
+                <div>
+                  <h3>{t('routingPreviewTitle', language)}</h3>
+                  <dl className="upgrade-facts">
+                    <div>
+                      <dt>{t('routingPreviewConsole', language)}</dt>
+                      <dd data-testid="upgrade-preview-console">
+                        <code>{previewUrls.consoleUrl || '—'}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('routingPreviewApi', language)}</dt>
+                      <dd data-testid="upgrade-preview-api">
+                        <code>{previewUrls.managementApiUrl || '—'}</code>
+                      </dd>
+                    </div>
+                    {isManagedTarget ? (
+                      <div>
+                        <dt>{t('routingPreviewInference', language)}</dt>
+                        <dd data-testid="upgrade-preview-inference">
+                          <code>{previewUrls.inferenceUrl || '—'}</code>
+                        </dd>
+                      </div>
+                    ) : (
+                      <div>
+                        <dt>{t('routingPreviewExternal', language)}</dt>
+                        <dd data-testid="upgrade-preview-external">
+                          <code>{previewUrls.externalUrl || '—'}</code>
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </div>
+              </div>
+              {routingError && (
+                <div className="upgrade-notice" role="alert" data-testid="upgrade-routing-error">
+                  <FullWebIcon name="alert" size={24} />
+                  <div>
+                    <p>{routingError}</p>
+                  </div>
+                </div>
+              )}
+              {routingSaved && (
+                <p className="upgrade-step-help" data-testid="upgrade-routing-saved">
+                  {t('routingSavedNotice', language)}
+                </p>
+              )}
+              {saveRouting && (
+                <div className="upgrade-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    data-testid="upgrade-save-routing"
+                    disabled={routingSaving || verification.phase === 'running'}
+                    onClick={saveUpgradeRouting}
+                  >
+                    {routingSaving ? t('routingSaving', language) : t('routingSave', language)}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {record?.recorded && record.nextAction === 'verify' && verify && (
             <div className="upgrade-notice" data-testid="upgrade-verify-offer">
               <FullWebIcon name="shield" size={24} />
@@ -1056,7 +1643,7 @@ export function FreshUpgradeFlow({
               <button
                 className="btn btn-primary"
                 data-testid="upgrade-verify-action"
-                disabled={verification.phase === 'running'}
+                disabled={routingSaving || verification.phase === 'running'}
                 onClick={runVerification}
               >
                 <FullWebIcon name="shield" size={18} />{' '}
@@ -1159,6 +1746,31 @@ export function FreshUpgradeFlow({
                 <p className="upgrade-step-help" data-testid="upgrade-result-next">
                   {t('resultNext', language)}: {nextActionText(record.nextAction, language)}
                 </p>
+              )}
+              {record.stage === 'complete' && record.stageKnown && resultAccessInfo && (
+                <div data-testid="upgrade-result-access">
+                  <h3>{t('resultAccessTitle', language)}</h3>
+                  {resultAccessInfo.ready ? (
+                    <p className="alert alert-info" data-testid="upgrade-access-active">
+                      {t('resultAccessActive', language)}
+                    </p>
+                  ) : (
+                    (resultAccessInfo.code === 'upgrade_restart_required' || !resultAccessInfo.code) && (
+                      <p className="alert alert-warn" data-testid="upgrade-access-pending-restart">
+                        {t('resultAccessPendingRestart', language)}
+                      </p>
+                    )
+                  )}
+                  <AccessInfoSummary
+                    client={FAIL_CLOSED_ACCESS_CLIENT}
+                    auth={{ kind: 'admin', value: '' }}
+                    info={resultAccessInfo}
+                    pendingRestart={
+                      !resultAccessInfo.ready &&
+                      resultAccessInfo.code === 'upgrade_restart_required'
+                    }
+                  />
+                </div>
               )}
             </>
           )}

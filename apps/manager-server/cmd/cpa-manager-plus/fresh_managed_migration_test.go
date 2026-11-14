@@ -117,7 +117,11 @@ func migrationFixture(t *testing.T, generation model.RuntimeGeneration, stageErr
 	checkpoint := bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: string(runtime.status.Identity), TargetGeneration: 7, TargetArtifactID: string(artifact)}
 	if _, err = fresh.Update(t.Context(), id, record.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = checkpoint
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = id.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.ProductComplete = true
 		return nil
 	}); err != nil {

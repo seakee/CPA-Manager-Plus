@@ -317,6 +317,9 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	if err != nil {
 		t.Fatal(err)
 	}
+	// committedControlPrefix is the prefix this fixture commits below; the
+	// refusal messages are asserted against it instead of a run-time constant.
+	committedControlPrefix := "/cpamp-admin"
 	genericRefusal := freshInitializeErrorMessage(errors.New("unclassified"))
 	stdoutLocked, stderrLocked := runFreshInitializeFailure(t, env)
 	if runtime.GOOS == "windows" {
@@ -328,7 +331,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 		strings.Contains(stderrLocked, "#handoff=") ||
 		strings.Contains(stderrLocked, genericRefusal) ||
 		!strings.Contains(stderrLocked, "initialize") ||
-		strings.Contains(stderrLocked, "/console") {
+		strings.Contains(stderrLocked, committedControlPrefix) {
 		opened.Close()
 		t.Fatalf("locked in-progress initialize output: stdout=%q stderr=%q", stdoutLocked, stderrLocked)
 	}
@@ -346,18 +349,20 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 			TargetGeneration: 1,
 			Stage:            "committed",
 		}
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID,
-			Revision:    1,
-			Target:      "/console",
-			Stage:       bootstrap.PrefixCommitted,
-			Committed:   true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = committedControlPrefix
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
 		opened.Close()
 		t.Fatal(err)
+	}
+	if committedControlPrefix = updated.Operation.Routing.Target; committedControlPrefix == "" {
+		opened.Close()
+		t.Fatal("fixture did not commit a control prefix")
 	}
 
 	// 1. Active initial route (Routing.Committed && !ProductComplete) while live:
@@ -370,7 +375,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	} else if stdoutActiveLive != "" ||
 		strings.Contains(stderrActiveLive, "#handoff=") ||
 		strings.Contains(stderrActiveLive, genericRefusal) ||
-		!strings.Contains(stderrActiveLive, "/console") ||
+		!strings.Contains(stderrActiveLive, committedControlPrefix) ||
 		stderrActiveLive == stderrLocked {
 		opened.Close()
 		t.Fatalf("live active-route initialize output: stdout=%q stderr=%q", stdoutActiveLive, stderrActiveLive)
@@ -384,7 +389,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	if stdoutActiveStopped != "" ||
 		strings.Contains(stderrActiveStopped, "#handoff=") ||
 		strings.Contains(stderrActiveStopped, genericRefusal) ||
-		!strings.Contains(stderrActiveStopped, "/console") {
+		!strings.Contains(stderrActiveStopped, committedControlPrefix) {
 		t.Fatalf("stopped active-route initialize output: stdout=%q stderr=%q", stdoutActiveStopped, stderrActiveStopped)
 	}
 	if runtime.GOOS != "windows" && stderrActiveStopped != stderrActiveLive {
@@ -415,7 +420,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	} else if stdoutLive != "" ||
 		strings.Contains(stderrLive, "#handoff=") ||
 		strings.Contains(stderrLive, genericRefusal) ||
-		!strings.Contains(stderrLive, "/console") ||
+		!strings.Contains(stderrLive, committedControlPrefix) ||
 		stderrLive == stderrActiveLive ||
 		stderrLive == stderrLocked {
 		opened.Close()
@@ -430,7 +435,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	if stdoutStopped != "" ||
 		strings.Contains(stderrStopped, "#handoff=") ||
 		strings.Contains(stderrStopped, genericRefusal) ||
-		!strings.Contains(stderrStopped, "/console") ||
+		!strings.Contains(stderrStopped, committedControlPrefix) ||
 		stderrStopped == stderrActiveStopped {
 		t.Fatalf("stopped completed initialize output: stdout=%q stderr=%q", stdoutStopped, stderrStopped)
 	}
@@ -442,7 +447,7 @@ func TestFreshInitializeReportsCompletedAndActiveStatesDistinctFromOwnershipFail
 	activeFallback := freshInitializeErrorMessage(fresh.RoutingCommittedError{})
 	completeFallback := freshInitializeErrorMessage(fresh.AlreadyCompleteError{})
 	for name, msg := range map[string]string{"active": activeFallback, "complete": completeFallback} {
-		if msg == "" || msg == genericRefusal || strings.Contains(msg, "/console") || strings.Contains(msg, "  ") || strings.Contains(msg, `""`) {
+		if msg == "" || msg == genericRefusal || strings.Contains(msg, committedControlPrefix) || strings.Contains(msg, "  ") || strings.Contains(msg, `""`) {
 			t.Fatalf("unexpected %s fallback message: %q", name, msg)
 		}
 	}

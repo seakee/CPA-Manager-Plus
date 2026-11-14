@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,7 @@ type Context struct {
 	PanelService                   *panelsvc.Service
 	AutomationRuntimeService       AutomationRuntimeService
 	DatabaseMaintenance            DatabaseMaintenanceStatusProvider
+	UpgradeAPIKeys                 func(w http.ResponseWriter, r *http.Request, resource string)
 }
 
 func FromExisting(

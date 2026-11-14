@@ -2,15 +2,21 @@ package identityusage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	projectionadapter "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityprojection"
+	sqliteusage "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityusage"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
 
 const (
@@ -29,6 +35,7 @@ type fakeRepo struct {
 	series        []ports.Bucket
 	rawDeleted    bool
 	incomplete    []ports.IncompleteDay
+	windowRanges  []ports.KeyRange
 	windowFromMS  int64
 	windowToMS    int64
 	markedAt      int64
@@ -49,11 +56,15 @@ func (f *fakeRepo) ProjectionState(context.Context) (ports.ProjectionState, erro
 	return f.projection, f.projectionErr
 }
 
-func (f *fakeRepo) Windows(_ context.Context, ids []identity.APIKeyID, fromMS, toMS int64) (map[identity.APIKeyID]ports.Window, error) {
-	f.windowFromMS, f.windowToMS = fromMS, toMS
+func (f *fakeRepo) Windows(_ context.Context, ranges []ports.KeyRange, toMS int64) (map[identity.APIKeyID]ports.Window, error) {
+	f.windowRanges = append([]ports.KeyRange(nil), ranges...)
+	if len(ranges) > 0 {
+		f.windowFromMS = ranges[0].FromMS
+	}
+	f.windowToMS = toMS
 	result := map[identity.APIKeyID]ports.Window{}
-	for _, id := range ids {
-		result[id] = f.windows[id]
+	for _, item := range ranges {
+		result[item.APIKeyID] = f.windows[item.APIKeyID]
 	}
 	return result, nil
 }
@@ -488,5 +499,162 @@ func TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64(t *testing.T) {
 	}
 	if got := daysWithin(marks, 1<<60, math.MaxInt64); len(got) != 0 {
 		t.Fatalf("daysWithin past the last stored day = %+v, want none", got)
+	}
+}
+
+func TestSummaryAndDetailAgreeAcrossPreCollectionAndPreBindingEvents(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "summary-detail-parity.sqlite"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := sqliterepo.Migrate(db); err != nil {
+		t.Fatalf("migrate test db: %v", err)
+	}
+	ctx := context.Background()
+
+	const (
+		runtimeID       = "runtime-parity-1"
+		preCollectKeyID = identity.APIKeyID("11111111111111111111111111111111")
+		preBindingKeyID = identity.APIKeyID("22222222222222222222222222222222")
+		futureKeyID     = identity.APIKeyID("33333333333333333333333333333333")
+	)
+	fromMS := testNowMS - DefaultWindowMS
+	collectingAtMS := testNowMS - 6*3_600_000
+
+	seedKey := func(id identity.APIKeyID, rawSecret string, firstSeenMS int64) string {
+		t.Helper()
+		sum := sha256.Sum256([]byte(rawSecret))
+		hash := hex.EncodeToString(sum[:])
+		if _, err := db.ExecContext(ctx,
+			`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms) values (?, 1, 'active', ?, ?)`,
+			string(id), firstSeenMS, firstSeenMS); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview) values (?, ?, 'cipher', ?, 'cpamp_sk_…0000')`,
+			hash[:32], string(id), hash); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`insert into gateway_api_key_source_bindings (api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms, retired_at_ms) values (?, ?, ?, ?, ?, null)`,
+			string(id), runtimeID, hash, firstSeenMS, firstSeenMS); err != nil {
+			t.Fatal(err)
+		}
+		return hash
+	}
+	seedEvent := func(eventHash string, ts int64, secretHash string, tokens int64) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`insert into usage_events (event_hash, timestamp_ms, timestamp, api_key_hash, endpoint, model, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed, created_at_ms)
+			 values (?, ?, 'synthetic', ?, '/v1/responses', 'gpt-5', ?, 0, 0, 0, ?, 0, ?)`,
+			eventHash, ts, secretHash, tokens, tokens, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Key 1: bound 12h ago (before collectingAt=6h ago). Has 2 pre-collection mapped calls at now-8h
+	// and 4 post-collection mapped calls at now-2h.
+	hashPreCollect := seedKey(preCollectKeyID, "cpamp_sk_"+strings.Repeat("a", 64), testNowMS-12*3_600_000)
+	seedEvent("pre-collect-1", testNowMS-8*3_600_000, hashPreCollect, 10)
+	seedEvent("pre-collect-2", testNowMS-8*3_600_000+1000, hashPreCollect, 10)
+	for i := range 4 {
+		seedEvent("post-collect-"+string(rune('a'+i)), testNowMS-2*3_600_000+int64(i*1000), hashPreCollect, 15)
+	}
+
+	// Key 2: bound 2h ago (after collectingAt=6h ago). Has 3 pre-binding events at now-4h (marked stale)
+	// and 5 post-binding mapped calls at now-1h.
+	hashPreBinding := seedKey(preBindingKeyID, "cpamp_sk_"+strings.Repeat("b", 64), testNowMS-2*3_600_000)
+	for i := range 3 {
+		seedEvent("pre-bind-"+string(rune('a'+i)), testNowMS-4*3_600_000+int64(i*1000), hashPreBinding, 20)
+	}
+	for i := range 5 {
+		seedEvent("post-bind-"+string(rune('a'+i)), testNowMS-3_600_000+int64(i*1000), hashPreBinding, 25)
+	}
+
+	// Key 3: bound at testNowMS (windowFromMS == toMS -> unobserved window), with a pre-binding event at fromMS+1000.
+	hashFuture := seedKey(futureKeyID, "cpamp_sk_"+strings.Repeat("c", 64), testNowMS)
+	seedEvent("pre-future-1", fromMS+1000, hashFuture, 30)
+
+	projRepo := projectionadapter.New(db)
+	if res, err := projRepo.CatchUp(ctx, 100, testNowMS); err != nil || res.Pending {
+		t.Fatalf("CatchUp = %+v (%v)", res, err)
+	}
+
+	repo := sqliteusage.New(db)
+	if err := repo.MarkCollectionStarted(ctx, collectingAtMS); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(repo, func() CollectionPhase { return PhaseRunning })
+	svc.SetClock(func() int64 { return testNowMS })
+
+	ids := []identity.APIKeyID{preCollectKeyID, preBindingKeyID, futureKeyID}
+	summary, err := svc.Summary(ctx, ids)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(summary.Items) != len(ids) {
+		t.Fatalf("Summary items = %d, want %d", len(summary.Items), len(ids))
+	}
+
+	for i, id := range ids {
+		detail, err := svc.Detail(ctx, id, 0, 0)
+		if err != nil {
+			t.Fatalf("Detail(%s): %v", id, err)
+		}
+		item := summary.Items[i]
+		if item.Coverage.State != detail.Coverage.State || item.Coverage.Reason != detail.Coverage.Reason {
+			t.Fatalf("key %s coverage mismatch: Summary=%+v Detail=%+v", id, item.Coverage, detail.Coverage)
+		}
+		var detailCalls int64
+		var detailLastUsed *int64
+		if detail.Totals != nil {
+			detailCalls = detail.Totals.Calls
+			detailLastUsed = detail.Totals.LastUsedAtMS
+		}
+		if item.Calls != detailCalls {
+			t.Fatalf("key %s calls mismatch: Summary=%d Detail=%d", id, item.Calls, detailCalls)
+		}
+		if (item.LastUsedAtMS == nil) != (detailLastUsed == nil) ||
+			(item.LastUsedAtMS != nil && *item.LastUsedAtMS != *detailLastUsed) {
+			t.Fatalf("key %s lastUsed mismatch: Summary=%v Detail=%v", id, item.LastUsedAtMS, detailLastUsed)
+		}
+	}
+
+	// Explicit expectations: pre-collection and pre-binding events are excluded from published counts.
+	if summary.Items[0].Calls != 4 || summary.Items[0].Coverage.State != "partial" || summary.Items[0].Coverage.Reason != "window_partial" {
+		t.Fatalf("preCollectKey summary item = %+v, want calls=4 partial/window_partial", summary.Items[0])
+	}
+	if summary.Items[1].Calls != 5 || summary.Items[1].Coverage.State != "partial" || summary.Items[1].Coverage.Reason != "window_partial" {
+		t.Fatalf("preBindingKey summary item = %+v, want calls=5 partial/window_partial", summary.Items[1])
+	}
+	if summary.Items[2].Calls != 0 || summary.Items[2].Coverage.State != "unknown" || summary.Items[2].Coverage.Reason != "window_unobserved" {
+		t.Fatalf("futureKey summary item = %+v, want calls=0 unknown/window_unobserved", summary.Items[2])
+	}
+
+	// Also verify catching-up parity when a key has ONLY pre-collection calls: neither Summary nor Detail may
+	// leak pre-collection calls into a partial lower bound while projection is catching up.
+	preOnlyKeyID := identity.APIKeyID("44444444444444444444444444444444")
+	hashPreOnly := seedKey(preOnlyKeyID, "cpamp_sk_"+strings.Repeat("d", 64), testNowMS-12*3_600_000)
+	seedEvent("pre-only-1", testNowMS-9*3_600_000, hashPreOnly, 10)
+	if res, err := projRepo.CatchUp(ctx, 100, testNowMS); err != nil || res.Pending {
+		t.Fatalf("CatchUp(preOnly) = %+v (%v)", res, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`update gateway_usage_identity_projection_state set status = 'backfilling' where state_name = ?`,
+		projectionadapter.StateName); err != nil {
+		t.Fatal(err)
+	}
+	sumCatchUp, err := svc.Summary(ctx, []identity.APIKeyID{preOnlyKeyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detCatchUp, err := svc.Detail(ctx, preOnlyKeyID, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sumCatchUp.Items[0].Coverage.State != detCatchUp.Coverage.State || sumCatchUp.Items[0].Coverage.Reason != detCatchUp.Coverage.Reason || sumCatchUp.Items[0].Coverage.State != "unknown" ||
+		sumCatchUp.Items[0].Coverage.Reason != "projection_catching_up" || sumCatchUp.Items[0].Calls != 0 {
+		t.Fatalf("catching-up pre-collection parity: Summary=%+v Detail=%+v", sumCatchUp.Items[0], detCatchUp)
 	}
 }

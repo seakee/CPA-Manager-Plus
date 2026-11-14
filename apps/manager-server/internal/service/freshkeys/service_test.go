@@ -164,18 +164,25 @@ func TestMatchStagedSecretDoesNotGrantRuntimeAuthorization(t *testing.T) {
 			t.Fatalf("staged match mismatch: got %v, want %v; err %v", ok, v.want, err)
 		}
 	}
-	// Only an active canonical identity may match. A previously valid secret
-	// must stop matching after each supported non-active lifecycle transition.
-	for _, lifecycle := range []identity.Lifecycle{identity.LifecycleMissing, identity.LifecycleSuperseded} {
-		if _, err := db.ExecContext(ctx,
-			"update gateway_api_key_identities set lifecycle=?, revision=revision+1 where id=?",
-			lifecycle, first.Key.ID,
-		); err != nil {
-			t.Fatalf("set %s key lifecycle: %v", lifecycle, err)
-		}
-		if ok, err := svc.MatchStagedSecret(ctx, first.CreatedSecret); err != nil || ok {
-			t.Fatalf("%s key matched staged proof: %v, %v", lifecycle, ok, err)
-		}
+	// Passive LifecycleMissing remains a non-retired staged credential, whereas
+	// terminal LifecycleSuperseded must stop matching immediately.
+	if _, err := db.ExecContext(ctx,
+		"update gateway_api_key_identities set lifecycle=?, revision=revision+1 where id=?",
+		identity.LifecycleMissing, first.Key.ID,
+	); err != nil {
+		t.Fatalf("set missing key lifecycle: %v", err)
+	}
+	if ok, err := svc.MatchStagedSecret(ctx, first.CreatedSecret); err != nil || !ok {
+		t.Fatalf("passive missing key failed staged proof: %v, %v", ok, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"update gateway_api_key_identities set lifecycle=?, revision=revision+1 where id=?",
+		identity.LifecycleSuperseded, first.Key.ID,
+	); err != nil {
+		t.Fatalf("set superseded key lifecycle: %v", err)
+	}
+	if ok, err := svc.MatchStagedSecret(ctx, first.CreatedSecret); err != nil || ok {
+		t.Fatalf("superseded key matched staged proof: %v, %v", ok, err)
 	}
 	if ok, err := New(repo.New(db), nil).MatchStagedSecret(ctx, first.CreatedSecret); err == nil || ok {
 		t.Fatal("missing protector allowed a key")
@@ -239,8 +246,9 @@ func TestPreboundAndObservedKeyPassiveSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("WithStagedSecret(prebound absent) err = %v", err)
 	}
 
-	// 2. Once observed on the runtime and subsequently absent, the key transitions to missing,
-	// List/Detail preserve LifecycleMissing, and WithStagedSecret refuses it.
+	// 2. Once observed on the runtime and subsequently absent, the key transitions to missing:
+	// List/Detail preserve LifecycleMissing while non-retired staged-secret helpers remain available,
+	// and terminal LifecycleSuperseded refuses non-retained secret consumers.
 	if _, err := identities.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
 		RuntimeIdentity:           "runtime-managed-1",
 		ObservedRuntimeGeneration: 2,
@@ -265,7 +273,42 @@ func TestPreboundAndObservedKeyPassiveSnapshotLifecycle(t *testing.T) {
 	if err != nil || detail.Lifecycle != identity.LifecycleMissing {
 		t.Fatalf("Detail(after observed absent) = %+v, %v; want missing", detail, err)
 	}
+	gotSecret = ""
+	if err := service.WithStagedSecret(ctx, string(created.Key.ID), func(secret string) error {
+		gotSecret = secret
+		return nil
+	}); err != nil || gotSecret != created.CreatedSecret {
+		t.Fatalf("WithStagedSecret(missing) = %q, %v; want non-retired secret", gotSecret, err)
+	}
+	if allStaged, err := service.AllStaged(ctx, []string{created.CreatedSecret}); err != nil || !allStaged {
+		t.Fatalf("AllStaged(missing) = %v, %v; want true", allStaged, err)
+	}
+	mappedKeys, bySecret, secretByID, err := service.ActiveSecretMap(ctx)
+	if err != nil || len(mappedKeys) != 1 || bySecret[created.CreatedSecret].ID != created.Key.ID || secretByID[string(created.Key.ID)] != created.CreatedSecret {
+		t.Fatalf("ActiveSecretMap(missing) = keys=%+v bySecret=%d secretByID=%d err=%v", mappedKeys, len(bySecret), len(secretByID), err)
+	}
+
+	// 3. Terminal LifecycleSuperseded is rejected by non-retired helpers while WithRetainedSecret stays readable.
+	if _, err := db.ExecContext(ctx,
+		"update gateway_api_key_identities set lifecycle=?, revision=revision+1, updated_at_ms=updated_at_ms+1 where id=?",
+		identity.LifecycleSuperseded, created.Key.ID,
+	); err != nil {
+		t.Fatalf("set superseded lifecycle: %v", err)
+	}
 	if err := service.WithStagedSecret(ctx, string(created.Key.ID), func(string) error { return nil }); err == nil {
-		t.Fatal("WithStagedSecret(missing) succeeded; want error")
+		t.Fatal("WithStagedSecret(superseded) succeeded; want error")
+	}
+	if allStaged, err := service.AllStaged(ctx, []string{created.CreatedSecret}); err != nil || allStaged {
+		t.Fatalf("AllStaged(superseded) = %v, %v; want false", allStaged, err)
+	}
+	if _, bySecret, secretByID, err = service.ActiveSecretMap(ctx); err != nil || len(bySecret) != 0 || len(secretByID) != 0 {
+		t.Fatalf("ActiveSecretMap(superseded) = bySecret=%d secretByID=%d err=%v; want empty maps", len(bySecret), len(secretByID), err)
+	}
+	retainedSecret := ""
+	if err := service.WithRetainedSecret(ctx, string(created.Key.ID), func(secret string) error {
+		retainedSecret = secret
+		return nil
+	}); err != nil || retainedSecret != created.CreatedSecret {
+		t.Fatalf("WithRetainedSecret(superseded) = %q, %v; want retained secret", retainedSecret, err)
 	}
 }

@@ -808,13 +808,13 @@ func TestClassifyInitializeRefusalFailsClosedOnDamagedOrNonFreshStoreUnderLock(t
 				TargetGeneration: 1,
 				Stage:            "committed",
 			}
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID,
-				Revision:    1,
-				Target:      "/console",
-				Stage:       bootstrap.PrefixCommitted,
-				Committed:   true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/console"
+			r.Operation.Routing.InferenceTarget = "/access-api"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
+			r.Operation.Routing.InferenceCommitted = true
 			return nil
 		})
 		if err != nil {

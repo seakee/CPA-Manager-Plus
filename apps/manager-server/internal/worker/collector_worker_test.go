@@ -2,22 +2,28 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -213,7 +219,13 @@ func TestCollectorWorkerUsesCompletedManagedConnectionMirror(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = fresh.Update(ctx, id, pending.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = id.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/console"
+		r.Operation.Routing.InferenceTarget = "/access-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		r.Operation.ProductComplete = true
 		return nil
 	}); err != nil {
@@ -247,4 +259,191 @@ func TestCollectorWorkerUsesCompletedManagedConnectionMirror(t *testing.T) {
 		t.Fatal("collector did not receive the completed managed connection")
 	}
 	worker.Stop(context.Background())
+}
+
+func TestCollectorWorkerDoesNotStartSetupFallbackWhenManagerConfigDisablesCollector(t *testing.T) {
+	cfg := workerTestConfig(t)
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	enabled := false
+	if err := db.SaveManagerConfigAndSetup(
+		context.Background(),
+		store.ManagerConfig{
+			Collector: store.ManagerCollectorConfig{Enabled: &enabled},
+		},
+		model.Setup{
+			CPAUpstreamURL: "http://cpa.local:8317",
+			ManagementKey:  "management-key",
+		},
+	); err != nil {
+		t.Fatalf("save disabled manager config and setup: %v", err)
+	}
+
+	manager := collectorpkg.NewManager(cfg, db)
+	collectorService := collectorservice.New(manager)
+	NewCollectorWorker(cfg, db, collectorService).Start(context.Background())
+
+	if status := collectorService.Status(); status.Collector != "stopped" {
+		t.Fatalf("collector status = %#v, want stopped", status)
+	}
+}
+
+func TestCollectorWorkerGatesUpgradeExternalStoreOnPersistentRejectionAndTargetFence(t *testing.T) {
+	var outboundRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		outboundRequests.Add(1)
+		if r.URL.Path == "/v0/management/usage-queue" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "usage.sqlite")
+	dataKeyPath := filepath.Join(dir, "data.key")
+	keyBytes, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateDataKey: %v", err)
+	}
+	protector, err := security.NewProtector(keyBytes)
+	if err != nil {
+		t.Fatalf("NewProtector: %v", err)
+	}
+	db, err := store.Open(dbPath, protector)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	canonicalURL, err := identity.CanonicalExternalURL(upstream.URL)
+	if err != nil {
+		t.Fatalf("CanonicalExternalURL: %v", err)
+	}
+	const mgmtKey = "upgrade-external-worker-mgmt-key"
+	enabled := true
+	if err := db.SaveManagerConfigAndSetup(
+		ctx,
+		store.ManagerConfig{
+			CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: canonicalURL, ManagementKey: mgmtKey},
+			Collector:     store.ManagerCollectorConfig{Enabled: &enabled, CollectorMode: "http", PollIntervalMS: 20},
+		},
+		model.Setup{CPAUpstreamURL: canonicalURL, ManagementKey: mgmtKey},
+	); err != nil {
+		t.Fatalf("SaveManagerConfigAndSetup: %v", err)
+	}
+
+	repo := upgradeoperation.New(db.SQLDB())
+	fpr := "sha256:" + strings.Repeat("a", 64)
+	manifest := "sha256:" + strings.Repeat("b", 64)
+	if err := repo.Put(ctx, model.UpgradeOperation{
+		Stage:                   model.UpgradeStageExternalConnect,
+		LastForwardStage:        model.UpgradeStageExternalConnect,
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig},
+		SourceKind:              legacypreflight.SourceKindUpgradedLegacy,
+		SourceVersion:           "v1.8.0",
+		SourceRoot:              filepath.Join(dir, "legacy"),
+		SourceFingerprintBefore: fpr,
+		SourceFingerprintAfter:  fpr,
+		BackupManifestSHA256:    manifest,
+		Reconciliation:          json.RawMessage(`{"ok":true}`),
+		ControlBasePath:         "/upg-console",
+		RoutingCommitted:        true,
+		CreatedAtMS:             1000,
+		UpdatedAtMS:             1000,
+	}); err != nil {
+		t.Fatalf("seed upgrade op: %v", err)
+	}
+	sealedKey, err := protector.ProtectString(mgmtKey)
+	if err != nil {
+		t.Fatalf("ProtectString: %v", err)
+	}
+	extID := freshkeyapply.ExternalIdentity(canonicalURL)
+	tx, err := db.SQLDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
+		BaseURL:       canonicalURL,
+		Identity:      extID,
+		Generation:    extID,
+		ManagementKey: sealedKey,
+		ObservedAtMS:  2000,
+	}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("RecordExternalBindingTx: %v", err)
+	}
+	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, model.UpgradeVerification{
+		TargetMode:          model.UpgradeTargetExternal,
+		SourceFingerprint:   fpr,
+		Domains:             []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig},
+		BindingIdentity:     extID,
+		BindingGeneration:   extID,
+		BindingObservedAtMS: 2000,
+		ObservedAtMS:        2001,
+	}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("RecordCompletionTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Persist a refusal for (extID, credDigest) and verify CollectorWorker.Start stays stopped with 0 requests.
+	credDigest := workerEnvelopeDigest(sealedKey)
+	refusalJSON, _ := json.Marshal(map[string]any{
+		"identity":   extID,
+		"credential": credDigest,
+		"atMs":       time.Now().UnixMilli(),
+	})
+	if _, err := db.SQLDB().ExecContext(ctx,
+		`insert into settings (key, value, updated_at_ms) values (?, ?, ?)`,
+		workerExternalRejectionKey, string(refusalJSON), time.Now().UnixMilli(),
+	); err != nil {
+		t.Fatalf("insert refusal row: %v", err)
+	}
+
+	cfg := config.Config{
+		DBPath:        dbPath,
+		DataKeyPath:   dataKeyPath,
+		CollectorMode: "http",
+		PollInterval:  20 * time.Millisecond,
+	}
+	manager := collectorpkg.NewManager(cfg, db)
+	collectorSvc := collectorservice.New(manager)
+	t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+	cw := NewCollectorWorker(cfg, db, collectorSvc)
+	cw.Start(ctx)
+	time.Sleep(60 * time.Millisecond)
+	if status := collectorSvc.Status(); status.Collector != "stopped" {
+		t.Fatalf("collector status with persisted refusal = %#v, want stopped", status)
+	}
+	if got := outboundRequests.Load(); got != 0 {
+		t.Fatalf("outbound CPA requests with persisted refusal = %d, want 0", got)
+	}
+
+	// Clear the refusal row; CollectorWorker.Start now starts polling.
+	if _, err := db.SQLDB().ExecContext(ctx, `delete from settings where key = ?`, workerExternalRejectionKey); err != nil {
+		t.Fatalf("delete refusal row: %v", err)
+	}
+	cw.Start(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for collectorSvc.Status().Collector != "running" {
+		if time.Now().After(deadline) {
+			t.Fatalf("collector did not reach running after clearing refusal: %#v", collectorSvc.Status())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if outboundRequests.Load() == 0 {
+		t.Fatal("expected outbound CPA queue requests after clearing refusal")
+	}
 }

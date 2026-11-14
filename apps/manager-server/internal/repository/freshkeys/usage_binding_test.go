@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	projectionadapter "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	projectionports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
@@ -376,4 +378,232 @@ func TestRegisterAdoptionEnforcesCommittedKeySetDigestOnReplay(t *testing.T) {
 	if err != nil || len(listed) != 2 {
 		t.Fatalf("final listed keys = %#v (%v), want 2", listed, err)
 	}
+}
+
+func TestBindFreshKeySourcesHandsOffPriorRuntimeSkipsRetiredAndRollsBackOnConflict(t *testing.T) {
+	t.Run("hands_off_prior_runtime_clamps_timestamps_and_skips_retired_bindings", func(t *testing.T) {
+		db := openTestDB(t)
+		repo := New(db)
+		ctx := t.Context()
+
+		priorKey := stagedRecord(t, strings.Repeat("1", 32), usageKeyID, "cpamp_sk_"+strings.Repeat("a", 64))
+		priorKey.Identity.CreatedAtMS = 1000
+		priorKey.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, priorKey, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+
+		unboundKey := stagedRecord(t, strings.Repeat("2", 32), usageKeeper, "cpamp_sk_"+strings.Repeat("b", 64))
+		unboundKey.Identity.CreatedAtMS = 4000
+		unboundKey.Identity.UpdatedAtMS = 4000
+		if _, err := repo.Create(ctx, unboundKey, ""); err != nil {
+			t.Fatal(err)
+		}
+
+		// Explicitly closed source window (even if lifecycle remained active) must never be resurrected.
+		retiredKey := stagedRecord(t, strings.Repeat("3", 32), usageOtherID, "cpamp_sk_"+strings.Repeat("c", 64))
+		retiredKey.Identity.CreatedAtMS = 1000
+		retiredKey.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, retiredKey, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `update gateway_api_key_source_bindings set retired_at_ms = 2000 where api_key_id = ?`, usageOtherID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Pass nowMS = 3000 (< unboundKey.CreatedAtMS = 4000) to also prove monotonic last_seen_at_ms clamp.
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundCount, err := repo.BindFreshKeySourcesTx(ctx, tx, usageRuntime, 3000)
+		if err != nil || boundCount != 2 {
+			_ = tx.Rollback()
+			t.Fatalf("BindFreshKeySourcesTx = %d (%v), want 2", boundCount, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+
+		priorRows := bindingRows(t, db, usageKeyID)
+		if len(priorRows) != 2 ||
+			priorRows[0].runtimeIdentity != "legacy-runtime" || !priorRows[0].retiredAtMS.Valid || priorRows[0].retiredAtMS.Int64 != 3000 ||
+			priorRows[1].runtimeIdentity != usageRuntime || priorRows[1].firstSeenAtMS != 3000 || priorRows[1].retiredAtMS.Valid {
+			t.Fatalf("priorKey handoff rows = %+v", priorRows)
+		}
+
+		var unboundLastSeen int64
+		if err := db.QueryRowContext(ctx,
+			`select last_seen_at_ms from gateway_api_key_source_bindings where api_key_id = ? and runtime_identity = ? and retired_at_ms is null`,
+			usageKeeper, usageRuntime).Scan(&unboundLastSeen); err != nil || unboundLastSeen != 4000 {
+			t.Fatalf("unboundKey last_seen_at_ms = %d (%v), want 4000 (>= first_seen_at_ms)", unboundLastSeen, err)
+		}
+
+		retiredRows := bindingRows(t, db, usageOtherID)
+		if len(retiredRows) != 1 || !retiredRows[0].retiredAtMS.Valid || retiredRows[0].retiredAtMS.Int64 != 2000 {
+			t.Fatalf("retiredKey bindings resurrected = %+v", retiredRows)
+		}
+
+		insertUsageEventForKeyTest(t, db, "ev-bind-pre", 2000, priorKey.Hash, 4, 4, 8, 0)
+		insertUsageEventForKeyTest(t, db, "ev-bind-post", 3000, priorKey.Hash, 6, 6, 12, 0)
+		projRepo := projectionadapter.New(db)
+		if _, err := projRepo.CatchUp(ctx, 50, 5000); err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range []string{"ev-bind-pre", "ev-bind-post"} {
+			p, err := projRepo.GetProjectionByEventHash(ctx, ev)
+			if err != nil || p == nil || p.APIKeyState != projectionports.StateMapped || p.APIKeyID == nil || *p.APIKeyID != usageKeyID {
+				t.Fatalf("projection(%s) = %+v (%v)", ev, p, err)
+			}
+		}
+
+		if again, err := repo.BindFreshKeySources(ctx, usageRuntime, 5000); err != nil || again != 0 {
+			t.Fatalf("idempotent BindFreshKeySources = %d (%v), want 0", again, err)
+		}
+	})
+
+	t.Run("rolls_back_all_handoffs_when_later_key_conflicts", func(t *testing.T) {
+		db := openTestDB(t)
+		repo := New(db)
+		ctx := t.Context()
+
+		firstKey := stagedRecord(t, strings.Repeat("4", 32), usageKeyID, "cpamp_sk_"+strings.Repeat("d", 64))
+		firstKey.Identity.CreatedAtMS = 1000
+		firstKey.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, firstKey, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+
+		secondKey := stagedRecord(t, strings.Repeat("5", 32), usageKeeper, "cpamp_sk_"+strings.Repeat("e", 64))
+		secondKey.Identity.CreatedAtMS = 2000
+		secondKey.Identity.UpdatedAtMS = 2000
+		if _, err := repo.Create(ctx, secondKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		// Seed a conflicting active hash on (usageKeeper, usageRuntime) so BindFreshKeySources must fail with ErrSourceOwned.
+		if _, err := db.ExecContext(ctx,
+			`insert into gateway_api_key_source_bindings (api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms, retired_at_ms) values (?, ?, ?, 2000, 2000, null)`,
+			usageKeeper, usageRuntime, hashHex("conflicting-other-secret")); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := repo.BindFreshKeySources(ctx, usageRuntime, 3000); !errors.Is(err, ErrSourceOwned) {
+			t.Fatalf("BindFreshKeySources conflict = %v, want ErrSourceOwned", err)
+		}
+		firstRows := bindingRows(t, db, usageKeyID)
+		if len(firstRows) != 1 || firstRows[0].runtimeIdentity != "legacy-runtime" || firstRows[0].retiredAtMS.Valid {
+			t.Fatalf("failed BindFreshKeySources mutated firstKey binding: %+v", firstRows)
+		}
+	})
+
+	t.Run("recovers_passive_missing_on_valid_handoff_preserves_same_runtime_missing_and_never_resurrects_superseded", func(t *testing.T) {
+		db := openTestDB(t)
+		repo := New(db)
+		ctx := t.Context()
+
+		// Key A: bound on legacy-runtime, passively marked LifecycleMissing (last_seen = 2500).
+		handoffMissing := stagedRecord(t, strings.Repeat("6", 32), usageKeyID, "cpamp_sk_"+strings.Repeat("1", 64))
+		handoffMissing.Identity.CreatedAtMS = 1000
+		handoffMissing.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, handoffMissing, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_identities set lifecycle = 'missing', revision = 2, updated_at_ms = 2000 where id = ?`,
+			usageKeyID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_source_bindings set observed_runtime_generation = '3', last_seen_at_ms = 2500 where api_key_id = ?`,
+			usageKeyID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Key B: already bound on usageRuntime and passively marked LifecycleMissing on that same runtime.
+		sameRuntimeMissing := stagedRecord(t, strings.Repeat("7", 32), usageKeeper, "cpamp_sk_"+strings.Repeat("2", 64))
+		sameRuntimeMissing.Identity.CreatedAtMS = 1000
+		sameRuntimeMissing.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, sameRuntimeMissing, usageRuntime); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_identities set lifecycle = 'missing', revision = 2, updated_at_ms = 2000 where id = ?`,
+			usageKeeper); err != nil {
+			t.Fatal(err)
+		}
+
+		// Key C: superseded identity must never be resurrected.
+		supersededID := "22334455667788990011aabbccddeeff"
+		supersededKey := stagedRecord(t, strings.Repeat("8", 32), supersededID, "cpamp_sk_"+strings.Repeat("3", 64))
+		supersededKey.Identity.CreatedAtMS = 1000
+		supersededKey.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, supersededKey, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_identities set lifecycle = 'superseded', revision = 2, updated_at_ms = 2000 where id = ?`,
+			supersededID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_source_bindings set retired_at_ms = 2001 where api_key_id = ?`,
+			supersededID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Key D: explicitly retired binding (activeRows == 0, retiredRows == 1) must never be resurrected even if missing.
+		retiredBindingKey := stagedRecord(t, strings.Repeat("9", 32), usageOtherID, "cpamp_sk_"+strings.Repeat("4", 64))
+		retiredBindingKey.Identity.CreatedAtMS = 1000
+		retiredBindingKey.Identity.UpdatedAtMS = 1000
+		if _, err := repo.Create(ctx, retiredBindingKey, "legacy-runtime"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_identities set lifecycle = 'missing', revision = 2, updated_at_ms = 2000 where id = ?`,
+			usageOtherID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`update gateway_api_key_source_bindings set retired_at_ms = 2001 where api_key_id = ?`,
+			usageOtherID); err != nil {
+			t.Fatal(err)
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundCount, err := repo.BindFreshKeySourcesTx(ctx, tx, usageRuntime, 2200)
+		if err != nil || boundCount != 1 {
+			_ = tx.Rollback()
+			t.Fatalf("BindFreshKeySourcesTx = %d (%v), want 1", boundCount, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+
+		recoveredA, err := repo.ByID(ctx, identity.APIKeyID(usageKeyID))
+		if err != nil || recoveredA == nil || recoveredA.Identity.Lifecycle != identity.LifecycleActive ||
+			recoveredA.Identity.Revision != 3 || recoveredA.Identity.UpdatedAtMS != 2500 {
+			t.Fatalf("handed-off missing key A = %+v (%v), want active rev=3 updatedAtMs=2500", recoveredA, err)
+		}
+		rowsA := bindingRows(t, db, usageKeyID)
+		if len(rowsA) != 2 || !rowsA[0].retiredAtMS.Valid || rowsA[0].retiredAtMS.Int64 != 2500 ||
+			rowsA[1].runtimeIdentity != usageRuntime || rowsA[1].firstSeenAtMS != 2500 || rowsA[1].retiredAtMS.Valid {
+			t.Fatalf("handed-off key A bindings = %+v, want [1000, 2500) and [2500, null)", rowsA)
+		}
+
+		unchangedB, err := repo.ByID(ctx, identity.APIKeyID(usageKeeper))
+		if err != nil || unchangedB == nil || unchangedB.Identity.Lifecycle != identity.LifecycleMissing || unchangedB.Identity.Revision != 2 {
+			t.Fatalf("same-runtime missing key B = %+v (%v), want preserved missing rev=2", unchangedB, err)
+		}
+		unchangedC, err := repo.ByID(ctx, identity.APIKeyID(supersededID))
+		if err != nil || unchangedC == nil || unchangedC.Identity.Lifecycle != identity.LifecycleSuperseded {
+			t.Fatalf("superseded key C = %+v (%v), want superseded", unchangedC, err)
+		}
+		rowsD := bindingRows(t, db, usageOtherID)
+		if len(rowsD) != 1 || !rowsD[0].retiredAtMS.Valid || rowsD[0].retiredAtMS.Int64 != 2001 {
+			t.Fatalf("explicitly retired binding key D = %+v, want no active binding", rowsD)
+		}
+	})
 }

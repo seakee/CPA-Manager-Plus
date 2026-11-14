@@ -59,6 +59,7 @@ var (
 	// was written by a build that had no gate; a reader cannot re-prove it and
 	// says so instead of presenting the stage as an observation.
 	ErrVerificationEvidenceMissing = errors.New("upgrade operation complete row carries no verification evidence")
+	ErrRoutingAlreadyCommitted     = errors.New("upgrade operation routing prefixes are already committed")
 )
 
 type Repository struct{ db *sql.DB }
@@ -71,6 +72,14 @@ const selectColumns = `stage, last_forward_stage, revision, domains_done, source
 	rollback_image, rollback_image_source, rollback_image_form,
 	rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 	created_at_ms, updated_at_ms`
+
+const selectColumnsWithLegacyRouting = selectColumns + `,
+	control_base_path, inference_base_path, shared_entry, routing_committed,
+	suggested_control_base_path, suggested_inference_base_path`
+
+const selectColumnsWithRouting = selectColumns + `,
+	control_base_path, inference_base_path, shared_entry, routing_committed, inference_committed,
+	suggested_control_base_path, suggested_inference_base_path`
 
 // requiredColumns are the columns selectColumns reads. The table is created by a
 // writable open, so a store written by an earlier build can hold the table
@@ -118,15 +127,70 @@ func (r *Repository) MissingColumns(ctx context.Context) ([]string, error) {
 // Get returns the single operation row. found is false before the first
 // Advance; the caller must not treat that as an operation in progress.
 func (r *Repository) Get(ctx context.Context) (model.UpgradeOperation, bool, error) {
-	row := r.db.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
-	return scanOperation(row)
+	routingCols, err := queryerRoutingColumns(ctx, r.db)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	cols := selectColumns
+	if routingCols.present {
+		if routingCols.inferenceCommitted {
+			cols = selectColumnsWithRouting
+		} else {
+			cols = selectColumnsWithLegacyRouting
+		}
+	}
+	return scanOperationWithRouting(r.db.QueryRowContext(ctx, `select `+cols+` from `+tableName+` where id = 1`), routingCols)
 }
 
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+type columnQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+type routingColumnSet struct {
+	present            bool
+	inferenceCommitted bool
+}
+
+func queryerRoutingColumns(ctx context.Context, q columnQueryer) (routingColumnSet, error) {
+	rows, err := q.QueryContext(ctx, `select name from pragma_table_info(?)`, tableName)
+	if err != nil {
+		return routingColumnSet{}, nil
+	}
+	defer func() { _ = rows.Close() }()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return routingColumnSet{}, err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return routingColumnSet{}, err
+	}
+	for _, col := range []string{
+		"control_base_path", "inference_base_path", "shared_entry", "routing_committed",
+		"suggested_control_base_path", "suggested_inference_base_path",
+	} {
+		if !present[col] {
+			return routingColumnSet{}, nil
+		}
+	}
+	return routingColumnSet{
+		present:            true,
+		inferenceCommitted: present["inference_committed"],
+	}, nil
+}
+
 func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
+	return scanOperationWithRouting(row, routingColumnSet{})
+}
+
+func scanOperationWithRouting(row rowScanner, routingCols routingColumnSet) (model.UpgradeOperation, bool, error) {
 	var (
 		op                                                    model.UpgradeOperation
 		stage, lastForwardStage                               string
@@ -138,13 +202,26 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 		rollbackImage, rollbackImageSource, rollbackImageForm sql.NullString
 		rollbackStatusURL, rollbackFpr                        sql.NullString
 		rollbackObservedAtMS                                  sql.NullInt64
+		controlBasePath, inferenceBasePath                    sql.NullString
+		sharedEntry, routingCommitted, inferenceCommitted     sql.NullInt64
+		suggestedControlBasePath, suggestedInferenceBasePath  sql.NullString
 	)
-	err := row.Scan(&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion, &sourceRoot,
+	dest := []any{
+		&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion, &sourceRoot,
 		&fingerprintBefore, &fingerprintAfter, &backupManifest,
 		&reconciliation, &verification, &manualItems, &errorCode, &errorDetail,
 		&rollbackImage, &rollbackImageSource, &rollbackImageForm,
 		&rollbackStatusURL, &rollbackFpr, &rollbackObservedAtMS,
-		&op.CreatedAtMS, &op.UpdatedAtMS)
+		&op.CreatedAtMS, &op.UpdatedAtMS,
+	}
+	if routingCols.present {
+		dest = append(dest, &controlBasePath, &inferenceBasePath, &sharedEntry, &routingCommitted)
+		if routingCols.inferenceCommitted {
+			dest = append(dest, &inferenceCommitted)
+		}
+		dest = append(dest, &suggestedControlBasePath, &suggestedInferenceBasePath)
+	}
+	err := row.Scan(dest...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.UpgradeOperation{}, false, nil
 	}
@@ -161,6 +238,19 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	op.BackupManifestSHA256 = backupManifest.String
 	op.ErrorCode = errorCode.String
 	op.ErrorDetail = errorDetail.String
+	if routingCols.present {
+		op.ControlBasePath = controlBasePath.String
+		op.InferenceBasePath = inferenceBasePath.String
+		op.SharedEntry = sharedEntry.Int64 != 0
+		op.RoutingCommitted = routingCommitted.Int64 != 0
+		if routingCols.inferenceCommitted {
+			op.InferenceCommitted = inferenceCommitted.Int64 != 0
+		} else {
+			op.InferenceCommitted = op.Stage == model.UpgradeStageComplete && op.RoutingCommitted && op.InferenceBasePath != ""
+		}
+		op.SuggestedControlBasePath = suggestedControlBasePath.String
+		op.SuggestedInferenceBasePath = suggestedInferenceBasePath.String
+	}
 	if rollbackImage.String != "" || rollbackImageSource.String != "" || rollbackImageForm.String != "" ||
 		rollbackStatusURL.String != "" || rollbackFpr.String != "" || rollbackObservedAtMS.Int64 > 0 {
 		op.Rollback = &model.RollbackEvidence{
@@ -348,7 +438,7 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	if err != nil {
 		return err
 	}
-	current, found, err := scanOperation(tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -383,6 +473,19 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	// replaces every column, so the stored value is carried forward: erasing it
 	// would leave a Managed verify row with a stage no reader could re-check.
 	op.Verification = current.Verification
+	if op.ControlBasePath == "" && !op.RoutingCommitted {
+		op.ControlBasePath = current.ControlBasePath
+		op.InferenceBasePath = current.InferenceBasePath
+		op.SharedEntry = current.SharedEntry
+		op.RoutingCommitted = current.RoutingCommitted
+		op.InferenceCommitted = current.InferenceCommitted
+	}
+	if op.SuggestedControlBasePath == "" {
+		op.SuggestedControlBasePath = current.SuggestedControlBasePath
+	}
+	if op.SuggestedInferenceBasePath == "" {
+		op.SuggestedInferenceBasePath = current.SuggestedInferenceBasePath
+	}
 	op.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	op.Revision = current.Revision + 1
 	if op.Stage == model.UpgradeStageFailed || op.Stage == model.UpgradeStageRolledBack {
@@ -442,9 +545,18 @@ func requireTransition(current model.UpgradeOperation, next model.UpgradeStage) 
 
 type operationWriter interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func writeOperation(ctx context.Context, writer operationWriter, op model.UpgradeOperation) error {
+	routingCols, _ := queryerRoutingColumns(ctx, writer)
 	domains, err := json.Marshal(op.DomainsDone)
 	if err != nil {
 		return err
@@ -469,6 +581,113 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 	verification := op.Verification
 	if len(bytes.TrimSpace(verification)) == 0 {
 		verification = json.RawMessage("{}")
+	}
+	if routingCols.present && routingCols.inferenceCommitted {
+		_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
+			id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			reconciliation, verification, manual_items, error_code, error_detail,
+			rollback_image, rollback_image_source, rollback_image_form,
+			rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+			control_base_path, inference_base_path, shared_entry, routing_committed, inference_committed,
+			suggested_control_base_path, suggested_inference_base_path,
+			created_at_ms, updated_at_ms
+		) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		on conflict(id) do update set
+			stage = excluded.stage,
+			last_forward_stage = excluded.last_forward_stage,
+			revision = excluded.revision,
+			domains_done = excluded.domains_done,
+			source_kind = excluded.source_kind,
+			source_version = excluded.source_version,
+			source_root = excluded.source_root,
+			source_fingerprint_before = excluded.source_fingerprint_before,
+			source_fingerprint_after = excluded.source_fingerprint_after,
+			backup_manifest_sha256 = excluded.backup_manifest_sha256,
+			reconciliation = excluded.reconciliation,
+			verification = excluded.verification,
+			manual_items = excluded.manual_items,
+			error_code = excluded.error_code,
+			error_detail = excluded.error_detail,
+			rollback_image = excluded.rollback_image,
+			rollback_image_source = excluded.rollback_image_source,
+			rollback_image_form = excluded.rollback_image_form,
+			rollback_status_url = excluded.rollback_status_url,
+			rollback_source_fingerprint = excluded.rollback_source_fingerprint,
+			rollback_observed_at_ms = excluded.rollback_observed_at_ms,
+			control_base_path = excluded.control_base_path,
+			inference_base_path = excluded.inference_base_path,
+			shared_entry = excluded.shared_entry,
+			routing_committed = excluded.routing_committed,
+			inference_committed = excluded.inference_committed,
+			suggested_control_base_path = excluded.suggested_control_base_path,
+			suggested_inference_base_path = excluded.suggested_inference_base_path,
+			created_at_ms = excluded.created_at_ms,
+			updated_at_ms = excluded.updated_at_ms`,
+			string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
+			nullString(op.SourceRoot),
+			nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
+			nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(verification), string(manualItems),
+			nullString(op.ErrorCode), nullString(op.ErrorDetail),
+			rollbackImage, rollbackImageSource, rollbackImageForm,
+			rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
+			op.ControlBasePath, op.InferenceBasePath, boolInt(op.SharedEntry), boolInt(op.RoutingCommitted), boolInt(op.InferenceCommitted),
+			op.SuggestedControlBasePath, op.SuggestedInferenceBasePath,
+			op.CreatedAtMS, op.UpdatedAtMS)
+		return err
+	}
+	if routingCols.present {
+		_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
+			id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			reconciliation, verification, manual_items, error_code, error_detail,
+			rollback_image, rollback_image_source, rollback_image_form,
+			rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+			control_base_path, inference_base_path, shared_entry, routing_committed,
+			suggested_control_base_path, suggested_inference_base_path,
+			created_at_ms, updated_at_ms
+		) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		on conflict(id) do update set
+			stage = excluded.stage,
+			last_forward_stage = excluded.last_forward_stage,
+			revision = excluded.revision,
+			domains_done = excluded.domains_done,
+			source_kind = excluded.source_kind,
+			source_version = excluded.source_version,
+			source_root = excluded.source_root,
+			source_fingerprint_before = excluded.source_fingerprint_before,
+			source_fingerprint_after = excluded.source_fingerprint_after,
+			backup_manifest_sha256 = excluded.backup_manifest_sha256,
+			reconciliation = excluded.reconciliation,
+			verification = excluded.verification,
+			manual_items = excluded.manual_items,
+			error_code = excluded.error_code,
+			error_detail = excluded.error_detail,
+			rollback_image = excluded.rollback_image,
+			rollback_image_source = excluded.rollback_image_source,
+			rollback_image_form = excluded.rollback_image_form,
+			rollback_status_url = excluded.rollback_status_url,
+			rollback_source_fingerprint = excluded.rollback_source_fingerprint,
+			rollback_observed_at_ms = excluded.rollback_observed_at_ms,
+			control_base_path = excluded.control_base_path,
+			inference_base_path = excluded.inference_base_path,
+			shared_entry = excluded.shared_entry,
+			routing_committed = excluded.routing_committed,
+			suggested_control_base_path = excluded.suggested_control_base_path,
+			suggested_inference_base_path = excluded.suggested_inference_base_path,
+			created_at_ms = excluded.created_at_ms,
+			updated_at_ms = excluded.updated_at_ms`,
+			string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
+			nullString(op.SourceRoot),
+			nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
+			nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(verification), string(manualItems),
+			nullString(op.ErrorCode), nullString(op.ErrorDetail),
+			rollbackImage, rollbackImageSource, rollbackImageForm,
+			rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
+			op.ControlBasePath, op.InferenceBasePath, boolInt(op.SharedEntry), boolInt(op.RoutingCommitted),
+			op.SuggestedControlBasePath, op.SuggestedInferenceBasePath,
+			op.CreatedAtMS, op.UpdatedAtMS)
+		return err
 	}
 	_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
 		id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
@@ -518,6 +737,23 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 type Tx interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func getInTx(ctx context.Context, tx Tx) (model.UpgradeOperation, bool, error) {
+	routingCols, err := queryerRoutingColumns(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	cols := selectColumns
+	if routingCols.present {
+		if routingCols.inferenceCommitted {
+			cols = selectColumnsWithRouting
+		} else {
+			cols = selectColumnsWithLegacyRouting
+		}
+	}
+	return scanOperationWithRouting(tx.QueryRowContext(ctx, `select `+cols+` from `+tableName+` where id = 1`), routingCols)
 }
 
 // nextUpdatedAtMS returns the updated_at_ms the next write must store. nowMS is
@@ -616,8 +852,7 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
-	current, found, err := scanOperation(row)
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -714,8 +949,7 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
 		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
 	}
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -757,8 +991,7 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 // writer advanced since returns ErrConflict instead of being overwritten.
 func AppendManualItemsTx(ctx context.Context, tx Tx, items []string) (model.UpgradeOperation, error) {
 	now := time.Now().UnixMilli()
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -806,8 +1039,7 @@ func AppendManualItemsTx(ctx context.Context, tx Tx, items []string) (model.Upgr
 // the stamp is computed from the row as this transaction sees it.
 func ClearErrorTx(ctx context.Context, tx Tx) error {
 	now := time.Now().UnixMilli()
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -867,8 +1099,7 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if err := json.Unmarshal(report, &object); err != nil {
 		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
 	}
-	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
-	current, found, err := scanOperation(row)
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -907,8 +1138,7 @@ func RecordErrorTx(ctx context.Context, tx Tx, code, detail string) (model.Upgra
 		return model.UpgradeOperation{}, fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
 	}
 	now := time.Now().UnixMilli()
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -1011,6 +1241,12 @@ func RecordCompletionTx(ctx context.Context, tx Tx, verification model.UpgradeVe
 	next.Stage = model.UpgradeStageComplete
 	next.LastForwardStage = model.UpgradeStageComplete
 	next.Verification = payload
+	if next.ControlBasePath != "" {
+		next.RoutingCommitted = true
+		if verification.TargetMode == model.UpgradeTargetManaged && next.InferenceBasePath != "" {
+			next.InferenceCommitted = true
+		}
+	}
 	next.ErrorCode = ""
 	next.ErrorDetail = ""
 	next.UpdatedAtMS = nextUpdatedAtMS(now, next)
@@ -1023,12 +1259,35 @@ func RecordCompletionTx(ctx context.Context, tx Tx, verification model.UpgradeVe
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set stage = ?, last_forward_stage = ?, verification = ?, manual_items = ?,
-			error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
-		where id = 1 and revision = ?`,
-		string(next.Stage), string(next.LastForwardStage), string(payload), string(manual),
-		nullString(next.ErrorCode), nullString(next.ErrorDetail), next.Revision, next.UpdatedAtMS, expectedRevision)
+	routingCols, _ := queryerRoutingColumns(ctx, tx)
+	var result sql.Result
+	switch {
+	case routingCols.present && routingCols.inferenceCommitted:
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, last_forward_stage = ?, verification = ?, manual_items = ?,
+				routing_committed = ?, inference_committed = ?,
+				error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(next.Stage), string(next.LastForwardStage), string(payload), string(manual),
+			boolInt(next.RoutingCommitted), boolInt(next.InferenceCommitted),
+			nullString(next.ErrorCode), nullString(next.ErrorDetail), next.Revision, next.UpdatedAtMS, expectedRevision)
+	case routingCols.present:
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, last_forward_stage = ?, verification = ?, manual_items = ?,
+				routing_committed = ?,
+				error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(next.Stage), string(next.LastForwardStage), string(payload), string(manual),
+			boolInt(next.RoutingCommitted),
+			nullString(next.ErrorCode), nullString(next.ErrorDetail), next.Revision, next.UpdatedAtMS, expectedRevision)
+	default:
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, last_forward_stage = ?, verification = ?, manual_items = ?,
+				error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(next.Stage), string(next.LastForwardStage), string(payload), string(manual),
+			nullString(next.ErrorCode), nullString(next.ErrorDetail), next.Revision, next.UpdatedAtMS, expectedRevision)
+	}
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -1062,8 +1321,7 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 		return model.UpgradeOperation{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -1142,8 +1400,7 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
 		return model.UpgradeOperation{}, errors.New("no upgrade operation is recorded, so there is nothing to roll back")
 	}
-	current, found, err := scanOperation(tx.QueryRowContext(ctx,
-		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	current, found, err := getInTx(ctx, tx)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -1189,6 +1446,368 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 		return model.UpgradeOperation{}, err
 	}
 	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// RecordRouting persists pre-completion Upgrade prefix configuration on the
+// single upgrade_operations row behind its revision CAS. Already-committed
+// prefixes are preserved idempotently and never overwritten.
+func (r *Repository) RecordRouting(ctx context.Context, controlBasePath, inferenceBasePath string, sharedEntry bool, sugControl, sugInference string) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated, err := RecordRoutingTx(ctx, tx, controlBasePath, inferenceBasePath, sharedEntry, sugControl, sugInference)
+	if err != nil {
+		return updated, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return updated, nil
+}
+
+// RecordRoutingTx records pre-completion Upgrade prefix configuration inside the
+// caller's transaction so Verify can commit routing and completion atomically.
+func RecordRoutingTx(ctx context.Context, tx Tx, controlBasePath, inferenceBasePath string, sharedEntry bool, sugControl, sugInference string) (model.UpgradeOperation, error) {
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no recorded operation to configure routing on", ErrInvalidRow)
+	}
+	if current.RoutingCommitted {
+		if current.ControlBasePath == controlBasePath &&
+			current.InferenceBasePath == inferenceBasePath &&
+			current.SharedEntry == sharedEntry &&
+			(inferenceBasePath == "" || current.InferenceCommitted) {
+			return current, nil
+		}
+		return current, ErrRoutingAlreadyCommitted
+	}
+	if err := requireMutableStage(current); err != nil {
+		return current, err
+	}
+	if current.ControlBasePath == controlBasePath &&
+		current.InferenceBasePath == inferenceBasePath &&
+		current.SharedEntry == sharedEntry &&
+		(sugControl == "" || current.SuggestedControlBasePath != "") &&
+		(sugInference == "" || current.SuggestedInferenceBasePath != "") {
+		return current, nil
+	}
+	current.ControlBasePath = controlBasePath
+	current.InferenceBasePath = inferenceBasePath
+	current.SharedEntry = sharedEntry
+	current.InferenceCommitted = false
+	if current.SuggestedControlBasePath == "" && sugControl != "" {
+		current.SuggestedControlBasePath = sugControl
+	}
+	if current.SuggestedInferenceBasePath == "" && sugInference != "" {
+		current.SuggestedInferenceBasePath = sugInference
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	routingCols, _ := queryerRoutingColumns(ctx, tx)
+	var result sql.Result
+	if routingCols.inferenceCommitted {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set control_base_path = ?, inference_base_path = ?, shared_entry = ?, inference_committed = 0,
+				suggested_control_base_path = ?, suggested_inference_base_path = ?,
+				revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			current.ControlBasePath, current.InferenceBasePath, boolInt(current.SharedEntry),
+			current.SuggestedControlBasePath, current.SuggestedInferenceBasePath,
+			current.Revision, current.UpdatedAtMS, expectedRevision)
+	} else {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set control_base_path = ?, inference_base_path = ?, shared_entry = ?,
+				suggested_control_base_path = ?, suggested_inference_base_path = ?,
+				revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			current.ControlBasePath, current.InferenceBasePath, boolInt(current.SharedEntry),
+			current.SuggestedControlBasePath, current.SuggestedInferenceBasePath,
+			current.Revision, current.UpdatedAtMS, expectedRevision)
+	}
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// StageMissingInferenceOnCompletedUpgrade persists the intended inference
+// prefix on an already-completed Managed Upgrade store as uncommitted
+// (InferenceCommitted = false) while retaining committed management routing.
+// Replaying the exact already-staged or already-committed intent returns the
+// stored row without a second write; a competing different intent fails closed
+// with ErrRoutingAlreadyCommitted.
+func (r *Repository) StageMissingInferenceOnCompletedUpgrade(ctx context.Context, inferenceBasePath string, sharedEntry bool) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found || current.Stage != model.UpgradeStageComplete || !current.RoutingCommitted || strings.TrimSpace(current.ControlBasePath) == "" {
+		return current, ErrInvalidRow
+	}
+	evidence, err := current.VerificationEvidence()
+	if err != nil || evidence.TargetMode != model.UpgradeTargetManaged {
+		return current, ErrInvalidRow
+	}
+	if current.InferenceCommitted {
+		if current.InferenceBasePath == inferenceBasePath && current.SharedEntry == sharedEntry {
+			return current, nil
+		}
+		return current, ErrRoutingAlreadyCommitted
+	}
+	if current.InferenceBasePath != "" {
+		if current.InferenceBasePath == inferenceBasePath && current.SharedEntry == sharedEntry {
+			return current, nil
+		}
+		return current, ErrRoutingAlreadyCommitted
+	}
+	current.InferenceBasePath = inferenceBasePath
+	current.SharedEntry = sharedEntry
+	current.InferenceCommitted = false
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set inference_base_path = ?, shared_entry = ?, inference_committed = 0, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.InferenceBasePath, boolInt(current.SharedEntry), current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// CommitMissingInferenceOnCompletedUpgrade marks a verified staged inference
+// prefix on a completed Managed Upgrade store as committed behind expectedRevision CAS.
+// If the exact same intent is already committed, it returns the stored row
+// without a second write; any different intent fails closed with ErrRoutingAlreadyCommitted.
+func (r *Repository) CommitMissingInferenceOnCompletedUpgrade(ctx context.Context, expectedRevision int64, inferenceBasePath string, sharedEntry bool) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found || current.Stage != model.UpgradeStageComplete || !current.RoutingCommitted || strings.TrimSpace(current.ControlBasePath) == "" {
+		return current, ErrInvalidRow
+	}
+	evidence, err := current.VerificationEvidence()
+	if err != nil || evidence.TargetMode != model.UpgradeTargetManaged {
+		return current, ErrInvalidRow
+	}
+	if current.InferenceCommitted {
+		if current.InferenceBasePath == inferenceBasePath && current.SharedEntry == sharedEntry {
+			return current, nil
+		}
+		return current, ErrRoutingAlreadyCommitted
+	}
+	if current.InferenceBasePath == "" {
+		return current, ErrConflict
+	}
+	if current.InferenceBasePath != inferenceBasePath || current.SharedEntry != sharedEntry {
+		return current, ErrRoutingAlreadyCommitted
+	}
+	if current.Revision != expectedRevision {
+		return current, ErrConflict
+	}
+	current.InferenceCommitted = true
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set inference_committed = 1, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// RepairMissingRoutingOnCompletedUpgrade commits missing access prefixes one
+// time on a pre-existing completed Upgrade row while preserving any already
+// committed prefix and refusing modifications once mode-complete routing is committed.
+func (r *Repository) RepairMissingRoutingOnCompletedUpgrade(
+	ctx context.Context,
+	expectedRevision int64,
+	controlBasePath, inferenceBasePath string,
+	sharedEntry bool,
+	sugControl, sugInference string,
+) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated, err := RepairMissingRoutingOnCompletedUpgradeTx(ctx, tx, expectedRevision, controlBasePath, inferenceBasePath, sharedEntry, sugControl, sugInference)
+	if err != nil {
+		return updated, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return updated, nil
+}
+
+// RepairMissingRoutingOnCompletedUpgradeTx executes the one-time missing-prefix
+// repair inside the caller's transaction so callers can validate target proofs
+// against the same locked SQLite state.
+func RepairMissingRoutingOnCompletedUpgradeTx(
+	ctx context.Context,
+	tx Tx,
+	expectedRevision int64,
+	controlBasePath, inferenceBasePath string,
+	sharedEntry bool,
+	sugControl, sugInference string,
+) (model.UpgradeOperation, error) {
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found || current.Stage != model.UpgradeStageComplete {
+		return current, ErrInvalidRow
+	}
+	evidence, err := current.VerificationEvidence()
+	if err != nil || !evidence.Complete() {
+		return current, ErrInvalidRow
+	}
+	if current.RoutingCommitted && strings.TrimSpace(current.ControlBasePath) != "" {
+		if controlBasePath != "" && controlBasePath != current.ControlBasePath {
+			return current, ErrRoutingAlreadyCommitted
+		}
+		controlBasePath = current.ControlBasePath
+	}
+	switch evidence.TargetMode {
+	case model.UpgradeTargetExternal:
+		if current.RoutingCommitted && strings.TrimSpace(current.ControlBasePath) != "" {
+			if current.ControlBasePath == controlBasePath &&
+				inferenceBasePath == "" &&
+				!sharedEntry &&
+				current.InferenceBasePath == "" &&
+				!current.SharedEntry &&
+				!current.InferenceCommitted {
+				return current, nil
+			}
+			return current, ErrRoutingAlreadyCommitted
+		}
+		if strings.TrimSpace(controlBasePath) == "" || inferenceBasePath != "" || sharedEntry {
+			return current, ErrInvalidRow
+		}
+		current.ControlBasePath = controlBasePath
+		current.InferenceBasePath = ""
+		current.SharedEntry = false
+		current.RoutingCommitted = true
+		current.InferenceCommitted = false
+	case model.UpgradeTargetManaged:
+		if current.RoutingCommitted && strings.TrimSpace(current.ControlBasePath) != "" &&
+			current.InferenceCommitted && strings.TrimSpace(current.InferenceBasePath) != "" {
+			if current.ControlBasePath == controlBasePath &&
+				current.InferenceBasePath == inferenceBasePath &&
+				current.SharedEntry == sharedEntry {
+				return current, nil
+			}
+			return current, ErrRoutingAlreadyCommitted
+		}
+		if !current.InferenceCommitted && strings.TrimSpace(current.InferenceBasePath) != "" {
+			if current.InferenceBasePath != inferenceBasePath || current.SharedEntry != sharedEntry {
+				return current, ErrRoutingAlreadyCommitted
+			}
+		}
+		if strings.TrimSpace(controlBasePath) == "" || strings.TrimSpace(inferenceBasePath) == "" {
+			return current, ErrInvalidRow
+		}
+		current.ControlBasePath = controlBasePath
+		current.InferenceBasePath = inferenceBasePath
+		current.SharedEntry = sharedEntry
+		current.RoutingCommitted = true
+		current.InferenceCommitted = true
+	default:
+		return current, ErrInvalidRow
+	}
+	if expectedRevision >= 0 && current.Revision != expectedRevision {
+		return current, ErrConflict
+	}
+	if current.SuggestedControlBasePath == "" && sugControl != "" {
+		current.SuggestedControlBasePath = sugControl
+	}
+	if current.SuggestedInferenceBasePath == "" && sugInference != "" {
+		current.SuggestedInferenceBasePath = sugInference
+	}
+	prevRevision := current.Revision
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	current.Revision = prevRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set control_base_path = ?, inference_base_path = ?, shared_entry = ?,
+			routing_committed = 1, inference_committed = ?,
+			suggested_control_base_path = ?, suggested_inference_base_path = ?,
+			revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.ControlBasePath, current.InferenceBasePath, boolInt(current.SharedEntry),
+		boolInt(current.InferenceCommitted),
+		current.SuggestedControlBasePath, current.SuggestedInferenceBasePath,
+		current.Revision, current.UpdatedAtMS, prevRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, prevRevision); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	return current, nil

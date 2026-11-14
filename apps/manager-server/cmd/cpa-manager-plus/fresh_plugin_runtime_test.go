@@ -416,7 +416,7 @@ func TestPluginRuntimeSurfaceRejectsAnythingOutsideTheContract(t *testing.T) {
 	}
 	// A query string and a non-canonical escaping are never a resource selector.
 	for _, target := range []string{"plugins/runtime?path=plugins", "plugins/runtime/groups/plugins%2F"} {
-		request := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+target, nil)
+		request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+target, nil)
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)

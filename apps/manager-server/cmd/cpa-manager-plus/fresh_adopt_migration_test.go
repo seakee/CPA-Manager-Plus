@@ -489,10 +489,11 @@ func newAdoptMigrationFixtureWithClientKeys(t *testing.T, clientKeys ...string) 
 	record, err = app.store.Update(ctx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = staged.Checkpoint
 		r.AdoptionCiphertext = staged.AdoptionCiphertext
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -562,7 +563,7 @@ func (f *adoptMigrationFixture) strategy(t *testing.T, record freshstore.Record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	f.app.canonicalAPI(response, request)
@@ -1187,7 +1188,7 @@ func TestReplayBlockedOnTheLockNeverStartsAfterCompletion(t *testing.T) {
 // complete posts the completion request of this fixture's installation.
 func (f *adoptMigrationFixture) complete(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	f.app.canonicalAPI(response, request)
@@ -1378,7 +1379,7 @@ func TestCheckpointRefusesAnIdentityTheRecordDoesNotOwn(t *testing.T) {
 // completeWith posts a completion request carrying the given body.
 func (f *adoptMigrationFixture) completeWith(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()

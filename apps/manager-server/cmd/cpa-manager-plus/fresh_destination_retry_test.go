@@ -68,7 +68,11 @@ func newRetryFixture(t *testing.T) *retryFixture {
 		r.AdoptionCiphertext = staged.AdoptionCiphertext
 		// A real installation commits its public route before it commits the
 		// strategy; the browser endpoint below only exists behind that route.
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -87,7 +91,7 @@ func (f *retryFixture) strategy(t *testing.T, revision uint64) *httptest.Respons
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	f.app.canonicalAPI(response, request)

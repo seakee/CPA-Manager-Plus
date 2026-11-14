@@ -178,7 +178,7 @@ func TestFreshAdoptCanonicalRefusalsHaveNoSourceOrStateEffect(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)

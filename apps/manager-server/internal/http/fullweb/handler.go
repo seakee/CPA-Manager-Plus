@@ -33,10 +33,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	context, _ := json.Marshal(struct {
-		State    routing.SnapshotState `json:"state"`
-		Base     string                `json:"verifiedEffectiveControlBasePath"`
-		Revision uint64                `json:"revision"`
-	}{h.Snapshot.State, prefix, h.Snapshot.Revision})
+		State                       routing.SnapshotState `json:"state"`
+		Base                        string                `json:"verifiedEffectiveControlBasePath"`
+		Revision                    uint64                `json:"revision"`
+		InferenceCompletionRequired bool                  `json:"inferenceCompletionRequired,omitempty"`
+	}{h.Snapshot.State, prefix, h.Snapshot.Revision, h.Snapshot.MissingInferenceCompletionRequired})
 	serveFullWeb(w, r, prefix, h.Dist, routing.PublicAPIHandler{Snapshot: h.Snapshot, Active: h.API}, context)
 }
 
@@ -70,8 +71,15 @@ func serveFullWeb(w http.ResponseWriter, r *http.Request, prefix string, dist fs
 	if suffix == requestPath {
 		suffix = ""
 	}
-	// All API-looking paths remain failures, including malformed API versions.
-	if suffix == "api" || strings.HasPrefix(suffix, "api/") {
+	// All API-looking and protocol/management-looking paths remain 404 failures,
+	// never SPA HTML fallbacks.
+	if suffix == "api" || strings.HasPrefix(suffix, "api/") ||
+		suffix == "v0" || strings.HasPrefix(suffix, "v0/") ||
+		suffix == "v1" || strings.HasPrefix(suffix, "v1/") ||
+		suffix == "v8" || strings.HasPrefix(suffix, "v8/") ||
+		suffix == "v1beta" || strings.HasPrefix(suffix, "v1beta/") ||
+		suffix == "openai/v1" || strings.HasPrefix(suffix, "openai/v1/") ||
+		suffix == "backend-api/codex" || strings.HasPrefix(suffix, "backend-api/codex/") {
 		http.NotFound(w, r)
 		return
 	}

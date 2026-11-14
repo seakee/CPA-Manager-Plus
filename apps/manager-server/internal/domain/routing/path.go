@@ -51,11 +51,16 @@ func validSnapshotState(state SnapshotState) bool {
 // state and request-derived values are intentionally retained as separate
 // fields so consumers cannot accidentally treat either as effective routing.
 type RoutingSnapshot struct {
-	DesiredControlBasePath           string
-	VerifiedEffectiveControlBasePath string
-	PreviousVerifiedControlBasePath  string
-	Revision                         uint64
-	State                            SnapshotState
+	DesiredControlBasePath             string
+	VerifiedEffectiveControlBasePath   string
+	PreviousVerifiedControlBasePath    string
+	DesiredInferenceBasePath           string
+	VerifiedEffectiveInferenceBasePath string
+	InferenceState                     SnapshotState
+	SharedEntry                        bool
+	MissingInferenceCompletionRequired bool
+	Revision                           uint64
+	State                              SnapshotState
 }
 
 // Validate checks the shape and authority state without consulting any
@@ -100,6 +105,9 @@ func (s RoutingSnapshot) Validate() error {
 			return errors.New("unknown or unavailable snapshot cannot carry effective authority")
 		}
 	}
+	if err := s.validateInferenceState(); err != nil {
+		return err
+	}
 	if err := ValidateNamespaceCollisions(s, nil); err != nil {
 		return err
 	}
@@ -120,6 +128,58 @@ func (s RoutingSnapshot) EffectiveControlBasePath() (string, bool) {
 		return "", false
 	}
 	return s.VerifiedEffectiveControlBasePath, true
+}
+
+// EffectiveInferenceBasePath returns the only inference prefix that may be used
+// by public inference consumers or access-info metadata. Empty means fail-closed.
+func (s RoutingSnapshot) EffectiveInferenceBasePath() (string, bool) {
+	if s.Validate() != nil || s.State != SnapshotVerifiedEffective ||
+		s.InferenceState != SnapshotVerifiedEffective || s.VerifiedEffectiveInferenceBasePath == "" {
+		return "", false
+	}
+	return s.VerifiedEffectiveInferenceBasePath, true
+}
+
+func (s RoutingSnapshot) validateInferenceState() error {
+	if s.InferenceState == "" {
+		if s.DesiredInferenceBasePath != "" || s.VerifiedEffectiveInferenceBasePath != "" || s.SharedEntry {
+			return errors.New("uninitialized inference snapshot state carries inference path or sharedEntry")
+		}
+		return nil
+	}
+	if !validSnapshotState(s.InferenceState) {
+		return fmt.Errorf("unknown inference snapshot state %q", s.InferenceState)
+	}
+	if s.DesiredInferenceBasePath != "" && !ValidInferenceBasePath(s.DesiredInferenceBasePath) {
+		return errors.New("desired inferenceBasePath is not canonical")
+	}
+	if s.VerifiedEffectiveInferenceBasePath != "" && !ValidInferenceBasePath(s.VerifiedEffectiveInferenceBasePath) {
+		return errors.New("verified effective inferenceBasePath is not canonical")
+	}
+	for _, candidate := range []string{s.DesiredInferenceBasePath, s.VerifiedEffectiveInferenceBasePath} {
+		if candidate != "" && reservedNamespaceCollision(candidate) {
+			return fmt.Errorf("inferenceBasePath collides with reserved path: %q", candidate)
+		}
+	}
+	switch s.InferenceState {
+	case SnapshotVerifiedEffective:
+		if s.State != SnapshotVerifiedEffective || s.VerifiedEffectiveInferenceBasePath == "" || s.Revision == 0 || s.MissingInferenceCompletionRequired {
+			return errors.New("verified effective inference snapshot requires verified control state, path, and revision")
+		}
+	case SnapshotDesiredOnly:
+		if s.DesiredInferenceBasePath == "" || s.VerifiedEffectiveInferenceBasePath != "" {
+			return errors.New("desired-only inference snapshot requires desired path and no effective path")
+		}
+	case SnapshotStale:
+		if s.VerifiedEffectiveInferenceBasePath == "" || s.Revision == 0 {
+			return errors.New("stale inference snapshot requires the last effective path and revision")
+		}
+	case SnapshotUnknown, SnapshotUnavailable:
+		if s.VerifiedEffectiveInferenceBasePath != "" {
+			return errors.New("unknown or unavailable inference snapshot cannot carry effective authority")
+		}
+	}
+	return nil
 }
 
 // CanonicalPublicAPIBase returns <controlBasePath>/api/v2 only when the
@@ -304,7 +364,10 @@ func ValidateNamespaceCollisions(snapshot RoutingSnapshot, retired []RetiredName
 			}
 		}
 	}
-	paths := make([]string, 0, len(retired)+3)
+	if err := validateControlInferenceCollision(snapshot); err != nil {
+		return err
+	}
+	paths := make([]string, 0, len(retired)+5)
 	for _, candidate := range []string{
 		snapshot.DesiredControlBasePath,
 		snapshot.VerifiedEffectiveControlBasePath,
@@ -314,6 +377,7 @@ func ValidateNamespaceCollisions(snapshot RoutingSnapshot, retired []RetiredName
 			paths = append(paths, candidate)
 		}
 	}
+	inferencePaths := []string{snapshot.DesiredInferenceBasePath, snapshot.VerifiedEffectiveInferenceBasePath}
 	for _, item := range retired {
 		if item.ControlBasePath == "" {
 			continue
@@ -330,6 +394,11 @@ func ValidateNamespaceCollisions(snapshot RoutingSnapshot, retired []RetiredName
 				return fmt.Errorf("routing namespace collision between %q and %q", existing, item.ControlBasePath)
 			}
 		}
+		for _, inf := range inferencePaths {
+			if inf != "" && sameOrNestedPrefix(inf, item.ControlBasePath) {
+				return fmt.Errorf("routing namespace collision between inference %q and retired %q", inf, item.ControlBasePath)
+			}
+		}
 		paths = append(paths, item.ControlBasePath)
 	}
 	return nil
@@ -339,6 +408,96 @@ func ValidateNamespaceCollisions(snapshot RoutingSnapshot, retired []RetiredName
 // preview contracts. Routing does not define another canonical prefix grammar.
 func ValidControlBasePath(value string) bool {
 	return bootstrapdomain.ValidControlBasePath(value)
+}
+
+// ValidInferenceBasePath delegates to the same canonical prefix grammar as
+// ValidControlBasePath.
+func ValidInferenceBasePath(value string) bool {
+	return bootstrapdomain.ValidInferenceBasePath(value)
+}
+
+// ReservedNamespaceCollision reports whether a candidate prefix equals or nests
+// with any fixed CPAMP or pinned CPA v8.0.55 management/protocol/callback route.
+func ReservedNamespaceCollision(candidate string) bool {
+	return reservedNamespaceCollision(candidate)
+}
+
+// ValidateAccessPrefixPair validates a controlBasePath + inferenceBasePath pair
+// under canonical grammar, reserved collision rules, nesting prohibition, and
+// explicit sharedEntry confirmation semantics.
+func ValidateAccessPrefixPair(control, inference string, sharedEntry, external bool) error {
+	if control == "" || !ValidControlBasePath(control) {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeInvalidAccessPrefix, Detail: "controlBasePath is missing or not canonical"}
+	}
+	if reservedNamespaceCollision(control) {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeReservedPrefixCollision, Detail: "controlBasePath collides with a reserved route"}
+	}
+	if external {
+		if inference != "" || sharedEntry {
+			return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeExternalInferencePrefixForbidden, Detail: "external mode does not use a managed inference prefix"}
+		}
+		return nil
+	}
+	if inference == "" {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeInferencePrefixRequired, Detail: "inferenceBasePath is required for managed inference"}
+	}
+	if !ValidInferenceBasePath(inference) {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeInvalidAccessPrefix, Detail: "inferenceBasePath is not canonical"}
+	}
+	if reservedNamespaceCollision(inference) {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeReservedPrefixCollision, Detail: "inferenceBasePath collides with a reserved route"}
+	}
+	if control == inference {
+		if !sharedEntry {
+			return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeSharedPrefixConfirmationRequired, Detail: "identical control and inference prefixes require sharedEntry confirmation"}
+		}
+		return nil
+	}
+	if sharedEntry {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodeSharedPrefixMismatch, Detail: "sharedEntry requires identical control and inference prefixes"}
+	}
+	if sameOrNestedPrefix(control, inference) {
+		return &bootstrapdomain.AccessPrefixError{Code: bootstrapdomain.CodePrefixOverlapForbidden, Detail: "control and inference prefixes must not nest"}
+	}
+	return nil
+}
+
+func validateControlInferenceCollision(snapshot RoutingSnapshot) error {
+	pairs := [][2]string{
+		{snapshot.DesiredControlBasePath, snapshot.DesiredInferenceBasePath},
+		{snapshot.VerifiedEffectiveControlBasePath, snapshot.VerifiedEffectiveInferenceBasePath},
+	}
+	checkedPair := false
+	for _, pair := range pairs {
+		ctrl, inf := pair[0], pair[1]
+		if ctrl == "" || inf == "" {
+			continue
+		}
+		checkedPair = true
+		if ctrl == inf {
+			if !snapshot.SharedEntry {
+				return fmt.Errorf("identical control and inference prefix %q requires sharedEntry", ctrl)
+			}
+			continue
+		}
+		if snapshot.SharedEntry {
+			return fmt.Errorf("distinct control %q and inference %q cannot set sharedEntry", ctrl, inf)
+		}
+		if sameOrNestedPrefix(ctrl, inf) {
+			return fmt.Errorf("routing namespace overlap between control %q and inference %q", ctrl, inf)
+		}
+	}
+	if snapshot.SharedEntry && !checkedPair {
+		return errors.New("sharedEntry requires matching control and inference paths")
+	}
+	if snapshot.PreviousVerifiedControlBasePath != "" {
+		for _, inf := range []string{snapshot.DesiredInferenceBasePath, snapshot.VerifiedEffectiveInferenceBasePath} {
+			if inf != "" && sameOrNestedPrefix(inf, snapshot.PreviousVerifiedControlBasePath) {
+				return fmt.Errorf("routing namespace collision between inference %q and previous control %q", inf, snapshot.PreviousVerifiedControlBasePath)
+			}
+		}
+	}
+	return nil
 }
 
 // Preserve Phase4-01's decoded namespace shape for deny-only ownership of an
@@ -405,16 +564,33 @@ func sameOrNestedPrefix(left, right string) bool {
 func reservedNamespaceCollision(candidate string) bool {
 	for _, reserved := range []string{
 		BootstrapDiscoveryPath,
+		"/.well-known",
 		"/favicon.ico",
 		"/apple-touch-icon.png",
+		"/assets",
 		"/health",
+		"/healthz",
+		"/keepalive",
 		"/management.html",
 		"/models",
 		"/setup",
 		"/status",
 		"/v0",
+		"/v8",
 		"/v1",
+		"/v1beta",
+		"/openai/v1",
+		"/backend-api/codex",
+		"/api/provider",
+		"/api/v2",
+		"/api/gateway",
+		"/callback",
+		"/anthropic/callback",
+		"/codex/callback",
+		"/antigravity/callback",
+		"/devin/callback",
 		"/usage-service",
+		"/internal",
 		"/internal/routing/fresh",
 		"/internal/routing/fresh-authority",
 	} {

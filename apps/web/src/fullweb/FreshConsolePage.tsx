@@ -1,10 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { fullWebI18n, fullWebText as t } from '../i18n/fullweb';
-import { sameIdentity, type FreshOperation } from './bootstrapTransport';
+import type { FreshOperation } from './bootstrapTransport';
+import { isCanonicalPrefix } from './accessPrefix';
 import { createPublicApiClient, PublicApiError } from './publicApi';
 import type { RoutingContext } from './routingContext';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
 import { FreshExternalConnection } from './FreshExternalConnection';
+import { FreshInferencePrefixCompletion } from './FreshInferencePrefixCompletion';
 import { FullWebIcon } from './FullWebIcon';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
@@ -22,6 +24,103 @@ const FullWebLoginPage = lazy(() =>
   import('./FullWebLoginPage').then((module) => ({ default: module.FullWebLoginPage }))
 );
 
+function hasNonEmptyToken(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function validOptionalToken(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === 'string' && (value.length === 0 || value.trim().length > 0))
+  );
+}
+
+function validConsoleIdentity(identity: FreshOperation['identity'] | undefined): boolean {
+  if (!identity || typeof identity !== 'object') return false;
+  if (
+    !hasNonEmptyToken(identity.installationId) ||
+    !hasNonEmptyToken(identity.generation) ||
+    !hasNonEmptyToken(identity.operationId) ||
+    !validOptionalToken(identity.admissionId) ||
+    !validOptionalToken(identity.databasePath)
+  ) {
+    return false;
+  }
+  return Boolean(identity.admissionId) === Boolean(identity.databasePath);
+}
+
+function sameConsoleOwner(
+  a: FreshOperation['identity'] | undefined,
+  b: FreshOperation['identity'] | undefined
+): boolean {
+  if (!validConsoleIdentity(a) || !validConsoleIdentity(b) || !a || !b) return false;
+  return (
+    a.installationId === b.installationId &&
+    a.generation === b.generation &&
+    a.operationId === b.operationId &&
+    (a.admissionId ?? '') === (b.admissionId ?? '') &&
+    (a.databasePath ?? '') === (b.databasePath ?? '')
+  );
+}
+
+function isValidConsoleOperation(
+  next: FreshOperation | null | undefined,
+  context: RoutingContext,
+  current: FreshOperation | null
+): next is FreshOperation {
+  if (!next || !validConsoleIdentity(next.identity)) return false;
+  if (!Number.isSafeInteger(next.revision) || next.revision <= 0) return false;
+  if (next.adminInitialized !== true) return false;
+  if (typeof next.gatewayPending !== 'boolean') return false;
+  if (!next.routing || next.routing.committed !== true || next.routing.stage !== 'committed') {
+    return false;
+  }
+  if (next.routing.target !== context.basePath) return false;
+  if (next.routing.operationId !== next.identity.operationId) return false;
+  const routingRevision = next.routing.revision;
+  if (
+    routingRevision === undefined ||
+    !Number.isSafeInteger(routingRevision) ||
+    routingRevision <= 0
+  ) {
+    return false;
+  }
+  const minRoutingRevision = Math.max(
+    context.revision,
+    current?.routing?.revision ?? context.revision
+  );
+  if (routingRevision < minRoutingRevision) return false;
+  if (routingRevision > context.revision) {
+    const completedInference =
+      next.routing.inferenceCommitted === true &&
+      next.routing.missingInferenceCompletionRequired !== true &&
+      isCanonicalPrefix(next.routing.inferenceTarget);
+    const stagedInference =
+      context.inferenceCompletionRequired === true &&
+      next.routing.missingInferenceCompletionRequired === true &&
+      next.routing.inferenceCommitted !== true;
+    if (!completedInference && !stagedInference) {
+      return false;
+    }
+  }
+  if (current) {
+    if (!sameConsoleOwner(next.identity, current.identity)) return false;
+    if (next.revision < current.revision) return false;
+    if (next.routing.target !== current.routing.target) return false;
+    if (current.routing.inferenceCommitted === true) {
+      if (
+        next.routing.inferenceCommitted !== true ||
+        next.routing.missingInferenceCompletionRequired === true ||
+        (next.routing.inferenceTarget ?? '') !== (current.routing.inferenceTarget ?? '') ||
+        Boolean(next.routing.sharedEntry) !== Boolean(current.routing.sharedEntry)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function FreshConsolePage({
   context,
   client = defaultClient,
@@ -33,6 +132,7 @@ export function FreshConsolePage({
   const [rememberPassword, setRememberPassword] = useState(false);
   const [operation, setOperation] = useState<FreshOperation | null>(null);
   const [enteredConsole, setEnteredConsole] = useState(false);
+  const [inferenceCompletionActive, setInferenceCompletionActive] = useState(false);
   const [externalSelected, setExternalSelected] = useState(false);
   const [busy, setBusy] = useState(false);
   // Kept as a key: the login form and its language menu must retranslate a
@@ -41,6 +141,7 @@ export function FreshConsolePage({
   const [light, setLight] = useState(true);
   const installationPendingRef = useRef(false);
   const requestId = useRef(0);
+  const operationRef = useRef<FreshOperation | null>(null);
   const language = useFullWebLanguage();
   useConsoleDocumentTitle();
   // The stored failure key is translated at render: subscribing to the Fresh
@@ -58,25 +159,24 @@ export function FreshConsolePage({
     document.documentElement.setAttribute('data-theme', light ? 'white' : 'dark');
   }, [light, operation, enteredConsole]);
 
-  function acceptOperation(next: FreshOperation) {
-    setOperation((current) => {
-      // Keep newer durable state if an earlier Console read completes later.
-      if (
-        current &&
-        (!sameIdentity(next.identity, current.identity) || next.revision < current.revision)
-      )
-        return current;
-      return next;
-    });
+  function acceptOperation(next: FreshOperation): boolean {
+    if (!isValidConsoleOperation(next, context, operationRef.current)) {
+      return false;
+    }
+    operationRef.current = next;
+    setOperation(next);
+    return true;
   }
 
   function clearAuthentication() {
     requestId.current++;
     installationPendingRef.current = false;
+    operationRef.current = null;
     clearFreshSession();
     setCredential('');
     setOperation(null);
     setEnteredConsole(false);
+    setInferenceCompletionActive(false);
     setExternalSelected(false);
     setBusy(false);
     setError(null);
@@ -93,32 +193,17 @@ export function FreshConsolePage({
         value: candidate,
       });
       if (currentRequest !== requestId.current) return false;
-      if (
-        !next?.identity ||
-        !(
-          ['admissionId', 'installationId', 'generation', 'databasePath', 'operationId'] as const
-        ).every(
-          (field) => typeof next.identity[field] === 'string' && next.identity[field].length > 0
-        ) ||
-        !next.identity.operationId ||
-        !Number.isSafeInteger(next.revision) ||
-        next.revision <= 0 ||
-        next.adminInitialized !== true ||
-        typeof next.gatewayPending !== 'boolean' ||
-        next.routing?.committed !== true ||
-        next.routing.stage !== 'committed' ||
-        next.routing.target !== context.basePath ||
-        next.routing.revision !== context.revision ||
-        next.routing.operationId !== next.identity.operationId ||
-        (operation && !sameIdentity(next.identity, operation.identity))
-      ) {
+      if (!isValidConsoleOperation(next, context, operationRef.current)) {
         clearAuthentication();
         setError('invalidOperation');
         return false;
       }
       activateFreshSession(context, candidate, remember);
       setRememberPassword(remember);
-      setEnteredConsole(next.productComplete === true);
+      const requiresInferenceCompletion =
+        next.productComplete === true && next.routing?.missingInferenceCompletionRequired === true;
+      setInferenceCompletionActive(requiresInferenceCompletion);
+      setEnteredConsole(next.productComplete === true && !requiresInferenceCompletion);
       setCredential(candidate);
       acceptOperation(next);
       return true;
@@ -158,7 +243,10 @@ export function FreshConsolePage({
       </Suspense>
     );
   }
-  if (!operation.productComplete || !enteredConsole)
+  const requiresInferenceCompletion =
+    operation.productComplete === true &&
+    (operation.routing?.missingInferenceCompletionRequired === true || inferenceCompletionActive);
+  if (!operation.productComplete || !enteredConsole || requiresInferenceCompletion)
     return (
       <div className="bootstrap-shell">
         <header className="bootstrap-header">
@@ -176,7 +264,20 @@ export function FreshConsolePage({
                 {errorText}
               </p>
             )}
-            {operation.strategy?.strategy === 'connect_external' ||
+            {requiresInferenceCompletion ? (
+              <FreshInferencePrefixCompletion
+                client={client}
+                credential={credential}
+                operation={operation}
+                onOperation={acceptOperation}
+                onUnauthorized={unauthorized}
+                onContinue={() => {
+                  setInferenceCompletionActive(false);
+                  setEnteredConsole(true);
+                  window.history.replaceState(null, '', context.basePath);
+                }}
+              />
+            ) : operation.strategy?.strategy === 'connect_external' ||
             (!operation.strategy?.strategy && externalSelected) ? (
               <FreshExternalConnection
                 client={client}

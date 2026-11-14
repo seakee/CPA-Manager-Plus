@@ -1,6 +1,8 @@
 // Bounded pre-canonical carrier. It has no CPA/Admin transport and persists no
 // secrets. This module belongs to the existing Full Web entry graph.
-import { validControlBasePath } from './routingContext';
+import { validAccessPrefix, validatePrefixPair } from './accessPrefix';
+import { PublicApiError } from './publicApi';
+import type { AccessInfo } from './FreshAccessInfo';
 import {
   ADOPT_SOURCE_CLASS,
   parseAdoptionSummary,
@@ -44,8 +46,22 @@ export interface FreshRoutingCheckpoint {
   operationId?: string;
   revision?: number;
   target?: string;
+  inferenceTarget?: string;
+  sharedEntry?: boolean;
+  inferenceCommitted?: boolean;
+  missingInferenceCompletionRequired?: boolean;
+  suggestedControlBasePath?: string;
+  suggestedInferenceBasePath?: string;
+  draftControlBasePath?: string;
+  draftInferenceBasePath?: string;
+  draftSharedEntry?: boolean;
   stage?: string;
   committed: boolean;
+}
+
+export interface RoutingPrefixInput {
+  inferenceTarget?: string;
+  sharedEntry?: boolean;
 }
 
 export interface FreshStrategyCheckpoint {
@@ -298,10 +314,21 @@ function validOperationState(next: FreshOperation | undefined, previous?: FreshO
     (!next.routing.committed ||
       (next.adminInitialized &&
         next.routing.stage === 'committed' &&
-        validControlBasePath(next.routing.target) &&
+        validAccessPrefix(next.routing.target) &&
+        (!next.routing.inferenceTarget || validAccessPrefix(next.routing.inferenceTarget)) &&
+        (!next.routing.sharedEntry ||
+          !next.routing.inferenceTarget ||
+          next.routing.inferenceTarget === next.routing.target) &&
         next.routing.operationId === next.identity.operationId &&
         Number.isSafeInteger(next.routing.revision) &&
-        next.routing.revision! > 0))
+        next.routing.revision! > 0)) &&
+    (!previous?.routing?.committed ||
+      (next.routing.committed &&
+        next.routing.target === previous.routing.target &&
+        (!previous.routing.inferenceCommitted ||
+          !previous.routing.inferenceTarget ||
+          (next.routing.inferenceCommitted === true &&
+            next.routing.inferenceTarget === previous.routing.inferenceTarget))))
   );
 }
 
@@ -365,6 +392,7 @@ const methods = {
   operation: 'GET',
   'admin/generate': 'POST',
   'admin/commit': 'POST',
+  'routing/draft': 'POST',
   'routing/prepare': 'POST',
   'routing/activate': 'POST',
   strategy: 'POST',
@@ -489,6 +517,15 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
               code = refusal.code;
           } else {
             if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+            else if (
+              (resource === 'routing/draft' ||
+                resource === 'routing/prepare' ||
+                resource === 'routing/activate') &&
+              typeof refusal?.code === 'string' &&
+              refusal.code
+            ) {
+              code = refusal.code;
+            }
             if (Array.isArray(refusal?.Unsupported))
               unsupported = refusal.Unsupported.filter(
                 (entry): entry is string =>
@@ -668,22 +705,73 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       operation = next;
       return next;
     },
-    async prepareRouting(target: string): Promise<FreshOperation> {
+    async saveRoutingDraft(
+      target: string,
+      options?: RoutingPrefixInput
+    ): Promise<FreshOperation> {
+      const inferenceTarget = options?.inferenceTarget;
+      const sharedEntry = Boolean(options?.sharedEntry);
+      const hasInference = inferenceTarget !== undefined || sharedEntry;
+      if (
+        !operation ||
+        !validAccessPrefix(target) ||
+        (hasInference &&
+          !validatePrefixPair({
+            controlBasePath: target,
+            inferenceBasePath: inferenceTarget ?? '',
+            sharedEntry,
+            requireInference: true,
+          }).valid)
+      ) {
+        throw new BootstrapTransportError('Routing draft unavailable', 'bad_request');
+      }
+      const next = await request<FreshOperation>('routing/draft', {
+        identity: operation.identity,
+        target,
+        ...(inferenceTarget !== undefined ? { inferenceTarget } : {}),
+        ...(options?.sharedEntry !== undefined ? { sharedEntry } : {}),
+      });
+      if (!sameIdentity(next?.identity, operation.identity) || !validOperationState(next, operation)) {
+        throw new BootstrapTransportError('Routing response unavailable', 'response');
+      }
+      operation = next;
+      return next;
+    },
+    async prepareRouting(
+      target: string,
+      options?: RoutingPrefixInput
+    ): Promise<FreshOperation> {
+      const inferenceTarget = options?.inferenceTarget;
+      const sharedEntry = options?.sharedEntry;
+      const hasDualPrefix = inferenceTarget !== undefined || Boolean(sharedEntry);
       if (
         !operation?.adminInitialized ||
-        !validControlBasePath(target) ||
-        (operation.routing.target && operation.routing.target !== target)
+        !validAccessPrefix(target) ||
+        (operation.routing.target && operation.routing.target !== target) ||
+        (hasDualPrefix &&
+          (!validatePrefixPair({
+            controlBasePath: target,
+            inferenceBasePath: inferenceTarget ?? '',
+            sharedEntry: Boolean(sharedEntry),
+            requireInference: true,
+          }).valid ||
+            (operation.routing.inferenceTarget &&
+              operation.routing.inferenceTarget !== (inferenceTarget ?? ''))))
       ) {
         throw new BootstrapTransportError('Routing target unavailable', 'bad_request');
       }
       const next = await request<FreshOperation>('routing/prepare', {
         identity: operation.identity,
         target,
+        ...(inferenceTarget !== undefined ? { inferenceTarget } : {}),
+        ...(sharedEntry !== undefined ? { sharedEntry } : {}),
       });
       if (
         !sameIdentity(next?.identity, operation.identity) ||
         !next.adminInitialized ||
         next.routing?.target !== target ||
+        (inferenceTarget !== undefined && next.routing?.inferenceTarget !== inferenceTarget) ||
+        (sharedEntry !== undefined && Boolean(next.routing?.sharedEntry) !== sharedEntry) ||
         next.routing.operationId !== operation.identity.operationId ||
         !Number.isSafeInteger(next.routing.revision) ||
         next.routing.revision! <= 0
@@ -696,7 +784,7 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     async activateRouting(): Promise<string> {
       if (
         !operation?.adminInitialized ||
-        !validControlBasePath(operation.routing.target) ||
+        !validAccessPrefix(operation.routing.target) ||
         operation.routing.operationId !== operation.identity.operationId ||
         !Number.isSafeInteger(operation.routing.revision) ||
         operation.routing.revision! <= 0
@@ -716,7 +804,11 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
           next.routing.operationId !== prepared.routing.operationId ||
           next.routing.revision !== prepared.routing.revision ||
           next.routing.committed !== true ||
-          next.routing.stage !== 'committed'
+          next.routing.stage !== 'committed' ||
+          (prepared.routing.inferenceTarget &&
+            (next.routing.inferenceTarget !== prepared.routing.inferenceTarget ||
+              Boolean(next.routing.sharedEntry) !== Boolean(prepared.routing.sharedEntry) ||
+              next.routing.inferenceCommitted !== true))
         ) {
           throw new BootstrapTransportError('Routing response unavailable', 'mismatch');
         }
@@ -841,6 +933,61 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     },
     uploadArtifact<T = unknown>(body: BodyInit): Promise<T> {
       return request<T>('runtime/artifact/upload', body);
+    },
+    sessionToken(): string {
+      return token ?? '';
+    },
+    async readAccessInfo(basePath?: string): Promise<AccessInfo> {
+      const targetBase = basePath || canonicalBase || operation?.routing.target;
+      if (
+        !token ||
+        !operation?.routing?.committed ||
+        !validAccessPrefix(targetBase) ||
+        !['http:', 'https:'].includes(window.location.protocol)
+      ) {
+        throw new PublicApiError('routing_unavailable');
+      }
+      const url = new URL(`${targetBase}/api/v2/api-keys/access-info`, window.location.origin);
+      if (
+        url.origin !== window.location.origin ||
+        url.pathname !== `${targetBase}/api/v2/api-keys/access-info` ||
+        url.search ||
+        url.hash
+      ) {
+        throw new PublicApiError('routing_unavailable');
+      }
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+      let response: Response;
+      try {
+        response = await transport(url.href, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Fresh ${token}`,
+          },
+          signal: controller.signal,
+          mode: 'same-origin',
+          credentials: 'omit',
+          redirect: 'error',
+          cache: 'no-store',
+        });
+      } catch {
+        throw new PublicApiError('network');
+      } finally {
+        clearTimeout(deadline);
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new PublicApiError('authentication', response.status);
+      }
+      if (!response.ok) {
+        throw new PublicApiError('http', response.status);
+      }
+      try {
+        return (await response.json()) as AccessInfo;
+      } catch {
+        throw new PublicApiError('network');
+      }
     },
     request,
     clear() {

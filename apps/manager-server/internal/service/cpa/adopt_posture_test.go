@@ -194,10 +194,16 @@ func TestAdoptPostureCarriesTheSourceKeyList(t *testing.T) {
 	if managedProofPosture.validKeys(keys) {
 		t.Fatal("managed key policy accepted a source list")
 	}
+	largeList := make([]string, 0, 150)
+	for i := range 150 {
+		largeList = append(largeList, "source-key-extra-"+strings.Repeat("x", 4)+string(rune('0'+i%10))+strings.Repeat("y", i%7)+"-"+strings.Repeat("z", 1+i/10))
+	}
+	if !adoptProofPosture().validKeys(largeList) {
+		t.Fatal("adopted key policy refused a 150-key source list")
+	}
 	for name, list := range map[string][]string{
 		"empty":         nil,
 		"duplicate":     {"a", "a"},
-		"too many":      make([]string, adoptMaxClientKeys+1),
 		"not printable": {"a b"},
 	} {
 		if adoptProofPosture().validKeys(list) {

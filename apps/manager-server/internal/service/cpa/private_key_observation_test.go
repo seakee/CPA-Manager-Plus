@@ -77,9 +77,9 @@ func TestConfiguredStatesMembershipForAnAdoptedDestination(t *testing.T) {
 }
 
 // TestValidKeySetAnswersThePosturesOwnBound is the write-time half of the same
-// question: the policy a whole-list write applies, asked before the attempt. An
-// adoption may carry the source's list up to its bound; a New Managed destination
-// takes at most two canonical keys.
+// question: the policy a whole-list write applies, asked before the attempt.
+// Adopted and New Managed destinations impose no artificial upper cap on total
+// keys, while the private loopback fixture retains its intentional two-key bound.
 func TestValidKeySetAnswersThePosturesOwnBound(t *testing.T) {
 	adopted := &Transport{}
 	adopted.SetPostureSelector(func() (DestinationPosture, bool) { return DestinationPosture{Adopt: true}, true })
@@ -90,25 +90,29 @@ func TestValidKeySetAnswersThePosturesOwnBound(t *testing.T) {
 		}
 		return keys
 	}
-	if !adopted.ValidKeySet(source(adoptMaxClientKeys)) {
-		t.Fatalf("the adoption bound of %d keys was refused", adoptMaxClientKeys)
-	}
-	if adopted.ValidKeySet(source(adoptMaxClientKeys + 1)) {
-		t.Fatal("a list past the adoption bound was accepted")
+	if !adopted.ValidKeySet(source(129)) || !adopted.ValidKeySet(source(200)) {
+		t.Fatal("adopted destination refused a multi-key list above 128")
 	}
 	if adopted.ValidKeySet(nil) || adopted.ValidKeySet([]string{"a b"}) || adopted.ValidKeySet([]string{"dup", "dup"}) {
 		t.Fatal("an adopted destination accepted a list it cannot hold")
 	}
 	managed := &Transport{posture: managedProofPosture}
-	second := "cpamp_sk_" + strings.Repeat("b", 64)
-	third := "cpamp_sk_" + strings.Repeat("c", 64)
-	if !managed.ValidKeySet([]string{testSecret()}) || !managed.ValidKeySet([]string{testSecret(), second}) {
-		t.Fatal("a list the managed posture holds was refused")
+	manyCanonical := make([]string, 0, 150)
+	for i := range 150 {
+		hexSuffix := strconv.FormatInt(int64(i+1), 16)
+		manyCanonical = append(manyCanonical, "cpamp_sk_"+strings.Repeat("0", 64-len(hexSuffix))+hexSuffix)
 	}
-	if managed.ValidKeySet([]string{testSecret(), second, third}) {
-		t.Fatal("the managed posture accepted three keys")
+	if !managed.ValidKeySet([]string{testSecret()}) || !managed.ValidKeySet(manyCanonical[:3]) || !managed.ValidKeySet(manyCanonical) {
+		t.Fatal("a multi-key canonical list the managed posture holds was refused")
+	}
+	if managed.ValidKeySet(nil) || managed.ValidKeySet([]string{testSecret(), testSecret()}) {
+		t.Fatal("the managed posture accepted an empty or duplicate key list")
 	}
 	if managed.ValidKeySet([]string{testSecret(), "source-key-one"}) {
 		t.Fatal("the managed posture accepted a non-canonical key")
+	}
+	private := &Transport{}
+	if !private.ValidKeySet(manyCanonical[:2]) || private.ValidKeySet(manyCanonical[:3]) {
+		t.Fatal("private fixture two-key bound drifted")
 	}
 }

@@ -8,6 +8,7 @@ import {
   adoptText,
 } from '../i18n/freshAdopt';
 import { shellText as s } from '../i18n/consoleShell';
+import { bootstrapPrefixCodeText } from '../i18n/bootstrapJourney';
 import {
   BootstrapTransportError,
   type AdoptionFence,
@@ -29,6 +30,8 @@ import {
 } from './freshAdoption';
 import { PublicApiError } from './publicApi';
 import { FullWebIcon, type FullWebIconName } from './FullWebIcon';
+import type { FullWebCredential, PublicApiClient } from './publicApi';
+import { AccessInfoSummary } from './FreshAccessInfo';
 
 // The Adopt flow's two carriers. The wizard before routing exists and the Console
 // after it hold the same operation but not the same transport, so the flow talks
@@ -148,6 +151,9 @@ export function FreshAdoptFlow({
   onStage,
   onExit,
   embedded = false,
+  accessInfoClient,
+  accessInfoAuth,
+  onUnauthorized,
 }: {
   operation: FreshOperation;
   carrier: AdoptCarrier;
@@ -178,6 +184,9 @@ export function FreshAdoptFlow({
    * so the flow provides the journey, not the shell.
    */
   embedded?: boolean;
+  accessInfoClient?: PublicApiClient;
+  accessInfoAuth?: FullWebCredential;
+  onUnauthorized?: () => void;
 }) {
   const checkpoint = operation.strategy;
   const committed = checkpoint?.stage === 'committed';
@@ -631,7 +640,11 @@ export function FreshAdoptFlow({
     // decision the operator was never shown.
     if (acceptRetryable) {
       const identity = summary ? retryableIdentity(summary) : null;
-      if (!summary?.runId || acceptedRetryable.current !== identity) {
+      // A record written before run identity existed parses as the empty string,
+      // which is a value the server itself compares: it refuses that
+      // acknowledgement with `adopt_migration_run_changed`. The page therefore
+      // fences on the identity it showed, never on non-emptiness.
+      if (!summary || acceptedRetryable.current !== identity) {
         acceptedRetryable.current = null;
         setAcceptRetryable(false);
         setNote(adoptText('runChanged'));
@@ -661,7 +674,7 @@ export function FreshAdoptFlow({
       if (!alive.current) return;
       if (!completeFailure(err)) {
         const coded = refusal(err);
-        setError(coded.code ? adoptBlockerText(coded.code) : s('failureHelp'));
+        setError(bootstrapPrefixCodeText(coded.code || undefined) || (coded.code ? adoptBlockerText(coded.code) : s('failureHelp')));
         try {
           const truth = await carrier.readOperation();
           if (alive.current) onOperation(truth);
@@ -694,6 +707,15 @@ export function FreshAdoptFlow({
   // be granted over it.
   const remaining = groups ? groups.remaining : 0;
   const settledRun = !!summary && summary.finished && !summary.running;
+  // The server names the retryable items; the page does not guess at them from
+  // the summary. A refusal is about the run it answered, so it stays on screen
+  // until that run is replaced or the operator's action supersedes it — the
+  // acknowledgement offered under it is exactly that decision.
+  const retryableRefused = completion?.code === 'adopt_migration_retryable';
+  // A record that predates run identity cannot carry an acknowledgement: there
+  // is nothing to bind it to, so the server refuses it by name. The action that
+  // helps is a Resume into a tracked run.
+  const retryableRunTracked = !!summary?.runId;
   const manualCount = summary?.counts.manual ?? 0;
   const failedCount = summary?.counts.failed ?? 0;
   // The installation can be complete while the copy is not: the server allows a
@@ -1001,7 +1023,7 @@ export function FreshAdoptFlow({
                 {adoptText('retryableRefusal', { count: summary.retryable })}
               </p>
             )}
-            {completion?.code === 'adopt_migration_retryable' && !summary?.runId && (
+            {retryableRefused && !retryableRunTracked && (
               <p className="journey-help" data-testid="adopt-retryable-legacy">
                 {adoptText('legacyRunNotice')}
               </p>
@@ -1010,6 +1032,18 @@ export function FreshAdoptFlow({
               <p className="journey-help" data-testid="adopt-remaining">
                 {adoptText('remainingItems', { count: remaining })}
               </p>
+            )}
+            {!embedded && operation.productComplete && accessInfoClient && accessInfoAuth && (
+              // A standalone completion has nowhere else to read the endpoints
+              // it just published: the operator is still on this screen, and the
+              // Console is a click away rather than an automatic departure. The
+              // host reports the refusal itself when the session lapsed, so the
+              // summary never claims an address it could not read.
+              <AccessInfoSummary
+                client={accessInfoClient}
+                auth={accessInfoAuth}
+                onUnauthorized={onUnauthorized}
+              />
             )}
           </div>
         )}
@@ -1116,7 +1150,7 @@ export function FreshAdoptFlow({
                 <FullWebIcon name="arrowRight" size={20} />
               </button>
             )}
-            {completion?.code === 'adopt_migration_retryable' && summary?.runId && (
+            {retryableRefused && retryableRunTracked && (
               <label className="journey-checkline">
                 <input
                   type="checkbox"
@@ -1126,7 +1160,8 @@ export function FreshAdoptFlow({
                     setAcceptRetryable(event.target.checked);
                     // The acknowledgement covers this run and the retryable
                     // items on screen right now, item for item, and only those:
-                    // the completion carries the run identity it was given for.
+                    // the completion carries the run identity it was given for,
+                    // and a record without one is refused by the server itself.
                     acceptedRetryable.current =
                       event.target.checked && summary ? retryableIdentity(summary) : null;
                   }}
@@ -1138,12 +1173,17 @@ export function FreshAdoptFlow({
               type="button"
               className="btn btn-primary"
               data-testid="adopt-complete"
-              // A settled run with retryable items can always ask to complete:
-              // the server's refusal is what names them, and the count is what
-              // the acknowledgement is about. A run that never processed its own
-              // plan is different — completion cannot succeed over it — so the
-              // only action offered there is Resume.
-              disabled={busy || !settledRun || remaining > 0}
+              // The installation is completed by the server, and its refusal is
+              // what names anything left over: retryable items, unprocessed plan
+              // items, a run that is still going. So the action is offered
+              // whenever the record holds an attempt and the installation is not
+              // complete yet — never on the read's own guess about how the run
+              // will settle, because a run that has not reported yet is the one
+              // whose completion refusal is most informative. A run that left
+              // planned items unprocessed is different in one respect: completion
+              // cannot succeed over it, so Resume is offered beside this button
+              // and the refusal points back at it.
+              disabled={busy || !summary || unknown}
               onClick={() => void complete()}
             >
               {adoptText(busy ? 'completing' : 'complete')}
