@@ -575,7 +575,13 @@ func runServerWithOptions(options legacypreflight.Options) {
 		CollectorWorker:      collectorWorker,
 	})
 	serverApp.SetUpgradeAPIKeys(upgradeKeysHandler.serveHTTP)
-	if err := attachCompletedUpgradeRouting(ctx, cfg, db, serverApp, upgradeKeysHandler.gatewayAdmitted, upgradeCanonicalDependencies{Protector: protector, Workspace: upgradeKeysHandler, Runtime: runtimeClient}); err != nil {
+	var reconcilerDesiredStore runtimeservice.DesiredStateStore = db
+	if err := attachCompletedUpgradeRouting(ctx, cfg, db, serverApp, upgradeKeysHandler.gatewayAdmitted, upgradeCanonicalDependencies{
+		Protector:       protector,
+		Workspace:       upgradeKeysHandler,
+		Runtime:         runtimeClient,
+		DesiredStateOut: &reconcilerDesiredStore,
+	}); err != nil {
 		if ctx.Err() != nil {
 			shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 			return
@@ -586,7 +592,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if cfg.EmbeddedRuntimeConfigured() {
 		runtimeReconciler := runtimeservice.NewReconciler(
 			runtimeClient,
-			db,
+			reconcilerDesiredStore,
 			runtimeservice.DefaultReconcileInterval,
 			log.Printf,
 		)

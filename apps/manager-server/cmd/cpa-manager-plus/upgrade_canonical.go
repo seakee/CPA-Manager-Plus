@@ -190,6 +190,9 @@ func attachCompletedUpgradeRouting(
 	if err := u.initCanonicalResources(ctx, cfg, dep); err != nil {
 		return failClosed("upgrade_authority_unavailable", err)
 	}
+	if dep.DesiredStateOut != nil {
+		*dep.DesiredStateOut = upgradeDesiredStateStore{owner: u}
+	}
 	if u.gatewayAuthority == nil && u.workspace != nil {
 		u.gatewayAuthority = u.workspace.gatewayAdmitted
 	}

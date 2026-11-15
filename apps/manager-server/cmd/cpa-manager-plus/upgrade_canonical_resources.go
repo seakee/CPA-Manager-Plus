@@ -57,9 +57,10 @@ const (
 // so all post-upgrade v2 Console resources share a single rejection ledger and
 // credential gate without introducing a fake FreshApplication or FreshStore.
 type upgradeCanonicalDependencies struct {
-	Workspace *upgradeKeyWorkspace
-	Protector *security.Protector
-	Runtime   runtimeservice.RuntimeClient
+	Workspace       *upgradeKeyWorkspace
+	Protector       *security.Protector
+	Runtime         runtimeservice.RuntimeClient
+	DesiredStateOut *runtimeservice.DesiredStateStore
 }
 
 func resolveUpgradeProtector(cfg config.Config, explicit *security.Protector) (*security.Protector, error) {
@@ -156,8 +157,48 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 	}
 	if u.targetMode == model.UpgradeTargetManaged && u.runtime != nil {
 		u.pluginCapability.reprove(ctx)
+		if u.db != nil && u.db.SQLDB() != nil {
+			if _, _, destErr := u.loadVerifiedManagedDestination(ctx); destErr == nil {
+				if _, err := u.db.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx, model.EmbeddedRuntimeDesiredRunning); err != nil {
+					return fmt.Errorf("seed upgraded managed runtime desired state: %w", err)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+type upgradeDesiredStateStore struct {
+	owner *upgradeCanonicalServer
+}
+
+var (
+	_ runtimeservice.DesiredStateStore = upgradeDesiredStateStore{}
+	_ runtimeservice.LifecycleLocker   = upgradeDesiredStateStore{}
+)
+
+func (s upgradeDesiredStateStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if s.owner == nil {
+		return func() {}, nil
+	}
+	return s.owner.runtimeLifecycleMu.Lock(ctx)
+}
+
+func (s upgradeDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	var zero model.EmbeddedRuntimeDesiredState
+	if s.owner == nil || s.owner.db == nil || s.owner.db.SQLDB() == nil {
+		return zero, false, nil
+	}
+	if _, err := s.owner.loadCurrentOp(ctx); err != nil {
+		return zero, false, err
+	}
+	if s.owner.targetMode != model.UpgradeTargetManaged {
+		return zero, false, nil
+	}
+	if _, _, err := s.owner.loadVerifiedManagedDestination(ctx); err != nil {
+		return zero, false, err
+	}
+	return s.owner.db.LoadEmbeddedRuntimeDesiredState(ctx)
 }
 
 // loadFencedExternalInstall loads the completed External Upgrade binding and

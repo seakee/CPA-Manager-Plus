@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,11 +25,13 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	freshstrategy "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -991,6 +994,7 @@ func TestCompletedExternalUpgradeCanonicalOperationAndFencedAccessInfo(t *testin
 type upgradeCanonicalTestRuntime struct {
 	mu              sync.Mutex
 	status          model.RuntimeObservedStatus
+	startCalls      int
 	restartCalls    int
 	lastMutationReq model.RuntimeMutationRequest
 }
@@ -1003,6 +1007,7 @@ func (r *upgradeCanonicalTestRuntime) Status(context.Context) (model.RuntimeObse
 
 func (r *upgradeCanonicalTestRuntime) Start(_ context.Context, req model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
 	r.mu.Lock()
+	r.startCalls++
 	r.lastMutationReq = req
 	r.mu.Unlock()
 	return model.RuntimeOperationResult{
@@ -1817,5 +1822,142 @@ func TestCompletedManagedMissingInferenceRejectsSharedEntryFlag(t *testing.T) {
 	serverApp := httpapi.New(cfg, st, nil)
 	if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, nil); err == nil {
 		t.Fatal("expected attachCompletedUpgradeRouting to reject missing inference with sharedEntry=true")
+	}
+}
+
+func TestCompletedManagedUpgradeSeedsDesiredRunningOnceAndExternalFencesReconciler(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	ctx := context.Background()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("QualifiedUpgradeAdoptionArtifactID: %v", err)
+	}
+
+	st, cfg, _ := seedCompletedManagedUpgradeStore(t, "/upg-console", "/upg-api")
+	cfg.RuntimeURL = "http://127.0.0.1:9081"
+	tokenFile := filepath.Join(t.TempDir(), "runtime.token")
+	if err := os.WriteFile(tokenFile, []byte("runtime-token-fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.RuntimeTokenFile = tokenFile
+
+	// Mirror real 1.x -> v2 Managed upgrade: legacy connection rows exist, so
+	// bootstrapservice.Run leaves runtime_desired_v1 unseeded.
+	if _, err := bootstrapservice.Run(ctx, cfg, st, false); err != nil {
+		t.Fatalf("bootstrapservice.Run: %v", err)
+	}
+	if _, found, err := st.LoadEmbeddedRuntimeDesiredState(ctx); err != nil || found {
+		t.Fatalf("pre-attach desired state = (found=%v, err=%v), want absent", found, err)
+	}
+
+	keyBytes, _, err := security.LoadOrCreateDataKey("", cfg.DataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector, err := security.NewProtector(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedDestKey, err := protector.ProtectString(strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceIdentity := "external:sha256:" + strings.Repeat("c", 64)
+	pluginsInit := false
+	destPayload, _ := json.Marshal(upgradeDestinationRecord{
+		BaseURL:           "http://127.0.0.1:8317",
+		URLProved:         true,
+		ManagementKey:     sealedDestKey,
+		ServerFingerprint: "external:sha256:" + strings.Repeat("b", 64),
+		Attempt:           1,
+		OperationID:       upgradeManagedDestinationOperationID(sourceIdentity, 1),
+		Intent: upgradeDestinationIntent{
+			ExpectedRuntimeIdentity:   "embedded-default",
+			ExpectedRuntimeGeneration: 7,
+			ExpectedActiveArtifactID:  qualifiedArtifact,
+			SourceIdentity:            sourceIdentity,
+			SourceClass:               upgradeManagedDestinationClass,
+			APIKeys:                   []string{"sk-legacy-1"},
+			PluginsEnabled:            &pluginsInit,
+		},
+	})
+	if _, err := st.SQLDB().Exec(`insert into settings(key, value, updated_at_ms) values(?, ?, ?)`, upgradeImportDestinationSettingKey, string(destPayload), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &upgradeCanonicalTestRuntime{
+		status: model.RuntimeObservedStatus{
+			Identity:           "embedded-default",
+			Generation:         21,
+			ProtocolVersion:    "v1",
+			State:              model.RuntimeStateOffline,
+			Capabilities:       model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStop, model.RuntimeCapabilityRestart},
+			CPAObservedVersion: "8.0.55",
+			Recovery:           &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive},
+			ActiveGatewayArtifact: &model.ActiveGatewayArtifact{
+				Engine:     "cpa",
+				ArtifactID: qualifiedArtifact,
+				Version:    "8.0.55",
+			},
+		},
+	}
+
+	var desiredStore runtimeservice.DesiredStateStore = st
+	serverApp := httpapi.New(cfg, st, nil)
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp, func(context.Context) bool { return true }, upgradeCanonicalDependencies{
+		Protector:       protector,
+		Runtime:         rt,
+		DesiredStateOut: &desiredStore,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting(Managed): %v", err)
+	}
+
+	seeded, found, err := desiredStore.LoadEmbeddedRuntimeDesiredState(ctx)
+	if err != nil || !found || seeded.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+		t.Fatalf("Managed post-attach desired state = (%+v, found=%v, err=%v), want running", seeded, found, err)
+	}
+	reconciler := runtimeservice.NewReconciler(rt, desiredStore, time.Second, nil)
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce(Managed offline -> Start): %v", err)
+	}
+	if rt.startCalls != 1 {
+		t.Fatalf("ReconcileOnce Start calls = %d, want 1", rt.startCalls)
+	}
+
+	// Explicit operator Stop must survive subsequent startup attach without re-seeding Running.
+	if _, err := st.SetEmbeddedRuntimeDesiredLifecycle(ctx, model.EmbeddedRuntimeDesiredStopped); err != nil {
+		t.Fatal(err)
+	}
+	var secondDesiredStore runtimeservice.DesiredStateStore = st
+	serverApp2 := httpapi.New(cfg, st, nil)
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp2, func(context.Context) bool { return true }, upgradeCanonicalDependencies{
+		Protector:       protector,
+		Runtime:         rt,
+		DesiredStateOut: &secondDesiredStore,
+	}); err != nil {
+		t.Fatalf("second attachCompletedUpgradeRouting(Managed): %v", err)
+	}
+	afterStop, found, err := secondDesiredStore.LoadEmbeddedRuntimeDesiredState(ctx)
+	if err != nil || !found || afterStop.DesiredLifecycle != model.EmbeddedRuntimeDesiredStopped {
+		t.Fatalf("Managed desired state after explicit stop + restart = (%+v, found=%v, err=%v), want stopped", afterStop, found, err)
+	}
+
+	// Completed External upgrade must never expose Embedded desired state to Reconciler,
+	// even if a stale runtime_desired_v1 row exists in SQLite.
+	extSt, extCfg, _ := seedCompletedExternalUpgradeStore(t, "/ext-console", "http://127.0.0.1:19317")
+	if _, err := extSt.SetEmbeddedRuntimeDesiredLifecycle(ctx, model.EmbeddedRuntimeDesiredRunning); err != nil {
+		t.Fatal(err)
+	}
+	var extDesiredStore runtimeservice.DesiredStateStore = extSt
+	extApp := httpapi.New(extCfg, extSt, nil)
+	if err := attachCompletedUpgradeRouting(ctx, extCfg, extSt, extApp, nil, upgradeCanonicalDependencies{
+		DesiredStateOut: &extDesiredStore,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting(External): %v", err)
+	}
+	if _, extFound, extErr := extDesiredStore.LoadEmbeddedRuntimeDesiredState(ctx); extErr != nil || extFound {
+		t.Fatalf("External desired state = (found=%v, err=%v), want absent", extFound, extErr)
 	}
 }
