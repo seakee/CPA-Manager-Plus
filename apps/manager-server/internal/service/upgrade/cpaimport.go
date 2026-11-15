@@ -454,6 +454,23 @@ func replayRecordedManagedImport(
 	recorded model.UpgradeOperation,
 	result *CPAImportResult,
 ) error {
+	if declared := strings.TrimSpace(options.CPAVersion); declared != "" {
+		parsed, ok := parseCPAVersion(declared)
+		if !ok {
+			return newUpgradeError(UpgradeErrorCPAVersionUnsupported,
+				"the managed CPA release the source declares is not an exact release, so it cannot be compared with the accepted v8 range and was not imported", nil)
+		}
+		if !parsed.atLeast(cpaImportFloor) {
+			return newUpgradeError(UpgradeErrorCPAVersionUnsupported,
+				fmt.Sprintf("the managed CPA source is release %s and this import accepts %s and above; upgrade the CPA inside the 1.x stack to CPA v8 before importing it",
+					parsed.String(), CPAImportMinimumVersion), nil)
+		}
+		if parsed.major != 8 {
+			return newUpgradeError(UpgradeErrorCPAVersionUnsupported,
+				fmt.Sprintf("the managed CPA source declares release %s, outside the CPA v8 generation this import reads, so it was not imported",
+					parsed.String()), nil)
+		}
+	}
 	// The copy a recorded import claims was made under the compiled authority this
 	// build carries. A build whose record no longer proves it cannot re-assert the
 	// verdict, and it must say so before it connects to any destination.

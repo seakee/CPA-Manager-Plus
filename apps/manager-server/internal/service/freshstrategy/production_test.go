@@ -572,15 +572,17 @@ func TestProductionLoaderRequiresIndependentLegacyTransitionBinding(t *testing.T
 		"transition implementation head malformed": chain(func(s *syntheticLegacyTransition) {
 			s.binding.ImplementationHead = "not-a-head"
 		}, nil),
-		"transition legacy version":             chain(func(s *syntheticLegacyTransition) { s.binding.LegacyVersion = "v7.0.13" }, nil),
-		"transition legacy archive":             chain(func(s *syntheticLegacyTransition) { s.binding.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
-		"transition legacy binary":              chain(func(s *syntheticLegacyTransition) { s.binding.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
-		"transition source class":               chain(func(s *syntheticLegacyTransition) { s.observation.SourceClass = string(bootstrap.AdoptNetworkExisting) }, nil),
-		"transition observation case ref":       chain(func(s *syntheticLegacyTransition) { s.observation.CaseRef = "other-case" }, nil),
-		"transition observation schema":         chain(func(s *syntheticLegacyTransition) { s.observation.SchemaVersion = 2 }, nil),
-		"transition observation legacy version": chain(func(s *syntheticLegacyTransition) { s.observation.LegacyVersion = "v7.0.13" }, nil),
-		"transition observation legacy archive": chain(func(s *syntheticLegacyTransition) { s.observation.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
-		"transition observation legacy binary":  chain(func(s *syntheticLegacyTransition) { s.observation.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
+		"transition below-v8 legacy version":             chain(func(s *syntheticLegacyTransition) { s.binding.LegacyVersion = "v7.0.12" }, nil),
+		"transition unpinned legacy version":             chain(func(s *syntheticLegacyTransition) { s.binding.LegacyVersion = "v8.0.13" }, nil),
+		"transition legacy archive":                      chain(func(s *syntheticLegacyTransition) { s.binding.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
+		"transition legacy binary":                       chain(func(s *syntheticLegacyTransition) { s.binding.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
+		"transition source class":                        chain(func(s *syntheticLegacyTransition) { s.observation.SourceClass = string(bootstrap.AdoptNetworkExisting) }, nil),
+		"transition observation case ref":                chain(func(s *syntheticLegacyTransition) { s.observation.CaseRef = "other-case" }, nil),
+		"transition observation schema":                  chain(func(s *syntheticLegacyTransition) { s.observation.SchemaVersion = 2 }, nil),
+		"transition observation below-v8 legacy version": chain(func(s *syntheticLegacyTransition) { s.observation.LegacyVersion = "v7.0.12" }, nil),
+		"transition observation unpinned legacy version": chain(func(s *syntheticLegacyTransition) { s.observation.LegacyVersion = "v8.0.13" }, nil),
+		"transition observation legacy archive":          chain(func(s *syntheticLegacyTransition) { s.observation.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
+		"transition observation legacy binary":           chain(func(s *syntheticLegacyTransition) { s.observation.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
 		"transition artifact": chain(func(s *syntheticLegacyTransition) {
 			s.observation.TargetArtifactID = "sha256:" + strings.Repeat("a", 64)
 		}, nil),
@@ -609,7 +611,8 @@ func TestProductionLoaderRequiresIndependentLegacyTransitionBinding(t *testing.T
 			s.manifest.Cases[0].ProfileRefs = []string{"CPA8-EXTERNAL-SAFETY-r1"}
 		}, nil),
 		"manifest case proof scope missing": chain(func(s *syntheticLegacyTransition) { s.manifest.Cases[0].ProofScope = "" }, nil),
-		"manifest legacy version":           chain(func(s *syntheticLegacyTransition) { s.manifest.LegacySource.Version = "v7.0.13" }, nil),
+		"manifest below-v8 legacy version":  chain(func(s *syntheticLegacyTransition) { s.manifest.LegacySource.Version = "v7.0.12" }, nil),
+		"manifest unpinned legacy version":  chain(func(s *syntheticLegacyTransition) { s.manifest.LegacySource.Version = "v8.0.13" }, nil),
 		"manifest legacy archive":           chain(func(s *syntheticLegacyTransition) { s.manifest.LegacySource.ArchiveSHA256 = strings.Repeat("a", 64) }, nil),
 		"manifest legacy binary":            chain(func(s *syntheticLegacyTransition) { s.manifest.LegacySource.BinarySHA256 = strings.Repeat("a", 64) }, nil),
 		"report missing":                    chain(nil, deleteEntry(func(s syntheticLegacyTransition) string { return s.binding.ReportSHA256 })),
@@ -890,7 +893,7 @@ func newScopeTestServer(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		case "/v8/management/config":
 			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["source-client"]}}`))
 		case "/v0/management/config":
-			w.Header().Set("X-CPA-VERSION", "7.0.12")
+			w.Header().Set("X-CPA-VERSION", "8.0.55")
 			_, _ = w.Write([]byte(`{"tls":{"enable":false},"api-keys":["source-client"]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)

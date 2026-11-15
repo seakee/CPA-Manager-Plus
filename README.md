@@ -84,6 +84,7 @@ See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/next/en/guide/choosing-
 
 ### v2 Access And Client Keys
 
+- v2 supports CPA v8; the bundled runtime remains pinned to v8.0.55. Managed upgrade sources must already meet that version boundary. Older CPA releases are rejected, not supported as an alternative runtime or a positive import path; future major versions are not qualified by this release.
 - First installation and first upgrade configure management and inference prefixes independently. Each has its own secure random default; sharing a prefix is an explicit choice. An existing v2 installation missing only its inference prefix completes it once without changing its management entry.
 - Saving an ordinary Client Key persists it encrypted and applies it to CPA. The workspace distinguishes observed activation from pending or unknown outcomes; do not blindly repeat an unknown mutation. There is no artificial total-Key cap; empty-keyset and last-Key protections remain.
 - Copy client-specific protocol addresses from the completion page or Key workspace. Managed inference uses its committed prefix; External clients use the external CPA URL directly. See [Client Access](https://cpamp-docs.seakee.dev/next/en/gateway/clients.html).

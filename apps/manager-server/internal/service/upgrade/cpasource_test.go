@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
 // writeCPAFixture writes a stopped 1.x stack: a Manager data directory, the
@@ -64,10 +62,68 @@ func mustJSON(t *testing.T, value any) string {
 // cpaDirectoryName mirrors the sibling directory name the adapter resolves.
 func cpaDirectoryName() string { return cpaSiblingDirectoryName }
 
-// v7FixtureConfig is a v7.3.4-shaped configuration: the v7 spellings this import
-// maps, one provider list, the three shapes it reports as manual work, and one
-// section it does not know at all.
-const v7FixtureConfig = `host: "127.0.0.1"
+// v8FixtureConfig is a canonical CPA 8.0.55 configuration: the v8 schema paths
+// this import copies, excluded Manager-owned paths (`server`, `management`,
+// `plugins`, `oauth.auth-dir`, `access.api-keys`), provider key groups, one
+// removed section (`ampcode`), and one out-of-scope section (`something-new`).
+const v8FixtureConfig = `config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+management:
+  allow-remote: true
+  secret-key: "legacy-management-secret-that-the-destination-must-not-inherit"
+plugins:
+  enabled: true
+oauth:
+  auth-dir: "/root/.cli-proxy-api"
+  model-alias:
+    claude:
+      - name: "claude-sonnet-4"
+        alias: "sonnet"
+access:
+  api-keys:
+    - "legacy-client-key-1"
+    - "legacy-client-key-2"
+routing:
+  retry:
+    request-retry: 3
+    max-retry-credentials: 5
+  cooldown:
+    disable-cooling: true
+requests:
+  proxy-url: "http://127.0.0.1:7890"
+  payload:
+    default:
+      - models:
+          - name: "gpt-5"
+        params:
+          temperature: 0.2
+upstream:
+  codex:
+    disable-codex-cloaking: true
+api-keys:
+  gemini:
+    - name: "gemini-1"
+      base-url: "https://generativelanguage.googleapis.com"
+      keys:
+        - api-key: "gemini-provider-key"
+  claude:
+    - name: "claude-1"
+      keys:
+        - api-key: "claude-provider-key"
+      models:
+        - name: "claude-sonnet-4"
+ampcode:
+  upstream-url: "https://amp.example"
+something-new:
+  enabled: true
+`
+
+// v7LayoutFixtureConfig exercises the legacy unversioned `v7` YAML grammar that
+// pinned CPA 8.0.55 still loads (`internal/config/config_v8.go`): it describes
+// file grammar on a CPA 8.0.55 runtime, not a supported CPA 7 runtime.
+const v7LayoutFixtureConfig = `host: "127.0.0.1"
 port: 8317
 auth-dir: "/root/.cli-proxy-api"
 remote-management:
@@ -106,24 +162,40 @@ something-new:
   enabled: true
 `
 
-// v734Source opens the standard v7.3.4 fixture with the declared release.
-func v734Source(t *testing.T) *cpaManagedSource {
+// v8Source opens the canonical CPA 8.0.55 fixture with pinned release 8.0.55.
+func v8Source(t *testing.T) *cpaManagedSource {
 	t.Helper()
-	legacyRoot, _ := writeCPAFixture(t, v7FixtureConfig, map[string]string{
+	legacyRoot, _ := writeCPAFixture(t, v8FixtureConfig, map[string]string{
 		"codex-user.json":  `{"type":"codex","access_token":"token"}`,
 		"gemini-user.json": `{"type":"gemini","access_token":"token"}`,
 	})
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if err != nil {
-		t.Fatalf("open the managed CPA source: %v", err)
+		t.Fatalf("open the managed CPA 8.0.55 source: %v", err)
+	}
+	return source
+}
+
+// v8LegacyGrammarSource opens a CPA 8.0.55 source whose config.yaml still uses
+// the unversioned `v7` YAML grammar that CPA 8.0.55 loads.
+func v8LegacyGrammarSource(t *testing.T) *cpaManagedSource {
+	t.Helper()
+	legacyRoot, _ := writeCPAFixture(t, v7LayoutFixtureConfig, map[string]string{
+		"codex-user.json":  `{"type":"codex","access_token":"token"}`,
+		"gemini-user.json": `{"type":"gemini","access_token":"token"}`,
+	})
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("open the managed CPA 8.0.55 legacy-grammar source: %v", err)
 	}
 	return source
 }
 
 // TestCPASourceMapsTheV7SpellingsOntoTheV8Paths is the mapping table's own test:
-// every mapped path lands where the destination accepts it and reads back.
+// every mapped legacy-grammar path on a CPA 8.0.55 source lands where the
+// destination accepts it and reads back.
 func TestCPASourceMapsTheV7SpellingsOntoTheV8Paths(t *testing.T) {
-	source := v734Source(t)
+	source := v8LegacyGrammarSource(t)
 	for _, testCase := range []struct {
 		path string
 		want any
@@ -175,35 +247,50 @@ func TestCPASourceMapsTheV7SpellingsOntoTheV8Paths(t *testing.T) {
 // TestCPASourceNeverCopiesTheManagersOwnPaths pins the exclusions: the
 // destination keeps its own management secret, listener and client key list.
 func TestCPASourceNeverCopiesTheManagersOwnPaths(t *testing.T) {
-	source := v734Source(t)
-	for _, path := range []string{
-		"management", "remote-management", "server", "host", "port",
-		"access.api-keys", "plugins", "auth-dir", "oauth.auth-dir",
+	for _, testCase := range []struct {
+		name   string
+		source *cpaManagedSource
+	}{
+		{name: "canonical v8.0.55 schema", source: v8Source(t)},
+		{name: "legacy grammar on CPA 8.0.55", source: v8LegacyGrammarSource(t)},
 	} {
-		if value, presence := lookupDocumentPath(source.document, path); presence == documentPresent {
-			t.Fatalf("%s was copied into the destination document as %#v", path, value)
-		}
-	}
-	// The source's client key list is a list of strings; the destination document
-	// carries `api-keys.<provider>` groups instead, never that list.
-	if value, presence := lookupDocumentPath(source.document, "api-keys"); presence != documentPresent {
-		t.Fatal("the provider group section was not mapped")
-	} else if _, isList := value.([]any); isList {
-		t.Fatalf("the source client key list was copied as api-keys: %#v", value)
-	}
-	if strings.Contains(mustJSON(t, source.document), "legacy-client-key-1") {
-		t.Fatal("the source client key list reached the destination document")
-	}
-	if strings.Contains(source.sourceIdentity(), "legacy-management-secret") {
-		t.Fatal("the source identity carries a secret")
+		t.Run(testCase.name, func(t *testing.T) {
+			source := testCase.source
+			for _, path := range []string{
+				"management", "remote-management", "server", "host", "port",
+				"access.api-keys", "plugins", "auth-dir", "oauth.auth-dir",
+			} {
+				if value, presence := lookupDocumentPath(source.document, path); presence == documentPresent {
+					t.Fatalf("%s was copied into the destination document as %#v", path, value)
+				}
+			}
+			for _, item := range source.manual {
+				if item.item == "config:oauth.auth-dir" || item.item == "config:auth-dir" {
+					t.Fatalf("excluded auth-dir was reported as manual work: %+v", item)
+				}
+			}
+			// The source's client key list is a list of strings; the destination document
+			// carries `api-keys.<provider>` groups instead, never that list.
+			if value, presence := lookupDocumentPath(source.document, "api-keys"); presence != documentPresent {
+				t.Fatal("the provider group section was not mapped")
+			} else if _, isList := value.([]any); isList {
+				t.Fatalf("the source client key list was copied as api-keys: %#v", value)
+			}
+			if strings.Contains(mustJSON(t, source.document), "legacy-client-key-1") {
+				t.Fatal("the source client key list reached the destination document")
+			}
+			if strings.Contains(source.sourceIdentity(), "legacy-management-secret") {
+				t.Fatal("the source identity carries a secret")
+			}
+		})
 	}
 }
 
 // TestCPASourceReportsGeminiAmpcodeAndIdentityConfuseAsManualItems pins the three
-// source shapes CPA v8 drops: each one is reported, and none of them fails the
-// read.
+// source shapes CPA v8 drops when a CPA 8.0.55 source still carries legacy keys:
+// each one is reported, and none of them fails the read.
 func TestCPASourceReportsGeminiAmpcodeAndIdentityConfuseAsManualItems(t *testing.T) {
-	source := v734Source(t)
+	source := v8LegacyGrammarSource(t)
 	items := map[string]cpaManualItem{}
 	for _, item := range source.manual {
 		items[item.item] = item
@@ -236,7 +323,7 @@ func TestCPASourceReportsGeminiAmpcodeAndIdentityConfuseAsManualItems(t *testing
 // TestCPASourceReportsAnUnknownSectionInsteadOfDroppingIt pins the refusal to
 // guess: a section the mapping does not name becomes a manual item.
 func TestCPASourceReportsAnUnknownSectionInsteadOfDroppingIt(t *testing.T) {
-	source := v734Source(t)
+	source := v8Source(t)
 	found := false
 	for _, item := range source.manual {
 		if item.item != "section:something-new" {
@@ -259,7 +346,7 @@ func TestCPASourceReportsAnUnknownSectionInsteadOfDroppingIt(t *testing.T) {
 // level down, where a silently dropped key is easiest to miss.
 func TestCPASourceReportsAnUnknownLeafInsideAMappedSection(t *testing.T) {
 	legacyRoot, _ := writeCPAFixture(t, "api-keys:\n  - \"legacy-client-key-1\"\ncodex:\n  identity-confuse: true\n  an-unknown-setting: 7\n", nil)
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatalf("open the managed CPA source: %v", err)
 	}
@@ -274,25 +361,34 @@ func TestCPASourceReportsAnUnknownLeafInsideAMappedSection(t *testing.T) {
 	}
 }
 
-// TestCPASourceVersionGateRefusesBelowTheFloor is the preflight block: a source
-// below v7.3.4 is refused with the typed version code and nothing is written.
+// TestCPASourceVersionGateRefusesBelowTheFloor is the preflight block: every
+// CPA release below 8.0.0 (including 7.3.4 and 8.0.0 pre-releases) and outside
+// major 8 is refused with the typed version code and nothing is written.
 func TestCPASourceVersionGateRefusesBelowTheFloor(t *testing.T) {
-	legacyRoot, _ := writeCPAFixture(t, v7FixtureConfig, nil)
-	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.0.12"})
-	code, ok := UpgradeErrorCodeOf(err)
-	if !ok || code != UpgradeErrorCPAVersionUnsupported {
-		t.Fatalf("v7.0.12 refused with %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+	for _, version := range []string{"6.9.0", "7.0.12", "7.3.4", "v7.3.4", "7.3.20", "7.99.99", "8.0.0-rc.1"} {
+		legacyRoot, _ := writeCPAFixture(t, v7LayoutFixtureConfig, nil)
+		_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: version})
+		code, ok := UpgradeErrorCodeOf(err)
+		if !ok || code != UpgradeErrorCPAVersionUnsupported {
+			t.Fatalf("%s refused with %v (code %q), want %s", version, err, code, UpgradeErrorCPAVersionUnsupported)
+		}
+		if !strings.Contains(err.Error(), CPAImportMinimumVersion) {
+			t.Fatalf("the refusal for %s does not name the floor %s: %v", version, CPAImportMinimumVersion, err)
+		}
 	}
-	if !strings.Contains(err.Error(), CPAImportMinimumVersion) {
-		t.Fatalf("the refusal does not name the floor %s: %v", CPAImportMinimumVersion, err)
+	legacyRoot, _ := writeCPAFixture(t, v7LayoutFixtureConfig, nil)
+	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "9.0.0"})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+		t.Fatalf("9.0.0 produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
 	}
 }
 
-// TestCPASourceVersionGateAcceptsTheFloorAndAbove pins the boundary: v7.3.4
-// itself imports, and a v8 old-layout file needs no declared release.
+// TestCPASourceVersionGateAcceptsTheFloorAndAbove pins the v8-only boundary:
+// CPA 8.0.0 and pinned 8.0.55 import, and a standalone `config-version: 8` file
+// needs no declared release.
 func TestCPASourceVersionGateAcceptsTheFloorAndAbove(t *testing.T) {
-	for _, version := range []string{"7.3.4", "v7.3.4", "7.3.20", "v8.0.13"} {
-		legacyRoot, _ := writeCPAFixture(t, v7FixtureConfig, nil)
+	for _, version := range []string{"8.0.0", "v8.0.0", "8.0.55", "v8.0.55"} {
+		legacyRoot, _ := writeCPAFixture(t, v7LayoutFixtureConfig, nil)
 		source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: version})
 		if err != nil {
 			t.Fatalf("%s was refused: %v", version, err)
@@ -301,10 +397,10 @@ func TestCPASourceVersionGateAcceptsTheFloorAndAbove(t *testing.T) {
 			t.Fatalf("%s produced an empty source version", version)
 		}
 	}
-	legacyRoot, _ := writeCPAFixture(t, "config-version: 8\napi-keys:\n  - \"k1\"\n", nil)
+	legacyRoot, _ := writeCPAFixture(t, v8FixtureConfig, nil)
 	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
 	if err != nil {
-		t.Fatalf("a v8 old-layout source was refused without a declared release: %v", err)
+		t.Fatalf("a standalone v8.0.55 source was refused without a declared release: %v", err)
 	}
 	if source.layout != cpaLayoutV8Legacy {
 		t.Fatalf("layout = %q, want %q", source.layout, cpaLayoutV8Legacy)
@@ -314,21 +410,24 @@ func TestCPASourceVersionGateAcceptsTheFloorAndAbove(t *testing.T) {
 // TestCPASourceVersionGateComparesADeclaredReleaseWithTheV8Layout pins the
 // direction of the v8 declaration check. A file that declares `config-version: 8`
 // was written by a v8 release, so the operator's declared release is accepted
-// only when it is a v8 one: the earlier comparison ran from the v8 constant
-// towards the declaration, which accepted every release at or below v8 and
-// refused the v8 releases the file actually came from.
+// only when it is a v8 release at or above 8.0.0.
 func TestCPASourceVersionGateComparesADeclaredReleaseWithTheV8Layout(t *testing.T) {
-	config := "config-version: 8\napi-keys:\n  - \"legacy-client-key-1\"\n"
+	config := "config-version: 8\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"
 	cases := []struct {
 		declared string
 		accepted bool
 	}{
-		{declared: "v8.0.13", accepted: true},
+		{declared: "v8.0.55", accepted: true},
+		{declared: "8.0.55", accepted: true},
 		{declared: "8.0.0", accepted: true},
+		{declared: "8.0.0-rc.1", accepted: false},
 		{declared: "9.0.0", accepted: false},
+		{declared: "7.3.20", accepted: false},
 		{declared: "7.3.4", accepted: false},
 		{declared: "7.0.12", accepted: false},
 		{declared: "6.9.0", accepted: false},
+		{declared: "8.0.55+", accepted: false},
+		{declared: "v8.0.0+", accepted: false},
 	}
 	for _, testCase := range cases {
 		legacyRoot, _ := writeCPAFixture(t, config, nil)
@@ -406,7 +505,7 @@ request-retry: 4
 // skipped without a trace, so the run reported a complete copy while the
 // operator's credential was simply absent from both the count and the record.
 func TestCPASourceReportsCredentialFilesItCannotUpload(t *testing.T) {
-	config := "api-keys:\n  - \"legacy-client-key-1\"\n"
+	config := "config-version: 8\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"
 	legacyRoot, cpaDirectory := writeCPAFixture(t, config, map[string]string{"codex-a.json": `{"type":"codex"}`})
 	authDir := filepath.Join(cpaDirectory, cpaAuthDirectoryName)
 	target := filepath.Join(cpaDirectory, "outside-target.json")
@@ -420,7 +519,7 @@ func TestCPASourceReportsCredentialFilesItCannotUpload(t *testing.T) {
 	if err := os.WriteFile(oversized, []byte(strings.Repeat("x", cpaMaxAuthFileBytes+1)), 0o600); err != nil {
 		t.Fatalf("write the oversized credential: %v", err)
 	}
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatalf("open the source: %v", err)
 	}
@@ -456,120 +555,185 @@ func TestCPASourceReportsCredentialFilesItCannotUpload(t *testing.T) {
 // TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed pins the "never guess"
 // rule for the one input a v7 file cannot provide: it has no version of its own.
 func TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed(t *testing.T) {
-	legacyRoot, _ := writeCPAFixture(t, v7FixtureConfig, nil)
+	legacyRoot, _ := writeCPAFixture(t, v7LayoutFixtureConfig, nil)
 	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
 	code, ok := UpgradeErrorCodeOf(err)
 	if !ok || code != UpgradeErrorCPAVersionRequired {
-		t.Fatalf("an unversioned v7 source produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+		t.Fatalf("an unversioned source produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
 	}
 }
 
 // TestCPASourceVersionComesFromTheStackFile pins the second input the gate
-// accepts: the image tag of the stack file beside the CPA directory.
+// accepts: the image tag of the stack file beside the CPA directory, rejecting
+// every stack-detected release below v8 regardless of config layout.
 func TestCPASourceVersionComesFromTheStackFile(t *testing.T) {
-	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
-	stack := "services:\n  cli-proxy-api:\n    image: eceasy/cli-proxy-api:v7.0.12\n"
-	if err := os.WriteFile(filepath.Join(filepath.Dir(cpaDirectory), "docker-compose.yml"), []byte(stack), 0o600); err != nil {
-		t.Fatalf("write the fixture stack file: %v", err)
-	}
-	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	code, ok := UpgradeErrorCodeOf(err)
-	if !ok || code != UpgradeErrorCPAVersionUnsupported {
-		t.Fatalf("the stack file's v7.0.12 produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
-	}
-	// A moving tag is not a release, so it is not a version either.
-	if err := os.WriteFile(filepath.Join(filepath.Dir(cpaDirectory), "docker-compose.yml"),
-		[]byte("services:\n  cli-proxy-api:\n    image: eceasy/cli-proxy-api:latest\n"), 0o600); err != nil {
-		t.Fatalf("rewrite the fixture stack file: %v", err)
-	}
-	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
-		t.Fatalf("a latest tag produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+	for _, testCase := range []struct {
+		name   string
+		config string
+	}{
+		{name: "canonical v8.0.55 schema", config: v8FixtureConfig},
+		{name: "legacy grammar", config: v7LayoutFixtureConfig},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			legacyRoot, cpaDirectory := writeCPAFixture(t, testCase.config, nil)
+			composePath := filepath.Join(filepath.Dir(cpaDirectory), "docker-compose.yml")
+			for _, preV8 := range []string{"v7.0.12", "v7.3.4", "v7.3.20"} {
+				stack := "services:\n  cli-proxy-api:\n    image: eceasy/cli-proxy-api:" + preV8 + "\n"
+				if err := os.WriteFile(composePath, []byte(stack), 0o600); err != nil {
+					t.Fatalf("write the fixture stack file: %v", err)
+				}
+				_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+				if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+					t.Fatalf("the stack file's %s produced %v (code %q), want %s", preV8, err, code, UpgradeErrorCPAVersionUnsupported)
+				}
+			}
+			// A moving tag is not a release, so it is not a version either.
+			if err := os.WriteFile(composePath,
+				[]byte("services:\n  cli-proxy-api:\n    image: eceasy/cli-proxy-api:latest\n"), 0o600); err != nil {
+				t.Fatalf("rewrite the fixture stack file: %v", err)
+			}
+			_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+				t.Fatalf("a latest tag produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+			}
+			// Pinned CPA v8.0.55 in the stack file is accepted.
+			if err := os.WriteFile(composePath,
+				[]byte("services:\n  cli-proxy-api:\n    image: eceasy/cli-proxy-api:v8.0.55\n"), 0o600); err != nil {
+				t.Fatalf("rewrite the fixture stack file to v8.0.55: %v", err)
+			}
+			source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+			if err != nil {
+				t.Fatalf("the stack file's v8.0.55 was refused: %v", err)
+			}
+			if source.version != "8.0.55" {
+				t.Fatalf("source version = %q, want 8.0.55", source.version)
+			}
+		})
 	}
 }
 
-// TestCPASourceVersionComesFromTheInstallerStack is the Low finding: a real v1
-// install writes compose.yaml with `image: ${CPA_IMAGE}` and the release in
-// .env, so a reader that only accepts a literal docker-compose.yml image never
-// sees a version. The release must come from the installer's own files.
+// TestCPASourceVersionComesFromTheInstallerStack pins compose.yaml + .env
+// resolution: pre-v8 tags (including v7.3.4) are refused without leaking .env
+// secrets, and pinned v8.0.55 is accepted.
 func TestCPASourceVersionComesFromTheInstallerStack(t *testing.T) {
-	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
-	installDir := filepath.Dir(cpaDirectory)
-	compose := "services:\n" +
-		"  cli-proxy-api:\n" +
-		"    image: ${CPA_IMAGE}\n" +
-		"    restart: unless-stopped\n" +
-		"  cpa-manager-plus:\n" +
-		"    image: ${CPAMP_IMAGE}\n"
-	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
-		t.Fatalf("write the installer compose file: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(installDir, ".env"),
-		[]byte("COMPOSE_PROJECT_NAME=cpamp\nCPAMP_ADMIN_KEY=cpamp-admin-secret-value\nCPA_IMAGE=eceasy/cli-proxy-api:v7.0.12\n"), 0o600); err != nil {
-		t.Fatalf("write the installer environment file: %v", err)
-	}
-	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
-		t.Fatalf("the installer's v7.0.12 produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
-	}
-	// The file holds the admin key; a refusal must never echo a value from it.
-	if strings.Contains(err.Error(), "cpamp-admin-secret-value") {
-		t.Fatalf("the refusal leaks a value from .env: %v", err)
-	}
-
-	// The floor release is accepted from the same two files.
-	if err := os.WriteFile(filepath.Join(installDir, ".env"),
-		[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4\n"), 0o600); err != nil {
-		t.Fatalf("rewrite the installer environment file: %v", err)
-	}
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	if err != nil {
-		t.Fatalf("the installer's v7.3.4 was refused: %v", err)
-	}
-	if source.version != "7.3.4" {
-		t.Fatalf("source version = %q, want 7.3.4", source.version)
+	for _, testCase := range []struct {
+		name   string
+		config string
+	}{
+		{name: "canonical v8.0.55 schema", config: v8FixtureConfig},
+		{name: "legacy grammar", config: v7LayoutFixtureConfig},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			legacyRoot, cpaDirectory := writeCPAFixture(t, testCase.config, nil)
+			installDir := filepath.Dir(cpaDirectory)
+			compose := "services:\n" +
+				"  cli-proxy-api:\n" +
+				"    image: ${CPA_IMAGE}\n" +
+				"    restart: unless-stopped\n" +
+				"  cpa-manager-plus:\n" +
+				"    image: ${CPAMP_IMAGE}\n"
+			if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
+				t.Fatalf("write the installer compose file: %v", err)
+			}
+			for _, preV8 := range []string{"v7.0.12", "v7.3.4"} {
+				if err := os.WriteFile(filepath.Join(installDir, ".env"),
+					[]byte("COMPOSE_PROJECT_NAME=cpamp\nCPAMP_ADMIN_KEY=cpamp-admin-secret-value\nCPA_IMAGE=eceasy/cli-proxy-api:"+preV8+"\n"), 0o600); err != nil {
+					t.Fatalf("write the installer environment file: %v", err)
+				}
+				_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+				if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+					t.Fatalf("the installer's %s produced %v (code %q), want %s", preV8, err, code, UpgradeErrorCPAVersionUnsupported)
+				}
+				if strings.Contains(err.Error(), "cpamp-admin-secret-value") {
+					t.Fatalf("the refusal leaks a value from .env: %v", err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(installDir, ".env"),
+				[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v8.0.55\n"), 0o600); err != nil {
+				t.Fatalf("rewrite the installer environment file: %v", err)
+			}
+			source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+			if err != nil {
+				t.Fatalf("the installer's v8.0.55 was refused: %v", err)
+			}
+			if source.version != "8.0.55" {
+				t.Fatalf("source version = %q, want 8.0.55", source.version)
+			}
+			for _, validEnv := range []string{
+				"CPA_IMAGE=eceasy/cli-proxy-api:v8.0.55 # pinned release\n",
+				"CPA_IMAGE=\"eceasy/cli-proxy-api:v8.0.55\" # quoted release\n",
+				"export CPA_IMAGE='eceasy/cli-proxy-api:v8.0.55' # exported single-quoted\n",
+			} {
+				if err := os.WriteFile(filepath.Join(installDir, ".env"), []byte(validEnv), 0o600); err != nil {
+					t.Fatalf("write commented/quoted environment file: %v", err)
+				}
+				source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+				if err != nil {
+					t.Fatalf("valid .env %q was refused: %v", validEnv, err)
+				}
+				if source.version != "8.0.55" {
+					t.Fatalf("source version = %q, want 8.0.55 for %q", source.version, validEnv)
+				}
+			}
+			// An explicit --cpa-version 8.0.55 cannot override a stack-detected non-v8 major.
+			if err := os.WriteFile(filepath.Join(installDir, ".env"),
+				[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v9.0.0\n"), 0o600); err != nil {
+				t.Fatalf("write v9 environment file: %v", err)
+			}
+			_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+				t.Fatalf("stack v9.0.0 with declared 8.0.55 produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+			}
+		})
 	}
 }
 
-// TestCPASourceVersionRefusesADigestBearingImage pins the Low finding: a
-// tag-plus-digest reference pins bytes, not a release. The reader used to cut the
-// digest off and accept the tag, claiming a version the digest may not resolve to;
-// the documented contract says a digest names no release.
+// TestCPASourceVersionRefusesADigestBearingImage pins that a tag-plus-digest or
+// bare-digest image pins bytes rather than a release, so it requires an explicit
+// --cpa-version regardless of config layout.
 func TestCPASourceVersionRefusesADigestBearingImage(t *testing.T) {
-	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
-	installDir := filepath.Dir(cpaDirectory)
-	compose := "services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"
-	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
-		t.Fatalf("write the installer compose file: %v", err)
-	}
-	digest := strings.Repeat("a", 64)
-	if err := os.WriteFile(filepath.Join(installDir, ".env"),
-		[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4@sha256:"+digest+"\n"), 0o600); err != nil {
-		t.Fatalf("write the installer environment file: %v", err)
-	}
-	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
-		t.Fatalf("a digest-bearing image produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
-	}
-	// A bare digest names no release either, and the refusal must not echo it.
-	if err := os.WriteFile(filepath.Join(installDir, ".env"),
-		[]byte("CPA_IMAGE=eceasy/cli-proxy-api@sha256:"+digest+"\n"), 0o600); err != nil {
-		t.Fatalf("rewrite the installer environment file: %v", err)
-	}
-	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
-		t.Fatalf("a bare digest produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
-	}
-	if strings.Contains(err.Error(), digest) {
-		t.Fatalf("the refusal echoes the digest: %v", err)
+	for _, testCase := range []struct {
+		name   string
+		config string
+	}{
+		{name: "canonical v8.0.55 schema", config: v8FixtureConfig},
+		{name: "legacy grammar", config: v7LayoutFixtureConfig},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			legacyRoot, cpaDirectory := writeCPAFixture(t, testCase.config, nil)
+			installDir := filepath.Dir(cpaDirectory)
+			compose := "services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"
+			if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
+				t.Fatalf("write the installer compose file: %v", err)
+			}
+			digest := strings.Repeat("a", 64)
+			for _, ref := range []string{
+				"eceasy/cli-proxy-api:v8.0.55@sha256:" + digest,
+				"eceasy/cli-proxy-api:v7.3.4@sha256:" + digest,
+				"eceasy/cli-proxy-api@sha256:" + digest,
+			} {
+				if err := os.WriteFile(filepath.Join(installDir, ".env"),
+					[]byte("CPA_IMAGE="+ref+"\n"), 0o600); err != nil {
+					t.Fatalf("write the installer environment file: %v", err)
+				}
+				_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+				if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+					t.Fatalf("digest reference %q produced %v (code %q), want %s", ref, err, code, UpgradeErrorCPAVersionRequired)
+				}
+				if strings.Contains(err.Error(), digest) {
+					t.Fatalf("the refusal echoes the digest: %v", err)
+				}
+			}
+		})
 	}
 }
 
 // TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt pins the
-// fail-closed side of the same reader: an unresolvable reference is not a
-// release, and a file that cannot be read is not a declaration.
+// fail-closed side of the stack reader: unresolved references require
+// --cpa-version, pre-v8 compose defaults are refused, and v8.0.55 compose
+// defaults are accepted.
 func TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt(t *testing.T) {
-	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
+	legacyRoot, cpaDirectory := writeCPAFixture(t, v8FixtureConfig, nil)
 	installDir := filepath.Dir(cpaDirectory)
 	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
 		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"), 0o600); err != nil {
@@ -580,17 +744,26 @@ func TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt(t *testing.T)
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
 		t.Fatalf("an unresolved reference produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
 	}
-	// A default in the compose reference is a declaration compose itself makes.
+	// A pre-v8 default in the compose reference is refused.
 	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
 		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE:-eceasy/cli-proxy-api:v7.3.4}\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the installer compose file with pre-v8 default: %v", err)
+	}
+	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+		t.Fatalf("a pre-v8 compose default produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+	}
+	// A pinned v8.0.55 default in the compose reference is accepted.
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE:-eceasy/cli-proxy-api:v8.0.55}\n"), 0o600); err != nil {
 		t.Fatalf("rewrite the installer compose file: %v", err)
 	}
 	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
 	if err != nil {
-		t.Fatalf("the compose default was refused: %v", err)
+		t.Fatalf("the v8.0.55 compose default was refused: %v", err)
 	}
-	if source.version != "7.3.4" {
-		t.Fatalf("source version = %q, want 7.3.4 from the compose default", source.version)
+	if source.version != "8.0.55" {
+		t.Fatalf("source version = %q, want 8.0.55 from the compose default", source.version)
 	}
 	// A required reference that has no value is not a release either.
 	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
@@ -610,70 +783,58 @@ func TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt(t *testing.T)
 // this import cannot read at all.
 func TestCPASourceRefusesAnUnusableConfiguration(t *testing.T) {
 	legacyRoot, _ := writeCPAFixture(t, "api-keys: [\n", nil)
-	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConfigInvalid {
 		t.Fatalf("a broken configuration produced %v (code %q), want %s", err, code, UpgradeErrorCPAConfigInvalid)
 	}
-	legacyRoot, _ = writeCPAFixture(t, "request-retry: 3\n", nil)
-	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	legacyRoot, _ = writeCPAFixture(t, "config-version: 8\nrouting:\n  retry:\n    request-retry: 3\n", nil)
+	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAClientKeysMissing {
 		t.Fatalf("a source without client keys produced %v (code %q), want %s", err, code, UpgradeErrorCPAClientKeysMissing)
 	}
-}
-
-// TestCPASourceMappingTableNamesTheReleaseOfEveryEntry pins the documentation
-// claim: every row names the release that introduced or removed it.
-func TestCPASourceMappingTableNamesTheReleaseOfEveryEntry(t *testing.T) {
-	for _, path := range cpaConfigPaths {
-		if path.current == "" {
-			t.Fatalf("mapping row %+v has no destination path", path)
-		}
-		if path.introduced == "" {
-			t.Fatalf("mapping row %q/%q names no release that introduced it", path.legacy, path.current)
-		}
-		if _, ok := parseCPAVersion(path.introduced); !ok {
-			t.Fatalf("mapping row %q names an unparsable release %q", path.current, path.introduced)
-		}
-		// A mapped row never appears in the removal table: a key is either copied
-		// or reported as removed, and a row in both would claim contradictory
-		// answers for one path.
-		for _, removed := range cpaRemovedConfigPaths {
-			if removed.legacy == path.legacy {
-				t.Fatalf("mapping row %q is also reported as removed in %q", path.legacy, removed.removed)
-			}
+	for _, rawConfigVersion := range []string{`"8"`, `"+8"`, `"08"`, `8.0`, `+8`, `0x8`, `7`, `9`} {
+		body := "config-version: " + rawConfigVersion + "\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"
+		legacyRoot, _ = writeCPAFixture(t, body, nil)
+		_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+			t.Fatalf("config-version %s produced %v (code %q), want %s", rawConfigVersion, err, code, UpgradeErrorCPAVersionUnsupported)
 		}
 	}
-	for _, removed := range cpaRemovedConfigPaths {
-		if removed.removed == "" {
-			t.Fatalf("removed row %q names no release", removed.legacy)
-		}
-		if _, ok := parseCPAVersion(removed.removed); !ok {
-			t.Fatalf("removed row %q names an unparsable release %q", removed.legacy, removed.removed)
-		}
-		if removed.instruction == "" {
-			t.Fatalf("removed row %q carries no operator instruction", removed.legacy)
+	for _, multiDoc := range []string{
+		"config-version: 8\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n---\nrouting:\n  retry:\n    request-retry: 3\n",
+		"config-version: 8\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n---\n",
+	} {
+		legacyRoot, _ = writeCPAFixture(t, multiDoc, nil)
+		_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConfigInvalid {
+			t.Fatalf("multi-document configuration produced %v (code %q), want %s", err, code, UpgradeErrorCPAConfigInvalid)
 		}
 	}
-}
-
-// TestCPASourceMappingPathsAreAllCopyable pins the bound of the table: every
-// mapped path is one the adoption executor walks, so a row can never describe a
-// copy this step cannot make.
-func TestCPASourceMappingPathsAreAllCopyable(t *testing.T) {
-	copyable := map[string]bool{}
-	for _, path := range configLeafPathsForTest() {
-		copyable[path] = true
+	outsideDir := filepath.Join(t.TempDir(), "outside-auths")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create outside auth directory: %v", err)
 	}
-	for _, path := range configRuleFamilyPathsForTest() {
-		copyable[path] = true
+	if err := os.WriteFile(filepath.Join(outsideDir, "outside.json"), []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write outside credential: %v", err)
 	}
-	for _, section := range providerSectionNamesForTest() {
-		copyable[section] = true
+	fenceConfig := "config-version: 8\noauth:\n  auth-dir: linked-outside\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"
+	legacyRoot, cpaDirectory := writeCPAFixture(t, fenceConfig, map[string]string{"in-tree.json": `{"type":"codex"}`})
+	if err := os.Symlink(outsideDir, filepath.Join(cpaDirectory, "linked-outside")); err != nil {
+		t.Skipf("this platform does not create symbolic links: %v", err)
 	}
-	for _, path := range cpaConfigPaths {
-		if !copyable[path.current] {
-			t.Fatalf("mapping row %q names %q, which the adoption executor never copies", path.legacy, path.current)
-		}
+	aliasDir := filepath.Join(t.TempDir(), "cpa-alias")
+	if err := os.Symlink(cpaDirectory, aliasDir); err != nil {
+		t.Fatalf("create symlinked CPA directory: %v", err)
+	}
+	fencedSource, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPADirectory: aliasDir, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("open fenced source: %v", err)
+	}
+	if _, ok := fencedSource.credentialData["outside.json"]; ok {
+		t.Fatal("oauth.auth-dir read outside the CPA directory tree")
+	}
+	if _, ok := fencedSource.credentialData["in-tree.json"]; !ok {
+		t.Fatalf("expected fallback to in-tree auths directory when oauth.auth-dir resolves outside tree, got %v", fencedSource.credentials)
 	}
 }
 
@@ -714,13 +875,3 @@ func TestCPASourceGroupingReproducesCPAsOwnShape(t *testing.T) {
 		t.Fatalf("an already grouped list was regrouped: %#v", again)
 	}
 }
-
-// configLeafPathsForTest, configRuleFamilyPathsForTest and
-// providerSectionNamesForTest are the copy scope of the adoption executor, read
-// from the product's own tables so a mapping row cannot describe a copy the
-// executor does not make.
-func configLeafPathsForTest() []string { return cpa.ConfigLeafPaths() }
-
-func configRuleFamilyPathsForTest() []string { return cpa.ConfigRuleFamilyPaths() }
-
-func providerSectionNamesForTest() []string { return cpa.ProviderAdoptionSections() }

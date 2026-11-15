@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -34,15 +35,21 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 )
 
-// cleanSourceConfig is a 1.x CPA configuration whose every key this import
-// copies, so the step's own manual-item report is empty. It is the shape a test
-// needs to tell "this step reported none" apart from "the row lists another
-// step's work".
-const cleanSourceConfig = `host: "127.0.0.1"
-port: 8317
-api-keys:
-  - "legacy-client-key-1"
-request-retry: 3
+// cleanSourceConfig is a canonical CPA 8.0.55 configuration whose every key
+// this import copies or excludes by ownership (`server`, `oauth.auth-dir`,
+// `access.api-keys`), so the step's own manual-item report is empty.
+const cleanSourceConfig = `config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+oauth:
+  auth-dir: "/root/.cli-proxy-api"
+access:
+  api-keys:
+    - "legacy-client-key-1"
+routing:
+  retry:
+    request-retry: 3
 `
 
 // importFixture is a stopped 1.x volume with a recorded copy-in and the managed
@@ -152,9 +159,9 @@ func (c *fakeDestinationCPA) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	case r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet:
 		// The version probe reads the advertised build from the response header.
-		w.Header().Set("X-CPA-Version", "v8.0.13")
+		w.Header().Set("X-CPA-Version", "v8.0.55")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"version":"v8.0.13"}`))
+		_, _ = w.Write([]byte(`{"version":"v8.0.55"}`))
 	case r.URL.Path == "/v8/management/config.yaml" && r.Method == http.MethodGet:
 		// The server fingerprint is the digest of this body, and a real CPA serves
 		// the configuration it currently holds: the executor writes routing leaves,
@@ -598,8 +605,8 @@ func (f *fakeImportRuntime) Status(context.Context) (model.RuntimeObservedStatus
 	defer f.mu.Unlock()
 	return model.RuntimeObservedStatus{
 		Identity: f.identity, Generation: f.generation, ProtocolVersion: "v1", State: f.state,
-		CPAObservedVersion:    "8.0.13",
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: f.artifact, Version: "8.0.13"},
+		CPAObservedVersion:    "8.0.55",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: f.artifact, Version: "8.0.55"},
 		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStageDestination, model.RuntimeCapabilityStart},
 	}, nil
 }
@@ -741,7 +748,7 @@ func importOptions(fixture importFixture, runtime CPAImportRuntime, destinationU
 	return CPAImportOptions{
 		LegacyRoot:     fixture.legacyRoot,
 		SourceLock:     fixture.sourceLock,
-		CPAVersion:     "7.3.4",
+		CPAVersion:     "8.0.55",
 		TargetRoot:     fixture.targetRoot,
 		Runtime:        runtime,
 		DestinationURL: destinationURL,
@@ -758,7 +765,7 @@ func boolPointer(value bool) *bool { return &value }
 // not about the absence of a field name.
 func TestSuccessfulImportNeverReportsSecrets(t *testing.T) {
 	const credentialToken = "credential-access-token-secret-value"
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{
 		"codex-user.json": `{"type":"codex","access_token":"` + credentialToken + `"}`,
 	})
 	destination := newFakeDestinationCPA(t, "")
@@ -797,7 +804,7 @@ func TestSuccessfulImportNeverReportsSecrets(t *testing.T) {
 // refused before the CPA directory is read, and a marker for another database
 // does not authorize this source.
 func TestImportCPARequiresTheHeldSourceOwnershipLock(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -836,7 +843,7 @@ func TestImportCPARequiresTheHeldSourceOwnershipLock(t *testing.T) {
 // remaining items are recorded with their rule's own manual action, and the row
 // advances to cpa_import with the cpa_config domain.
 func TestImportCPACopiesTheManagedSourceAndRecordsCPAConfig(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{
 		"codex-user.json":  `{"type":"codex","access_token":"token"}`,
 		"gemini-user.json": `{"type":"gemini","access_token":"token"}`,
 	})
@@ -893,9 +900,9 @@ func TestImportCPACopiesTheManagedSourceAndRecordsCPAConfig(t *testing.T) {
 	}
 	joined := strings.Join(recorded.ManualItems, "\n")
 	for _, want := range []string{
-		"config:codex.identity-confuse", "(removed_upstream)",
 		"section:something-new", "(not_in_import_scope)",
-		"section:ampcode", "credential:gemini-user.json", "(gemini_credential_unsupported)",
+		"section:ampcode", "(removed_upstream)",
+		"credential:gemini-user.json", "(gemini_credential_unsupported)",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("recorded manual items do not name %q: %s", want, joined)
@@ -908,40 +915,76 @@ func TestImportCPACopiesTheManagedSourceAndRecordsCPAConfig(t *testing.T) {
 	}
 }
 
-// TestImportCPARefusesAV7012FixtureBeforeWriting is the preflight block: a source
-// below the floor is refused with the typed code and the destination is never
-// touched.
+// TestImportCPARefusesAV7012FixtureBeforeWriting is the preflight block: every
+// declared or stack-detected CPA release below v8 (including 7.0.12, 7.3.4,
+// 7.3.20, and 8.0.0 pre-releases) is refused with UpgradeErrorCPAVersionUnsupported
+// before any staging, HTTP request, or SQLite mutation.
 func TestImportCPARefusesAV7012FixtureBeforeWriting(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "")
-	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
-	runtime.staged = destination
-	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
-	options.CPAVersion = "7.0.12"
-	_, err := ImportCPA(context.Background(), options)
-	code, ok := UpgradeErrorCodeOf(err)
-	if !ok || code != UpgradeErrorCPAVersionUnsupported {
-		t.Fatalf("a v7.0.12 source produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+	for _, version := range []string{"7.0.12", "7.3.4", "v7.3.20", "8.0.0-rc.1"} {
+		t.Run("declared_"+version, func(t *testing.T) {
+			fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+			destination := newFakeDestinationCPA(t, "")
+			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+			runtime.staged = destination
+			options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+			options.CPAVersion = version
+			_, err := ImportCPA(context.Background(), options)
+			code, ok := UpgradeErrorCodeOf(err)
+			if !ok || code != UpgradeErrorCPAVersionUnsupported {
+				t.Fatalf("a %s source produced %v (code %q), want %s", version, err, code, UpgradeErrorCPAVersionUnsupported)
+			}
+			if runtime.stageCall != nil {
+				t.Fatalf("the destination was staged for a refused %s source: %+v", version, runtime.stageCall)
+			}
+			if requests := destination.requests(); len(requests) != 0 {
+				t.Fatalf("the destination answered %v for a refused %s source, want no request", requests, version)
+			}
+			paths := newTargetPaths(fixture.targetRoot)
+			if _, _, found, loadErr := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); loadErr != nil || found {
+				t.Fatalf("a refused %s source recorded a destination attempt (found %t): %v", version, found, loadErr)
+			}
+			recorded := readOperation(t, fixture.targetRoot)
+			if recorded.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
+			}
+			if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+				t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
+			}
+		})
 	}
-	if runtime.stageCall != nil {
-		t.Fatalf("the destination was staged for a refused source: %+v", runtime.stageCall)
-	}
-	if requests := destination.requests(); len(requests) != 0 {
-		t.Fatalf("the destination answered %v for a refused source, want no request", requests)
-	}
-	recorded := readOperation(t, fixture.targetRoot)
-	if recorded.Stage != model.UpgradeStageReconcile {
-		t.Fatalf("recorded stage = %q, want the copy-in the refusal must not move", recorded.Stage)
-	}
-	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
-	}
+	t.Run("stack_detected_v7.3.4", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		installDir := filepath.Dir(fixture.cpaDir)
+		if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+			[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"), 0o600); err != nil {
+			t.Fatalf("write stack compose.yaml: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(installDir, ".env"),
+			[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4\n"), 0o600); err != nil {
+			t.Fatalf("write stack .env: %v", err)
+		}
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+		options.CPAVersion = ""
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+			t.Fatalf("a stack-detected v7.3.4 source produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+		}
+		if runtime.stageCall != nil || len(destination.requests()) != 0 {
+			t.Fatal("a stack-detected v7.3.4 source reached the Runtime or destination")
+		}
+		if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile || recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+			t.Fatalf("a stack-detected v7.3.4 refusal mutated the operation row: %+v", recorded)
+		}
+	})
 }
 
 // TestImportCPARequiresThePluginChoice pins the missing choice: it is never
 // defaulted, and nothing is read or written.
 func TestImportCPARequiresThePluginChoice(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	fixture := newImportFixture(t, v8FixtureConfig, nil)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -956,7 +999,7 @@ func TestImportCPARequiresThePluginChoice(t *testing.T) {
 
 // TestImportCPARefusesAStageThatCannotEnterTheImport pins the monotonicity rule.
 func TestImportCPARefusesAStageThatCannotEnterTheImport(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	fixture := newImportFixture(t, v8FixtureConfig, nil)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -977,7 +1020,7 @@ func TestImportCPARefusesAStageThatCannotEnterTheImport(t *testing.T) {
 // which refuses a stage it can no longer enter, so usage reconciliation was
 // permanently skipped for that operation.
 func TestImportCPARefusesToEnterBeforeReconciliation(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	fixture := newImportFixture(t, v8FixtureConfig, nil)
 	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCopyIn, []string{model.UpgradeDomainSourceCopy})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
@@ -1000,7 +1043,7 @@ func TestImportCPARefusesToEnterBeforeReconciliation(t *testing.T) {
 // leave the operation at cpa_import with nothing written, which reported a started
 // import that never started.
 func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
 	runtime := newFakeImportRuntime(model.RuntimeStateReady)
 	runtime.staged = destination
@@ -1017,7 +1060,7 @@ func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T
 
 	// The same rule for an unusable destination URL, which is refused before the
 	// Runtime is asked for its status.
-	unusableFixture := newImportFixture(t, v7FixtureConfig, nil)
+	unusableFixture := newImportFixture(t, v8FixtureConfig, nil)
 	unusableDestination := newFakeDestinationCPA(t, "")
 	unusableRuntime := newFakeImportRuntime(model.RuntimeStateOffline)
 	unusableRuntime.staged = unusableDestination
@@ -1037,7 +1080,7 @@ func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T
 // other plugin choice, a different destination URL or another client key set would
 // keep the destination it staged while reporting the new choice.
 func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -1094,7 +1137,7 @@ func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
 // and no stage movement. The static key the caller supplied is exactly the input
 // that made the foreign CPA answerable, so it is refused with it.
 func TestImportCPARefusesUnrecordedReadyDestinationWithIdenticalKeys(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{
 		"codex-user.json": `{"type":"codex","access_token":"token"}`,
 	})
 	const sharedKey = "shared-destination-management-secret-0123456789abcdef"
@@ -1143,7 +1186,7 @@ func TestImportCPARefusesUnrecordedReadyDestinationWithIdenticalKeys(t *testing.
 // CPA shares say nothing about which process it is, and only the per-attempt
 // 256-bit secret the stage writes into the Supervisor's CPA distinguishes them.
 func TestImportCPARefusesAForeignDestinationBeforeAnyWrite(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{
 		"codex-user.json": `{"type":"codex","access_token":"token"}`,
 	})
 	staged := newFakeDestinationCPA(t, "")
@@ -1196,7 +1239,7 @@ func TestImportCPARefusesAForeignDestinationBeforeAnyWrite(t *testing.T) {
 // CPA ready, so the retry proves the destination and finishes without submitting a
 // second stage or start.
 func TestImportCPADoesNotRestageAnAlreadyRunningDestination(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
 	destination.clientKeys = []string{"legacy-client-key-1", "legacy-client-key-2"}
 	runtime := newFakeImportRuntime(model.RuntimeStateReady)
@@ -1229,7 +1272,7 @@ func TestImportCPADoesNotRestageAnAlreadyRunningDestination(t *testing.T) {
 // applying a manual item, so the replay has to observe what the destination serves
 // now — and every one of them is a read.
 func TestImportCPAIsIdempotentOnceRecorded(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -1269,7 +1312,7 @@ func TestImportCPAIsIdempotentOnceRecorded(t *testing.T) {
 // destination evidence still matches the Manager's own connection. Removing the
 // destination row is the shape of a store whose handoff did not survive.
 func TestImportCPAReplayRefusesADestinationTheStoreNoLongerDescribes(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -1300,7 +1343,7 @@ func TestImportCPAReplayRefusesADestinationTheStoreNoLongerDescribes(t *testing.
 // The stored configuration reaches the destination after a restart, and the
 // unrelated settings the import does not own survive unchanged.
 func TestImportCPAHoldsTheDestinationConnectionInTheManagerConfig(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
 		Collector: model.ManagerCollectorConfig{
 			CollectorMode: "http", Queue: "custom-usage", PopSide: "left", BatchSize: 7,
@@ -1348,7 +1391,7 @@ func TestImportCPAHoldsTheDestinationConnectionInTheManagerConfig(t *testing.T) 
 // the attempt recorded, so the secret is not lost and the same run completes once
 // the operator rebinds the connection explicitly.
 func TestImportCPARefusesToRepointAnExistingManagerConnection(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	const otherURL = "http://other-cpa.example:8317"
 	const otherKey = "another-cpa-management-key"
 	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
@@ -1439,7 +1482,7 @@ func TestImportCPAReportsAManualItemForAnUnknownSectionAndStillSucceeds(t *testi
 // TestImportCPARefusesAFailedDestinationStage pins the Runtime refusal: no
 // configuration is written when the destination never came up.
 func TestImportCPARefusesAFailedDestinationStage(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	fixture := newImportFixture(t, v8FixtureConfig, nil)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -1460,7 +1503,7 @@ func TestImportCPARefusesAFailedDestinationStage(t *testing.T) {
 // or a credential v8 cannot list — is recorded with its own action and never
 // written.
 func TestImportCPACopiesOnlyWhatTheAdoptionRulesAuthorize(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+	fixture := newImportFixture(t, v7LayoutFixtureConfig, map[string]string{
 		"codex-user.json": `{"type":"codex","access_token":"token"}`,
 	})
 	destination := newFakeDestinationCPA(t, "")
@@ -1624,7 +1667,7 @@ func writeOperationStage(t *testing.T, targetRoot string, stage model.UpgradeSta
 // import. The refusal is raised before the attempt is read, so nothing is staged
 // and no CPA receives a request.
 func TestImportCPARefusesADestinationStagedOnAnotherArtifact(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -1669,8 +1712,8 @@ func runManagedImportWithOptions(t *testing.T, fixture *verifyFixture, runtime C
 	options := CPAImportOptions{
 		LegacyRoot:     fixture.volume.root,
 		SourceLock:     lock,
-		CPADirectory:   writeCPABeside(t, fixture.volume.root, v7FixtureConfig, credentials),
-		CPAVersion:     "7.3.4",
+		CPADirectory:   writeCPABeside(t, fixture.volume.root, v8FixtureConfig, credentials),
+		CPAVersion:     "8.0.55",
 		TargetRoot:     fixture.target,
 		Runtime:        runtime,
 		PluginsEnabled: boolPointer(true),
@@ -1694,7 +1737,7 @@ func destinationFingerprint(t *testing.T, destination *fakeDestinationCPA) strin
 	body := destination.renderConfigDocument()
 	destination.mu.Unlock()
 	digest := sha256.Sum256([]byte(body))
-	return freshkeyapply.ExternalServerFingerprint("v8.0.13", hex.EncodeToString(digest[:]))
+	return freshkeyapply.ExternalServerFingerprint("v8.0.55", hex.EncodeToString(digest[:]))
 }
 
 // TestImportCPAThenVerifyCompletesTheManagedOperation is the end-to-end contract
@@ -1987,7 +2030,7 @@ func TestImportCPAReplayReportsTheRecordedSourceFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import the fixture CPA: %v", err)
 	}
-	if first.SourceVersion != "7.3.4" || first.SourceLayout != "v7" {
+	if first.SourceVersion != "8.0.55" || first.SourceLayout != cpaLayoutV8Legacy {
 		t.Fatalf("first result reports %q/%q, want the fixture source", first.SourceVersion, first.SourceLayout)
 	}
 	if len(first.ManualItems) == 0 {
@@ -2017,6 +2060,17 @@ func TestImportCPAReplayReportsTheRecordedSourceFacts(t *testing.T) {
 	}
 	if replayed.PluginsEnabled != first.PluginsEnabled {
 		t.Fatalf("the replay reported plugins %t, want the recorded %t", replayed.PluginsEnabled, first.PluginsEnabled)
+	}
+	beforeReplayRequests := len(destination.requests())
+	_, err = runManagedImportWithOptions(t, fixture, runtime, credentials, func(options *CPAImportOptions) {
+		options.DestinationURL = destination.url()
+		options.CPAVersion = "7.3.4"
+	})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+		t.Fatalf("replay with pre-v8 --cpa-version produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+	}
+	if requests := destination.requests()[beforeReplayRequests:]; len(requests) != 0 {
+		t.Fatalf("refused pre-v8 replay contacted the destination: %v", requests)
 	}
 }
 
@@ -2334,21 +2388,29 @@ func TestImportCPAReplayRefusesAnUnreachableDestination(t *testing.T) {
 func TestImportCPAThenVerifyWithOpenAICompatAndEmptyModelList(t *testing.T) {
 	fixture := newVerifyFixture(t)
 	fixture.reconcile(t)
-	sourceConfig := `host: "127.0.0.1"
-port: 8317
+	sourceConfig := `config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+access:
+  api-keys:
+    - "legacy-client-key-1"
+routing:
+  retry:
+    request-retry: 3
 api-keys:
-  - "legacy-client-key-1"
-request-retry: 3
-gemini-api-key:
-  - api-key: "legacy-gemini-provider-key"
-openai-compatibility:
-  - name: "legacy-compat"
-    base-url: "https://example.invalid/v1"
-    api-key-entries:
-      - api-key: "legacy-compat-provider-key"
-    models:
-      - name: "compat-model-1"
-        alias: "compat-model-1"
+  gemini:
+    - name: "gemini-1"
+      keys:
+        - api-key: "legacy-gemini-provider-key"
+  openai-compatibility:
+    - name: "legacy-compat"
+      base-url: "https://example.invalid/v1"
+      keys:
+        - api-key: "legacy-compat-provider-key"
+      models:
+        - name: "compat-model-1"
+          alias: "compat-model-1"
 `
 	writeCPABeside(t, fixture.volume.root, sourceConfig, nil)
 	destination := newFakeDestinationCPA(t, "")
@@ -2364,7 +2426,7 @@ openai-compatibility:
 		LegacyRoot:     fixture.volume.root,
 		SourceLock:     sourceLock,
 		TargetRoot:     fixture.target,
-		CPAVersion:     "7.3.4",
+		CPAVersion:     "8.0.55",
 		PluginsEnabled: boolPointer(false),
 		DestinationURL: destination.url(),
 		Runtime:        runtime,

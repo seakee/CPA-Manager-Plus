@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
@@ -183,8 +185,8 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 	result := upgradeservice.CPAImportResult{
 		Stage:          "cpa_import",
 		DomainsDone:    []string{"source_copy"},
-		SourceVersion:  "7.3.4",
-		SourceLayout:   "v7",
+		SourceVersion:  "8.0.55",
+		SourceLayout:   "v8-legacy",
 		SourceIdentity: "external:sha256:fixture",
 		DestinationURL: "http://127.0.0.1:8317",
 		PluginsEnabled: true,
@@ -240,8 +242,8 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 // a refused result carries zero anyway.
 func TestCPAImportRefusalDoesNotClaimProvedClientKeys(t *testing.T) {
 	result := upgradeservice.CPAImportResult{
-		SourceVersion:  "7.3.4",
-		SourceLayout:   "v7",
+		SourceVersion:  "8.0.55",
+		SourceLayout:   "v8-legacy",
 		DestinationURL: "http://127.0.0.1:8317",
 		ClientKeys:     3,
 	}
@@ -277,8 +279,8 @@ func TestCPAImportReplayReportsTheRecordedItems(t *testing.T) {
 	result := upgradeservice.CPAImportResult{
 		Stage:          "cpa_import",
 		DomainsDone:    []string{"source_copy", "cpa_config"},
-		SourceVersion:  "7.3.4",
-		SourceLayout:   "v7",
+		SourceVersion:  "8.0.55",
+		SourceLayout:   "v8-legacy",
 		SourceIdentity: "external:sha256:fixture",
 		DestinationURL: "http://127.0.0.1:8317",
 		PluginsEnabled: true,
@@ -293,7 +295,7 @@ func TestCPAImportReplayReportsTheRecordedItems(t *testing.T) {
 	writeCPAImportOutput(buffer, false, cpaImportOutput{Result: &result})
 	written := buffer.String()
 	for _, want := range []string{
-		"source version: 7.3.4", "source layout: v7", "manual items: 2",
+		"source version: 8.0.55", "source layout: v8-legacy", "manual items: 2",
 		"section:ampcode reconfigure_after_adoption", "section:something-new not_in_import_scope",
 		"already complete: true",
 	} {
@@ -316,7 +318,7 @@ func TestCPAImportReplayReportsTheRecordedItems(t *testing.T) {
 	if err := json.Unmarshal(buffer.Bytes(), &decoded); err != nil {
 		t.Fatalf("the JSON replay output is not valid JSON: %v", err)
 	}
-	if decoded.Result.SourceVersion != "7.3.4" || decoded.Result.SourceLayout != "v7" ||
+	if decoded.Result.SourceVersion != "8.0.55" || decoded.Result.SourceLayout != "v8-legacy" ||
 		!decoded.Result.PluginsEnabled || !decoded.Result.AlreadyComplete {
 		t.Fatalf("the JSON replay output = %+v, want the recorded source facts", decoded.Result)
 	}
@@ -326,4 +328,82 @@ func TestCPAImportReplayReportsTheRecordedItems(t *testing.T) {
 	if decoded.Result.ManualItems[0] != result.ManualItems[0] {
 		t.Fatalf("the JSON replay output manual item = %+v, want %+v", decoded.Result.ManualItems[0], result.ManualItems[0])
 	}
+}
+
+// TestCPAImportCommandRefusesPreV8SourceWithDecisionExitCode pins the CLI
+// boundary for v8-only source admission: both an explicit pre-v8 --cpa-version
+// and a stack-detected pre-v8 CPA_IMAGE exit 1 with upgrade_cpa_version_unsupported
+// before contacting the Runtime or mutating the recorded operation.
+func TestCPAImportCommandRefusesPreV8SourceWithDecisionExitCode(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy-in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	installDir := filepath.Dir(source)
+	cpaDir := filepath.Join(installDir, "legacy-cpa")
+	if err := os.MkdirAll(cpaDir, 0o700); err != nil {
+		t.Fatalf("create legacy-cpa directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cpaDir, "config.yaml"),
+		[]byte("config-version: 8\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"), 0o600); err != nil {
+		t.Fatalf("write legacy-cpa config.yaml: %v", err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "runtime.token")
+	if err := os.WriteFile(tokenFile, []byte("runtime-token"), 0o600); err != nil {
+		t.Fatalf("write runtime token file: %v", err)
+	}
+	// Point RuntimeURL at a closed local port: the pre-v8 version refusal must
+	// happen before Runtime.Status or destination staging is attempted.
+	t.Setenv("CPAMP_RUNTIME_URL", "http://127.0.0.1:1")
+	t.Setenv("CPAMP_RUNTIME_TOKEN_FILE", tokenFile)
+
+	t.Run("declared_7.3.4", func(t *testing.T) {
+		code, stdout, _ := run(t, "cpa-import", "--json", "--legacy", source, "--cpa-dir", cpaDir,
+			"--cpa-version", "7.3.4", "--plugins", "true", "--target", target, "--destination-url", "http://127.0.0.1:8317")
+		if code != 1 {
+			t.Fatalf("cpa-import --cpa-version 7.3.4 exited %d, want 1; stdout: %s", code, stdout)
+		}
+		var output cpaImportOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode JSON output: %v; stdout: %s", err, stdout)
+		}
+		if output.ErrorCode != string(upgradeservice.UpgradeErrorCPAVersionUnsupported) {
+			t.Fatalf("errorCode = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorCPAVersionUnsupported)
+		}
+		recorded, found, err := upgradeservice.ReadRecord(context.Background(), filepath.Join(target, upgradeservice.SourceDatabaseName))
+		if err != nil || !found || recorded.Stage != model.UpgradeStageReconcile || recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+			t.Fatalf("recorded operation after refusal = %+v (found=%t, err=%v), want untouched reconcile", recorded, found, err)
+		}
+	})
+
+	t.Run("stack_detected_v7.3.4", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+			[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"), 0o600); err != nil {
+			t.Fatalf("write compose.yaml: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(installDir, ".env"),
+			[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4\n"), 0o600); err != nil {
+			t.Fatalf("write .env: %v", err)
+		}
+		code, stdout, _ := run(t, "cpa-import", "--json", "--legacy", source, "--cpa-dir", cpaDir,
+			"--plugins", "true", "--target", target, "--destination-url", "http://127.0.0.1:8317")
+		if code != 1 {
+			t.Fatalf("cpa-import with stack v7.3.4 exited %d, want 1; stdout: %s", code, stdout)
+		}
+		var output cpaImportOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode JSON output: %v; stdout: %s", err, stdout)
+		}
+		if output.ErrorCode != string(upgradeservice.UpgradeErrorCPAVersionUnsupported) {
+			t.Fatalf("errorCode = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorCPAVersionUnsupported)
+		}
+		recorded, found, err := upgradeservice.ReadRecord(context.Background(), filepath.Join(target, upgradeservice.SourceDatabaseName))
+		if err != nil || !found || recorded.Stage != model.UpgradeStageReconcile || recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+			t.Fatalf("recorded operation after refusal = %+v (found=%t, err=%v), want untouched reconcile", recorded, found, err)
+		}
+	})
 }

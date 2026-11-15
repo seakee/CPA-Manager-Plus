@@ -231,7 +231,7 @@ func (f *verifyFixture) connectExternal(t *testing.T) ExternalConnectResult {
 		BaseURL:       verifyExternalAddress,
 		ManagementKey: externalTestKey,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
-			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			return cpa.ClassifyExternalVersion("v8.0.55"), nil
 		},
 		readExternalKeys: func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 			return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
@@ -278,7 +278,7 @@ func (f *verifyFixture) handManagerConnection(t *testing.T, address, secret stri
 // below report, so the evidence the fixture records is the one the live re-proof
 // derives.
 func verifyManagedFingerprint() string {
-	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
+	return freshkeyapply.ExternalServerFingerprint("v8.0.55", strings.Repeat("a", 64))
 }
 
 // managedDestinationRecord is the destination attempt a completed Managed import
@@ -305,8 +305,8 @@ func managedDestinationRecord(t *testing.T) cpaImportDestinationRecord {
 		},
 		OperationID:   cpaImportDestinationOperationID(verifyDestinationSource, 1),
 		Attempt:       1,
-		SourceVersion: "7.3.4",
-		SourceLayout:  "v7",
+		SourceVersion: "8.0.55",
+		SourceLayout:  cpaLayoutV8Legacy,
 		ManualItems: []CPAImportManualItem{{
 			Item:        "section:ampcode",
 			Reason:      "reconfigure_after_adoption",
@@ -378,7 +378,7 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 		Runtime:         f.runtime,
 		ControlBasePath: testControlBasePath,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
-			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			return cpa.ClassifyExternalVersion("v8.0.55"), nil
 		},
 		readExternalKeys: func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 			return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
@@ -417,8 +417,8 @@ func newFakeVerifyRuntime(t *testing.T) *fakeVerifyRuntime {
 		Generation:            4,
 		ProtocolVersion:       "v1",
 		State:                 model.RuntimeStateReady,
-		CPAObservedVersion:    "v8.0.13",
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.13"},
+		CPAObservedVersion:    "v8.0.55",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.55"},
 		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart},
 	}}
 }
@@ -684,7 +684,7 @@ func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndC
 			contacted := 0
 			options.observeExternalVersion = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
 				contacted++
-				return cpa.ClassifyExternalVersion("v8.0.13"), nil
+				return cpa.ClassifyExternalVersion("v8.0.55"), nil
 			}
 			options.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 				contacted++
@@ -1531,7 +1531,7 @@ func TestVerifyRefusesAManagerKeyTheConnectStepDidNotProve(t *testing.T) {
 // satisfied and the live authenticated read is not, so the gate must refuse
 // instead of recording a completion the restarted Manager cannot use.
 func TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts(t *testing.T) {
-	server := newExternalVerifyCPAServer(t, "v8.0.13")
+	server := newExternalVerifyCPAServer(t, "v8.0.55")
 	fixture := newVerifyFixture(t)
 	fixture.reconcile(t)
 	// The connect step runs against the real CPA, so the binding records the

@@ -41,7 +41,7 @@ func TestLegacyManagedSafeReadHasOneBoundedReadOnlyRequest(t *testing.T) {
 			t.Errorf("unexpected legacy safe-read request: %s %s", r.Method, r.URL.RequestURI())
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-CPA-VERSION", "7.0.12")
+		w.Header().Set("X-CPA-VERSION", "8.0.55")
 		_, _ = w.Write([]byte(safeLegacyConfig))
 	}))
 	defer server.Close()
@@ -129,7 +129,7 @@ func TestLegacyManagedRejectsV8ConfigAndInvalidBodies(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", item.contentType)
-				w.Header().Set("X-CPA-VERSION", "7.0.12")
+				w.Header().Set("X-CPA-VERSION", "8.0.55")
 				_, _ = w.Write(item.body)
 			}))
 			defer server.Close()
@@ -145,7 +145,7 @@ func TestLegacyManagedRejectsV8ConfigAndInvalidBodies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("X-CPA-VERSION", "7.0.12")
+		w.Header().Set("X-CPA-VERSION", "8.0.55")
 		_, _ = w.Write(compressed.Bytes())
 	}))
 	defer server.Close()
@@ -155,10 +155,10 @@ func TestLegacyManagedRejectsV8ConfigAndInvalidBodies(t *testing.T) {
 }
 
 func TestLegacyManagedUnknownSectionsUseOnlyTheFixedSentinel(t *testing.T) {
-	body := `{"api-keys":["private-client"],"attacker-controlled-section":{"secret":"do-not-store"},"tls":{"enable":false}}`
+	body := `{"api-keys":["private-client"],"unrecognized-upstream-section":{"secret":"do-not-store"},"tls":{"enable":false}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-CPA-VERSION", "7.0.12")
+		w.Header().Set("X-CPA-VERSION", "8.0.55")
 		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
@@ -171,13 +171,13 @@ func TestLegacyManagedUnknownSectionsUseOnlyTheFixedSentinel(t *testing.T) {
 		t.Fatalf("unknown upstream key escaped as identity: %v", snapshot.ResourceSections)
 	}
 	encoded, _ := json.Marshal(snapshot)
-	if strings.Contains(string(encoded), "attacker-controlled-section") || strings.Contains(string(encoded), "do-not-store") {
+	if strings.Contains(string(encoded), "unrecognized-upstream-section") || strings.Contains(string(encoded), "do-not-store") {
 		t.Fatal("unknown upstream key or value escaped the bounded projection")
 	}
 }
 
 func TestLegacyManagedRequiresExactAcceptedSourceProfile(t *testing.T) {
-	for _, version := range []string{"", "7.0.11", "7.0.13", "8.0.13", "v7.0.12", "7.0.12-rc.1", "dev"} {
+	for _, version := range []string{"", "6.9.15", "7.0.11", "7.0.12", "7.0.13", "7.3.3", "v7.0.12", "8.0.0", "8.0.13", "8.0.54", "8.0.56", "v8.0.55", "8.0.55-rc.1", "dev"} {
 		t.Run("header="+version, func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -194,17 +194,21 @@ func TestLegacyManagedRequiresExactAcceptedSourceProfile(t *testing.T) {
 			}
 		})
 	}
-	// A real v8.0.13 v0 response is legacy-shaped: it has client API keys and no
-	// v8 nested sections, so only the version metadata rejects it.
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-CPA-VERSION", "8.0.13")
-		_, _ = w.Write([]byte(`{"client":{"codex":{}},"api-keys":["private-v8-key"],"tls":{"enable":false}}`))
-	}))
-	defer server.Close()
-	if _, err := ReadLegacyManagedAdoptionSnapshot(context.Background(), server.URL, "private"); !errors.Is(err, LegacySourceProfileUnsupported) || calls.Load() != 1 || strings.Contains(err.Error(), "8.0.13") {
-		t.Fatalf("v8 v0 compatibility endpoint accepted as legacy: %v", err)
+	// Pre-v8 and unpinned v8 v0 responses share the same legacy-shaped JSON body
+	// (client API keys and no v8 nested sections); version metadata refuses both
+	// fail-closed without leaking upstream version text.
+	for _, rejected := range []string{"7.0.12", "7.3.3", "8.0.13"} {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-CPA-VERSION", rejected)
+			_, _ = w.Write([]byte(`{"client":{"codex":{}},"api-keys":["private-source-key"],"tls":{"enable":false}}`))
+		}))
+		_, err := ReadLegacyManagedAdoptionSnapshot(context.Background(), server.URL, "private")
+		server.Close()
+		if !errors.Is(err, LegacySourceProfileUnsupported) || calls.Load() != 1 || strings.Contains(err.Error(), rejected) {
+			t.Fatalf("unaccepted v0 source %q accepted as legacy_managed: %v", rejected, err)
+		}
 	}
 }

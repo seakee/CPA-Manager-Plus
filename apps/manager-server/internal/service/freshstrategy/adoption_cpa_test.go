@@ -56,16 +56,20 @@ const (
 // These controlled-source runs are implementation evidence, not an independent
 // acceptance. Only the test constructor injects resource/profile qualification.
 //
-// The legacy_managed case points Fresh at the real pre-v8 process. The legacy
-// v0 safe read observes that process; the existing Supervisor StageDestination
-// child operation then creates the Manager-owned exact v8 destination, which is
-// the staging-v8 transition itself. No second runtime or artificial v8 source
-// stands in for the historical source.
+// The legacy_managed case points Fresh at a real pinned CPA v8.0.55 process
+// started with a legacy-layout configuration document. The legacy v0 safe read
+// observes that process (`X-CPA-VERSION: 8.0.55`); the existing Supervisor
+// StageDestination child operation then creates the Manager-owned exact v8
+// destination, proving the staging-v8 transition without running any < v8
+// executable.
 func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 	cpaPath, supervisorPath := os.Getenv("CPAMP_TEST_CPA_V8"), os.Getenv("CPAMP_TEST_RUNTIME")
-	legacyCPAPath := os.Getenv("CPAMP_TEST_CPA_LEGACY")
 	if cpaPath == "" || supervisorPath == "" {
 		t.Skip("requires exact CPA candidate and built Supervisor; CI runs explicitly")
+	}
+	legacyCPAPath := os.Getenv("CPAMP_TEST_CPA_LEGACY")
+	if legacyCPAPath == "" {
+		legacyCPAPath = cpaPath
 	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("exact evidence requires linux/amd64")
@@ -137,7 +141,7 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			var source *exec.Cmd
 			if class == bootstrap.AdoptLegacyManaged {
 				if legacyCPAPath == "" {
-					t.Fatal("legacy_managed evidence requires pinned historical CPA")
+					t.Fatal("legacy_managed evidence requires pinned CPA v8.0.55 executable")
 				}
 				legacyBytes, err := os.ReadFile(legacyCPAPath)
 				if err != nil {
@@ -145,13 +149,20 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				}
 				legacyDigest := sha256.Sum256(legacyBytes)
 				if hex.EncodeToString(legacyDigest[:]) != cpa.AcceptedLegacyManagedBinarySHA256 {
-					t.Fatal("historical CPA executable does not match the accepted legacy source profile")
+					t.Fatal("legacy_managed CPA executable does not match the accepted v8.0.55 source profile")
 				}
 				if archive := os.Getenv("CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256"); archive != "" && archive != cpa.AcceptedLegacyManagedArchiveSHA256 {
-					t.Fatal("historical CPA archive does not match the accepted legacy source profile")
+					t.Fatal("legacy_managed CPA archive does not match the accepted v8.0.55 source profile")
 				}
 				_, sourcePort, _ := net.SplitHostPort(sourceAddr)
-				legacyConfig := map[string]any{"host": "127.0.0.1", "port": json.Number(sourcePort), "auth-dir": filepath.Join(sourceRoot, "auth"), "remote-management": map[string]any{"secret-key": sourceKey, "disable-control-panel": true}, "api-keys": clientKeys, "plugins": map[string]any{"enabled": false}}
+				legacyConfig := map[string]any{
+					"host":              "127.0.0.1",
+					"port":              json.Number(sourcePort),
+					"auth-dir":          filepath.Join(sourceRoot, "auth"),
+					"remote-management": map[string]any{"secret-key": sourceKey, "disable-control-panel": true, "disable-auto-update-panel": true},
+					"api-keys":          clientKeys,
+					"plugins":           map[string]any{"enabled": false},
+				}
 				configPath := filepath.Join(sourceRoot, "config.yaml")
 				writeTestJSON(t, configPath, legacyConfig)
 				source = exec.Command(legacyCPAPath, "-config", configPath)
@@ -161,13 +172,11 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				}
 				defer killTestProcess(source)
 				waitTest(t, func() bool {
-					_, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), sourceURL, sourceKey)
-					return err == nil
+					observed, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), sourceURL, sourceKey)
+					return err == nil && slices.Equal(observed.APIKeys, clientKeys)
 				})
-				// The real v7 source cannot answer the v8 probe; this adapter is
-				// explicit, never a v0 fallback from a failed v8 read.
-				if _, err := cpa.ReadV8AdoptionSnapshot(t.Context(), sourceURL, sourceKey); err == nil {
-					t.Fatal("historical source unexpectedly answered the v8 management read")
+				if _, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), sourceURL, "wrong-source-management-key"); !errors.Is(err, cpa.LegacyAuthenticationRejected) {
+					t.Fatalf("legacy_managed v0 surface did not enforce management authentication: %v", err)
 				}
 				waitClientModels(t, sourceAddr, clientKeys[0])
 			} else {
@@ -405,19 +414,35 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				finalStatus.CPAObservedVersion != realCPA8Version || finalStatus.Identity != status.Identity || finalStatus.Generation != status.Generation {
 				t.Fatalf("destination is not the accepted exact v8 target: %+v %v", finalStatus, err)
 			}
-			// The exact v8 destination still serves the v0 compatibility
-			// endpoint. The legacy adapter must reject it by declared source
-			// profile even though its body is legacy-shaped.
+			// The exact v8 destination serves the v0 compatibility endpoint with
+			// X-CPA-VERSION: 8.0.55. Self-adoption against the destination URL is
+			// refused by identity conflict, while any below-v8 v0 surface is
+			// refused fail-closed by version metadata.
 			directHTTP := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second}
 			v0Request, _ := http.NewRequest(http.MethodGet, "http://"+targetAddr+"/v0/management/config", nil)
 			v0Request.Header.Set("Authorization", "Bearer "+snapshot.Destination.ManagementKey)
 			v0Response, err := directHTTP.Do(v0Request)
-			if err != nil || v0Response.StatusCode != http.StatusOK {
-				t.Fatalf("exact v8 destination v0 compatibility endpoint unavailable: %v", err)
+			if err != nil || v0Response.StatusCode != http.StatusOK || v0Response.Header.Get("X-CPA-VERSION") != "8.0.55" {
+				t.Fatalf("exact v8 destination v0 compatibility endpoint mismatch: err=%v", err)
 			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(v0Response.Body, 1<<20))
 			_ = v0Response.Body.Close()
-			if _, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); !errors.Is(err, cpa.LegacySourceProfileUnsupported) {
-				t.Fatalf("real v8 v0 endpoint was accepted as the accepted legacy source profile: %v", err)
+			selfRequest := request
+			selfRequest.BaseURL = "http://" + targetAddr
+			selfRequest.AdoptionCiphertext = ""
+			var selfBlocker *Blocker
+			if _, selfErr := New(options).Execute(t.Context(), operation(), selfRequest); !errors.As(selfErr, &selfBlocker) || selfBlocker.Code != "adoption_destination_identity_conflict" {
+				t.Fatalf("self-adoption against the destination URL was not refused: %v", selfErr)
+			}
+			belowV8 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-CPA-VERSION", "7.0.12")
+				_, _ = w.Write([]byte(`{"tls":{"enable":false},"api-keys":["obsolete-v7-key"]}`))
+			}))
+			_, belowV8Err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), belowV8.URL, sourceKey)
+			belowV8.Close()
+			if !errors.Is(belowV8Err, cpa.LegacySourceProfileUnsupported) {
+				t.Fatalf("below-v8 v0 surface was accepted as legacy_managed: %v", belowV8Err)
 			}
 			// The adopted destination carries the installation's own template facts:
 			// usage statistics are on, because Key usage and the Key workspace read
@@ -460,19 +485,16 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			writeAdoptionResourceEvidence(t, class, record, finalStatus, expectedArtifact, sourceURL, sourceKey, clientKeys, kindCounts, snapshot, legacyCPAPath)
 
 			if class == bootstrap.AdoptLegacyManaged {
-				// The historical v7 process remains live, byte-preserved and on v0.
+				// The legacy-managed v8.0.55 process remains live, byte-preserved,
+				// and authenticated solely with its own source management secret.
 				waitClientModels(t, sourceAddr, clientKeys[0])
 				legacy, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), sourceURL, sourceKey)
 				if err != nil || !reflect.DeepEqual(legacy.APIKeys, clientKeys) {
 					t.Fatalf("legacy source no longer readable or preserved: %v", err)
 				}
-				directHTTP := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second}
-				response, err := directHTTP.Get(sourceURL + "/v8/management/config")
-				if err != nil || response.StatusCode != http.StatusNotFound {
-					t.Fatalf("historical source answered v8 management: %v", err)
+				if _, err := cpa.ReadLegacyManagedAdoptionSnapshot(t.Context(), sourceURL, snapshot.Destination.ManagementKey); !errors.Is(err, cpa.LegacyAuthenticationRejected) {
+					t.Fatalf("preserved legacy source accepted destination management secret: %v", err)
 				}
-				_ = response.Body.Close()
-				directHTTP.CloseIdleConnections()
 				if before != directoryDigest(t, sourceRoot) {
 					t.Fatal("legacy source changed during transition")
 				}
@@ -541,9 +563,9 @@ func writeLegacyTransitionEvidence(t *testing.T, record freshstore.Record, statu
 	}
 	legacyDigest := sha256.Sum256(legacyBinary)
 	if hex.EncodeToString(legacyDigest[:]) != cpa.AcceptedLegacyManagedBinarySHA256 {
-		t.Fatal("historical CPA executable does not match the accepted legacy source profile")
+		t.Fatal("legacy_managed CPA executable does not match the accepted v8.0.55 source profile")
 	}
-	manifestName, manifestData, manifest := embeddedLegacyTransitionManifest(t)
+	manifestName, manifestData, manifest := producerLegacyTransitionManifest(t)
 	if manifest.SchemaVersion != 1 || manifest.ContractID != "cpamp-cpa-v8-qualification" ||
 		manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 || manifest.Candidate.ArtifactID != string(artifact) ||
 		manifest.LegacySource.Version != cpa.AcceptedLegacyManagedVersion ||
@@ -663,9 +685,9 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 	// chain read it back above.
 	counts := map[string]int{"client-api-keys": clientKeyCount}
 	if class != bootstrap.AdoptNetworkExisting {
-		// A pre-v8 source has no v8 management surface at all: the executor
-		// cannot read its configuration or credential list, so nothing beyond the
-		// client keys the destination already received can be migrated from it.
+		// This pinned CPA v8 legacy-layout profile qualifies only the safe-read
+		// client-key transfer. It does not grant the executor authority to migrate
+		// credentials or other configuration through the source's v8 APIs.
 		return counts
 	}
 	source, err := freshadopt.NewSource(t.Context(), freshadopt.Endpoint{BaseURL: sourceURL, ManagementKey: sourceKey})
@@ -785,7 +807,7 @@ func writeAdoptionResourceEvidence(t *testing.T, class bootstrap.AdoptSourceClas
 	if !validEvidenceDigest(head, 40) || !validEvidenceDigest(tree, 40) {
 		t.Fatal("resource evidence requires exact tested commit and tree")
 	}
-	manifestName, manifestData, manifest := embeddedAdoptionResourceManifest(t, class)
+	manifestName, manifestData, manifest := producerAdoptionResourceManifest(t, class)
 	if manifest.Candidate.ArtifactID != string(artifact) || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 ||
 		manifest.SourceClass != class || manifest.SchemaVersion != 1 || manifest.ContractID != adoptionResourceContract {
 		t.Fatalf("checked-in resource manifest does not bind this run: %s", manifestName)
