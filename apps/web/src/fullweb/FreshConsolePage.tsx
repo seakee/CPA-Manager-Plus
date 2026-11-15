@@ -11,7 +11,13 @@ import { FullWebIcon } from './FullWebIcon';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
 import './consoleWorkspace.css';
-import { activateFreshSession, clearFreshSession, rememberedFreshCredential } from './freshSession';
+import {
+  activateFreshSession,
+  clearFreshSession,
+  isConsoleUiEntryPath,
+  rememberedFreshCredential,
+  resolveConsoleEntryPath,
+} from './freshSession';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import { useConsoleDocumentTitle } from './useConsoleDocumentTitle';
 import { useFullWebLanguage } from './useFullWebLanguage';
@@ -182,6 +188,14 @@ export function FreshConsolePage({
     setError(null);
   }
 
+  function enterCompletedConsole(replaceEntryPath: boolean) {
+    const nextPath = resolveConsoleEntryPath(context.basePath);
+    if (replaceEntryPath || isConsoleUiEntryPath(context.basePath)) {
+      window.history?.replaceState?.(null, '', nextPath);
+    }
+    setEnteredConsole(true);
+  }
+
   async function readOperation(candidate = credential, remember = rememberPassword) {
     if (busy || installationPendingRef.current || !candidate) return false;
     const currentRequest = ++requestId.current;
@@ -203,7 +217,11 @@ export function FreshConsolePage({
       const requiresInferenceCompletion =
         next.productComplete === true && next.routing?.missingInferenceCompletionRequired === true;
       setInferenceCompletionActive(requiresInferenceCompletion);
-      setEnteredConsole(next.productComplete === true && !requiresInferenceCompletion);
+      if (next.productComplete === true && !requiresInferenceCompletion) {
+        enterCompletedConsole(false);
+      } else {
+        setEnteredConsole(false);
+      }
       setCredential(candidate);
       acceptOperation(next);
       return true;
@@ -273,8 +291,7 @@ export function FreshConsolePage({
                 onUnauthorized={unauthorized}
                 onContinue={() => {
                   setInferenceCompletionActive(false);
-                  setEnteredConsole(true);
-                  window.history.replaceState(null, '', context.basePath);
+                  enterCompletedConsole(true);
                 }}
               />
             ) : operation.strategy?.strategy === 'connect_external' ||
@@ -287,8 +304,7 @@ export function FreshConsolePage({
                 onUnauthorized={unauthorized}
                 onBack={() => setExternalSelected(false)}
                 onContinue={() => {
-                  setEnteredConsole(true);
-                  window.history.replaceState(null, '', context.basePath);
+                  enterCompletedConsole(true);
                 }}
                 onPending={(pending) => {
                   installationPendingRef.current = pending;
@@ -307,8 +323,7 @@ export function FreshConsolePage({
                 }}
                 onContinue={() => {
                   // Completion has been confirmed by the canonical operation.
-                  setEnteredConsole(true);
-                  window.history.replaceState(null, '', context.basePath);
+                  enterCompletedConsole(true);
                 }}
                 onSelectExternal={() => setExternalSelected(true)}
               />

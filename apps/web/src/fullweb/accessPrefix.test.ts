@@ -173,7 +173,7 @@ describe('accessPrefix validation, random generation, and URL preview', () => {
         'https://cpa.upstream.example:8317/'
       )
     ).toEqual({
-      consoleUrl: 'https://manager.example:8443/ctl-entry/',
+      consoleUrl: 'https://manager.example:8443/ctl-entry/ui',
       managementApiUrl: 'https://manager.example:8443/ctl-entry/api/v2',
       inferenceUrl: 'https://manager.example:8443/inf-entry',
       externalUrl: 'https://cpa.upstream.example:8317',

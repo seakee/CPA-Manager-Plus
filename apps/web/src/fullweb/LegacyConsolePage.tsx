@@ -31,7 +31,11 @@ import { useAuthStore } from '../stores';
 import { FreshManagedResources } from './FreshManagedResources';
 import type { PublicApiClient } from './publicApi';
 import { resolveRoutingContext, type RoutingContext } from './routingContext';
-import { activateFreshSession } from './freshSession';
+import {
+  activateFreshSession,
+  isConsoleUiEntryPath,
+  resolveConsoleEntryPath,
+} from './freshSession';
 
 // The original CPAMP pages use data-router APIs (for example useBlocker on
 // AccountsPage). Keep the route element behind a small context bridge so the
@@ -94,6 +98,9 @@ export function LegacyConsolePage({
       return;
     }
 
+    if (isConsoleUiEntryPath(verified.basePath)) {
+      window.history?.replaceState?.(null, '', verified.basePath);
+    }
     // The canonical Fresh endpoint already verified this credential. Reuse the
     // original session without clearing the user's remember-login choice.
     activateFreshSession(verified, credential, useAuthStore.getState().rememberPassword);
@@ -207,7 +214,10 @@ export function LegacyConsolePage({
   // navigation.
   if (typeof window === 'undefined' || typeof window.history?.replaceState !== 'function') {
     return (
-      <MemoryRouter basename={context.basePath} initialEntries={[context.basePath]}>
+      <MemoryRouter
+        basename={context.basePath}
+        initialEntries={[resolveConsoleEntryPath(context.basePath)]}
+      >
         {content}
       </MemoryRouter>
     );
