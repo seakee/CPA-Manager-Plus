@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// LegacyManagedAdoptionSnapshot is the bounded, non-secret projection of an
-// actual pre-v8 CPA source. Only client API keys (the sole resource Fresh may
-// replay) and stable resource category names escape this read; provider
-// credentials, OAuth/auth contents, configuration values, usage and logs never
-// leave the helper.
+// LegacyManagedAdoptionSnapshot is the bounded, non-secret projection of a
+// legacy-managed CPA v8 source read through its v0 compatibility surface. Only
+// client API keys (the sole resource this profile replays) and stable resource
+// category names escape this read; provider credentials, OAuth/auth contents,
+// configuration values, usage and logs never leave the helper.
 type LegacyManagedAdoptionSnapshot struct {
 	APIKeys          []string
 	ResourceSections []string
@@ -30,33 +30,34 @@ const (
 	// This adapter never falls back to the v8 probe.
 	LegacyOwnerNotLegacy LegacyReadError = "legacy_management_source_not_legacy"
 	// LegacySourceProfileUnsupported marks a present v0 surface whose declared
-	// CPA version is not the one accepted legacy source profile. CPA v8 keeps a
-	// v0 compatibility endpoint, so body shape cannot identify the source
-	// generation; only the management version metadata can.
+	// CPA version is not the one accepted legacy-managed v8 source profile (for
+	// example any CPA release below v8, an unpinned v8 release, or a missing
+	// version header). Body shape cannot identify the source version; only the
+	// management version metadata can.
 	LegacySourceProfileUnsupported LegacyReadError = "legacy_management_source_profile_unsupported"
 	LegacyAuthenticationRejected   LegacyReadError = "legacy_management_authentication_rejected"
 	LegacyReadUnavailable          LegacyReadError = "legacy_management_safe_read_unavailable"
 	LegacyInvalidConfig            LegacyReadError = "legacy_management_config_invalid"
 )
 
-// AcceptedLegacyManagedVersion is the only pre-v8 source release accepted by
-// the Fresh legacy transition. This is deliberately an exact profile, not a
-// version range: v6, other v7 releases and the v8 v0 compatibility endpoint are
-// unsupported until separately evidenced and accepted.
-const AcceptedLegacyManagedVersion = "v7.0.12"
+// AcceptedLegacyManagedVersion is the only legacy-managed source release
+// accepted by the Fresh legacy transition. CPAMP v2 does not support CPA below
+// v8; this is deliberately an exact v8 profile, not a version range: pre-v8
+// releases (v6/v7) and unpinned v8 releases are refused fail-closed.
+const AcceptedLegacyManagedVersion = "v8.0.55"
 
 // acceptedLegacyManagedHeaderVersion is the value the pinned official CPA
-// v7.0.12 release reports in X-CPA-VERSION (the release tag without its "v"
+// v8.0.55 release reports in X-CPA-VERSION (the release tag without its "v"
 // prefix). The exact pinned Linux amd64 release bytes are bound below.
-const acceptedLegacyManagedHeaderVersion = "7.0.12"
+const acceptedLegacyManagedHeaderVersion = "8.0.55"
 
 const (
-	AcceptedLegacyManagedArchiveSHA256 = "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74"
-	AcceptedLegacyManagedBinarySHA256  = "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
+	AcceptedLegacyManagedArchiveSHA256 = "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123"
+	AcceptedLegacyManagedBinarySHA256  = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
 )
 
-// legacySectionFields classifies only the top-level keys of the pinned CPA
-// v7.0.12 config projection into stable bounded categories. Values are ignored;
+// legacySectionFields classifies only the top-level keys of the legacy-shaped
+// v0 config projection into stable bounded categories. Values are ignored;
 // an unrecognized key can only contribute the fixed unknown sentinel.
 var legacySectionFields = map[string][]string{
 	"server": {
@@ -87,7 +88,7 @@ var legacySectionFields = map[string][]string{
 // legacySectionOrder makes the bounded inventory deterministic.
 var legacySectionOrder = []string{"access", "oauth", "server", "routing", "usage", "providers", "unknown_cpa_native_resource"}
 
-// v8ConfigSections are never emitted by the pinned v7.0.12 config projection.
+// v8ConfigSections are never emitted by the legacy-shaped v0 config projection.
 // They remain an extra fail-closed sanity check only; the accepted source
 // profile is decided by the management version metadata, never by body shape.
 var v8ConfigSections = []string{"config-version", "server", "management", "access", "oauth"}
@@ -97,9 +98,10 @@ var v8ConfigSections = []string{"config-version", "server", "management", "acces
 // of the legacy read-only config surface with the same direct transport, fixed
 // DNS resolution, normal TLS verification, no redirects/retries, bounded
 // headers/body and five-second total budget as the v8 safe read. It succeeds
-// only for the exact accepted legacy source profile (CPA v7.0.12) declared by
-// the management version metadata. No source write, lifecycle mutation,
-// usage/history access or queue consumption occurs.
+// only for the exact accepted legacy-managed v8 source profile (CPA v8.0.55)
+// declared by the management version metadata, refusing any CPA release below
+// v8 or unpinned build. No source write, lifecycle mutation, usage/history
+// access or queue consumption occurs.
 func ReadLegacyManagedAdoptionSnapshot(ctx context.Context, baseURL, managementKey string) (LegacyManagedAdoptionSnapshot, error) {
 	baseURL, err := NormalizeV8BaseURL(baseURL)
 	if err != nil {
@@ -141,9 +143,8 @@ func readLegacyConfigWithClient(ctx context.Context, client *http.Client, baseUR
 	default:
 		return LegacyManagedAdoptionSnapshot{}, LegacyReadUnavailable
 	}
-	// The version header is the source-profile authority. CPA v8.0.13 still
-	// serves this v0 endpoint with a legacy-shaped body, so a missing or
-	// non-matching version must fail closed before any body is interpreted.
+	// The version header is the source-profile authority. Missing, pre-v8, or
+	// non-matching version headers fail closed before any body is interpreted.
 	if response.Header.Get("X-CPA-VERSION") != acceptedLegacyManagedHeaderVersion {
 		return LegacyManagedAdoptionSnapshot{}, LegacySourceProfileUnsupported
 	}
@@ -169,9 +170,9 @@ func readLegacyConfigWithClient(ctx context.Context, client *http.Client, baseUR
 	if err != nil {
 		return LegacyManagedAdoptionSnapshot{}, err
 	}
-	// A pre-v8 CPA always owns an auth directory; the legacy v0 projection
-	// deliberately omits auth-dir, so its existence is reported as a bounded
-	// category without reading or exporting the value.
+	// A CPA source always owns an auth directory; the legacy-shaped v0
+	// projection deliberately omits auth-dir, so its existence is reported as a
+	// bounded category without reading or exporting the value.
 	present := map[string]bool{"access": true, "oauth": true}
 	classified := map[string]string{}
 	for section, names := range legacySectionFields {
@@ -207,7 +208,7 @@ func legacyClientAPIKeys(raw json.RawMessage) ([]string, error) {
 		return nil, LegacyInvalidConfig
 	}
 	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil || len(entries) == 0 || len(entries) > 128 {
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil || len(entries) == 0 {
 		return nil, LegacyInvalidConfig
 	}
 	keys := make([]string, 0, len(entries))

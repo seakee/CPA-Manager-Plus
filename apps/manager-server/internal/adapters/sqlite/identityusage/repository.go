@@ -81,44 +81,60 @@ func (r *repository) ProjectionState(ctx context.Context) (ports.ProjectionState
 	return state, nil
 }
 
-func (r *repository) Windows(ctx context.Context, ids []identity.APIKeyID, fromMS, toMS int64) (map[identity.APIKeyID]ports.Window, error) {
+func (r *repository) Windows(ctx context.Context, ranges []ports.KeyRange, toMS int64) (map[identity.APIKeyID]ports.Window, error) {
 	result := map[identity.APIKeyID]ports.Window{}
-	if len(ids) == 0 {
+	if len(ranges) == 0 {
 		return result, nil
 	}
-	if toMS <= fromMS {
-		return nil, errors.New("invalid identity usage window")
+	deduped := make([]ports.KeyRange, 0, len(ranges))
+	seen := make(map[identity.APIKeyID]int64, len(ranges))
+	for _, item := range ranges {
+		if toMS <= item.FromMS {
+			return nil, errors.New("invalid identity usage window")
+		}
+		if prev, exists := seen[item.APIKeyID]; exists {
+			if prev != item.FromMS {
+				return nil, errors.New("invalid identity usage window")
+			}
+			continue
+		}
+		seen[item.APIKeyID] = item.FromMS
+		deduped = append(deduped, item)
 	}
 	// One statement can only carry a bounded number of placeholders, so large
 	// key lists are aggregated in batches and merged. Never truncate: a key
 	// dropped here would be reported as an exact zero by its caller.
-	for start := 0; start < len(ids); start += maxIdentityPlaceholders {
+	for start := 0; start < len(deduped); start += maxIdentityPlaceholders {
 		end := start + maxIdentityPlaceholders
-		if end > len(ids) {
-			end = len(ids)
+		if end > len(deduped) {
+			end = len(deduped)
 		}
-		if err := r.windowsBatch(ctx, result, ids[start:end], fromMS, toMS); err != nil {
+		if err := r.windowsBatch(ctx, result, deduped[start:end], toMS); err != nil {
 			return nil, err
 		}
 	}
 	return result, nil
 }
 
-func (r *repository) windowsBatch(ctx context.Context, result map[identity.APIKeyID]ports.Window, ids []identity.APIKeyID, fromMS, toMS int64) error {
-	args, placeholders := identityArgs(ids)
-	mappedSource := ` select p.api_key_id, count(*) as calls,
+func (r *repository) windowsBatch(ctx context.Context, result map[identity.APIKeyID]ports.Window, ranges []ports.KeyRange, toMS int64) error {
+	rangeArgs, valuesClause, minFromMS := keyRangeArgs(ranges)
+	queryArgs := append(append([]any{}, rangeArgs...), minFromMS, toMS)
+
+	rows, err := r.db.QueryContext(ctx, `
+		with floors(api_key_id, from_ms) as (values `+valuesClause+`)
+		select p.api_key_id, count(*) as calls,
 			coalesce(sum(case when u.failed <> 0 then 1 else 0 end), 0) as failures,
 			coalesce(sum(u.input_tokens), 0) as input_tokens,
 			coalesce(sum(u.output_tokens), 0) as output_tokens,
 			coalesce(sum(u.total_tokens), 0) as total_tokens,
 			max(u.timestamp_ms) as last_used_at_ms
-		from ` + sqliterepo.GatewayUsageIdentityProjectionTable + ` p
+		from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
+		join floors f on f.api_key_id = p.api_key_id
 		join usage_events u on u.id = p.usage_event_id
-		where p.api_key_state = 'mapped' and p.api_key_id in (` + placeholders + `)`
-	totalsArgs := append(append([]any{}, args...), fromMS, toMS)
-	rows, err := r.db.QueryContext(ctx, mappedSource+`
-		and u.timestamp_ms >= ? and u.timestamp_ms < ?
-		group by p.api_key_id`, totalsArgs...)
+		where p.api_key_state = 'mapped'
+		  and u.timestamp_ms >= ? and u.timestamp_ms < ?
+		  and u.timestamp_ms >= f.from_ms
+		group by p.api_key_id`, queryArgs...)
 	if err != nil {
 		return fmt.Errorf("aggregate canonical key usage: %w", err)
 	}
@@ -142,15 +158,19 @@ func (r *repository) windowsBatch(ctx context.Context, result map[identity.APIKe
 	}
 	rows.Close()
 
-	// Events whose source hash could not be attributed are positive proof that
-	// the window is incomplete, even when the key currently has no calls.
+	// Events whose source hash could not be attributed inside this key's own
+	// provable [from_ms, toMS) range are positive proof that the window is
+	// incomplete, even when the key currently has no calls.
 	unmappedRows, err := r.db.QueryContext(ctx, `
+		with floors(api_key_id, from_ms) as (values `+valuesClause+`)
 		select b.api_key_id, count(distinct p.usage_event_id)
 		from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
 		join `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b on b.api_key_hash = p.api_key_source_hash
-		where p.api_key_state <> 'mapped' and b.api_key_id in (`+placeholders+`)
+		join floors f on f.api_key_id = b.api_key_id
+		where p.api_key_state <> 'mapped'
 		  and p.evidence_timestamp_ms >= ? and p.evidence_timestamp_ms < ?
-		group by b.api_key_id`, totalsArgs...)
+		  and p.evidence_timestamp_ms >= f.from_ms
+		group by b.api_key_id`, queryArgs...)
 	if err != nil {
 		return fmt.Errorf("count unattributed canonical key usage: %w", err)
 	}
@@ -263,12 +283,16 @@ func (r *repository) MarkCollectionStarted(ctx context.Context, nowMS int64) err
 	return nil
 }
 
-// identityArgs renders one bounded batch. Callers split larger lists before
-// calling it; truncating here would silently report later keys as empty.
-func identityArgs(ids []identity.APIKeyID) ([]any, string) {
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = string(id)
+// keyRangeArgs renders one bounded batch of (api_key_id, from_ms) pairs plus
+// the batch-wide minimum floor used to bound the SQLite timestamp scan.
+func keyRangeArgs(ranges []ports.KeyRange) ([]any, string, int64) {
+	args := make([]any, 0, len(ranges)*2)
+	minFromMS := ranges[0].FromMS
+	for _, item := range ranges {
+		args = append(args, string(item.APIKeyID), item.FromMS)
+		if item.FromMS < minFromMS {
+			minFromMS = item.FromMS
+		}
 	}
-	return args, strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	return args, strings.TrimSuffix(strings.Repeat("(?,?),", len(ranges)), ","), minFromMS
 }

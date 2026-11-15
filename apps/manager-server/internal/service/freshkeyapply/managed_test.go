@@ -393,6 +393,15 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
 		t.Fatal("committed managed install with an installed client key not proven")
 	}
+	cpa.mu.Lock()
+	cpa.authOpen = true
+	cpa.mu.Unlock()
+	if s.DefaultInstallCPAAuthorityProven(t.Context()) {
+		t.Fatal("Gateway admitted config-only proof while anonymous requests succeed")
+	}
+	cpa.mu.Lock()
+	cpa.authOpen = false
+	cpa.mu.Unlock()
 	// Losing the only key reopens the Gateway; the predicate must follow the
 	// destination, not Manager memory.
 	installed := cpa.snapshot()

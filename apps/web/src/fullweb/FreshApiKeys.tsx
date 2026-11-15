@@ -3,16 +3,111 @@ import { fullWebText as t } from '../i18n/fullweb';
 import { Modal } from '../components/ui/Modal';
 import { DropdownMenu } from '../components/ui/DropdownMenu';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { FullWebIcon } from './FullWebIcon';
 import './freshKeys.css';
-import { PublicApiError, type createPublicApiClient } from './publicApi';
+import { PublicApiError, type PublicApiClient } from './publicApi';
 import { FreshKeyDetails } from './FreshKeyDetails';
 import { FreshKeyRevocation } from './FreshKeyRevocation';
-import { parseUsageSummary, usageCountText, usageCoveragePill, usageReasonText, usageStateText, usageTimeText, type UsageSummary } from './freshKeyUsage';
-import { keyDisplayName, maskedPreviewOf, validKey, type Key } from './freshKeyMetadata';
+import { AccessInfoSummary, type AccessInfo } from './FreshAccessInfo';
+import {
+  parseUsageSummary,
+  usageCountText,
+  usageCoveragePill,
+  usageReasonText,
+  usageStateText,
+  usageTimeText,
+  type UsageSummary,
+} from './freshKeyUsage';
+import {
+  effectBlockerTextKey,
+  isTerminalKeyOperationOutcome,
+  keyDisplayName,
+  keyLifecyclePillClass,
+  keyLifecycleTextKey,
+  keyRuntimePillClass,
+  keyRuntimeTextKey,
+  maskedPreviewOf,
+  validKey,
+  validKeyOperationResult,
+  validSavedSecret,
+  type Key,
+  type KeyOperation,
+  type KeyOperationResult,
+} from './freshKeyMetadata';
 import { FreshExternalBlocker } from './FreshExternalBlocker';
 import { blockerOf, type ExternalBlocker } from './externalState';
 import { FreshExternalUsage } from './FreshExternalUsage';
+
+function extractErrorKey(err: PublicApiError, expectedRequestId?: string): Key | null {
+  const raw = err.key;
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as Key;
+  if (!validKey(candidate)) return null;
+  if (expectedRequestId && candidate.requestId !== expectedRequestId) return null;
+  return candidate;
+}
+
+function extractErrorOperation(err: PublicApiError): KeyOperation | null {
+  const res = err.operationResult as KeyOperationResult | undefined;
+  if (!res || !validKeyOperationResult(res)) return null;
+  return res.operation;
+}
+
+function randomRequestId(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+    b.toString(16).padStart(2, '0')
+  ).join('');
+}
+
+function validScopedOperationSnapshot(
+  raw: unknown,
+  expectedOperationId: string,
+  expectedTargetId: string
+): KeyOperationResult | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as KeyOperationResult;
+  if (!validKeyOperationResult(candidate)) return null;
+  if (
+    candidate.operation &&
+    (candidate.operation.id !== expectedOperationId ||
+      (candidate.operation.targetId !== expectedTargetId &&
+        candidate.operation.keeperId !== expectedTargetId))
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+function isCommittedMissingAddResponse(
+  err: PublicApiError,
+  updatedKey: Key,
+  expectedId: string
+): boolean {
+  if (err.code !== 'key_operation_unknown' || updatedKey.runtimeState !== 'not_applied') {
+    return false;
+  }
+  if (!err.operationResult || typeof err.operationResult !== 'object') return false;
+  const res = err.operationResult as KeyOperationResult;
+  if (!validKeyOperationResult(res) || !res.operation) return false;
+  return (
+    res.operation.mode === 'add' &&
+    res.operation.outcome === 'committed' &&
+    res.operation.targetId === expectedId &&
+    res.operation.keeperId === ''
+  );
+}
+function isExternalOrSourceBlocker(code?: string): boolean {
+  if (!code) return false;
+  if (blockerOf(code) !== null) return true;
+  return [
+    'key_operation_source_conflict',
+    'key_operation_conflict',
+    'key_operation_generation_mismatch',
+    'key_operation_host_proof_required',
+    'config_authority_unavailable',
+  ].includes(code);
+}
 
 export function FreshApiKeys({
   client,
@@ -26,7 +121,7 @@ export function FreshApiKeys({
   externalUsage = false,
   reloadToken = 0,
 }: {
-  client: ReturnType<typeof createPublicApiClient>;
+  client: PublicApiClient;
   credential: string;
   onUnauthorized: () => void;
   onCreationPending: (pending: boolean) => void;
@@ -42,6 +137,8 @@ export function FreshApiKeys({
 }) {
   const [keys, setKeys] = useState<Key[] | null>(null);
   const [gatewayPending, setGatewayPending] = useState(true);
+  const [presenceUnverified, setPresenceUnverified] = useState(false);
+  const [accessInfo, setAccessInfo] = useState<AccessInfo | null>(null);
   // A typed External blocker is the page's own contract. It is kept apart from
   // the generic failure so the page names the state and offers its way out
   // instead of collapsing everything into "key state is unavailable".
@@ -54,14 +151,29 @@ export function FreshApiKeys({
   const [retryAllowed, setRetryAllowed] = useState(false);
   const [secret, setSecret] = useState('');
   const [copyFeedback, setCopyFeedback] = useState<'copied' | 'failed' | ''>('');
+  const [persistedCopyFeedback, setPersistedCopyFeedback] = useState<'copied' | 'failed' | ''>('');
+  const [persistedCopying, setPersistedCopying] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [confirmedEffect, setConfirmedEffect] = useState(false);
+  const [createdKeyId, setCreatedKeyId] = useState('');
+  const [recoveryKey, setRecoveryKey] = useState<{
+    key: Key;
+    code: string;
+    detail?: string;
+    operation: KeyOperation | null;
+    statusUnknown?: boolean;
+  } | null>(null);
   const [createName, setCreateName] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [failedCreateName, setFailedCreateName] = useState<{
     id: string;
     message: string;
   } | null>(null);
+  const failedCreateNameRef = useRef(failedCreateName);
+  failedCreateNameRef.current = failedCreateName;
   const [selected, setSelected] = useState('');
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'saved' | 'replaced'>('saved');
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
@@ -87,13 +199,18 @@ export function FreshApiKeys({
   // Coalesces at most one pending refresh requested while a read or mutation
   // was open, or after a read observed a concurrent key-list mutation.
   const pendingRefresh = useRef(false);
-  // Tracks rebinds so pre-rebind mutation errors cannot paint stale blockers.
+  // Tracks rebinds on the active session so pre-rebind errors do not overwrite
+  // post-rebind state, while ownerEpoch invalidates replies across credential changes.
   const rebindSeq = useRef(0);
+  const ownerEpoch = useRef(0);
+  const prevCredentialRef = useRef(credential);
   // Bumped on every local key-list write (`createKey` POST and name PUT,
   // `retryCreateName` GET/PUT, `reconcile`, `FreshKeyDetails` `onSaved`) so a
   // read that started earlier re-reads instead of overwriting or dropping it.
   const mutationRev = useRef(0);
   const copyAttempt = useRef(0);
+  const persistedCopyAttempt = useRef(0);
+  const pendingReapplyOpId = useRef('');
   const secretPendingRef = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
 
@@ -101,13 +218,13 @@ export function FreshApiKeys({
     alive.current = true;
     return () => {
       alive.current = false;
+      ownerEpoch.current += 1;
       readEpoch.current += 1;
       activeReadEpoch.current = null;
       activeMutation.current = false;
       pendingRefresh.current = false;
     };
   }, []);
-  // Multiple Key operations share the Console exit lock; a completed read in
   // one panel must not release another panel's unresolved write.
   function reportPending() {
     onCreationPending(
@@ -124,7 +241,7 @@ export function FreshApiKeys({
 
   function finishMutation() {
     activeMutation.current = false;
-    if (alive.current && pendingRefresh.current && activeReadEpoch.current === null) {
+    if (alive.current && pendingRefresh.current && activeReadEpoch.current === null && !selectedRef.current && !detailPendingRef.current) {
       pendingRefresh.current = false;
       void refresh(true);
     } else {
@@ -151,19 +268,20 @@ export function FreshApiKeys({
   async function refresh(forced = false) {
     // Forced refreshes (rebind, committed revocation, explicit blocker reload)
     // retire pre-existing reads immediately and run even if details are open.
-    // An unforced refresh coalesces behind any open operation rather than being dropped.
+    // An unforced refresh coalesces behind any open operation or drawer.
     if (
       !forced &&
       (activeReadEpoch.current !== null ||
         activeMutation.current ||
-        selected ||
+        selectedRef.current ||
         detailPendingRef.current)
     ) {
-      if (activeReadEpoch.current !== null || activeMutation.current) pendingRefresh.current = true;
+      pendingRefresh.current = true;
       return;
     }
     pendingRefresh.current = false;
     const epoch = ++readEpoch.current;
+    const ownerAtStart = ownerEpoch.current;
     activeReadEpoch.current = epoch;
     const mutationsAtStart = mutationRev.current;
     let authenticatedFailure = false;
@@ -175,14 +293,17 @@ export function FreshApiKeys({
         keys: Key[];
         gatewayPending: boolean;
         revocationAvailable: boolean;
+        presenceUnverified?: boolean;
       }>('api-keys', auth);
-      if (!alive.current || readEpoch.current !== epoch) return;
+      if (!alive.current || readEpoch.current !== epoch || ownerEpoch.current !== ownerAtStart)
+        return;
       if (
         !Array.isArray(result.keys) ||
         !result.keys.every(validKey) ||
         new Set(result.keys.map((key) => key.id)).size !== result.keys.length ||
         typeof result.gatewayPending !== 'boolean' ||
-        typeof result.revocationAvailable !== 'boolean'
+        typeof result.revocationAvailable !== 'boolean' ||
+        (result.presenceUnverified !== undefined && typeof result.presenceUnverified !== 'boolean')
       )
         throw new Error();
       // A mutation committed while this read was open: skip this snapshot and
@@ -194,13 +315,16 @@ export function FreshApiKeys({
       setKeys(result.keys);
       setGatewayPending(result.gatewayPending);
       setRevocationAvailable(result.revocationAvailable);
+      setPresenceUnverified(!!result.presenceUnverified);
       setBlocker(null);
       try {
         const parsed = parseUsageSummary(await client.get<unknown>('api-keys/usage-summary', auth));
         if (!parsed) throw new Error('Invalid usage summary response');
-        if (alive.current && readEpoch.current === epoch) setUsage(parsed);
+        if (alive.current && readEpoch.current === epoch && ownerEpoch.current === ownerAtStart)
+          setUsage(parsed);
       } catch (usageErr) {
-        if (!alive.current || readEpoch.current !== epoch) return;
+        if (!alive.current || readEpoch.current !== epoch || ownerEpoch.current !== ownerAtStart)
+          return;
         if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
           authenticatedFailure = true;
           onUnauthorized();
@@ -209,17 +333,17 @@ export function FreshApiKeys({
       }
       // Usage is intentionally best-effort; a failed read leaves the key list usable.
     } catch (err) {
-      if (alive.current && readEpoch.current === epoch) {
+      if (alive.current && readEpoch.current === epoch && ownerEpoch.current === ownerAtStart) {
         if (err instanceof PublicApiError && err.kind === 'authentication') {
           authenticatedFailure = true;
         }
         failure(err);
       }
     } finally {
-      if (activeReadEpoch.current === epoch) {
+      if (ownerEpoch.current === ownerAtStart && activeReadEpoch.current === epoch) {
         activeReadEpoch.current = null;
         if (authenticatedFailure) pendingRefresh.current = false;
-        if (alive.current && pendingRefresh.current && !activeMutation.current) {
+        if (alive.current && pendingRefresh.current && !activeMutation.current && !selectedRef.current && !detailPendingRef.current) {
           pendingRefresh.current = false;
           void refresh(true);
         } else {
@@ -232,33 +356,314 @@ export function FreshApiKeys({
   // No credential, secret or request journal enters persistent browser storage.
   // A successful rebind changes `reloadToken`, clearing stale blockers
   // immediately and retiring pre-rebind reads even while details are open.
+  // A credential change additionally resets owner state and pending locks.
   useEffect(() => {
     rebindSeq.current += 1;
+    pendingReapplyOpId.current = '';
+    if (prevCredentialRef.current !== credential) {
+      prevCredentialRef.current = credential;
+      ownerEpoch.current += 1;
+      readEpoch.current += 1;
+      activeReadEpoch.current = null;
+      activeMutation.current = false;
+      pendingRefresh.current = false;
+      creationPendingRef.current = false;
+      secretPendingRef.current = false;
+      detailPendingRef.current = false;
+      operationPendingRef.current = false;
+      setKeys(null);
+      setUsage(null);
+      setPresenceUnverified(false);
+      setPending('');
+      setRetryAllowed(false);
+      setSecret('');
+      setCopyFeedback('');
+      setPersistedCopyFeedback('');
+      setPersistedCopying(false);
+      setConfirmed(false);
+      setConfirmedEffect(false);
+      setCreatedKeyId('');
+      setRecoveryKey(null);
+      setFailedCreateName(null);
+      setCreateName('');
+      setCreateOpen(false);
+      setSelected('');
+      setRevocationOpen(false);
+      setRevocationPreset(null);
+      reportPending();
+    }
     setUsageBlocker(null);
     setBlocker(null);
     setError('');
+    setAccessInfo(null);
     void refresh(true);
-  }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadToken, credential]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function copyCreatedSecret() {
     if (!secret) return;
     const attempt = ++copyAttempt.current;
+    const ownerAtStart = ownerEpoch.current;
     setCopyFeedback('');
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(secret);
-      if (alive.current && attempt === copyAttempt.current) setCopyFeedback('copied');
+      if (alive.current && attempt === copyAttempt.current && ownerEpoch.current === ownerAtStart)
+        setCopyFeedback('copied');
     } catch {
-      if (alive.current && attempt === copyAttempt.current) setCopyFeedback('failed');
+      if (alive.current && attempt === copyAttempt.current && ownerEpoch.current === ownerAtStart)
+        setCopyFeedback('failed');
+    }
+  }
+
+  function mergeCanonicalKey(latest: Key) {
+    mutationRev.current += 1;
+    setKeys((previous) =>
+      previous
+        ? previous.some((item) => item.id === latest.id)
+          ? previous.map((item) => (item.id === latest.id ? latest : item))
+          : [...previous, latest]
+        : [latest]
+    );
+    setRecoveryKey((prev) =>
+      prev && prev.key.id === latest.id
+        ? {
+            ...prev,
+            key: latest,
+            code:
+              latest.lifecycle === 'superseded'
+                ? ''
+                : latest.effectCode || prev.code,
+            detail:
+              latest.lifecycle === 'superseded' || latest.runtimeState === 'revoked_observed'
+                ? ''
+                : prev.detail,
+            statusUnknown:
+              latest.lifecycle !== 'superseded' && latest.runtimeState === 'effect_unknown',
+          }
+        : prev
+    );
+    if (
+      latest.lifecycle === 'superseded' ||
+      latest.runtimeState === 'revoked_observed' ||
+      latest.runtimeState === 'effective_observed'
+    ) {
+      pendingReapplyOpId.current = '';
+    }
+    if (latest.lifecycle === 'superseded' && !failedCreateNameRef.current) {
+      creationPendingRef.current = false;
+      reportPending();
+    }
+  }
+
+  async function copyPersistedKeySecret(targetKey: Key) {
+    if (!targetKey || targetKey.lifecycle === 'superseded') return;
+    const attempt = ++persistedCopyAttempt.current;
+    const ownerAtStart = ownerEpoch.current;
+    const rebindAtStart = rebindSeq.current;
+    setPersistedCopying(true);
+    setPersistedCopyFeedback('');
+    try {
+      const value = await client.post<{ secret: string }>(
+        `api-keys/${targetKey.id}/secret`,
+        {},
+        auth
+      );
+      if (
+        !alive.current ||
+        attempt !== persistedCopyAttempt.current ||
+        ownerEpoch.current !== ownerAtStart
+      )
+        return;
+      if (!value || !validSavedSecret(targetKey, value.secret)) throw new Error();
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(value.secret);
+      if (
+        alive.current &&
+        attempt === persistedCopyAttempt.current &&
+        ownerEpoch.current === ownerAtStart
+      )
+        setPersistedCopyFeedback('copied');
+    } catch (err) {
+      if (
+        !alive.current ||
+        attempt !== persistedCopyAttempt.current ||
+        ownerEpoch.current !== ownerAtStart
+      )
+        return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        onUnauthorized();
+        return;
+      }
+      setPersistedCopyFeedback('failed');
+      if (err instanceof PublicApiError && err.status === 409) {
+        try {
+          const latest = await client.get<Key>(`api-keys/${targetKey.id}`, auth);
+          if (
+            !alive.current ||
+            attempt !== persistedCopyAttempt.current ||
+            ownerEpoch.current !== ownerAtStart ||
+            rebindSeq.current !== rebindAtStart
+          )
+            return;
+          if (validKey(latest) && latest.id === targetKey.id) {
+            mergeCanonicalKey(latest);
+          }
+        } catch (readErr) {
+          if (
+            !alive.current ||
+            attempt !== persistedCopyAttempt.current ||
+            ownerEpoch.current !== ownerAtStart
+          )
+            return;
+          if (readErr instanceof PublicApiError && readErr.kind === 'authentication') {
+            onUnauthorized();
+            return;
+          }
+        }
+      }
+    } finally {
+      if (
+        alive.current &&
+        attempt === persistedCopyAttempt.current &&
+        ownerEpoch.current === ownerAtStart
+      ) {
+        setPersistedCopying(false);
+      }
     }
   }
 
   function dismissCreatedSecret() {
     ++copyAttempt.current;
+    ++persistedCopyAttempt.current;
     setCopyFeedback('');
+    setPersistedCopyFeedback('');
+    setPersistedCopying(false);
     setSecret('');
     secretPendingRef.current = false;
-    if (!failedCreateName) setCreateOpen(false);
+    if (!failedCreateName && !recoveryKey) {
+      setError('');
+      setConfirmed(false);
+      setConfirmedEffect(false);
+      setCreatedKeyId('');
+      setCreateOpen(false);
+    }
     reportPending();
+  }
+
+  function dismissRecoveryKey(andRebind = false) {
+    if (!canDismissRecovery || !recoveryKey) return;
+    const code = recoveryKey.code || recoveryKey.key.effectCode;
+    const typed = blockerOf(code);
+    if (typed) {
+      setBlocker((prev) =>
+        typed.kind === 'key_rejected'
+          ? recoveryKey.detail
+            ? { ...typed, detail: recoveryKey.detail }
+            : prev?.kind === 'key_rejected' && prev.detail
+              ? prev
+              : typed
+          : prev ?? typed
+      );
+    }
+    ++persistedCopyAttempt.current;
+    pendingReapplyOpId.current = '';
+    setError('');
+    setPersistedCopyFeedback('');
+    setPersistedCopying(false);
+    setRecoveryKey(null);
+    setFailedCreateName(null);
+    setCreateName('');
+    setConfirmed(false);
+    setConfirmedEffect(false);
+    setCreatedKeyId('');
+    setCreateOpen(false);
+    creationPendingRef.current = false;
+    reportPending();
+    if (andRebind && onRebind) {
+      onRebind();
+    }
+  }
+
+  function closeCreateResultModal() {
+    if (
+      activeReadEpoch.current !== null ||
+      activeMutation.current ||
+      persistedCopying ||
+      pending ||
+      secret
+    ) {
+      if (
+        secret &&
+        !pending &&
+        !failedCreateName &&
+        !recoveryKey &&
+        activeReadEpoch.current === null &&
+        !activeMutation.current &&
+        !persistedCopying
+      ) {
+        dismissCreatedSecret();
+      }
+      return;
+    }
+    if (recoveryKey) {
+      if (canDismissRecovery) dismissRecoveryKey(false);
+      return;
+    }
+    if (failedCreateName) return;
+    ++persistedCopyAttempt.current;
+    setError('');
+    setPersistedCopyFeedback('');
+    setConfirmed(false);
+    setConfirmedEffect(false);
+    setCreatedKeyId('');
+    dismissCreatedSecret();
+    setCreateName('');
+    setCreateOpen(false);
+  }
+
+  function applySettledCreateKey(
+    settled: Key,
+    createdSecret: string | undefined,
+    operation: KeyOperation | null,
+    desiredName: string,
+    effectErrorCode: string,
+    effectErrorDetail = ''
+  ) {
+    const isPreStrategy = gatewayPending && !revocationAvailable && settled.runtimeState === 'not_applied';
+    const isReady = settled.runtimeState === 'effective_observed' || isPreStrategy;
+    mutationRev.current += 1;
+    setKeys((previous) => [...(previous || []).filter((key) => key.id !== settled.id), settled]);
+    setCreatedKeyId(settled.id);
+    setPending('');
+    setRetryAllowed(false);
+    if (createdSecret !== undefined) {
+      setSecret(createdSecret);
+      secretPendingRef.current = !!createdSecret;
+    }
+    if (isReady) {
+      setRecoveryKey(null);
+      setConfirmed(true);
+      setConfirmedEffect(settled.runtimeState === 'effective_observed');
+      return { ready: true, needsNamePut: Boolean(desiredName && settled.name !== desiredName) };
+    }
+    setConfirmed(false);
+    setConfirmedEffect(false);
+    setRecoveryKey({
+      key: settled,
+      code: effectErrorCode || settled.effectCode || '',
+      detail:
+        (effectErrorCode || settled.effectCode) === 'external_management_key_rejected'
+          ? effectErrorDetail
+          : '',
+      operation,
+      statusUnknown: settled.runtimeState === 'effect_unknown',
+    });
+    if (desiredName && settled.name !== desiredName) {
+      setFailedCreateName({ id: settled.id, message: k('createNameNotSaved') });
+    }
+    creationPendingRef.current = true;
+    reportPending();
+    return { ready: false, needsNamePut: false };
   }
 
   async function createKey() {
@@ -269,6 +674,7 @@ export function FreshApiKeys({
       detailPendingRef.current ||
       secret ||
       failedCreateName ||
+      recoveryKey ||
       (pending && !retryAllowed) ||
       operationPendingRef.current
     )
@@ -277,12 +683,17 @@ export function FreshApiKeys({
     if ([...desiredName].length > 120) return;
     activeMutation.current = true;
     const rebindAtStart = rebindSeq.current;
+    const ownerAtStart = ownerEpoch.current;
     syncBusy();
     setError('');
     setConfirmed(false);
+    setConfirmedEffect(false);
+    setCreatedKeyId('');
     setRetryAllowed(false);
     ++copyAttempt.current;
+    ++persistedCopyAttempt.current;
     setCopyFeedback('');
+    setPersistedCopyFeedback('');
     let requestId = '';
     try {
       // The same request ID is reused for a retry after an unknown answer, so it
@@ -294,12 +705,12 @@ export function FreshApiKeys({
         ).join('');
       creationPendingRef.current = true;
       reportPending();
-      const result = await client.post<{ key: Key; createdSecret?: string }>(
-        'api-keys',
-        { requestId },
-        auth
-      );
-      if (!alive.current) return;
+      const result = await client.post<{
+        key: Key;
+        createdSecret?: string;
+        operation?: KeyOperation;
+      }>('api-keys', { requestId }, auth);
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (
         !validKey(result.key) ||
         result.key.requestId !== requestId ||
@@ -308,23 +719,21 @@ export function FreshApiKeys({
             result.key.maskedPreview !== maskedPreviewOf(result.createdSecret)))
       )
         throw new Error();
-      mutationRev.current += 1;
-      setKeys((previous) => [
-        ...(previous || []).filter((key) => key.id !== result.key.id),
+      const settled = applySettledCreateKey(
         result.key,
-      ]);
-      setSecret(result.createdSecret || '');
-      secretPendingRef.current = !!result.createdSecret;
-      setConfirmed(true);
-      setPending('');
-      if (desiredName) {
+        result.createdSecret || '',
+        result.operation ?? null,
+        desiredName,
+        result.key.effectCode || ''
+      );
+      if (settled.ready && desiredName) {
         try {
           const namedKey = await client.put<Key>(
             'api-keys/' + result.key.id,
             { name: desiredName, nameRevision: result.key.nameRevision },
             auth
           );
-          if (!alive.current) return;
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
           if (
             !validKey(namedKey) ||
             namedKey.id !== result.key.id ||
@@ -341,7 +750,7 @@ export function FreshApiKeys({
           creationPendingRef.current = false;
           reportPending();
         } catch (nameErr) {
-          if (!alive.current) return;
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
           if (nameErr instanceof PublicApiError && nameErr.kind === 'authentication') {
             pendingRefresh.current = false;
             creationPendingRef.current = false;
@@ -363,12 +772,12 @@ export function FreshApiKeys({
           creationPendingRef.current = true;
           reportPending();
         }
-      } else {
+      } else if (settled.ready) {
         creationPendingRef.current = false;
         reportPending();
       }
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         pendingRefresh.current = false;
         creationPendingRef.current = false;
@@ -376,14 +785,598 @@ export function FreshApiKeys({
         onUnauthorized();
         return;
       }
-      // Only a failed request has an unknown outcome: a proxy failure can lose
-      // a reply the Manager already committed, so the request ID is kept and
-      // the result is reconciled instead of replayed blindly.
+      const persisted =
+        err instanceof PublicApiError && requestId ? extractErrorKey(err, requestId) : null;
+      if (persisted) {
+        const errCode = (err instanceof PublicApiError ? err.code || '' : '') || persisted.effectCode || '';
+        const errDetail = err instanceof PublicApiError ? err.detail || '' : '';
+        applySettledCreateKey(
+          persisted,
+          undefined,
+          err instanceof PublicApiError ? extractErrorOperation(err) : null,
+          desiredName,
+          errCode,
+          errDetail
+        );
+        if (rebindAtStart === rebindSeq.current && err instanceof PublicApiError && blockerOf(err.code)) {
+          failure(err);
+        }
+        return;
+      }
+      // Only a failed request without a persisted key snapshot has an unknown
+      // persistence outcome: keep the request ID and reconcile read-only.
       if (requestId) setPending(requestId);
-      // HTTP errors are also reconciled: a proxy failure can lose a committed reply.
       if (rebindAtStart === rebindSeq.current) failure(err);
     } finally {
-      finishMutation();
+      if (ownerEpoch.current === ownerAtStart) finishMutation();
+      else activeMutation.current = false;
+    }
+  }
+
+  async function executeReapplyRecoveryAdd(
+    targetKey: Key,
+    ownerAtStart: number,
+    rebindAtStart: number
+  ) {
+    if (rebindSeq.current !== rebindAtStart) return;
+    const reapplyId = randomRequestId();
+    pendingReapplyOpId.current = reapplyId;
+    let preparedOk = false;
+    try {
+      const prep = await client.post<KeyOperationResult>(
+        'api-keys/' + targetKey.id + '/revocation',
+        { requestId: reapplyId, keeperId: '', mode: 'add' },
+        auth
+      );
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (
+        !validKeyOperationResult(prep) ||
+        !prep.operation ||
+        prep.operation.id !== reapplyId ||
+        prep.operation.targetId !== targetKey.id ||
+        prep.operation.keeperId !== '' ||
+        prep.operation.mode !== 'add'
+      ) {
+        throw new Error();
+      }
+      preparedOk = true;
+      let settledOp = prep;
+      if (prep.operation.outcome === 'pending' && prep.nextStep === 'add') {
+        if (rebindSeq.current !== rebindAtStart) return;
+        const cont = await client.post<KeyOperationResult>(
+          'api-keys/operations/' + reapplyId + '/continue',
+          {},
+          auth
+        );
+        if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+        if (
+          !validKeyOperationResult(cont) ||
+          !cont.operation ||
+          cont.operation.id !== reapplyId ||
+          cont.operation.targetId !== targetKey.id ||
+          cont.operation.keeperId !== '' ||
+          cont.operation.mode !== 'add'
+        ) {
+          throw new Error();
+        }
+        settledOp = cont;
+      }
+
+      if (settledOp.operation!.outcome === 'aborted') {
+        let refreshed = targetKey;
+        try {
+          const canonical = await client.get<Key>('api-keys/' + targetKey.id, auth);
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+          if (validKey(canonical) && canonical.id === targetKey.id && canonical.requestId === targetKey.requestId) {
+            refreshed = canonical;
+          }
+        } catch (refreshErr) {
+          if (refreshErr instanceof PublicApiError && refreshErr.kind === 'authentication') {
+            throw refreshErr;
+          }
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+        }
+        pendingReapplyOpId.current = '';
+        mutationRev.current += 1;
+        setKeys((previous) => [...(previous || []).filter((item) => item.id !== refreshed.id), refreshed]);
+        setCreatedKeyId(refreshed.id);
+        const retired =
+          refreshed.lifecycle === 'superseded' || refreshed.runtimeState === 'revoked_observed';
+        const resolvedCode = retired ? '' : refreshed.effectCode || '';
+        setRecoveryKey({
+          key: refreshed,
+          code: resolvedCode,
+          detail: '',
+          operation: settledOp.operation,
+          statusUnknown: !retired && refreshed.runtimeState === 'effect_unknown',
+        });
+        if (rebindAtStart === rebindSeq.current && resolvedCode) {
+          const typed = blockerOf(resolvedCode);
+          if (typed) setBlocker(typed);
+        }
+        if (retired && !failedCreateName) {
+          creationPendingRef.current = false;
+          reportPending();
+        }
+        return;
+      }
+
+      if (
+        settledOp.operation!.outcome === 'committed' &&
+        settledOp.runtimeState === 'effective_observed'
+      ) {
+        const canonical = await client.get<Key>('api-keys/' + targetKey.id, auth);
+        if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+        if (
+          !validKey(canonical) ||
+          canonical.id !== targetKey.id ||
+          canonical.requestId !== targetKey.requestId
+        ) {
+          throw new Error();
+        }
+        mutationRev.current += 1;
+        setKeys((previous) => [
+          ...(previous || []).filter((item) => item.id !== canonical.id),
+          canonical,
+        ]);
+        setCreatedKeyId(canonical.id);
+        if (canonical.runtimeState === 'effective_observed') {
+          pendingReapplyOpId.current = '';
+          setRecoveryKey(null);
+          setConfirmed(true);
+          setConfirmedEffect(true);
+          if (rebindAtStart === rebindSeq.current) setBlocker(null);
+          if (!failedCreateName) {
+            setCreateName('');
+            creationPendingRef.current = false;
+            reportPending();
+          }
+        } else {
+          pendingReapplyOpId.current = '';
+          const retired =
+            canonical.lifecycle === 'superseded' || canonical.runtimeState === 'revoked_observed';
+          setRecoveryKey({
+            key: canonical,
+            code: retired ? '' : canonical.effectCode || '',
+            detail: '',
+            operation: settledOp.operation,
+            statusUnknown: !retired && canonical.runtimeState === 'effect_unknown',
+          });
+        }
+        return;
+      }
+
+      const unsettled: Key = {
+        ...targetKey,
+        runtimeState: 'effect_unknown',
+        operationId: reapplyId,
+      };
+      mutationRev.current += 1;
+      setKeys((previous) => [
+        ...(previous || []).filter((item) => item.id !== unsettled.id),
+        unsettled,
+      ]);
+      setRecoveryKey({
+        key: unsettled,
+        code: '',
+        detail: '',
+        operation: settledOp.operation,
+        statusUnknown: true,
+      });
+    } catch (err) {
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        pendingRefresh.current = false;
+        creationPendingRef.current = false;
+        reportPending();
+        onUnauthorized();
+        return;
+      }
+      if (err instanceof PublicApiError) {
+        const code = err.code || '';
+        const detail = err.detail || '';
+        const rawSnap =
+          (err.status === 409 || err.status === 503) && err.operationResult !== undefined
+            ? (err.operationResult as KeyOperationResult)
+            : null;
+        const validSnap =
+          rawSnap && validKeyOperationResult(rawSnap) && rawSnap.operation ? rawSnap : null;
+        const ownOp =
+          validSnap?.operation &&
+          validSnap.operation.id === reapplyId &&
+          validSnap.operation.targetId === targetKey.id &&
+          validSnap.operation.mode === 'add'
+            ? validSnap
+            : null;
+        if (ownOp?.operation?.outcome === 'aborted') {
+          let refreshed = targetKey;
+          let resolvedCode = code === 'key_operation_unknown' ? '' : code;
+          const resolvedDetail = resolvedCode === 'external_management_key_rejected' ? detail : '';
+          try {
+            const canonical = await client.get<Key>('api-keys/' + targetKey.id, auth);
+            if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+            if (
+              validKey(canonical) &&
+              canonical.id === targetKey.id &&
+              canonical.requestId === targetKey.requestId
+            ) {
+              refreshed = canonical;
+            }
+          } catch (refreshErr) {
+            if (refreshErr instanceof PublicApiError && refreshErr.kind === 'authentication') {
+              pendingRefresh.current = false;
+              creationPendingRef.current = false;
+              reportPending();
+              onUnauthorized();
+              return;
+            }
+            if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+          }
+          if (!resolvedCode && refreshed.effectCode && refreshed.effectCode !== 'key_operation_unknown') {
+            resolvedCode = refreshed.effectCode;
+          }
+          pendingReapplyOpId.current = '';
+          mutationRev.current += 1;
+          setKeys((previous) => [
+            ...(previous || []).filter((item) => item.id !== refreshed.id),
+            refreshed,
+          ]);
+          setCreatedKeyId(refreshed.id);
+          const retired =
+            refreshed.lifecycle === 'superseded' || refreshed.runtimeState === 'revoked_observed';
+          setRecoveryKey({
+            key: refreshed,
+            code: retired ? '' : resolvedCode,
+            detail: retired ? '' : resolvedDetail,
+            operation: ownOp.operation,
+            statusUnknown: !retired && refreshed.runtimeState === 'effect_unknown',
+          });
+          if (rebindAtStart === rebindSeq.current && !retired) {
+            const typed = blockerOf(resolvedCode);
+            if (typed) {
+              setBlocker(
+                typed.kind === 'key_rejected' && resolvedDetail
+                  ? { ...typed, detail: resolvedDetail }
+                  : typed
+              );
+            }
+          }
+          if (retired && !failedCreateName) {
+            creationPendingRef.current = false;
+            reportPending();
+          }
+          return;
+        }
+        if (
+          !preparedOk &&
+          code === 'key_operation_conflict' &&
+          validSnap?.operation &&
+          validSnap.operation.id !== reapplyId &&
+          !isTerminalKeyOperationOutcome(validSnap.operation.outcome)
+        ) {
+          pendingReapplyOpId.current = '';
+          setRecoveryKey({
+            key: targetKey,
+            code,
+            detail: '',
+            operation: validSnap.operation,
+            statusUnknown: false,
+          });
+          return;
+        }
+        if (ownOp?.operation) {
+          const nextKey: Key = {
+            ...targetKey,
+            runtimeState: 'effect_unknown',
+            operationId: reapplyId,
+            effectCode: code || targetKey.effectCode,
+          };
+          mutationRev.current += 1;
+          setKeys((previous) => [
+            ...(previous || []).filter((item) => item.id !== nextKey.id),
+            nextKey,
+          ]);
+          setRecoveryKey({
+            key: nextKey,
+            code,
+            detail: code === 'external_management_key_rejected' ? detail : '',
+            operation: ownOp.operation,
+            statusUnknown: true,
+          });
+          if (rebindAtStart === rebindSeq.current && blockerOf(code)) {
+            failure(err);
+          }
+          return;
+        }
+        if (isExternalOrSourceBlocker(code) || [400, 404, 409].includes(err.status || 0)) {
+          if (!preparedOk) pendingReapplyOpId.current = '';
+          const nextKey: Key = preparedOk
+            ? {
+                ...targetKey,
+                runtimeState: 'effect_unknown',
+                operationId: reapplyId,
+                effectCode: code || targetKey.effectCode,
+              }
+            : {
+                ...targetKey,
+                effectCode: code || targetKey.effectCode,
+              };
+          mutationRev.current += 1;
+          setKeys((previous) => [
+            ...(previous || []).filter((item) => item.id !== nextKey.id),
+            nextKey,
+          ]);
+          setRecoveryKey({
+            key: nextKey,
+            code,
+            detail: code === 'external_management_key_rejected' ? detail : '',
+            operation: null,
+            statusUnknown: preparedOk,
+          });
+          if (rebindAtStart === rebindSeq.current && blockerOf(code)) {
+            failure(err);
+          }
+          return;
+        }
+      }
+      setRecoveryKey((prev) => (prev ? { ...prev, code: '', detail: '', statusUnknown: true } : prev));
+      if (rebindAtStart === rebindSeq.current) failure(err);
+    }
+  }
+
+  async function retryApplyRecoveryKey() {
+    if (
+      !recoveryKey ||
+      recoveryKey.statusUnknown ||
+      recoveryKey.key.runtimeState === 'effect_unknown' ||
+      recoveryKey.key.lifecycle === 'superseded' ||
+      recoveryKey.key.runtimeState === 'revoked_observed' ||
+      activeReadEpoch.current !== null ||
+      activeMutation.current
+    )
+      return;
+    activeMutation.current = true;
+    const rebindAtStart = rebindSeq.current;
+    const ownerAtStart = ownerEpoch.current;
+    const targetKey = recoveryKey.key;
+    syncBusy();
+    setError('');
+    try {
+      const res = await client.post<{ key: Key; operation?: KeyOperation }>(
+        'api-keys',
+        { requestId: targetKey.requestId },
+        auth
+      );
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (
+        !validKey(res?.key) ||
+        res.key.id !== targetKey.id ||
+        res.key.requestId !== targetKey.requestId
+      )
+        throw new Error();
+      pendingReapplyOpId.current = '';
+      mutationRev.current += 1;
+      setKeys((previous) => [...(previous || []).filter((item) => item.id !== res.key.id), res.key]);
+      setCreatedKeyId(res.key.id);
+      if (res.key.runtimeState === 'effective_observed') {
+        setRecoveryKey(null);
+        setConfirmed(true);
+        setConfirmedEffect(true);
+        if (rebindAtStart === rebindSeq.current) setBlocker(null);
+        if (!failedCreateName) {
+          setCreateName('');
+          creationPendingRef.current = false;
+          reportPending();
+        }
+      } else {
+        setRecoveryKey({
+          key: res.key,
+          code: res.key.effectCode || '',
+          detail: '',
+          operation: res.operation ?? null,
+          statusUnknown: res.key.runtimeState === 'effect_unknown',
+        });
+      }
+    } catch (err) {
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        pendingRefresh.current = false;
+        creationPendingRef.current = false;
+        reportPending();
+        onUnauthorized();
+        return;
+      }
+      const rawPersisted =
+        err instanceof PublicApiError ? extractErrorKey(err, targetKey.requestId) : null;
+      const persisted = rawPersisted && rawPersisted.id === targetKey.id ? rawPersisted : null;
+      if (persisted && err instanceof PublicApiError && isCommittedMissingAddResponse(err, persisted, targetKey.id)) {
+        await executeReapplyRecoveryAdd(persisted, ownerAtStart, rebindAtStart);
+        return;
+      }
+      if (persisted) {
+        const errCode = (err instanceof PublicApiError ? err.code || '' : '') || persisted.effectCode || '';
+        const errDetail = err instanceof PublicApiError ? err.detail || '' : '';
+        mutationRev.current += 1;
+        setKeys((previous) => [
+          ...(previous || []).filter((item) => item.id !== persisted.id),
+          persisted,
+        ]);
+        setRecoveryKey({
+          key: persisted,
+          code: errCode,
+          detail: errCode === 'external_management_key_rejected' ? errDetail : '',
+          operation: err instanceof PublicApiError ? extractErrorOperation(err) : null,
+          statusUnknown: persisted.runtimeState === 'effect_unknown',
+        });
+        if (rebindAtStart === rebindSeq.current && err instanceof PublicApiError && blockerOf(err.code)) {
+          failure(err);
+        }
+        return;
+      }
+      setRecoveryKey((prev) => (prev ? { ...prev, code: '', detail: '', statusUnknown: true } : prev));
+      if (rebindAtStart === rebindSeq.current) failure(err);
+    } finally {
+      if (ownerEpoch.current === ownerAtStart) finishMutation();
+      else activeMutation.current = false;
+    }
+  }
+
+  async function reconcileRecoveryKey() {
+    if (!recoveryKey || activeReadEpoch.current !== null || activeMutation.current) return;
+    activeMutation.current = true;
+    const rebindAtStart = rebindSeq.current;
+    const ownerAtStart = ownerEpoch.current;
+    const targetKey = recoveryKey.key;
+    syncBusy();
+    setError('');
+    try {
+      let current = await client.get<Key>('api-keys/requests/' + targetKey.requestId, auth);
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (!validKey(current) || current.id !== targetKey.id || current.requestId !== targetKey.requestId)
+        throw new Error();
+      let nextOp: KeyOperation | null = recoveryKey.operation;
+      let opErrCode = '';
+      let opErrDetail = '';
+      let abortedSnapshot = false;
+      const opIdToCheck = current.operationId || pendingReapplyOpId.current;
+      if (opIdToCheck && (current.runtimeState === 'effect_unknown' || !!pendingReapplyOpId.current)) {
+        let snapshot: KeyOperationResult | null = null;
+        try {
+          const opRes = await client.get<KeyOperationResult>(
+            'api-keys/operations/' + opIdToCheck,
+            auth
+          );
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+          snapshot = validScopedOperationSnapshot(opRes, opIdToCheck, current.id);
+        } catch (opErr) {
+          if (opErr instanceof PublicApiError && opErr.kind === 'authentication') {
+            throw opErr;
+          }
+          if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+          if (opErr instanceof PublicApiError) {
+            opErrCode = opErr.code || '';
+            opErrDetail = opErr.detail || '';
+            if (
+              (opErr.status === 409 || opErr.status === 503) &&
+              opErr.operationResult !== undefined
+            ) {
+              snapshot = validScopedOperationSnapshot(
+                opErr.operationResult,
+                opIdToCheck,
+                current.id
+              );
+            }
+          }
+        }
+        if (snapshot?.operation) {
+          nextOp = snapshot.operation;
+        }
+        if (
+          snapshot &&
+          snapshot.operation === null &&
+          current.runtimeState === 'not_applied' &&
+          !current.operationId
+        ) {
+          pendingReapplyOpId.current = '';
+        }
+        if (
+          snapshot &&
+          (snapshot.runtimeState === 'effective_observed' ||
+            snapshot.operation?.outcome === 'aborted' ||
+            (snapshot.operation?.outcome === 'committed' && !!pendingReapplyOpId.current))
+        ) {
+          abortedSnapshot = snapshot.operation?.outcome === 'aborted';
+          if (opErrCode === 'key_operation_unknown') {
+            opErrCode = '';
+          }
+          try {
+            const refreshed = await client.get<Key>('api-keys/' + current.id, auth);
+            if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+            if (
+              validKey(refreshed) &&
+              refreshed.id === current.id &&
+              refreshed.requestId === current.requestId
+            ) {
+              current = refreshed;
+            }
+          } catch (refreshErr) {
+            if (refreshErr instanceof PublicApiError && refreshErr.kind === 'authentication') {
+              throw refreshErr;
+            }
+            if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+            if (refreshErr instanceof PublicApiError && refreshErr.code) {
+              opErrCode = refreshErr.code;
+              opErrDetail = refreshErr.detail || opErrDetail;
+            }
+          }
+        }
+      }
+      mutationRev.current += 1;
+      setKeys((previous) => [...(previous || []).filter((item) => item.id !== current.id), current]);
+      setCreatedKeyId(current.id);
+      const retired = current.lifecycle === 'superseded' || current.runtimeState === 'revoked_observed';
+      if (current.runtimeState === 'effective_observed' || abortedSnapshot || retired) {
+        pendingReapplyOpId.current = '';
+      }
+      if (current.runtimeState === 'effective_observed') {
+        setRecoveryKey(null);
+        setConfirmed(true);
+        setConfirmedEffect(true);
+        if (rebindAtStart === rebindSeq.current) setBlocker(null);
+        if (!failedCreateName) {
+          setCreateName('');
+          creationPendingRef.current = false;
+          reportPending();
+        }
+      } else {
+        let resolvedCode = retired ? '' : current.effectCode || opErrCode || '';
+        if (
+          resolvedCode === 'key_operation_unknown' &&
+          (abortedSnapshot || nextOp?.outcome === 'aborted') &&
+          current.runtimeState === 'not_applied'
+        ) {
+          resolvedCode = '';
+        }
+        const resolvedDetail =
+          !retired && resolvedCode === 'external_management_key_rejected'
+            ? opErrDetail ||
+              (recoveryKey.code === 'external_management_key_rejected'
+                ? recoveryKey.detail || ''
+                : '')
+            : '';
+        setRecoveryKey({
+          key: current,
+          code: resolvedCode,
+          detail: resolvedDetail,
+          operation: nextOp,
+          statusUnknown: !retired && current.runtimeState === 'effect_unknown',
+        });
+        if (rebindAtStart === rebindSeq.current && !retired) {
+          const typed = blockerOf(resolvedCode);
+          if (typed) {
+            setBlocker(
+              typed.kind === 'key_rejected' && resolvedDetail
+                ? { ...typed, detail: resolvedDetail }
+                : typed
+            );
+          }
+        }
+        if (retired && !failedCreateName) {
+          creationPendingRef.current = false;
+          reportPending();
+        }
+      }
+    } catch (err) {
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        pendingRefresh.current = false;
+        onUnauthorized();
+        return;
+      }
+      if (rebindAtStart === rebindSeq.current) failure(err);
+    } finally {
+      if (ownerEpoch.current === ownerAtStart) finishMutation();
+      else activeMutation.current = false;
     }
   }
 
@@ -392,23 +1385,25 @@ export function FreshApiKeys({
     const desiredName = createName.trim();
     if (!discard && [...desiredName].length > 120) return;
     activeMutation.current = true;
+    const ownerAtStart = ownerEpoch.current;
     syncBusy();
     setError('');
     creationPendingRef.current = true;
     reportPending();
     try {
       const current = await client.get<Key>('api-keys/' + failedCreateName.id, auth);
-      if (!alive.current) return;
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (!validKey(current) || current.id !== failedCreateName.id) throw new Error();
       mutationRev.current += 1;
       setKeys((previous) =>
         (previous || []).map((item) => (item.id === current.id ? current : item))
       );
+      setRecoveryKey((prev) => (prev && prev.key.id === current.id ? { ...prev, key: current } : prev));
       // Even abandoning an unknown write requires a read of the saved result.
       if (discard || current.name === desiredName) {
         setFailedCreateName(null);
         setCreateName('');
-        creationPendingRef.current = false;
+        creationPendingRef.current = !!recoveryKey;
         reportPending();
         return;
       }
@@ -417,7 +1412,7 @@ export function FreshApiKeys({
         { name: desiredName, nameRevision: current.nameRevision },
         auth
       );
-      if (!alive.current) return;
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (
         !validKey(saved) ||
         saved.id !== current.id ||
@@ -427,12 +1422,13 @@ export function FreshApiKeys({
         throw new Error();
       mutationRev.current += 1;
       setKeys((previous) => (previous || []).map((item) => (item.id === saved.id ? saved : item)));
+      setRecoveryKey((prev) => (prev && prev.key.id === saved.id ? { ...prev, key: saved } : prev));
       setFailedCreateName(null);
       setCreateName('');
-      creationPendingRef.current = false;
+      creationPendingRef.current = !!recoveryKey;
       reportPending();
     } catch (err) {
-      if (!alive.current) return;
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         pendingRefresh.current = false;
         creationPendingRef.current = false;
@@ -456,7 +1452,8 @@ export function FreshApiKeys({
           : null
       );
     } finally {
-      finishMutation();
+      if (ownerEpoch.current === ownerAtStart) finishMutation();
+      else activeMutation.current = false;
     }
   }
 
@@ -482,29 +1479,50 @@ export function FreshApiKeys({
     if (!pending || activeReadEpoch.current !== null || activeMutation.current) return;
     activeMutation.current = true;
     const rebindAtStart = rebindSeq.current;
+    const ownerAtStart = ownerEpoch.current;
     syncBusy();
     setError('');
     try {
       const key = await client.get<Key>('api-keys/requests/' + pending, auth);
-      if (!alive.current) return;
+      if (!alive.current || ownerEpoch.current !== ownerAtStart) return;
       if (!validKey(key) || key.requestId !== pending) throw new Error();
       mutationRev.current += 1;
       setKeys((previous) => [...(previous || []).filter((item) => item.id !== key.id), key]);
-      setConfirmed(true);
-      setPending('');
-      // Creation readback must not silently drop the optional name or replay
-      // either write. Let the user save or abandon the name on this same key.
-      if (createName.trim() && key.name !== createName.trim()) {
-        setFailedCreateName({ id: key.id, message: k('createNameNotSaved') });
-        creationPendingRef.current = true;
+      setCreatedKeyId(key.id);
+      const isPreStrategy = gatewayPending && !revocationAvailable && key.runtimeState === 'not_applied';
+      if (key.runtimeState === 'effective_observed' || isPreStrategy) {
+        setConfirmed(true);
+        setConfirmedEffect(key.runtimeState === 'effective_observed');
+        setPending('');
+        setRecoveryKey(null);
+        // Creation readback must not silently drop the optional name or replay
+        // either write. Let the user save or abandon the name on this same key.
+        if (createName.trim() && key.name !== createName.trim()) {
+          setFailedCreateName({ id: key.id, message: k('createNameNotSaved') });
+          creationPendingRef.current = true;
+        } else {
+          setCreateName('');
+          creationPendingRef.current = false;
+        }
       } else {
-        setCreateName('');
-        creationPendingRef.current = false;
+        setConfirmed(false);
+        setConfirmedEffect(false);
+        setPending('');
+        setRecoveryKey({
+          key,
+          code: key.effectCode || '',
+          operation: null,
+          statusUnknown: key.runtimeState === 'effect_unknown',
+        });
+        if (createName.trim() && key.name !== createName.trim()) {
+          setFailedCreateName({ id: key.id, message: k('createNameNotSaved') });
+        }
+        creationPendingRef.current = true;
       }
       reportPending();
       setRetryAllowed(false);
     } catch (err) {
-      if (alive.current) {
+      if (alive.current && ownerEpoch.current === ownerAtStart) {
         if (err instanceof PublicApiError && err.status === 404) setRetryAllowed(true);
         else {
           if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -516,7 +1534,8 @@ export function FreshApiKeys({
         }
       }
     } finally {
-      finishMutation();
+      if (ownerEpoch.current === ownerAtStart) finishMutation();
+      else activeMutation.current = false;
     }
   }
 
@@ -529,8 +1548,24 @@ export function FreshApiKeys({
           value.toLocaleLowerCase().includes(query)
         ))
   );
-  const savedCount = (keys || []).filter((key) => key.lifecycle !== 'superseded').length;
+  const activeKeys = (keys || []).filter((key) => key.lifecycle !== 'superseded');
+  const savedCount = activeKeys.length;
   const replacedCount = (keys || []).length - savedCount;
+  const effectiveCount = activeKeys.filter((key) => key.runtimeState === 'effective_observed').length;
+  const runtimeSummaryValue =
+    keys === null
+      ? '—'
+      : savedCount === 0
+        ? k('summaryRuntimeNoActive')
+        : effectiveCount === savedCount && !presenceUnverified
+          ? k('summaryRuntimeAllActive')
+          : `${effectiveCount}/${savedCount} ${k('summaryRuntimeVerifiedCount')}`;
+  const runtimeSummaryPillClass =
+    keys === null || savedCount === 0
+      ? 'is-muted'
+      : effectiveCount === savedCount && !presenceUnverified
+        ? 'is-effective'
+        : 'is-pending';
   const usageCalls = usage?.items
     .filter((item) => item.coverage.state === 'complete' || item.coverage.state === 'partial')
     .reduce((total, item) => total + item.calls, 0) ?? null;
@@ -565,7 +1600,30 @@ export function FreshApiKeys({
     detailPending ||
     !!pending ||
     !!secret ||
+    !!recoveryKey ||
     !!failedCreateName;
+  const createdKeyRecord = createdKeyId
+    ? (keys || []).find((item) => item.id === createdKeyId) || null
+    : null;
+  const confirmedRetired =
+    !!createdKeyRecord &&
+    (createdKeyRecord.lifecycle === 'superseded' ||
+      createdKeyRecord.runtimeState === 'revoked_observed');
+  const recoveryRetired =
+    !!recoveryKey &&
+    (recoveryKey.key.lifecycle === 'superseded' ||
+      recoveryKey.key.runtimeState === 'revoked_observed');
+  const recoveryBlockerCode = recoveryKey ? recoveryKey.code || recoveryKey.key.effectCode || '' : '';
+  const recoveryBlocker = blockerOf(recoveryBlockerCode);
+  const canDismissRecovery =
+    !!recoveryKey &&
+    !busy &&
+    !persistedCopying &&
+    !pending &&
+    !secret &&
+    (recoveryRetired ||
+      (!recoveryKey.statusUnknown && recoveryKey.key.runtimeState === 'not_applied') ||
+      isExternalOrSourceBlocker(recoveryBlockerCode));
   return (
     <section className="key-workspace" aria-labelledby="client-key-title" aria-busy={busy}>
       <header className="card page-header key-workspace-heading">
@@ -584,6 +1642,9 @@ export function FreshApiKeys({
             aria-label={t('keysCreate')}
             onClick={() => {
               setConfirmed(false);
+              setConfirmedEffect(false);
+              setCreatedKeyId('');
+              setRecoveryKey(null);
               setCreateOpen(true);
             }}
             disabled={
@@ -610,10 +1671,18 @@ export function FreshApiKeys({
           }}
         />
       )}
-      {error && !createOpen && !pending && (
+      {error && !createOpen && !pending && !recoveryKey && (
         <p role="alert" className="key-notice key-notice-warning">
           <FullWebIcon name="alert" />
           <span>{error}</span>
+        </p>
+      )}
+      {presenceUnverified && (
+        <p role="status" className="key-notice key-notice-warning" data-testid="keys-presence-unverified">
+          <FullWebIcon name="alert" />
+          <span>
+            <strong>{k('presenceUnverifiedTitle')}</strong> — {k('presenceUnverifiedHelp')}
+          </span>
         </p>
       )}
       {externalUsage && (
@@ -636,23 +1705,38 @@ export function FreshApiKeys({
         </p>
       )}
       <Modal
-        open={visible && (createOpen || !!pending || !!secret || !!failedCreateName)}
-        title={confirmed ? k('secretTitle') : t('keysCreate')}
+        open={visible && (createOpen || !!pending || !!secret || !!failedCreateName || !!recoveryKey)}
+        title={
+          confirmed
+            ? confirmedRetired
+              ? t('keysRevokedHistory')
+              : confirmedEffect
+                ? k('createdActiveTitle')
+                : k('secretTitle')
+            : recoveryKey
+              ? recoveryRetired
+                ? t('keysRevokedHistory')
+                : recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown'
+                  ? k('createApplyUnknownTitle')
+                  : k('createApplyPendingTitle')
+              : t('keysCreate')
+        }
         className="key-create-modal"
-        closeDisabled={busy || !!pending || !!failedCreateName}
-        onClose={() => {
-          if (activeReadEpoch.current !== null || activeMutation.current || pending || failedCreateName) return;
-          dismissCreatedSecret();
-          setCreateName('');
-          setCreateOpen(false);
-        }}
+        closeDisabled={
+          busy ||
+          persistedCopying ||
+          !!pending ||
+          (!!failedCreateName && !canDismissRecovery) ||
+          (!!recoveryKey && !canDismissRecovery)
+        }
+        onClose={closeCreateResultModal}
       >
         {error && (
           <p className="key-notice key-notice-warning" role="alert">
             {error}
           </p>
         )}
-        {(!confirmed || failedCreateName) && (
+        {((!confirmed && !recoveryKey) || failedCreateName) && (
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -681,11 +1765,15 @@ export function FreshApiKeys({
                   <button
                     className="btn btn-secondary"
                     type="button"
-                    disabled={busy || !!pending}
-                    onClick={() => {
-                      setCreateName('');
-                      setCreateOpen(false);
-                    }}
+                    disabled={
+                      busy ||
+                      persistedCopying ||
+                      !!pending ||
+                      !!recoveryKey ||
+                      !!failedCreateName ||
+                      !!secret
+                    }
+                    onClick={closeCreateResultModal}
                   >
                     {k('cancel')}
                   </button>
@@ -735,6 +1823,127 @@ export function FreshApiKeys({
             </div>
           </div>
         )}
+        {recoveryKey && (
+          <div
+            role="alert"
+            className="key-creation-recovery key-notice-warning"
+            data-testid="create-apply-recovery"
+          >
+            <FullWebIcon name="alert" />
+            <div>
+              <h3>
+                {recoveryRetired
+                  ? t('keysRevokedHistory')
+                  : recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown'
+                    ? k('createApplyUnknownTitle')
+                    : k('createApplyPendingTitle')}
+              </h3>
+              <p>
+                {recoveryRetired
+                  ? k('detailRevokedHelp')
+                  : recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown'
+                    ? k('createApplyUnknownHelp')
+                    : k('createApplyPendingHelp')}
+              </p>
+              {!recoveryRetired && recoveryKey.operation?.outcome === 'aborted' && recoveryBlockerCode && (
+                <p data-testid="create-apply-aborted">{k('operationAborted')}</p>
+              )}
+              {!recoveryRetired &&
+                (recoveryBlockerCode ? (
+                  <p data-testid="create-apply-blocker-reason">
+                    {k(effectBlockerTextKey(recoveryBlockerCode))}
+                  </p>
+                ) : recoveryKey.operation?.outcome === 'aborted' ? (
+                  <p data-testid="create-apply-blocker-reason">{k('operationAborted')}</p>
+                ) : null)}
+              {!recoveryRetired &&
+                recoveryKey.detail &&
+                recoveryBlocker?.kind === 'key_rejected' && (
+                  <details
+                    className="fresh-external-blocker-detail"
+                    data-testid="create-apply-blocker-detail"
+                  >
+                    <summary>{x('details')}</summary>
+                    <p>{recoveryKey.detail}</p>
+                  </details>
+                )}
+              <p>
+                <code>{recoveryKey.key.maskedPreview}</code>
+              </p>
+              <div className="key-toolbar-actions">
+                {!recoveryRetired &&
+                  (recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown' ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      data-testid="create-reconcile-apply"
+                      disabled={busy || persistedCopying}
+                      onClick={() => void reconcileRecoveryKey()}
+                    >
+                      {k('checkOperationResult')}
+                    </button>
+                  ) : !['key_rejected', 'target_moved', 'version_unsupported'].includes(
+                      recoveryBlocker?.kind ?? ''
+                    ) ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      data-testid="create-retry-apply"
+                      disabled={busy || persistedCopying}
+                      onClick={() => void retryApplyRecoveryKey()}
+                    >
+                      {k('retryApplyKey')}
+                    </button>
+                  ) : null)}
+                {!recoveryRetired &&
+                  onRebind &&
+                  (recoveryBlocker?.kind === 'key_rejected' ||
+                    recoveryBlocker?.kind === 'target_moved') && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      data-testid="recovery-rebind-action"
+                      disabled={busy || persistedCopying}
+                      onClick={() => dismissRecoveryKey(true)}
+                    >
+                      {k('rebindConnection')}
+                    </button>
+                  )}
+                {recoveryKey.key.lifecycle !== 'superseded' && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    data-testid="copy-recovered-client-secret"
+                    disabled={busy || persistedCopying}
+                    onClick={() => void copyPersistedKeySecret(recoveryKey.key)}
+                  >
+                    <FullWebIcon name="copy" />
+                    {k('copyPersistedSecret')}
+                  </button>
+                )}
+                {canDismissRecovery && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    data-testid="dismiss-create-recovery"
+                    disabled={busy || persistedCopying}
+                    onClick={() => dismissRecoveryKey(false)}
+                  >
+                    {recoveryRetired ? k('closeDialog') : k('manageLater')}
+                  </button>
+                )}
+              </div>
+              {canDismissRecovery && !recoveryRetired && (
+                <p className="key-field-help">{k('recoveryManageLaterHelp')}</p>
+              )}
+              {persistedCopyFeedback && (
+                <p role="status" data-testid="copy-recovered-client-secret-feedback">
+                  {k(persistedCopyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
         {failedCreateName && (
           <div
             role="alert"
@@ -767,11 +1976,59 @@ export function FreshApiKeys({
             </div>
           </div>
         )}
-        {confirmed && !secret && !failedCreateName && (
-          <p role="status" className="key-notice">
-            <FullWebIcon name="check" />
-            <span>{t('keysConfirmed')}</span>
-          </p>
+        {confirmed && !secret && !failedCreateName && !recoveryKey && (
+          <div className="key-secret-panel" role="status">
+            <p className={confirmedRetired ? 'key-notice key-notice-warning' : 'key-notice'}>
+              <FullWebIcon name={confirmedRetired ? 'alert' : 'check'} />
+              <span>
+                {confirmedRetired
+                  ? t('keysRevokedHistory')
+                  : confirmedEffect
+                    ? k('createdActiveConfirmed')
+                    : t('keysConfirmed')}
+              </span>
+            </p>
+            {confirmedRetired && <p className="key-field-help">{k('detailRevokedHelp')}</p>}
+            <div className="key-toolbar-actions">
+              {createdKeyRecord && createdKeyRecord.lifecycle !== 'superseded' && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-testid="copy-confirmed-client-secret"
+                  disabled={busy || persistedCopying}
+                  onClick={() => void copyPersistedKeySecret(createdKeyRecord)}
+                >
+                  <FullWebIcon name="copy" />
+                  {k('copyPersistedSecret')}
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="close-confirmed-create"
+                disabled={busy || persistedCopying}
+                onClick={closeCreateResultModal}
+              >
+                {k('closeDialog')}
+              </button>
+            </div>
+            {persistedCopyFeedback && (
+              <p role="status" data-testid="copy-confirmed-client-secret-feedback">
+                {k(persistedCopyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
+              </p>
+            )}
+            <div className="key-create-access-panel">
+              <AccessInfoSummary
+                client={client}
+                auth={auth}
+                onUnauthorized={onUnauthorized}
+                info={accessInfo ?? undefined}
+                reloadToken={reloadToken}
+                compact
+                testIdPrefix="create-access-info"
+              />
+            </div>
+          </div>
         )}
         {secret && (
           <div className="key-secret-panel" role="status">
@@ -780,10 +2037,10 @@ export function FreshApiKeys({
                 <FullWebIcon name="key" size={24} />
               </span>
               <div>
-                <p>{t('keysCreated')}</p>
+                <p>{confirmedEffect ? k('createdActiveTitle') : t('keysCreated')}</p>
               </div>
             </div>
-            <p>{k('secretHelp')}</p>
+            <p>{confirmedEffect ? k('createdActiveHelp') : k('secretHelp')}</p>
             <p className="key-once-note">{t('keysOnce')}</p>
             <div className="key-secret-value">
               <code data-testid="created-client-secret">{secret}</code>
@@ -806,6 +2063,20 @@ export function FreshApiKeys({
               <p role="status" data-testid="copy-created-client-secret-feedback">
                 {t(copyFeedback === 'copied' ? 'keysCopied' : 'keysCopyFailed')}
               </p>
+            )}
+            {confirmed && !recoveryKey && (
+              <div className="key-create-access-panel">
+                <p className="key-field-help">{k('createAccessEndpointsTitle')}</p>
+                <AccessInfoSummary
+                  client={client}
+                  auth={auth}
+                  onUnauthorized={onUnauthorized}
+                  info={accessInfo ?? undefined}
+                  reloadToken={reloadToken}
+                  compact
+                  testIdPrefix="create-access-info"
+                />
+              </div>
             )}
           </div>
         )}
@@ -878,7 +2149,7 @@ export function FreshApiKeys({
                 'shield',
                 'summaryRuntimeTitle',
                 'summaryRuntimeHelp',
-                keys === null ? '—' : k('effectUnknown'),
+                runtimeSummaryValue,
               ],
               [
                 'replaced',
@@ -901,11 +2172,14 @@ export function FreshApiKeys({
               <strong
                 className={
                   'key-summary-value' +
-                  (id === 'runtime' || (id === 'usage' && usageUnavailable) ? ' is-unavailable' : '')
+                  ((id === 'runtime' && runtimeSummaryPillClass !== 'is-effective') ||
+                  (id === 'usage' && usageUnavailable)
+                    ? ' is-unavailable'
+                    : '')
                 }
               >
                 {id === 'runtime' ? (
-                  <span className="key-state-pill is-pending">{value}</span>
+                  <span className={'key-state-pill ' + runtimeSummaryPillClass}>{value}</span>
                 ) : id === 'usage' ? (
                   <span className="key-usage-value">
                     <span>{value}</span>
@@ -920,6 +2194,14 @@ export function FreshApiKeys({
             </div>
           ))}
         </div>
+        <AccessInfoSummary
+          client={client}
+          auth={auth}
+          onUnauthorized={onUnauthorized}
+          reloadToken={reloadToken}
+          className="fresh-keys-access-panel"
+          onLoaded={setAccessInfo}
+        />
         <div className="card key-table-panel">
           <div className="key-table-heading">
             <div>
@@ -1014,18 +2296,17 @@ export function FreshApiKeys({
                       </td>
                       <td data-label={k('lifecycle')}>
                         <span
-                          className={
-                            'key-state-pill ' +
-                            (key.lifecycle === 'superseded' ? 'is-muted' : 'is-saved')
-                          }
+                          className={'key-state-pill ' + keyLifecyclePillClass(key.lifecycle)}
+                          data-testid={'key-lifecycle-' + key.id}
                         >
-                          {k(key.lifecycle === 'superseded' ? 'replaced' : 'saved')}
+                          {k(keyLifecycleTextKey(key.lifecycle))}
                         </span>
                         <br />
-                        <span className="key-state-pill is-pending">
-                          {k(
-                            key.runtimeState === 'effect_unknown' ? 'effectUnknown' : 'notApplied'
-                          )}
+                        <span
+                          className={'key-state-pill ' + keyRuntimePillClass(key.runtimeState)}
+                          data-testid={'key-runtime-' + key.id}
+                        >
+                          {k(keyRuntimeTextKey(key.runtimeState))}
                         </span>
                       </td>
                       <td data-label={k('usageColumn')} data-testid={'key-usage-' + key.id}>
@@ -1109,6 +2390,8 @@ export function FreshApiKeys({
           id={selected}
           client={client}
           gatewayPending={gatewayPending}
+          accessInfo={accessInfo}
+          reloadToken={reloadToken}
           credential={credential}
           onUnauthorized={onUnauthorized}
           onPending={(value) => {
@@ -1120,12 +2403,40 @@ export function FreshApiKeys({
             mutationRev.current += 1;
             setKeys((previous) => (previous || []).map((item) => (item.id === key.id ? key : item)));
           }}
-          onClose={() => setSelected('')}
+          onClose={() => {
+            setSelected('');
+            if (
+              pendingRefresh.current &&
+              activeReadEpoch.current === null &&
+              !activeMutation.current &&
+              !detailPendingRef.current
+            ) {
+              pendingRefresh.current = false;
+              void refresh(true);
+            }
+          }}
           onRequestOperation={
             revocationAvailable
               ? (desiredMode) => openRevocationFor(selected, desiredMode)
               : undefined
           }
+          onRebind={
+            onRebind
+              ? () => {
+                  if (!detailPendingRef.current) setSelected('');
+                  onRebind();
+                }
+              : undefined
+          }
+          onBlocker={(code, detail) => {
+            const typed = blockerOf(code);
+            if (!typed) return;
+            setBlocker(
+              typed.kind === 'key_rejected' && detail
+                ? { ...typed, detail }
+                : typed
+            );
+          }}
         />
       )}
       {revocationAvailable && keys && (
@@ -1144,6 +2455,15 @@ export function FreshApiKeys({
           credential={credential}
           disabled={locked}
           preset={revocationPreset}
+          reloadToken={reloadToken}
+          onRebind={
+            onRebind
+              ? () => {
+                  setRevocationOpen(false);
+                  onRebind();
+                }
+              : undefined
+          }
           onUnauthorized={onUnauthorized}
           onPending={(value) => {
             operationPendingRef.current = value;

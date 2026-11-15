@@ -76,6 +76,11 @@ type recordEvidence struct {
 	verification string
 	// binding is the External connect row that observation names.
 	binding *completedBinding
+	// controlBasePath and inferenceBasePath are the access routing the verdict
+	// commits. An empty control prefix falls back to the fixture's External
+	// prefix; an External verdict never carries an inference prefix.
+	controlBasePath   string
+	inferenceBasePath string
 }
 
 func (e recordEvidence) recordedDomains() string {
@@ -102,6 +107,28 @@ func (e recordEvidence) recordedBinding() *completedBinding {
 		generation:   "https://cpa.example",
 		observedAtMS: 1_700_000_000_000,
 	}
+}
+
+// fixtureControlBasePath and fixtureInferenceBasePath are the canonical routing
+// a completed fixture commits. A real completion records the prefixes the
+// operation serves, so the legitimate fixtures carry them too: the startup path
+// that wraps a completed store needs them, even though the admission reader
+// itself decides on the stage and the verdict evidence. An External verdict
+// commits the control prefix only.
+const (
+	fixtureControlBasePath   = "/test-control"
+	fixtureInferenceBasePath = "/test-inference"
+)
+
+// recordedRouting is the access routing a completed row carries beside its
+// verdict: the control prefix, and the inference prefix only for a Managed
+// target.
+func (e recordEvidence) recordedRouting() (control, inference string) {
+	control = e.controlBasePath
+	if control == "" {
+		control = fixtureControlBasePath
+	}
+	return control, e.inferenceBasePath
 }
 
 // fullCopyInEvidence is what a completed source copy records.
@@ -159,11 +186,17 @@ func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence r
 	defer func() { _ = db.Close() }()
 	// A store written by a build that predates the completion gate has neither
 	// the verification column nor the External connect table, so the fixture
-	// writes only the record that schema can hold.
-	var hasVerification int
+	// writes only the record that schema can hold. The same goes for the access
+	// routing columns: a migrated store carries the prefixes a completion
+	// commits, and a store from before them has no column to record.
+	var hasVerification, hasRouting int
 	if err := db.QueryRow(`select count(*) from pragma_table_info('upgrade_operations')
 		where name = 'verification'`).Scan(&hasVerification); err != nil {
 		t.Fatalf("read the fixture schema: %v", err)
+	}
+	if err := db.QueryRow(`select count(*) from pragma_table_info('upgrade_operations')
+		where name = 'control_base_path'`).Scan(&hasRouting); err != nil {
+		t.Fatalf("read the fixture routing schema: %v", err)
 	}
 	columns := `id, stage, domains_done, source_kind, source_fingerprint_before,
 		source_fingerprint_after, backup_manifest_sha256, created_at_ms, updated_at_ms`
@@ -180,6 +213,20 @@ func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence r
 		values = append(values, evidence.recordedVerification())
 		placeholders += `, ?`
 		updates += `, verification = excluded.verification`
+	}
+	if hasRouting > 0 && model.UpgradeStage(stage) == model.UpgradeStageComplete {
+		control, inference := evidence.recordedRouting()
+		inferenceCommitted := 0
+		if inference != "" {
+			inferenceCommitted = 1
+		}
+		columns += `, control_base_path, inference_base_path, routing_committed, inference_committed`
+		values = append(values, control, inference, 1, inferenceCommitted)
+		placeholders += `, ?, ?, ?, ?`
+		updates += `, control_base_path = excluded.control_base_path,
+			inference_base_path = excluded.inference_base_path,
+			routing_committed = excluded.routing_committed,
+			inference_committed = excluded.inference_committed`
 	}
 	if _, err := db.Exec(`insert into upgrade_operations (`+columns+`) values (`+placeholders+`)
 		on conflict(id) do update set `+updates, values...); err != nil {
@@ -905,10 +952,11 @@ func (f completedOperationFixture) record(t *testing.T) {
 	if _, err := db.Exec(`insert into upgrade_operations (
 		id, stage, last_forward_stage, domains_done, source_kind,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-		verification, created_at_ms, updated_at_ms
+		verification, control_base_path, inference_base_path,
+		routing_committed, inference_committed, created_at_ms, updated_at_ms
 	) values (1, 'complete', 'complete', ?, 'upgraded-legacy', 'source-fingerprint',
-		'source-fingerprint', 'backup-manifest-sha256', ?, 1, 1)`,
-		f.domainsDone, f.verification); err != nil {
+		'source-fingerprint', 'backup-manifest-sha256', ?, ?, '', 1, 0, 1, 1)`,
+		f.domainsDone, f.verification, fixtureControlBasePath); err != nil {
 		t.Fatalf("record the completed fixture row: %v", err)
 	}
 	f.recordBinding(t, db)
@@ -982,10 +1030,11 @@ func (f completedOperationFixture) recordManaged(t *testing.T, db *sql.DB) {
 	if _, err := db.Exec(`insert into upgrade_operations (
 		id, stage, last_forward_stage, domains_done, source_kind,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-		verification, created_at_ms, updated_at_ms
+		verification, control_base_path, inference_base_path,
+		routing_committed, inference_committed, created_at_ms, updated_at_ms
 	) values (1, 'complete', 'complete', ?, 'upgraded-legacy', 'source-fingerprint',
-		'source-fingerprint', 'backup-manifest-sha256', ?, 1, 1)`,
-		f.domainsDone, f.verification); err != nil {
+		'source-fingerprint', 'backup-manifest-sha256', ?, ?, ?, 1, 1, 1, 1)`,
+		f.domainsDone, f.verification, fixtureControlBasePath, fixtureInferenceBasePath); err != nil {
 		t.Fatalf("record the managed completed row: %v", err)
 	}
 	protector := fixtureProtector(t, f.paths.Database)

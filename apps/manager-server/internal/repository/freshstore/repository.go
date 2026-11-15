@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -393,7 +394,25 @@ func (r *repository) Create(ctx context.Context, id bootstrap.FreshIdentity, adm
 	if err = ValidatePristine(ctx, tx); err != nil {
 		return Record{}, err
 	}
-	v := Record{Operation: bootstrap.FreshOperation{Version: bootstrap.FreshContractVersion, Identity: id, Revision: 1, GatewayPending: true, AdminInitialized: admin != nil}, Admin: admin, Authority: Authority{ClaimClosed: admin != nil}}
+	sugCtrl, sugInf, err := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
+	if err != nil {
+		return Record{}, err
+	}
+	v := Record{
+		Operation: bootstrap.FreshOperation{
+			Version:          bootstrap.FreshContractVersion,
+			Identity:         id,
+			Revision:         1,
+			GatewayPending:   true,
+			AdminInitialized: admin != nil,
+			Routing: bootstrap.FreshRoutingCheckpoint{
+				SuggestedControlBasePath:   sugCtrl,
+				SuggestedInferenceBasePath: sugInf,
+			},
+		},
+		Admin:     admin,
+		Authority: Authority{ClaimClosed: admin != nil},
+	}
 	if err = write(ctx, tx, OperationKey, v.Operation); err == nil {
 		err = write(ctx, tx, AuthorityKey, v.Authority)
 	}
@@ -487,7 +506,16 @@ func (r *repository) UpdateTx(ctx context.Context, id bootstrap.FreshIdentity, r
 	if !reflect.DeepEqual(before.ConfigDamaged, v.ConfigDamaged) {
 		return Record{}, ErrConflict
 	}
-	if v.Operation.Identity != id || v.Operation.Revision != revision || before.Admin != nil && !reflect.DeepEqual(before.Admin, v.Admin) || before.Operation.AdminInitialized && !v.Operation.AdminInitialized || before.Authority.ClaimClosed && !v.Authority.ClaimClosed || before.Operation.Routing.Committed && !v.Operation.Routing.Committed {
+	if v.Operation.Identity != id || v.Operation.Revision != revision ||
+		before.Admin != nil && !reflect.DeepEqual(before.Admin, v.Admin) ||
+		before.Operation.AdminInitialized && !v.Operation.AdminInitialized ||
+		before.Authority.ClaimClosed && !v.Authority.ClaimClosed ||
+		before.Operation.Routing.Committed && !v.Operation.Routing.Committed ||
+		before.Operation.Routing.InferenceCommitted && !v.Operation.Routing.InferenceCommitted ||
+		(before.Operation.Routing.Target != "" && v.Operation.Routing.Target != before.Operation.Routing.Target) ||
+		(before.Operation.Routing.InferenceTarget != "" && (v.Operation.Routing.InferenceTarget != before.Operation.Routing.InferenceTarget || v.Operation.Routing.SharedEntry != before.Operation.Routing.SharedEntry)) ||
+		(before.Operation.Routing.SuggestedControlBasePath != "" && v.Operation.Routing.SuggestedControlBasePath != before.Operation.Routing.SuggestedControlBasePath) ||
+		(before.Operation.Routing.SuggestedInferenceBasePath != "" && v.Operation.Routing.SuggestedInferenceBasePath != before.Operation.Routing.SuggestedInferenceBasePath) {
 		return Record{}, ErrConflict
 	}
 	if before.Connection != nil && !reflect.DeepEqual(before.Connection, v.Connection) {

@@ -2064,3 +2064,91 @@ func TestCompletedOperationIsFrozenForEveryColumnWriter(t *testing.T) {
 		})
 	}
 }
+
+func TestStageAndCommitMissingInferenceOnCompletedUpgrade(t *testing.T) {
+	ctx := context.Background()
+	repo, db := newRepository(t)
+	copyIn := recordedCopyIn(t, repo)
+	copyIn.Stage = model.UpgradeStageCPAImport
+	copyIn.DomainsDone = []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig}
+	copyIn.ControlBasePath = "/upg-console"
+	if err := repo.Put(ctx, copyIn); err != nil {
+		t.Fatalf("Put pre-completion row: %v", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	completed, err := upgradeoperation.RecordCompletionTx(ctx, tx, model.UpgradeVerification{
+		TargetMode:        model.UpgradeTargetManaged,
+		SourceFingerprint: copyIn.SourceFingerprintAfter,
+		Domains:           copyIn.DomainsDone,
+		ObservedAtMS:      1_700_000_000_001,
+	})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("RecordCompletionTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("tx.Commit: %v", err)
+	}
+	if !completed.RoutingCommitted || completed.InferenceCommitted || completed.InferenceBasePath != "" {
+		t.Fatalf("unexpected initial completed row: %+v", completed)
+	}
+
+	// Commit without staged intent fails closed.
+	if _, err := repo.CommitMissingInferenceOnCompletedUpgrade(ctx, completed.Revision, "/upg-api", false); !errors.Is(err, upgradeoperation.ErrConflict) {
+		t.Fatalf("Commit without staged intent = %v, want ErrConflict", err)
+	}
+
+	// Stage persists uncommitted intent while preserving RoutingCommitted=true.
+	staged, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/upg-api", false)
+	if err != nil {
+		t.Fatalf("StageMissingInferenceOnCompletedUpgrade: %v", err)
+	}
+	if !staged.RoutingCommitted || staged.InferenceCommitted || staged.InferenceBasePath != "/upg-api" || staged.Revision != completed.Revision+1 {
+		t.Fatalf("unexpected staged row: %+v", staged)
+	}
+
+	// Replaying identical staged intent preserves row without a second write.
+	replayedStage, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/upg-api", false)
+	if err != nil {
+		t.Fatalf("replay StageMissingInferenceOnCompletedUpgrade: %v", err)
+	}
+	if replayedStage.Revision != staged.Revision || replayedStage.InferenceCommitted {
+		t.Fatalf("replay Stage wrote a second time: %+v vs %+v", replayedStage, staged)
+	}
+
+	// Competing different intent while uncommitted fails closed.
+	if _, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/other-api", false); !errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
+		t.Fatalf("competing Stage = %v, want ErrRoutingAlreadyCommitted", err)
+	}
+	if _, err := repo.CommitMissingInferenceOnCompletedUpgrade(ctx, staged.Revision, "/other-api", false); !errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
+		t.Fatalf("competing Commit = %v, want ErrRoutingAlreadyCommitted", err)
+	}
+	if _, err := repo.CommitMissingInferenceOnCompletedUpgrade(ctx, staged.Revision-1, "/upg-api", false); !errors.Is(err, upgradeoperation.ErrConflict) {
+		t.Fatalf("stale-revision Commit = %v, want ErrConflict", err)
+	}
+
+	// CAS commit flips InferenceCommitted=true.
+	committed, err := repo.CommitMissingInferenceOnCompletedUpgrade(ctx, staged.Revision, "/upg-api", false)
+	if err != nil {
+		t.Fatalf("CommitMissingInferenceOnCompletedUpgrade: %v", err)
+	}
+	if !committed.RoutingCommitted || !committed.InferenceCommitted || committed.InferenceBasePath != "/upg-api" || committed.Revision != staged.Revision+1 {
+		t.Fatalf("unexpected committed row: %+v", committed)
+	}
+
+	// Same already-committed intent returns stored row without a second write; different intent conflicts.
+	replayStageAfterCommit, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/upg-api", false)
+	if err != nil || replayStageAfterCommit.Revision != committed.Revision || !replayStageAfterCommit.InferenceCommitted {
+		t.Fatalf("Stage replay after commit = %+v, %v", replayStageAfterCommit, err)
+	}
+	replayCommitAfterCommit, err := repo.CommitMissingInferenceOnCompletedUpgrade(ctx, 0, "/upg-api", false)
+	if err != nil || replayCommitAfterCommit.Revision != committed.Revision || !replayCommitAfterCommit.InferenceCommitted {
+		t.Fatalf("Commit replay after commit = %+v, %v", replayCommitAfterCommit, err)
+	}
+	if _, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/upg-console", true); !errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
+		t.Fatalf("different intent after commit = %v, want ErrRoutingAlreadyCommitted", err)
+	}
+}

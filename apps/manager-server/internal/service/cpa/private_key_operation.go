@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"sync"
 )
 
 type KeySnapshot struct {
@@ -119,30 +120,100 @@ func (t *Transport) WriteKeySet(ctx context.Context, management string, keys []s
 // SampleKeySet observes the real CPA auth middleware, including the revoked
 // credential. This is independent of the persisted management projection.
 func (t *Transport) SampleKeySet(ctx context.Context, accepted, rejected []string) (bool, error) {
-	samples := []struct {
+	return t.sampleClientModels(ctx, accepted, rejected)
+}
+
+const maxConcurrentAuthSamples = 8
+
+func (t *Transport) sampleClientModels(ctx context.Context, accepted, rejected []string) (bool, error) {
+	if t == nil || t.client == nil {
+		return false, ErrProofUnavailable
+	}
+	for _, base := range []struct {
 		key    string
 		status int
-	}{{"", 401}, {"ku-invalid-client-key", 401}}
-	for _, key := range accepted {
-		samples = append(samples, struct {
-			key    string
-			status int
-		}{key, 200})
-	}
-	for _, key := range rejected {
-		samples = append(samples, struct {
-			key    string
-			status int
-		}{key, 401})
-	}
-	for _, sample := range samples {
-		code, _, err := t.request(ctx, http.MethodGet, "/v1/models", sample.key, nil)
+	}{{"", http.StatusUnauthorized}, {"ku-invalid-client-key", http.StatusUnauthorized}} {
+		code, _, err := t.request(ctx, http.MethodGet, "/v1/models", base.key, nil)
 		if err != nil {
 			return false, err
 		}
-		if code != sample.status {
+		if code != base.status {
 			return false, nil
 		}
 	}
-	return true, nil
+	type probeItem struct {
+		key    string
+		status int
+	}
+	items := make([]probeItem, 0, len(accepted)+len(rejected))
+	for _, key := range accepted {
+		items = append(items, probeItem{key: key, status: http.StatusOK})
+	}
+	for _, key := range rejected {
+		items = append(items, probeItem{key: key, status: http.StatusUnauthorized})
+	}
+	if len(items) <= 2 {
+		for _, sample := range items {
+			code, _, err := t.request(ctx, http.MethodGet, "/v1/models", sample.key, nil)
+			if err != nil {
+				return false, err
+			}
+			if code != sample.status {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workers := min(maxConcurrentAuthSamples, len(items))
+	jobs := make(chan probeItem, len(items))
+	for _, item := range items {
+		jobs <- item
+	}
+	close(jobs)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		mismatch bool
+	)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for sample := range jobs {
+				if probeCtx.Err() != nil {
+					return
+				}
+				code, _, err := t.request(probeCtx, http.MethodGet, "/v1/models", sample.key, nil)
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil && !mismatch {
+						firstErr = err
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+				if code != sample.status {
+					mu.Lock()
+					if !mismatch && firstErr == nil {
+						mismatch = true
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if firstErr != nil {
+		return false, firstErr
+	}
+	return !mismatch, nil
 }

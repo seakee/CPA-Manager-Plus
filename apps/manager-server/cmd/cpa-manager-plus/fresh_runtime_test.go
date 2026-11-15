@@ -283,10 +283,11 @@ func TestFreshRuntimeExternalConstructionKeepsRuntimeStatusOnly(t *testing.T) {
 	defer func() { _ = opened.Close() }()
 	records := freshstore.New(opened.DB)
 	if _, err := records.Update(t.Context(), opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(record *freshstore.Record) error {
-		record.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: record.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		record.Operation.Routing.OperationID = record.Operation.Identity.OperationID
+		record.Operation.Routing.Revision = 1
+		record.Operation.Routing.Target = "/cpamp-admin"
+		record.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		record.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)

@@ -77,7 +77,13 @@ func newPluginProxyFixture(t *testing.T, handler http.HandlerFunc) pluginProxyFi
 		t.Fatal(err)
 	}
 	if _, err = fresh.Update(context.Background(), id, pending.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = id.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/console"
+		r.Operation.Routing.InferenceTarget = "/access-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		r.Operation.ProductComplete = true
 		return nil
 	}); err != nil {

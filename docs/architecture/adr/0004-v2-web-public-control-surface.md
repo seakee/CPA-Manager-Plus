@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-15
+- Amended: 2026-11-14 — independent inference entry and client-key activation
 - Scope: Phase 1 public ingress + Phase 2–4 Web/Foundation contracts
 - Related: ADR-0001 Runtime Foundation, Issue #171
 
@@ -60,30 +61,26 @@ AI Client -> CPAMP Ingress -> CPA/Gateway -> Provider
 
 The invariant from ADR-0001 remains unchanged: model traffic MUST NOT pass through Manager or Runtime Supervisor.
 
-### 2. Configurable canonical Control Base Path
+### 2. Configurable canonical Control and Inference Base Paths
 
-The long-term Control Plane public surface MUST live under one canonical configurable path prefix:
-
-```text
-controlBasePath
-```
+The public Control Plane and Manager-owned CPA inference surface use independent
+canonical prefixes, `controlBasePath` and `inferenceBasePath`.
 
 Example:
 
 ```text
 controlBasePath = /7f3a9c
+inferenceBasePath = /8b2d41
 
 :18317
 ├─ /7f3a9c/*        -> Manager / CPAMP Control Plane
-└─ everything else -> CPA / Gateway Data Plane
+├─ /8b2d41/<protocol-path> -> CPA / Gateway Data Plane, prefix stripped
+└─ unmatched paths -> denied; no unprefixed inference fallback
 ```
 
-The long-term Ingress classifier is therefore conceptually:
-
-```text
-matches effective controlBasePath -> Manager
-otherwise                         -> Gateway
-```
+This classifier applies after Fresh or upgraded-v2 routing activation. The
+explicit pre-Fresh legacy posture remains lifecycle-bounded; an absent or
+unverified routing projection never grants Gateway access.
 
 A very small number of fixed transport/liveness paths may exist when they do not disclose product-sensitive state, but Full Web route growth MUST NOT require an ever-growing Ingress allowlist.
 
@@ -98,13 +95,41 @@ does not create a generic public static namespace.
 
 `controlBasePath` is an attack-surface and scan-noise reduction measure. It is NOT authentication or authorization and MUST NOT weaken normal security controls.
 
+First installation or first upgrade may accept a custom prefix or independently
+generate each prefix. Suggestions are immutable within the installation and
+different by default. Equal prefixes require explicit shared-entry intent;
+ancestor/descendant overlap is rejected. Shared entry disambiguates protocol
+paths from Control resources without exposing CPA management or Runtime paths.
+
+First-time New Managed and Adopt completion requires a valid, verified and
+committed inference prefix as well as the Control prefix. A control-only route
+prepared before strategy selection remains valid for Connect External, but
+cannot be used to select a Manager-owned strategy or mark its installation
+complete. Strategy selection, routing activation and completion re-check this
+invariant at their durable transaction boundaries. Already-completed historical
+v2 records with a missing inference prefix remain loadable and use the
+authenticated one-time completion path below; they are not reclassified as
+first-time installations.
+
+Inference forwarding preserves protocol paths, query strings, request streaming,
+SSE and WebSocket upgrades. Supported CPA protocol families include `/v1/`,
+`/v1beta/`, `/openai/v1/`, `/backend-api/codex/` and the bounded
+`/api/provider/` surface. Model discovery is prefixed too. CPA management,
+internal and callback paths are not inference routes.
+
+Connect External and Upgrade External expose the verified external CPA URL and
+its actual protocol endpoints. A Manager prefix does not control that external
+server. Existing v2 installations keep their committed Control prefix and may
+complete a missing inference prefix once; normal post-install prefix editing is
+outside this contract.
+
 ### 3. Authority and configuration ownership
 
-- Manager owns desired `controlBasePath` as product/runtime configuration authority.
-- Ingress consumes only the effective routing value.
+- Manager owns desired Control and inference prefixes as product configuration authority.
+- Ingress consumes the effective canonical projection, including separate Control and inference commitment facts.
 - Ingress MUST NOT read Manager SQLite or become product desired-state authority.
-- Browser Router basename, Public CPAMP API base, static-asset base, Manager SPA fallback, and Ingress route ownership MUST derive from the same canonical value/contract.
-- Changing the prefix requires a validated configuration operation with collision checking and eventual apply/health/commit-or-rollback semantics. The exact reload/distribution mechanism is deferred to the appropriate Foundation/Setup implementation slice.
+- Browser Router basename, Public CPAMP API base, static-asset base, Manager SPA fallback and Ingress Control ownership derive from the same Control value.
+- Prefix completion persists its exact uncommitted intent before external callbacks, verifies the applied route, then commits. Management stays available while inference is pending. Failed or lost responses recover from canonical state; identical committed replay does not rewrite intent, and different intent is rejected.
 
 The canonical contract MUST reject ambiguous forms, including root `/`, dot-segment traversal, encoded path bypasses, duplicate-slash ambiguity, and trailing-slash multi-meaning. It MUST detect collisions with fixed transport paths and Gateway protocol ownership.
 
@@ -112,6 +137,26 @@ Phase4-02 limits canonical prefix characters to ASCII letters, digits and
 `-._~$&+,/:;=@`, which remain unchanged in both Go and browser URL path
 serialization. Prefixes requiring escaping (including Unicode literals) are
 rejected during authority validation, not normalized into a second mount.
+
+### Client Key activation and source identity
+
+Ordinary Key creation encrypts and saves one canonical Key, applies it to the
+selected CPA and confirms real client authentication in the same operation.
+Configuration readback alone is not proof of effectiveness: anonymous and invalid
+credentials must be rejected, and the intended client credential must succeed.
+Authentication evidence is fenced to the installation, source snapshot and, for a
+Manager-owned destination, the live Runtime generation and artifact.
+
+A failed or unknown write keeps the same saved Key and durable attempt. Refresh,
+retry and process reconstruction reconcile read-only rather than minting another
+Key or blindly resending an attempted write. Plaintext remains protected at rest;
+administrator and CPA management credentials are not client credentials.
+
+There is no artificial total-Key limit. Add, revoke and replace preserve other
+effective keys, refuse an empty client inventory and protect the final effective
+Key. Adopt and Upgrade preserve canonical identities and history. A same-ID,
+same-hash runtime handoff atomically closes the prior half-open attribution
+window and opens the next; a different active canonical owner remains a conflict.
 
 ### 4. Two Browser Applications, not one mode-switched application
 

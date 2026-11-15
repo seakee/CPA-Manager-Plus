@@ -102,7 +102,7 @@ func (r DestinationRequest) Validate() error {
 	}
 	if validateRequest(r.OperationID, r.ExpectedRuntimeIdentity, r.ExpectedRuntimeGeneration) != nil || !r.ExpectedActiveArtifactID.IsValid() ||
 		!strings.HasPrefix(r.SourceIdentity, prefix) || len(r.SourceIdentity) != len(prefix)+64 ||
-		len(r.ManagementKey) != 64 || r.APIKeys == nil || len(r.APIKeys) > 128 {
+		len(r.ManagementKey) != 64 || len(r.APIKeys) == 0 {
 		return ErrInvalidRequest
 	}
 	if _, err := hex.DecodeString(r.ManagementKey); err != nil {

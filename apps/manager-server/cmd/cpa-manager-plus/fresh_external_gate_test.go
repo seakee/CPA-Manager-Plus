@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,8 +23,8 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	codexsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -437,8 +438,8 @@ func TestExternalWritesAnswerTheRecordedRefusalLocally(t *testing.T) {
 	}
 	created := gatewayRequest(t, app, http.MethodPost, "api-keys",
 		`{"requestId":"`+strings.Repeat("c", 32)+`"}`, "application/json")
-	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
-		t.Fatalf("key create = %d %s", created.Code, created.Body.String())
+	if created.Code != http.StatusConflict || errorCode(t, created) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("key create under active refusal = %d %s", created.Code, created.Body.String())
 	}
 	var body struct {
 		Key struct {
@@ -925,6 +926,19 @@ func newStatefulExternalCPA(t *testing.T, initialKey string) *statefulExternalCP
 		refuseStatus: http.StatusUnauthorized,
 	}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			s.mu.Lock()
+			accepted := token != "" && r.Header.Get("Authorization") == "Bearer "+token && slices.Contains(s.clientKeys, token)
+			s.mu.Unlock()
+			if !accepted {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+			return
+		}
 		s.requests.Add(1)
 		authHeader := r.Header.Get("Authorization")
 		s.mu.Lock()
@@ -989,10 +1003,18 @@ func newStatefulExternalCPA(t *testing.T, initialKey string) *statefulExternalCP
 
 func stageExternalKeyForGateTest(t *testing.T, app *freshApplication, reqChar string, installOnCPA bool) string {
 	t.Helper()
+	reqID := strings.Repeat(reqChar, 32)
+	if !installOnCPA {
+		staged, _, err := app.keys.Create(t.Context(), reqID)
+		if err != nil || staged.Key.ID == "" {
+			t.Fatalf("stage local key: %v", err)
+		}
+		return string(staged.Key.ID)
+	}
 	created := gatewayRequest(t, app, http.MethodPost, "api-keys",
-		`{"requestId":"`+strings.Repeat(reqChar, 32)+`"}`, "application/json")
+		`{"requestId":"`+reqID+`"}`, "application/json")
 	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
-		t.Fatalf("create key = %d %s", created.Code, created.Body.String())
+		t.Fatalf("create and apply key = %d %s", created.Code, created.Body.String())
 	}
 	var decoded struct {
 		Key struct {
@@ -1001,12 +1023,6 @@ func stageExternalKeyForGateTest(t *testing.T, app *freshApplication, reqChar st
 	}
 	if err := json.Unmarshal(created.Body.Bytes(), &decoded); err != nil || decoded.Key.ID == "" {
 		t.Fatalf("decode created key %q: %v", created.Body.String(), err)
-	}
-	if installOnCPA {
-		installed := gatewayRequest(t, app, http.MethodPost, "api-keys/"+decoded.Key.ID+"/initial-install", `{}`, "application/json")
-		if installed.Code != http.StatusOK {
-			t.Fatalf("initial-install key %s = %d %s", decoded.Key.ID, installed.Code, installed.Body.String())
-		}
 	}
 	return decoded.Key.ID
 }
@@ -1470,6 +1486,7 @@ func TestExternalFreshNativeSurfacesBindSingleSnapshotAcrossRebind(t *testing.T)
 		}
 	})
 }
+
 // TestExternalLegacyGateBindsPostWaitSnapshotAcrossRebind proves that
 // guardFreshExternalLegacy re-reads freshstore.Record inside
 // legacyCredentialGate and forces the downstream legacy proxy to send the
@@ -1662,14 +1679,14 @@ func TestExternalBridgedManagementServicesSerializeAndRecordRejection(t *testing
 				app := newBridgedExternalApp(t, cpaSrv.server.URL, externalAuthorityManagement)
 
 				cand, err := app.legacyApp.Store.UpsertAccountActionCandidate(t.Context(), model.AccountActionCandidateUpsert{
-					ActionType:        model.AccountActionTypeReview,
-					Provider:          "codex",
-					AuthFileName:      "codex-1.json",
-					AuthIndex:         "idx-1",
-					AccountSnapshot:   "acct-1@example.com",
-					ReasonCode:        "quota_exhausted",
-					Reason:            "test candidate",
-					SeenAtMS:          time.Now().UnixMilli(),
+					ActionType:      model.AccountActionTypeReview,
+					Provider:        "codex",
+					AuthFileName:    "codex-1.json",
+					AuthIndex:       "idx-1",
+					AccountSnapshot: "acct-1@example.com",
+					ReasonCode:      "quota_exhausted",
+					Reason:          "test candidate",
+					SeenAtMS:        time.Now().UnixMilli(),
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -1995,7 +2012,7 @@ func TestExternalPrecheckPropagatesContextCancellationWhileWaitingOnGate(t *test
 		} else {
 			reader = bytes.NewReader([]byte(body))
 		}
-		req := httptest.NewRequest(method, "/control/api/v2/"+resource, reader).WithContext(ctx)
+		req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, reader).WithContext(ctx)
 		req.Header.Set("Authorization", gateAdmin)
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
@@ -2568,7 +2585,7 @@ func TestExternalRefusalSQLiteWriteFailureFailsClosedAcrossFamiliesAndRecoversOn
 			if applyRes := gatewayRequest(t, app, http.MethodPost, "api-keys/"+stagedKey+"/initial-install", `{}`, "application/json"); applyRes.Code != http.StatusConflict || errorCode(t, applyRes) != freshconfig.ReasonManagementRejected {
 				t.Fatalf("api-keys initial-install after SQLite write failure = %d %s", applyRes.Code, applyRes.Body.String())
 			}
-			inspectReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
 			inspectReq.Header.Set("Content-Type", "application/json")
 			inspectReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			inspectRes := httptest.NewRecorder()
@@ -2598,7 +2615,7 @@ func TestExternalRefusalSQLiteWriteFailureFailsClosedAcrossFamiliesAndRecoversOn
 			if keysAfter := gatewayRequest(t, app, http.MethodGet, "api-keys", "", ""); keysAfter.Code != http.StatusOK {
 				t.Fatalf("api-keys after rebind = %d %s", keysAfter.Code, keysAfter.Body.String())
 			}
-			inspectAfterReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectAfterReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
 			inspectAfterReq.Header.Set("Content-Type", "application/json")
 			inspectAfterReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			inspectAfterRes := httptest.NewRecorder()
@@ -2688,7 +2705,7 @@ func TestExternalWedgedRefusalPersistenceFailsClosedWithinBoundAndFreesGate(t *t
 						req := gateHTTPRequest(http.MethodGet, "/v0/management/api-keys", gateAdmin).WithContext(leaderCtx)
 						app.legacy.ServeHTTP(res, req)
 					case "fresh_gateway_config":
-						req := httptest.NewRequest(http.MethodGet, "/control/api/v2/gateway/config", nil).WithContext(leaderCtx)
+						req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"gateway/config", nil).WithContext(leaderCtx)
 						req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 						app.canonicalAPI(res, req)
 					}
@@ -3139,7 +3156,7 @@ func TestExternalRejectionReadFailureFailsClosedAndRetainsPositiveBlocker(t *tes
 			if legacyRes := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin); legacyRes.Code != http.StatusServiceUnavailable {
 				t.Fatalf("%s: legacy /v0/management/api-keys = %d %s, want 503", label, legacyRes.Code, legacyRes.Body.String())
 			}
-			inspectReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
+			inspectReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/codex-inspection/run", strings.NewReader(`{"async":false}`))
 			inspectReq.Header.Set("Content-Type", "application/json")
 			inspectReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			inspectRes := httptest.NewRecorder()

@@ -231,3 +231,91 @@ func TestLegacyFailedUpgradeOperationFailsClosed(t *testing.T) {
 		t.Fatalf("rewritten failed row = %q high-water %q revision %d", rewritten.Stage, rewritten.LastForwardStage, rewritten.Revision)
 	}
 }
+
+func TestUpgradeOperationsInferenceCommittedMigrationAndStagedRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := raw.Exec(`create table upgrade_operations (
+		id integer primary key check (id = 1),
+		stage text not null,
+		last_forward_stage text not null default '',
+		revision integer not null default 0,
+		domains_done text not null default '[]',
+		source_kind text,
+		source_version text,
+		source_root text,
+		source_fingerprint_before text,
+		source_fingerprint_after text,
+		backup_manifest_sha256 text,
+		reconciliation text not null default '{}',
+		verification text not null default '{}',
+		manual_items text not null default '[]',
+		error_code text,
+		error_detail text,
+		rollback_image text,
+		rollback_image_source text,
+		rollback_image_form text,
+		rollback_status_url text,
+		rollback_source_fingerprint text,
+		rollback_observed_at_ms integer,
+		control_base_path text not null default '',
+		inference_base_path text not null default '',
+		shared_entry integer not null default 0,
+		routing_committed integer not null default 0,
+		suggested_control_base_path text not null default '',
+		suggested_inference_base_path text not null default '',
+		created_at_ms integer not null,
+		updated_at_ms integer not null
+	)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("create pre-inference_committed table: %v", err)
+	}
+	if _, err := raw.Exec(`insert into upgrade_operations (
+		id, stage, last_forward_stage, revision, domains_done, source_kind,
+		source_fingerprint_after, verification,
+		control_base_path, inference_base_path, routing_committed,
+		created_at_ms, updated_at_ms
+	) values (
+		1, 'complete', 'complete', 2, '["source_copy","identity","cpa_config"]', 'upgraded_legacy',
+		'fp-1', '{"targetMode":"managed","sourceFingerprint":"fp-1","domains":["source_copy","identity","cpa_config"],"observedAtMs":1700000000000}',
+		'/adm', '/api', 1, 1700000000000, 1700000000000
+	)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("insert pre-inference_committed completed row: %v", err)
+	}
+	_ = raw.Close()
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(migrated): %v", err)
+	}
+	var infCommitted int
+	if err := migrated.QueryRow(`select inference_committed from upgrade_operations where id = 1`).Scan(&infCommitted); err != nil {
+		_ = migrated.Close()
+		t.Fatalf("select inference_committed: %v", err)
+	}
+	if infCommitted != 1 {
+		_ = migrated.Close()
+		t.Fatalf("backfilled inference_committed = %d, want 1", infCommitted)
+	}
+	if _, err := migrated.Exec(`update upgrade_operations set inference_committed = 0 where id = 1`); err != nil {
+		_ = migrated.Close()
+		t.Fatalf("stage uncommitted inference_committed = 0: %v", err)
+	}
+	_ = migrated.Close()
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(reopened): %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if err := reopened.QueryRow(`select inference_committed from upgrade_operations where id = 1`).Scan(&infCommitted); err != nil {
+		t.Fatalf("select reopened inference_committed: %v", err)
+	}
+	if infCommitted != 0 {
+		t.Fatalf("reopened staged inference_committed = %d, want 0", infCommitted)
+	}
+}

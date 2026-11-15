@@ -453,7 +453,7 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 			}
 			fixture.app.store = failing
 			fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
-			serveResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+			serveResp := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 			if serveResp.Code != http.StatusServiceUnavailable || errorCode(t, serveResp) != "adopt_installation_unavailable" {
 				t.Fatalf("ServeHTTP store.Load outage (failFromCall=%d) = %d %s", failAt, serveResp.Code, serveResp.Body.String())
 			}
@@ -474,7 +474,7 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 			err:          errors.New("transient snapshot sqlite read blip"),
 		}
 		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
-		recoveredOp := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/operation", "", "")
+		recoveredOp := serveHTTPRequest(t, fixture.app, http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", "", "")
 		if recoveredOp.Code != http.StatusOK {
 			t.Errorf("transient Snapshot blip on committed route = %d %s, want 200", recoveredOp.Code, recoveredOp.Body.String())
 		}
@@ -489,7 +489,7 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 			err:           errors.New("transient snapshot unavailability"),
 		}
 		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
-		stillCommittedUnavailable := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		stillCommittedUnavailable := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if stillCommittedUnavailable.Code != http.StatusServiceUnavailable || errorCode(t, stillCommittedUnavailable) != "adopt_installation_unavailable" {
 			t.Fatalf("SnapshotUnavailable with committed reload = %d %s, want 503 adopt_installation_unavailable", stillCommittedUnavailable.Code, stillCommittedUnavailable.Body.String())
 		}
@@ -500,7 +500,7 @@ func TestAdoptCompletionRefusesConflictsAndStorageFailuresAtomically(t *testing.
 			err:          freshstore.ErrNotFresh,
 		}
 		fixture.app.routing = freshrouting.New(fixture.app.store, activeAdoptRoutingDriver{store: fixture.app.store})
-		if notFresh := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); notFresh.Code != http.StatusNotFound {
+		if notFresh := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json"); notFresh.Code != http.StatusNotFound {
 			t.Fatalf("ErrNotFresh complete = %d, want 404", notFresh.Code)
 		}
 
@@ -620,19 +620,19 @@ func TestAdoptCompletionEnablesRealConfigAndPluginWritesAcrossRestart(t *testing
 		}
 		return fixture.app.v8PluginCapable(probeCtx)
 	})
-	preOpResp := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/operation", "", "")
+	preOpResp := serveHTTPRequest(t, fixture.app, http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", "", "")
 	if preOpResp.Code != http.StatusOK || preOpResp.Header().Get(supportPluginHeader) != "" {
 		t.Fatalf("pre-completion ServeHTTP operation = %d header=%q", preOpResp.Code, preOpResp.Header().Get(supportPluginHeader))
 	}
 	<-oldProbeEntered
 
-	completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+	completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 	if completeResp.Code != http.StatusOK {
 		t.Fatalf("ServeHTTP complete = %d %s", completeResp.Code, completeResp.Body.String())
 	}
 	close(releaseOldProbe)
 
-	firstPostComplete := serveHTTPRequest(t, fixture.app, http.MethodGet, "/control/api/v2/api-keys", "", "")
+	firstPostComplete := serveHTTPRequest(t, fixture.app, http.MethodGet, currentInstallManagementAPIV2Prefix+"api-keys", "", "")
 	if firstPostComplete.Code != http.StatusOK || firstPostComplete.Header().Get(supportPluginHeader) != supportPluginHeaderValue {
 		t.Fatalf("first post-completion Console response = %d %s=%q", firstPostComplete.Code, supportPluginHeader, firstPostComplete.Header().Get(supportPluginHeader))
 	}
@@ -774,15 +774,23 @@ func TestAdoptCompletionReusesPreStagedWorkspaceKeysAndBindsSourceAtomically(t *
 		}
 	})
 
-	t.Run("existing key bound to incompatible runtime refuses 409 and rolls back sibling keys", func(t *testing.T) {
+	t.Run("foreign canonical hash owner refuses 409 and rolls back sibling keys", func(t *testing.T) {
 		fixture := adoptionFixtureWithKeys(t, "source-peer-clean", "source-peer-foreign-runtime")
 		ctx := t.Context()
 		staged, err := fixture.app.keys.RegisterAdopted(ctx, []string{"source-peer-foreign-runtime"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.opened.DB.Exec(`update gateway_api_key_source_bindings set runtime_identity='external-other' where api_key_id=?`, string(staged[0].ID)); err != nil {
+		foreignID := strings.Repeat("f", 32)
+		if _, err := fixture.opened.DB.Exec(`insert into gateway_api_key_identities(id,revision,lifecycle,created_at_ms,updated_at_ms) select ?,revision,lifecycle,created_at_ms,updated_at_ms from gateway_api_key_identities where id=?`, foreignID, string(staged[0].ID)); err != nil {
 			t.Fatal(err)
+		}
+		binding, err := fixture.opened.DB.Exec(`update gateway_api_key_source_bindings set runtime_identity='external-other',api_key_id=? where api_key_id=?`, foreignID, string(staged[0].ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count, err := binding.RowsAffected(); err != nil || count != 1 {
+			t.Fatalf("foreign canonical source binding fixture = %d rows, %v", count, err)
 		}
 
 		resp := fixture.complete(t)
@@ -867,7 +875,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		if save.Code != http.StatusOK || fixture.destination.value("routing", "strategy") != "fill-first" {
 			t.Fatalf("backfilled config save = %d %s", save.Code, save.Body.String())
 		}
-		replay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		replay := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if replay.Code != http.StatusOK {
 			t.Fatalf("post-backfill complete replay = %d %s", replay.Code, replay.Body.String())
 		}
@@ -889,7 +897,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 			t.Fatal(err)
 		}
 
-		resp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		resp := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if resp.Code != http.StatusConflict || errorCode(t, resp) != "adopt_installation_conflict" {
 			t.Fatalf("conflicted historical complete = %d %s", resp.Code, resp.Body.String())
 		}
@@ -921,18 +929,19 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		fixture.destination.mu.Unlock()
 
 		createResp := gatewayRequest(t, upgraded, http.MethodPost, "api-keys", `{"requestId":"`+strings.Repeat("a", 32)+`"}`, "application/json")
-		if createResp.Code != http.StatusCreated {
-			t.Fatalf("POST api-keys = %d %s", createResp.Code, createResp.Body.String())
+		if createResp.Code != http.StatusConflict {
+			t.Fatalf("POST api-keys on un-backfilled historical adopt = %d %s, want 409", createResp.Code, createResp.Body.String())
 		}
 		var created struct {
-			Key struct {
-				ID string `json:"id"`
+			Code string `json:"code"`
+			Key  struct {
+				ID           string `json:"id"`
+				RuntimeState string `json:"runtimeState"`
 			} `json:"key"`
 		}
-		if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil || created.Key.ID == "" {
-			t.Fatalf("decode created workspace key: %v %s", err, createResp.Body.String())
+		if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil || created.Key.ID == "" || created.Key.RuntimeState != "not_applied" {
+			t.Fatalf("decode persisted unapplied workspace key: %v %s", err, createResp.Body.String())
 		}
-
 		installResp := gatewayRequest(t, upgraded, http.MethodPost, "api-keys/"+created.Key.ID+"/initial-install", `{}`, "application/json")
 		if installResp.Code != http.StatusConflict {
 			t.Fatalf("POST initial-install on historical adopt = %d %s, want 409", installResp.Code, installResp.Body.String())
@@ -960,7 +969,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		fixture.destination.mu.Unlock()
 		upgraded.prepareCompletedStartup(ctx, preUpgrade.Operation)
 		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
-		unprovenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		unprovenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if unprovenReplay.Code != http.StatusServiceUnavailable || errorCode(t, unprovenReplay) != "adopt_destination_unproven" {
 			t.Fatalf("POST complete while destination unproven = %d %s, want 503 adopt_destination_unproven", unprovenReplay.Code, unprovenReplay.Body.String())
 		}
@@ -968,7 +977,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		fixture.destination.mu.Lock()
 		fixture.destination.authFn = origAuthFn
 		fixture.destination.mu.Unlock()
-		provenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		provenReplay := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if provenReplay.Code != http.StatusOK {
 			t.Fatalf("POST complete after destination recovery = %d %s", provenReplay.Code, provenReplay.Body.String())
 		}
@@ -1033,7 +1042,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		origAuthFn := fixture.destination.authFn
 		fixture.destination.authFn = func() string { return "destination-down" }
 		fixture.destination.mu.Unlock()
-		if downResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); downResp.Code != http.StatusServiceUnavailable || errorCode(t, downResp) != "adopt_destination_unproven" {
+		if downResp := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json"); downResp.Code != http.StatusServiceUnavailable || errorCode(t, downResp) != "adopt_destination_unproven" {
 			t.Fatalf("POST complete with suspicious journal while destination down = %d %s, want 503 adopt_destination_unproven", downResp.Code, downResp.Body.String())
 		}
 		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, false)
@@ -1043,7 +1052,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		fixture.destination.mu.Lock()
 		fixture.destination.authFn = origAuthFn
 		fixture.destination.mu.Unlock()
-		if okResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json"); okResp.Code != http.StatusOK {
+		if okResp := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json"); okResp.Code != http.StatusOK {
 			t.Fatalf("POST complete recovery = %d %s", okResp.Code, okResp.Body.String())
 		}
 		assertFreshAuthorityAdmission(t, upgraded, preUpgrade.Operation, true)
@@ -1079,7 +1088,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 			go func(slot int, target *freshApplication) {
 				defer wg.Done()
 				<-start
-				rec := serveHTTPRequest(t, target, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+				rec := serveHTTPRequest(t, target, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 				codes[slot] = rec.Code
 				bodies[slot] = rec.Body.String()
 			}(idx, candidateApp)
@@ -1154,7 +1163,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 				var interleaved sync.Once
 				appA.keyRepo.SetVerifyAfterInitialInstallHookForTest(func() {
 					interleaved.Do(func() {
-						peerRec := serveHTTPRequest(t, appB, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+						peerRec := serveHTTPRequest(t, appB, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 						if peerRec.Code != http.StatusOK {
 							t.Errorf("interleaved peer POST complete = %d %s, want 200", peerRec.Code, peerRec.Body.String())
 						}
@@ -1162,7 +1171,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 				})
 				t.Cleanup(func() { appA.keyRepo.SetVerifyAfterInitialInstallHookForTest(nil) })
 
-				replayRec := serveHTTPRequest(t, appA, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+				replayRec := serveHTTPRequest(t, appA, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 				if replayRec.Code != http.StatusOK {
 					t.Fatalf("interleaved POST complete (%s) = %d %s, want 200", mode, replayRec.Code, replayRec.Body.String())
 				}
@@ -1243,7 +1252,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		go func() {
 			defer wg.Done()
 			defer closeDoneA()
-			recA = serveHTTPRequest(t, appA, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+			recA = serveHTTPRequest(t, appA, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		}()
 
 		// Wait until appA has finished its read-only destination proof of {A, B},
@@ -1258,7 +1267,7 @@ func TestHistoricalCompletedAdoptionFailsClosedUntilBackfilledAndRecoversDetermi
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			recB = serveHTTPRequest(t, appB, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+			recB = serveHTTPRequest(t, appB, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		}()
 		wg.Wait()
 
@@ -1405,7 +1414,7 @@ func TestAdoptCompletionBackfillAndKeyPreflightWorkThroughStrategySelectorAndGat
 		fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
 		ctx := t.Context()
 
-		completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		completeResp := serveHTTPRequest(t, fixture.app, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if completeResp.Code != http.StatusOK {
 			t.Fatalf("POST complete via StrategySelector = %d %s, want 200", completeResp.Code, completeResp.Body.String())
 		}
@@ -1459,7 +1468,7 @@ func TestAdoptCompletionBackfillAndKeyPreflightWorkThroughStrategySelectorAndGat
 			err:          errors.New("simulated sqlite read outage during replay"),
 		}
 		upgraded.routing = freshrouting.New(upgraded.store, activeAdoptRoutingDriver{store: upgraded.store})
-		outageResp := serveHTTPRequest(t, upgraded, http.MethodPost, "/control/api/v2/complete", `{}`, "application/json")
+		outageResp := serveHTTPRequest(t, upgraded, http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", `{}`, "application/json")
 		if outageResp.Code != http.StatusServiceUnavailable || errorCode(t, outageResp) != "adopt_installation_unavailable" {
 			t.Fatalf("POST complete replay store outage = %d %s, want 503 adopt_installation_unavailable", outageResp.Code, outageResp.Body.String())
 		}

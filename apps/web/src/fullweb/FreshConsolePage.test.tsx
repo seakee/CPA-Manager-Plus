@@ -1,11 +1,13 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import i18n from '../i18n';
 import { apiKeysApi } from '../services/api/apiKeys';
 import { configApi } from '../services/api/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshConsolePage } from './FreshConsolePage';
+import { FreshInferencePrefixCompletion } from './FreshInferencePrefixCompletion';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import { createPublicApiClient } from './publicApi';
@@ -66,17 +68,27 @@ const key = 'Cpamp_Test_Only_Console_Admin_123456';
 describe('Fresh installation and Console authority boundary', () => {
   let renderer: ReactTestRenderer;
   let location: URL;
+  let historyState: unknown = null;
   let read: ReturnType<typeof vi.fn<typeof fetch>>;
   const persist = vi.fn((_key: string, _value: string) => undefined);
   const storage = new Map<string, string>();
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     location = new URL('https://manager.example/console');
-    vi.stubGlobal('window', {
+    historyState = null;
+    const stubWindow = {
       location,
       history: {
-        pushState: (_: unknown, _title: string, path: string) => {
-          location.href = new URL(path, location).href;
+        get state() {
+          return historyState;
+        },
+        pushState: (state: unknown, _title: string, path?: string | URL | null) => {
+          historyState = state;
+          if (typeof path === 'string' && path.length > 0) {
+            location.href = new URL(path, location).href;
+          } else if (path instanceof URL) {
+            location.href = path.href;
+          }
         },
       },
       addEventListener: (event: string, handler: () => void) => {
@@ -93,8 +105,10 @@ describe('Fresh installation and Console authority boundary', () => {
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       }),
-    });
+    };
+    vi.stubGlobal('window', stubWindow);
     vi.stubGlobal('document', {
+      defaultView: stubWindow,
       documentElement: {
         classList: { toggle: vi.fn() },
         setAttribute: vi.fn(),
@@ -155,13 +169,13 @@ describe('Fresh installation and Console authority boundary', () => {
       .find((button) =>
         [t('logout'), 'Logout', '登出', 'Выйти'].includes(button.props['aria-label'])
       )!;
-  async function mount(retryTransport?: typeof fetch) {
+  async function mount(retryTransport?: typeof fetch, mountContext = context) {
     await act(async () => {
       renderer = create(
         <FreshConsolePage
-          context={context}
+          context={mountContext}
           client={createPublicApiClient(
-            () => context,
+            () => mountContext,
             async (url, init) => {
               const target = String(url);
               if (target.endsWith('/api-keys'))
@@ -758,5 +772,511 @@ describe('Fresh installation and Console authority boundary', () => {
     });
     expect(updateDebugSpy).toHaveBeenCalledWith(true);
     expect(useConfigStore.getState().config?.debug).toBe(true);
+  });
+  it('gates an installed v2 session with missingInferenceCompletionRequired through FreshInferencePrefixCompletion before entering LegacyConsolePage', async () => {
+    const incompleteInferenceOp: FreshOperation = {
+      ...operation,
+      productComplete: true,
+      routing: {
+        ...operation.routing,
+        inferenceTarget: '',
+        sharedEntry: false,
+        inferenceCommitted: false,
+        missingInferenceCompletionRequired: true,
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+      },
+    };
+    let currentOp = incompleteInferenceOp;
+    read.mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('/api/v2/operation')) {
+        return Response.json(currentOp);
+      }
+      if (target.endsWith('/api/v2/installation/access/completion')) {
+        if (init?.method === 'POST') {
+          const payload = JSON.parse(String(init.body));
+          currentOp = {
+            ...incompleteInferenceOp,
+            revision: incompleteInferenceOp.revision + 1,
+            routing: {
+              ...incompleteInferenceOp.routing,
+              inferenceTarget: payload.inferenceBasePath,
+              sharedEntry: Boolean(payload.sharedEntry),
+              inferenceCommitted: true,
+              missingInferenceCompletionRequired: false,
+            },
+          };
+          return Response.json({
+            required: true,
+            mode: 'new_managed',
+            controlBasePath: '/console',
+            inferenceBasePath: payload.inferenceBasePath,
+            sharedEntry: Boolean(payload.sharedEntry),
+            inferenceCommitted: true,
+          });
+        }
+        return Response.json({
+          required: true,
+          mode: 'new_managed',
+          controlBasePath: '/console',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          inferenceCommitted: false,
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        });
+      }
+      if (target.endsWith('/api/v2/api-keys/access-info')) {
+        return Response.json({
+          mode: 'new_managed',
+          managementBasePath: '/console',
+          inferenceBasePath: currentOp.routing.inferenceTarget || '/inf1234567890abcd',
+          protocols: [
+            {
+              id: 'openai',
+              label: 'OpenAI',
+              basePath: '/inf1234567890abcd/v1',
+              examplePath: '/inf1234567890abcd/v1/chat/completions',
+            },
+          ],
+          ready: true,
+          code: '',
+        });
+      }
+      return Response.json(currentOp);
+    });
+
+    await mount();
+    await login();
+
+    expect(has('legacy-console')).toBe(false);
+    expect(renderer.root.findByType(FreshInferencePrefixCompletion)).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-submit' })).toBeTruthy();
+    });
+
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-submit' })
+        .props.onClick();
+    });
+
+    // Stays on the completion summary so the user can review AccessInfoSummary before entering.
+    expect(has('legacy-console')).toBe(false);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'inference-completion-enter-console' })
+    ).toBeTruthy();
+    expect(renderer.root.findByProps({ 'data-testid': 'access-info-summary' })).toBeTruthy();
+
+    const history = window.history;
+    Object.defineProperty(window, 'history', {
+      value: { ...history, replaceState: vi.fn() },
+      configurable: true,
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-enter-console' })
+        .props.onClick();
+      Object.defineProperty(window, 'history', { value: history, configurable: true });
+    });
+    expect(has('legacy-console')).toBe(true);
+  });
+  it('accepts Upgrade canonical operation lacking Fresh-only admissionId/databasePath while rejecting partial identity', async () => {
+    const upgradeOp: FreshOperation = {
+      version: 1,
+      identity: {
+        admissionId: '',
+        installationId: 'upgrade-installation-1',
+        generation: 'upgrade-generation-1',
+        databasePath: '',
+        operationId: 'upgrade:sha256:1234',
+      },
+      revision: 3,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: false,
+      routing: {
+        operationId: 'upgrade:sha256:1234',
+        target: '/console',
+        revision: 1,
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: {
+        strategy: 'migrate_legacy',
+        stage: 'committed',
+      },
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(upgradeOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    await act(async () => renderer.unmount());
+    const omittedFreshFieldsOp: FreshOperation = {
+      ...upgradeOp,
+      identity: {
+        installationId: upgradeOp.identity.installationId,
+        generation: upgradeOp.identity.generation,
+        operationId: upgradeOp.identity.operationId,
+      } as FreshOperation['identity'],
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(omittedFreshFieldsOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    await act(async () => renderer.unmount());
+    const halfFreshOp: FreshOperation = {
+      ...upgradeOp,
+      identity: {
+        ...upgradeOp.identity,
+        admissionId: 'stray-admission',
+        databasePath: '',
+      },
+    };
+    read.mockImplementation(() => Promise.resolve(Response.json(halfFreshOp)));
+    await mount();
+    await login();
+    expect(has('legacy-console')).toBe(false);
+  });
+  it('allows verified monotonic routing revision after one-time completion (including re-login against older HTML) and blocks owner drift or regression', async () => {
+    const upgradeIncomplete: FreshOperation = {
+      version: 1,
+      identity: {
+        admissionId: '',
+        installationId: 'upgrade-installation-2',
+        generation: 'upgrade-generation-2',
+        databasePath: '',
+        operationId: 'upgrade:sha256:5678',
+      },
+      revision: 5,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: false,
+      routing: {
+        operationId: 'upgrade:sha256:5678',
+        target: '/console',
+        revision: 1,
+        inferenceTarget: '',
+        sharedEntry: false,
+        inferenceCommitted: false,
+        missingInferenceCompletionRequired: true,
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: {
+        strategy: 'migrate_legacy',
+        stage: 'committed',
+      },
+    };
+    let currentOp = upgradeIncomplete;
+    read.mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('/api/v2/operation')) return Response.json(currentOp);
+      if (target.endsWith('/api/v2/installation/access/completion')) {
+        if (init?.method === 'POST') {
+          const payload = JSON.parse(String(init.body));
+          currentOp = {
+            ...upgradeIncomplete,
+            revision: upgradeIncomplete.revision + 1,
+            routing: {
+              ...upgradeIncomplete.routing,
+              revision: 2,
+              inferenceTarget: payload.inferenceBasePath,
+              sharedEntry: Boolean(payload.sharedEntry),
+              inferenceCommitted: true,
+              missingInferenceCompletionRequired: false,
+              suggestedInferenceBasePath: '',
+            },
+          };
+          return Response.json({
+            required: true,
+            mode: 'migrate_legacy',
+            controlBasePath: '/console',
+            inferenceBasePath: payload.inferenceBasePath,
+            sharedEntry: Boolean(payload.sharedEntry),
+            inferenceCommitted: true,
+          });
+        }
+        return Response.json({
+          required: true,
+          mode: 'migrate_legacy',
+          controlBasePath: '/console',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          inferenceCommitted: false,
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        });
+      }
+      if (target.endsWith('/api/v2/api-keys/access-info')) {
+        return Response.json({
+          mode: 'migrate_legacy',
+          managementBasePath: '/console',
+          inferenceBasePath: currentOp.routing.inferenceTarget || '/inf1234567890abcd',
+          protocols: [],
+          ready: true,
+          code: '',
+        });
+      }
+      return Response.json(currentOp);
+    });
+
+    await mount();
+    await login();
+    await vi.waitFor(() => {
+      expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-submit' })).toBeTruthy();
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-submit' })
+        .props.onClick();
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-enter-console' })).toBeTruthy();
+
+    // Foreign owner callback cannot mutate the accepted Console operation.
+    await act(async () => {
+      const rejected = renderer.root
+        .findByType(FreshInferencePrefixCompletion)
+        .props.onOperation({
+          ...currentOp,
+          identity: { ...currentOp.identity, installationId: 'foreign-installation' },
+        });
+      expect(rejected).toBe(false);
+    });
+
+    const history = window.history;
+    Object.defineProperty(window, 'history', {
+      value: { ...history, replaceState: vi.fn() },
+      configurable: true,
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-enter-console' })
+        .props.onClick();
+      Object.defineProperty(window, 'history', { value: history, configurable: true });
+    });
+    expect(has('legacy-console')).toBe(true);
+
+    // Re-logging in against older HTML context.revision === 1 succeeds when backend routing.revision === 2 after completion.
+    await act(async () => logout().props.onClick());
+    expect(hasLogin()).toBe(true);
+    await login();
+    expect(has('legacy-console')).toBe(true);
+
+    // Regressive routing revision below HTML context.revision is rejected even after completion.
+    await act(async () => renderer.unmount());
+    read.mockImplementation(async () => Response.json(currentOp));
+    await mount(undefined, { ...context, revision: 3 });
+    await login();
+    expect(has('legacy-console')).toBe(false);
+  });
+
+  it('normalizes /ui preview entry to console root and preserves /api-keys deep link across unremembered reload and re-authentication without plaintext storage', async () => {
+    location.href = 'https://manager.example/console/ui';
+    const replaceState = vi.fn(
+      (state: unknown, _title: string, path?: string | URL | null) => {
+        historyState = state;
+        if (typeof path === 'string' && path.length > 0) {
+          location.href = new URL(path, location).href;
+        } else if (path instanceof URL) {
+          location.href = path.href;
+        }
+      }
+    );
+    Object.defineProperty(window.history, 'replaceState', {
+      value: replaceState,
+      configurable: true,
+    });
+
+    await mount();
+    await login(false);
+    expect(replaceState).toHaveBeenCalledWith(null, '', '/console');
+    expect(location.pathname).toBe('/console');
+    expect(has('legacy-console')).toBe(true);
+    expect(has('fresh-route-keys')).toBe(false);
+    expect(has('fresh-managed-keys')).toBe(false);
+    expect(
+      renderer.root
+        .findAllByType('a')
+        .some(
+          (link) =>
+            link.props.href === '/console' && String(link.props.className).includes('active')
+        )
+    ).toBe(true);
+    expect(
+      persist.mock.calls.some(([, value]) => typeof value === 'string' && value.includes(key))
+    ).toBe(false);
+
+    await navigate('/api-keys');
+    expect(location.pathname).toBe('/console/api-keys');
+    expect(find('fresh-route-keys').props.hidden).toBe(false);
+    expect(has('fresh-managed-keys')).toBe(true);
+
+    // Simulate browser reload on /console/api-keys with remember=false.
+    await act(async () => renderer.unmount());
+    useAuthStore.setState({ isAuthenticated: false, managementKey: '' });
+    await useAuthStore.persist.rehydrate();
+    read.mockClear();
+    await mount();
+    expect(hasLogin()).toBe(true);
+    expect(has('legacy-console')).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+    expect(
+      Array.from(storage.values()).some((value) => value.includes(key))
+    ).toBe(false);
+    expect(
+      obfuscatedStorage.getItem<{ state: { managementKey?: string } }>(STORAGE_KEY_AUTH)?.state
+        .managementKey
+    ).toBeUndefined();
+
+    await login(false);
+    expect(has('legacy-console')).toBe(true);
+    expect(location.pathname).toBe('/console/api-keys');
+    expect(find('fresh-route-keys').props.hidden).toBe(false);
+    expect(has('fresh-managed-keys')).toBe(true);
+    expect(
+      persist.mock.calls.some(([, value]) => typeof value === 'string' && value.includes(key))
+    ).toBe(false);
+
+    // Also verify inRouter mounting context normalizes /ui and reaches /api-keys.
+    await act(async () => renderer.unmount());
+    location.href = 'https://manager.example/console/ui';
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter basename="/console" initialEntries={['/console/ui']}>
+          <LegacyConsolePage
+            context={context}
+            credential={key}
+            client={createPublicApiClient(
+              () => context,
+              async (url, init) => {
+                if (String(url).endsWith('/api-keys')) {
+                  return Response.json({
+                    keys: [],
+                    gatewayPending: true,
+                    revocationAvailable: false,
+                  });
+                }
+                return read(url, init);
+              }
+            )}
+            onUnauthorized={vi.fn()}
+          />
+        </MemoryRouter>
+      );
+    });
+    expect(location.pathname).toBe('/console');
+    expect(has('legacy-console')).toBe(true);
+    expect(has('fresh-route-keys')).toBe(false);
+    await navigate('/api-keys');
+    expect(find('fresh-route-keys').props.hidden).toBe(false);
+    expect(has('fresh-managed-keys')).toBe(true);
+  });
+
+  it('preserves /api-keys deep link when one-time inference completion continues into the console', async () => {
+    location.href = 'https://manager.example/console/api-keys';
+    const replaceState = vi.fn(
+      (state: unknown, _title: string, path?: string | URL | null) => {
+        historyState = state;
+        if (typeof path === 'string' && path.length > 0) {
+          location.href = new URL(path, location).href;
+        } else if (path instanceof URL) {
+          location.href = path.href;
+        }
+      }
+    );
+    Object.defineProperty(window.history, 'replaceState', {
+      value: replaceState,
+      configurable: true,
+    });
+    const upgradeIncomplete: FreshOperation = {
+      ...operation,
+      productComplete: true,
+      gatewayPending: true,
+      routing: {
+        ...operation.routing,
+        revision: 1,
+        inferenceCommitted: false,
+        missingInferenceCompletionRequired: true,
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+      },
+    };
+    let currentOp = upgradeIncomplete;
+    read.mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('/api/v2/operation')) return Response.json(currentOp);
+      if (target.endsWith('/api/v2/installation/access/completion')) {
+        if (init?.method === 'POST') {
+          const payload = JSON.parse(String(init.body));
+          currentOp = {
+            ...upgradeIncomplete,
+            revision: upgradeIncomplete.revision + 1,
+            routing: {
+              ...upgradeIncomplete.routing,
+              revision: 2,
+              inferenceTarget: payload.inferenceBasePath,
+              sharedEntry: Boolean(payload.sharedEntry),
+              inferenceCommitted: true,
+              missingInferenceCompletionRequired: false,
+              suggestedInferenceBasePath: '',
+            },
+          };
+          return Response.json({
+            required: true,
+            mode: 'migrate_legacy',
+            controlBasePath: '/console',
+            inferenceBasePath: payload.inferenceBasePath,
+            sharedEntry: Boolean(payload.sharedEntry),
+            inferenceCommitted: true,
+          });
+        }
+        return Response.json({
+          required: true,
+          mode: 'migrate_legacy',
+          controlBasePath: '/console',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          inferenceCommitted: false,
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        });
+      }
+      if (target.endsWith('/api/v2/api-keys/access-info')) {
+        return Response.json({
+          mode: 'migrate_legacy',
+          managementBasePath: '/console',
+          inferenceBasePath: currentOp.routing.inferenceTarget || '/inf1234567890abcd',
+          protocols: [],
+          ready: true,
+          code: '',
+        });
+      }
+      return Response.json(currentOp);
+    });
+
+    await mount();
+    await login(false);
+    await vi.waitFor(() => {
+      expect(renderer.root.findByProps({ 'data-testid': 'inference-completion-submit' })).toBeTruthy();
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-submit' })
+        .props.onClick();
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'inference-completion-enter-console' })
+        .props.onClick();
+    });
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+
+    expect(replaceState).toHaveBeenCalledWith(null, '', '/console/api-keys');
+    expect(location.pathname).toBe('/console/api-keys');
+    expect(has('legacy-console')).toBe(true);
+    expect(find('fresh-route-keys').props.hidden).toBe(false);
+    expect(has('fresh-managed-keys')).toBe(true);
   });
 });

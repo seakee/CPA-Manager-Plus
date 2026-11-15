@@ -26,8 +26,8 @@ func TestAdmissionRequiresInstalledIdentityAndFreshLiveAuthority(t *testing.T) {
 	if _, err := admit(); err == nil {
 		t.Fatal("staging alone admitted")
 	}
-	p, _ := s.permit()
-	s.permit = func() (Permit, error) { return p, nil }
+	p, _ := s.permit(context.Background())
+	s.permit = func(context.Context) (Permit, error) { return p, nil }
 	if err := s.repo.ClaimInitialInstall(t.Context(), repo.InitialInstall{KeyID: id, RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestAdmissionRequiresInstalledIdentityAndFreshLiveAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.status.Generation--
-	s.permit = func() (Permit, error) { return Permit{}, ErrUnavailable }
+	s.permit = func(context.Context) (Permit, error) { return Permit{}, ErrUnavailable }
 	if _, err := admit(); err == nil {
 		t.Fatal("missing permit admitted")
 	}
@@ -71,9 +71,9 @@ func TestS2BJournalBindsFixtureAcrossRequestsAndReload(t *testing.T) {
 	t.Setenv("CPAMP_PRIVATE_S2B_CHAT", "1")
 	t.Setenv("CPAMP_PRIVATE_S2A_CHAT", "")
 	s, _, _, id := fixture(t)
-	p, _ := s.permit()
+	p, _ := s.permit(context.Background())
 	p.S2B = cpa.PrivateProviderSeed{Provider: "unit-provider", Model: "unit-model", Target: "https://provider.invalid/v1", CredentialSHA256: strings.Repeat("a", 64)}
-	s.permit = func() (Permit, error) { return p, nil }
+	s.permit = func(context.Context) (Permit, error) { return p, nil }
 	var secret string
 	s.keys.WithStagedSecret(t.Context(), id, func(v string) error { secret = v; return nil })
 	if err := s.repo.ClaimInitialInstall(t.Context(), repo.InitialInstall{KeyID: id, RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli(), ProviderSeedSHA256: p.S2B.Binding()}); err != nil {
@@ -111,8 +111,8 @@ func TestAdmissionLosesAuthorityDuringObservation(t *testing.T) {
 			s, w, rt, id := fixture(t)
 			var secret string
 			s.keys.WithStagedSecret(t.Context(), id, func(v string) error { secret = v; return nil })
-			p, _ := s.permit()
-			s.permit = func() (Permit, error) { return p, nil }
+			p, _ := s.permit(context.Background())
+			s.permit = func(context.Context) (Permit, error) { return p, nil }
 			if err := s.repo.ClaimInitialInstall(t.Context(), repo.InitialInstall{KeyID: id, RunID: p.RunID, Generation: p.Generation, AttemptedAtMS: time.Now().UnixMilli()}); err != nil {
 				t.Fatal(err)
 			}

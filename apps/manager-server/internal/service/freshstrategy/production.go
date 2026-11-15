@@ -92,13 +92,13 @@ const (
 
 	applicabilitySourceNone       = "none"
 	applicabilitySourceV8Read     = "bounded_v8_direct_safe_read"
-	applicabilitySourceLegacyRead = "pinned_legacy_cpa_v7_0_12_direct_safe_read"
+	applicabilitySourceLegacyRead = "pinned_legacy_cpa_v8_0_55_direct_safe_read"
 
 	applicabilityDestinationExternal  = "external_connection"
 	applicabilityDestinationRuntimeV1 = "manager_runtime_private_v1"
 
 	applicabilityConfigV8         = "cpa_v8"
-	applicabilityConfigLegacyToV8 = "cpa_v7_0_12_source_to_cpa_v8_destination"
+	applicabilityConfigLegacyToV8 = "cpa_v8_0_55_source_to_cpa_v8_destination"
 
 	applicabilityModeNewManaged   = "fresh_new_managed"
 	applicabilityModeExternal     = "fresh_connect_external"
@@ -115,7 +115,7 @@ const (
 	limitationReadOnlyBoundedRead    = "read_only_bounded_safe_read"
 	limitationDirectTransport        = "direct_transport_no_proxy_no_redirect"
 	limitationClientAPIKeysOnly      = "client_api_keys_only"
-	limitationLegacyProfile          = "legacy_source_profile_cpa_v7_0_12"
+	limitationLegacyProfile          = "legacy_source_profile_cpa_v8_0_55"
 	limitationSourcePreserved        = "source_preserved"
 	limitationGatewayPending         = "gateway_pending"
 )

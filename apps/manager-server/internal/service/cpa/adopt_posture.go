@@ -81,7 +81,7 @@ func PostureFor(strategy string) (DestinationPosture, bool) {
 	switch strategy {
 	case "new_managed":
 		return DestinationPosture{}, true
-	case "adopt_existing":
+	case "adopt_existing", "upgrade_managed":
 		return DestinationPosture{Adopt: true}, true
 	default:
 		return DestinationPosture{}, false
@@ -308,18 +308,17 @@ func exactJSONNonNegativeInt64(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &v) == nil && v >= 0
 }
 
-// adoptMaxClientKeys is the adoption bound: a source with more client keys than
-// this has nothing this Manager will copy, so a destination above it is not one
-// this Manager staged.
-const adoptMaxClientKeys = 128
-
-// validKeys is the client-key policy of one posture. The adopted destination
-// carries the source's list, which is opaque to this Manager: any printable key
-// up to the adoption bound, unique. A Manager-owned New Managed destination only
-// ever carries the two shapes this Manager minted.
+// validKeys is the client-key policy of one posture. An adopted destination
+// carries the source's opaque list plus any keys added afterwards: any
+// non-empty duplicate-free set of printable keys. A Manager-owned New Managed
+// destination carries any non-empty duplicate-free set of canonical keys. Only
+// the private loopback S1/S2 fixture retains its intentional two-key bound.
 func (p proofPosture) validKeys(keys []string) bool {
+	if p.deny {
+		return false
+	}
 	if p.adopt {
-		if len(keys) < 1 || len(keys) > adoptMaxClientKeys {
+		if len(keys) < 1 {
 			return false
 		}
 		seen := make(map[string]bool, len(keys))
@@ -331,7 +330,11 @@ func (p proofPosture) validKeys(keys []string) bool {
 		}
 		return true
 	}
-	if len(keys) < 1 || len(keys) > 2 {
+	if !p.managed {
+		if len(keys) < 1 || len(keys) > 2 {
+			return false
+		}
+	} else if len(keys) < 1 {
 		return false
 	}
 	seen := make(map[string]bool, len(keys))

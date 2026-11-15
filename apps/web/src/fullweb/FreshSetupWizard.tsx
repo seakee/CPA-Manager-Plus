@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { bootstrapJourneyText as j, type BootstrapJourneyKey } from '../i18n/bootstrapJourney';
 import { useFullWebLanguage } from './useFullWebLanguage';
 import { shellText as s } from '../i18n/consoleShell';
 import { fullWebText as t } from '../i18n/fullweb';
@@ -10,7 +10,16 @@ import {
   type BootstrapTransportClient,
   type FreshOperation,
 } from './bootstrapTransport';
-import { validControlBasePath } from './routingContext';
+import {
+  buildPrefixPreviewUrls,
+  generateRandomAccessPrefix,
+  isSameOrNestedPrefix,
+  resolveBrowserOrigin,
+  validAccessPrefix,
+  validatePrefixPair,
+} from './accessPrefix';
+import { AccessInfoSummary } from './FreshAccessInfo';
+import { PublicApiError, type FullWebCredential, type PublicApiClient } from './publicApi';
 import { validRuntimeGeneration, type RuntimeGeneration } from './runtimeGeneration';
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
 import {
@@ -79,7 +88,7 @@ function attemptID() {
 // rendered sentence, so switching language re-renders what is already on screen
 // in the newly selected language.
 type WizardMessage =
-  | { from: 'journey'; key: Parameters<typeof j>[0] }
+  | { from: 'journey'; key: BootstrapJourneyKey }
   | { from: 'shell'; key: Parameters<typeof s>[0] }
   | { from: 'external'; key: Parameters<typeof x>[0] }
   | { from: 'artifact'; mapped: MappedArtifactError };
@@ -97,6 +106,30 @@ function wizardMessageText(message: WizardMessage): string {
     }
   }
 }
+function prefixCodeToJourneyKey(code?: string | null): BootstrapJourneyKey | null {
+  switch (code) {
+    case 'invalid_access_prefix':
+      return 'prefixErrorInvalid';
+    case 'inference_prefix_required':
+      return 'prefixErrorInferenceRequired';
+    case 'external_inference_prefix_forbidden':
+      return 'prefixErrorExternalInferenceForbidden';
+    case 'shared_prefix_mismatch':
+      return 'prefixErrorSharedMismatch';
+    case 'shared_prefix_confirmation_required':
+      return 'prefixErrorSharedConfirmRequired';
+    case 'prefix_overlap_forbidden':
+      return 'prefixErrorOverlapForbidden';
+    case 'reserved_prefix_collision':
+      return 'prefixErrorReservedCollision';
+    case 'routing_conflict':
+      return 'prefixErrorRoutingConflict';
+    case 'inference_prefix_already_committed':
+      return 'prefixErrorAlreadyCommitted';
+    default:
+      return null;
+  }
+}
 // One message for every failed step. A typed refusal from the Manager names the
 // cause it recorded; only when nothing names it does the journey fall back to
 // the sentence that covers any unfinished setup.
@@ -109,6 +142,8 @@ function setupErrorMessage(err: unknown): WizardMessage {
     // answer as required; that cause is actionable, unlike a bare 503.
     if (err.code === 'routing_verification_failed')
       return { from: 'shell', key: 'routingVerificationFailed' };
+    const prefixKey = prefixCodeToJourneyKey(err.code);
+    if (prefixKey) return { from: 'journey', key: prefixKey };
     const blocker = externalSetupBlockerKey(err.code);
     if (blocker) return { from: 'external', key: blocker };
   }
@@ -158,7 +193,32 @@ export function FreshSetupWizard({
   const [step, setStep] = useState(initialOperation.strategy?.strategy ? 3 : 0);
   const [key, setKey] = useState('');
   const [visible, setVisible] = useState(false);
-  const [path, setPath] = useState(initialOperation.routing.target || '/console');
+  const [path, setPath] = useState(
+    () =>
+      initialOperation.routing.target ||
+      initialOperation.routing.draftControlBasePath ||
+      initialOperation.routing.suggestedControlBasePath ||
+      generateRandomAccessPrefix()
+  );
+  const [inferencePath, setInferencePath] = useState(() => {
+    if (initialOperation.routing.inferenceTarget) return initialOperation.routing.inferenceTarget;
+    if (initialOperation.routing.draftInferenceBasePath) {
+      return initialOperation.routing.draftInferenceBasePath;
+    }
+    const suggested = initialOperation.routing.suggestedInferenceBasePath;
+    if (suggested && (!path || !isSameOrNestedPrefix(suggested, path))) {
+      return suggested;
+    }
+    return generateRandomAccessPrefix(path ? [path] : []);
+  });
+  const [sharedEntry, setSharedEntry] = useState(() =>
+    Boolean(
+      initialOperation.routing.target
+        ? initialOperation.routing.sharedEntry
+        : (initialOperation.routing.draftSharedEntry ?? initialOperation.routing.sharedEntry)
+    )
+  );
+  const [accessSessionExpired, setAccessSessionExpired] = useState(false);
   const [baseURL, setBaseURL] = useState('');
   const [cpaKey, setCPAKey] = useState('');
   const [savedKey, setSavedKey] = useState(false);
@@ -194,6 +254,28 @@ export function FreshSetupWizard({
       alive.current = false;
     };
   }, []);
+  const accessClient = useMemo<PublicApiClient>(
+    () => ({
+      get: async <T = unknown>(resource: string, credential?: FullWebCredential) => {
+        if (
+          resource === 'api-keys/access-info' &&
+          operation.routing.target &&
+          credential?.kind === 'session'
+        ) {
+          return (await transport.readAccessInfo(operation.routing.target)) as T;
+        }
+        throw new PublicApiError('routing_unavailable');
+      },
+      post: () => Promise.reject(new PublicApiError('routing_unavailable')),
+      put: () => Promise.reject(new PublicApiError('routing_unavailable')),
+    }),
+    [transport, operation.routing.target]
+  );
+
+
+  const effectiveInferencePath =
+    strategy === 'connect_external' ? '' : sharedEntry ? path : inferencePath;
+  const prefixesLocked = !!operation.routing.target || operation.routing.committed;
 
   function accept(next: FreshOperation) {
     if (!alive.current) throw new Error('Installation closed');
@@ -202,6 +284,13 @@ export function FreshSetupWizard({
     if (next.routing.target && next.routing.target !== path)
       throw new Error('Installation route changed');
     if (
+      strategy !== 'connect_external' &&
+      next.routing.inferenceTarget &&
+      next.routing.inferenceTarget !== effectiveInferencePath
+    )
+      throw new Error('Installation inference route changed');
+    setOperation(next);
+    if (
       next.strategy?.strategy === 'new_managed' &&
       target &&
       (next.strategy.targetIdentity !== target.runtimeIdentity ||
@@ -209,7 +298,6 @@ export function FreshSetupWizard({
         next.strategy.targetArtifactId !== target.activeGatewayArtifact.artifactId)
     )
       throw new Error('Installation target changed');
-    setOperation(next);
     onOperation?.(next);
     return next;
   }
@@ -292,12 +380,56 @@ export function FreshSetupWizard({
       if (alive.current) setBusy(false);
     }
   }
+  async function persistPrefixDraft(nextControl: string, nextInference: string, nextShared: boolean) {
+    const check = validatePrefixPair({
+      controlBasePath: nextControl,
+      inferenceBasePath: strategy === 'connect_external' ? '' : nextShared ? nextControl : nextInference,
+      sharedEntry: strategy === 'connect_external' ? false : nextShared,
+      requireInference: strategy !== 'connect_external',
+    });
+    if (!check.valid) {
+      const code = check.controlError || check.inferenceError || check.pairError;
+      setError({ from: 'journey', key: prefixCodeToJourneyKey(code) || 'invalidSetup' });
+      return;
+    }
+    await task(async () => {
+      try {
+        const next = accept(
+          await transport.saveRoutingDraft(
+            nextControl,
+            strategy === 'connect_external'
+              ? undefined
+              : { inferenceTarget: nextShared ? nextControl : nextInference, sharedEntry: nextShared }
+          )
+        );
+        if (next.routing.draftControlBasePath) {
+          setPath(next.routing.draftControlBasePath);
+          setSharedEntry(Boolean(next.routing.draftSharedEntry));
+        }
+        if (next.routing.draftInferenceBasePath) setInferencePath(next.routing.draftInferenceBasePath);
+        setNote({ from: 'journey', key: 'prefixDraftSaved' });
+      } catch (err) {
+        if (err instanceof BootstrapTransportError && prefixCodeToJourneyKey(err.code)) throw err;
+        throw new BootstrapTransportError('Prefix draft unavailable', 'unavailable');
+      }
+    });
+  }
+
   async function review() {
-    if (
-      (!operation.adminInitialized && !validateFreshAdminKey(key).valid) ||
-      !validControlBasePath(path)
-    ) {
+    if (!operation.adminInitialized && !validateFreshAdminKey(key).valid) {
       setError({ from: 'journey', key: 'invalidSetup' });
+      return;
+    }
+    const prefixValidation = validatePrefixPair({
+      controlBasePath: path,
+      inferenceBasePath: effectiveInferencePath,
+      sharedEntry: strategy === 'connect_external' ? false : sharedEntry,
+      requireInference: strategy !== 'connect_external',
+    });
+    if (!prefixValidation.valid) {
+      const code =
+        prefixValidation.controlError || prefixValidation.inferenceError || prefixValidation.pairError;
+      setError({ from: 'journey', key: prefixCodeToJourneyKey(code) || 'invalidSetup' });
       return;
     }
     // The External form is refused here, in the operator's words: nothing has
@@ -349,11 +481,22 @@ export function FreshSetupWizard({
         // installation's own facts. The Admin key is committed here because the
         // strategy write that follows is authorized by it, and the console route
         // is prepared just before completion.
+        let current = operation;
         if (!operation.adminInitialized) {
-          const current = await read();
-          await write(current, 'admin', () => transport.commitAdminKey(commitID.current, key));
+          current = await read();
+          current = await write(current, 'admin', () =>
+            transport.commitAdminKey(commitID.current, key)
+          );
           setKey('');
           setVisible(false);
+        }
+        if (!current.routing.target && !current.routing.committed) {
+          accept(
+            await transport.saveRoutingDraft(path, {
+              inferenceTarget: effectiveInferencePath,
+              sharedEntry,
+            })
+          );
         }
         setStep(2);
         return;
@@ -380,6 +523,41 @@ export function FreshSetupWizard({
         );
         setKey('');
         setVisible(false);
+      }
+      if (
+        !current.routing.target &&
+        !current.routing.committed &&
+        current.strategy?.stage !== 'committed'
+      ) {
+        const desiredDraftInference =
+          strategy === 'connect_external' ? '' : effectiveInferencePath;
+        const desiredDraftShared = strategy === 'connect_external' ? false : sharedEntry;
+        const draftMatches =
+          current.routing.draftControlBasePath === path &&
+          (current.routing.draftInferenceBasePath ?? '') === desiredDraftInference &&
+          Boolean(current.routing.draftSharedEntry) === desiredDraftShared;
+        if (!draftMatches) {
+          try {
+            current = accept(
+              await transport.saveRoutingDraft(
+                path,
+                strategy === 'connect_external'
+                  ? undefined
+                  : { inferenceTarget: effectiveInferencePath, sharedEntry }
+              )
+            );
+          } catch (err) {
+            if (
+              !current.strategy?.stage &&
+              err instanceof BootstrapTransportError &&
+              prefixCodeToJourneyKey(err.code) &&
+              err.code !== 'routing_conflict'
+            ) {
+              setStep(1);
+            }
+            throw err;
+          }
+        }
       }
       for (let action = 0; action < 3 && current.strategy?.stage !== 'committed'; action++) {
         let body: Record<string, unknown>;
@@ -433,7 +611,16 @@ export function FreshSetupWizard({
           return;
         }
       }
-      if (!current.routing.target) current = accept(await transport.prepareRouting(path));
+      if (!current.routing.target) {
+        current = accept(
+          await transport.prepareRouting(
+            path,
+            strategy === 'connect_external'
+              ? undefined
+              : { inferenceTarget: effectiveInferencePath, sharedEntry }
+          )
+        );
+      }
       if (!current.routing.committed) {
         pending.current = { revision: current.revision, stage: 'route' };
         try {
@@ -491,7 +678,12 @@ export function FreshSetupWizard({
       // Managed path does, so the console the operator enters is the one this
       // installation owns.
       let current = await transport.fetchOperation();
-      if (!current.routing.target) current = await transport.prepareRouting(path);
+      if (!current.routing.target) {
+        current = await transport.prepareRouting(path, {
+          inferenceTarget: effectiveInferencePath,
+          sharedEntry,
+        });
+      }
       await transport.activateRouting();
       return transport.fetchOperation();
     },
@@ -532,6 +724,12 @@ export function FreshSetupWizard({
       </section>
     );
   }
+  const previewUrls = buildPrefixPreviewUrls(
+    resolveBrowserOrigin(),
+    path,
+    strategy === 'connect_external' ? undefined : effectiveInferencePath,
+    strategy === 'connect_external' ? baseURL : undefined
+  );
   const summary = [
     [
       s('choiceTitle'),
@@ -542,8 +740,22 @@ export function FreshSetupWizard({
           : s('external'),
     ],
     [j('key'), operation.adminInitialized ? j('keepKey') : j('keyHidden')],
-    [s('consoleAddress'), path],
-    ...(strategy === 'connect_external' && baseURL ? [[t('externalBaseURL'), baseURL]] : []),
+    [j('managementPrefix'), path],
+    ...(strategy !== 'connect_external'
+      ? [
+          [j('inferencePrefix'), effectiveInferencePath],
+          [
+            j('sharedPrefixBadge'),
+            sharedEntry ? j('sharedPrefixBadge') : j('independentPrefixBadge'),
+          ],
+        ]
+      : []),
+    ...(strategy === 'connect_external' && baseURL
+      ? [
+          [t('externalBaseURL'), baseURL],
+          [j('externalInferenceLabel'), baseURL],
+        ]
+      : []),
     ...(strategy === 'new_managed'
       ? [[j('plugins'), plugins ? j('enabled') : j('disabled'), 'review-plugins']]
       : []),
@@ -640,6 +852,15 @@ export function FreshSetupWizard({
                   aria-pressed={strategy === value}
                   disabled={!!operation.strategy?.strategy}
                   onClick={() => {
+                    if (
+                      strategy === 'connect_external' &&
+                      value !== 'connect_external' &&
+                      !sharedEntry &&
+                      (!validAccessPrefix(inferencePath) ||
+                        (path && isSameOrNestedPrefix(inferencePath, path)))
+                    ) {
+                      setInferencePath(generateRandomAccessPrefix(path ? [path] : []));
+                    }
                     setStrategy(value);
                     setTarget(null);
                     setArtifactGate(null);
@@ -772,18 +993,184 @@ export function FreshSetupWizard({
               )}
               <div className="journey-field">
                 <label className="form-label" htmlFor="setup-control-path">
-                  {j('routeTitle')}
+                  {j('managementPrefix')}
                 </label>
-                <input
-                  id="setup-control-path"
-                  data-testid="route-target-input"
-                  className="form-input"
-                  value={path}
-                  disabled={!!operation.routing.target}
-                  onChange={(e) => setPath(e.target.value)}
-                />
-                <p className="journey-help">{j('pathHelp')}</p>
+                <div className="input-wrap">
+                  <input
+                    id="setup-control-path"
+                    data-testid="route-target-input"
+                    className="form-input"
+                    value={path}
+                    disabled={prefixesLocked}
+                    onChange={(e) => {
+                      setPath(e.target.value);
+                      setError(null);
+                      setNote((prev) =>
+                        prev?.from === 'journey' && prev.key === 'prefixDraftSaved' ? null : prev
+                      );
+                    }}
+                  />
+                  <div className="input-actions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      data-testid="randomize-control-prefix"
+                      disabled={busy || prefixesLocked}
+                      onClick={() => {
+                        const avoid =
+                          strategy !== 'connect_external' && !sharedEntry
+                            ? [path, inferencePath]
+                            : [path];
+                        const nextControl = generateRandomAccessPrefix(avoid);
+                        setPath(nextControl);
+                        setError(null);
+                        setNote((prev) =>
+                          prev?.from === 'journey' && prev.key === 'prefixDraftSaved' ? null : prev
+                        );
+                        if (operation.adminInitialized) {
+                          void persistPrefixDraft(
+                            nextControl,
+                            sharedEntry ? nextControl : inferencePath,
+                            sharedEntry
+                          );
+                        }
+                      }}
+                    >
+                      {j('randomizePrefix')}
+                    </button>
+                  </div>
+                </div>
+                <p className="journey-help">{j('managementPrefixHelp')}</p>
               </div>
+              {strategy !== 'connect_external' ? (
+                <>
+                  <div className="journey-field">
+                    <label className="journey-checkline" htmlFor="setup-shared-prefix">
+                      <input
+                        id="setup-shared-prefix"
+                        data-testid="shared-prefix-checkbox"
+                        type="checkbox"
+                        checked={sharedEntry}
+                        disabled={busy || prefixesLocked}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setSharedEntry(checked);
+                          if (
+                            !checked &&
+                            (!validAccessPrefix(inferencePath) ||
+                              (path && isSameOrNestedPrefix(inferencePath, path)))
+                          ) {
+                            setInferencePath(generateRandomAccessPrefix(path ? [path] : []));
+                          }
+                          setError(null);
+                          setNote((prev) =>
+                            prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                              ? null
+                              : prev
+                          );
+                        }}
+                      />
+                      <span>{j('sharedPrefixToggle')}</span>
+                    </label>
+                    <p className="journey-help">{j('sharedPrefixHelp')}</p>
+                  </div>
+                  <div className="journey-field">
+                    <label className="form-label" htmlFor="setup-inference-path">
+                      {j('inferencePrefix')}
+                    </label>
+                    <div className="input-wrap">
+                      <input
+                        id="setup-inference-path"
+                        data-testid="inference-target-input"
+                        className="form-input"
+                        value={sharedEntry ? path : inferencePath}
+                        disabled={prefixesLocked || sharedEntry}
+                        onChange={(e) => {
+                          setInferencePath(e.target.value);
+                          setError(null);
+                          setNote((prev) =>
+                            prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                              ? null
+                              : prev
+                          );
+                        }}
+                      />
+                      <div className="input-actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          data-testid="randomize-inference-prefix"
+                          disabled={busy || prefixesLocked || sharedEntry}
+                          onClick={() => {
+                            const nextInference = generateRandomAccessPrefix([path, inferencePath]);
+                            setInferencePath(nextInference);
+                            setError(null);
+                            setNote((prev) =>
+                              prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                                ? null
+                                : prev
+                            );
+                            if (operation.adminInitialized) {
+                              void persistPrefixDraft(path, nextInference, false);
+                            }
+                          }}
+                        >
+                          {j('randomizePrefix')}
+                        </button>
+                      </div>
+                    </div>
+                    <p className="journey-help">{j('inferencePrefixHelp')}</p>
+                  </div>
+                </>
+              ) : (
+                <p className="alert alert-info" data-testid="external-inference-note">
+                  {j('externalInferenceNote')}
+                </p>
+              )}
+              <div className="info-card" data-testid="prefix-url-preview">
+                <div className="info-row">
+                  <span className="info-key">{j('finalUrlsPreview')}</span>
+                  <span className="badge badge-neutral">
+                    {strategy === 'connect_external'
+                      ? s('external')
+                      : sharedEntry
+                        ? j('sharedPrefixBadge')
+                        : j('independentPrefixBadge')}
+                  </span>
+                </div>
+                <div className="info-row">
+                  <span className="info-key">{j('previewConsoleUrl')}</span>
+                  <code className="info-val">{previewUrls.consoleUrl}</code>
+                </div>
+                <div className="info-row">
+                  <span className="info-key">{j('previewManagementApiUrl')}</span>
+                  <code className="info-val">{previewUrls.managementApiUrl}</code>
+                </div>
+                {strategy !== 'connect_external' ? (
+                  <div className="info-row">
+                    <span className="info-key">{j('previewInferenceUrl')}</span>
+                    <code className="info-val">{previewUrls.inferenceUrl}</code>
+                  </div>
+                ) : (
+                  <div className="info-row">
+                    <span className="info-key">{j('previewExternalInferenceUrl')}</span>
+                    <code className="info-val">{previewUrls.externalUrl}</code>
+                  </div>
+                )}
+              </div>
+              {!prefixesLocked && (
+                <div className="header-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    data-testid="save-prefix-draft"
+                    disabled={busy || !operation.adminInitialized}
+                    onClick={() => void persistPrefixDraft(path, effectiveInferencePath, sharedEntry)}
+                  >
+                    {j('savePrefixDraft')}
+                  </button>
+                </div>
+              )}
               {strategy === 'connect_external' && (
                 <>
                   <div className="journey-field">
@@ -939,6 +1326,18 @@ export function FreshSetupWizard({
                 </section>
               )}
               {complete && <p className="journey-quiet">{j('bookmark')}</p>}
+              {complete && (
+                <AccessInfoSummary
+                  client={accessClient}
+                  auth={{ kind: 'session', value: transport.sessionToken() }}
+                  onUnauthorized={() => setAccessSessionExpired(true)}
+                />
+              )}
+              {complete && accessSessionExpired && (
+                <p className="alert alert-info" role="alert" data-testid="access-session-expired">
+                  <strong>{j('accessSessionExpired')}:</strong> {j('accessSessionExpiredHelp')}
+                </p>
+              )}
             </>
           )}
           {step === 3 && !complete && (

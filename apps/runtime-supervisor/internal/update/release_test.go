@@ -9,10 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -215,46 +211,6 @@ func TestProductionHTTPClientIgnoresProxyEnvironmentAndRejectsUnsafeRedirects(t 
 	safe, _ := http.NewRequest(http.MethodGet, "https://release-assets.githubusercontent.com/asset", nil)
 	if err := client.CheckRedirect(safe, []*http.Request{initial}); err != nil {
 		t.Fatalf("safe release redirect rejected: %v", err)
-	}
-}
-
-func TestAcceptedV733GitHubDigestsMatchPinnedDockerArchives(t *testing.T) {
-	fixtures := map[string]string{
-		"CLIProxyAPI_7.3.3_linux_amd64.tar.gz":   "sha256:7af8c99cd08eee3ccc81d1596e8a31785674d3de6bd7ec61416d59493dd8fc01",
-		"CLIProxyAPI_7.3.3_linux_aarch64.tar.gz": "sha256:5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883",
-	}
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller did not identify the release test source")
-	}
-	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
-	dockerfile, err := os.ReadFile(filepath.Join(repositoryRoot, "Dockerfile"))
-	if err != nil {
-		t.Fatalf("read repository Dockerfile: %v", err)
-	}
-	dockerfileText := string(dockerfile)
-	version := regexp.MustCompile(`cpa_version="([^"]+)"`).FindStringSubmatch(dockerfileText)
-	if len(version) != 2 || version[1] != "7.3.3" {
-		t.Fatalf("Dockerfile.runtime CPA version = %v, want 7.3.3", version)
-	}
-	readPin := func(name, pattern string) string {
-		match := regexp.MustCompile(pattern).FindStringSubmatch(dockerfileText)
-		if len(match) != 2 {
-			t.Fatalf("Dockerfile.runtime %s archive pin is missing or malformed", name)
-		}
-		return match[1]
-	}
-	pins := map[string]string{
-		"CLIProxyAPI_7.3.3_linux_amd64.tar.gz":   readPin("amd64", `amd64\)\s*asset_arch="amd64";\s*asset_sha256="([0-9a-f]{64})"`),
-		"CLIProxyAPI_7.3.3_linux_aarch64.tar.gz": readPin("arm64", `arm64\)\s*asset_arch="aarch64";\s*asset_sha256="([0-9a-f]{64})"`),
-	}
-	for name, digest := range fixtures {
-		if !canonicalDigest(digest) || !strings.Contains(name, "7.3.3") {
-			t.Fatalf("invalid pinned fixture %s=%s", name, digest)
-		}
-		if pins[name] != strings.TrimPrefix(digest, "sha256:") {
-			t.Fatalf("Dockerfile.runtime pin drift for %s: got %q want %q", name, pins[name], digest)
-		}
 	}
 }
 

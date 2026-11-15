@@ -83,7 +83,7 @@ func fixture(t *testing.T) (*Service, *fakeWire, *observedRuntime, string) {
 	w := &fakeWire{configured: true, auth: true}
 	s := New(r, keys, rt)
 	s.wire = w
-	s.permit = func() (Permit, error) {
+	s.permit = func(context.Context) (Permit, error) {
 		return Permit{RunID: "cpamp-s1-test-run", Generation: "7", ManagementKey: strings.Repeat("b", 64), IssuedAtMS: time.Now().Add(-time.Second).UnixMilli(), ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli()}, nil
 	}
 	return s, w, rt, string(created.Key.ID)
@@ -134,7 +134,7 @@ func TestObserveForeignInitialJournalDoesNotProveThisKeyAttempt(t *testing.T) {
 		t.Fatal("foreign S1 journal certified this Key", status, err)
 	}
 	// A missing Host permit does not turn the foreign journal into evidence.
-	s.permit = func() (Permit, error) { return Permit{}, ErrUnavailable }
+	s.permit = func(context.Context) (Permit, error) { return Permit{}, ErrUnavailable }
 	status, err = s.Observe(t.Context(), otherID, 7)
 	if err != nil || status.Attempted || status.InstallAvailable {
 		t.Fatal("foreign journal certified this Key without Host permit", status, err)
@@ -181,7 +181,7 @@ func TestObservationIsGenerationAndWindowBoundWithoutPersistentEffect(t *testing
 		t.Fatal(got, err)
 	}
 	rt.status.Generation = 7
-	s.permit = func() (Permit, error) { return Permit{}, ErrUnavailable }
+	s.permit = func(context.Context) (Permit, error) { return Permit{}, ErrUnavailable }
 	got, err = s.Observe(t.Context(), id, 7)
 	if err != nil || got.RuntimeState == "effective_observed" || got.CPAConfigured {
 		t.Fatal(got, err)

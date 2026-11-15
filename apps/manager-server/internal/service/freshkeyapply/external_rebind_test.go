@@ -3,14 +3,20 @@ package freshkeyapply
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
 
 // rebindRecordFor is a committed Connect External record holding one protected
@@ -215,6 +221,251 @@ func TestExternalRebindNeedsTheCommittedGeneration(t *testing.T) {
 	}
 	if probed {
 		t.Fatal("a foreign generation was probed against the CPA")
+	}
+}
+
+// TestExternalRefusalRebindAbortsUnattemptedOperationAllowsRecoveryAndFencesAttemptedWrites
+// verifies the end-to-end refusal -> rebind -> recovery contract:
+//  1. A management-refused, entirely unattempted operation is truthfully aborted on
+//     real credential rotation without marking target identities superseded or allowing
+//     the old destructive intent to execute against the rebound CPA, unblocking recovery.
+//  2. Attempted/unknown or partially-applied operations remain fenced against rotation,
+//     while same-credential re-verify stays available to recover from temporary bans.
+func TestExternalRefusalRebindAbortsUnattemptedOperationAllowsRecoveryAndFencesAttemptedWrites(t *testing.T) {
+	ctx := t.Context()
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "rebind-recovery.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := sqlite.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	keyRepo := repo.New(db)
+	protector, err := security.NewProtector([]byte("isolated-rebind-recovery-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := freshkeys.New(keyRepo, protector)
+
+	initialManagement := strings.Repeat("a", 64)
+	rotatedManagement := strings.Repeat("b", 64)
+	thirdManagement := strings.Repeat("c", 64)
+
+	fakeCPA := newFakeExternalCPA(t)
+	fakeCPA.management = initialManagement
+	protectedInitial, err := protector.ProtectString(initialManagement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &rebindStore{
+		record: freshstore.Record{
+			Operation: bootstrap.FreshOperation{
+				Strategy: bootstrap.FreshStrategyCheckpoint{
+					Strategy:         bootstrap.ConnectExternal,
+					Stage:            "committed",
+					TargetIdentity:   ExternalIdentity(fakeCPA.server.URL),
+					TargetGeneration: 1,
+				},
+				ProductComplete: true,
+				Revision:        1,
+			},
+			Connection: &model.ManagerCPAConnectionConfig{
+				CPABaseURL:    fakeCPA.server.URL,
+				ManagementKey: protectedInitial,
+			},
+		},
+	}
+	source := func(context.Context) (ExternalInstall, error) {
+		rec, loadErr := store.Load(ctx)
+		if loadErr != nil || rec.Connection == nil {
+			return ExternalInstall{}, ErrExternalUnavailable
+		}
+		mgmt, openErr := protector.UnprotectString(rec.Connection.ManagementKey)
+		if openErr != nil {
+			return ExternalInstall{}, ErrExternalUnavailable
+		}
+		return ExternalInstall{
+			Identity:      rec.Operation.Strategy.TargetIdentity,
+			Checkpoint:    rec.Operation.Strategy.TargetGeneration,
+			BaseURL:       rec.Connection.CPABaseURL,
+			ManagementKey: mgmt,
+		}, nil
+	}
+	service := NewExternal(keyRepo, keys, source)
+	service.externalProbe = supportedExternalVersion
+	service.externalRebindVerifier = func(_ context.Context, _ string, candidate string) (cpa.ExternalVersionReport, error) {
+		fakeCPA.mu.Lock()
+		currentMgmt := fakeCPA.management
+		fakeCPA.mu.Unlock()
+		if candidate != currentMgmt {
+			return cpa.ExternalVersionReport{}, cpa.ErrManagementRejected
+		}
+		return cpa.ClassifyExternalVersion("v8.0.13"), nil
+	}
+
+	stageKey := func(reqID string) (string, string) {
+		created, _, createErr := keys.Create(ctx, reqID)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return string(created.Key.ID), created.CreatedSecret
+	}
+
+	targetID, targetSecret := stageKey(strings.Repeat("1", 32))
+	keeperID, keeperSecret := stageKey(strings.Repeat("2", 32))
+	fakeCPA.mu.Lock()
+	fakeCPA.keys = []string{targetSecret, keeperSecret}
+	fakeCPA.authKeys = []string{targetSecret, keeperSecret}
+	fakeCPA.mu.Unlock()
+
+	// Prepare a destructive revoke of targetID, then rotate CPA's management key before ContinueOperation.
+	revokeOpID := strings.Repeat("3", 32)
+	prepared, err := service.Prepare(ctx, revokeOpID, targetID, keeperID, "revoke", 1)
+	if err != nil {
+		t.Fatalf("Prepare(revoke): %v", err)
+	}
+	fakeCPA.mu.Lock()
+	fakeCPA.management = rotatedManagement
+	fakeCPA.mu.Unlock()
+
+	if _, err := service.ContinueOperation(ctx, prepared.Operation.ID, 1); !errors.Is(err, cpa.ErrManagementRejected) {
+		t.Fatalf("ContinueOperation with rotated management key = %v, want ErrManagementRejected", err)
+	}
+	refusedOp, err := keyRepo.LatestOperation(ctx)
+	if err != nil || refusedOp == nil || refusedOp.Outcome != repo.OutcomePending || !refusedOp.AllStepsUnattempted() {
+		t.Fatalf("operation after management refusal = %+v (%v), want pending + all unattempted", refusedOp, err)
+	}
+
+	// Real credential rebind aborts the unattempted revoke without lying committed.
+	rebound, err := service.Rebind(ctx, store, protector, 1, "", rotatedManagement)
+	if err != nil {
+		t.Fatalf("Rebind with unattempted operation: %v", err)
+	}
+	if rebound.Reverified || store.rebounds != 1 {
+		t.Fatalf("rebound = %+v rebounds=%d, want rotation commit", rebound, store.rebounds)
+	}
+
+	abortedOp, err := keyRepo.Operation(ctx, revokeOpID)
+	if err != nil || abortedOp == nil || abortedOp.Outcome != repo.OutcomeAborted || !abortedOp.IsTerminal() || !abortedOp.AllStepsUnattempted() {
+		t.Fatalf("abortedOp after Rebind = %+v (%v), want terminal OutcomeAborted", abortedOp, err)
+	}
+	targetDetail, err := keys.Detail(ctx, targetID)
+	if err != nil || targetDetail.Lifecycle != identity.LifecycleActive {
+		t.Fatalf("target lifecycle after aborted revoke = %+v (%v), want active (never falsely superseded)", targetDetail, err)
+	}
+
+	checked, err := service.CheckOperation(ctx, revokeOpID, 1)
+	if err != nil || checked.Operation == nil || checked.Operation.Outcome != repo.OutcomeAborted || checked.RuntimeState != "not_applied" || checked.NextStep != "" {
+		t.Fatalf("CheckOperation(aborted) = %+v (%v), want aborted not_applied empty nextStep", checked, err)
+	}
+	if _, err := service.ContinueOperation(ctx, revokeOpID, 1); !errors.Is(err, repo.ErrConflict) {
+		t.Fatalf("ContinueOperation(aborted) = %v, want repo.ErrConflict (never retargets old revoke)", err)
+	}
+	if !slices.Contains(fakeCPA.keys, targetSecret) {
+		t.Fatalf("rebound CPA lost targetSecret from aborted pre-rebind revoke: %v", fakeCPA.keys)
+	}
+
+	// Recovery with SAME canonical key and SAME original requestId after an aborted
+	// ApplyAdd: initial ApplyAdd(createReqID) fails with ErrManagementRejected -> Rebind
+	// aborts that unattempted add -> retrying ApplyAdd(createReqID) with the SAME
+	// requestId allocates one fresh add intent, coalesces idempotent retries while
+	// pending/unknown without resending attempted PUTs, and commits the preserved key.
+	fourthManagement := strings.Repeat("d", 64)
+	createReqID := strings.Repeat("4", 32)
+	recoveredKeyID, recoveredSecret := stageKey(createReqID)
+	if _, err := service.Prepare(ctx, createReqID, recoveredKeyID, "", "add", 1); err != nil {
+		t.Fatalf("prepare add before credential rotation: %v", err)
+	}
+	fakeCPA.mu.Lock()
+	fakeCPA.management = thirdManagement
+	fakeCPA.mu.Unlock()
+
+	if _, err := service.ApplyAdd(ctx, createReqID, recoveredKeyID, 1); !errors.Is(err, cpa.ErrManagementRejected) {
+		t.Fatalf("ApplyAdd before second Rebind = %v, want ErrManagementRejected", err)
+	}
+	if _, err := service.Rebind(ctx, store, protector, 1, "", thirdManagement); err != nil {
+		t.Fatalf("second Rebind after refused ApplyAdd: %v", err)
+	}
+	origAddOp, err := keyRepo.Operation(ctx, createReqID)
+	if err != nil || origAddOp == nil || origAddOp.Outcome != repo.OutcomeAborted {
+		t.Fatalf("original add op after Rebind = %+v (%v), want OutcomeAborted", origAddOp, err)
+	}
+
+	// Hold hot-reload so the first post-rebind retry writes once and stays unknown;
+	// a second retry with the SAME createReqID must resolve the newest unknown op
+	// without minting another ID or sending a duplicate PUT.
+	fakeCPA.mu.Lock()
+	fakeCPA.holdHotReload = true
+	fakeCPA.authKeys = slices.Clone(fakeCPA.keys)
+	writesBeforeAdd := fakeCPA.writes
+	fakeCPA.mu.Unlock()
+
+	unknownRes, err := service.ApplyAdd(ctx, createReqID, recoveredKeyID, 1)
+	if !errors.Is(err, cpa.ErrApplyUnknown) || unknownRes.Operation == nil || unknownRes.Operation.ID == createReqID {
+		t.Fatalf("post-rebind ApplyAdd during hot-reload lag = %+v (%v), want fresh op ID + ErrApplyUnknown", unknownRes, err)
+	}
+	postRebindOpID := unknownRes.Operation.ID
+	if fakeCPA.writes != writesBeforeAdd+1 {
+		t.Fatalf("writes after first post-rebind ApplyAdd = %d, want +1", fakeCPA.writes-writesBeforeAdd)
+	}
+
+	retryUnknown, err := service.ApplyAdd(ctx, createReqID, recoveredKeyID, 1)
+	if !errors.Is(err, cpa.ErrApplyUnknown) || retryUnknown.Operation == nil || retryUnknown.Operation.ID != postRebindOpID {
+		t.Fatalf("idempotent retry while unknown = %+v (%v), want same op %s + ErrApplyUnknown", retryUnknown, err, postRebindOpID)
+	}
+	if fakeCPA.writes != writesBeforeAdd+1 {
+		t.Fatalf("writes after idempotent unknown retry = %d, want 0 duplicate PUTs", fakeCPA.writes-(writesBeforeAdd+1))
+	}
+
+	fakeCPA.mu.Lock()
+	fakeCPA.holdHotReload = false
+	fakeCPA.authKeys = slices.Clone(fakeCPA.keys)
+	fakeCPA.mu.Unlock()
+
+	recoveredRes, err := service.ApplyAdd(ctx, createReqID, recoveredKeyID, 1)
+	if err != nil {
+		t.Fatalf("ApplyAdd recovery settle with original requestId: %v", err)
+	}
+	if recoveredRes.Operation == nil || recoveredRes.Operation.ID != postRebindOpID ||
+		recoveredRes.Operation.Outcome != repo.OutcomeCommitted || !slices.Contains(fakeCPA.keys, recoveredSecret) {
+		t.Fatalf("recovered ApplyAdd = %+v, keys=%v", recoveredRes, fakeCPA.keys)
+	}
+	if fakeCPA.writes != writesBeforeAdd+1 {
+		t.Fatalf("writes after read-only settle = %d, want still 1 total PUT", fakeCPA.writes-writesBeforeAdd)
+	}
+
+	// Replaying ApplyAdd(createReqID) after commit resolves the committed op read-only.
+	replayedRes, err := service.ApplyAdd(ctx, createReqID, recoveredKeyID, 1)
+	if err != nil || replayedRes.Operation == nil || replayedRes.Operation.ID != postRebindOpID || replayedRes.Operation.Outcome != repo.OutcomeCommitted {
+		t.Fatalf("replayed ApplyAdd(createReqID) = %+v (%v), want committed op %s", replayedRes, err, postRebindOpID)
+	}
+	if fakeCPA.writes != writesBeforeAdd+1 {
+		t.Fatalf("writes after committed replay = %d, want 0 additional PUTs", fakeCPA.writes-(writesBeforeAdd+1))
+	}
+
+	// Attempted/unknown write remains fenced against credential rotation, while same-key reverify stays open.
+	fencedKeyID, _ := stageKey(strings.Repeat("6", 32))
+	attemptedOp := repo.Operation{
+		ID: strings.Repeat("7", 32), TargetID: fencedKeyID, Mode: "add",
+		RunID: ExternalIdentity(fakeCPA.server.URL), Generation: ExternalIdentity(fakeCPA.server.URL),
+		Revision: 1, Outcome: repo.OutcomeUnknown,
+		Steps:       []repo.KeyStep{{Name: "add", State: "attempted", Returned: true}},
+		CreatedAtMS: 5_000,
+	}
+	if err := keyRepo.BeginOperation(ctx, attemptedOp); err != nil {
+		t.Fatalf("BeginOperation(attempted): %v", err)
+	}
+	if _, err := service.Rebind(ctx, store, protector, 1, "", fourthManagement); !errors.Is(err, ErrRebindRefused) || !errors.Is(err, repo.ErrConflict) {
+		t.Fatalf("Rebind during attempted/unknown operation = %v, want ErrRebindRefused + repo.ErrConflict", err)
+	}
+	stillUnknown, err := keyRepo.LatestOperation(ctx)
+	if err != nil || stillUnknown == nil || stillUnknown.Outcome != repo.OutcomeUnknown {
+		t.Fatalf("LatestOperation after fenced Rebind = %+v (%v), want unchanged OutcomeUnknown", stillUnknown, err)
+	}
+	reverified, err := service.Rebind(ctx, store, protector, 1, "", thirdManagement)
+	if err != nil || !reverified.Reverified {
+		t.Fatalf("same-credential Rebind reverify with unknown op = %+v (%v), want Reverified=true", reverified, err)
 	}
 }
 

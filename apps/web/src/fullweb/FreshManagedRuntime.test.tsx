@@ -48,7 +48,21 @@ const committed: FreshOperation = {
   revision: 6,
   strategy: { ...staged.strategy, stage: 'committed' },
 };
-
+const managedAccessInfo = {
+  mode: 'new_managed',
+  managementBasePath: '/console',
+  inferenceBasePath: '/infer',
+  protocols: [
+    {
+      id: 'openai',
+      label: 'OpenAI',
+      basePath: '/infer/v1',
+      examplePath: '/infer/v1/chat/completions',
+    },
+  ],
+  ready: true,
+  code: '',
+};
 async function mount(
   get: ReturnType<typeof vi.fn>,
   post: ReturnType<typeof vi.fn>,
@@ -93,13 +107,11 @@ async function mount(
 describe('Fresh New existing Runtime strategy integration', () => {
   it('guides a user through review and one install action using server observations only', async () => {
     let current = initial;
-    const get = vi
-      .fn()
-      .mockImplementation((resource: string) =>
-        Promise.resolve(
-          resource === 'installation/runtime' ? { ...status, state: 'ready' } : current
-        )
-      );
+    const get = vi.fn().mockImplementation((resource: string) => {
+      if (resource === 'installation/runtime') return Promise.resolve({ ...status, state: 'ready' });
+      if (resource === 'api-keys/access-info') return Promise.resolve(managedAccessInfo);
+      return Promise.resolve(current);
+    });
     const post = vi.fn().mockImplementation((resource: string) => {
       current =
         resource === 'complete'
@@ -132,11 +144,11 @@ describe('Fresh New existing Runtime strategy integration', () => {
 
   it('resumes a confirmed destination without creating a second strategy', async () => {
     const done = { ...committed, revision: 7, productComplete: true };
-    const get = vi
-      .fn()
-      .mockImplementation((resource: string) =>
-        Promise.resolve(resource === 'installation/runtime' ? { ...status, state: 'ready' } : done)
-      );
+    const get = vi.fn().mockImplementation((resource: string) => {
+      if (resource === 'installation/runtime') return Promise.resolve({ ...status, state: 'ready' });
+      if (resource === 'api-keys/access-info') return Promise.resolve(managedAccessInfo);
+      return Promise.resolve(done);
+    });
     const post = vi.fn().mockResolvedValue(done);
     const ui = await mount(get, post, committed, true);
     await ui.click('install-runtime');
@@ -155,11 +167,15 @@ describe('Fresh New existing Runtime strategy integration', () => {
   });
 
   it('requires a host target then stages, starts and completes with authoritative reads', async () => {
-    const get = vi
-      .fn()
-      .mockResolvedValueOnce(staged)
-      .mockResolvedValueOnce(committed)
-      .mockResolvedValueOnce({ ...committed, revision: 7, productComplete: true });
+    const operationReads = [
+      staged,
+      committed,
+      { ...committed, revision: 7, productComplete: true },
+    ];
+    const get = vi.fn().mockImplementation((resource: string) => {
+      if (resource === 'api-keys/access-info') return Promise.resolve(managedAccessInfo);
+      return Promise.resolve(operationReads.shift());
+    });
     const post = vi.fn().mockResolvedValue({});
     const ui = await mount(get, post);
     await ui.click('install-runtime');
@@ -183,7 +199,7 @@ describe('Fresh New existing Runtime strategy integration', () => {
     expect(post.mock.calls[1][1].expectedRuntimeGeneration).toBe(3);
     await ui.click('install-runtime');
     expect(post.mock.calls[2][0]).toBe('complete');
-    expect(get).toHaveBeenCalledTimes(3);
+    expect(get.mock.calls.some(([resource]) => resource === 'api-keys/access-info')).toBe(true);
     expect(ui.renderer.root.findAllByProps({ 'data-testid': 'install-runtime' })).toHaveLength(0);
     expect(ui.pending).toHaveBeenLastCalledWith(false);
   });
@@ -277,7 +293,9 @@ describe('Fresh New existing Runtime strategy integration', () => {
     'keeps $action UNKNOWN while GET only returns the pre-write state',
     async ({ before, after, requiresObservation }) => {
       let current = before;
-      const get = vi.fn().mockImplementation(async () => current);
+      const get = vi.fn().mockImplementation(async (resource: string) =>
+        resource === 'api-keys/access-info' ? managedAccessInfo : current
+      );
       const post = vi.fn().mockRejectedValue(new PublicApiError('network'));
       const ui = await mount(get, post, before);
       if (requiresObservation) await ui.observe();
@@ -369,5 +387,26 @@ describe('Fresh New existing Runtime strategy integration', () => {
       finish(committed);
     });
     expect(ui.pending).toHaveBeenLastCalledWith(false);
+  });
+
+  it('renders AccessInfoSummary on completion and propagates 401 on access-info to onUnauthorized', async () => {
+    const done: FreshOperation = {
+      ...committed,
+      revision: 7,
+      productComplete: true,
+      routing: { ...committed.routing, inferenceTarget: '/infer', sharedEntry: false },
+    };
+    const get = vi.fn().mockImplementation(async (resource: string) => {
+      if (resource === 'api-keys/access-info') return managedAccessInfo;
+      return done;
+    });
+    const ui = await mount(get, vi.fn(), done, true);
+    expect(ui.node('access-info-summary')).toBeTruthy();
+    expect(JSON.stringify(ui.renderer.toJSON())).toContain('/infer/v1');
+    await act(async () => ui.renderer.unmount());
+
+    const unauthorizedGet = vi.fn().mockRejectedValue(new PublicApiError('authentication', 401));
+    const authUi = await mount(unauthorizedGet, vi.fn(), done, true);
+    expect(authUi.unauthorized).toHaveBeenCalledTimes(1);
   });
 });

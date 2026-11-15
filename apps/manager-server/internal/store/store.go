@@ -174,6 +174,10 @@ type Store struct {
 
 func (s *Store) FreshStore() freshstore.Store { return freshstore.New(s.db) }
 
+// SQLDB shares the Store-owned pool with composition-root repository adapters.
+// Callers must not close it; the Store retains the connection lifetime.
+func (s *Store) SQLDB() *sql.DB { return s.db }
+
 func Open(path string, protector ...*security.Protector) (*Store, error) {
 	db, err := sqliterepo.Open(path)
 	if err != nil {

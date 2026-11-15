@@ -40,7 +40,7 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 		}
 		record, err := store.Load(ctx)
 		if err != nil {
-			return freshkeyapply.ManagedInstall{}, fmt.Errorf("%w: %w", freshkeyapply.ErrUnavailable, err)
+			return freshkeyapply.ManagedInstall{}, err
 		}
 		checkpoint := record.Operation.Strategy
 		if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" || record.Connection == nil {
@@ -109,7 +109,7 @@ func externalInstallSource(store freshstore.Store, protector *security.Protector
 			var err error
 			record, err = store.Load(ctx)
 			if err != nil {
-				return freshkeyapply.ExternalInstall{}, freshkeyapply.ErrUnavailable
+				return freshkeyapply.ExternalInstall{}, err
 			}
 		}
 		return externalInstallFromRecord(record, protector)

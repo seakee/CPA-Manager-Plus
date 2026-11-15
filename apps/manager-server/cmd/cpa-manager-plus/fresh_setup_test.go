@@ -60,7 +60,13 @@ func TestFreshSetupContinuationCannotBecomeConsoleAuthentication(t *testing.T) {
 	}
 	op, _ := app.current(t.Context())
 	_, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		s := validInstallationRuntime()
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: string(s.Identity), TargetGeneration: uint64(s.Generation), TargetArtifactID: string(s.ActiveGatewayArtifact.ArtifactID)}
 		return nil
@@ -72,25 +78,25 @@ func TestFreshSetupContinuationCannotBecomeConsoleAuthentication(t *testing.T) {
 		if w := request(http.MethodGet, bootstrap.FixedBootstrapAPIPath+resource, "Fresh "+token); w.Code != 404 {
 			t.Fatal("fixed transport reopened", resource, w.Code)
 		}
-		if w := request(http.MethodGet, "/control/api/v2/"+resource, "Fresh "+token); w.Code != 200 {
+		if w := request(http.MethodGet, currentInstallManagementAPIV2Prefix+""+resource, "Fresh "+token); w.Code != 200 {
 			t.Fatal("original installation cannot continue", resource, w.Code)
 		}
 	}
 	for _, resource := range []string{"cpamp/usage-service/info", "cpamp/v0/management/config", "api-keys", "settings/update-channel", "admin/commit", "claim/exchange", "routing/prepare"} {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
-			if w := request(method, "/control/api/v2/"+resource, "Fresh "+token); w.Code != 401 {
+			if w := request(method, currentInstallManagementAPIV2Prefix+""+resource, "Fresh "+token); w.Code != 401 {
 				t.Fatal("installation credential escaped its scope", resource, method, w.Code)
 			}
 		}
 	}
-	if w := request(http.MethodPost, "/control/api/v2/complete", "Fresh "+token); w.Code != 200 {
+	if w := request(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", "Fresh "+token); w.Code != 200 {
 		t.Fatal("setup needed a premature Admin login", w.Code)
 	}
 	// A lost completion reply has a bounded read receipt, not a normal session.
-	if w := request(http.MethodGet, "/control/api/v2/operation", "Fresh "+token); w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`"productComplete":true`)) {
+	if w := request(http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", "Fresh "+token); w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`"productComplete":true`)) {
 		t.Fatal("completion receipt unavailable", w.Code)
 	}
-	if w := request(http.MethodPost, "/control/api/v2/strategy", "Fresh "+token); w.Code != 401 {
+	if w := request(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", "Fresh "+token); w.Code != 401 {
 		t.Fatal("completed installation allowed mutation", w.Code)
 	}
 	// Completion ends the installation credential's reach over its own resources
@@ -99,15 +105,15 @@ func TestFreshSetupContinuationCannotBecomeConsoleAuthentication(t *testing.T) {
 	// afterwards it is a Console resource and the session is only a receipt
 	// reader.
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		if w := request(method, "/control/api/v2/installation/adoption", "Fresh "+token); w.Code != 401 {
+		if w := request(method, currentInstallManagementAPIV2Prefix+"installation/adoption", "Fresh "+token); w.Code != 401 {
 			t.Fatal("completed installation still reached its adoption summary", method, w.Code)
 		}
 	}
-	if w := request(http.MethodGet, "/control/api/v2/operation", "Bearer "+strategyTestAdmin); w.Code != 200 {
+	if w := request(http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", "Bearer "+strategyTestAdmin); w.Code != 200 {
 		t.Fatal("normal Admin login stopped working", w.Code)
 	}
 	for _, auth := range []string{"Fresh wrong", "Bearer " + token, "Fresh " + strategyTestAdmin} {
-		if w := request(http.MethodGet, "/control/api/v2/operation", auth); w.Code != 401 {
+		if w := request(http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", auth); w.Code != 401 {
 			t.Fatal("wrong credential accepted", w.Code)
 		}
 	}

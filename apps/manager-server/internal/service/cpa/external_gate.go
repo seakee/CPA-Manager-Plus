@@ -90,6 +90,19 @@ func ObserveExternalResponseStatus(ctx context.Context, statusCode int) {
 	observer(statusCode, !keepHold)
 }
 
+// withoutExternalCredentialHooks detaches saved-management-credential gate and
+// header-observer hooks from ctx so client-key /v1/models probes never record
+// client 401 responses against the External management credential.
+func withoutExternalCredentialHooks(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	ctx = context.WithValue(ctx, externalSavedCredentialGateKey{}, nil)
+	ctx = context.WithValue(ctx, externalHeaderObserverKey{}, nil)
+	ctx = context.WithValue(ctx, externalKeepHoldKey{}, false)
+	return ctx
+}
+
 // TrustedCARoots holds reusable pooled and direct HTTP transports configured
 // with a scoped X.509 root pool so self-signed TLS tests never mutate
 // http.DefaultTransport or allocate unclosed transports per request.

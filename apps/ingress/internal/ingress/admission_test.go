@@ -14,7 +14,7 @@ import (
 )
 
 func committedProjection() FreshRouteState {
-	return FreshRouteState{InstallationID: "install-one", Generation: "generation-one", OperationID: "fresh-operation", Revision: 3, Target: "/control", Committed: true}
+	return FreshRouteState{InstallationID: "install-one", Generation: "generation-one", OperationID: "fresh-operation", Revision: 3, Target: "/control", InferenceTarget: "/inference", Committed: true, InferenceCommitted: true}
 }
 
 func admittedReply(state FreshRouteState) FreshAuthority {
@@ -256,7 +256,7 @@ func TestHandlerAdmitsFreshGatewayTrafficOnlyWhileManagerAdmits(t *testing.T) {
 	handler.EnableFreshGatewayAdmission(admitter.Admitted)
 	request := func() int {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		req := httptest.NewRequest(http.MethodPost, "/inference/v1/responses", nil)
 		req.Header.Set("Authorization", "Bearer cpamp_sk_client")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
@@ -340,9 +340,9 @@ func TestHandlerAdmissionNeverForwardsManagementOrPrivatePaths(t *testing.T) {
 		target string
 		want   int
 	}{
-		{target: "/v0/management/config", want: http.StatusNoContent},
-		{target: "/management.html", want: http.StatusNoContent},
-		{target: "/usage-service/config", want: http.StatusNoContent},
+		{target: "/v0/management/config", want: http.StatusNotFound},
+		{target: "/management.html", want: http.StatusNotFound},
+		{target: "/usage-service/config", want: http.StatusNotFound},
 		{target: "/v8/management/config", want: http.StatusNotFound},
 		{target: "/v8/management/config/access/api-keys", want: http.StatusNotFound},
 		{target: "/v8/management/config/api-keys", want: http.StatusNotFound},
@@ -362,11 +362,11 @@ func TestHandlerAdmissionNeverForwardsManagementOrPrivatePaths(t *testing.T) {
 	if gatewayHits.Load() != 0 {
 		t.Fatalf("management/private path reached Gateway: %d", gatewayHits.Load())
 	}
-	if managerPaths.Load() != 3 {
-		t.Fatalf("manager-owned paths = %d, want 3", managerPaths.Load())
+	if managerPaths.Load() != 0 {
+		t.Fatalf("unprefixed management path reached Manager: %d", managerPaths.Load())
 	}
 	// The same handler still forwards ordinary model traffic once admitted.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/inference/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || gatewayHits.Load() != 1 {

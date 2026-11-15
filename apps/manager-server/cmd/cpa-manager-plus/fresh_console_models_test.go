@@ -552,7 +552,7 @@ func TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate(t *testing.
 			firstDone := make(chan struct{})
 			go func() {
 				defer close(firstDone)
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(firstResp, req)
 			}()
@@ -573,14 +573,14 @@ func TestConsoleModelListRecordsExternalRejectionBeforeReleasingGate(t *testing.
 			go func() {
 				defer waiters.Done()
 				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterModelEntered}
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil).WithContext(ctx)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(waiterModelResp, req)
 			}()
 			go func() {
 				defer waiters.Done()
 				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterLegacyEntered}
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v0/management/api-keys", nil).WithContext(ctx)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/api-keys", nil).WithContext(ctx)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(waiterLegacyResp, req)
 			}()
@@ -664,7 +664,7 @@ func TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot(t *testing.T) {
 			install, err := baseSource(ctx)
 			if err == nil {
 				rebindOnce.Do(func() {
-					rebindReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", strings.NewReader(rebindBody("", reboundKey)))
+					rebindReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/rebind", strings.NewReader(rebindBody("", reboundKey)))
 					rebindReq.Header.Set("Content-Type", "application/json")
 					rebindReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 					rebindResp := httptest.NewRecorder()
@@ -745,7 +745,7 @@ func TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot(t *testing.T) {
 		firstDone := make(chan struct{})
 		go func() {
 			defer close(firstDone)
-			req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil)
+			req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			app.canonicalAPI(firstResp, req)
 		}()
@@ -756,7 +756,7 @@ func TestConsoleModelListCapturesGrantAndInstallFromSameSnapshot(t *testing.T) {
 			t.Fatal("first model-list request never entered upstream /v8/management/config")
 		}
 
-		rebindReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", strings.NewReader(rebindBody("", reboundKey)))
+		rebindReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/rebind", strings.NewReader(rebindBody("", reboundKey)))
 		rebindReq.Header.Set("Content-Type", "application/json")
 		rebindReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		rebindResp := httptest.NewRecorder()

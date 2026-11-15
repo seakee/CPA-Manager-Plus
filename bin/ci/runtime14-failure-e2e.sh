@@ -5,13 +5,22 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # The Dockerfiles fail closed on identity; bind a local build to this checkout.
 export VERSION="${VERSION:-dev}"
 export SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
-project="${CPAMP_RUNTIME14_PROJECT:-cpamp-runtime14-${RANDOM}-$$}"
-public_port="${CPAMP_RUNTIME14_PORT:-29317}"
-skip_build="${CPAMP_RUNTIME14_SKIP_BUILD:-false}"
+project="${CPAMP_RUNTIME14_PROJECT:-${CPAMP_SMOKE_PROJECT:-cpamp-runtime14-${RANDOM}-$$}}"
+public_port="${CPAMP_RUNTIME14_PORT:-${CPAMP_SMOKE_PORT:-29317}}"
+skip_build="${CPAMP_RUNTIME14_SKIP_BUILD:-${CPAMP_SMOKE_SKIP_BUILD:-false}}"
 initializer_name="${project}-cpamp-manager-init"
 snapshot_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime14-failure.XXXXXX")"
-# Explicit historical baseline; the normal Docker/Compose default is CPA v8.
-compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
+compose_override="${CPAMP_SMOKE_COMPOSE_OVERRIDE:-}"
+compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml")
+if [ -n "${compose_override}" ]; then
+  if [ ! -f "${compose_override}" ]; then
+    echo "CPAMP_SMOKE_COMPOSE_OVERRIDE does not exist or is not a regular file: ${compose_override}" >&2
+    exit 2
+  fi
+  export CPAMP_SMOKE_COMPOSE_OVERRIDE="${compose_override}"
+  compose+=(-f "${compose_override}")
+fi
+compose+=(-p "${project}")
 
 paused_manager_pid=""
 stopped_cpa_pid=""
@@ -403,9 +412,8 @@ if [ "${skip_build}" != "true" ]; then
 fi
 
 scenario 'A — healthy Manager-owned baseline'
-# Runtime14 tests historical Runtime failure behavior, not Fresh product setup.
-# Seed a CI-only historical Manager lifecycle baseline without restoring the
-# removed implicit Embedded behavior to Phase4-03 initialize.
+# Seed the disposable Manager reconciler baseline on the default CPA v8.0.55
+# full bundle without restoring implicit Embedded behavior to Fresh initialize.
 "${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 "${compose[@]}" up -d
 wait_public_success /health 90
@@ -421,8 +429,11 @@ if [[ ! "$baseline_artifact_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   fail "baseline active artifact ID is noncanonical: $baseline_artifact_id"
 fi
 assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.engine)" 'cpa' 'baseline artifact engine'
-assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.version)" '7.3.3' 'baseline trusted artifact version'
-assert_equal "$(printf '%s' "$baseline_status" | json_field cpaObservedVersion)" '7.3.3' 'baseline legacy version projection'
+assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.version)" '8.0.55' 'baseline trusted artifact version'
+assert_equal "$(printf '%s' "$baseline_status" | json_field cpaObservedVersion)" '8.0.55' 'baseline observed CPA version'
+manifest_json="$("${compose[@]}" exec -T cpa-manager-plus cat /usr/local/share/cpamp/runtime/cpa-artifact.json)"
+assert_equal "$(printf '%s' "${manifest_json}" | json_field version)" '8.0.55' 'pinned CPA manifest version'
+assert_equal "$(printf '%s' "${manifest_json}" | json_field artifactId)" "${baseline_artifact_id}" 'pinned CPA manifest artifact ID'
 runtime_binary_artifact_id="sha256:$("${compose[@]}" exec -T cpa-manager-plus sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
 assert_equal "$baseline_artifact_id" "$runtime_binary_artifact_id" 'baseline exact executable artifact ID'
 baseline_cpa_pid="$(runtime_cpa_pid)"
@@ -430,6 +441,9 @@ assert_cpa_pid_alive "${baseline_cpa_pid}"
 
 "${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-launcher"
+  test -f /data/runtime/.cpamp-v8-bootstrap
+  test "$(stat -c %u:%g:%a /data/runtime/.cpamp-v8-bootstrap)" = "0:0:444"
+  grep -q "^config-version: 8$" /data/runtime/gateway/config.yaml
 '
 
 baseline_manager_database="$(snapshot_manager_database scenario-a-manager)"

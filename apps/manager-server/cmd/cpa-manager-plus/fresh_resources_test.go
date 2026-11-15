@@ -58,7 +58,7 @@ func TestFreshCanonicalLegacyBridgeKeepsQuerySeparateFromPath(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	request := httptest.NewRequest(http.MethodPut, "/control/api/v2/cpamp/v0/management/usage/import-sessions/resume-123/chunk?offset=17", nil)
+	request := httptest.NewRequest(http.MethodPut, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/usage/import-sessions/resume-123/chunk?offset=17", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, request)
@@ -87,7 +87,7 @@ func TestFreshCanonicalResourcesReuseCPAMPServices(t *testing.T) {
 	markFreshProductComplete(t, app)
 	for _, resource := range []string{"cpamp/dashboard", "cpamp/config", "cpamp/status"} {
 		t.Run(resource, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+resource, nil)
+			req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+resource, nil)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			response := httptest.NewRecorder()
 			app.canonicalAPI(response, req)
@@ -104,7 +104,7 @@ func TestFreshCanonicalResourcesReuseCPAMPServices(t *testing.T) {
 func TestFreshCanonicalResourcesRemainAdminProtected(t *testing.T) {
 	app := newInstallationTestApplication(t)
 	for _, resource := range []string{"cpamp/dashboard", "cpamp/config", "cpamp/status"} {
-		req := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+resource, nil)
+		req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+resource, nil)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, req)
 		if response.Code != http.StatusUnauthorized {
@@ -122,7 +122,7 @@ func TestFreshCanonicalLegacyBridgeReusesCompleteRouter(t *testing.T) {
 		"cpamp/status",
 	} {
 		t.Run(resource, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+resource, nil)
+			req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+resource, nil)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			response := httptest.NewRecorder()
 			app.canonicalAPI(response, req)
@@ -147,7 +147,7 @@ func TestFreshCanonicalLegacyBridgeRequiresProductCompletion(t *testing.T) {
 		{http.MethodPost, "cpamp/setup"},
 	} {
 		t.Run(request.method+" "+request.resource, func(t *testing.T) {
-			req := httptest.NewRequest(request.method, "/control/api/v2/"+request.resource, nil)
+			req := httptest.NewRequest(request.method, currentInstallManagementAPIV2Prefix+""+request.resource, nil)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			response := httptest.NewRecorder()
 			app.canonicalAPI(response, req)
@@ -169,7 +169,7 @@ func TestFreshCanonicalLegacyBridgeRejectsUnknownOrEscapingPaths(t *testing.T) {
 		"cpamp/v0/management/%2e%2e/status",
 		"cpamp/internal/routing/fresh-authority",
 	} {
-		req := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+resource, nil)
+		req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+resource, nil)
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, req)
@@ -177,7 +177,7 @@ func TestFreshCanonicalLegacyBridgeRejectsUnknownOrEscapingPaths(t *testing.T) {
 			t.Fatalf("resource %s returned %d, want 404", resource, response.Code)
 		}
 	}
-	req := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/config", nil)
+	req := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/config", nil)
 	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, req)

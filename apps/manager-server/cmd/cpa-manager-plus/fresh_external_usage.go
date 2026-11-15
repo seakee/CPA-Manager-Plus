@@ -296,9 +296,13 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	hold.finish()
 	// address and never to the managed destination: another CPA is another
 	// identity, so a rebind can never inherit this history.
-	if _, err := a.keyRepo.BindFreshKeySources(ctx, install.Identity, time.Now().UnixMilli()); err != nil {
+	bound, err := a.keyRepo.BindFreshKeySources(ctx, install.Identity, time.Now().UnixMilli())
+	if err != nil {
 		log.Printf("Fresh external key usage bindings unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+	}
+	if bound > 0 && a.usageProjection != nil {
+		a.usageProjection.Wake()
 	}
 	runtimeCfg, err := a.usageRuntimeConfig(ctx, install.BaseURL, install.ManagementKey)
 	if err != nil {

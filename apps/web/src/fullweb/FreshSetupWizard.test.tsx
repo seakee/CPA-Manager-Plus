@@ -187,6 +187,23 @@ async function setup(
     }
     if (resource === 'bootstrap/identity')
       throw new Error('Public identity must not carry a credential');
+    if (resource === 'routing/draft') {
+      if (!operation.adminInitialized) {
+        return Response.json({ Code: 'routing_conflict' }, { status: 409 });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          draftControlBasePath: body.target,
+          ...(typeof body.inferenceTarget === 'string'
+            ? { draftInferenceBasePath: body.inferenceTarget }
+            : {}),
+          ...(body.sharedEntry !== undefined ? { draftSharedEntry: Boolean(body.sharedEntry) } : {}),
+        },
+      };
+    }
     if (resource === 'admin/commit') {
       expect(body.key).toBe(admin);
       operation = { ...operation, adminInitialized: true, revision: operation.revision + 1 };
@@ -248,6 +265,10 @@ async function setup(
         revision: operation.revision + 1,
         routing: {
           target: body.target,
+          ...(typeof body.inferenceTarget === 'string'
+            ? { inferenceTarget: body.inferenceTarget }
+            : {}),
+          ...(body.sharedEntry !== undefined ? { sharedEntry: Boolean(body.sharedEntry) } : {}),
           revision: 1,
           operationId: identity.operationId,
           stage: 'intent_persisted',
@@ -274,13 +295,57 @@ async function setup(
       operation = {
         ...operation,
         revision: operation.revision + 1,
-        routing: { ...operation.routing, stage: 'committed', committed: true },
+        routing: { ...operation.routing, stage: 'committed', committed: true, inferenceCommitted: Boolean(operation.routing.inferenceTarget) },
       };
     }
     if (resource === 'complete') {
       expect(new URL(String(url)).pathname).toBe('/private/api/v2/complete');
       expect(operation.routing.committed).toBe(true);
-      operation = { ...operation, revision: operation.revision + 1, productComplete: true };
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        productComplete: true,
+        routing: {
+          ...operation.routing,
+          ...(operation.routing.inferenceTarget ? { inferenceCommitted: true } : {}),
+        },
+      };
+    }
+    if (resource === 'api-keys/access-info') {
+      if (options.external) {
+        return Response.json({
+          mode: 'connect_external',
+          managementBasePath: operation.routing.target || '/private',
+          inferenceBasePath: '',
+          externalBaseUrl: 'http://cpa:8317',
+          protocols: [
+            {
+              id: 'openai',
+              label: 'OpenAI',
+              basePath: 'http://cpa:8317/v1',
+              examplePath: 'http://cpa:8317/v1/chat/completions',
+            },
+          ],
+          ready: true,
+          code: '',
+        });
+      }
+      const inferenceBase = operation.routing.inferenceTarget || '/infer-default';
+      return Response.json({
+        mode: options.adopt ? 'adopt_existing' : 'new_managed',
+        managementBasePath: operation.routing.target || '/private',
+        inferenceBasePath: inferenceBase,
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: `${inferenceBase}/v1`,
+            examplePath: `${inferenceBase}/v1/chat/completions`,
+          },
+        ],
+        ready: true,
+        code: '',
+      });
     }
     if (resource === options.lost && !lost) {
       lost = true;
@@ -338,43 +403,28 @@ async function setup(
   };
 }
 
+it('does not offer a durable prefix draft write before administrator initialization', async () => {
+  await setup();
+  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+  await click('setup-review');
+  expect(byID('setup-execute').props.disabled).toBe(true);
+  await input('confirm-key-saved-checkbox', true);
+  expect(byID('setup-execute').props.disabled).toBe(false);
+});
+
 it.each([false, true])(
   'keeps key, route and CPA in one confirmed journey; external=%s',
   async (external) => {
-    const { transport } = await setup({ external });
+    await setup({ external });
     await click('setup-review');
     expect(JSON.stringify(renderer.toJSON())).not.toContain(admin);
     expect(JSON.stringify(renderer.toJSON())).not.toContain(sourceKey);
-    expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1); // only claim, no product writes
     await input('confirm-key-saved-checkbox', true);
     await click('setup-execute');
     expect(byID('enter-console').props.href).toBe('/private');
     expect(JSON.stringify(renderer.toJSON())).toContain(s('ready'));
     expect(localStorage.setItem).not.toHaveBeenCalled();
     expect(sessionStorage.setItem).not.toHaveBeenCalled();
-    const writes = transport.mock.calls
-      .filter(([, init]) => init?.method === 'POST')
-      .map(([url]) => new URL(String(url)).pathname.split('/api/v2/')[1]);
-    expect(writes).toEqual(
-      external
-        ? [
-            'claim/exchange',
-            'admin/commit',
-            'strategy',
-            'routing/prepare',
-            'routing/activate',
-            'complete',
-          ]
-        : [
-            'claim/exchange',
-            'admin/commit',
-            'strategy',
-            'strategy',
-            'routing/prepare',
-            'routing/activate',
-            'complete',
-          ]
-    );
   }
 );
 
@@ -1148,6 +1198,10 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
           revision: operation.revision + 1,
           routing: {
             target: body.target,
+            ...(typeof body.inferenceTarget === 'string'
+              ? { inferenceTarget: body.inferenceTarget }
+              : {}),
+            ...(body.sharedEntry !== undefined ? { sharedEntry: Boolean(body.sharedEntry) } : {}),
             revision: 1,
             operationId: identity.operationId,
             stage: 'intent_persisted',
@@ -1160,13 +1214,39 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
         operation = {
           ...operation,
           revision: operation.revision + 1,
-          routing: { ...operation.routing, stage: 'committed', committed: true },
+          routing: { ...operation.routing, stage: 'committed', committed: true, inferenceCommitted: Boolean(operation.routing.inferenceTarget) },
         };
         return Response.json(operation);
       }
       if (resource === 'complete') {
-        operation = { ...operation, revision: operation.revision + 1, productComplete: true };
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          productComplete: true,
+          routing: {
+            ...operation.routing,
+            ...(operation.routing.inferenceTarget ? { inferenceCommitted: true } : {}),
+          },
+        };
         return Response.json(operation);
+      }
+      if (resource === 'api-keys/access-info') {
+        const inferenceBase = operation.routing.inferenceTarget || '/infer-resume';
+        return Response.json({
+          mode: 'new_managed',
+          managementBasePath: operation.routing.target || '',
+          inferenceBasePath: inferenceBase,
+          protocols: [
+            {
+              id: 'openai',
+              label: 'OpenAI',
+              basePath: `${inferenceBase}/v1`,
+              examplePath: `${inferenceBase}/v1/chat/completions`,
+            },
+          ],
+          ready: true,
+          code: '',
+        });
       }
       throw new Error(`Unexpected resource ${resource}`);
     });
@@ -1212,9 +1292,12 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
     // Once CPA is ready on the rotated generation, resume finishes routing and completion.
     runtimeState = 'ready';
     await click('setup-resume');
-    expect(byID('enter-console').props.href).toBe('/console');
+    expect(byID('enter-console').props.href).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+    expect(byID('enter-console').props.href).toBe(operation.routing.target);
     expect(renderer.root.findAllByProps({ 'data-testid': 'setup-resume' })).toHaveLength(0);
-    expect(renderer.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(renderer.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+    });
     expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
     expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
     expect(transport.mock.calls.some(([url]) => String(url).endsWith('/routing/prepare'))).toBe(
@@ -1230,3 +1313,661 @@ it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
     expect(readyHeadingText).not.toMatch(/^(?:journey\.|setup\.|ready$)/);
   }
 );
+
+it('initializes distinct 16-char CSPRNG dual prefixes by default, randomizes locally before admin commit without durable writes, and supports explicit shared mode', async () => {
+  const { transport } = await setup();
+  const defaultInference = String(byID('inference-target-input').props.value);
+  expect(defaultInference).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+  expect(defaultInference).not.toBe('/private');
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(false);
+  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+
+  // Language switch does not regenerate or wipe operator prefixes
+  await switchLanguage('en');
+  expect(byID('route-target-input').props.value).toBe('/private');
+  expect(byID('inference-target-input').props.value).toBe(defaultInference);
+
+  // Pre-admin independent randomization generates distinct CSPRNG prefixes locally without durable writes
+  const postsBeforeRandomize = transport.mock.calls.filter(([, init]) => init?.method === 'POST').length;
+  await click('randomize-inference-prefix');
+  const randomizedInference = String(byID('inference-target-input').props.value);
+  expect(randomizedInference).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+  expect(randomizedInference).not.toBe(defaultInference);
+  expect(randomizedInference).not.toBe('/private');
+  expect(byID('route-target-input').props.value).toBe('/private');
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(false);
+
+  await click('randomize-control-prefix');
+  const randomizedControl = String(byID('route-target-input').props.value);
+  expect(randomizedControl).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+  expect(randomizedControl).not.toBe('/private');
+  expect(randomizedControl).not.toBe(randomizedInference);
+  expect(byID('inference-target-input').props.value).toBe(randomizedInference);
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(false);
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+  expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(postsBeforeRandomize);
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/routing/draft') || String(url).endsWith('/admin/commit'))
+  ).toBe(false);
+
+  // Manual nested or equal paths without shared confirmation fail locally without POST
+  await input('route-target-input', '/private');
+  await input('inference-target-input', '/private/sub');
+  await click('setup-review');
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(1);
+  expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(postsBeforeRandomize);
+
+  // Explicit shared checkbox locks inference input to management path and pre-admin control randomize updates both
+  await input('shared-prefix-checkbox', true);
+  expect(byID('inference-target-input').props.value).toBe('/private');
+  expect(byID('inference-target-input').props.disabled).toBe(true);
+  await click('randomize-control-prefix');
+  const sharedRandomControl = String(byID('route-target-input').props.value);
+  expect(sharedRandomControl).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+  expect(sharedRandomControl).not.toBe('/private');
+  expect(byID('inference-target-input').props.value).toBe(sharedRandomControl);
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(true);
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+  expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(postsBeforeRandomize);
+
+  // Confirmed choices persist after admin/commit when executed
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  const prepareCall = transport.mock.calls.find(([url]) => String(url).endsWith('/routing/prepare'));
+  expect(JSON.parse(String(prepareCall?.[1]?.body))).toMatchObject({
+    target: sharedRandomControl,
+    inferenceTarget: sharedRandomControl,
+    sharedEntry: true,
+  });
+});
+
+it('keeps connect_external free of inference prefix or shared mode and handles 401 session expiration cleanly on AccessInfoSummary', async () => {
+  const { transport } = await setup({ external: true });
+  expect(renderer.root.findAllByProps({ 'data-testid': 'inference-target-input' })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'shared-prefix-checkbox' })).toHaveLength(0);
+  expect(byID('external-inference-note')).toBeTruthy();
+  expect(JSON.stringify(renderer.toJSON())).toContain('http://cpa:8317');
+
+  const baseImpl = transport.getMockImplementation()!;
+  transport.mockImplementation(async (url, init) => {
+    if (String(url).endsWith('/api-keys/access-info')) {
+      return new Response('', { status: 401 });
+    }
+    return baseImpl(url, init);
+  });
+
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  const prepareCall = transport.mock.calls.find(([url]) => String(url).endsWith('/routing/prepare'));
+  expect(JSON.parse(String(prepareCall?.[1]?.body))).not.toHaveProperty('inferenceTarget');
+  await vi.waitFor(() => {
+    expect(renderer.root.findAllByProps({ 'data-testid': 'access-session-expired' })).toHaveLength(1);
+  });
+  expect(byID('enter-console').props.href).toBe('/private');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain(admin);
+});
+
+it('persists NewManaged prefix draft before strategy execution so starting+refresh resumes exact shared/dual intent', async () => {
+  let operation: FreshOperation = {
+    version: 1,
+    identity,
+    revision: 1,
+    adminInitialized: false,
+    productComplete: false,
+    gatewayPending: true,
+    routing: {
+      committed: false,
+      suggestedControlBasePath: '/sugctl1234567890',
+      suggestedInferenceBasePath: '/suginf1234567890',
+    },
+  };
+  let strategyAttempts = 0;
+  let runtimeState: 'starting' | 'ready' = 'starting';
+  let draftBeforeFirstStrategy = false;
+  const transport = vi.fn<typeof fetch>(async (url, init) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname.endsWith('/api/v2/bootstrap/identity')) {
+      return Response.json(
+        {
+          installationId: identity.installationId,
+          generation: identity.generation,
+          operationId: identity.operationId,
+          revision: operation.routing.revision ?? 1,
+          target: operation.routing.target,
+          committed: operation.routing.committed,
+        },
+        { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
+      );
+    }
+    const resource = pathname.split('/api/v2/')[1];
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (resource === 'claim/exchange') {
+      return Response.json({ token: 'installation-session', operation });
+    }
+    if (resource === 'operation') {
+      return Response.json(operation);
+    }
+    if (resource === 'admin/commit') {
+      operation = { ...operation, revision: operation.revision + 1, adminInitialized: true };
+      return Response.json(operation);
+    }
+    if (resource === 'runtime/artifact') {
+      return Response.json({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: runtime.activeGatewayArtifact.artifactId },
+        active: { artifactId: runtime.activeGatewayArtifact.artifactId, origin: 'bundled' },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      });
+    }
+    if (resource === 'installation/runtime') {
+      return Response.json({ ...runtime, state: runtimeState });
+    }
+    if (resource === 'routing/draft') {
+      if (!operation.adminInitialized) {
+        return Response.json({ Code: 'routing_conflict' }, { status: 409 });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          draftControlBasePath: body.target,
+          draftInferenceBasePath: typeof body.inferenceTarget === 'string' ? body.inferenceTarget : '',
+          draftSharedEntry: Boolean(body.sharedEntry),
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'strategy') {
+      strategyAttempts += 1;
+      if (strategyAttempts === 1) {
+        draftBeforeFirstStrategy =
+          operation.routing.draftControlBasePath === '/custom-ctl' &&
+          operation.routing.draftInferenceBasePath === '/custom-ctl' &&
+          operation.routing.draftSharedEntry === true;
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          strategy: {
+            strategy: 'new_managed',
+            stage: 'starting',
+            targetIdentity: runtime.runtimeIdentity,
+            targetGeneration: runtime.runtimeGeneration,
+            targetArtifactId: runtime.activeGatewayArtifact.artifactId,
+          },
+        };
+        return Response.json({ operation, initialClientKey: 'Cpamp_Client_Start_11223344' });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        strategy: {
+          ...operation.strategy!,
+          stage: 'committed',
+        },
+      };
+      return Response.json({ operation, initialClientKey: '' });
+    }
+    if (resource === 'routing/prepare') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          operationId: operation.identity.operationId,
+          revision: 1,
+          target: body.target,
+          inferenceTarget: body.inferenceTarget,
+          sharedEntry: Boolean(body.sharedEntry),
+          stage: 'intent_persisted',
+          committed: false,
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'routing/activate') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          stage: 'committed',
+          committed: true,
+          inferenceCommitted: Boolean(operation.routing.inferenceTarget),
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'complete') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        productComplete: true,
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'api-keys/access-info') {
+      return Response.json({
+        mode: 'new_managed',
+        managementBasePath: operation.routing.target || '',
+        inferenceBasePath: operation.routing.inferenceTarget || '',
+        sharedEntry: Boolean(operation.routing.sharedEntry),
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: `${operation.routing.inferenceTarget}/v1`,
+            examplePath: `${operation.routing.inferenceTarget}/v1/chat/completions`,
+          },
+        ],
+        ready: true,
+        code: '',
+      });
+    }
+    throw new Error(`Unexpected resource ${resource}`);
+  });
+  setFullWebLanguage('en');
+  const client = createBootstrapTransport(transport);
+  const initial = await client.start({
+    identity,
+    claimGeneration: 1,
+    token: 'claim-token',
+    resume: false,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={initial} transport={client} />);
+  });
+  await click('choose-new_managed');
+  await click('setup-next');
+  await input('admin-key-input', admin);
+  await input('route-target-input', '/custom-ctl');
+  await input('shared-prefix-checkbox', true);
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+
+  expect(draftBeforeFirstStrategy).toBe(true);
+  expect(byID('setup-resume')).toBeTruthy();
+
+  // Simulate page reload while strategy.stage === 'starting' (with explicit sharedEntry: false on uncommitted routing)
+  await act(async () => renderer.unmount());
+  operation = {
+    ...operation,
+    routing: {
+      ...operation.routing,
+      sharedEntry: false,
+    },
+  };
+  runtimeState = 'ready';
+  const resumedClient = createBootstrapTransport(transport);
+  const resumedOperation = await resumedClient.start({
+    identity,
+    claimGeneration: 1,
+    token: 'installation-session',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={resumedOperation} transport={resumedClient} />);
+  });
+  await click('setup-resume');
+
+  const prepareCall = transport.mock.calls.find(([url]) => String(url).endsWith('/routing/prepare'));
+  expect(JSON.parse(String(prepareCall?.[1]?.body))).toMatchObject({
+    target: '/custom-ctl',
+    inferenceTarget: '/custom-ctl',
+    sharedEntry: true,
+  });
+  expect(byID('enter-console').props.href).toBe('/custom-ctl');
+});
+
+it('persists ConnectExternal draft before strategy execution (clearing prior inference draft) and restores exact control prefix on refresh', async () => {
+  let operation: FreshOperation = {
+    version: 1,
+    identity,
+    revision: 1,
+    adminInitialized: false,
+    productComplete: false,
+    gatewayPending: true,
+    routing: {
+      committed: false,
+      draftControlBasePath: '/stale-ctl',
+      draftInferenceBasePath: '/stale-inf',
+      draftSharedEntry: true,
+    },
+  };
+  let draftClearedBeforeStrategy = false;
+  let failPrepareOnce = true;
+  const transport = vi.fn<typeof fetch>(async (url, init) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname.endsWith('/api/v2/bootstrap/identity')) {
+      return Response.json(
+        {
+          installationId: identity.installationId,
+          generation: identity.generation,
+          operationId: identity.operationId,
+          revision: operation.routing.revision ?? 1,
+          target: operation.routing.target,
+          committed: operation.routing.committed,
+        },
+        { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
+      );
+    }
+    const resource = pathname.split('/api/v2/')[1];
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (resource === 'claim/exchange') {
+      return Response.json({ token: 'installation-session', operation });
+    }
+    if (resource === 'operation') {
+      return Response.json(operation);
+    }
+    if (resource === 'admin/commit') {
+      operation = { ...operation, revision: operation.revision + 1, adminInitialized: true };
+      return Response.json(operation);
+    }
+    if (resource === 'routing/draft') {
+      if (!operation.adminInitialized) {
+        return Response.json({ Code: 'routing_conflict' }, { status: 409 });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          draftControlBasePath: body.target,
+          draftInferenceBasePath: typeof body.inferenceTarget === 'string' ? body.inferenceTarget : '',
+          draftSharedEntry: Boolean(body.sharedEntry),
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'strategy') {
+      draftClearedBeforeStrategy =
+        operation.routing.draftControlBasePath === '/ext-user-ctl' &&
+        operation.routing.draftInferenceBasePath === '' &&
+        operation.routing.draftSharedEntry === false;
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        strategy: {
+          strategy: 'connect_external',
+          stage: 'committed',
+          targetIdentity: 'external:sha256:' + 'b'.repeat(64),
+          targetGeneration: 1,
+        },
+      };
+      return Response.json({ operation, initialClientKey: '' });
+    }
+    if (resource === 'routing/prepare') {
+      if (failPrepareOnce) {
+        failPrepareOnce = false;
+        return new Response('', { status: 503 });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          operationId: operation.identity.operationId,
+          revision: 1,
+          target: body.target,
+          stage: 'intent_persisted',
+          committed: false,
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'routing/activate') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: { ...operation.routing, stage: 'committed', committed: true },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'complete') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        productComplete: true,
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'api-keys/access-info') {
+      return Response.json({
+        mode: 'connect_external',
+        managementBasePath: operation.routing.target || '',
+        inferenceBasePath: '',
+        externalBaseUrl: 'http://cpa:8317',
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: 'http://cpa:8317/v1',
+            examplePath: 'http://cpa:8317/v1/chat/completions',
+          },
+        ],
+        ready: true,
+        code: '',
+      });
+    }
+    throw new Error(`Unexpected resource ${resource}`);
+  });
+  setFullWebLanguage('en');
+  const client = createBootstrapTransport(transport);
+  const initial = await client.start({
+    identity,
+    claimGeneration: 1,
+    token: 'claim-token',
+    resume: false,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={initial} transport={client} />);
+  });
+  await click('choose-connect_external');
+  await click('setup-next');
+  await input('admin-key-input', admin);
+  await input('route-target-input', '/ext-user-ctl');
+  await input('external-base-url', 'http://cpa:8317');
+  await input('external-management-key', sourceKey);
+  await click('setup-review');
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  expect(draftClearedBeforeStrategy).toBe(true);
+
+  // Refresh after strategy commit and before routing/prepare: exact /ext-user-ctl resumes
+  await act(async () => renderer.unmount());
+  const resumedClient = createBootstrapTransport(transport);
+  const resumed = await resumedClient.start({
+    identity,
+    claimGeneration: 1,
+    token: 'installation-session',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={resumed} transport={resumedClient} />);
+  });
+  await click('setup-resume');
+
+  expect(byID('enter-console').props.href).toBe('/ext-user-ctl');
+});
+
+it('keeps immutable server suggestions untouched before admin commit and persists post-admin randomization across page refresh', async () => {
+  const suggestedControl = '/sugctl1234567890';
+  const suggestedInference = '/suginf1234567890';
+  let operation: FreshOperation = {
+    version: 1,
+    identity,
+    revision: 1,
+    adminInitialized: false,
+    productComplete: false,
+    gatewayPending: true,
+    routing: {
+      committed: false,
+      suggestedControlBasePath: suggestedControl,
+      suggestedInferenceBasePath: suggestedInference,
+    },
+  };
+  const transport = vi.fn<typeof fetch>(async (url, init) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname.endsWith('/api/v2/bootstrap/identity')) {
+      return Response.json(
+        {
+          installationId: identity.installationId,
+          generation: identity.generation,
+          operationId: identity.operationId,
+          revision: operation.routing.revision ?? 1,
+          target: operation.routing.target,
+          committed: operation.routing.committed,
+        },
+        { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
+      );
+    }
+    const resource = pathname.split('/api/v2/')[1];
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (resource === 'claim/exchange') {
+      return Response.json({ token: 'installation-session', operation });
+    }
+    if (resource === 'operation') {
+      return Response.json(operation);
+    }
+    if (resource === 'runtime/artifact') {
+      return Response.json({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: runtime.activeGatewayArtifact.artifactId },
+        active: { artifactId: runtime.activeGatewayArtifact.artifactId, origin: 'bundled' },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      });
+    }
+    if (resource === 'installation/runtime') {
+      return Response.json({ ...runtime, state: 'ready' });
+    }
+    if (resource === 'routing/draft') {
+      if (!operation.adminInitialized) {
+        return Response.json({ Code: 'routing_conflict' }, { status: 409 });
+      }
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          ...operation.routing,
+          draftControlBasePath: body.target,
+          draftInferenceBasePath: typeof body.inferenceTarget === 'string' ? body.inferenceTarget : '',
+          draftSharedEntry: Boolean(body.sharedEntry),
+        },
+      };
+      return Response.json(operation);
+    }
+    throw new Error(`Unexpected resource ${resource}`);
+  });
+  setFullWebLanguage('en');
+  const client = createBootstrapTransport(transport);
+  const initial = await client.start({
+    identity,
+    claimGeneration: 1,
+    token: 'claim-token',
+    resume: false,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={initial} transport={client} />);
+  });
+  await click('setup-next');
+  expect(byID('route-target-input').props.value).toBe(suggestedControl);
+  expect(byID('inference-target-input').props.value).toBe(suggestedInference);
+  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+
+  // Pre-admin randomization never calls routing/draft or admin/commit and never mutates server suggestions
+  await click('randomize-control-prefix');
+  await click('randomize-inference-prefix');
+  expect(initial.routing.suggestedControlBasePath).toBe(suggestedControl);
+  expect(initial.routing.suggestedInferenceBasePath).toBe(suggestedInference);
+  expect(operation.routing.suggestedControlBasePath).toBe(suggestedControl);
+  expect(operation.routing.suggestedInferenceBasePath).toBe(suggestedInference);
+  expect(
+    transport.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url]) => String(url))
+  ).toHaveLength(1); // claim/exchange only
+
+  // Simulate resumed session after adminInitialized = true: post-admin randomization persists draft via POST routing/draft
+  await act(async () => renderer.unmount());
+  operation = { ...operation, adminInitialized: true, revision: operation.revision + 1 };
+  const adminClient = createBootstrapTransport(transport);
+  const resumedAdmin = await adminClient.start({
+    identity,
+    claimGeneration: 1,
+    token: 'installation-session',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={resumedAdmin} transport={adminClient} />);
+  });
+  await click('setup-next');
+  expect(byID('save-prefix-draft').props.disabled).toBe(false);
+  await click('randomize-control-prefix');
+  const postAdminControl = String(byID('route-target-input').props.value);
+  await vi.waitFor(() => {
+    expect(operation.routing.draftControlBasePath).toBe(postAdminControl);
+    expect(byID('randomize-inference-prefix').props.disabled).toBe(false);
+  });
+  await click('randomize-inference-prefix');
+  const postAdminInference = String(byID('inference-target-input').props.value);
+  await vi.waitFor(() => {
+    expect(operation.routing.draftInferenceBasePath).toBe(postAdminInference);
+    expect(byID('save-prefix-draft').props.disabled).toBe(false);
+  });
+  expect(postAdminInference).toMatch(/^\/[a-z][a-z0-9]{15}$/);
+  expect(postAdminControl).not.toBe(postAdminInference);
+  expect(operation.routing.draftControlBasePath).toBe(postAdminControl);
+  expect(operation.routing.draftInferenceBasePath).toBe(postAdminInference);
+  expect(operation.routing.draftSharedEntry).toBe(false);
+  expect(operation.routing.suggestedControlBasePath).toBe(suggestedControl);
+  expect(operation.routing.suggestedInferenceBasePath).toBe(suggestedInference);
+  // Refresh recovers exact post-admin randomized independent prefixes
+  await act(async () => renderer.unmount());
+  const refreshedClient = createBootstrapTransport(transport);
+  const refreshedOp = await refreshedClient.start({
+    identity,
+    claimGeneration: 1,
+    token: 'installation-session',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={refreshedOp} transport={refreshedClient} />);
+  });
+  await click('setup-next');
+  expect(byID('route-target-input').props.value).toBe(postAdminControl);
+  expect(byID('inference-target-input').props.value).toBe(postAdminInference);
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(false);
+
+  // Post-admin shared mode randomization updates both and recovers shared intent across refresh
+  await input('shared-prefix-checkbox', true);
+  await click('randomize-control-prefix');
+  const postAdminShared = String(byID('route-target-input').props.value);
+  await vi.waitFor(() => {
+    expect(operation.routing.draftControlBasePath).toBe(postAdminShared);
+    expect(operation.routing.draftInferenceBasePath).toBe(postAdminShared);
+    expect(operation.routing.draftSharedEntry).toBe(true);
+    expect(byID('save-prefix-draft').props.disabled).toBe(false);
+  });
+  expect(byID('inference-target-input').props.value).toBe(postAdminShared);
+  await act(async () => renderer.unmount());
+  const sharedRefreshedClient = createBootstrapTransport(transport);
+  const sharedRefreshedOp = await sharedRefreshedClient.start({
+    identity,
+    claimGeneration: 1,
+    token: 'installation-session',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={sharedRefreshedOp} transport={sharedRefreshedClient} />);
+  });
+  await click('setup-next');
+  expect(byID('route-target-input').props.value).toBe(postAdminShared);
+  expect(byID('inference-target-input').props.value).toBe(postAdminShared);
+  expect(byID('shared-prefix-checkbox').props.checked).toBe(true);
+  expect(byID('inference-target-input').props.disabled).toBe(true);
+});

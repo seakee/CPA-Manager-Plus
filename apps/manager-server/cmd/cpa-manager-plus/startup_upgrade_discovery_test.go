@@ -149,7 +149,7 @@ func assertWriteAndCanonicalPathsClosed(t *testing.T, server *httptest.Server, a
 		{http.MethodGet, "/setup", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/status", http.StatusNotFound},
 		{http.MethodPost, "/api/v1/settings", http.StatusNotFound},
-		{http.MethodGet, "/control/api/v2/status", http.StatusNotFound},
+		{http.MethodGet, currentInstallManagementAPIV2Prefix + "status", http.StatusNotFound},
 		{http.MethodPost, "/v1/chat/completions", http.StatusNotFound},
 		{http.MethodPost, bootstrapdiscovery.Path, http.StatusMethodNotAllowed},
 		{http.MethodPost, bootstrap.FixedBootstrapAPIPath + "installation/fresh/claim/exchange", http.StatusNotFound},

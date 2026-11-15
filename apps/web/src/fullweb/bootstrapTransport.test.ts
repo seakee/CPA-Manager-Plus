@@ -475,4 +475,107 @@ describe('Fresh routing prepare, cutover and lost-response recovery', () => {
       vi.useRealTimers();
     }
   });
+  it('persists dual-prefix drafts via routing/draft and refuses invalid/nested pairs before sending', async () => {
+    const draftOp = {
+      ...operation,
+      revision: 2,
+      routing: {
+        committed: false,
+        draftControlBasePath: '/ctl-draft',
+        draftInferenceBasePath: '/inf-draft',
+        draftSharedEntry: false,
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(reply({ token: 'session-secret', operation }))
+      .mockResolvedValueOnce(reply(draftOp));
+    const client = createBootstrapTransport(fetchMock);
+    await client.start(handoff);
+
+    await expect(
+      client.saveRoutingDraft('/ctl-draft', { inferenceTarget: '/ctl-draft/sub', sharedEntry: false })
+    ).rejects.toMatchObject({ kind: 'bad_request' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const updated = await client.saveRoutingDraft('/ctl-draft', {
+      inferenceTarget: '/inf-draft',
+      sharedEntry: false,
+    });
+    expect(updated).toEqual(draftOp);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'https://manager.example/.well-known/cpamp-bootstrap/api/v2/routing/draft'
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      identity,
+      target: '/ctl-draft',
+      inferenceTarget: '/inf-draft',
+      sharedEntry: false,
+    });
+  });
+
+  it('prepares dual prefixes and validates canonical 6-field /bootstrap/identity without requiring inferenceTarget on identity', async () => {
+    const dualPrepared = {
+      ...prepared,
+      routing: {
+        ...prepared.routing,
+        target: '/ctl-a',
+        inferenceTarget: '/inf-a',
+        sharedEntry: false,
+      },
+    };
+    const dualCommitted = {
+      ...dualPrepared,
+      revision: 6,
+      routing: { ...dualPrepared.routing, stage: 'committed', committed: true, inferenceCommitted: true },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(reply({ ...operation, adminInitialized: true }))
+      .mockResolvedValueOnce(reply(dualPrepared))
+      .mockResolvedValueOnce(reply(dualCommitted))
+      .mockResolvedValueOnce(
+        reply({
+          installationId: identity.installationId,
+          generation: identity.generation,
+          operationId: identity.operationId,
+          target: '/ctl-a',
+          revision: 1,
+          committed: true,
+        })
+      )
+      .mockResolvedValueOnce(
+        reply({
+          mode: 'new_managed',
+          managementBasePath: '/ctl-a',
+          inferenceBasePath: '/inf-a',
+          protocols: [],
+          ready: true,
+        })
+      );
+
+    const client = createBootstrapTransport(fetchMock);
+    await client.start({ ...handoff, resume: true });
+    expect(client.sessionToken()).toBe(handoff.token);
+
+    await expect(
+      client.prepareRouting('/ctl-a', { inferenceTarget: '/ctl-a', sharedEntry: false })
+    ).rejects.toMatchObject({ kind: 'bad_request' });
+
+    await client.prepareRouting('/ctl-a', { inferenceTarget: '/inf-a', sharedEntry: false });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      identity,
+      target: '/ctl-a',
+      inferenceTarget: '/inf-a',
+      sharedEntry: false,
+    });
+    expect(await client.activateRouting()).toBe('/ctl-a');
+    const info = await client.readAccessInfo('/ctl-a');
+    expect(info.managementBasePath).toBe('/ctl-a');
+    expect(fetchMock.mock.calls[4][0]).toBe('https://manager.example/ctl-a/api/v2/api-keys/access-info');
+    expect(fetchMock.mock.calls[4][1]).toMatchObject({
+      method: 'GET',
+      headers: { Accept: 'application/json', Authorization: `Fresh ${handoff.token}` },
+    });
+  });
 });

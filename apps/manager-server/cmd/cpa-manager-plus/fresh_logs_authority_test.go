@@ -361,10 +361,11 @@ func TestLogsCapabilityCoversManagedPrivateAndMethodGuard(t *testing.T) {
 
 	t.Run("managed and adopt profiles stay writable", func(t *testing.T) {
 		adoptInstall := func(r *freshstore.Record, env managedInstallEnv) {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.AdoptExisting,
 				SourceClass:                   bootstrap.AdoptNetworkExisting,

@@ -133,7 +133,12 @@ func TestUpgradeEntriesRequireCopyInRecovery(t *testing.T) {
 					return err
 				}},
 				{"verify", func() error {
-					_, err := Verify(context.Background(), VerifyOptions{LegacyRoot: volume.root, TargetRoot: target})
+					_, err := Verify(context.Background(), VerifyOptions{
+						LegacyRoot:        volume.root,
+						TargetRoot:        target,
+						ControlBasePath:   testControlBasePath,
+						InferenceBasePath: testInferenceBasePath,
+					})
 					return err
 				}},
 				{"candidate", func() error {
@@ -224,7 +229,12 @@ func TestCopyInCandidateRefusesUnexpectedSidecars(t *testing.T) {
 			requireTargetConflict(t, err)
 			_, err = Reconcile(context.Background(), copied.reconcileOptions())
 			requireTargetConflict(t, err)
-			_, err = Verify(context.Background(), VerifyOptions{LegacyRoot: copied.volume.root, TargetRoot: copied.target})
+			_, err = Verify(context.Background(), VerifyOptions{
+				LegacyRoot:        copied.volume.root,
+				TargetRoot:        copied.target,
+				ControlBasePath:   testControlBasePath,
+				InferenceBasePath: testInferenceBasePath,
+			})
 			requireTargetConflict(t, err)
 			_, err = PrepareRollback(context.Background(), RollbackOptions{LegacyRoot: copied.volume.root, TargetRoot: copied.target})
 			requireTargetConflict(t, err)

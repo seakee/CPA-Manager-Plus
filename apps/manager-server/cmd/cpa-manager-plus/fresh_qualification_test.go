@@ -15,6 +15,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
@@ -146,6 +147,17 @@ func TestFreshProductionQualificationCannotBeExtendedByHTTPOrRestart(t *testing.
 func TestFreshAdoptCanonicalRefusalsHaveNoSourceOrStateEffect(t *testing.T) {
 	app, closeApp := newA3TestApp(t)
 	defer closeApp()
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.InferenceCommitted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var sourceCalls atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sourceCalls.Add(1)
@@ -178,7 +190,7 @@ func TestFreshAdoptCanonicalRefusalsHaveNoSourceOrStateEffect(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)

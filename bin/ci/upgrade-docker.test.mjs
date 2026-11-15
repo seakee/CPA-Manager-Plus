@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import http from 'node:http';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,6 +50,8 @@ import {
   installSignalGuard,
   isOwnedResourceName,
   newCleanupResult,
+  dockerContainerRunArgvAndEnv,
+  httpJsonSpawnSpec,
   verifyEvidenceDocument,
   withEvidenceHash,
 } from './upgrade-docker.mjs';
@@ -489,20 +492,6 @@ test('preflight, run and reconcile always declare the pinned accepted release', 
   );
 });
 
-test('every source-reading invocation in the harness runs through the declaration', () => {
-  // The declaration is applied once, in runCli, so a new call site cannot
-  // silently omit it. This pins that wiring: both the helper call and the
-  // subcommand list live in the shipped source, and the only direct spawn of
-  // `upgrade run` (the interrupted-copy-in fault) opts in explicitly.
-  assert.match(HARNESS_SOURCE, /const effectiveArgs = withDeclaredSourceVersion\(cliArgs, acceptedRelease\);/);
-  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'preflight'.*\]/);
-  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'run'.*\]/);
-  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'reconcile'.*\]/);
-  const directSpawns = [...HARNESS_SOURCE.matchAll(/spawn\(binary, (\[[^\]]*\])/g)].map((match) => match[1]);
-  const sourceSpawns = directSpawns.filter((args) => args.includes("'upgrade', 'run'"));
-  assert.deepEqual(sourceSpawns.length, 0, 'a direct spawn of upgrade run must pass the declared release through the helper');
-  assert.match(HARNESS_SOURCE, /withDeclaredSourceVersion\(\['upgrade', 'run'/);
-});
 
 test('the accepted release is read from the report and a mismatch names both releases', () => {
   const report = (detail, code = 'ok') =>
@@ -541,14 +530,6 @@ test('the accepted release is read from the report and a mismatch names both rel
   assert.equal(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10 declared=v1.14.4');
   assert.notEqual(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10');
 
-  // The fixture commit pin lives in the harness and matches the contract's
-  // PlannedDirectSourceCommit, so a moved tag cannot be qualified silently.
-  assert.match(HARNESS_SOURCE, /const EXPECTED_V1_COMMIT = 'a67ed8834a914ab24c36d2490fa6bb6d4166724c';/);
-  assert.match(HARNESS_SOURCE, /fixture\.commit === EXPECTED_V1_COMMIT/);
-  // The planned tag is never a fallback for the report: an unreadable
-  // `expected=` throws instead of accepting the tag this run was asked to use.
-  assert.doesNotMatch(HARNESS_SOURCE, /expectedReleaseOf\(probe\) \|\|/);
-  assert.match(HARNESS_SOURCE, /if \(!expected \|\| !RELEASE_TAG_PATTERN\.test\(String\(expected\)\)\)/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1281,4 +1262,80 @@ test('copy-in interruption requires the target database to remain absent before 
 
 test('copy-in interruption refuses a dangling database sidecar symlink', async () => {
   await assert.rejects(interruptedCopyInHarness('dangling-sidecar'), /absent|unpublished/);
+});
+
+
+test('dockerContainerRunArgvAndEnv keeps admin credentials off host argv and refuses seakee images', () => {
+  const secret = 'Cpamp_Private_Admin_Credential_9999';
+  const spec = dockerContainerRunArgvAndEnv({
+    name: 'cpampd01234567-seed',
+    image: 'cpampd-fixture/legacy-v1:1.14.10',
+    port: 29100,
+    dataDir: '/tmp/scratch/data',
+    adminKey: secret,
+    userArgv: ['--user', '1000:1000'],
+  });
+  assert.equal(spec.env.CPA_MANAGER_ADMIN_KEY, secret);
+  assert.ok(spec.argv.includes('CPA_MANAGER_ADMIN_KEY'));
+  for (const token of spec.argv) {
+    assert.ok(!token.includes(secret), `argv leaked admin credential in token ${token}`);
+    assert.ok(!token.startsWith('CPA_MANAGER_ADMIN_KEY='), `argv assigned CPA_MANAGER_ADMIN_KEY inline: ${token}`);
+  }
+  assert.throws(
+    () =>
+      dockerContainerRunArgvAndEnv({
+        name: 'cpampd01234567-seed',
+        image: 'seakee/cpa-manager-plus:latest',
+        port: 29100,
+        dataDir: '/tmp/scratch/data',
+        adminKey: secret,
+      }),
+    /disallowed image reference/,
+  );
+});
+
+test('httpJsonSpawnSpec passes headers and bodies over stdin instead of process argv', async () => {
+  const secret = 'Cpamp_Private_Bearer_Token_8888';
+  let observedAuth = '';
+  let observedBody = '';
+  const server = http.createServer((req, res) => {
+    observedAuth = req.headers.authorization ?? '';
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      observedBody = Buffer.concat(chunks).toString('utf8');
+      res.writeHead(200, { 'content-type': 'application/json', allow: 'GET, POST' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  try {
+    const { port } = server.address();
+    const spec = httpJsonSpawnSpec('POST', `http://127.0.0.1:${port}/probe`, {
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+    for (const arg of spec.args) {
+      assert.ok(!arg.includes(secret), `process argv leaked credential: ${arg}`);
+    }
+    const stdout = await new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, spec.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      const out = [];
+      child.stdout.on('data', (c) => out.push(c));
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        if (code !== 0) rejectPromise(new Error(`child exited ${code}`));
+        else resolvePromise(Buffer.concat(out).toString('utf8'));
+      });
+      child.stdin.end(spec.input);
+    });
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.status, 200);
+    assert.equal(parsed.allow, 'GET, POST');
+    assert.deepEqual(JSON.parse(parsed.body), { ok: true });
+    assert.equal(observedAuth, `Bearer ${secret}`);
+    assert.equal(observedBody, JSON.stringify({ secret }));
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
 });

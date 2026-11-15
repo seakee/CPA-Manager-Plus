@@ -203,6 +203,18 @@ describe('upgrade authentication lifecycle', () => {
       0
     );
     expect(renderer.root.findAllByType(FullWebLoginPage)).toHaveLength(1);
+    // Hiding the page retires the envelope and its requests, not the key: a
+    // BFCache return must not ask the operator to retype a key the server has
+    // already proved, and re-entry is a fresh verification that never reuses
+    // the retired revision.
+    expect(adapter().error).toBe('');
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    expect(mocks.verify).toHaveBeenLastCalledWith('old-key', expect.any(AbortSignal), undefined);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(
+      1
+    );
   });
 
   it('falls back on missing/bad cache, accepts weak old keys manually, and revokes on failed revalidation', async () => {
@@ -284,6 +296,9 @@ describe('upgrade authentication lifecycle', () => {
   });
 
   it('does not claim there is no migration path once the wizard reads a recorded operation', async () => {
+    // A recorded operation needs no public summary either: the entry's own
+    // "nothing was written" sentence is what the record below contradicts, so
+    // this case is the observation that has that sentence.
     mocks.verify.mockResolvedValueOnce({
       revision: 'd'.repeat(64),
       observation: 'observation_unavailable',
@@ -306,8 +321,7 @@ describe('upgrade authentication lifecycle', () => {
       'fetch',
       vi.fn(async (input: unknown) => {
         const url = String(input);
-        const payload = url.includes('/installation/upgrade/status') ? recorded : {};
-        return { ok: true, status: 200, json: async () => payload } as Response;
+        return Response.json(url.includes('/installation/upgrade/status') ? recorded : {});
       })
     );
     await act(async () => {
@@ -325,17 +339,24 @@ describe('upgrade authentication lifecycle', () => {
     });
 
     const page = JSON.stringify(renderer.toJSON());
-    // A recorded operation is a migration that is already under way. The entry
-    // must not tell the operator nothing was written, that migration is
-    // unavailable, or that further decisions wait for a future path — with the
-    // recorded row on screen those sentences contradict it.
+    // The boot read answered with a record, so the wizard resumed on it instead
+    // of asking the operator to qualify the source again.
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'upgrade-boot-failed' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'upgrade-entry-status' }).props['data-observation']
+    ).toBe('observation_unavailable');
+    // Neither the "nothing was written" sentence nor the "no migration path"
+    // headline may stand next to the recorded row.
     expect(page).not.toContain('Nothing was written and migration is not available');
+    expect(page).not.toContain('Migration is not available for this source yet.');
     expect(page).not.toContain('Further upgrade decisions will become available');
     expect(page).toContain('it is the record this page acts on');
-    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
   });
 
-  it('wires the upgrade artifact transport through the real UpgradeAuthenticationEntry on cpa_import', async () => {
+  it('offers the cpa_import artifact step on the entry and only offers it as ready after acquisition', async () => {
     const digest = 'sha256:' + 'e'.repeat(64);
     const recordedCpaImport = {
       contractVersion: 'cpamp.upgrade-wizard.v1',
@@ -351,28 +372,38 @@ describe('upgrade authentication lifecycle', () => {
       errorDetail: '',
       reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
     };
-    const artifactCalls: Array<{ url: string; init?: RequestInit }> = [];
+    // The step only offers a source after it has both read the pinned artifact
+    // and probed the official source, so the fixture is that pair, not a
+    // single "already active" shortcut.
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: unknown, init?: RequestInit) => {
+      vi.fn(async (input: unknown) => {
         const url = String(input);
-        if (url.includes('/installation/upgrade/status')) {
+        if (url.endsWith('/installation/upgrade/status')) {
           return Response.json(recordedCpaImport);
         }
         if (url.endsWith('/installation/upgrade/runtime/artifact')) {
-          artifactCalls.push({ url, init });
           return Response.json({
             schemaVersion: 1,
             pinned: { version: '8.0.55', artifactId: digest },
-            active: { artifactId: digest, origin: 'acquired' },
-            required: false,
+            active: null,
+            required: true,
             operation: null,
             cdnPresets: [],
           });
         }
         if (url.endsWith('/installation/upgrade/runtime/artifact/probe')) {
-          artifactCalls.push({ url, init });
           return Response.json({ reachable: true, code: '' });
+        }
+        if (url.endsWith('/installation/upgrade/runtime/artifact/acquire')) {
+          return Response.json({
+            id: 'op-1',
+            source: 'github',
+            phase: 'succeeded',
+            receivedBytes: 0,
+            totalBytes: 0,
+            code: '',
+          });
         }
         throw new Error(`unexpected request: ${url}`);
       })
@@ -384,32 +415,30 @@ describe('upgrade authentication lifecycle', () => {
     await act(async () => {
       await adapter().authenticate('old-key', false);
     });
-    await act(async () => {
-      await Promise.resolve();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
 
     expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
     expect(
-      renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })
-    ).toHaveLength(1);
-    expect(JSON.stringify(renderer.toJSON())).toContain('upgrade cpa-import');
-    expect(artifactCalls.length).toBeGreaterThanOrEqual(1);
-    expect(artifactCalls[0].url).toBe(
-      '/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/runtime/artifact'
+      renderer.root.findByProps({ 'data-testid': 'artifact-probe-status' }).props['data-probe']
+    ).toBe('reachable');
+    expect(renderer.root.findByProps({ 'data-testid': 'artifact-source-upload' })).toBeDefined();
+    // A pinned-but-not-active artifact is not ready, and the entry does not
+    // claim the operator can continue before the artifact is in place.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })).toHaveLength(
+      0
     );
-    expect(artifactCalls[0].init).toMatchObject({
-      method: 'GET',
-      mode: 'same-origin',
-      credentials: 'omit',
-      redirect: 'error',
-      headers: {
-        Accept: 'application/json',
-        Authorization: 'Bearer old-key',
-      },
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'artifact-acquire-btn' }).props.onClick();
     });
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })).toHaveLength(
+      1
+    );
+    expect(JSON.stringify(renderer.toJSON())).toContain('upgrade cpa-import');
   });
 
   it.each(['status', 'upload'] as const)(
@@ -438,9 +467,12 @@ describe('upgrade authentication lifecycle', () => {
         operation: null,
         cdnPresets: [],
       };
-      let pending: RequestInit | undefined;
+      // One request is held open so the page can be hidden while it is still in
+      // flight: the artifact read itself, or the upload PUT, which has no
+      // deadline of its own and is cancelled only by the session lifecycle.
+      let held: RequestInit | undefined;
       let phase: 'hanging' | 'reauthenticated' = 'hanging';
-      const reauthArtifactCalls: Array<{ url: string; init?: RequestInit }> = [];
+      const reauthArtifactReads: RequestInit[] = [];
 
       vi.stubGlobal(
         'fetch',
@@ -452,8 +484,8 @@ describe('upgrade authentication lifecycle', () => {
           if (url.endsWith('/runtime/artifact/probe')) {
             return Promise.resolve(Response.json({ reachable: true, code: '' }));
           }
-          if (phase === 'reauthenticated' && url.endsWith('/runtime/artifact')) {
-            reauthArtifactCalls.push({ url, init });
+          if (url.endsWith('/runtime/artifact') && phase === 'reauthenticated') {
+            reauthArtifactReads.push(init ?? {});
             return Promise.resolve(
               Response.json({
                 ...artifact,
@@ -469,7 +501,7 @@ describe('upgrade authentication lifecycle', () => {
             (kind === 'status' && url.endsWith('/runtime/artifact')) ||
             (kind === 'upload' && url.endsWith('/runtime/artifact/upload'))
           ) {
-            pending = init;
+            held = init;
             return new Promise<Response>(() => {});
           }
           throw new Error(`unexpected request ${url}`);
@@ -488,6 +520,9 @@ describe('upgrade authentication lifecycle', () => {
         });
       }
       if (kind === 'upload') {
+        expect(
+          renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })
+        ).toHaveLength(1);
         await act(async () => {
           renderer.root.findByProps({ 'data-testid': 'artifact-source-upload' }).props.onClick();
         });
@@ -499,13 +534,18 @@ describe('upgrade authentication lifecycle', () => {
             .findByProps({ 'data-testid': 'artifact-upload-input' })
             .props.onChange({ target: { files: [file], value: 'review.tar.gz' } });
         });
-        // Upload has no 15s deadline; only the session lifecycle signal can abort it.
+        expect(held?.method).toBe('PUT');
+        // Upload has no 15s deadline of its own; only the session lifecycle can
+        // abort it, so the timer must not cancel it on its own.
         await act(async () => {
           await vi.advanceTimersByTimeAsync(15_000);
         });
-        expect(pending?.signal?.aborted).toBe(false);
+        expect(held?.signal?.aborted).toBe(false);
+      } else {
+        expect(held?.method).toBe('GET');
       }
-      expect(pending).toBeDefined();
+      expect(held?.signal).toBeDefined();
+
       const pagehideCalls = vi
         .mocked(window.addEventListener)
         .mock.calls.filter(([name]) => name === 'pagehide');
@@ -514,13 +554,11 @@ describe('upgrade authentication lifecycle', () => {
       await act(async () => {
         onPagehide();
       });
+      // The pending artifact request is cancelled and the entry is back on the
+      // login shell; the retained credential is not what pagehide discards.
       expect(renderer.root.findAllByType(FullWebLoginPage)).toHaveLength(1);
-      expect({
-        hasCancellationSignal: !!pending?.signal,
-        aborted: pending?.signal?.aborted ?? false,
-      }).toEqual({ hasCancellationSignal: true, aborted: true });
+      expect(held?.signal?.aborted).toBe(true);
 
-      // Re-authenticating creates a fresh session controller so subsequent artifact calls work.
       phase = 'reauthenticated';
       await act(async () => {
         await adapter().authenticate('review-source-admin-reauth', false);
@@ -530,11 +568,12 @@ describe('upgrade authentication lifecycle', () => {
           await Promise.resolve();
         });
       }
-      expect(reauthArtifactCalls).toHaveLength(1);
-      expect(reauthArtifactCalls[0].init?.signal?.aborted).toBe(false);
-      expect(reauthArtifactCalls[0].init?.headers).toMatchObject({
-        Authorization: 'Bearer review-source-admin-reauth',
-      });
+      // A fresh session controller owns the re-authenticated artifact read, so
+      // a request made after re-verification is live rather than inheriting the
+      // retired envelope's cancellation.
+      expect(reauthArtifactReads).toHaveLength(1);
+      expect(reauthArtifactReads[0].signal?.aborted).toBe(false);
+      expect(held?.signal?.aborted).toBe(true);
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })
       ).toHaveLength(1);
@@ -755,5 +794,101 @@ describe('upgrade authentication lifecycle', () => {
     }
     expect(ownershipErrorByLocale['zh-CN']).not.toBe(ownershipErrorByLocale['zh-TW']);
     expect(ownershipErrorByLocale['ru']).toMatch(/[\u0400-\u04ff]/);
+  });
+
+  it('offers the first-upgrade Managed prefix editor on the entry and records what it saved without rendering the key', async () => {
+    mocks.verify.mockResolvedValueOnce({
+      revision: 'e'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    const adminSecret = 'old-upgrade-admin-key';
+    // The first-upgrade Managed row: no routing committed yet, so the wizard
+    // offers the dual-prefix editor whose suggestions the server generated.
+    const firstUpgrade = {
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'cpa_import',
+      stageKnown: true,
+      nextAction: 'verify',
+      domainsDone: ['source_copy', 'cpa_config'],
+      sourceKind: 'cpamp_1x',
+      sourceVersion: 'v1.14.4',
+      manualItems: [],
+      errorCode: '',
+      errorDetail: '',
+      targetMode: 'managed',
+      routing: {
+        configured: false,
+        committed: false,
+        existingPrefixesPreserved: false,
+        controlBasePath: '',
+        inferenceBasePath: '',
+        sharedEntry: false,
+        externalBaseUrl: '',
+        suggestedControlBasePath: '/ctl1234567890abcd',
+        suggestedInferenceBasePath: '/inf1234567890abcd',
+      },
+      reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
+    };
+    let writes = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith('/installation/upgrade/routing')) {
+          writes += 1;
+          return Response.json({
+            ...firstUpgrade,
+            routing: {
+              ...firstUpgrade.routing,
+              configured: true,
+              controlBasePath: '/ctl1234567890abcd',
+              inferenceBasePath: '/inf1234567890abcd',
+            },
+          });
+        }
+        if (url.endsWith('/installation/upgrade/status')) {
+          return Response.json(firstUpgrade);
+        }
+        return Response.json({});
+      })
+    );
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate(adminSecret, false);
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+
+    // The editor is initialized from the recorded suggestions, and the page
+    // never renders the key it holds in its ref.
+    expect(renderer.root.findByProps({ 'data-testid': 'upgrade-control-prefix-input' }).props.value).toBe(
+      '/ctl1234567890abcd'
+    );
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'upgrade-inference-prefix-input' }).props.value
+    ).toBe('/inf1234567890abcd');
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'upgrade-routing-saved' })
+    ).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain(adminSecret);
+
+    await act(async () => {
+      await renderer.root.findByProps({ 'data-testid': 'upgrade-save-routing' }).props.onClick();
+    });
+
+    // One write, reported as the save's own outcome, and the key still never
+    // appears in the page the operator sees.
+    expect(writes).toBe(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'upgrade-routing-saved' })
+    ).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-routing-error' })).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain(adminSecret);
   });
 });

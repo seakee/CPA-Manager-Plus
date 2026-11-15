@@ -58,11 +58,19 @@ type FreshOperation struct {
 }
 
 type FreshRoutingCheckpoint struct {
-	OperationID OperationID          `json:"operationId,omitempty"`
-	Revision    uint64               `json:"revision"`
-	Target      string               `json:"target,omitempty"`
-	Stage       PrefixOperationStage `json:"stage,omitempty"`
-	Committed   bool                 `json:"committed"`
+	OperationID                OperationID          `json:"operationId,omitempty"`
+	Revision                   uint64               `json:"revision"`
+	Target                     string               `json:"target,omitempty"`
+	InferenceTarget            string               `json:"inferenceTarget,omitempty"`
+	SharedEntry                bool                 `json:"sharedEntry,omitempty"`
+	InferenceCommitted         bool                 `json:"inferenceCommitted,omitempty"`
+	SuggestedControlBasePath   string               `json:"suggestedControlBasePath,omitempty"`
+	SuggestedInferenceBasePath string               `json:"suggestedInferenceBasePath,omitempty"`
+	DraftControlBasePath       string               `json:"draftControlBasePath,omitempty"`
+	DraftInferenceBasePath     string               `json:"draftInferenceBasePath,omitempty"`
+	DraftSharedEntry           bool                 `json:"draftSharedEntry,omitempty"`
+	Stage                      PrefixOperationStage `json:"stage,omitempty"`
+	Committed                  bool                 `json:"committed"`
 }
 
 // MaxAdoptionDestinationRetry bounds how far adoption may advance the shared
@@ -156,6 +164,20 @@ func (o FreshOperation) Ownership() FreshOwnership {
 		CurrentGeneration: o.Identity.Generation, CurrentOperationID: o.Identity.OperationID, Revision: o.Revision}
 }
 
+// MissingInferenceCompletionRequired reports whether an existing committed
+// Managed or Adopt Fresh installation predates the inference-prefix checkpoint
+// and must complete its one-time authenticated inference prefix setup before
+// managed inference ingress can open.
+func (o FreshOperation) MissingInferenceCompletionRequired() bool {
+	if !o.Routing.Committed {
+		return false
+	}
+	if o.Strategy.Strategy != NewManaged && o.Strategy.Strategy != AdoptExisting {
+		return false
+	}
+	return !o.Routing.InferenceCommitted || o.Routing.InferenceTarget == ""
+}
+
 func (o FreshOperation) Validate() error {
 	if o.Version != FreshContractVersion || !o.Ownership().Valid() || !o.GatewayPending {
 		return errors.New("invalid Fresh ownership checkpoint")
@@ -166,8 +188,19 @@ func (o FreshOperation) Validate() error {
 	if o.Strategy.Strategy != "" && !o.AdminInitialized {
 		return errors.New("Fresh strategy requires initialized Admin")
 	}
+	for _, suggestion := range []string{
+		o.Routing.SuggestedControlBasePath,
+		o.Routing.SuggestedInferenceBasePath,
+		o.Routing.DraftControlBasePath,
+		o.Routing.DraftInferenceBasePath,
+	} {
+		if suggestion != "" && !ValidControlBasePath(suggestion) {
+			return errors.New("invalid routing suggestion or draft prefix")
+		}
+	}
 	if o.Routing.OperationID == "" {
-		if o.Routing.Revision != 0 || o.Routing.Target != "" || o.Routing.Stage != "" || o.Routing.Committed {
+		if o.Routing.Revision != 0 || o.Routing.Target != "" || o.Routing.InferenceTarget != "" ||
+			o.Routing.SharedEntry || o.Routing.InferenceCommitted || o.Routing.Stage != "" || o.Routing.Committed {
 			return errors.New("unowned initial routing checkpoint")
 		}
 	} else {
@@ -177,9 +210,31 @@ func (o FreshOperation) Validate() error {
 		if o.Routing.Revision == 0 || !ValidControlBasePath(o.Routing.Target) {
 			return errors.New("invalid initial routing target")
 		}
+		if o.Routing.InferenceTarget != "" {
+			if !ValidInferenceBasePath(o.Routing.InferenceTarget) {
+				return errors.New("invalid initial inference routing target")
+			}
+			if o.Strategy.Strategy == ConnectExternal {
+				return errors.New("external Fresh strategy cannot carry managed inference target")
+			}
+			if o.Routing.Target == o.Routing.InferenceTarget {
+				if !o.Routing.SharedEntry {
+					return errors.New("identical control and inference targets require explicit sharedEntry")
+				}
+			} else {
+				if o.Routing.SharedEntry {
+					return errors.New("distinct control and inference targets cannot set sharedEntry")
+				}
+				if SameOrNestedBasePath(o.Routing.Target, o.Routing.InferenceTarget) {
+					return errors.New("overlapping control and inference targets are forbidden")
+				}
+			}
+		} else if o.Routing.SharedEntry || o.Routing.InferenceCommitted {
+			return errors.New("unconfigured inference target cannot be shared or committed")
+		}
 		switch o.Routing.Stage {
 		case PrefixIntentPersisted, PrefixRouteActivated, PrefixHealthVerified:
-			if o.Routing.Committed {
+			if o.Routing.Committed || o.Routing.InferenceCommitted {
 				return errors.New("inconsistent initial routing commit")
 			}
 		case PrefixCommitted:
@@ -192,6 +247,9 @@ func (o FreshOperation) Validate() error {
 	}
 	if o.Routing.Committed && (!o.AdminInitialized || o.Routing.Stage != PrefixCommitted || o.Routing.Target == "" || o.Routing.Revision == 0) {
 		return errors.New("unverified Fresh route commit")
+	}
+	if o.Routing.InferenceCommitted && (!o.Routing.Committed || o.Routing.InferenceTarget == "") {
+		return errors.New("unverified Fresh inference route commit")
 	}
 	if o.ProductComplete && (!o.AdminInitialized || !o.Routing.Committed || o.Strategy.Stage != "committed") {
 		return errors.New("Fresh product completion is not established")

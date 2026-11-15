@@ -494,7 +494,7 @@ func TestWithSupportPluginHeaderPreservesStreamingFlushAndHijack(t *testing.T) {
 
 		reqCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/control/api/v2/cpamp/v0/management/logs", nil)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+currentInstallManagementAPIV2Prefix+"cpamp/v0/management/logs", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -898,9 +898,11 @@ func TestOpenedCloseDrainsInFlightPluginCapabilityRefreshBeforeClosingDB(t *test
 	})
 	op := opened.Record.Operation
 	updated, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -921,7 +923,7 @@ func TestOpenedCloseDrainsInFlightPluginCapabilityRefreshBeforeClosingDB(t *test
 	if res := a3Post(t, app, updated.Operation.Revision, externalCPA.URL, externalAuthorityManagement); res.Code != http.StatusOK {
 		t.Fatalf("ConnectExternal commit = %d %s, want 200", res.Code, res.Body.String())
 	}
-	req := httptest.NewRequest(http.MethodGet, "/control/api/v2/operation", nil)
+	req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"operation", nil)
 	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	opRes := httptest.NewRecorder()
 	app.ServeHTTP(opRes, req)
@@ -986,9 +988,11 @@ func TestOpenedCloseDrainsCollectorAuthRejectionWithoutDeadlockAndBeforeRejectio
 	}
 	op := opened.Record.Operation
 	updated, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: freshkeyapply.ExternalIdentity(normalized), TargetGeneration: 1,
@@ -1223,9 +1227,11 @@ func TestFreshShutdownPreservesDBAcrossLongRuntimeMutationAndEarlyServerExit(t *
 		}
 		op := opened.Record.Operation
 		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = op.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -1261,7 +1267,7 @@ func TestFreshShutdownPreservesDBAcrossLongRuntimeMutationAndEarlyServerExit(t *
 		go func() {
 			req, reqErr := http.NewRequest(
 				http.MethodPost,
-				"http://"+listener.Addr().String()+"/control/api/v2/runtime/operations",
+				"http://"+listener.Addr().String()+currentInstallManagementAPIV2Prefix+"runtime/operations",
 				strings.NewReader(`{"action":"start","requestId":"77777777-7777-4777-8777-777777777777"}`),
 			)
 			if reqErr != nil {
@@ -1585,9 +1591,11 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		}
 		op := opened.Record.Operation
 		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = op.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -1631,7 +1639,7 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		}
 		t.Cleanup(func() { _ = stalledConfigConn.Close() })
 		rawConfigReq := fmt.Sprintf(
-			"POST /control/api/v2/gateway/config/groups/routing HTTP/1.1\r\n"+
+			"POST "+currentInstallManagementAPIV2Prefix+"gateway/config/groups/routing HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"Authorization: Bearer %s\r\n"+
 				"Content-Type: application/json\r\n"+
@@ -1657,7 +1665,7 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		}
 		t.Cleanup(func() { _ = stalledChunkConn.Close() })
 		rawChunkReq := fmt.Sprintf(
-			"PUT /control/api/v2/cpamp/v0/management/usage/import-sessions/%s/chunk?offset=0 HTTP/1.1\r\n"+
+			"PUT "+currentInstallManagementAPIV2Prefix+"cpamp/v0/management/usage/import-sessions/%s/chunk?offset=0 HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"Authorization: Bearer %s\r\n"+
 				"Content-Length: 4096\r\n\r\n"+
@@ -1684,7 +1692,7 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		go func() {
 			req, reqErr := http.NewRequest(
 				http.MethodPost,
-				"http://"+listener.Addr().String()+"/control/api/v2/runtime/operations",
+				"http://"+listener.Addr().String()+currentInstallManagementAPIV2Prefix+"runtime/operations",
 				strings.NewReader(`{"action":"start","requestId":"88888888-8888-4888-8888-888888888888"}`),
 			)
 			if reqErr != nil {
@@ -1793,9 +1801,11 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		}
 		op := opened.Record.Operation
 		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = op.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -1852,7 +1862,7 @@ func TestFreshShutdownUnblocksStalledRequestsWhilePreservingRuntimeMutation(t *t
 		_ = stalledReader.SetReadBuffer(1024)
 
 		rawGet := fmt.Sprintf(
-			"GET /control/api/v2/cpamp/v0/management/usage HTTP/1.1\r\n"+
+			"GET "+currentInstallManagementAPIV2Prefix+"cpamp/v0/management/usage HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"Authorization: Bearer %s\r\n\r\n",
 			tcpListener.Addr().String(),
@@ -1935,9 +1945,11 @@ func TestFreshShutdownInterruptsEarlyBodyCloseOnProxyLimit(t *testing.T) {
 		}
 		op := opened.Record.Operation
 		if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = op.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -1975,7 +1987,7 @@ func TestFreshShutdownInterruptsEarlyBodyCloseOnProxyLimit(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 
 		reqHeader := fmt.Sprintf(
-			"PATCH /control/api/v2/cpamp/v0/management/auth-files/status HTTP/1.1\r\n"+
+			"PATCH "+currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files/status HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"Authorization: Bearer %s\r\n"+
 				"Content-Type: application/json\r\n"+

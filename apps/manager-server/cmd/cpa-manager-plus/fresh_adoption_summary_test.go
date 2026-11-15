@@ -29,7 +29,7 @@ func (f *adoptMigrationFixture) adoption(t *testing.T) *httptest.ResponseRecorde
 // adoptionWith is the same read with an explicit credential, because the route's
 // authorization is part of what these tests have to prove.
 func (f *adoptMigrationFixture) adoptionWith(auth string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/adoption", nil)
+	request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/adoption", nil)
 	if auth != "" {
 		request.Header.Set("Authorization", auth)
 	}
@@ -195,15 +195,16 @@ func TestAdoptionSummaryRefusesANonAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := app.store.Update(ctx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/adoption", nil)
+	request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/adoption", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, request)
@@ -213,7 +214,7 @@ func TestAdoptionSummaryRefusesANonAdoption(t *testing.T) {
 	// The browser's own credential reaches the same answer: the session branch
 	// admits the read, and the route's projection refuses it because no adoption
 	// was ever committed.
-	request = httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/adoption", nil)
+	request = httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/adoption", nil)
 	request.Header.Set("Authorization", "Fresh "+session)
 	response = httptest.NewRecorder()
 	app.canonicalAPI(response, request)

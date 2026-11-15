@@ -267,7 +267,10 @@ func (s r8ObservedOwnership) Lchown(path string, uid, gid int) error {
 		return err
 	}
 	resolved := filepath.Join(parent, filepath.Base(path))
-	root := s.hostPath("/data/runtime/gateway")
+	root, err := filepath.EvalSymlinks(s.hostPath("/data/runtime/gateway"))
+	if err != nil {
+		return err
+	}
 	if strings.HasPrefix(path, "/data/runtime/gateway/") && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
 		*s.outside = append(*s.outside, path)
 	}

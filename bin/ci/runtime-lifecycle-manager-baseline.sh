@@ -10,7 +10,16 @@ if [ -z "${project}" ] || [ -z "${initializer_name}" ]; then
   exit 2
 fi
 
-compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
+compose_override="${CPAMP_SMOKE_COMPOSE_OVERRIDE:-}"
+compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml")
+if [ -n "${compose_override}" ]; then
+  if [ ! -f "${compose_override}" ]; then
+    echo "CPAMP_SMOKE_COMPOSE_OVERRIDE does not exist or is not a regular file: ${compose_override}" >&2
+    exit 2
+  fi
+  compose+=(-f "${compose_override}")
+fi
+compose+=(-p "${project}")
 scratch_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime-manager-baseline.XXXXXX")"
 
 cleanup() {
@@ -43,12 +52,11 @@ docker cp "${initializer_name}:/data/." "${scratch_root}/data"
 test -s "${scratch_root}/data/usage.sqlite"
 test -s "${scratch_root}/data/data.key"
 
-# Runtime12/14/17/18/19 exercise the pre-Phase4 Runtime lifecycle contract,
-# not the new Fresh product workflow. Convert only this disposable CI volume
-# into an explicit historical Manager baseline. This must never become product
-# initialization behavior: Fresh ownership is removed, an old bootstrap-state
-# witness is installed, and normal Manager startup then creates the historical
-# Embedded Runtime desired state through its existing compatibility path.
+# Runtime12/14/17/18/19 exercise the Manager-owned Runtime reconciler contract
+# on the default CPA v8.0.55 full bundle rather than the interactive Fresh setup
+# wizard. Seed only the Manager compatibility bootstrap witness in this
+# disposable CI volume; /data/runtime remains absent so cpamp-launcher performs
+# genuine CPA v8.0.55 runtime initialization on startup.
 python3 - "${scratch_root}/data/usage.sqlite" <<'PY'
 import json
 import sqlite3
@@ -94,16 +102,16 @@ try:
     if "runtime_desired_v1" in remaining:
         raise SystemExit("Runtime desired state was pre-seeded instead of being created by Manager startup")
     if "bootstrap_state_v1" not in remaining:
-        raise SystemExit("historical bootstrap baseline was not persisted")
+        raise SystemExit("Manager compatibility bootstrap baseline was not persisted")
 finally:
     connection.close()
 PY
 
 docker cp "${scratch_root}/data/usage.sqlite" "${initializer_name}:/data/usage.sqlite"
 
-# Fresh uses a non-empty same-inode receipt as ownership evidence. Historical
-# Manager startup uses the existing empty retained marker. Remove any copied
-# WAL sidecars and convert only the disposable test marker before startup.
+# Fresh uses a non-empty same-inode receipt as ownership evidence; compatibility
+# Manager startup uses the empty retained marker. Remove any copied WAL sidecars
+# and convert only the disposable test marker before startup.
 "${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
   rm -f /data/usage.sqlite-wal /data/usage.sqlite-shm
   : > /data/usage.sqlite.manager.lock

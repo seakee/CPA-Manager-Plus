@@ -23,7 +23,7 @@ func gatewayRequest(t *testing.T, app *freshApplication, method, resource, body 
 	} else {
 		reader = bytes.NewReader([]byte(body))
 	}
-	request := httptest.NewRequest(method, "/control/api/v2/"+resource, reader)
+	request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, reader)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
@@ -105,7 +105,7 @@ func TestGatewayConfigSurfaceRejectsAnythingOutsideTheContract(t *testing.T) {
 	}
 	// A query string and a non-canonical escaping are never a resource selector.
 	for _, target := range []string{"gateway/config?path=routing", "gateway/config/groups/retry%2F"} {
-		request := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+target, nil)
+		request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+target, nil)
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)

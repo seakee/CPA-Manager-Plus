@@ -33,7 +33,11 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 	}()
 	app := newFreshApplication(opened, config.Config{}, nil)
 	_, err = app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -41,7 +45,7 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 	}
 	call := func(method, resource, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+		request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 		request.Header.Set("Content-Type", "application/json")
 		if token != "" {
 			request.Header.Set("Authorization", "Bearer "+token)
@@ -49,7 +53,7 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 		response := httptest.NewRecorder()
 		// Exercise the real canonical Admin verifier. Ingress routing is covered
 		// separately by the process smoke; this does not forge its verification.
-		httpapi.InitialFullWebHandler("/control", http.HandlerFunc(app.canonicalAPI)).ServeHTTP(response, request)
+		httpapi.InitialFullWebHandler(currentInstallControlPrefix, http.HandlerFunc(app.canonicalAPI)).ServeHTTP(response, request)
 		if response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("Full Web wrapper weakened API cache control")
 		}
@@ -194,7 +198,7 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 	adopted := after.Operation
 	adopted.Strategy.Strategy = bootstrap.AdoptExisting
 	adopted.Strategy.SourceClass = bootstrap.AdoptNetworkExisting
-	adoptedRequest := httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body))
+	adoptedRequest := httptest.NewRequest("POST", currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(body))
 	adoptedRequest.Header.Set("Content-Type", "application/json")
 	served := httptest.NewRecorder()
 	app.clientKeys(served, adoptedRequest, adopted, "api-keys")
@@ -207,14 +211,14 @@ func TestFreshClientKeysAdminPersistenceAndStops(t *testing.T) {
 	legacy.Strategy.Strategy = bootstrap.AdoptExisting
 	legacy.Strategy.SourceClass = bootstrap.AdoptLegacyManaged
 	legacyRecorder := httptest.NewRecorder()
-	app.clientKeys(legacyRecorder, httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body)), legacy, "api-keys")
+	app.clientKeys(legacyRecorder, httptest.NewRequest("POST", currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(body)), legacy, "api-keys")
 	if legacyRecorder.Code != 409 {
 		t.Fatalf("legacy_managed scope answered without its installation authority: %d", legacyRecorder.Code)
 	}
 	external := after.Operation
 	external.Strategy.Strategy = bootstrap.ConnectExternal
 	refused := httptest.NewRecorder()
-	app.clientKeys(refused, httptest.NewRequest("POST", "/control/api/v2/api-keys", strings.NewReader(body)), external, "api-keys")
+	app.clientKeys(refused, httptest.NewRequest("POST", currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(body)), external, "api-keys")
 	if refused.Code != 409 {
 		t.Fatalf("Connect External scope answered without its installation authority: %d", refused.Code)
 	}

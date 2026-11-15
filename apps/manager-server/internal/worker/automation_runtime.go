@@ -23,13 +23,12 @@ type accountAutomationWorker interface {
 
 type AutomationRuntime struct {
 	settings      *automationsvc.Service
-	manager       *collectorpkg.Manager
 	quotaWorker   quotaAutomationWorker
 	accountWorker accountAutomationWorker
 	handler       *automationUsageHandler
 }
 
-func NewAutomationRuntime(settings *automationsvc.Service, manager *collectorpkg.Manager, quotaWorker quotaAutomationWorker, accountWorker accountAutomationWorker) *AutomationRuntime {
+func NewAutomationRuntime(settings *automationsvc.Service, quotaWorker quotaAutomationWorker, accountWorker accountAutomationWorker) *AutomationRuntime {
 	handler := &automationUsageHandler{
 		settings:      settings,
 		quotaWorker:   quotaWorker,
@@ -37,7 +36,6 @@ func NewAutomationRuntime(settings *automationsvc.Service, manager *collectorpkg
 	}
 	return &AutomationRuntime{
 		settings:      settings,
-		manager:       manager,
 		quotaWorker:   quotaWorker,
 		accountWorker: accountWorker,
 		handler:       handler,
@@ -53,9 +51,6 @@ func (r *AutomationRuntime) Start(ctx context.Context) {
 	}
 	if r.accountWorker != nil {
 		r.accountWorker.Start(ctx)
-	}
-	if r.manager != nil && r.handler != nil {
-		r.manager.SetUsageEventHandler(r.handler)
 	}
 	r.logState(ctx, "loaded")
 }

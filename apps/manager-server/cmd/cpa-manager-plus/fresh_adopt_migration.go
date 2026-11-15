@@ -18,6 +18,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
 // adoptMigrationSourceClass is the only source class the v8 migration executor
@@ -362,7 +363,9 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 	authority := a.keyApply.ForOperation(op)
 	if op.Strategy.Stage != "committed" || record.Connection == nil || authority == nil ||
 		authority.Profile() != freshkeyapply.ProfileManaged ||
-		!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+		!freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) ||
+		!op.Routing.Committed || !op.Routing.InferenceCommitted || op.Routing.OperationID == "" ||
+		freshrouting.ValidateCheckpointForStrategy(bootstrap.AdoptExisting, op.Routing) != nil {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
@@ -439,7 +442,13 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	// written. A registration that outlived a checkpoint this completion may no
 	// longer finish would hand the gateway configuration page and the key journal
 	// authority over an installation that is not (or is no longer) this adoption.
-	if current.Operation.Strategy.Stage != "committed" || current.Operation.Strategy.Strategy != bootstrap.AdoptExisting || current.Operation.ProductComplete {
+	if current.Operation.Strategy.Stage != "committed" ||
+		current.Operation.Strategy.Strategy != bootstrap.AdoptExisting ||
+		current.Operation.ProductComplete ||
+		!current.Operation.Routing.Committed ||
+		!current.Operation.Routing.InferenceCommitted ||
+		current.Operation.Routing.OperationID == "" ||
+		freshrouting.ValidateCheckpointForStrategy(bootstrap.AdoptExisting, current.Operation.Routing) != nil {
 		return adoptCompletion{status: http.StatusConflict}
 	}
 	record := current
@@ -494,7 +503,13 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 				return err
 			}
 		}
-		if record.Operation.Strategy.Stage != "committed" || record.Operation.Strategy.Strategy != bootstrap.AdoptExisting || record.Operation.ProductComplete {
+		if record.Operation.Strategy.Stage != "committed" ||
+			record.Operation.Strategy.Strategy != bootstrap.AdoptExisting ||
+			record.Operation.ProductComplete ||
+			!record.Operation.Routing.Committed ||
+			!record.Operation.Routing.InferenceCommitted ||
+			record.Operation.Routing.OperationID == "" ||
+			freshrouting.ValidateCheckpointForStrategy(bootstrap.AdoptExisting, record.Operation.Routing) != nil {
 			return freshstore.ErrConflict
 		}
 		if request.AcceptRetryable && (record.AdoptionSummary == nil || record.AdoptionSummary.RunID != request.RunID) {

@@ -1,6 +1,7 @@
 package freshstrategy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,75 @@ import (
 
 const syntheticAdoptionResourceRunID = "test-adoption-resource-run"
 
+func canonicalAdoptionResourceManifest(t *testing.T, class bootstrap.AdoptSourceClass) ([]byte, adoptionResourceManifest) {
+	t.Helper()
+	manifest := adoptionResourceManifest{
+		SchemaVersion: 1,
+		ContractID:    adoptionResourceContract,
+		Candidate: evidenceCandidate{
+			ID:             "CPA8-8.0.55-linux-amd64-plugin",
+			DeclaredSHA256: realCPA8ArchiveSHA256,
+			ArtifactID:     "sha256:" + realCPA8BinarySHA256,
+		},
+		Profiles:    []evidenceProfile{{ID: adoptionResourceProfile}},
+		SourceClass: class,
+	}
+	switch class {
+	case bootstrap.AdoptNetworkExisting:
+		manifest.Revision = "fresh-network-client-api-keys-r1"
+		manifest.Cases = []evidenceCase{
+			{ID: "fresh-network-client-api-keys-read", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofRead},
+			{ID: "fresh-network-client-api-keys-replay", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofReplay},
+			{ID: "fresh-network-client-api-keys-verify", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofVerify},
+		}
+		manifest.SourceProfile = adoptionResourceSourceCPAV8
+	case bootstrap.AdoptLegacyManaged:
+		manifest.Revision = "fresh-legacy-client-api-keys-r1"
+		manifest.Cases = []evidenceCase{
+			{ID: "fresh-legacy-client-api-keys-read", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofRead},
+			{ID: "fresh-legacy-client-api-keys-replay", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofReplay},
+			{ID: "fresh-legacy-client-api-keys-verify", ProfileRefs: []string{adoptionResourceProfile}, ProofScope: adoptionResourceProofVerify},
+		}
+		manifest.LegacySource = &evidenceSource{
+			Version:       cpa.AcceptedLegacyManagedVersion,
+			ArchiveSHA256: cpa.AcceptedLegacyManagedArchiveSHA256,
+			BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
+		}
+	default:
+		t.Fatalf("unsupported adoption resource class %q", class)
+	}
+	return encodeJSON(t, manifest), manifest
+}
+
+// producerAdoptionResourceManifest returns the canonical manifest for the
+// current accepted source profile of class, verifying exact byte identity
+// whenever the content-addressed manifest is already checked into evidence/.
+func producerAdoptionResourceManifest(t *testing.T, class bootstrap.AdoptSourceClass) (string, []byte, adoptionResourceManifest) {
+	t.Helper()
+	canonicalData, canonical := canonicalAdoptionResourceManifest(t, class)
+	name := "qualification/evidence/" + sha256Hex(canonicalData) + ".json"
+	if checkedIn, err := fs.ReadFile(productionEvidence, name); err == nil && !bytes.Equal(checkedIn, canonicalData) {
+		t.Fatalf("checked-in adoption resource manifest %s drifted from canonical bytes", name)
+	}
+	return name, canonicalData, canonical
+}
+
+func adoptionResourceManifestMatchesAcceptedSource(manifest adoptionResourceManifest, class bootstrap.AdoptSourceClass) bool {
+	switch class {
+	case bootstrap.AdoptNetworkExisting:
+		return manifest.SourceProfile == adoptionResourceSourceCPAV8 && manifest.LegacySource == nil
+	case bootstrap.AdoptLegacyManaged:
+		return manifest.SourceProfile == "" && manifest.LegacySource != nil &&
+			*manifest.LegacySource == (evidenceSource{
+				Version:       cpa.AcceptedLegacyManagedVersion,
+				ArchiveSHA256: cpa.AcceptedLegacyManagedArchiveSHA256,
+				BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
+			})
+	default:
+		return false
+	}
+}
+
 func embeddedAdoptionResourceManifest(t *testing.T, class bootstrap.AdoptSourceClass) (string, []byte, adoptionResourceManifest) {
 	t.Helper()
 	names, err := fs.Glob(productionEvidence, "qualification/evidence/*.json")
@@ -34,7 +104,9 @@ func embeddedAdoptionResourceManifest(t *testing.T, class bootstrap.AdoptSourceC
 			t.Fatal(err)
 		}
 		var manifest adoptionResourceManifest
-		if json.Unmarshal(data, &manifest) != nil || manifest.ContractID != adoptionResourceContract || manifest.SourceClass != class || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 {
+		if json.Unmarshal(data, &manifest) != nil || manifest.ContractID != adoptionResourceContract ||
+			manifest.SourceClass != class || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 ||
+			!adoptionResourceManifestMatchesAcceptedSource(manifest, class) {
 			continue
 		}
 		if foundName != "" {
@@ -100,8 +172,8 @@ type syntheticAdoptionResource struct {
 }
 
 // syntheticKindCounts is the per-kind evidence a run of this source class can
-// honestly produce: a v8 source has the whole v8 management surface, a v7 source
-// has only its client key list.
+// honestly produce: network_existing exercises the four v8 management kinds,
+// while legacy_managed exercises only its client key list via the v0 surface.
 func syntheticKindCounts(class bootstrap.AdoptSourceClass) map[string]int {
 	counts := map[string]int{"client-api-keys": 2}
 	if class == bootstrap.AdoptNetworkExisting {
@@ -151,9 +223,9 @@ func syntheticAdoptionResourceDefaults(record *productionRecord, class bootstrap
 			BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
 		}
 	}
-	// The kinds this class's run exercises: a v8 source has the whole v8
-	// management surface, a v7 source has only the client key list, so nothing
-	// else can be authorized for it.
+	// The kinds this class's run exercises: network_existing uses the four v8
+	// management kinds, while legacy_managed exercises only the client key list
+	// via the v0 surface, so nothing else can be authorized for it.
 	read := adoptionResourceReadTrace{
 		SchemaVersion: 1, RunID: syntheticAdoptionResourceRunID, CaseRef: readRef,
 		SourceClass: string(class), ConsumerImplementationSHA256: consumerImplementationSHA256(),
@@ -268,7 +340,7 @@ func resourceConsumerFixture(t *testing.T, index int) (productionRecord, fstest.
 func TestGeneratedAdoptionResourceEvidenceSatisfiesProductionLoader(t *testing.T) {
 	for _, index := range []int{2, 3} {
 		record, files := acceptedConsumerFixture(t, index)
-		_, manifestData, manifest := embeddedAdoptionResourceManifest(t, record.Consumers[index].SourceClass)
+		_, manifestData, manifest := producerAdoptionResourceManifest(t, record.Consumers[index].SourceClass)
 		artifact := record.ArtifactID
 		// Each trace owns its own copy of the counts: a fixture that shared one map
 		// could not express a chain whose traces disagree.
@@ -501,13 +573,15 @@ func TestLegacyAdoptionResourceChainBindsPinnedSource(t *testing.T) {
 		}
 	}
 	for name, mutate := range map[string]func(*productionRecord, fstest.MapFS){
-		"manifest source missing": before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource = nil }, nil),
-		"manifest version":        before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.Version = "v7.0.13" }, nil),
-		"manifest archive":        before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.ArchiveSHA256 = strings.Repeat("a", 64) }, nil),
-		"manifest binary":         before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.BinarySHA256 = strings.Repeat("a", 64) }, nil),
-		"read version":            before(func(s *syntheticAdoptionResource) { s.read.LegacyVersion = "v7.0.13" }, nil),
-		"read archive":            before(func(s *syntheticAdoptionResource) { s.read.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
-		"read binary":             before(func(s *syntheticAdoptionResource) { s.read.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
+		"manifest source missing":   before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource = nil }, nil),
+		"manifest below-v8 version": before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.Version = "v7.0.12" }, nil),
+		"manifest unpinned version": before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.Version = "v8.0.13" }, nil),
+		"manifest archive":          before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.ArchiveSHA256 = strings.Repeat("a", 64) }, nil),
+		"manifest binary":           before(func(s *syntheticAdoptionResource) { s.manifest.LegacySource.BinarySHA256 = strings.Repeat("a", 64) }, nil),
+		"read below-v8 version":     before(func(s *syntheticAdoptionResource) { s.read.LegacyVersion = "v7.0.12" }, nil),
+		"read unpinned version":     before(func(s *syntheticAdoptionResource) { s.read.LegacyVersion = "v8.0.13" }, nil),
+		"read archive":              before(func(s *syntheticAdoptionResource) { s.read.LegacyArchiveSHA256 = strings.Repeat("a", 64) }, nil),
+		"read binary":               before(func(s *syntheticAdoptionResource) { s.read.LegacyBinarySHA256 = strings.Repeat("a", 64) }, nil),
 		"network chain on legacy": func(record *productionRecord, files fstest.MapFS) {
 			attachSyntheticAdoptionResourceForClass(t, files, record, 3, bootstrap.AdoptNetworkExisting, nil, nil)
 		},

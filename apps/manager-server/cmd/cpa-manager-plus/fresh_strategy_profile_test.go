@@ -43,7 +43,9 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		var routingStrategy atomic.Value
 		routingStrategy.Store("round-robin")
 		var authFileDeleted atomic.Bool
+		var externalHits atomic.Int32
 		externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			externalHits.Add(1)
 			if r.Header.Get("Authorization") != "Bearer "+management {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -122,7 +124,7 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		}
 
 		callApp := func(target *freshApplication, method, resource, body string) *httptest.ResponseRecorder {
-			req := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+			req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			if method == http.MethodPut {
 				req.Header.Set("Content-Type", "application/gzip")
@@ -144,10 +146,11 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 			t.Fatal(err)
 		}
 		record, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy: bootstrap.ConnectExternal, Stage: "committed",
 				TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
@@ -164,9 +167,21 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		if _, srcErr := app.externalSource(t.Context()); !errors.Is(srcErr, freshkeyapply.ErrUnavailable) {
 			t.Fatalf("pre-complete externalSource err = %v, want ErrUnavailable", srcErr)
 		}
+		stagedKey, _, err := app.keys.Create(t.Context(), strings.Repeat("a", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
 		preKeys := callApp(app, http.MethodGet, "api-keys", "")
-		if preKeys.Code != http.StatusOK || !strings.Contains(preKeys.Body.String(), `"presenceUnverified":true`) {
-			t.Fatalf("pre-complete GET api-keys = %d %s, want 200 presenceUnverified", preKeys.Code, preKeys.Body.String())
+		if preKeys.Code != http.StatusOK || !strings.Contains(preKeys.Body.String(), `"presenceUnverified":true`) ||
+			!strings.Contains(preKeys.Body.String(), `"gatewayPending":true`) ||
+			!strings.Contains(preKeys.Body.String(), `"runtimeState":"effect_unknown"`) ||
+			strings.Contains(preKeys.Body.String(), `"runtimeState":"effective_observed"`) {
+			t.Fatalf("pre-complete GET api-keys = %d %s, want 200 presenceUnverified effect_unknown", preKeys.Code, preKeys.Body.String())
+		}
+		preDetail := callApp(app, http.MethodGet, "api-keys/"+string(stagedKey.Key.ID), "")
+		if preDetail.Code != http.StatusOK || !strings.Contains(preDetail.Body.String(), `"runtimeState":"effect_unknown"`) ||
+			strings.Contains(preDetail.Body.String(), `"runtimeState":"effective_observed"`) {
+			t.Fatalf("pre-complete GET api-keys/<id> = %d %s, want 200 effect_unknown", preDetail.Code, preDetail.Body.String())
 		}
 		preCfg := callApp(app, http.MethodGet, "gateway/config", "")
 		if preCfg.Code != http.StatusOK || !strings.Contains(preCfg.Body.String(), `"mode":"unavailable"`) {
@@ -180,6 +195,9 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		}
 		if updRec := callApp(app, http.MethodGet, "cpamp/usage-service/runtime/updates", ""); updRec.Code != http.StatusPreconditionRequired && updRec.Code != http.StatusConflict {
 			t.Fatalf("pre-complete GET cpamp/usage-service/runtime/updates = %d %s, want 409/428", updRec.Code, updRec.Body.String())
+		}
+		if hits := externalHits.Load(); hits != 0 {
+			t.Fatalf("pre-complete External install contacted external CPA %d times, want 0", hits)
 		}
 
 		// 3. Complete installation in-process.
@@ -350,10 +368,11 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 
 	t.Run("adopt_existing_with_same_runtime_env", func(t *testing.T) {
 		harness := newManagedInstallHarnessWith(t, func(r *freshstore.Record, env managedInstallEnv) {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.AdoptExisting,
 				SourceClass:                   bootstrap.AdoptNetworkExisting,
@@ -478,6 +497,7 @@ func TestEffectiveRuntimeModeFailsClosedOnStoreError(t *testing.T) {
 		t.Fatalf("store error contacted external runtime client %d times", hits)
 	}
 }
+
 type staticDesiredRunningStore struct{}
 
 func (staticDesiredRunningStore) LoadEmbeddedRuntimeDesiredState(context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
@@ -578,10 +598,11 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy: bootstrap.ConnectExternal, Stage: "committed",
 				TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
@@ -598,7 +619,7 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 		// Call 4: SetEmbeddedMutationsEnabled inside ProxyService.
 		baseStore := app.store
 		app.store = &nthLoadFailingStore{Store: baseStore, failOnCall: 4}
-		delReq := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", nil)
+		delReq := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=codex-a.json", nil)
 		delReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		delRec := httptest.NewRecorder()
 		app.canonicalAPI(delRec, delReq)
@@ -669,10 +690,11 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy: bootstrap.ConnectExternal, Stage: "committed",
 				TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
@@ -691,7 +713,7 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 
 		baseStore := app.store
 		app.store = &nthLoadFailingStore{Store: baseStore, failOnCall: 4}
-		delReq := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", nil)
+		delReq := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=codex-a.json", nil)
 		delReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		delRec := httptest.NewRecorder()
 		app.canonicalAPI(delRec, delReq)
@@ -704,7 +726,7 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 
 		// Once the checkpoint store is healthy again, External forwards allowed auth-file deletes.
 		app.store = baseStore
-		okReq := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", nil)
+		okReq := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=codex-a.json", nil)
 		okReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		okRec := httptest.NewRecorder()
 		app.canonicalAPI(okRec, okReq)
@@ -756,10 +778,11 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec, err = store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy: bootstrap.ConnectExternal, Stage: "committed",
 				TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
@@ -779,7 +802,7 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			CPAUpstreamURL:   externalServer.URL,
 		}, nil)
 		app.store = &nthLoadFailingStore{Store: app.store, failOnCall: 4}
-		delReq := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", nil)
+		delReq := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=codex-a.json", nil)
 		delReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		delRec := httptest.NewRecorder()
 		app.canonicalAPI(delRec, delReq)
@@ -818,10 +841,11 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -849,8 +873,8 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			path   string
 			body   string
 		}{
-			{http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", ""},
-			{http.MethodPatch, "/control/api/v2/cpamp/v0/management/api-keys", `{"old":"k1","new":"k2"}`},
+			{http.MethodDelete, currentInstallManagementAPIV2Prefix + "cpamp/v0/management/auth-files?name=codex-a.json", ""},
+			{http.MethodPatch, currentInstallManagementAPIV2Prefix + "cpamp/v0/management/api-keys", `{"old":"k1","new":"k2"}`},
 		} {
 			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -867,7 +891,7 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 		// Inner checkpoint read failure also fails closed with 503 and zero upstream hits.
 		baseStore := app.store
 		app.store = &nthLoadFailingStore{Store: baseStore, failOnCall: 3}
-		delReq := httptest.NewRequest(http.MethodDelete, "/control/api/v2/cpamp/v0/management/auth-files?name=codex-a.json", nil)
+		delReq := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=codex-a.json", nil)
 		delReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		delRec := httptest.NewRecorder()
 		app.canonicalAPI(delRec, delReq)
@@ -977,10 +1001,11 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	record, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -1013,7 +1038,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	statusReadDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil)
 		app.runtimeStatus(rec, req, preCommitCompleteOp)
 		statusReadDone <- rec
 	}()
@@ -1034,7 +1059,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	opDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"start","requestId":"11111111-1111-4111-8111-111111111111"}`))
 		req.Header.Set("Content-Type", "application/json")
 		app.runtimeOperations(rec, req, preCommitCompleteOp, "runtime/operations")
@@ -1064,7 +1089,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commitReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(commitPayload))
+	commitReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(commitPayload))
 	commitReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	commitReq.Header.Set("Content-Type", "application/json")
 	commitRec := httptest.NewRecorder()
@@ -1073,7 +1098,6 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		t.Fatalf("POST installation/strategy (ConnectExternal) = %d %s, want 200", commitRec.Code, commitRec.Body.String())
 	}
 	externalCommitted.Store(true)
-
 
 	// Reconciler and in-flight runtime/operations must already be drained/completed.
 	select {
@@ -1098,7 +1122,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		{http.MethodPost, "runtime/artifact/acquire", `{"source":"github"}`},
 		{http.MethodPut, "runtime/artifact/upload", "not-a-gzip"},
 	} {
-		req := httptest.NewRequest(tc.method, "/control/api/v2/"+tc.resource, strings.NewReader(tc.body))
+		req := httptest.NewRequest(tc.method, currentInstallManagementAPIV2Prefix+""+tc.resource, strings.NewReader(tc.body))
 		if tc.method == http.MethodPut {
 			req.Header.Set("Content-Type", "application/gzip")
 			req.ContentLength = int64(len(tc.body))
@@ -1180,10 +1204,11 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 		recOp, err = appOp.store.Update(t.Context(), recOp.Operation.Identity, recOp.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -1195,7 +1220,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		opResDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 				strings.NewReader(`{"action":"start","requestId":"33333333-3333-4333-8333-333333333333"}`))
 			req.Header.Set("Content-Type", "application/json")
 			appOp.runtimeOperations(rec, req, staleCompleteOp, "runtime/operations")
@@ -1225,7 +1250,7 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(bodyOp))
+		cReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(bodyOp))
 		cReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		cReq.Header.Set("Content-Type", "application/json")
 		cRec := httptest.NewRecorder()
@@ -1284,10 +1309,11 @@ func TestInFlightEmbeddedOperationsExcludedByExternalCommit(t *testing.T) {
 				return
 			}
 			_, err = app2.store.Update(t.Context(), rec2.Operation.Identity, rec2.Operation.Revision, func(r *freshstore.Record) error {
-				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-					OperationID: r.Operation.Identity.OperationID, Revision: 1,
-					Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-				}
+				r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+				r.Operation.Routing.Revision = 1
+				r.Operation.Routing.Target = "/cpamp-admin"
+				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				r.Operation.Routing.Committed = true
 				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 					Strategy: bootstrap.ConnectExternal, Stage: "committed",
 					TargetIdentity: freshkeyapply.ExternalIdentity(externalServer.URL), TargetGeneration: 1,
@@ -1371,7 +1397,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -1462,10 +1488,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -1479,7 +1506,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		opDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
 			out := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 				strings.NewReader(`{"action":"start","requestId":"aaaaaaaa-1111-4111-8111-111111111111"}`)).WithContext(clientCtx)
 			req.Header.Set("Content-Type", "application/json")
 			app.runtimeOperations(out, req, preCommitCompleteOp, "runtime/operations")
@@ -1527,7 +1554,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 
 		// Once Embedded CPA is stopped, ConnectExternal can prove stopped state and commit.
 		stopOut := httptest.NewRecorder()
-		stopReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		stopReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"stop","requestId":"bbbbbbbb-2222-4222-8222-222222222222"}`))
 		stopReq.Header.Set("Content-Type", "application/json")
 		app.runtimeOperations(stopOut, stopReq, preCommitCompleteOp, "runtime/operations")
@@ -1611,10 +1638,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -1624,7 +1652,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		preCommitCompleteOp.ProductComplete = true
 
 		opOut := httptest.NewRecorder()
-		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		opReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"start","requestId":"cccccccc-3333-4333-8333-333333333333"}`))
 		opReq.Header.Set("Content-Type", "application/json")
 		app.runtimeOperations(opOut, opReq, preCommitCompleteOp, "runtime/operations")
@@ -1709,10 +1737,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1793,10 +1822,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1877,10 +1907,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1974,10 +2005,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -2036,10 +2068,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -2107,10 +2140,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -2213,10 +2247,11 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -2226,7 +2261,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 		preCommitCompleteOp.ProductComplete = true
 
 		opOut := httptest.NewRecorder()
-		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		opReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"start","requestId":"dddddddd-4444-4444-8444-444444444444"}`))
 		opReq.Header.Set("Content-Type", "application/json")
 		app.runtimeOperations(opOut, opReq, preCommitCompleteOp, "runtime/operations")
@@ -2264,7 +2299,7 @@ func TestAcceptedEmbeddedStartFencesExternalCommitAndPreservesOutcomeOnRollback(
 			t.Fatal(err)
 		}
 		statusOut := httptest.NewRecorder()
-		app.runtimeStatus(statusOut, httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil), preCommitCompleteOp)
+		app.runtimeStatus(statusOut, httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil), preCommitCompleteOp)
 
 		// ConnectExternal must STILL refuse with 409: wall-clock age never proves completion.
 		res := postConnectExternal(t, app, externalServer.URL)
@@ -2328,10 +2363,11 @@ func TestUnreachableOrUnverifiedSupervisorFailsClosedWithActionable409AndAllowsS
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -2363,7 +2399,7 @@ func TestUnreachableOrUnverifiedSupervisorFailsClosedWithActionable409AndAllowsS
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -2532,10 +2568,11 @@ func TestRuntimeModeFollowsCommittedStrategyWithoutRuntimeClient(t *testing.T) {
 				destIdentity = freshstrategy.AdoptedDestinationIdentity("http://127.0.0.1:8317")
 			}
 			if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-					OperationID: r.Operation.Identity.OperationID, Revision: 1,
-					Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-				}
+				r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+				r.Operation.Routing.Revision = 1
+				r.Operation.Routing.Target = "/cpamp-admin"
+				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				r.Operation.Routing.Committed = true
 				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 					Strategy:                      tc.strategy,
 					SourceClass:                   tc.source,
@@ -2568,7 +2605,7 @@ func TestRuntimeModeFollowsCommittedStrategyWithoutRuntimeClient(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			statusReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+			statusReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil)
 			statusReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			statusRec := httptest.NewRecorder()
 			app.canonicalAPI(statusRec, statusReq)
@@ -2606,93 +2643,6 @@ func TestRuntimeModeFollowsCommittedStrategyWithoutRuntimeClient(t *testing.T) {
 				t.Fatalf("External client contacted %d times for %s", hits, tc.name)
 			}
 		})
-	}
-}
-
-// TestExternalKeyListSurfacesCheckpointReadFailure verifies P2-2: when GET
-// /control/api/v2/api-keys encounters a checkpoint read failure while resolving
-// the External key list, it never returns 200 with presenceUnverified=false.
-func TestExternalKeyListSurfacesCheckpointReadFailure(t *testing.T) {
-	const management = externalAuthorityManagement
-	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-CPA-Version", "v8.0.55")
-		_, _ = w.Write([]byte(`[]`))
-	}))
-	t.Cleanup(externalServer.Close)
-	baseURL, err := cpa.NormalizeV8BaseURL(externalServer.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(supervisor.Close)
-	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
-	if err := os.WriteFile(tokenPath, []byte("keylist-token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
-	paths.Config = filepath.Join(dir, "config.json")
-	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = opened.Close() })
-
-	app := newFreshApplication(opened, config.Config{
-		RuntimeURL:       supervisor.URL,
-		RuntimeTokenFile: tokenPath,
-		CPAUpstreamURL:   "http://127.0.0.1:8317",
-	}, nil)
-	if _, _, err := app.keys.Create(t.Context(), strings.Repeat("c", 32)); err != nil {
-		t.Fatal(err)
-	}
-	protected, err := opened.Protector.ProtectString(management)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec, err := app.store.Load(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
-		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
-			Strategy: bootstrap.ConnectExternal, Stage: "committed",
-			TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
-		}
-		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: baseURL, ManagementKey: protected}
-		r.Operation.ProductComplete = true
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Call 1: authorizeCanonical; Call 2: externalReadGrant; Call 3: externalSource inside ExternalKeyGrant;
-	// Call 4: selector.loadOp inside ExternalKeyList -> fails closed with 503.
-	baseStore := app.store
-	app.store = &nthLoadFailingStore{Store: baseStore, failOnCall: 4}
-	req := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
-	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
-	res := httptest.NewRecorder()
-	app.canonicalAPI(res, req)
-	if res.Code != http.StatusServiceUnavailable {
-		t.Fatalf("GET api-keys on selector loadOp failure = %d %s, want 503", res.Code, res.Body.String())
-	}
-
-	// Call 5: externalSource inside ExternalKeyPresence -> returns 200 with presenceUnverified=true.
-	app.store = &nthLoadFailingStore{Store: baseStore, failOnCall: 5}
-	req2 := httptest.NewRequest(http.MethodGet, "/control/api/v2/api-keys", nil)
-	req2.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
-	res2 := httptest.NewRecorder()
-	app.canonicalAPI(res2, req2)
-	if res2.Code != http.StatusOK || !strings.Contains(res2.Body.String(), `"presenceUnverified":true`) {
-		t.Fatalf("GET api-keys on externalSource read failure = %d %s, want 200 presenceUnverified=true", res2.Code, res2.Body.String())
 	}
 }
 
@@ -2753,10 +2703,11 @@ func TestExternalRuntimeStatusSerializesAndRecordsRejectedKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-					OperationID: r.Operation.Identity.OperationID, Revision: 1,
-					Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-				}
+				r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+				r.Operation.Routing.Revision = 1
+				r.Operation.Routing.Target = "/cpamp-admin"
+				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				r.Operation.Routing.Committed = true
 				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 					Strategy: bootstrap.ConnectExternal, Stage: "committed",
 					TargetIdentity: freshkeyapply.ExternalIdentity(baseURL), TargetGeneration: 1,
@@ -2780,7 +2731,7 @@ func TestExternalRuntimeStatusSerializesAndRecordsRejectedKey(t *testing.T) {
 			}
 
 			callStatus := func() *httptest.ResponseRecorder {
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				out := httptest.NewRecorder()
 				app.canonicalAPI(out, req)
@@ -2873,10 +2824,11 @@ func TestFreshRuntimeClientAdapterStartRejectsExternalModeWithoutExternalCalls(t
 		t.Fatal(err)
 	}
 	if _, err := app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: freshkeyapply.ExternalIdentity(externalServer.URL), TargetGeneration: 1,
@@ -3032,10 +2984,11 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -3073,7 +3026,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(payload))
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(payload))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
@@ -3115,7 +3068,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 		}
 
 		// Embedded installation runtime probe must still succeed.
-		instReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil)
+		instReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/runtime", nil)
 		instReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		instRes := httptest.NewRecorder()
 		app.canonicalAPI(instRes, instReq)
@@ -3124,6 +3077,17 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 		}
 
 		// Switching to NewManaged (staged -> committed) must succeed.
+		curBeforeMgd, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), curBeforeMgd.Operation.Identity, curBeforeMgd.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		managedReq := freshstrategy.Request{
 			Strategy:                  bootstrap.NewManaged,
 			ExpectedRuntimeIdentity:   "runtime-01",
@@ -3150,7 +3114,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			t.Fatal(err)
 		}
 
-		statusReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/status", nil)
+		statusReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/status", nil)
 		statusReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		statusRes := httptest.NewRecorder()
 		app.canonicalAPI(statusRes, statusReq)
@@ -3158,7 +3122,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			t.Fatalf("GET runtime/status after NewManaged commit = %d %s, want 200 embedded/ready", statusRes.Code, statusRes.Body.String())
 		}
 
-		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		opReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"restart","requestId":"44444444-4444-4444-8444-444444444444"}`))
 		opReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		opReq.Header.Set("Content-Type", "application/json")
@@ -3284,10 +3248,11 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		})
 		if err != nil {
@@ -3326,7 +3291,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 		}
 		extDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(extPayload))
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(extPayload))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
@@ -3334,6 +3299,14 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			extDone <- out
 		}()
 		<-externalEntered
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Commit NewManaged (staged -> committed) while ConnectExternal is in flight.
 		postMgd := func(rev uint64) *httptest.ResponseRecorder {
@@ -3354,7 +3327,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			mgdReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(mgdPayload))
+			mgdReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(mgdPayload))
 			mgdReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			mgdReq.Header.Set("Content-Type", "application/json")
 			mgdRes := httptest.NewRecorder()
@@ -3390,7 +3363,7 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 		}
 
 		// Verify runtime/operations and reconciler on the committed NewManaged install still work.
-		opReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/runtime/operations",
+		opReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"restart","requestId":"55555555-5555-4555-8555-555555555555"}`))
 		opReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		opReq.Header.Set("Content-Type", "application/json")
@@ -3493,10 +3466,11 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -3544,7 +3518,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commitReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(reqBody))
+	commitReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(reqBody))
 	commitReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	commitReq.Header.Set("Content-Type", "application/json")
 	commitRes := httptest.NewRecorder()
@@ -3565,7 +3539,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 	// Drive controlled post-commit HTTP entry points before and after completion:
 	// embedded installation observation and lifecycle mutations must fail closed
 	// at the HTTP boundary without sending any request to the embedded Supervisor.
-	installObsReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil)
+	installObsReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/runtime", nil)
 	installObsReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	installObsRes := httptest.NewRecorder()
 	app.ServeHTTP(installObsRes, installObsReq)
@@ -3573,7 +3547,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 		t.Errorf("GET installation/runtime after External commit = %d %s, want 409", installObsRes.Code, installObsRes.Body.String())
 	}
 
-	completeReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	completeReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 	completeReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	completeRes := httptest.NewRecorder()
 	app.ServeHTTP(completeRes, completeReq)
@@ -3583,7 +3557,7 @@ func TestEmbeddedReconcilerRetiresViaSignalWithoutFastPolling(t *testing.T) {
 
 	mutReq := httptest.NewRequest(
 		http.MethodPost,
-		"/control/api/v2/runtime/operations",
+		currentInstallManagementAPIV2Prefix+"runtime/operations",
 		strings.NewReader(`{"action":"start","requestId":"99999999-9999-4999-8999-999999999999"}`),
 	)
 	mutReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -3734,10 +3708,13 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 			t.Fatal(err)
 		}
 		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
+			r.Operation.Routing.InferenceCommitted = true
 			return nil
 		})
 		if err != nil {
@@ -3768,7 +3745,7 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
@@ -3892,10 +3869,11 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 				t.Fatal(err)
 			}
 			if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-					OperationID: r.Operation.Identity.OperationID, Revision: 1,
-					Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-				}
+				r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+				r.Operation.Routing.Revision = 1
+				r.Operation.Routing.Target = "/cpamp-admin"
+				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+				r.Operation.Routing.Committed = true
 				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 					Strategy:                      bootstrap.NewManaged,
 					Stage:                         "committed",
@@ -3914,7 +3892,7 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 			postRuntimeOp := func(requestID string) *httptest.ResponseRecorder {
 				req := httptest.NewRequest(
 					http.MethodPost,
-					"/control/api/v2/runtime/operations",
+					currentInstallManagementAPIV2Prefix+"runtime/operations",
 					strings.NewReader(`{"action":"`+tc.action+`","requestId":"`+requestID+`"}`),
 				)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -4004,10 +3982,11 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:                      bootstrap.NewManaged,
 				Stage:                         "committed",
@@ -4040,7 +4019,7 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 		postActivate := func(requestID string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(
 				http.MethodPost,
-				"/control/api/v2/cpamp/usage-service/runtime/updates/activate",
+				currentInstallManagementAPIV2Prefix+"cpamp/usage-service/runtime/updates/activate",
 				strings.NewReader(`{"request_id":"`+requestID+`","target_version":"8.0.56","expected_active_artifact_id":"`+productionArtifactID+`"}`),
 			)
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -4126,7 +4105,7 @@ func TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		req.Header.Set("Content-Type", "application/json")
 		out := httptest.NewRecorder()
@@ -4171,10 +4150,11 @@ func TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart(t *testing
 			t.Fatal(err)
 		}
 		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -4262,10 +4242,11 @@ func TestLegacyEverDispatchedStartLedgerRowCompatibilityAcrossRestart(t *testing
 			t.Fatal(err)
 		}
 		if _, err := app1.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -4352,10 +4333,11 @@ func TestValidatedExternalCheckpointKeepsSupervisorAndStartLedgerFenceAcrossRest
 			t.Fatal(err)
 		}
 		if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-			r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-				OperationID: r.Operation.Identity.OperationID, Revision: 1,
-				Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-			}
+			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+			r.Operation.Routing.Revision = 1
+			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+			r.Operation.Routing.Committed = true
 			r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 				Strategy:         bootstrap.ConnectExternal,
 				TargetIdentity:   freshkeyapply.ExternalIdentity(externalServer.URL),
@@ -4408,7 +4390,7 @@ func TestValidatedExternalCheckpointKeepsSupervisorAndStartLedgerFenceAcrossRest
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		req.Header.Set("Content-Type", "application/json")
 		out := httptest.NewRecorder()
@@ -4582,10 +4564,11 @@ func TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequest
 		t.Fatal(err)
 	}
 	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy:                      bootstrap.NewManaged,
 			Stage:                         "committed",
@@ -4631,7 +4614,7 @@ func TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequest
 	postSameStart := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(
 			http.MethodPost,
-			"/control/api/v2/runtime/operations",
+			currentInstallManagementAPIV2Prefix+"runtime/operations",
 			strings.NewReader(`{"action":"start","requestId":"`+sameRequestID+`"}`),
 		)
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -4652,7 +4635,7 @@ func TestRuntimeOperationDoubleWriteFailureNeverReplaysFakeAcceptedOnSameRequest
 	if desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
 		t.Fatalf("DesiredRunning persisted despite double write failure: (%+v, %v, %v)", desired, found, err)
 	}
-	lookupReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/operations/"+sameRequestID, nil)
+	lookupReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/operations/"+sameRequestID, nil)
 	lookupReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	lookupRes := httptest.NewRecorder()
 	app.ServeHTTP(lookupRes, lookupReq)
@@ -4761,10 +4744,11 @@ func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUnti
 		t.Fatal(err)
 	}
 	rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -4824,7 +4808,7 @@ func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUnti
 
 	startReq := httptest.NewRequest(
 		http.MethodPost,
-		"/control/api/v2/runtime/operations",
+		currentInstallManagementAPIV2Prefix+"runtime/operations",
 		strings.NewReader(`{"action":"start","requestId":"`+requestID+`"}`),
 	)
 	startReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -4840,7 +4824,7 @@ func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUnti
 	if desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
 		t.Fatalf("DesiredRunning persisted despite promotion+cleanup failure: (%+v, %v, %v)", desired, found, err)
 	}
-	lookupReq := httptest.NewRequest(http.MethodGet, "/control/api/v2/runtime/operations/"+requestID, nil)
+	lookupReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"runtime/operations/"+requestID, nil)
 	lookupReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	lookupRes := httptest.NewRecorder()
 	app.ServeHTTP(lookupRes, lookupReq)
@@ -4882,7 +4866,7 @@ func TestRuntimeOperationPromotionAndLedgerCleanupFailureKeepsExternalFencedUnti
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		req.Header.Set("Content-Type", "application/json")
 		out := httptest.NewRecorder()
@@ -4972,10 +4956,11 @@ func TestUncommittedValidatedExternalCheckpointDoesNotActivateExternalSurface(t 
 		t.Fatal(err)
 	}
 	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: r.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy:         bootstrap.ConnectExternal,
 			TargetIdentity:   freshkeyapply.ExternalIdentity(externalServer.URL),

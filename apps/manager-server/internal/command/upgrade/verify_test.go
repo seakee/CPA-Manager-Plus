@@ -17,6 +17,11 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
+// testControlBasePath is the canonical control prefix the CLI fixtures commit.
+// A completion now carries access routing, and the External fixture has no
+// managed inference prefix, so the operator's own flag names it.
+const testControlBasePath = "/test-control"
+
 // storeManagerConnection records the CPA connection the Manager itself resolves.
 // It is the target the verification compares the recorded External binding
 // against, so a test that exercises the External path has to store the same CPA
@@ -50,8 +55,7 @@ func storeManagerConnection(t *testing.T, target, address, secret string) {
 func verifiedTarget(t *testing.T, cpaAddress string) (source, target string) {
 	t.Helper()
 	source = copyReadySource(t)
-	target = t.TempDir()
-	bundle := filepath.Join(t.TempDir(), "backup")
+	target, bundle := reconcileRoots(t)
 	if code, _, stderr := run(t, "run", "--legacy", source,
 		"--source-version", bootstrap.PlannedDirectRelease,
 		"--target", target, "--bundle", bundle); code != 0 {
@@ -79,7 +83,7 @@ func TestVerifyCLICompletesTheExternalOperation(t *testing.T) {
 	server := newExternalCPAServer(t, "v8.0.13")
 	source, target := verifiedTarget(t, server.URL)
 
-	code, stdout, stderr := run(t, "verify", "--legacy", source, "--target", target, "--json")
+	code, stdout, stderr := run(t, "verify", "--legacy", source, "--target", target, "--control-base-path", testControlBasePath, "--json")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -117,7 +121,7 @@ func TestVerifyCLICompletesTheExternalOperation(t *testing.T) {
 	}
 
 	// A second run reports the recorded verdict and writes nothing.
-	repeatCode, repeatOut, _ := run(t, "verify", "--legacy", source, "--target", target, "--json")
+	repeatCode, repeatOut, _ := run(t, "verify", "--legacy", source, "--target", target, "--control-base-path", testControlBasePath, "--json")
 	if repeatCode != 0 {
 		t.Fatalf("repeat exit code = %d, want 0", repeatCode)
 	}
@@ -181,7 +185,7 @@ func TestVerifyCLIExitsOneOnATypedRefusal(t *testing.T) {
 		t.Fatalf("close the v2 database: %v", err)
 	}
 
-	code, stdout, stderr := run(t, "verify", "--legacy", source, "--target", target, "--json")
+	code, stdout, stderr := run(t, "verify", "--legacy", source, "--target", target, "--control-base-path", testControlBasePath, "--json")
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
 	}
@@ -204,7 +208,7 @@ func TestVerifyCLIExitsOneOnAnUnmountedSource(t *testing.T) {
 	server := newExternalCPAServer(t, "v8.0.13")
 	_, target := verifiedTarget(t, server.URL)
 	absent := filepath.Join(t.TempDir(), "unmounted")
-	code, stdout, stderr := run(t, "verify", "--legacy", absent, "--target", target, "--json")
+	code, stdout, stderr := run(t, "verify", "--legacy", absent, "--target", target, "--control-base-path", testControlBasePath, "--json")
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
 	}
@@ -297,7 +301,7 @@ func TestVerifyCLIWritesNothingInsideTheSource(t *testing.T) {
 	server := newExternalCPAServer(t, "v8.0.13")
 	source, target := verifiedTarget(t, server.URL)
 	before := treeDigests(t, source)
-	if code, _, stderr := run(t, "verify", "--legacy", source, "--target", target); code != 0 {
+	if code, _, stderr := run(t, "verify", "--legacy", source, "--target", target, "--control-base-path", testControlBasePath); code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	after := treeDigests(t, source)

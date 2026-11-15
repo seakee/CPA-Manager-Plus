@@ -469,7 +469,7 @@ curated note body outside that directory.
 
 All three v2 Dockerfiles require explicit `VERSION` and `SOURCE_COMMIT` build
 arguments. Every stage that performs network or build work — including the
-`cpa-download`/`cpa-v8-download` stages, the base-image stages and the
+`cpa-v8-download` stage, the base-image stages and the
 evidence stages — validates both before its first `apk add`, `apt-get`,
 `wget`, `npm ci`/`npm run build`, or `go mod download`/`go build`:
 `VERSION` must be 1-128 characters starting alphanumeric and limited

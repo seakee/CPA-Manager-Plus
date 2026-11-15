@@ -159,7 +159,7 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 				sourceReads++
 				w.Header().Set("Content-Type", "application/json")
 				if class == bootstrap.AdoptLegacyManaged {
-					w.Header().Set("X-CPA-VERSION", "7.0.12")
+					w.Header().Set("X-CPA-VERSION", "8.0.55")
 				}
 				_, _ = w.Write([]byte(body))
 			}))
@@ -358,10 +358,11 @@ func TestAdoptionRefusesAZeroKeySourceBeforeAnyDestinationOperation(t *testing.T
 	}
 }
 
-// Adopting a v7 or Manager-managed source is Upgrade's path, and an unspecified
-// class never guesses which generation to read. Both are refused with their own
-// code before the source is touched and before the destination moves, while the
-// admitted class proceeds to the adapter.
+// Adopting a legacy Manager-managed source is Upgrade's path (while below-v8
+// CPA is unsupported in v2), and an unspecified class never guesses which
+// surface to read. Both are refused with their own code before the source is
+// touched and before the destination moves, while the admitted class proceeds
+// to the adapter.
 func TestAdoptionRefusesLegacyAndUnspecifiedSourceClasses(t *testing.T) {
 	var sourceReads atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

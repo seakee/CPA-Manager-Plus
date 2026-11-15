@@ -793,10 +793,6 @@ class DockerContracts(unittest.TestCase):
                 self.assertTrue(guards, "stage must validate identity before network/build work")
                 self.assertLess(guards[0].start(), min(commands),
                                 "identity guard must precede the first network or build command")
-        guarded = {stage for stage, body in stages if self.GUARD.search(body)}
-        # The CPA download stages fetch third-party bytes even when they
-        # are built alone as an unsupported-architecture probe.
-        self.assertLessEqual({"cpa-download", "cpa-v8-download"}, guarded)
 
     def test_every_image_evidence_stage_declares_identity_args(self):
         # ARG is stage-scoped: a stage that runs the evidence generator must
@@ -820,14 +816,6 @@ class DockerContracts(unittest.TestCase):
         self.assertIn("base --kind debian --component glibc-runtime", slim_evidence)
         glibc_stage = text.split("FROM debian:bookworm-slim AS glibc-runtime", 1)[1].split("\nFROM ", 1)[0]
         self.assertIn("dpkg-query -W", glibc_stage)
-
-    def test_bundled_targets_preserve_cpa_original_license(self):
-        text = (ROOT / "Dockerfile").read_text()
-        self.assertIn('tar -xOzf "/tmp/${asset_name}" LICENSE > /out/CPA-LICENSE', text)
-        for stage in ("v7-compatibility", "full"):
-            block = text.split(" AS " + stage + "\n", 1)[1].split("\nFROM ", 1)[0]
-            with self.subTest(stage=stage):
-                self.assertIn("/usr/local/share/licenses/cli-proxy-api/LICENSE", block)
 
     def test_candidate_builder_passes_real_args_for_all_roles(self):
         text = (ROOT / "bin/release/build-embedded-candidate.sh").read_text()

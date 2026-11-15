@@ -46,7 +46,12 @@ type Handler struct {
 
 func NewFreshHandler(fresh *FreshRoutes, managerURL, gatewayURL *url.URL, logger *log.Logger, legacyGateway func(context.Context) bool) *Handler {
 	legacy := NewTransitionalClassifier()
-	matcher := ControlMatcherFunc(func(p string) bool { return fresh.Matches(p) || legacy.Classify(p) == RouteManager })
+	matcher := ControlMatcherFunc(func(p string) bool {
+		if fresh != nil && fresh.Active() {
+			return p == "/health" || fresh.Matches(p)
+		}
+		return legacy.Classify(p) == RouteManager
+	})
 	h := NewHandler(NewClassifier(matcher), managerURL, gatewayURL, logger)
 	h.fresh = fresh
 	h.legacyGateway = legacyGateway
@@ -87,25 +92,47 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	default:
 		w.Header().Set("X-CPAMP-Route-Owner", "gateway")
-		if h.chat != nil {
+		if h.chat != nil && (h.fresh == nil || !h.fresh.Active() || h.fresh.State().InferenceTarget == "") {
 			h.chat.ServeHTTP(w, r)
 			return
 		}
 		if h.fresh != nil && h.fresh.Active() {
-			// A Fresh routing projection establishes Control ownership only.
-			// Gateway traffic is admitted solely by a current positive private
-			// Manager answer bound to that same installation, generation and
-			// committed projection. Absence, error, expiry-without-reconfirmation
-			// and mismatch all stay closed.
-			if h.gatewayAdmission == nil || !h.gatewayAdmission(r.Context()) {
-				if !h.fresh.State().Committed && isPreCommitBrowserNavigation(r) && h.resolvePreFreshPosture(r.Context()) == PreFreshBootstrap {
+			state := h.fresh.State()
+			if h.fresh.MatchesInferenceCandidate(r) {
+				stripped, ok := StripInferenceRequest(r, state.InferenceTarget)
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				if h.chat != nil {
+					h.chat.ServeHTTP(w, stripped)
+					return
+				}
+				if !state.Committed || !state.InferenceCommitted || h.gatewayAdmission == nil || !h.gatewayAdmission(r.Context()) {
+					http.Error(w, "gateway pending configuration", http.StatusServiceUnavailable)
+					return
+				}
+				h.gateway.ServeHTTP(w, stripped)
+				return
+			}
+			// Unprefixed requests never fall back to the model Gateway when Fresh or
+			// upgraded-v2 routing projection is active.
+			if !state.Committed {
+				if isPreCommitBrowserNavigation(r) && h.resolvePreFreshPosture(r.Context()) == PreFreshBootstrap {
 					redirectToBootstrapUI(w, r)
 					return
 				}
 				http.Error(w, "gateway pending configuration", http.StatusServiceUnavailable)
 				return
 			}
-			h.gateway.ServeHTTP(w, r)
+			if state.InferenceCommitted || state.InferenceTarget != "" {
+				http.NotFound(w, r)
+				return
+			}
+			// Committed control route without an inference prefix (External mode or
+			// pre-upgrade v2 awaiting one-time inference prefix completion): keep
+			// Gateway strictly closed without forwarding.
+			http.Error(w, "gateway pending configuration", http.StatusServiceUnavailable)
 			return
 		}
 		// Only a positive legacy-mode reply from the private Manager authority
@@ -187,7 +214,7 @@ func gatewayDataPlaneCandidate(r *http.Request) bool {
 			raw = raw[:index]
 		}
 		for _, candidate := range routeCandidates(raw) {
-			for _, prefix := range [4]string{"/models", "/v0", "/v1", "/v1beta"} {
+			for _, prefix := range [8]string{"/models", "/v0", "/v1", "/v1beta", "/v8", "/openai/v1", "/backend-api/codex", "/api/provider"} {
 				if candidate == prefix || strings.HasPrefix(candidate, prefix+"/") {
 					return true
 				}

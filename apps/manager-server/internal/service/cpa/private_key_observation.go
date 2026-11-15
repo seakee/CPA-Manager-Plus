@@ -43,13 +43,10 @@ func (t *Transport) Configured(ctx context.Context, management, secret string) (
 	if json.Unmarshal(body, &keys) != nil || keys == nil {
 		return false, ErrProofUnavailable
 	}
-	// One list, two postures. A New Managed destination is staged with exactly one
-	// Client Key, so the installation's key is the whole list. An adopted
-	// destination carries the source CPA's list instead, and the key this
-	// installation was journaled with is one member of it: membership is the only
-	// configured fact an adoption can state. Neither answer is a live
-	// authentication proof; `AuthSweep` is what asks that.
-	if t.postureOf().adopt {
+	// Manager-owned and adopted destinations carry arbitrary multi-key sets, so
+	// membership is the configured fact; only the private S1 fixture requires a
+	// single-element list. Live authentication is checked separately via AuthSweep.
+	if t.postureOf().adopt || t.postureOf().managed {
 		return slices.Contains(keys, secret), nil
 	}
 	return len(keys) == 1 && keys[0] == secret, nil

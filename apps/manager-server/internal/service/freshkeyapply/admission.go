@@ -46,7 +46,7 @@ func (s *Service) Admit(ctx context.Context, candidate string, generation uint64
 	if ctx.Err() != nil {
 		return deny, ErrUnavailable
 	}
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return deny, ErrUnavailable
 	}
@@ -56,43 +56,68 @@ func (s *Service) Admit(ctx context.Context, candidate string, generation uint64
 	if _, err := s.target(ctx, p); err != nil {
 		return deny, err
 	}
-	attempt, err := s.repo.InitialInstall(ctx)
-	if err != nil || attempt == nil {
-		return deny, ErrUnavailable
-	}
-	if attempt.Generation != p.Generation || attempt.RunID != p.RunID || attempt.ProviderSeedSHA256 != p.S2B.Binding() {
-		return deny, ErrGeneration
-	}
-	installedID, err := s.installedKey(ctx)
-	if err != nil {
-		return deny, err
-	}
-	err = s.keys.WithStagedSecret(ctx, installedID, func(secret string) error {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(secret)) != 1 {
-			return ErrUnavailable
+	if s.profile == ProfileManaged {
+		if err := s.requireInstallJournal(ctx, p); err != nil {
+			return deny, err
 		}
-		configured, err := s.wire.Configured(ctx, p.ManagementKey, secret)
+		matched, err := s.keys.MatchStagedSecret(ctx, candidate)
+		if err != nil || !matched {
+			return deny, ErrUnavailable
+		}
+		configured, err := s.wire.Configured(ctx, p.ManagementKey, candidate)
 		if err != nil || !configured {
-			return ErrUnavailable
+			return deny, ErrUnavailable
 		}
-		ok, err := s.wire.AuthSweep(ctx, secret)
+		ok, err := s.wire.AuthSweep(ctx, candidate)
 		if err != nil || !ok {
-			return ErrUnavailable
+			return deny, ErrUnavailable
 		}
-		// Fence both the runtime and the single-key config after live auth.
 		if _, err := s.target(ctx, p); err != nil {
-			return err
+			return deny, err
 		}
-		configured, err = s.wire.Configured(ctx, p.ManagementKey, secret)
+		configured, err = s.wire.Configured(ctx, p.ManagementKey, candidate)
 		if err != nil || !configured {
-			return ErrUnavailable
+			return deny, ErrUnavailable
 		}
-		return nil
-	})
-	if err != nil {
-		return deny, err
+	} else {
+		attempt, err := s.repo.InitialInstall(ctx)
+		if err != nil || attempt == nil {
+			return deny, ErrUnavailable
+		}
+		if attempt.Generation != p.Generation || attempt.RunID != p.RunID || attempt.ProviderSeedSHA256 != p.S2B.Binding() {
+			return deny, ErrGeneration
+		}
+		installedID, err := s.installedKey(ctx)
+		if err != nil {
+			return deny, err
+		}
+		err = s.keys.WithStagedSecret(ctx, installedID, func(secret string) error {
+			if subtle.ConstantTimeCompare([]byte(candidate), []byte(secret)) != 1 {
+				return ErrUnavailable
+			}
+			configured, err := s.wire.Configured(ctx, p.ManagementKey, secret)
+			if err != nil || !configured {
+				return ErrUnavailable
+			}
+			ok, err := s.wire.AuthSweep(ctx, secret)
+			if err != nil || !ok {
+				return ErrUnavailable
+			}
+			// Fence both the runtime and the single-key config after live auth.
+			if _, err := s.target(ctx, p); err != nil {
+				return err
+			}
+			configured, err = s.wire.Configured(ctx, p.ManagementKey, secret)
+			if err != nil || !configured {
+				return ErrUnavailable
+			}
+			return nil
+		})
+		if err != nil {
+			return deny, err
+		}
 	}
-	current, err := s.permit()
+	current, err := s.permit(ctx)
 	if err != nil || current != p || !current.valid(time.Now()) {
 		return deny, ErrUnavailable
 	}

@@ -13,17 +13,43 @@ import (
 )
 
 // errExternalSettled is the in-process signal that the step a call was about to
-// write is already shown by the user's CPA. It never leaves this package: the
-// reconcile settles the journal from that read-back and returns the operation.
+// write is already shown and authenticated by the user's CPA. It never leaves
+// this package: the reconcile settles the journal from that read-back and
+// returns the operation.
 var errExternalSettled = errors.New("external key step already settled")
 
-// externalPrepare journals one revoke/replace intent for the user's CPA after
-// proving, by read-back, that the CPA is in exactly the state the intent starts
-// from. No step is written here: the journal is the durable record a lost reply is
-// reconciled against.
-// externalPreflight answers whether one revoke or replace would pass the External
-// checks, writing nothing. Every limit it can report is a fact about the user's
-// CPA, so the drawer names it before the operator submits.
+// uniqueExternalKeys preserves first-seen order while removing duplicate entries
+// that an External operator's configuration file may carry.
+func uniqueExternalKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func externalKeysAfterStep(keys []string, mode, step, old, next string) []string {
+	after := uniqueExternalKeys(keys)
+	if step == "add" {
+		added := next
+		if mode == "add" {
+			added = old
+		}
+		if added != "" && !slices.Contains(after, added) {
+			after = append(after, added)
+		}
+		return after
+	}
+	return slices.DeleteFunc(after, func(key string) bool { return key == old })
+}
 func (s *Service) externalPreflight(ctx context.Context, target, keeper, mode string, generation uint64) error {
 	install, err := s.externalTarget(ctx, generation)
 	if err != nil {
@@ -32,64 +58,156 @@ func (s *Service) externalPreflight(ctx context.Context, target, keeper, mode st
 	return s.externalPrerequisites(ctx, install, target, keeper, mode)
 }
 
-// externalPrerequisites is the read-only part of an External Prepare: the target
-// and keeper are members of the user's CPA, the keeper is not the only credential
-// left, and the CPA serves the version a step would write to.
 func (s *Service) externalPrerequisites(ctx context.Context, install ExternalInstall, target, keeper, mode string) error {
 	w := s.externalKeyWire(install)
 	if w == nil {
 		return ErrExternalUnavailable
 	}
-	// One operation at a time, decided here by the same rule `BeginOperation`
-	// applies to the submit that follows. Without it the read-only answer would
-	// say ready for an intent the write then refuses with `key_operation_conflict`,
-	// which is exactly the limit the preflight exists to name before the click.
-	// An unsettled journal already blocks every later operation of the connection,
-	// so nothing this call could report would be reachable.
 	latest, err := s.repo.LatestOperation(ctx)
 	if err != nil {
 		return err
 	}
-	if latest != nil && latest.Outcome != "committed" {
+	if latest != nil && !latest.IsTerminal() {
 		return repo.ErrConflict
 	}
-	// No step is written before this gate: an intent this Manager could never
-	// send would stay pending and block every later operation of the connection,
-	// so the version is asked before the intent exists.
 	if err := s.externalWriteGate(ctx, install); err != nil {
 		return err
 	}
-	return s.keyPair(ctx, target, keeper, false, func(old, next string) error {
+	return s.operationSecrets(ctx, mode, target, keeper, false, func(old, next string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
 		}
-		// The user's CPA is administered by the user, so it may carry credentials
-		// this Manager never staged. The step acts on exactly one of them: the
-		// credential it removes must be carried.
-		if old == next || !slices.Contains(snapshot.Keys, old) {
+		if mode == "add" {
+			if len(externalKeysAfterStep(snapshot.Keys, "add", "add", old, "")) == 0 {
+				return cpa.ErrSourceConflict
+			}
+			return nil
+		}
+		if (next != "" && old == next) || !slices.Contains(snapshot.Keys, old) {
 			return cpa.ErrSourceConflict
 		}
-		// A replace keeps a credential on the CPA; a revoke of the only one would
-		// leave it accepting unauthenticated clients, which is the user's decision
-		// and never a step of this Manager.
-		if mode == "revoke" && len(snapshot.Keys) <= 1 {
+		if mode == "revoke" {
+			after := externalKeysAfterStep(snapshot.Keys, "revoke", "revoke", old, next)
+			if len(after) == 0 {
+				return ErrLastKey
+			}
+			if next != "" && !slices.Contains(after, next) {
+				return cpa.ErrSourceConflict
+			}
+			return nil
+		}
+		afterAdd := externalKeysAfterStep(snapshot.Keys, "replace", "add", old, next)
+		afterRevoke := externalKeysAfterStep(afterAdd, "replace", "revoke", old, next)
+		if len(afterRevoke) == 0 || !slices.Contains(afterRevoke, next) {
 			return ErrLastKey
-		}
-		// A revoke is only permitted when the CPA keeps a credential this Manager
-		// staged. A keeper that was never installed, with a credential from outside
-		// this Manager keeping the count above one, would otherwise delete the
-		// target and leave the journal with no observable end state.
-		if mode == "revoke" && !slices.Contains(snapshot.Keys, next) {
-			return cpa.ErrSourceConflict
 		}
 		return nil
 	})
 }
 
+// externalApplyAdd executes or reconciles a durable "add" operation for one
+// canonical staged key on an External CPA while preserving its saved canonical
+// ID and secret across credential rebinds:
+//   - If the newest "add" operation for target is pending, unknown (attempted),
+//     or committed, idempotent retries (even with an older request ID) resolve
+//     that newest operation without minting a new ID and never resend an
+//     attempted PUT.
+//   - Only when the newest "add" for target is terminal "aborted" (proven
+//     never-attempted before a credential rebind) and requestID is already
+//     bound to an aborted row does Prepare allocate one fresh journal ID inside
+//     s.mu right before BeginOperation.
+func (s *Service) externalApplyAdd(ctx context.Context, id, target string, generation uint64) (OperationResult, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
+	s = s.active()
+	if s == nil || s.repo == nil {
+		return result, ErrUnavailable
+	}
+	if !freshkeys.ValidRequestID(id) || !freshkeys.ValidRequestID(target) {
+		return result, freshkeys.ErrRequest
+	}
+	if !s.KeyOperationsEnabled() {
+		return result, ErrUnavailable
+	}
+	prepared, opID, err := s.externalPrepareAdd(ctx, id, target, generation)
+	if err != nil {
+		return prepared, err
+	}
+	if prepared.Operation != nil && prepared.Operation.Outcome == repo.OutcomeCommitted {
+		key, err := s.keys.Detail(ctx, target)
+		if err != nil {
+			return prepared, err
+		}
+		return s.observeCommittedAdd(ctx, prepared, key, generation)
+	}
+	if prepared.NextStep == "add" {
+		return s.ContinueOperation(ctx, opID, generation)
+	}
+	return prepared, cpa.ErrApplyUnknown
+}
+
+func (s *Service) externalPrepareAdd(ctx context.Context, requestID, target string, generation uint64) (OperationResult, string, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.KeyOperationsEnabled() {
+		return result, "", ErrUnavailable
+	}
+	key, err := s.keys.Detail(ctx, target)
+	if err != nil {
+		return result, "", err
+	}
+	if key.Lifecycle == identity.LifecycleSuperseded {
+		return result, "", repo.ErrConflict
+	}
+
+	byReq, err := s.repo.Operation(ctx, requestID)
+	if err != nil {
+		return result, "", err
+	}
+	if byReq != nil && (byReq.TargetID != target || byReq.KeeperID != "" || byReq.Mode != "add") {
+		return result, "", repo.ErrConflict
+	}
+
+	latestForTarget, err := s.repo.LatestAddOperation(ctx, target, key.RequestID)
+	if err != nil {
+		return result, "", err
+	}
+	if latestForTarget == nil && byReq != nil {
+		latestForTarget = byReq
+	}
+	if latestForTarget != nil && latestForTarget.Outcome != repo.OutcomeAborted {
+		res, checkErr := s.externalCheckOperation(ctx, latestForTarget, generation)
+		return res, latestForTarget.ID, checkErr
+	}
+	if byReq != nil && byReq.Outcome != repo.OutcomeAborted {
+		res, checkErr := s.externalCheckOperation(ctx, byReq, generation)
+		return res, byReq.ID, checkErr
+	}
+
+	latest, err := s.reconcileUnsettledLatestLocked(ctx, generation)
+	if err != nil {
+		return result, "", err
+	}
+	if latest != nil && !latest.IsTerminal() {
+		return OperationResult{Operation: latest, RuntimeState: "effect_unknown"}, "", repo.ErrConflict
+	}
+
+	opID := requestID
+	if byReq != nil {
+		nextID, genErr := identity.NewAPIKeyID()
+		if genErr != nil {
+			return result, "", ErrExternalUnavailable
+		}
+		opID = string(nextID)
+	}
+	prepared, prepErr := s.externalPrepare(ctx, opID, target, "", "add", generation)
+	return prepared, opID, prepErr
+}
+
 func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
 	result := OperationResult{RuntimeState: "effect_unknown"}
-	if target == keeper || (mode != "revoke" && mode != "replace") {
+	if !validOperationRequestShape(target, keeper, mode) {
 		return result, freshkeys.ErrRequest
 	}
 	install, err := s.externalTarget(ctx, generation)
@@ -99,17 +217,19 @@ func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode 
 	if err = s.externalPrerequisites(ctx, install, target, keeper, mode); err != nil {
 		return result, err
 	}
-	steps := []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
-	if mode == "replace" {
-		steps = append([]repo.KeyStep{{Name: "add", State: "unattempted"}}, steps...)
+	var steps []repo.KeyStep
+	switch mode {
+	case "add":
+		steps = []repo.KeyStep{{Name: "add", State: "unattempted"}}
+	case "revoke":
+		steps = []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
+	case "replace":
+		steps = []repo.KeyStep{{Name: "add", State: "unattempted"}, {Name: "revoke", State: "unattempted"}}
 	}
 	o := repo.Operation{
 		ID: id, TargetID: target, KeeperID: keeper, Mode: mode,
-		// The journal records the connection identity, not the checkpoint number
-		// and not a configuration digest: the identity is what a later step is
-		// bound to, and it survives every edit the user makes to their own CPA.
 		RunID: install.Identity, Generation: install.Generation(),
-		Revision: 1, Outcome: "pending", Steps: steps, CreatedAtMS: time.Now().UnixMilli(),
+		Revision: 1, Outcome: repo.OutcomePending, Steps: steps, CreatedAtMS: time.Now().UnixMilli(),
 	}
 	if err = s.repo.BeginOperation(ctx, o); err != nil {
 		return result, err
@@ -117,12 +237,20 @@ func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode 
 	return s.externalCheckOperation(ctx, &o, generation)
 }
 
-// externalCheckOperation reconciles one journaled External operation by reading
-// the user's CPA. It never writes: an attempted step is resolved by what the CPA
-// now carries, and an unattempted step is only named.
 func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation, generation uint64) (OperationResult, error) {
 	r := OperationResult{Operation: o, RuntimeState: "effect_unknown"}
-	if o.Outcome == "committed" {
+	if o.IsTerminal() {
+		install, err := s.externalAuthority(ctx)
+		if err != nil {
+			return r, err
+		}
+		if (generation != 0 && generation != install.Checkpoint) || o.RunID != install.Identity || o.Generation != install.Generation() {
+			return r, ErrGeneration
+		}
+		if o.Outcome == repo.OutcomeAborted {
+			r.RuntimeState = "not_applied"
+			return r, nil
+		}
 		latest, err := s.repo.LatestOperation(ctx)
 		if err != nil {
 			return r, err
@@ -131,13 +259,6 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 			return r, repo.ErrConflict
 		}
 		if latest.ID != o.ID {
-			// A historical committed operation is a durable record, not a live
-			// effectiveness claim: its former keeper may since have been revoked.
-			// It is only reported for the connection and generation it was
-			// journaled against.
-			if o.RunID != latest.RunID || o.Generation != latest.Generation {
-				return r, ErrGeneration
-			}
 			return r, nil
 		}
 	}
@@ -158,23 +279,17 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 		}
 		switch {
 		case step.State == "attempted" || step.State == "observed":
-			err = s.keyPair(ctx, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
-				return s.awaitExternalKeyStep(ctx, w, install, step.Name, old, next)
+			err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
+				return s.awaitExternalKeyStep(ctx, w, install, o.Mode, step.Name, old, next)
 			})
 			if err != nil {
 				return r, err
 			}
 		default:
-			// A step that was never written is normally only named. The user's
-			// CPA may however already show the fact that step would establish —
-			// an edit between Prepare and Continue, or the same key revoked by
-			// hand — and then the read-back is the terminal state: the journal
-			// settles here instead of staying pending and blocking every later
-			// operation.
 			held := false
-			err = s.keyPair(ctx, o.TargetID, o.KeeperID, false, func(old, next string) error {
+			err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
 				var readErr error
-				held, readErr = s.externalStepHeld(ctx, w, install, step.Name, old, next)
+				held, readErr = s.externalStepHeld(ctx, w, install, o.Mode, step.Name, old, next)
 				return readErr
 			})
 			if err != nil {
@@ -185,12 +300,12 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 				return r, nil
 			}
 		}
-		if o.Outcome != "committed" {
+		if o.Outcome != repo.OutcomeCommitted {
 			o.Steps[i].State = "observed"
-			o.Outcome = "pending"
-			if step.Name == "revoke" {
-				o.Outcome = "committed"
-				o.CompletedAtMS = time.Now().UnixMilli()
+			o.Outcome = repo.OutcomePending
+			if step.Name == "revoke" || o.Mode == "add" {
+				o.Outcome = repo.OutcomeCommitted
+				o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
 			}
 			if err = s.repo.SaveOperation(ctx, *o); err != nil {
 				return r, err
@@ -203,34 +318,79 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 	return r, nil
 }
 
-// externalStepHeld reports one read of the user's CPA: a revoke step has ended
-// when the credential it removes is gone, and an add step has ended when the
-// credential it introduces is carried. That is the whole fact the step owns.
-func (s *Service) externalStepHeld(ctx context.Context, w externalWire, install ExternalInstall, step, old, next string) (bool, error) {
+// externalStepHeld requires config membership, live client authentication on
+// /v1/models, and a post-sample checkpoint/source/config observation fence.
+func (s *Service) externalStepHeld(ctx context.Context, w externalWire, install ExternalInstall, mode, step, old, next string) (bool, error) {
 	snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 	if err != nil {
 		return false, err
 	}
-	return externalStepSettled(snapshot.Keys, step, old, next), nil
-}
-
-// externalStepSettled reports the post-state of one step: a revoke removes the
-// target, and the add step of a replace carries the replacement. Membership is
-// the fact this Manager owns: an External CPA may carry credentials it never
-// staged, and the user may edit it at any time, so a whole-list comparison or a
-// whole-document digest would report a conflict for a correct write.
-func externalStepSettled(keys []string, step, old, next string) bool {
-	if step == "add" {
-		return slices.Contains(keys, next)
+	if !externalStepSettled(snapshot.Keys, mode, step, old, next) {
+		return false, nil
 	}
-	return !slices.Contains(keys, old)
+	sampler, ok := w.(externalAuthWire)
+	if !ok {
+		return false, cpa.ErrApplyUnknown
+	}
+	var accepted, rejected []string
+	if step == "add" {
+		added := next
+		if mode == "add" {
+			added = old
+		}
+		accepted = []string{added}
+	} else {
+		rejected = []string{old}
+		if next != "" {
+			accepted = []string{next}
+		} else {
+			unique := uniqueExternalKeys(snapshot.Keys)
+			if len(unique) == 0 {
+				return false, cpa.ErrApplyUnknown
+			}
+			accepted = []string{unique[0]}
+		}
+	}
+	authOK, authErr := sampler.ExternalSampleKeySet(ctx, accepted, rejected)
+	if err := s.externalObservationHeld(ctx, install, w, snapshot); err != nil {
+		return false, err
+	}
+	if authErr != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, cpa.ErrApplyUnknown
+	}
+	if !authOK {
+		return false, cpa.ErrApplyUnknown
+	}
+	s.authCache.recordProven(authProofVersion{
+		profile:      ProfileExternal,
+		target:       install.Identity,
+		runID:        install.Generation(),
+		sourceSHA256: snapshot.SourceSHA256,
+		keysSHA256:   orderedKeysDigest(snapshot.Keys),
+	}, snapshot.Keys, accepted)
+	return true, nil
 }
 
-// awaitExternalKeyStep requires the fact of one step to hold across spaced reads
-// of the user's CPA, so a lost reply is resolved by what the CPA shows.
-func (s *Service) awaitExternalKeyStep(ctx context.Context, w externalWire, install ExternalInstall, step, old, next string) error {
+func externalStepSettled(keys []string, mode, step, old, next string) bool {
+	if step == "add" {
+		added := next
+		if mode == "add" {
+			added = old
+		}
+		return added != "" && slices.Contains(keys, added)
+	}
+	if len(uniqueExternalKeys(keys)) == 0 || slices.Contains(keys, old) {
+		return false
+	}
+	return next == "" || slices.Contains(keys, next)
+}
+
+func (s *Service) awaitExternalKeyStep(ctx context.Context, w externalWire, install ExternalInstall, mode, step, old, next string) error {
 	for n := range 3 {
-		held, err := s.externalStepHeld(ctx, w, install, step, old, next)
+		held, err := s.externalStepHeld(ctx, w, install, mode, step, old, next)
 		if err != nil {
 			return err
 		}
@@ -248,13 +408,13 @@ func (s *Service) awaitExternalKeyStep(ctx context.Context, w externalWire, inst
 	return nil
 }
 
-// externalContinue writes the next unattempted step of one journaled External
-// operation. The step is journaled as attempted before the single request, so a
-// lost reply is resolved by externalCheckOperation and never by resending.
 func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index int, generation uint64) (OperationResult, error) {
 	r := OperationResult{Operation: o, RuntimeState: "effect_unknown"}
-	if o.Outcome == "committed" {
+	if o.Outcome == repo.OutcomeCommitted {
 		return r, nil
+	}
+	if o.Outcome == repo.OutcomeAborted {
+		return r, repo.ErrConflict
 	}
 	install, err := s.externalTarget(ctx, generation)
 	if err != nil {
@@ -281,32 +441,57 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 	if w == nil {
 		return r, ErrExternalUnavailable
 	}
-	err = s.keyPair(ctx, o.TargetID, o.KeeperID, false, func(old, next string) error {
+	err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
 		}
-		// The start state of this step, read at the moment of the write: the
-		// credential the step acts on is carried, and a revoke never removes the
-		// last one. A step whose end state the user's CPA already shows is settled
-		// by read-back instead: no write is sent for work that is already done.
-		if !slices.Contains(snapshot.Keys, old) || (step == "revoke" && len(snapshot.Keys) <= 1) {
-			if externalStepSettled(snapshot.Keys, step, old, next) {
-				return errExternalSettled
+		if step == "add" {
+			added := next
+			if o.Mode == "add" {
+				added = old
 			}
-			if step == "revoke" && len(snapshot.Keys) <= 1 {
-				return ErrLastKey
+			if slices.Contains(snapshot.Keys, added) {
+				held, heldErr := s.externalStepHeld(ctx, w, install, o.Mode, step, old, next)
+				if heldErr != nil {
+					return heldErr
+				}
+				if held {
+					return errExternalSettled
+				}
+				return cpa.ErrApplyUnknown
 			}
+			if o.Mode == "replace" && (old == next || !slices.Contains(snapshot.Keys, old)) {
+				return cpa.ErrSourceConflict
+			}
+		} else {
+			if !slices.Contains(snapshot.Keys, old) {
+				if externalStepSettled(snapshot.Keys, o.Mode, step, old, next) {
+					held, heldErr := s.externalStepHeld(ctx, w, install, o.Mode, step, old, next)
+					if heldErr != nil {
+						return heldErr
+					}
+					if held {
+						return errExternalSettled
+					}
+					return cpa.ErrApplyUnknown
+				}
+				if len(uniqueExternalKeys(snapshot.Keys)) == 0 {
+					return ErrLastKey
+				}
+				return cpa.ErrSourceConflict
+			}
+			if next != "" && (old == next || !slices.Contains(snapshot.Keys, next)) {
+				return cpa.ErrSourceConflict
+			}
+		}
+		after := externalKeysAfterStep(snapshot.Keys, o.Mode, step, old, next)
+		if len(after) == 0 {
+			return ErrLastKey
+		}
+		if step == "revoke" && next != "" && !slices.Contains(after, next) {
 			return cpa.ErrSourceConflict
 		}
-		// The credential that stays must be one this Manager staged: the step is
-		// never allowed to delete the target and leave the CPA's last key in the
-		// hands of a credential the journal cannot name.
-		if step == "revoke" && !slices.Contains(snapshot.Keys, next) {
-			return cpa.ErrSourceConflict
-		}
-		// The document this grant was derived from, compared immediately before the
-		// single PUT: an edit the user made in between is never written over.
 		if snapshot.SourceSHA256 != grant.SourceSHA256 {
 			return cpa.ErrSourceConflict
 		}
@@ -316,54 +501,26 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 		if time.Now().UnixMilli() >= grant.ExpiresAtMS {
 			return ErrExternalUnavailable
 		}
-		// The version is asked before the step is journaled as attempted: a CPA
-		// that became unsupported — or stopped answering the probe — since Prepare
-		// refuses here, while nothing has been sent. Journaling the attempt first
-		// would leave a step no later read can settle, because no byte of that
-		// write was ever sent, and every later operation of the connection would
-		// then be refused by the unsettled journal.
 		if err := s.externalWriteGate(ctx, install); err != nil {
 			return err
 		}
 		o.Steps[index].State = "attempted"
-		o.Outcome = "unknown"
+		o.Outcome = repo.OutcomeUnknown
 		if err = s.repo.SaveOperation(ctx, *o); err != nil {
 			return err
 		}
 		o.Revision++
-		// The whole list is written because the CPA v8 route replaces it, but the
-		// step is still exactly one membership change: an add introduces the keeper
-		// and a revoke removes the target.
-		after := slices.Clone(snapshot.Keys)
-		if step == "add" {
-			if !slices.Contains(after, next) {
-				after = append(after, next)
-			}
-		} else {
-			if len(after) <= 1 {
-				return ErrLastKey
-			}
-			after = slices.DeleteFunc(after, func(key string) bool { return key == old })
-		}
+
 		writeErr := w.ExternalWriteKeySet(ctx, install.ManagementKey, after)
-		o.Steps[index].Returned = true
-		if errors.Is(writeErr, cpa.ErrManagementRejected) {
-			// A 401 is CPA's own refusal of the management credential, and it
-			// proves no byte of the list was written. The step is journaled as not
-			// applied, so a rebind can take it again instead of the journal staying
-			// unknown forever.
-			o.Steps[index].State = "unattempted"
-			o.Outcome = "pending"
-		}
-		if errors.Is(writeErr, cpa.ErrExternalRejectionUnavailable) {
-			// The saved-credential wire gate refused locally before presenting the
-			// credential to CPA, so no byte of the key list was written.
+		if errors.Is(writeErr, cpa.ErrManagementRejected) ||
+			errors.Is(writeErr, cpa.ErrExternalRejectionUnavailable) ||
+			errors.Is(writeErr, cpa.ErrExternalTargetMoved) {
 			o.Steps[index].Returned = false
 			o.Steps[index].State = "unattempted"
-			o.Outcome = "pending"
+			o.Outcome = repo.OutcomePending
+		} else {
+			o.Steps[index].Returned = true
 		}
-		// Retain the attempt on a lost client: the journal, not the reply, is the
-		// evidence a later reconcile reads.
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		if err = s.repo.SaveOperation(saveCtx, *o); err != nil {

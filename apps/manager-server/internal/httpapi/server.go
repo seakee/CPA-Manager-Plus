@@ -54,3 +54,15 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) AppContext() *app.Context {
 	return s.appCtx
 }
+
+func (s *Server) SetUpgradeAPIKeys(fn func(w http.ResponseWriter, r *http.Request, resource string)) {
+	if s != nil && s.appCtx != nil {
+		s.appCtx.UpgradeAPIKeys = fn
+	}
+}
+
+func (s *Server) WrapHandler(wrap func(http.Handler) http.Handler) {
+	if s != nil && wrap != nil {
+		s.handler = wrap(s.handler)
+	}
+}

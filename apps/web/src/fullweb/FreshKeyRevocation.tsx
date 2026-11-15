@@ -1,56 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { FullWebIcon } from './FullWebIcon';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
-import { keyDisplayName, type Key } from './freshKeyMetadata';
+import {
+  effectBlockerTextKey,
+  isTerminalKeyOperationOutcome,
+  keyDisplayName,
+  validKeyOperationResult,
+  type Key,
+  type KeyOperationResult,
+} from './freshKeyMetadata';
 import { Modal } from '../components/ui/Modal';
-
-interface Operation {
-  id: string;
-  targetId: string;
-  keeperId: string;
-  mode: 'revoke' | 'replace';
-  outcome: 'pending' | 'unknown' | 'committed';
-  revision: number;
-  steps: {
-    name: 'add' | 'revoke';
-    state: 'unattempted' | 'attempted' | 'observed';
-    returned: boolean;
-  }[];
-}
-interface Result {
-  operation: Operation | null;
-  runtimeState: 'effect_unknown' | 'effective_observed';
-  expiresAtMs: number;
-  nextStep: '' | 'add' | 'revoke';
-}
-function validResult(r: Result): boolean {
-  const o = r?.operation;
-  return (
-    !!r &&
-    ['effect_unknown', 'effective_observed'].includes(r.runtimeState) &&
-    Number.isSafeInteger(r.expiresAtMs) &&
-    ['', 'add', 'revoke'].includes(r.nextStep) &&
-    (o === null ||
-      (!!o &&
-        [o.id, o.targetId, o.keeperId].every((v) => /^[a-f0-9]{32}$/.test(v)) &&
-        o.targetId !== o.keeperId &&
-        ['revoke', 'replace'].includes(o.mode) &&
-        ['pending', 'unknown', 'committed'].includes(o.outcome) &&
-        Number.isSafeInteger(o.revision) &&
-        o.revision > 0 &&
-        Array.isArray(o.steps) &&
-        o.steps.length === (o.mode === 'replace' ? 2 : 1) &&
-        o.steps.every(
-          (s, i) =>
-            s.name === (o.mode === 'replace' && i === 0 ? 'add' : 'revoke') &&
-            ['unattempted', 'attempted', 'observed'].includes(s.state) &&
-            typeof s.returned === 'boolean'
-        ) &&
-        (o.outcome !== 'committed' || o.steps.every((s) => s.state === 'observed'))))
-  );
-}
 
 export function FreshKeyRevocation({
   keys,
@@ -64,6 +26,8 @@ export function FreshKeyRevocation({
   open = true,
   onClose,
   onCreateReplacement,
+  onRebind,
+  reloadToken = 0,
 }: {
   keys: Key[];
   client: ReturnType<typeof createPublicApiClient>;
@@ -76,11 +40,13 @@ export function FreshKeyRevocation({
   open?: boolean;
   onClose?: () => void;
   onCreateReplacement?: () => void;
+  onRebind?: () => void;
+  reloadToken?: number;
 }) {
   const [target, setTarget] = useState('');
   const [keeper, setKeeper] = useState('');
   const [mode, setMode] = useState<'revoke' | 'replace'>('revoke');
-  const [result, setResult] = useState<Result | null>(null);
+  const [result, setResult] = useState<KeyOperationResult | null>(null);
   const [request, setRequest] = useState<{
     id: string;
     target: string;
@@ -98,40 +64,87 @@ export function FreshKeyRevocation({
   } | null>(null);
   const preflightSeq = useRef(0);
   const [message, setMessage] = useState('');
+  const [blockerCode, setBlockerCode] = useState('');
+  const [blockerDetail, setBlockerDetail] = useState('');
   const [showGuide, setShowGuide] = useState(false);
   const [settledPresetSeq, setSettledPresetSeq] = useState<number | null>(null);
-  const latestResult = useRef<Result | null>(null);
+  const [abortedPresetSeq, setAbortedPresetSeq] = useState<number | null>(null);
+  const prevPresetSeq = useRef<number | null>(null);
+  const latestResult = useRef<KeyOperationResult | null>(null);
   const active = useRef(true);
   const flight = useRef(false);
+  const ownerEpoch = useRef(0);
+  const prevReloadToken = useRef(reloadToken);
   const auth = { kind: 'admin' as const, value: credential };
   const available = keys.filter((k) => k.lifecycle !== 'superseded');
 
   useEffect(() => {
     active.current = true;
+    const ownerAtMount = ++ownerEpoch.current;
+    latestResult.current = null;
+    setResult(null);
+    setRequest(null);
+    setPreflight(null);
+    setMessage('');
+    setBlockerCode('');
+    setBlockerDetail('');
+    setSettledPresetSeq(null);
+    setAbortedPresetSeq(null);
+    prevPresetSeq.current = null;
     onPending(true);
-    void read();
+    void read(ownerAtMount);
     return () => {
       active.current = false;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [credential]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const unresolved = !!request || (!!result?.operation && result.operation.outcome !== 'committed');
+  useEffect(() => {
+    if (prevReloadToken.current === reloadToken) return;
+    prevReloadToken.current = reloadToken;
+    setPreflight(null);
+    if (!flight.current) {
+      setBlockerCode('');
+      setBlockerDetail('');
+      void read(ownerEpoch.current);
+    }
+  }, [reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const committedAddOnly =
+    result?.operation?.mode === 'add' && result.operation.outcome === 'committed' && !request;
+  const unresolved =
+    !!request ||
+    (!!result?.operation && !isTerminalKeyOperationOutcome(result.operation.outcome));
   const presetSettled =
     !!preset &&
     !unresolved &&
+    !committedAddOnly &&
     settledPresetSeq === preset.seq &&
     result?.operation?.outcome === 'committed';
-
   useEffect(() => {
-    if (!preset || request || (result?.operation && result.operation.outcome !== 'committed'))
+    if (
+      !preset ||
+      request ||
+      (result?.operation && !isTerminalKeyOperationOutcome(result.operation.outcome))
+    )
       return;
-    if (settledPresetSeq === preset.seq) return;
+    if (settledPresetSeq === preset.seq || abortedPresetSeq === preset.seq) return;
+    const isNewPreset = prevPresetSeq.current !== preset.seq;
+    prevPresetSeq.current = preset.seq;
     setMessage('');
+    if (isNewPreset) {
+      setBlockerCode('');
+      setBlockerDetail('');
+    }
     if (available.some((item) => item.id === preset.targetId)) {
       setTarget(preset.targetId);
       setMode(preset.mode);
-      setShowGuide(preset.mode === 'replace');
-      const fallbackKeeper = available.find((item) => item.id !== preset.targetId)?.id || '';
+      if (isNewPreset) setShowGuide(preset.mode === 'replace');
+      const fallbackKeeper =
+        available.find(
+          (item) => item.id !== preset.targetId && item.runtimeState === 'effective_observed'
+        )?.id ||
+        available.find((item) => item.id !== preset.targetId)?.id ||
+        '';
       setKeeper((previous) =>
         previous && previous !== preset.targetId && available.some((item) => item.id === previous)
           ? previous
@@ -140,17 +153,20 @@ export function FreshKeyRevocation({
     } else {
       setTarget('');
     }
-  }, [preset, keys, settledPresetSeq]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [preset, keys, settledPresetSeq, abortedPresetSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const validTarget = !!target && available.some((item) => item.id === target);
+  const validKeeper =
+    mode === 'revoke'
+      ? keeper === '' || (keeper !== target && available.some((item) => item.id === keeper))
+      : !!keeper && keeper !== target && available.some((item) => item.id === keeper);
   const currentSelection =
-    target &&
-    keeper &&
-    target !== keeper &&
+    validTarget &&
+    validKeeper &&
+    available.length > 1 &&
     !presetSettled &&
-    available.some((item) => item.id === target) &&
-    available.some((item) => item.id === keeper) &&
-    !(result?.operation && result.operation.outcome !== 'committed')
-      ? target + '|' + keeper + '|' + mode
+    !(result?.operation && !isTerminalKeyOperationOutcome(result.operation.outcome))
+      ? `${target}|${keeper}|${mode}`
       : '';
 
   // Every remaining limit is a fact about the destination or about the
@@ -160,14 +176,17 @@ export function FreshKeyRevocation({
   useEffect(() => {
     if (!currentSelection || disabled || !checked) return;
     const seq = ++preflightSeq.current;
+    const ownerAtStart = ownerEpoch.current;
     const [targetId, keeperId, selectionMode] = currentSelection.split('|');
+    const preflightPath =
+      keeperId === '' && selectionMode === 'revoke'
+        ? `api-keys/${targetId}/revocation/revoke`
+        : `api-keys/${targetId}/revocation/${keeperId}/${selectionMode}`;
     void (async () => {
       try {
-        const value = await client.get<{ ready: boolean; reason: string }>(
-          'api-keys/' + targetId + '/revocation/' + keeperId + '/' + selectionMode,
-          auth
-        );
-        if (!active.current || seq !== preflightSeq.current) return;
+        const value = await client.get<{ ready: boolean; reason: string }>(preflightPath, auth);
+        if (!active.current || seq !== preflightSeq.current || ownerAtStart !== ownerEpoch.current)
+          return;
         if (typeof value?.ready !== 'boolean') throw new Error();
         setPreflight({
           selection: currentSelection,
@@ -175,7 +194,8 @@ export function FreshKeyRevocation({
           reason: typeof value.reason === 'string' ? value.reason : '',
         });
       } catch (err) {
-        if (!active.current || seq !== preflightSeq.current) return;
+        if (!active.current || seq !== preflightSeq.current || ownerAtStart !== ownerEpoch.current)
+          return;
         if (err instanceof PublicApiError && err.kind === 'authentication') {
           onUnauthorized();
           return;
@@ -183,7 +203,7 @@ export function FreshKeyRevocation({
         setPreflight({ selection: currentSelection, ready: false, reason: 'key_operation_unknown' });
       }
     })();
-  }, [currentSelection, disabled, checked]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSelection, disabled, checked, reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function preflightText(reason: string): string {
     if (reason === 'key_operation_source_conflict') return k('operationBlockedSourceConflict');
@@ -194,11 +214,37 @@ export function FreshKeyRevocation({
     if (reason === 'external_management_key_rejected' || reason === 'external_target_moved')
       return k('operationBlockedCredentialRejected');
     if (reason === 'last_effective_key') return k('lastKeyProtectionHelp');
+    if (
+      reason === 'key_operation_host_proof_required' ||
+      reason === 'key_operation_generation_mismatch' ||
+      reason === 'external_cpa_version_unsupported' ||
+      reason === 'external_cpa_authority_unavailable'
+    ) {
+      return k(effectBlockerTextKey(reason));
+    }
     return k('operationBlockedUnavailable');
   }
 
-  function accept(value: Result, expected?: string, selection = request, observed = true) {
-    if (!validResult(value) || (expected && (!value.operation || value.operation.id !== expected)))
+  function accept(
+    value: KeyOperationResult,
+    expected?: string,
+    selection = request,
+    observed = true,
+    ownerAtStart = ownerEpoch.current
+  ) {
+    const prevResult = latestResult.current;
+    const pendingUnrecorded =
+      observed &&
+      !!selection &&
+      selection.id === expected &&
+      value.operation === null &&
+      (!prevResult?.operation ||
+        (isTerminalKeyOperationOutcome(prevResult.operation.outcome) &&
+          prevResult.operation.id !== expected));
+    if (
+      !validKeyOperationResult(value) ||
+      (expected && !pendingUnrecorded && (!value.operation || value.operation.id !== expected))
+    )
       throw new Error();
     if (
       selection &&
@@ -209,58 +255,158 @@ export function FreshKeyRevocation({
         value.operation.mode !== selection.mode)
     )
       throw new Error();
-    const prevResult = latestResult.current;
-    if (
-      prevResult?.operation &&
-      ((!value.operation &&
-        (prevResult.operation.outcome !== 'committed' ||
-          !expected ||
-          expected === prevResult.operation.id)) ||
-        (value.operation &&
-          value.operation.id === prevResult.operation.id &&
-          (value.operation.targetId !== prevResult.operation.targetId ||
-            value.operation.keeperId !== prevResult.operation.keeperId ||
-            value.operation.mode !== prevResult.operation.mode ||
-            value.operation.revision < prevResult.operation.revision ||
-            (prevResult.operation.outcome === 'committed' && value.operation.outcome !== 'committed') ||
-            value.operation.steps.some((step, i) => {
-              const previous = prevResult.operation!.steps[i];
-              const rank = { unattempted: 0, attempted: 1, observed: 2 };
-              return (
-                rank[step.state] < rank[previous.state] || (previous.returned && !step.returned)
-              );
-            }))))
-    )
-      throw new Error();
-    if (!active.current) return;
+    if (prevResult?.operation) {
+      if (!value.operation) {
+        if (
+          !pendingUnrecorded &&
+          (!isTerminalKeyOperationOutcome(prevResult.operation.outcome) ||
+            !expected ||
+            expected === prevResult.operation.id)
+        ) {
+          throw new Error();
+        }
+      } else if (value.operation.id === prevResult.operation.id) {
+        const rank = { unattempted: 0, attempted: 1, observed: 2 };
+        if (
+          value.operation.targetId !== prevResult.operation.targetId ||
+          value.operation.keeperId !== prevResult.operation.keeperId ||
+          value.operation.mode !== prevResult.operation.mode ||
+          value.operation.revision < prevResult.operation.revision ||
+          (prevResult.operation.outcome === 'committed' &&
+            value.operation.outcome !== 'committed') ||
+          (prevResult.operation.outcome === 'aborted' && value.operation.outcome !== 'aborted') ||
+          value.operation.steps.some((step, i) => {
+            const previous = prevResult.operation!.steps[i];
+            return (
+              rank[step.state] < rank[previous.state] || (previous.returned && !step.returned)
+            );
+          })
+        ) {
+          throw new Error();
+        }
+      }
+    }
+    if (!active.current || ownerAtStart !== ownerEpoch.current) return;
     latestResult.current = value;
     setResult(value);
-    setChecked(observed);
-    setMessage(observed ? '' : t('keysOperationUnknown'));
+    if (pendingUnrecorded) {
+      setChecked(true);
+      setRequest(null);
+      setPreflight(null);
+      setBlockerCode('');
+      setBlockerDetail('');
+      setMessage(k('operationNotRecorded'));
+      onPending(false);
+      return;
+    }
+    const isTerminal =
+      !!value.operation && isTerminalKeyOperationOutcome(value.operation.outcome);
+    const keepChecked = observed || value.operation?.outcome === 'aborted';
+    setChecked(keepChecked);
+    if (observed) {
+      setBlockerCode('');
+      setBlockerDetail('');
+    }
+    setMessage(
+      value.operation?.outcome === 'aborted'
+        ? expected || prevResult?.operation?.id === value.operation.id
+          ? k('operationAborted')
+          : ''
+        : observed
+          ? ''
+          : t('keysOperationUnknown')
+    );
     setRequest(null);
-    onPending(!observed || (!!value.operation && value.operation.outcome !== 'committed'));
-    if (observed && value.operation?.outcome === 'committed') {
-      if (preset && expected === value.operation.id) setSettledPresetSeq(preset.seq);
+    onPending(!keepChecked || (!!value.operation && !isTerminal));
+    const shouldNotifyChanged =
+      (observed &&
+        value.operation?.outcome === 'committed' &&
+        (value.operation.mode !== 'add' ||
+          !!expected ||
+          (prevResult?.operation?.id === value.operation.id &&
+            prevResult.operation.outcome !== 'committed'))) ||
+      (value.operation?.outcome === 'aborted' &&
+        (!!expected ||
+          (prevResult?.operation?.id === value.operation.id &&
+            prevResult.operation.outcome !== 'aborted')));
+    if (shouldNotifyChanged) {
+      if (preset && expected === value.operation!.id) {
+        if (
+          value.operation!.outcome === 'committed' &&
+          value.operation!.targetId === preset.targetId &&
+          value.operation!.mode === preset.mode
+        ) {
+          setSettledPresetSeq(preset.seq);
+        }
+        if (value.operation!.outcome === 'aborted') setAbortedPresetSeq(preset.seq);
+      }
       onChanged();
     }
   }
-  function failure(err: unknown, expected?: string, selection = request) {
-    if (!active.current) return;
+  function failure(
+    err: unknown,
+    expected?: string,
+    selection = request,
+    ownerAtStart = ownerEpoch.current,
+    allowPrepareConflict = false
+  ) {
+    if (!active.current || ownerAtStart !== ownerEpoch.current) return;
     if (err instanceof PublicApiError && err.kind === 'authentication') {
       onUnauthorized();
       return;
     }
+    const code = err instanceof PublicApiError ? err.code || '' : '';
+    const detail = err instanceof PublicApiError ? err.detail || '' : '';
+    if (
+      allowPrepareConflict &&
+      err instanceof PublicApiError &&
+      err.status === 409 &&
+      code === 'key_operation_conflict' &&
+      err.operationResult !== undefined
+    ) {
+      try {
+        const recovered = err.operationResult as KeyOperationResult;
+        if (
+          !validKeyOperationResult(recovered) ||
+          !recovered.operation ||
+          recovered.runtimeState === 'effective_observed' ||
+          isTerminalKeyOperationOutcome(recovered.operation.outcome) ||
+          recovered.operation.id === expected
+        ) {
+          throw new Error();
+        }
+        accept(recovered, recovered.operation.id, null, false, ownerAtStart);
+        setBlockerCode(code);
+        setBlockerDetail('');
+        setMessage(t('keysOperationRejected'));
+        return;
+      } catch {
+        // Fall through to standard selection/id checks or fail-closed lock.
+      }
+    }
     if (err instanceof PublicApiError && err.operationResult !== undefined) {
       try {
-        const recovered = err.operationResult as Result;
-        if (!recovered?.operation || recovered.runtimeState !== 'effect_unknown') throw new Error();
-        accept(recovered, expected, selection, false);
-        if (err.status === 409) setMessage(t('keysOperationRejected'));
+        const recovered = err.operationResult as KeyOperationResult;
+        if (!recovered?.operation || recovered.runtimeState === 'effective_observed')
+          throw new Error();
+        accept(recovered, expected, selection, false, ownerAtStart);
+        if (recovered.operation.outcome === 'aborted') {
+          const preservedCode = code === 'key_operation_conflict' ? '' : code;
+          setBlockerCode(preservedCode);
+          setBlockerDetail(preservedCode === 'external_management_key_rejected' ? detail : '');
+          setMessage(k('operationAborted'));
+        } else {
+          setBlockerCode(code);
+          setBlockerDetail(code === 'external_management_key_rejected' ? detail : '');
+          if (err.status === 409) setMessage(t('keysOperationRejected'));
+        }
         return;
       } catch {
         // Invalid or regressed failed-response snapshots never unlock a write.
       }
     }
+    setBlockerCode(code);
+    setBlockerDetail(code === 'external_management_key_rejected' ? detail : '');
     setMessage(
       t(
         err instanceof PublicApiError && err.status === 409
@@ -270,24 +416,32 @@ export function FreshKeyRevocation({
     );
     setChecked(false);
   }
-  async function run(action: () => Promise<Result>, expected?: string, selection = request) {
+  async function run(
+    action: () => Promise<KeyOperationResult>,
+    expected?: string,
+    selection = request,
+    ownerAtStart = ownerEpoch.current,
+    allowPrepareConflict = false
+  ) {
     if (flight.current) return;
     flight.current = true;
     setBusy(true);
     try {
-      accept(await action(), expected, selection);
+      accept(await action(), expected, selection, true, ownerAtStart);
     } catch (err) {
-      failure(err, expected, selection);
+      failure(err, expected, selection, ownerAtStart, allowPrepareConflict);
     } finally {
       flight.current = false;
-      if (active.current) setBusy(false);
+      if (active.current && ownerAtStart === ownerEpoch.current) setBusy(false);
     }
   }
-  async function read() {
+  async function read(ownerAtStart = ownerEpoch.current) {
     const id = request?.id || result?.operation?.id || 'latest';
     await run(
-      () => client.get<Result>('api-keys/operations/' + id, auth),
-      id === 'latest' ? undefined : id
+      () => client.get<KeyOperationResult>('api-keys/operations/' + id, auth),
+      id === 'latest' ? undefined : id,
+      request,
+      ownerAtStart
     );
   }
   async function prepare() {
@@ -296,28 +450,32 @@ export function FreshKeyRevocation({
       disabled ||
       !checked ||
       request ||
-      (result?.operation && result.operation.outcome !== 'committed') ||
-      !target ||
-      !keeper ||
+      (result?.operation && !isTerminalKeyOperationOutcome(result.operation.outcome)) ||
+      !validTarget ||
+      !validKeeper ||
       available.length <= 1 ||
-      target === keeper ||
       !currentSelection ||
       !preflight ||
       preflight.selection !== currentSelection ||
       !preflight.ready
     )
       return;
+    const ownerAtStart = ownerEpoch.current;
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
       b.toString(16).padStart(2, '0')
     ).join('');
     const selection = { id, target, keeper, mode };
+    setMessage('');
+    setBlockerCode('');
+    setBlockerDetail('');
+    setAbortedPresetSeq(null);
     setRequest(selection);
     setChecked(false);
     onPending(true);
     if (!preset) {
       await run(
         async () => {
-          const value = await client.post<Result>(
+          const value = await client.post<KeyOperationResult>(
             'api-keys/' + target + '/revocation',
             { requestId: id, keeperId: keeper, mode },
             auth
@@ -326,7 +484,9 @@ export function FreshKeyRevocation({
           return value;
         },
         id,
-        selection
+        selection,
+        ownerAtStart,
+        true
       );
       return;
     }
@@ -334,41 +494,44 @@ export function FreshKeyRevocation({
     setBusy(true);
     let currentId: string | undefined = id;
     let activeSelection: typeof selection | null = selection;
+    let inPreparePost = true;
     try {
-      let current = await client.post<Result>(
+      let current = await client.post<KeyOperationResult>(
         'api-keys/' + target + '/revocation',
         { requestId: id, keeperId: keeper, mode },
         auth
       );
+      inPreparePost = false;
       if (!current.operation) throw new Error();
-      accept(current, id, selection);
+      accept(current, id, selection, true, ownerAtStart);
       activeSelection = null;
       currentId = current.operation.id;
       const maxSteps = current.operation.steps.length;
       for (
         let step = 0;
         active.current &&
+        ownerAtStart === ownerEpoch.current &&
         current.operation &&
-        current.operation.outcome !== 'committed' &&
+        !isTerminalKeyOperationOutcome(current.operation.outcome) &&
         !!current.nextStep &&
         step < maxSteps;
         step += 1
       ) {
         setChecked(false);
         onPending(true);
-        const next = await client.post<Result>(
+        const next = await client.post<KeyOperationResult>(
           'api-keys/operations/' + current.operation.id + '/continue',
           {},
           auth
         );
-        accept(next, current.operation.id, null);
+        accept(next, current.operation.id, null, true, ownerAtStart);
         current = next;
       }
     } catch (err) {
-      failure(err, currentId, activeSelection);
+      failure(err, currentId, activeSelection, ownerAtStart, inPreparePost);
     } finally {
       flight.current = false;
-      if (active.current) setBusy(false);
+      if (active.current && ownerAtStart === ownerEpoch.current) setBusy(false);
     }
   }
   async function proceed() {
@@ -379,17 +542,21 @@ export function FreshKeyRevocation({
       !checked ||
       !o ||
       !result.nextStep ||
-      o.outcome === 'committed' ||
+      isTerminalKeyOperationOutcome(o.outcome) ||
       request
     )
       return;
+    const ownerAtStart = ownerEpoch.current;
     setChecked(false);
     onPending(true);
     await run(
-      () => client.post<Result>('api-keys/operations/' + o.id + '/continue', {}, auth),
-      o.id
+      () => client.post<KeyOperationResult>('api-keys/operations/' + o.id + '/continue', {}, auth),
+      o.id,
+      request,
+      ownerAtStart
     );
   }
+
   const guiding = showGuide && !!onCreateReplacement && checked && !unresolved && !presetSettled;
   const presetKey = preset ? keys.find((item) => item.id === preset.targetId) : undefined;
   const content = (
@@ -457,57 +624,122 @@ export function FreshKeyRevocation({
               <span>{message}</span>
             </p>
           )}
+          {blockerCode && blockerCode !== 'key_operation_unknown' && (
+            <p className="key-field-help" data-testid="key-operation-blocker-detail">
+              {k(effectBlockerTextKey(blockerCode))}
+            </p>
+          )}
+          {blockerCode === 'external_management_key_rejected' && blockerDetail && (
+            <details
+              className="fresh-external-blocker-detail"
+              data-testid="key-operation-rebind-detail"
+            >
+              <summary>{x('details')}</summary>
+              <p>{blockerDetail}</p>
+            </details>
+          )}
+          {onRebind &&
+            ['external_management_key_rejected', 'external_target_moved'].includes(
+              blockerCode || preflight?.reason || ''
+            ) && (
+              <div className="key-modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-testid="operation-rebind-action"
+                  disabled={busy}
+                  onClick={onRebind}
+                >
+                  {k('rebindConnection')}
+                </button>
+              </div>
+            )}
           {request && (
             <p>
               {t('keysOperationId')}: <code>{request.id}</code>
             </p>
           )}
-          {result?.operation && (!preset || unresolved || presetSettled) && (
-            <div role="status">
-              <details className="key-record-identifiers">
-                <summary>{k('diagnostics')}</summary>
-                <p>
-                  {t('keysOperationId')}: <code>{result.operation.id}</code>
-                </p>
-                <p>
-                  {t('keysOperationTarget')}: <code>{result.operation.targetId}</code>
-                </p>
-                <p>
-                  {t('keysOperationKeeper')}: <code>{result.operation.keeperId}</code>
-                </p>
-              </details>
-              <p>
-                {t(
-                  result.operation.outcome === 'committed'
-                    ? 'keysOperationCommitted'
-                    : 'keysOperationPending'
-                )}
-              </p>
-              {result.nextStep && (
-                <p>
-                  {t(
-                    result.nextStep === 'add' ? 'keysOperationAddNext' : 'keysOperationRevokeNext'
+          {result?.operation &&
+            !committedAddOnly &&
+            (!preset ||
+              unresolved ||
+              presetSettled ||
+              (result.operation.outcome === 'aborted' && abortedPresetSeq === preset.seq)) && (
+              <div role="status">
+                <details className="key-record-identifiers">
+                  <summary>{k('diagnostics')}</summary>
+                  <p>
+                    {t('keysOperationId')}: <code>{result.operation.id}</code>
+                  </p>
+                  <p>
+                    {t('keysOperationTarget')}: <code>{result.operation.targetId}</code>
+                  </p>
+                  {result.operation.keeperId !== '' && (
+                    <p>
+                      {t('keysOperationKeeper')}: <code>{result.operation.keeperId}</code>
+                    </p>
                   )}
+                </details>
+                <p data-testid="key-operation-outcome">
+                  {result.operation.outcome === 'committed'
+                    ? t('keysOperationCommitted')
+                    : result.operation.outcome === 'aborted'
+                      ? k('operationAborted')
+                      : t('keysOperationPending')}
                 </p>
-              )}
-              {!presetSettled && (
-                <button
-                  className="btn btn-primary"
-                  disabled={disabled || busy || !checked || !result.nextStep || !!request}
-                  onClick={() => void proceed()}
-                >
-                  {t('keysOperationContinue')}
-                </button>
-              )}
-              {presetSettled && onClose && (
-                <div className="key-modal-actions">
-                  <button className="btn btn-primary" type="button" onClick={onClose}>
-                    {k('closeDialog')}
+                <ul className="key-operation-steps" data-testid="key-operation-steps">
+                  {result.operation.steps.map((step) => (
+                    <li
+                      key={step.name}
+                      data-testid={`key-operation-step-${step.name}`}
+                      data-state={step.state}
+                    >
+                      <span>{k(step.name === 'add' ? 'operationStepAdd' : 'operationStepRevoke')}</span>
+                      {' — '}
+                      <span>
+                        {k(
+                          step.state === 'observed'
+                            ? 'operationStepObserved'
+                            : step.state === 'attempted'
+                              ? 'operationStepAttempted'
+                              : 'operationStepUnattempted'
+                        )}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {result.nextStep && (
+                  <p>
+                    {t(
+                      result.nextStep === 'add' ? 'keysOperationAddNext' : 'keysOperationRevokeNext'
+                    )}
+                  </p>
+                )}
+                {!presetSettled && result.operation.outcome !== 'aborted' && (
+                  <button
+                    className="btn btn-primary"
+                    disabled={
+                      disabled ||
+                      busy ||
+                      !checked ||
+                      !result.nextStep ||
+                      !!request ||
+                      isTerminalKeyOperationOutcome(result.operation.outcome)
+                    }
+                    onClick={() => void proceed()}
+                  >
+                    {t('keysOperationContinue')}
                   </button>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+                {presetSettled && onClose && (
+                  <div className="key-modal-actions">
+                    <button className="btn btn-primary" type="button" onClick={onClose}>
+                      {k('closeDialog')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           {!presetSettled && (
             <>
               <fieldset
@@ -539,7 +771,11 @@ export function FreshKeyRevocation({
                       value={keeper}
                       onChange={(e) => setKeeper(e.target.value)}
                     >
-                      <option value="">{t('keysOperationSelect')}</option>
+                      <option value="">
+                        {mode === 'revoke' && available.length > 1
+                          ? k('anySurvivingKeeperOption')
+                          : t('keysOperationSelect')}
+                      </option>
                       {available
                         .filter((key) => key.id !== target)
                         .map((key) => (
@@ -579,9 +815,8 @@ export function FreshKeyRevocation({
                 <button
                   className="btn btn-primary"
                   disabled={
-                    !target ||
-                    !keeper ||
-                    target === keeper ||
+                    !validTarget ||
+                    !validKeeper ||
                     available.length <= 1 ||
                     !currentSelection ||
                     !preflight ||

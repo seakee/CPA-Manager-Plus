@@ -40,8 +40,23 @@ const committed: FreshOperation = {
   },
 };
 const completed = { ...committed, revision: 6, productComplete: true };
+const externalAccessInfo = {
+  mode: 'connect_external',
+  managementBasePath: '/console',
+  inferenceBasePath: '',
+  externalBaseUrl: 'http://cpa.private:8317',
+  protocols: [
+    {
+      id: 'openai',
+      label: 'OpenAI',
+      basePath: 'http://cpa.private:8317/v1',
+      examplePath: 'http://cpa.private:8317/v1/chat/completions',
+    },
+  ],
+  ready: true,
+  code: '',
+};
 const renderers: ReactTestRenderer[] = [];
-
 async function mount(
   get = vi.fn().mockResolvedValue(committed),
   post = vi.fn().mockResolvedValue(committed),
@@ -132,10 +147,14 @@ describe('Fresh External initialization', () => {
     expect(ui.has('external-base-url')).toBe(false);
     expect(ui.pending).toHaveBeenLastCalledWith(false);
     ui.post.mockResolvedValue(completed);
-    ui.get.mockResolvedValue(completed);
+    ui.get.mockImplementation(async (resource: string) =>
+      resource === 'api-keys/access-info' ? externalAccessInfo : completed
+    );
     await ui.click('external-complete');
     expect(ui.post).toHaveBeenCalledTimes(2);
     expect(ui.post.mock.calls[1][0]).toBe('complete');
+    expect(ui.has('access-info-summary')).toBe(true);
+    expect(JSON.stringify(ui.renderer.toJSON())).toContain('http://cpa.private:8317/v1');
     await ui.click('external-console');
     expect(ui.enter).toHaveBeenCalledOnce();
   });
@@ -162,7 +181,9 @@ describe('Fresh External initialization', () => {
 
   it('recovers a lost completion response', async () => {
     const ui = await mount(
-      vi.fn().mockResolvedValue(completed),
+      vi.fn().mockImplementation(async (resource: string) =>
+        resource === 'api-keys/access-info' ? externalAccessInfo : completed
+      ),
       vi.fn().mockRejectedValue(new PublicApiError('network')),
       committed
     );
@@ -352,5 +373,13 @@ describe('Fresh External initialization', () => {
       x('setupBlockerSupervisorUnavailable')
     );
     expect(String(x('setupBlockerSupervisorUnavailable'))).toContain('cpamp-runtime-supervisor');
+  });
+  it('propagates 401 from AccessInfoSummary on completed external view to onUnauthorized', async () => {
+    const ui = await mount(
+      vi.fn().mockRejectedValue(new PublicApiError('authentication', 401)),
+      vi.fn(),
+      completed
+    );
+    expect(ui.unauthorized).toHaveBeenCalledOnce();
   });
 });

@@ -40,7 +40,7 @@ func runtimeDesiredTestCompleted(t *testing.T, db *sql.DB, path string) (bootstr
 		t.Fatal(err)
 	}
 	record, err = st.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: "runtime", TargetGeneration: 1, TargetArtifactID: "sha256:" + strings.Repeat("a", 64)}
 		r.Operation.ProductComplete = true
 		return nil

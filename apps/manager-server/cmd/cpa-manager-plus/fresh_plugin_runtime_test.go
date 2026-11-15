@@ -320,13 +320,14 @@ func TestPluginRuntimeReconcilesAnUnknownReplyByReadBackOnly(t *testing.T) {
 // TestPluginRuntimeFailsClosedOutsideTheManagedAuthority proves the route refuses
 // a profile that does not own the Supervisor destination, on read and on write.
 func TestPluginRuntimeFailsClosedOutsideTheManagedAuthority(t *testing.T) {
-	app := newInstallationTestApplication(t)
-	markFreshProductComplete(t, app)
+	app, closeApp := newA3TestApp(t)
+	defer closeApp()
 	record, err := app.store.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,
@@ -416,7 +417,7 @@ func TestPluginRuntimeSurfaceRejectsAnythingOutsideTheContract(t *testing.T) {
 	}
 	// A query string and a non-canonical escaping are never a resource selector.
 	for _, target := range []string{"plugins/runtime?path=plugins", "plugins/runtime/groups/plugins%2F"} {
-		request := httptest.NewRequest(http.MethodGet, "/control/api/v2/"+target, nil)
+		request := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+""+target, nil)
 		request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)

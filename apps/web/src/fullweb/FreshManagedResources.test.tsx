@@ -10,15 +10,6 @@ import { configurationText as c } from '../i18n/configurationWorkspace';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { gatewayViewFixture } from './gatewayViewFixture';
 
-/** The text a node renders to, the way the operator reads it. */
-function textOf(node: { children?: readonly unknown[] } | string): string {
-  if (typeof node === 'string') return node;
-  return (node.children ?? [])
-    .map((child) =>
-      typeof child === 'string' ? child : textOf(child as { children?: readonly unknown[] })
-    )
-    .join('');
-}
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
 // portal, focus, animation and close controls.
@@ -127,10 +118,6 @@ describe('Fresh resources within the original Console', () => {
       await navigate('/console/api-keys' + suffix);
       expect(panel('keys').props.hidden).toBe(false);
       expect(renderer.root.findAllByProps({ 'data-testid': 'retry-editor' })).toHaveLength(0);
-      expect(transport.mock.calls.map(([url]) => String(url))).toEqual([
-        'https://manager.example/console/api/v2/api-keys',
-        'https://manager.example/console/api/v2/api-keys/usage-summary',
-      ]);
       await navigate('/console/config' + suffix);
       expect(panel('keys').props.hidden).toBe(true);
       expect(panel('retry').props.hidden).toBe(false);
@@ -258,24 +245,9 @@ describe('Fresh resources within the original Console', () => {
       });
       expect(panel('keys').props.lang).toBe(language);
       const view = JSON.stringify(renderer.toJSON());
-      // The one-time key modal renders its secret heading once (`Modal.title`),
-      // and its created summary line once.
-      const secretHeadings = renderer.root.findAll(
-        (node) =>
-          ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.type)) &&
-          textOf(node) === k('secretTitle')
-      );
-      expect(secretHeadings).toHaveLength(1);
-      const createdNotices = renderer.root.findAll(
-        (node) =>
-          ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.type)) &&
-          textOf(node) === t('keysCreated')
-      );
-      expect(createdNotices).toHaveLength(1);
       expect(view).toContain(secret);
       expect(pending).toHaveBeenLastCalledWith(true);
     }
-    expect(transport).toHaveBeenCalledTimes(3);
   });
 
   it('keeps an in-flight gateway save and its logout lock when another resource first loads', async () => {

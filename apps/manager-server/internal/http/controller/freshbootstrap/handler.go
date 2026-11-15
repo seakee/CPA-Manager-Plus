@@ -106,10 +106,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reject(w)
 			return
 		}
-		writeJSON(w, result)
+		writeJSON(w, struct {
+			Token     string                         `json:"token"`
+			Operation freshrouting.OperationDocument `json:"operation"`
+		}{result.Token, freshrouting.OperationViewOf(result.Operation)})
 		return
 	}
-	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/adoption": http.MethodGet, "runtime/artifact": http.MethodGet, "runtime/artifact/probe": http.MethodPost, "runtime/artifact/acquire": http.MethodPost, "runtime/artifact/upload": http.MethodPut}
+	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/draft": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/adoption": http.MethodGet, "runtime/artifact": http.MethodGet, "runtime/artifact/probe": http.MethodPost, "runtime/artifact/acquire": http.MethodPost, "runtime/artifact/upload": http.MethodPut}
 	method, ok := known[resource]
 	if !ok {
 		http.NotFound(w, r)
@@ -131,7 +134,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch resource {
 	case "operation":
-		writeJSON(w, op)
+		writeJSON(w, freshrouting.OperationViewOf(op))
 	case "admin/generate":
 		key, err := h.Authority.GenerateAdmin(r.Context(), token)
 		if err != nil {
@@ -156,32 +159,61 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reject(w)
 			return
 		}
-		writeJSON(w, result)
-	case "routing/prepare", "routing/activate":
+		writeJSON(w, freshrouting.OperationViewOf(result))
+	case "routing/draft", "routing/prepare", "routing/activate":
 		if h.Routing == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		var request struct {
-			Identity bootstrap.FreshIdentity `json:"identity"`
-			Target   string                  `json:"target,omitempty"`
+			Identity        bootstrap.FreshIdentity `json:"identity"`
+			Target          string                  `json:"target,omitempty"`
+			InferenceTarget string                  `json:"inferenceTarget,omitempty"`
+			SharedEntry     bool                    `json:"sharedEntry,omitempty"`
 		}
 		if !decode(w, r, &request) || request.Identity != op.Identity {
 			badRequest(w)
 			return
 		}
 		var result bootstrap.FreshOperation
-		if resource == "routing/prepare" {
-			result, err = h.Routing.PrepareAuthorized(r.Context(), request.Identity, request.Target, func(record freshstore.Record) error { return h.Authority.ValidateSession(record, token) })
-		} else {
+		switch resource {
+		case "routing/draft":
+			result, err = h.Routing.SaveDraftAuthorized(r.Context(), request.Identity, freshrouting.AccessIntent{
+				Target:          request.Target,
+				InferenceTarget: request.InferenceTarget,
+				SharedEntry:     request.SharedEntry,
+			}, func(record freshstore.Record) error { return h.Authority.ValidateSession(record, token) })
+		case "routing/prepare":
+			result, err = h.Routing.PrepareAccessAuthorized(r.Context(), request.Identity, freshrouting.AccessIntent{
+				Target:          request.Target,
+				InferenceTarget: request.InferenceTarget,
+				SharedEntry:     request.SharedEntry,
+			}, func(record freshstore.Record) error { return h.Authority.ValidateSession(record, token) })
+		default:
+			if request.Target != "" || request.InferenceTarget != "" || request.SharedEntry {
+				badRequest(w)
+				return
+			}
 			result, err = h.Routing.ActivateAuthorized(r.Context(), request.Identity, func(record freshstore.Record) error { return h.Authority.ValidateSession(record, token) })
 		}
 		if err != nil {
+			if code, ok := bootstrap.AccessPrefixCodeOf(err); ok {
+				status := http.StatusBadRequest
+				switch code {
+				case bootstrap.CodeReservedPrefixCollision,
+					bootstrap.CodePrefixOverlapForbidden,
+					bootstrap.CodeSharedPrefixConfirmationRequired,
+					bootstrap.CodeRoutingConflict:
+					status = http.StatusConflict
+				}
+				writeCode(w, status, string(code))
+				return
+			}
 			switch {
 			case errors.Is(err, fresh.ErrAuthority):
 				reject(w)
 			case errors.Is(err, freshrouting.ErrConflict), errors.Is(err, freshstore.ErrConflict):
-				w.WriteHeader(http.StatusConflict)
+				writeCode(w, http.StatusConflict, string(bootstrap.CodeRoutingConflict))
 			case resource == "routing/activate" && errors.Is(err, freshrouting.ErrUnverified):
 				// The published address answered, but not as the engine this operation
 				// wrote. Only this cause carries a stable code: a blocked transport or a
@@ -192,7 +224,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		writeJSON(w, result)
+		writeJSON(w, freshrouting.OperationViewOf(result))
 	case "strategy":
 		if h.Strategy == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)

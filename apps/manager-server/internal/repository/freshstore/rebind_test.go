@@ -60,7 +60,7 @@ func newRebindFixture(t *testing.T) *rebindFixture {
 	const baseURL = "http://cpa:8317"
 	digest := sha256.Sum256([]byte(baseURL))
 	record, err = store.Update(t.Context(), id, record.Operation.Revision, func(r *Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: id.OperationID, Revision: 1, Target: "/console", Stage: bootstrap.PrefixCommitted, Committed: true, SuggestedControlBasePath: r.Operation.Routing.SuggestedControlBasePath, SuggestedInferenceBasePath: r.Operation.Routing.SuggestedInferenceBasePath}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: "external:sha256:" + hex.EncodeToString(digest[:]), TargetGeneration: 1,

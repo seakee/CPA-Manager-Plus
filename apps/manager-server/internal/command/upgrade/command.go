@@ -139,7 +139,7 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorExternalV2Running,
 	// A decision about the stopped 1.x stack's managed CPA state or about the
 	// destination it imports into: a held source marker, missing or unreadable
-	// managed state, a v7 source without a named release, absent client keys, no
+	// managed state, an unversioned source without a named CPA v8 release, a CPA below v8, absent client keys, no
 	// plugin decision, a stage the import may not be entered from, a source root
 	// that is not the one the copy-in read, a destination request that changed,
 	// a destination that answers as another product, or an inventory the run could
@@ -179,6 +179,15 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorVerifyBindingMissing,
 	upgradeservice.UpgradeErrorVerifyBindingDrifted,
 	upgradeservice.UpgradeErrorVerifyConnectionUnproven,
+	upgradeservice.UpgradeErrorVerifyAccessPrefixRequired,
+	upgradeservice.UpgradeErrorPrefixesAlreadyCommitted,
+	upgradeservice.UpgradeErrorCode("invalid_access_prefix"),
+	upgradeservice.UpgradeErrorCode("inference_prefix_required"),
+	upgradeservice.UpgradeErrorCode("external_inference_prefix_forbidden"),
+	upgradeservice.UpgradeErrorCode("shared_prefix_mismatch"),
+	upgradeservice.UpgradeErrorCode("shared_prefix_confirmation_required"),
+	upgradeservice.UpgradeErrorCode("prefix_overlap_forbidden"),
+	upgradeservice.UpgradeErrorCode("reserved_prefix_collision"),
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }
@@ -240,9 +249,9 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  cpa-import --legacy <dir> --plugins <true|false> [--cpa-dir <dir>] [--cpa-version <release>]")
 	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--destination-url <url>]")
 	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")
-	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA state into the")
-	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it")
-	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA v8 state into the")
+	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it; a CPA below v8 stops")
+	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--control-base-path </prefix>] [--inference-base-path </prefix>] [--shared-entry] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      verify the recorded operation and record the one verdict the")
 	_, _ = fmt.Fprintln(w, "                                      target supports: complete for both a Managed destination and")
 	_, _ = fmt.Fprintln(w, "                                      an External CPA")

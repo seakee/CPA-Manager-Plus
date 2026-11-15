@@ -68,7 +68,9 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
@@ -114,6 +116,12 @@ type VerifyOptions struct {
 	// Manager is running rather than a second client built from the same
 	// environment.
 	Runtime VerifyRuntime
+	// Access routing fields persisted atomically with completion (or repaired one
+	// time on a pre-existing completed unrouted store) when supplied. Mode-valid
+	// access prefixes are unconditionally required for completion.
+	ControlBasePath   string
+	InferenceBasePath string
+	SharedEntry       bool
 }
 
 // VerifyRuntime is the Supervisor observation the Managed gate needs: the
@@ -146,8 +154,14 @@ type VerifyResult struct {
 	ManualItems []string `json:"manualItems"`
 	// AlreadyVerified reports that the row already held this exact verdict and
 	// nothing was written.
-	AlreadyVerified bool  `json:"alreadyVerified"`
-	UpdatedAtMS     int64 `json:"updatedAtMs"`
+	AlreadyVerified    bool   `json:"alreadyVerified"`
+	UpdatedAtMS        int64  `json:"updatedAtMs"`
+	ControlBasePath    string `json:"controlBasePath,omitempty"`
+	InferenceBasePath  string `json:"inferenceBasePath,omitempty"`
+	SharedEntry        bool   `json:"sharedEntry,omitempty"`
+	RoutingCommitted   bool   `json:"routingCommitted,omitempty"`
+	InferenceCommitted bool   `json:"inferenceCommitted,omitempty"`
+	ExternalBaseURL    string `json:"externalBaseUrl,omitempty"`
 }
 
 // Verify proves the recorded operation and records the one verdict it may reach.
@@ -161,19 +175,14 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 			"the v2 data root is not usable, so there is no recorded operation to verify; nothing was written", err)
 	}
 	sourceRoot := strings.TrimSpace(options.LegacyRoot)
-	if sourceRoot == "" {
-		// The fingerprint is the proof that the volume the operation copied was
-		// not written since. A gate that skipped it would claim an observation it
-		// never took, so an absent mount is a refusal.
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifySourceUnavailable,
-			"no 1.x data directory is mounted, so the source the operation copied cannot be observed; the verification needs the volume to prove it was not written, and nothing was written", nil)
-	}
 	paths := newTargetPaths(targetRoot)
-	// The 1.x volume is a read-only input, so no root may contain another: a
-	// source inside the v2 data root would put the verification's own writes in
-	// the tree it fingerprints.
-	if err := RefuseOverlappingRoots(sourceRoot, targetRoot, DefaultBundleDirectory(targetRoot)); err != nil {
-		return VerifyResult{}, err
+	if sourceRoot != "" {
+		// The 1.x volume is a read-only input, so no root may contain another: a
+		// source inside the v2 data root would put the verification's own writes in
+		// the tree it fingerprints.
+		if err := RefuseOverlappingRoots(sourceRoot, targetRoot, DefaultBundleDirectory(targetRoot)); err != nil {
+			return VerifyResult{}, err
+		}
 	}
 	if err := requireRecoveredCopyIn(paths.Database); err != nil {
 		return VerifyResult{}, err
@@ -182,25 +191,41 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		return VerifyResult{}, snapshotReadError(ctx, err)
 	}
 	recorded, found, snapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
-	if snapshot != nil {
-		defer func() { _ = snapshot.Close() }()
+	closeSnapshot := func() {
+		if snapshot != nil {
+			_ = snapshot.Close()
+			snapshot = nil
+		}
 	}
+	defer closeSnapshot()
 	if err != nil {
 		return VerifyResult{}, verifyRecordReadError(snapshotReadError(ctx, err))
 	}
 	if !found {
+		if sourceRoot == "" {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifySourceUnavailable,
+				"no 1.x data directory is mounted, so the source the operation copied cannot be observed; the verification needs the volume to prove it was not written, and nothing was written", nil)
+		}
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the v2 data root holds no recorded copy-in, so there is no operation to verify; nothing was written", nil)
 	}
-	// A completed operation is over: the gate reports the stored verdict and
-	// touches neither the store nor the source. The product is admitted normally
-	// from here, so it must not need the 1.x volume to answer this call.
+	// A completed operation is over: the gate validates the stored verdict and
+	// committed access routing without requiring the 1.x volume, and allows a
+	// one-time canonical repair of missing prefixes on pre-existing unrouted stores.
 	if recorded.Stage == model.UpgradeStageComplete {
-		return completedVerifyResultFromStore(ctx, snapshot.DB(), paths, recorded)
+		return handleCompletedVerify(ctx, snapshot.DB(), closeSnapshot, paths, recorded, options)
+	}
+	if sourceRoot == "" {
+		// The fingerprint is the proof that the volume the operation copied was
+		// not written since. A gate that skipped it would claim an observation it
+		// never took, so an absent mount is a refusal.
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifySourceUnavailable,
+			"no 1.x data directory is mounted, so the source the operation copied cannot be observed; the verification needs the volume to prove it was not written, and nothing was written", nil)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
 	}
+	closeSnapshot()
 
 	// Two fences for the whole run: the 1.x source is read only, so its ownership
 	// marker is taken through a read-only descriptor (the same exclusive marker,
@@ -243,7 +268,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
+		return completedVerifyReplayResultForStore(ctx, db, paths, recorded, binding, hasBinding, options)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -320,7 +345,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResultForStore(ctx, db, paths, current, binding, hasBinding)
+		return completedVerifyReplayResultForStore(ctx, db, paths, current, binding, hasBinding, options)
 	}
 	if err := verifyEntry(current); err != nil {
 		return VerifyResult{}, err
@@ -352,6 +377,37 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	}
 	if err := requireVerifyTarget(mode, binding, target); err != nil {
 		return VerifyResult{}, err
+	}
+	if current.RoutingCommitted {
+		if options.ControlBasePath != "" || options.InferenceBasePath != "" || options.SharedEntry {
+			if options.ControlBasePath != current.ControlBasePath ||
+				options.InferenceBasePath != current.InferenceBasePath ||
+				options.SharedEntry != current.SharedEntry {
+				return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+					"the upgrade access prefixes are already committed and cannot be overwritten; nothing was written", nil)
+			}
+		}
+	} else if options.ControlBasePath != "" || options.InferenceBasePath != "" || options.SharedEntry {
+		if err := routing.ValidateAccessPrefixPair(options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, mode == model.UpgradeTargetExternal); err != nil {
+			return VerifyResult{}, mapAccessPrefixToUpgradeError(err)
+		}
+		sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
+		updated, routeErr := upgradeoperation.RecordRoutingTx(ctx, tx, options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, sugCtrl, sugInf)
+		if routeErr != nil {
+			if errors.Is(routeErr, upgradeoperation.ErrRoutingAlreadyCommitted) {
+				return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+					"the upgrade access prefixes are already committed and cannot be overwritten; nothing was written", routeErr)
+			}
+			return VerifyResult{}, mapVerifyRecordError(routeErr)
+		}
+		current = updated
+	}
+	if current.ControlBasePath == "" || (mode == model.UpgradeTargetManaged && current.InferenceBasePath == "") {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the access prefixes for this target mode have not been configured yet; nothing was written", nil)
+	}
+	if err := routing.ValidateAccessPrefixPair(current.ControlBasePath, current.InferenceBasePath, current.SharedEntry, mode == model.UpgradeTargetExternal); err != nil {
+		return VerifyResult{}, mapAccessPrefixToUpgradeError(err)
 	}
 
 	verification := model.UpgradeVerification{
@@ -397,7 +453,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	if err := tx.Commit(); err != nil {
 		return VerifyResult{}, fmt.Errorf("record the verification: %w", err)
 	}
-	return verifyResult(operation, mode, already), nil
+	return verifyResult(operation, mode, already, binding, hasBinding), nil
 }
 
 // completedVerifyResult reports a row that already carries the verdict. Nothing
@@ -493,7 +549,7 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 				"the recorded operation is complete as a Managed target but carries an External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
 		}
 	}
-	return verifyResult(recorded, evidence.TargetMode, true), nil
+	return verifyResult(recorded, evidence.TargetMode, true, binding, hasBinding), nil
 }
 
 // readExternalBindingFrom reads the recorded External binding from an open
@@ -560,6 +616,155 @@ func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths target
 	return result, nil
 }
 
+func completedVerifyReplayResultForStore(
+	ctx context.Context,
+	db *sql.DB,
+	paths targetPaths,
+	recorded model.UpgradeOperation,
+	binding upgradeoperation.ExternalBinding,
+	hasBinding bool,
+	options VerifyOptions,
+) (VerifyResult, error) {
+	result, err := completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	fullyRouted, err := completedOperationFullyRouted(recorded, result.TargetMode)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if !fullyRouted {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the completed upgrade operation has missing access prefixes; supply mode-valid prefixes once to repair it", nil)
+	}
+	callerProvidedRouting := options.ControlBasePath != "" ||
+		options.InferenceBasePath != "" ||
+		options.SharedEntry
+	if callerProvidedRouting &&
+		(options.ControlBasePath != recorded.ControlBasePath ||
+			options.InferenceBasePath != recorded.InferenceBasePath ||
+			options.SharedEntry != recorded.SharedEntry) {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+			"the upgrade access prefixes are already committed and preserved across upgrades; nothing was written", nil)
+	}
+	return result, nil
+}
+
+func handleCompletedVerify(
+	ctx context.Context,
+	snapshotDB *sql.DB,
+	closeSnapshot func(),
+	paths targetPaths,
+	recorded model.UpgradeOperation,
+	options VerifyOptions,
+) (VerifyResult, error) {
+	result, err := completedVerifyResultFromStore(ctx, snapshotDB, paths, recorded)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	fullyRouted, err := completedOperationFullyRouted(recorded, result.TargetMode)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	callerProvidedRouting := options.ControlBasePath != "" ||
+		options.InferenceBasePath != "" ||
+		options.SharedEntry
+	if fullyRouted {
+		if !callerProvidedRouting {
+			return result, nil
+		}
+		if options.ControlBasePath == recorded.ControlBasePath &&
+			options.InferenceBasePath == recorded.InferenceBasePath &&
+			options.SharedEntry == recorded.SharedEntry {
+			return result, nil
+		}
+		return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+			"the upgrade access prefixes are already committed and preserved across upgrades; nothing was written", nil)
+	}
+	if !callerProvidedRouting {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the completed upgrade operation has missing access prefixes; supply mode-valid prefixes once to repair it", nil)
+	}
+
+	ctrl := options.ControlBasePath
+	if recorded.RoutingCommitted && strings.TrimSpace(recorded.ControlBasePath) != "" {
+		if ctrl != "" && ctrl != recorded.ControlBasePath {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+				"the upgrade control prefix is already committed and cannot be overwritten; nothing was written", nil)
+		}
+		ctrl = recorded.ControlBasePath
+	}
+	if !recorded.InferenceCommitted && recorded.InferenceBasePath != "" &&
+		(options.InferenceBasePath != "" || options.SharedEntry) {
+		if options.InferenceBasePath != recorded.InferenceBasePath || options.SharedEntry != recorded.SharedEntry {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+				"a different staged inference prefix is already recorded on the completed upgrade; nothing was written", nil)
+		}
+	}
+	isExternal := result.TargetMode == model.UpgradeTargetExternal
+	if err := routing.ValidateAccessPrefixPair(ctrl, options.InferenceBasePath, options.SharedEntry, isExternal); err != nil {
+		return VerifyResult{}, mapAccessPrefixToUpgradeError(err)
+	}
+
+	closeSnapshot()
+	targetLock, err := acquireVerifyTargetFence(paths.Database)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	defer func() { _ = targetLock.Close() }()
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
+		return VerifyResult{}, err
+	}
+	db, err := managersqlite.Open(paths.Database)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("open the v2 database for completed routing repair: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	repo := upgradeoperation.New(db)
+	current, found, err := repo.Get(ctx)
+	if err != nil {
+		return VerifyResult{}, verifyRecordReadError(err)
+	}
+	if !found || current.Stage != model.UpgradeStageComplete {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is no longer complete; nothing was written", nil)
+	}
+	binding, hasBinding, err := repo.ExternalBinding(ctx)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
+	}
+	verifiedNow, err := completedVerifyResultForStore(ctx, db, paths, current, binding, hasBinding)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	fullyRoutedNow, err := completedOperationFullyRouted(current, verifiedNow.TargetMode)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if fullyRoutedNow {
+		return completedVerifyReplayResultForStore(ctx, db, paths, current, binding, hasBinding, options)
+	}
+	sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
+	repaired, err := repo.RepairMissingRoutingOnCompletedUpgrade(
+		ctx,
+		current.Revision,
+		ctrl,
+		options.InferenceBasePath,
+		options.SharedEntry,
+		sugCtrl,
+		sugInf,
+	)
+	if err != nil {
+		if errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+				"the upgrade access prefixes are already committed and preserved across upgrades; nothing was written", err)
+		}
+		return VerifyResult{}, mapVerifyRecordError(err)
+	}
+	return verifyResult(repaired, verifiedNow.TargetMode, repaired.Revision == current.Revision, binding, hasBinding), nil
+}
+
 // verifyRecordReadError maps the one stored-row failure the gate cannot report as
 // anything but an outdated verdict: a complete row whose verification did not
 // survive. Keeping it in the gate's own vocabulary means a caller reads the same
@@ -572,15 +777,25 @@ func verifyRecordReadError(err error) error {
 	return err
 }
 
-func verifyResult(operation model.UpgradeOperation, mode string, already bool) VerifyResult {
+func verifyResult(operation model.UpgradeOperation, mode string, already bool, binding upgradeoperation.ExternalBinding, hasBinding bool) VerifyResult {
+	extURL := ""
+	if mode == model.UpgradeTargetExternal {
+		extURL = FencedExternalBaseURL(operation, binding, hasBinding)
+	}
 	result := VerifyResult{
-		Stage:           operation.Stage,
-		DomainsDone:     append([]string{}, operation.DomainsDone...),
-		Complete:        operation.Stage == model.UpgradeStageComplete,
-		TargetMode:      mode,
-		ManualItems:     append([]string{}, operation.ManualItems...),
-		AlreadyVerified: already,
-		UpdatedAtMS:     operation.UpdatedAtMS,
+		Stage:              operation.Stage,
+		DomainsDone:        append([]string{}, operation.DomainsDone...),
+		Complete:           operation.Stage == model.UpgradeStageComplete,
+		TargetMode:         mode,
+		ManualItems:        append([]string{}, operation.ManualItems...),
+		AlreadyVerified:    already,
+		UpdatedAtMS:        operation.UpdatedAtMS,
+		ControlBasePath:    operation.ControlBasePath,
+		InferenceBasePath:  operation.InferenceBasePath,
+		SharedEntry:        operation.SharedEntry,
+		RoutingCommitted:   operation.RoutingCommitted,
+		InferenceCommitted: operation.InferenceCommitted,
+		ExternalBaseURL:    extURL,
 	}
 	if !result.Complete {
 		result.ReasonCode = operation.ErrorCode

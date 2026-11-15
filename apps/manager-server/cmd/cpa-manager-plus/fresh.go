@@ -1016,7 +1016,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	// Non-secret identity is the bounded real-public-entry verification leaf.
 	// It authenticates no browser and cannot mutate the pending installation.
 	if resource == "bootstrap/identity" && r.Method == http.MethodGet {
-		writeFreshJSON(w, freshrouting.StateFor(op))
+		writeFreshJSON(w, freshrouting.PublicIdentityFor(op))
 		return
 	}
 	// The Upgrade reads own their credential. They are neither the installation
@@ -1035,7 +1035,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	if freshAuth {
 		// The existing claim may finish its own installation after route
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
-		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
+		allowed := (resource == "operation" || resource == "api-keys/access-info") && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
 				// The per-item migration summary is the progress read of an
 				// adoption's own run, so the session that committed the
@@ -1067,6 +1067,16 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.pluginRuntime(w, r, strings.TrimPrefix(strings.TrimPrefix(resource, "plugins/runtime"), "/"))
 	case resource == "settings/update-channel":
 		a.updateChannel(w, r, op)
+	case resource == "api-keys/access-info":
+		a.clientAccessInfo(w, r, record)
+	case resource == "installation/access/completion":
+		bearer := security.ExtractBearerToken(r.Header.Get("Authorization"))
+		a.routing.ServeAccessCompletion(w, r, record, func(cur freshstore.Record) error {
+			if !cur.Operation.Routing.Committed || cur.Admin == nil || !security.VerifyAdminKey(*cur.Admin, bearer) {
+				return fresh.ErrAuthority
+			}
+			return nil
+		})
 	case resource == "api-keys" || strings.HasPrefix(resource, "api-keys/"):
 		a.clientKeys(w, r, op, resource)
 	case resource == "external/usage" || strings.HasPrefix(resource, "external/usage/"):
@@ -1080,7 +1090,12 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	case resource == "runtime/operations" || strings.HasPrefix(resource, "runtime/operations/"):
 		a.runtimeOperations(w, r, op, resource)
 	case resource == "operation" && r.Method == http.MethodGet:
-		writeFreshJSON(w, op)
+		doc, err := a.routing.OperationView(r.Context(), op)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeFreshJSON(w, doc)
 	case strings.HasPrefix(resource, "cpamp/"):
 		a.legacyResource(w, r, op, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
@@ -1112,7 +1127,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			// The safe-read result and encrypted Manager configuration were saved
 			// atomically. Completing Manager setup does not activate model traffic
 			// or take ownership of the external CPA lifecycle.
-			if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil {
+			if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil ||
+				!op.Routing.Committed || op.Routing.OperationID == "" ||
+				freshrouting.ValidateCheckpointForStrategy(bootstrap.ConnectExternal, op.Routing) != nil {
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
@@ -1120,9 +1137,17 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-		} else if !a.managedInstallationReady(r.Context(), op) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+		} else {
+			if op.Strategy.Strategy == bootstrap.NewManaged &&
+				(!op.Routing.Committed || !op.Routing.InferenceCommitted || op.Routing.OperationID == "" ||
+					freshrouting.ValidateCheckpointForStrategy(bootstrap.NewManaged, op.Routing) != nil) {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			if !a.managedInstallationReady(r.Context(), op) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 		}
 		next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
 			if freshAuth {
@@ -1130,7 +1155,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 					return err
 				}
 			}
-			if record.Operation.Strategy.Stage != "committed" {
+			if record.Operation.Strategy.Stage != "committed" ||
+				!record.Operation.Routing.Committed || record.Operation.Routing.OperationID == "" ||
+				freshrouting.ValidateCheckpointForStrategy(record.Operation.Strategy.Strategy, record.Operation.Routing) != nil {
 				return freshstore.ErrConflict
 			}
 			record.Operation.ProductComplete = true
@@ -1243,6 +1270,16 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 			w.WriteHeader(http.StatusBadRequest)
 		}
 		return
+	}
+	if !op.ProductComplete && op.Routing.OperationID != "" {
+		if err := freshrouting.ValidateCheckpointForStrategy(request.Strategy, op.Routing); err != nil {
+			if code, ok := bootstrap.AccessPrefixCodeOf(err); ok {
+				writeFreshStrategyError(w, &freshstrategy.Blocker{Code: string(code)})
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 	}
 	var externalBaseURL string
 	if request.Strategy == bootstrap.ConnectExternal {
@@ -1373,6 +1410,11 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		if token, freshAuth := freshbootstrap.SessionToken(r); freshAuth {
 			if err := a.validateInstallationSession(*record, token); err != nil {
 				return err
+			}
+		}
+		if !record.Operation.ProductComplete && record.Operation.Routing.OperationID != "" {
+			if err := freshrouting.ValidateCheckpointForStrategy(result.Checkpoint.Strategy, record.Operation.Routing); err != nil {
+				return freshstore.ErrConflict
 			}
 		}
 		record.Operation.Strategy = result.Checkpoint

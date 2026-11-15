@@ -30,7 +30,7 @@ import (
 // secret behind, so the next run against a ready destination proceeds without an
 // operator input the CLI cannot supply.
 func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	// The stored connection names another CPA, so the run stages and starts this
 	// destination and is then refused at the handoff: the attempt has to survive.
 	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
@@ -96,7 +96,7 @@ func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 // recorded nowhere. The retry must keep the recorded secret and move to a new
 // attempt ID — and only after the recorded attempt is known to be terminal.
 func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -175,7 +175,7 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 // request it would never accept. The drift is now refused before the attempt is
 // touched, and nothing is submitted.
 func TestImportCPARefusesARetryAfterTheSourceChanges(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -228,7 +228,7 @@ func TestImportCPARefusesARetryAfterTheSourceChanges(t *testing.T) {
 // The retry is refused as a changed request before the attempt moves; it is never
 // submitted under an authority that would answer "stale runtime generation".
 func TestImportCPARefusesARetryAfterTheSupervisorRestarts(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -268,7 +268,7 @@ func TestImportCPARefusesARetryAfterTheSupervisorRestarts(t *testing.T) {
 // resubmitted, so a restarted Supervisor does not turn a resumable destination
 // into a refusal. Nothing is staged again.
 func TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
 		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: "http://another-cpa.example:8317", ManagementKey: "another-cpa-management-key"},
 	})
@@ -307,7 +307,7 @@ func TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts(t *testing.T
 // proved nothing leaves the URL replaceable, and the retry with the staged
 // destination's address resumes the same attempt.
 func TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	staged := newFakeDestinationCPA(t, "")
 	foreign := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
 	foreign.clientKeys = []string{"another-installation-client-key"}
@@ -427,7 +427,7 @@ func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
 	}
 	for name, targetURL := range map[string]string{"connection refused": refusedURL(t), "no answer": silentURL(t)} {
 		t.Run(name, func(t *testing.T) {
-			fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+			fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 			staged := newFakeDestinationCPA(t, "")
 			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 			runtime.staged = staged
@@ -480,7 +480,7 @@ func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
 // therefore not offer a corrected URL as a recovery the way the unproved case does,
 // and it must not send the operator to start the CPA the URL names either.
 func TestImportCPAUnreachableAfterAProofKeepsTheProvedURL(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	staged := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = staged
@@ -549,7 +549,7 @@ func TestImportCPAProbesTheAddressTheProofDials(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	staged := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = staged
@@ -576,7 +576,7 @@ func TestImportCPAProbesTheAddressTheProofDials(t *testing.T) {
 // later run that happens to take the ready arm would repair it.
 func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 	ctx := context.Background()
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	staged := newFakeDestinationCPA(t, "")
 	foreign := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
 	foreign.clientKeys = []string{"another-installation-client-key"}
@@ -678,7 +678,7 @@ func TestImportCPAClassifiesAProofTransportFailureAsUnreachable(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	staged := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = staged
@@ -757,7 +757,7 @@ func TestImportCPANeverSendsTheStagedSecretToAnUnprovenURL(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+			fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 			endpoint := newUnprovenEndpoint(t, testCase.anonymous, testCase.credential)
 			staged := newFakeDestinationCPA(t, "")
 			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
@@ -800,7 +800,7 @@ func TestImportCPANeverSendsTheStagedSecretToAnUnprovenURL(t *testing.T) {
 // than what was already recorded. Both representations now move forward from the
 // stored value and are written from one value, so they cannot disagree.
 func TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	fixture := newImportFixture(t, v8FixtureConfig, nil)
 	paths := newTargetPaths(fixture.targetRoot)
 	const secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	record := cpaImportDestinationRecord{
@@ -904,7 +904,7 @@ func destinationUpdatedAtColumn(t *testing.T, databasePath string) int64 {
 // that replaces the old dead end: a ready destination with no recorded secret and
 // no file names the flag that supplies one.
 func TestImportCPARequiresTheDestinationSecretWhenNoneWasRecorded(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
 	runtime := newFakeImportRuntime(model.RuntimeStateReady)
 	runtime.staged = destination
@@ -922,7 +922,7 @@ func TestImportCPARequiresTheDestinationSecretWhenNoneWasRecorded(t *testing.T) 
 // tree the copy-in read. The impostor root has no CPA directory at all, so a read
 // would report a missing source; the mismatch code proves the order.
 func TestImportCPARefusesASourceRootOtherThanTheRecordedOne(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	impostor := newLegacyVolume(t)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
@@ -982,7 +982,7 @@ func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 func TestCPASourceKeepsCodexHeaderDefaultsAsAStatedGap(t *testing.T) {
 	config := "api-keys:\n  - \"legacy-client-key-1\"\ncodex-header-defaults:\n  user-agent: \"codex_cli_rs/0.20.0\"\n  beta-features: \"responses=v1\"\n"
 	legacyRoot, _ := writeCPAFixture(t, config, nil)
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatalf("open a source carrying codex header defaults: %v", err)
 	}

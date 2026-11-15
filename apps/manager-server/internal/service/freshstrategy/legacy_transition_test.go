@@ -1,6 +1,7 @@
 package freshstrategy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,13 +16,59 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
+func canonicalLegacyTransitionManifest(t *testing.T) ([]byte, legacyTransitionManifest) {
+	t.Helper()
+	manifest := legacyTransitionManifest{
+		SchemaVersion: 1,
+		ContractID:    "cpamp-cpa-v8-qualification",
+		Revision:      acceptedLegacyTransitionCaseRef,
+		Candidate: evidenceCandidate{
+			ID:             "CPA8-8.0.55-linux-amd64-plugin",
+			DeclaredSHA256: realCPA8ArchiveSHA256,
+			ArtifactID:     "sha256:" + realCPA8BinarySHA256,
+		},
+		Profiles: []evidenceProfile{{ID: acceptedLegacyTransitionProfile}},
+		Cases: []evidenceCase{{
+			ID:          acceptedLegacyTransitionCaseRef,
+			ProfileRefs: []string{acceptedLegacyTransitionProfile},
+			ProofScope:  "fresh-legacy-staging-transition",
+		}},
+		LegacySource: evidenceSource{
+			Version:       cpa.AcceptedLegacyManagedVersion,
+			ArchiveSHA256: cpa.AcceptedLegacyManagedArchiveSHA256,
+			BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
+		},
+	}
+	return encodeJSON(t, manifest), manifest
+}
+
+// producerLegacyTransitionManifest returns the canonical manifest for the
+// current accepted legacy_managed v8 profile, verifying exact byte identity
+// whenever the content-addressed manifest is already checked into evidence/.
+func producerLegacyTransitionManifest(t *testing.T) (string, []byte, legacyTransitionManifest) {
+	t.Helper()
+	canonicalData, canonical := canonicalLegacyTransitionManifest(t)
+	name := "qualification/evidence/" + sha256Hex(canonicalData) + ".json"
+	if checkedIn, err := fs.ReadFile(productionEvidence, name); err == nil && !bytes.Equal(checkedIn, canonicalData) {
+		t.Fatalf("checked-in transition manifest %s drifted from canonical bytes", name)
+	}
+	return name, canonicalData, canonical
+}
+
 // embeddedLegacyTransitionManifest locates the checked-in, content-addressed
-// case definition. It is review input, never production authority.
+// case definition for the current accepted legacy_managed source profile.
+// Historical manifests for superseded source profiles remain preserved in
+// evidence/ and are ignored here rather than deleted.
 func embeddedLegacyTransitionManifest(t *testing.T) (string, []byte, legacyTransitionManifest) {
 	t.Helper()
 	names, err := fs.Glob(productionEvidence, "qualification/evidence/*.json")
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantSource := evidenceSource{
+		Version:       cpa.AcceptedLegacyManagedVersion,
+		ArchiveSHA256: cpa.AcceptedLegacyManagedArchiveSHA256,
+		BinarySHA256:  cpa.AcceptedLegacyManagedBinarySHA256,
 	}
 	var foundName string
 	var foundData []byte
@@ -32,7 +79,8 @@ func embeddedLegacyTransitionManifest(t *testing.T) (string, []byte, legacyTrans
 			t.Fatal(err)
 		}
 		var manifest legacyTransitionManifest
-		if json.Unmarshal(data, &manifest) != nil || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 {
+		if json.Unmarshal(data, &manifest) != nil || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 ||
+			manifest.LegacySource != wantSource {
 			continue
 		}
 		for _, transitionCase := range manifest.Cases {
@@ -80,7 +128,7 @@ func TestCheckedInLegacyTransitionManifestBindsAcceptedSourceProfile(t *testing.
 
 func TestGeneratedLegacyTransitionEvidenceSatisfiesProductionLoader(t *testing.T) {
 	record, files := acceptedConsumerFixture(t, 3)
-	_, manifestData, manifest := embeddedLegacyTransitionManifest(t)
+	_, manifestData, manifest := producerLegacyTransitionManifest(t)
 	artifact := model.RuntimeArtifactID(manifest.Candidate.ArtifactID)
 	head, tree := strings.Repeat("b", 40), strings.Repeat("c", 40)
 	observation, report, _ := legacyTransitionEvidencePayload(t, manifestData, manifest, artifact, true, true, head, tree, head)

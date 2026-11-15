@@ -144,7 +144,7 @@ const en = {
   operationBlockedSourceConflict:
     'The destination CPA’s key list does not match this operation: it may carry a key the Manager never registered or already revoked, the key this operation would write, or already the most keys this Manager will rewrite there. Nothing was written.',
   operationBlockedInstalledKey:
-    'Keep this installation’s own key as the target or the keeper: only that key can carry the operation.',
+    'Another key operation or state conflict currently holds this installation. Check the latest operation status before retrying.',
   operationBlockedCredentialRejected:
     'The destination CPA refused the stored Management Key. Rebinding the connection with the current Management Key is the only way forward; retrying this operation changes nothing.',
   operationBlockedUnavailable:
@@ -154,6 +154,75 @@ const en = {
     'Manager blocks revoking the only remaining saved key to prevent accidental lockout. Create a replacement key first, then use Replace or Revoke.',
   detailReplaceHelp:
     'Need to rotate or retire this key? Jump to the revocation & replacement workflow with this key preselected.',
+  runtimeEffectiveObserved: 'Effective · verified',
+  runtimeApplying: 'Applying to gateway',
+  runtimeNotApplied: 'Saved · not yet active',
+  runtimeEffectUnknown: 'Effect needs confirmation',
+  runtimeRevokedObserved: 'Revoked · removed from gateway',
+  summaryRuntimeAllActive: 'All active keys verified',
+  summaryRuntimeNoActive: 'No active keys',
+  summaryRuntimeVerifiedCount: 'verified',
+  createdActiveTitle: 'Key active and ready',
+  createdActiveHelp:
+    'Saved in Manager and verified active on the gateway. Copy this one-time key now before closing.',
+  createdActiveConfirmed:
+    'Key persisted in Manager and verified active on the gateway. The creation secret is no longer available.',
+  createApplyPendingTitle: 'Key saved, but gateway activation is incomplete',
+  createApplyPendingHelp:
+    'The key is already persisted in Manager, so do not create a duplicate key. Retry gateway activation for this key, copy it on demand, or update its name.',
+  createApplyUnknownTitle: 'Key saved, but gateway activation outcome is unknown',
+  createApplyUnknownHelp:
+    'The key was saved in Manager and a gateway update was attempted. Check its result read-only before retrying.',
+  retryApplyKey: 'Retry gateway activation',
+  checkOperationResult: 'Check activation status',
+  continueAddOperation: 'Continue activation',
+  copyPersistedSecret: 'Copy saved key',
+  createAccessEndpointsTitle: 'Use this key with the verified API endpoints below',
+  presenceUnverifiedTitle: 'Live gateway verification is currently unverified',
+  presenceUnverifiedHelp:
+    'Manager could not complete live gateway verification right now. Keys without confirmed observation remain marked as needing confirmation.',
+  detailApplyHelp:
+    'This key is saved in Manager but not yet confirmed active on the gateway. Retry activating this existing key without creating a duplicate.',
+  detailUnknownHelp:
+    'A gateway write was attempted for this key and its outcome is unknown. Check status read-only before retrying.',
+  detailEffectiveHelp: 'Verified active on the gateway.',
+  detailRevokedHelp: 'Revoked and confirmed removed from the gateway.',
+  detailPendingOperationNote: 'Tracked by unsettled operation',
+  anySurvivingKeeperOption: 'Any surviving effective key (no specific keeper)',
+  effectBlockerHostProof:
+    'Host step authorization is required before modifying keys on this private deployment.',
+  effectBlockerSourceConflict:
+    'The destination CPA key list does not match Manager expectations. Check gateway state before continuing.',
+  effectBlockerConflict:
+    'Another key operation is currently active or conflicts with this key.',
+  effectBlockerGeneration:
+    'The deployment runtime generation changed; refresh key state before continuing.',
+  effectBlockerExternalRejected:
+    'External CPA refused the saved Management Key. Rebind the connection first.',
+  effectBlockerExternalMoved:
+    'External CPA target identity changed. Rebind the connection before modifying keys.',
+  effectBlockerExternalVersion:
+    'External CPA does not support the required v8 key management contract.',
+  effectBlockerExternalUnavailable:
+    'External CPA authority is temporarily unavailable. Check connection status and retry.',
+  effectBlockerLastKey:
+    'Cannot remove the last effective key while no other verified key remains.',
+  effectBlockerUnknown:
+    'Gateway activation did not complete or returned an unverified error.',
+  missingLifecycle: 'Saved · missing',
+  operationNotRecorded:
+    'No operation was recorded on the server for that request. You can adjust your selection, retry, or close.',
+  operationAborted:
+    'Operation aborted before applying any gateway change. Nothing was modified on the gateway.',
+  operationStepAdd: 'Install replacement key',
+  operationStepRevoke: 'Revoke target key',
+  operationStepUnattempted: 'Unattempted',
+  operationStepAttempted: 'Attempted (unconfirmed)',
+  operationStepObserved: 'Confirmed',
+  manageLater: 'Manage later',
+  rebindConnection: 'Rebind management key',
+  recoveryManageLaterHelp:
+    'This key row and request ID stay saved in Manager. You can manage, retry, or rebind from the workspace or key details.',
 };
 const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
@@ -289,7 +358,7 @@ const zh: typeof en = {
   operationBlockedSourceConflict:
     '目标 CPA 的密钥列表与本次操作不符：其中可能有 Manager 未登记或已撤销的密钥，可能已包含本次要写入的密钥，也可能已经持有本 Manager 会在此重写的上限数量密钥。未写入任何内容。',
   operationBlockedInstalledKey:
-    '目标或 keeper 必须是本安装当前使用的那把密钥，否则无法执行。',
+    '当前已有进行中的密钥操作或状态冲突，请先检查最新操作状态后再试。',
   operationBlockedCredentialRejected:
     '目标 CPA 拒绝了这个已保存的管理密钥。唯一出路是用当前管理密钥重新绑定连接；重复这次操作不会有任何改变。',
   operationBlockedUnavailable:
@@ -298,6 +367,63 @@ const zh: typeof en = {
   lastKeyProtectionHelp:
     '为防止客户端流量意外中断，当仅剩 1 把已保存密钥时禁止直接撤销。请先创建一把新密钥并完成客户端配置，再执行替换或撤销。',
   detailReplaceHelp: '需要轮换或停用此密钥？可将该密钥预填为目标密钥并前往撤销与替换流程。',
+  runtimeEffectiveObserved: '已生效 · 已验证',
+  runtimeApplying: '正在写入网关',
+  runtimeNotApplied: '已保存 · 尚未生效',
+  runtimeEffectUnknown: '生效结果待确认',
+  runtimeRevokedObserved: '已撤销 · 已从网关移除',
+  summaryRuntimeAllActive: '全部有效密钥已验证',
+  summaryRuntimeNoActive: '暂无有效密钥',
+  summaryRuntimeVerifiedCount: '已验证生效',
+  createdActiveTitle: '密钥已创建并生效',
+  createdActiveHelp:
+    '已保存到 Manager 并经网关注册与认证验证生效。请在关闭前复制并妥善保存此一次性完整密钥。',
+  createdActiveConfirmed:
+    '密钥已持久化保存在 Manager 并已验证在网关生效。创建时的一次性明文已不可再次获取。',
+  createApplyPendingTitle: '密钥已保存，但网关激活尚未完成',
+  createApplyPendingHelp:
+    '该密钥已在 Manager 持久化，切勿重复新建。请对这把密钥重试网关激活、按需复制密钥或保存名称。',
+  createApplyUnknownTitle: '密钥已保存，但网关激活结果未知',
+  createApplyUnknownHelp:
+    '密钥已保存且已尝试写入网关。请先只读核对状态，确认后再决定下一步操作。',
+  retryApplyKey: '重试网关激活',
+  checkOperationResult: '核对激活状态',
+  continueAddOperation: '继续激活操作',
+  copyPersistedSecret: '复制已保存密钥',
+  createAccessEndpointsTitle: '配合下方已验证的 API 接入地址使用此密钥',
+  presenceUnverifiedTitle: '实时网关验证暂未完成',
+  presenceUnverifiedHelp:
+    'Manager 暂无法完成对网关实际状态的实时核验。未确认观测到的密钥仍标记为待确认。',
+  detailApplyHelp: '该密钥已保存在 Manager，但尚未在网关确认生效。请重试激活当前密钥，无需新建重复密钥。',
+  detailUnknownHelp: '该密钥已尝试写入网关但结果未知。重试前请先只读核对状态。',
+  detailEffectiveHelp: '已验证在网关实际生效。',
+  detailRevokedHelp: '已撤销并确认从网关移除。',
+  detailPendingOperationNote: '正由未完成的操作跟踪',
+  anySurvivingKeeperOption: '任意仍生效的其他密钥（不指定 keeper）',
+  effectBlockerHostProof: '此私有部署修改密钥前需要先获得宿主机步骤授权。',
+  effectBlockerSourceConflict: '目标 CPA 的密钥列表与 Manager 预期不符，请先检查网关状态。',
+  effectBlockerConflict: '当前已有进行中的密钥操作，或该密钥存在状态冲突。',
+  effectBlockerGeneration: '部署运行代次已变更，请先刷新密钥状态后再继续。',
+  effectBlockerExternalRejected: '外部 CPA 拒绝了已保存的管理密钥，请先重新绑定连接。',
+  effectBlockerExternalMoved: '外部 CPA 目标身份已变更，请先重新绑定连接后再操作密钥。',
+  effectBlockerExternalVersion: '外部 CPA 不支持所需的 v8 密钥管理协议。',
+  effectBlockerExternalUnavailable: '外部 CPA 凭据校验暂时不可用，请检查连接状态后重试。',
+  effectBlockerLastKey: '无法移除最后一把已生效密钥，请确保至少保留一把可用密钥。',
+  effectBlockerUnknown: '网关激活未完成或返回了未确认的错误。',
+  missingLifecycle: '已保存 · 网关缺失',
+  operationNotRecorded:
+    '服务器未记录该操作请求。您可以修改选择、重试或关闭。',
+  operationAborted:
+    '操作在写入网关前已中止，未对网关产生任何变更。',
+  operationStepAdd: '安装替代密钥',
+  operationStepRevoke: '撤销目标密钥',
+  operationStepUnattempted: '未尝试',
+  operationStepAttempted: '已尝试（待确认）',
+  operationStepObserved: '已确认',
+  manageLater: '稍后处理',
+  rebindConnection: '重新绑定管理密钥',
+  recoveryManageLaterHelp:
+    '该密钥记录及其请求 ID 已保留在 Manager 中。您可以从工作区或密钥详情中继续处理、重试或重新绑定。',
 };
 const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
@@ -433,7 +559,7 @@ const tw: typeof en = {
   operationBlockedSourceConflict:
     '目標 CPA 的金鑰清單與本次操作不符：其中可能有 Manager 未登記或已撤銷的金鑰，可能已包含本次要寫入的金鑰，也可能已經持有本 Manager 會在此重寫的上限數量金鑰。未寫入任何內容。',
   operationBlockedInstalledKey:
-    '目標或 keeper 必須是本安裝目前使用的那把金鑰，否則無法執行。',
+    '目前已有進行中的金鑰操作或狀態衝突，請先檢查最新操作狀態後再試。',
   operationBlockedCredentialRejected:
     '目標 CPA 拒絕了這個已儲存的管理金鑰。唯一出路是用目前的管理金鑰重新綁定連線；重複這次操作不會有任何改變。',
   operationBlockedUnavailable:
@@ -442,6 +568,63 @@ const tw: typeof en = {
   lastKeyProtectionHelp:
     '為防止用戶端流量意外中斷，當僅剩 1 把已儲存金鑰時禁止直接撤銷。請先建立一把新金鑰並完成用戶端設定，再執行替換或撤銷。',
   detailReplaceHelp: '需要輪換或停用此金鑰？可將該金鑰預填為目標金鑰並前往撤銷與替換流程。',
+  runtimeEffectiveObserved: '已生效 · 已驗證',
+  runtimeApplying: '正在寫入閘道',
+  runtimeNotApplied: '已儲存 · 尚未生效',
+  runtimeEffectUnknown: '生效結果待確認',
+  runtimeRevokedObserved: '已撤銷 · 已從閘道移除',
+  summaryRuntimeAllActive: '全部有效金鑰已驗證',
+  summaryRuntimeNoActive: '暫無有效金鑰',
+  summaryRuntimeVerifiedCount: '已驗證生效',
+  createdActiveTitle: '金鑰已建立並生效',
+  createdActiveHelp:
+    '已儲存至 Manager 並通過閘道寫入與驗證確認生效。請於關閉前複製並妥善保存此一次性完整金鑰。',
+  createdActiveConfirmed:
+    '金鑰已持久化儲存於 Manager 並已驗證於閘道生效。建立時的一次性明文已無法再次取得。',
+  createApplyPendingTitle: '金鑰已儲存，但閘道啟用尚未完成',
+  createApplyPendingHelp:
+    '該金鑰已在 Manager 持久化，切勿重複新增。請針對此金鑰重試閘道啟用、按需複製金鑰或儲存名稱。',
+  createApplyUnknownTitle: '金鑰已儲存，但閘道啟用結果未知',
+  createApplyUnknownHelp:
+    '金鑰已儲存且已嘗試寫入閘道。請先唯讀核對狀態，確認後再決定下一步操作。',
+  retryApplyKey: '重試閘道啟用',
+  checkOperationResult: '核對啟用狀態',
+  continueAddOperation: '繼續啟用操作',
+  copyPersistedSecret: '複製已儲存金鑰',
+  createAccessEndpointsTitle: '搭配下方已驗證的 API 接入位址使用此金鑰',
+  presenceUnverifiedTitle: '即時閘道驗證暫未完成',
+  presenceUnverifiedHelp:
+    'Manager 暫無法完成對閘道實際狀態的即時核驗。未確認觀測到的金鑰仍標記為待確認。',
+  detailApplyHelp: '該金鑰已儲存在 Manager，但尚未在閘道確認生效。請重試啟用目前金鑰，無須新增重複金鑰。',
+  detailUnknownHelp: '該金鑰已嘗試寫入閘道但結果未知。重試前請先唯讀核對狀態。',
+  detailEffectiveHelp: '已驗證在閘道實際生效。',
+  detailRevokedHelp: '已撤銷並確認從閘道移除。',
+  detailPendingOperationNote: '正由未完成的操作追蹤',
+  anySurvivingKeeperOption: '任意仍生效的其他金鑰（不指定 keeper）',
+  effectBlockerHostProof: '此私有部署修改金鑰前需要先取得宿主機步驟授權。',
+  effectBlockerSourceConflict: '目標 CPA 的金鑰清單與 Manager 預期不符，請先檢查閘道狀態。',
+  effectBlockerConflict: '目前已有進行中的金鑰操作，或該金鑰存在狀態衝突。',
+  effectBlockerGeneration: '部署執行代次已變更，請先重新整理金鑰狀態後再繼續。',
+  effectBlockerExternalRejected: '外部 CPA 拒絕了已儲存的管理金鑰，請先重新綁定連線。',
+  effectBlockerExternalMoved: '外部 CPA 目標身分已變更，請先重新綁定連線後再操作金鑰。',
+  effectBlockerExternalVersion: '外部 CPA 不支援所需的 v8 金鑰管理協定。',
+  effectBlockerExternalUnavailable: '外部 CPA 憑證校驗暫時無法使用，請檢查連線狀態後重試。',
+  effectBlockerLastKey: '無法移除最後一把已生效金鑰，請確保至少保留一把可用金鑰。',
+  effectBlockerUnknown: '閘道啟用未完成或回傳了未確認的錯誤。',
+  missingLifecycle: '已儲存 · 閘道缺失',
+  operationNotRecorded:
+    '伺服器未記錄該操作請求。您可以修改選取、重試或關閉。',
+  operationAborted:
+    '操作在寫入閘道前已中止，未對閘道產生任何變更。',
+  operationStepAdd: '安裝替代金鑰',
+  operationStepRevoke: '撤銷目標金鑰',
+  operationStepUnattempted: '未嘗試',
+  operationStepAttempted: '已嘗試（待確認）',
+  operationStepObserved: '已確認',
+  manageLater: '稍後處理',
+  rebindConnection: '重新綁定管理金鑰',
+  recoveryManageLaterHelp:
+    '此金鑰記錄及其請求 ID 已保留於 Manager 中。您可以從工作區或金鑰詳細資料繼續處理、重試或重新綁定。',
 };
 const ru: typeof en = {
   installerOrigin: 'Ключ установки',
@@ -585,7 +768,7 @@ const ru: typeof en = {
   operationBlockedSourceConflict:
     'Список ключей на целевом CPA не соответствует этой операции: в нём может быть ключ, который Manager не регистрировал или уже отозвал, ключ, который эта операция должна записать, либо уже достигнут предел ключей, который этот Manager готов там переписать. Ничего не записано.',
   operationBlockedInstalledKey:
-    'Целью или keeper должен быть ключ этой установки: только он может нести операцию.',
+    'Эта установка сейчас занята другой операцией с ключом или конфликтом состояния. Проверьте последнюю операцию перед повтором.',
   operationBlockedCredentialRejected:
     'Целевой CPA отклонил сохранённый управляющий ключ. Единственный путь вперёд — заново привязать подключение с текущим управляющим ключом; повтор этой операции ничего не изменит.',
   operationBlockedUnavailable:
@@ -595,6 +778,73 @@ const ru: typeof en = {
     'Нельзя отозвать единственный сохранённый ключ. Сначала создайте новый ключ для замены.',
   detailReplaceHelp:
     'Нужно заменить или отозвать этот ключ? Перейдите к форме отзыва и замены с предвыбранным ключом.',
+  runtimeEffectiveObserved: 'Активен · подтверждён',
+  runtimeApplying: 'Применение к шлюзу',
+  runtimeNotApplied: 'Сохранён · не применён',
+  runtimeEffectUnknown: 'Требуется проверка эффекта',
+  runtimeRevokedObserved: 'Отозван · удалён со шлюза',
+  summaryRuntimeAllActive: 'Все активные ключи подтверждены',
+  summaryRuntimeNoActive: 'Нет активных ключей',
+  summaryRuntimeVerifiedCount: 'подтверждено',
+  createdActiveTitle: 'Ключ создан и активен',
+  createdActiveHelp:
+    'Ключ сохранён в Manager и подтверждён активным на шлюзе. Скопируйте одноразовый ключ до закрытия окна.',
+  createdActiveConfirmed:
+    'Ключ сохранён в Manager и подтверждён активным на шлюзе. Секрет создания больше недоступен.',
+  createApplyPendingTitle: 'Ключ сохранён, но активация на шлюзе не завершена',
+  createApplyPendingHelp:
+    'Ключ уже сохранён в Manager — не создавайте дубликат. Повторите активацию этого ключа, скопируйте его по запросу или сохраните имя.',
+  createApplyUnknownTitle: 'Ключ сохранён, но итог активации на шлюзе неизвестен',
+  createApplyUnknownHelp:
+    'Ключ сохранён в Manager, попытка записи на шлюз выполнена. Сначала проверьте состояние только чтением.',
+  retryApplyKey: 'Повторить активацию на шлюзе',
+  checkOperationResult: 'Проверить статус активации',
+  continueAddOperation: 'Продолжить активацию',
+  copyPersistedSecret: 'Скопировать сохранённый ключ',
+  createAccessEndpointsTitle: 'Используйте этот ключ с подтверждёнными адресами API ниже',
+  presenceUnverifiedTitle: 'Живая проверка шлюза не выполнена',
+  presenceUnverifiedHelp:
+    'Manager сейчас не смог завершить проверку состояния на шлюзе. Ключи без подтверждения остаются помеченными как требующие проверки.',
+  detailApplyHelp:
+    'Этот ключ сохранён в Manager, но ещё не подтверждён на шлюзе. Повторите активацию без создания нового ключа.',
+  detailUnknownHelp:
+    'Для этого ключа выполнялась запись на шлюз, результат неизвестен. Проверьте состояние только чтением перед повтором.',
+  detailEffectiveHelp: 'Подтверждён активным на шлюзе.',
+  detailRevokedHelp: 'Отозван и подтверждён удалённым со шлюза.',
+  detailPendingOperationNote: 'Отслеживается незавершённой операцией',
+  anySurvivingKeeperOption: 'Любой действующий оставшийся ключ (без выбора keeper)',
+  effectBlockerHostProof:
+    'В этом приватном профиле для изменения ключей требуется подтверждение шага хоста.',
+  effectBlockerSourceConflict:
+    'Список ключей на целевом CPA не совпадает с ожиданиями Manager. Проверьте состояние шлюза.',
+  effectBlockerConflict: 'Другая операция с ключами сейчас активна или конфликтует с этим ключом.',
+  effectBlockerGeneration:
+    'Поколение среды выполнения изменилось; обновите состояние ключей перед продолжением.',
+  effectBlockerExternalRejected:
+    'Внешний CPA отклонил сохранённый ключ управления. Сначала перепривяжите подключение.',
+  effectBlockerExternalMoved:
+    'Идентификатор внешнего CPA изменился. Перепривяжите подключение перед изменением ключей.',
+  effectBlockerExternalVersion:
+    'Внешний CPA не поддерживает требуемый контракт управления ключами v8.',
+  effectBlockerExternalUnavailable:
+    'Полномочия внешнего CPA временно недоступны. Проверьте подключение и повторите.',
+  effectBlockerLastKey:
+    'Нельзя удалить последний действующий ключ, пока нет другого подтверждённого ключа.',
+  effectBlockerUnknown: 'Активация на шлюзе не завершилась или вернула неподтверждённую ошибку.',
+  missingLifecycle: 'Сохранён · отсутствует',
+  operationNotRecorded:
+    'Сервер не зафиксировал этот запрос операции. Вы можете изменить выбор, повторить попытку или закрыть.',
+  operationAborted:
+    'Операция прервана до применения изменений на шлюзе. На шлюзе ничего не изменено.',
+  operationStepAdd: 'Установка нового ключа',
+  operationStepRevoke: 'Отзыв целевого ключа',
+  operationStepUnattempted: 'Не выполнялось',
+  operationStepAttempted: 'Выполнено (не подтверждено)',
+  operationStepObserved: 'Подтверждено',
+  manageLater: 'Управлять позже',
+  rebindConnection: 'Перепривязать ключ управления',
+  recoveryManageLaterHelp:
+    'Запись ключа и идентификатор запроса сохранены в Manager. Вы можете продолжить, повторить или перепривязать из рабочего пространства или подробностей ключа.',
 };
 export function keyWorkspaceText(key: keyof typeof en) {
   const language = fullWebLanguage();

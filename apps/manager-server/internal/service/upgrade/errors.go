@@ -257,7 +257,9 @@ const (
 	// the verdict, so the revision check refused it. Nothing was written: the
 	// verdict this run held was about a row that no longer exists, and re-running
 	// the verification re-proves the current one.
-	UpgradeErrorVerifyConflict UpgradeErrorCode = "upgrade_verify_conflict"
+	UpgradeErrorVerifyConflict             UpgradeErrorCode = "upgrade_verify_conflict"
+	UpgradeErrorVerifyAccessPrefixRequired UpgradeErrorCode = "upgrade_access_prefix_required"
+	UpgradeErrorPrefixesAlreadyCommitted   UpgradeErrorCode = "upgrade_prefixes_already_committed"
 
 	// UpgradeErrorStoreLocked reports that the Manager store's process lock is
 	// held, so an offline migration cannot run. The lock is the proof that the
@@ -376,16 +378,17 @@ const (
 	// load. Nothing was written.
 	UpgradeErrorCPAConfigInvalid UpgradeErrorCode = "upgrade_cpa_config_invalid"
 
-	// UpgradeErrorCPAVersionRequired reports that the source uses the v7 layout
-	// and neither the operator nor the stack's compose/environment files name an
-	// exact CPA release. A v7 file carries no version of its own, and this import
-	// never infers one from the file's shape. Nothing was written.
+	// UpgradeErrorCPAVersionRequired reports that the source uses the unversioned
+	// v7 grammar (or a compose stack whose cli-proxy-api image carries no exact
+	// tag) and neither the operator nor the stack's compose/environment files
+	// name an exact CPA v8 release. This import never guesses a release. Nothing
+	// was written.
 	UpgradeErrorCPAVersionRequired UpgradeErrorCode = "upgrade_cpa_version_required"
 
 	// UpgradeErrorCPAVersionUnsupported reports that the source CPA release is
-	// below the accepted floor, is not an exact release, or does not describe the
-	// configuration it holds. Nothing was written; the operator upgrades the CPA
-	// inside the 1.x stack first.
+	// below CPA 8.0.0, outside the CPA v8 generation, not an exact release, or
+	// declares a config-version this destination does not load. Nothing was
+	// written; an operator below v8 upgrades the CPA inside the 1.x stack first.
 	UpgradeErrorCPAVersionUnsupported UpgradeErrorCode = "upgrade_cpa_version_unsupported"
 
 	// UpgradeErrorCPAClientKeysMissing reports that the source CPA holds no client

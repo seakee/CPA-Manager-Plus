@@ -1,3 +1,4 @@
+import { refreshPanelFeatureAvailability } from '../hooks/usePanelFeatureAvailability';
 import { apiClient } from '../services/api/client';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useConfigStore } from '../stores/useConfigStore';
@@ -9,6 +10,37 @@ import type { RoutingContext } from './routingContext';
 
 export function freshSessionBase(context: RoutingContext) {
   return new URL(`${context.apiBase}/cpamp`, window.location.origin).toString();
+}
+
+export function isConsoleUiEntryPath(
+  basePath: string,
+  pathname: string | undefined = typeof window !== 'undefined'
+    ? window.location?.pathname
+    : undefined
+): boolean {
+  const normalizedBase = basePath.replace(/\/+$/, '') || '/';
+  const trimmedPath = (pathname || '').replace(/\/+$/, '') || '/';
+  return trimmedPath === `${normalizedBase}/ui`;
+}
+
+export function resolveConsoleEntryPath(
+  basePath: string,
+  currentLocation: Pick<Location, 'pathname' | 'search' | 'hash'> | undefined =
+    typeof window !== 'undefined' ? window.location : undefined
+): string {
+  const normalizedBase = basePath.replace(/\/+$/, '') || '/';
+  if (!currentLocation || typeof currentLocation.pathname !== 'string') {
+    return normalizedBase;
+  }
+  const trimmedPath = currentLocation.pathname.replace(/\/+$/, '') || '/';
+  if (
+    trimmedPath.startsWith(`${normalizedBase}/`) &&
+    trimmedPath !== `${normalizedBase}/ui` &&
+    trimmedPath !== `${normalizedBase}/technical-route`
+  ) {
+    return `${currentLocation.pathname}${currentLocation.search ?? ''}${currentLocation.hash ?? ''}`;
+  }
+  return normalizedBase;
 }
 
 // A stored credential is only a candidate. FreshConsolePage must verify it
@@ -33,6 +65,10 @@ export function activateFreshSession(
   const state = useAuthStore.getState();
   if (state.apiBase !== apiBase || state.managementKey !== credential) {
     clearFreshSession();
+  } else if (!state.isAuthenticated) {
+    try {
+      refreshPanelFeatureAvailability();
+    } catch { /* Availability cache reset must not block session activation. */ }
   }
   apiClient.setConfig({ apiBase, managementKey: credential });
   const session = {
@@ -57,6 +93,9 @@ export function activateFreshSession(
 }
 
 export function clearFreshSession() {
+  try {
+    refreshPanelFeatureAvailability();
+  } catch { /* Availability cache reset must not block session revocation. */ }
   try {
     useAuthStore.getState().logout();
     return;

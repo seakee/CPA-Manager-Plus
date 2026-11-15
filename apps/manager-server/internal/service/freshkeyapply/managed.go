@@ -25,6 +25,10 @@ const (
 	// ProfileManaged marks the authority derived from a committed Fresh
 	// NewManaged installation instead of a Host-issued S1 permit file.
 	ProfileManaged = "managed"
+	// StrategyUpgradedManaged marks a completed 1.x -> v2 Upgrade Managed
+	// destination governed by upgrade_operations + upgrade_cpa_destination
+	// without fabricating a FreshOperation row.
+	StrategyUpgradedManaged = "upgrade_managed"
 )
 
 // managedGrantTTL bounds one derived step grant. It is never longer than the
@@ -65,12 +69,12 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 	s.profile = ProfileManaged
 	s.endpoint = endpoint
 	s.source = source
-	managedPermit := func(requireComplete bool) (Permit, error) {
+	managedPermit := func(ctx context.Context, requireComplete bool) (Permit, error) {
 		if source == nil {
 			return Permit{}, ErrUnavailable
 		}
 		now := time.Now()
-		install, err := source(context.Background())
+		install, err := source(ctx)
 		if err != nil {
 			return Permit{}, err
 		}
@@ -95,8 +99,8 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 			Strategy: install.Strategy,
 		}, nil
 	}
-	s.permit = func() (Permit, error) { return managedPermit(true) }
-	s.registrationPermit = func() (Permit, error) { return managedPermit(false) }
+	s.permit = func(ctx context.Context) (Permit, error) { return managedPermit(ctx, true) }
+	s.registrationPermit = func(ctx context.Context) (Permit, error) { return managedPermit(ctx, false) }
 	s.keyOperations = true
 	transport := cpa.NewTransportForEndpoint(endpoint)
 	// The destination posture follows the committed strategy, never the transport's
@@ -231,7 +235,7 @@ func (s *Service) managedKeyGrant(ctx context.Context, operationID, step string)
 	if operationID == "" || (step != "add" && step != "revoke") {
 		return KeyPermit{}, ErrUnavailable
 	}
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return KeyPermit{}, err
 	}
@@ -308,7 +312,7 @@ func (s *Service) PrepareAdoption(ctx context.Context, secrets []string) (Prepar
 	if err := ctx.Err(); err != nil {
 		return PreparedAdoption{}, err
 	}
-	p, err := s.registrationPermit()
+	p, err := s.registrationPermit(ctx)
 	if err != nil {
 		return PreparedAdoption{}, err
 	}
@@ -377,6 +381,9 @@ func (s *Service) requireInstallJournal(ctx context.Context, p Permit) error {
 	if s == nil || s.repo == nil {
 		return ErrUnavailable
 	}
+	if p.Strategy == StrategyUpgradedManaged {
+		return nil
+	}
 	if p.Strategy == string(bootstrap.AdoptExisting) {
 		ready, err := s.repo.VerifyAdoptionRegistration(ctx, p.RunID, p.Generation, p.S2B.Binding(), p.Identity)
 		if err != nil {
@@ -413,7 +420,7 @@ func (s *Service) AdoptionRegistrationReady(ctx context.Context) (bool, error) {
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
 		return false, ErrUnavailable
 	}
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -434,7 +441,7 @@ func (s *Service) VerifyRuntimeTarget(ctx context.Context) error {
 	if s == nil || s.profile != ProfileManaged {
 		return ErrUnavailable
 	}
-	p, err := s.permit()
+	p, err := s.permit(ctx)
 	if err != nil {
 		return err
 	}

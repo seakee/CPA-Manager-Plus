@@ -89,7 +89,7 @@ const en = {
   refreshing: 'Checking…',
   routeTitle: 'Console address',
   path: 'Address path',
-  pathHelp: 'The path must begin with /. You can keep /console.',
+  pathHelp: 'The path must begin with /. Keep the generated random prefix or enter your own.',
   enable: 'Save Console address',
   enabling: 'Checking Console address…',
   routeReady:
@@ -110,6 +110,66 @@ const en = {
   claimRequired: 'Open your authorized installation link',
   claimRequiredHelp:
     'Open the secure installation link provided by your deployment host to begin or resume setup.',
+  managementPrefix: 'Management entry prefix',
+  managementPrefixHelp:
+    'Defaults to a random 16-character URL-safe prefix saved on the server. Serves the CPAMP Console and management API.',
+  inferencePrefix: 'Inference entry prefix',
+  inferencePrefixHelp:
+    'Independent prefix for OpenAI, Responses, Anthropic, and Gemini model requests. Must not overlap with the management prefix unless shared mode is enabled.',
+  randomizePrefix: 'Regenerate random',
+  sharedPrefixToggle: 'Use the same prefix for management and inference (shared mode)',
+  sharedPrefixHelp:
+    'Off by default. Enable explicitly only when you intentionally serve management and inference under one prefix.',
+  sharedPrefixBadge: 'Shared prefix mode',
+  independentPrefixBadge: 'Independent prefixes',
+  externalInferenceLabel: 'External CPA inference address',
+  externalInferenceNote:
+    'External mode only configures the CPAMP management prefix. Model inference continues using the external CPA address directly.',
+  finalUrlsPreview: 'Final URL preview',
+  previewConsoleUrl: 'Management Console URL',
+  previewManagementApiUrl: 'Management API base',
+  previewInferenceUrl: 'Inference entry base',
+  previewExternalInferenceUrl: 'External inference URL',
+  savePrefixDraft: 'Save prefix draft',
+  prefixDraftSaved: 'Prefix draft saved to this operation.',
+  prefixDraftFailed: 'Could not save the prefix draft. Retry before leaving this page.',
+  prefixErrorInvalid:
+    'Enter a canonical path starting with /, without trailing slash, spaces, encoding, or dot segments.',
+  prefixErrorInferenceRequired: 'An inference entry prefix is required for Managed and Adopt installations.',
+  prefixErrorExternalInferenceForbidden:
+    'External mode does not use a local inference prefix or shared mode.',
+  prefixErrorSharedMismatch:
+    'In shared mode, the management and inference prefixes must be identical.',
+  prefixErrorSharedConfirmRequired:
+    'Management and inference prefixes are identical. Enable shared mode explicitly to use the same prefix.',
+  prefixErrorOverlapForbidden:
+    'Management and inference prefixes cannot nest one inside the other.',
+  prefixErrorReservedCollision:
+    'This path conflicts with a reserved system or protocol route. Choose another prefix.',
+  prefixErrorRoutingConflict:
+    'Routing configuration conflicts with a committed operation. Refresh saved progress before continuing.',
+  prefixErrorVerificationFailed:
+    'The server could not verify the published management or inference routes. Check Ingress and retry.',
+  prefixErrorAlreadyCommitted:
+    'The inference prefix has already been committed and cannot be modified again here.',
+  accessSessionExpired: 'Bootstrap summary session expired',
+  accessSessionExpiredHelp:
+    'Sign in to the Console with your administrator key to inspect verified access endpoints and protocol paths.',
+  inferenceCompletionTitle: 'Complete inference entry prefix',
+  inferenceCompletionHelp:
+    'This existing v2 installation already committed its management prefix, but still needs a one-time inference entry prefix before entering the Console.',
+  inferenceCompletionReadOnlyNote:
+    'Your management prefix is preserved and locked. Set the missing inference prefix once; general re-editing is disabled afterwards.',
+  inferenceCompletionControlLabel: 'Committed management prefix (locked)',
+  inferenceCompletionSubmit: 'Commit inference prefix',
+  inferenceCompletionSubmitting: 'Verifying and committing…',
+  inferenceCompletionCompleteTitle: 'Inference entry prefix committed',
+  inferenceCompletionCompleteHelp:
+    'Both management and inference entry points are now verified and active. Review your protocol endpoints below, then enter the Console.',
+  inferenceCompletionAlreadyCommitted:
+    'The inference entry prefix is already committed for this installation.',
+  inferenceCompletionLoadError:
+    'Could not read the inference prefix completion state. Retry or verify Manager health.',
 };
 const zh: typeof en = {
   loginKeyPlaceholder: '请输入已保存的 CPAMP 管理员密钥',
@@ -193,7 +253,7 @@ const zh: typeof en = {
   refreshing: '正在检查…',
   routeTitle: '控制台地址',
   path: '访问路径',
-  pathHelp: '路径以 / 开头，可以保留默认的 /console。',
+  pathHelp: '路径需以 / 开头，可保留默认生成的随机前缀，或输入自定义路径。',
   enable: '保存控制台地址',
   enabling: '正在检查控制台地址…',
   routeReady: '控制台地址已验证。请使用已保存的管理员密钥登录，继续安装。',
@@ -211,6 +271,56 @@ const zh: typeof en = {
   revision: '已保存版本',
   claimRequired: '请打开获授权的安装链接',
   claimRequiredHelp: '请从部署主机提供的安全安装入口打开链接，开始或恢复设置。',
+  managementPrefix: '管理入口前缀',
+  managementPrefixHelp:
+    '默认由服务端生成并保存 16 位 URL 安全随机前缀，用于访问 CPAMP 控制台和管理 API。',
+  inferencePrefix: '推理入口前缀',
+  inferencePrefixHelp:
+    '用于 OpenAI、Responses、Anthropic 与 Gemini 模型请求的独立入口前缀；未显式开启共用模式时不可与管理前缀重叠或嵌套。',
+  randomizePrefix: '重新随机生成',
+  sharedPrefixToggle: '管理与推理使用同一前缀（显式共用模式）',
+  sharedPrefixHelp:
+    '默认关闭。仅当你明确希望管理入口与推理入口共用同一个路径前缀时勾选。',
+  sharedPrefixBadge: '共用前缀模式',
+  independentPrefixBadge: '独立双前缀',
+  externalInferenceLabel: '外部 CPA 推理地址',
+  externalInferenceNote:
+    'External 模式仅配置 CPAMP 管理入口前缀；模型推理仍直接使用所填写的外部 CPA 实际地址。',
+  finalUrlsPreview: '最终访问地址预览',
+  previewConsoleUrl: '管理控制台地址',
+  previewManagementApiUrl: '管理 API 基路径',
+  previewInferenceUrl: '推理入口地址',
+  previewExternalInferenceUrl: '外部推理地址',
+  savePrefixDraft: '保存前缀草稿',
+  prefixDraftSaved: '前缀草稿已保存到当前操作，刷新页面后仍会保留。',
+  prefixDraftFailed: '前缀草稿保存失败，请重试后再离开当前页面。',
+  prefixErrorInvalid: '请输入以 / 开头的规范路径，不能包含末尾斜杠、空白、百分号编码或点段。',
+  prefixErrorInferenceRequired: 'Managed 与 Adopt 安装方式必须配置推理入口前缀。',
+  prefixErrorExternalInferenceForbidden: 'External 模式不允许配置本地推理前缀或开启共用模式。',
+  prefixErrorSharedMismatch: '开启共用模式时，管理前缀与推理前缀必须完全一致。',
+  prefixErrorSharedConfirmRequired:
+    '管理前缀与推理前缀相同。如需使用相同路径，请显式勾选共用模式，或改用不同前缀。',
+  prefixErrorOverlapForbidden: '管理前缀与推理前缀不允许互为嵌套包含关系。',
+  prefixErrorReservedCollision: '该路径与系统保留路由或协议保留路径冲突，请更换其他前缀。',
+  prefixErrorRoutingConflict: '路由配置与已提交的操作冲突，请先检查已保存进度。',
+  prefixErrorVerificationFailed: '服务端未能核验已发布的管理或推理路由，请检查 Ingress 状态后重试。',
+  prefixErrorAlreadyCommitted: '该安装的推理前缀已完成一次性提交，此处不允许二次修改。',
+  accessSessionExpired: '初始化续期凭证已过期',
+  accessSessionExpiredHelp:
+    '请点击下方入口使用管理员密钥登录控制台，登录后即可查看完整的已验证协议接入信息。',
+  inferenceCompletionTitle: '补齐推理入口前缀',
+  inferenceCompletionHelp:
+    '当前已安装的 v2 环境已提交管理入口前缀，但尚未设置推理入口前缀。请完成这一次性的补齐配置后再进入控制台。',
+  inferenceCompletionReadOnlyNote:
+    '原有管理入口前缀已锁定保留。此处仅用于一次性补齐缺失的推理入口前缀，提交生效后不可二次修改。',
+  inferenceCompletionControlLabel: '已提交的管理入口前缀（锁定保留）',
+  inferenceCompletionSubmit: '验证并提交推理前缀',
+  inferenceCompletionSubmitting: '正在验证并提交…',
+  inferenceCompletionCompleteTitle: '推理入口前缀已提交并生效',
+  inferenceCompletionCompleteHelp:
+    '管理入口与推理入口均已验证就绪。请确认下方各协议接入端点，然后进入控制台。',
+  inferenceCompletionAlreadyCommitted: '该安装已完成推理入口前缀配置，无需重复设置。',
+  inferenceCompletionLoadError: '无法读取推理前缀补齐状态，请重试或检查 Manager 服务状态。',
 };
 const tw: typeof en = {
   ...zh,
@@ -294,7 +404,7 @@ const tw: typeof en = {
   refreshing: '正在檢查…',
   routeTitle: '控制台位址',
   path: '存取路徑',
-  pathHelp: '路徑以 / 開頭，可以保留預設的 /console。',
+  pathHelp: '路徑需以 / 開頭，可保留預設產生的隨機前綴，或輸入自訂路徑。',
   enable: '儲存控制台位址',
   enabling: '正在檢查控制台位址…',
   routeReady: '控制台位址已驗證。請使用已儲存的管理員金鑰登入，繼續安裝。',
@@ -312,6 +422,56 @@ const tw: typeof en = {
   revision: '已儲存版本',
   claimRequired: '請開啟獲授權的安裝連結',
   claimRequiredHelp: '請從部署主機提供的安全安裝入口開啟連結，開始或恢復設定。',
+  managementPrefix: '管理入口前綴',
+  managementPrefixHelp:
+    '預設由伺服器產生並儲存 16 位元 URL 安全隨機前綴，用於存取 CPAMP 控制台與管理 API。',
+  inferencePrefix: '推論入口前綴',
+  inferencePrefixHelp:
+    '用於 OpenAI、Responses、Anthropic 與 Gemini 模型請求的獨立入口前綴；未明確啟用共用模式時不可與管理前綴重疊或巢狀包含。',
+  randomizePrefix: '重新隨機產生',
+  sharedPrefixToggle: '管理與推論使用同一前綴（明確共用模式）',
+  sharedPrefixHelp:
+    '預設關閉。僅當你明確希望管理入口與推論入口共用同一個路徑前綴時勾選。',
+  sharedPrefixBadge: '共用前綴模式',
+  independentPrefixBadge: '獨立雙前綴',
+  externalInferenceLabel: '外部 CPA 推論位址',
+  externalInferenceNote:
+    'External 模式僅設定 CPAMP 管理入口前綴；模型推論仍直接使用所填寫的外部 CPA 實際位址。',
+  finalUrlsPreview: '最終存取位址預覽',
+  previewConsoleUrl: '管理控制台位址',
+  previewManagementApiUrl: '管理 API 基路徑',
+  previewInferenceUrl: '推論入口位址',
+  previewExternalInferenceUrl: '外部推論位址',
+  savePrefixDraft: '儲存前綴草稿',
+  prefixDraftSaved: '前綴草稿已儲存至目前操作，重新整理頁面後仍會保留。',
+  prefixDraftFailed: '前綴草稿儲存失敗，請重試後再離開目前頁面。',
+  prefixErrorInvalid: '請輸入以 / 開頭的規範路徑，不能包含結尾斜線、空白、百分比編碼或點區段。',
+  prefixErrorInferenceRequired: 'Managed 與 Adopt 安裝方式必須設定推論入口前綴。',
+  prefixErrorExternalInferenceForbidden: 'External 模式不允許設定本機推論前綴或啟用共用模式。',
+  prefixErrorSharedMismatch: '啟用共用模式時，管理前綴與推論前綴必須完全一致。',
+  prefixErrorSharedConfirmRequired:
+    '管理前綴與推論前綴相同。如需使用相同路徑，請明確勾選共用模式，或改用不同前綴。',
+  prefixErrorOverlapForbidden: '管理前綴與推論前綴不允許互為巢狀包含關係。',
+  prefixErrorReservedCollision: '此路徑與系統保留路由或協定保留路徑衝突，請更換其他前綴。',
+  prefixErrorRoutingConflict: '路由設定與已提交的操作衝突，請先檢查已儲存進度。',
+  prefixErrorVerificationFailed: '伺服器未能核驗已發佈的管理或推論路由，請檢查 Ingress 狀態後重試。',
+  prefixErrorAlreadyCommitted: '此安裝的推論前綴已完成一次性提交，此處不允許二次修改。',
+  accessSessionExpired: '初始化續期憑證已過期',
+  accessSessionExpiredHelp:
+    '請點選下方入口使用管理員金鑰登入控制台，登入後即可檢視完整的已驗證協定存取資訊。',
+  inferenceCompletionTitle: '補齊推論入口前綴',
+  inferenceCompletionHelp:
+    '目前安裝的 v2 環境已提交管理入口前綴，但尚未設定推論入口前綴。請完成這一次性的補齊設定後再進入控制台。',
+  inferenceCompletionReadOnlyNote:
+    '原有管理入口前綴已鎖定保留。此處僅用於一次性補齊缺失的推論入口前綴，提交生效後不可二次修改。',
+  inferenceCompletionControlLabel: '已提交的管理入口前綴（鎖定保留）',
+  inferenceCompletionSubmit: '驗證並提交推論前綴',
+  inferenceCompletionSubmitting: '正在驗證並提交…',
+  inferenceCompletionCompleteTitle: '推論入口前綴已提交並生效',
+  inferenceCompletionCompleteHelp:
+    '管理入口與推論入口均已驗證就緒。請確認下方各協定存取端點，然後進入控制台。',
+  inferenceCompletionAlreadyCommitted: '此安裝已完成推論入口前綴設定，無需重複設定。',
+  inferenceCompletionLoadError: '無法讀取推論前綴補齊狀態，請重試或檢查 Manager 服務狀態。',
 };
 const ru: typeof en = {
   loginKeyPlaceholder: 'Введите сохранённый ключ администратора CPAMP',
@@ -402,7 +562,7 @@ const ru: typeof en = {
   refreshing: 'Проверка…',
   routeTitle: 'Адрес консоли',
   path: 'Путь доступа',
-  pathHelp: 'Путь должен начинаться с /. Можно оставить /console.',
+  pathHelp: 'Путь должен начинаться с /. Оставьте случайный префикс или задайте свой.',
   enable: 'Сохранить адрес консоли',
   enabling: 'Проверка адреса консоли…',
   routeReady:
@@ -423,6 +583,65 @@ const ru: typeof en = {
   claimRequired: 'Откройте авторизованную ссылку установки',
   claimRequiredHelp:
     'Откройте защищённую ссылку установки, выданную хостом развёртывания, чтобы начать или возобновить настройку.',
+  managementPrefix: 'Префикс входа управления',
+  managementPrefixHelp:
+    'По умолчанию сервер создаёт и сохраняет случайный 16-символьный URL-безопасный префикс для консоли CPAMP и API управления.',
+  inferencePrefix: 'Префикс входа инференса',
+  inferencePrefixHelp:
+    'Независимый префикс для запросов OpenAI, Responses, Anthropic и Gemini. Не должен пересекаться с префиксом управления без явного общего режима.',
+  randomizePrefix: 'Сгенерировать новый',
+  sharedPrefixToggle: 'Использовать один префикс для управления и инференса (общий режим)',
+  sharedPrefixHelp:
+    'По умолчанию выключено. Включайте только если намеренно размещаете управление и инференс на одном префиксе.',
+  sharedPrefixBadge: 'Общий префикс',
+  independentPrefixBadge: 'Раздельные префиксы',
+  externalInferenceLabel: 'Внешний адрес инференса CPA',
+  externalInferenceNote:
+    'В режиме External настраивается только префикс управления CPAMP. Трафик инференса продолжает идти напрямую на внешний адрес CPA.',
+  finalUrlsPreview: 'Предпросмотр итоговых URL',
+  previewConsoleUrl: 'Адрес консоли управления',
+  previewManagementApiUrl: 'Базовый путь API управления',
+  previewInferenceUrl: 'Базовый адрес инференса',
+  previewExternalInferenceUrl: 'Внешний URL инференса',
+  savePrefixDraft: 'Сохранить черновик префиксов',
+  prefixDraftSaved: 'Черновик префиксов сохранён в операции и переживёт обновление страницы.',
+  prefixDraftFailed: 'Не удалось сохранить черновик префиксов. Повторите попытку перед уходом со страницы.',
+  prefixErrorInvalid:
+    'Введите канонический путь, начинающийся с /, без конечного слэша, пробелов, процентного кодирования и сегментов с точками.',
+  prefixErrorInferenceRequired:
+    'Для режимов Managed и Adopt требуется указать префикс входа инференса.',
+  prefixErrorExternalInferenceForbidden:
+    'В режиме External нельзя задавать локальный префикс инференса или общий режим.',
+  prefixErrorSharedMismatch: 'В общем режиме префиксы управления и инференса должны совпадать.',
+  prefixErrorSharedConfirmRequired:
+    'Префиксы управления и инференса совпадают. Явно включите общий режим или выберите разные префиксы.',
+  prefixErrorOverlapForbidden: 'Префиксы управления и инференса не могут быть вложены друг в друга.',
+  prefixErrorReservedCollision:
+    'Путь конфликтует с зарезервированным маршрутом системы или протокола. Выберите другой префикс.',
+  prefixErrorRoutingConflict:
+    'Конфигурация маршрутизации конфликтует с уже зафиксированной операцией. Обновите сохранённое состояние.',
+  prefixErrorVerificationFailed:
+    'Сервер не смог подтвердить опубликованные маршруты управления или инференса. Проверьте Ingress и повторите.',
+  prefixErrorAlreadyCommitted:
+    'Префикс инференса уже зафиксирован и больше не может быть изменён на этом экране.',
+  accessSessionExpired: 'Сеанс сводки установки истёк',
+  accessSessionExpiredHelp:
+    'Войдите в консоль с ключом администратора, чтобы просмотреть подтверждённые адреса протоколов.',
+  inferenceCompletionTitle: 'Задайте префикс входа инференса',
+  inferenceCompletionHelp:
+    'Эта установка v2 уже зафиксировала префикс управления, но требует однократно указать недостающий префикс инференса перед входом в консоль.',
+  inferenceCompletionReadOnlyNote:
+    'Префикс управления сохранён и заблокирован. Здесь однократно добавляется только префикс инференса; повторное редактирование не предусмотрено.',
+  inferenceCompletionControlLabel: 'Зафиксированный префикс управления (неизменяемый)',
+  inferenceCompletionSubmit: 'Проверить и сохранить префикс',
+  inferenceCompletionSubmitting: 'Проверка и сохранение…',
+  inferenceCompletionCompleteTitle: 'Префикс инференса сохранён и активен',
+  inferenceCompletionCompleteHelp:
+    'Входы управления и инференса проверены и работают. Проверьте адреса протоколов ниже и перейдите в консоль.',
+  inferenceCompletionAlreadyCommitted:
+    'Префикс входа инференса для этой установки уже настроен.',
+  inferenceCompletionLoadError:
+    'Не удалось прочитать состояние настройки префикса инференса. Повторите попытку или проверьте состояние Manager.',
 };
 export function bootstrapJourneyText(
   key: keyof typeof en,
@@ -431,4 +650,36 @@ export function bootstrapJourneyText(
   const table =
     language === 'zh-TW' ? tw : language.startsWith('zh') ? zh : language === 'ru' ? ru : en;
   return table[key];
+}
+
+export type BootstrapJourneyKey = keyof typeof en;
+
+export function bootstrapPrefixCodeText(
+  code: string | undefined,
+  language = fullWebLanguage()
+): string | null {
+  switch (code) {
+    case 'invalid_access_prefix':
+      return bootstrapJourneyText('prefixErrorInvalid', language);
+    case 'inference_prefix_required':
+      return bootstrapJourneyText('prefixErrorInferenceRequired', language);
+    case 'external_inference_prefix_forbidden':
+      return bootstrapJourneyText('prefixErrorExternalInferenceForbidden', language);
+    case 'shared_prefix_mismatch':
+      return bootstrapJourneyText('prefixErrorSharedMismatch', language);
+    case 'shared_prefix_confirmation_required':
+      return bootstrapJourneyText('prefixErrorSharedConfirmRequired', language);
+    case 'prefix_overlap_forbidden':
+      return bootstrapJourneyText('prefixErrorOverlapForbidden', language);
+    case 'reserved_prefix_collision':
+      return bootstrapJourneyText('prefixErrorReservedCollision', language);
+    case 'routing_conflict':
+      return bootstrapJourneyText('prefixErrorRoutingConflict', language);
+    case 'routing_verification_failed':
+      return bootstrapJourneyText('prefixErrorVerificationFailed', language);
+    case 'inference_prefix_already_committed':
+      return bootstrapJourneyText('prefixErrorAlreadyCommitted', language);
+    default:
+      return null;
+  }
 }

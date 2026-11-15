@@ -91,6 +91,12 @@ type Window struct {
 	UnmappedEvents int64
 }
 
+// KeyRange bounds one Canonical Key's provable window floor [FromMS, toMS).
+type KeyRange struct {
+	APIKeyID identity.APIKeyID
+	FromMS   int64
+}
+
 // IncompleteDay is one UTC day a v2 Upgrade marked incomplete. Reason is a
 // stable code; the UI owns its wording.
 type IncompleteDay struct {
@@ -107,8 +113,9 @@ type Repository interface {
 	// ProjectionState returns the canonical identity projection checkpoint.
 	ProjectionState(ctx context.Context) (ProjectionState, error)
 
-	// Windows aggregates mapped events per key inside [fromMS, toMS).
-	Windows(ctx context.Context, ids []identity.APIKeyID, fromMS, toMS int64) (map[identity.APIKeyID]Window, error)
+	// Windows aggregates mapped and unmapped events per key inside each key's
+	// half-open [FromMS, toMS) range.
+	Windows(ctx context.Context, ranges []KeyRange, toMS int64) (map[identity.APIKeyID]Window, error)
 
 	// Series aggregates mapped events of one key into fixed buckets.
 	Series(ctx context.Context, id identity.APIKeyID, fromMS, toMS, bucketMS int64) ([]Bucket, error)

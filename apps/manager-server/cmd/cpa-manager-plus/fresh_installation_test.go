@@ -56,7 +56,11 @@ func newInstallationTestApplication(t *testing.T) *freshApplication {
 	t.Cleanup(func() { _ = opened.Close() })
 	app := newFreshApplication(opened, config.Config{}, nil)
 	_, err = app.store.Update(t.Context(), opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -67,7 +71,7 @@ func newInstallationTestApplication(t *testing.T) *freshApplication {
 
 func installationAPI(t *testing.T, app *freshApplication, method, resource, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, "/control/api/v2/"+resource, nil)
+	req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -87,6 +91,10 @@ func installManagedCheckpoint(t *testing.T, app *freshApplication, stage string)
 	}
 	s := validInstallationRuntime()
 	after, err := app.store.Update(t.Context(), before.Operation.Identity, before.Operation.Revision, func(r *freshstore.Record) error {
+		if r.Operation.Routing.Committed && r.Operation.Routing.InferenceTarget == "" {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+		}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.NewManaged, Stage: stage, TargetIdentity: string(s.Identity),
 			TargetGeneration: uint64(s.Generation), TargetArtifactID: string(s.ActiveGatewayArtifact.ArtifactID),
@@ -188,14 +196,14 @@ func TestFreshInstallationRuntimeRejectsOtherStrategiesWithoutCallingRuntime(t *
 	// Connect External owns no Manager Runtime: its CPA is the user's, so the
 	// observation route refuses it before any status read.
 	response := httptest.NewRecorder()
-	app.installationRuntime(response, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal}})
+	app.installationRuntime(response, httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal}})
 	if response.Code != http.StatusConflict || runtime.calls != 0 {
 		t.Fatal("External acquired managed Runtime observation")
 	}
 	// Adopt is a Manager-owned installation: the destination the Manager staged
 	// is its own Runtime, so the same observation answers for it.
 	adopted := httptest.NewRecorder()
-	app.installationRuntime(adopted, httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting}})
+	app.installationRuntime(adopted, httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"installation/runtime", nil), bootstrap.FreshOperation{Strategy: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting}})
 	if adopted.Code != http.StatusOK || runtime.calls != 1 {
 		t.Fatalf("adopted installation lost its Runtime observation: %d", adopted.Code)
 	}

@@ -10,8 +10,17 @@ public_port="${CPAMP_SMOKE_PORT:-28317}"
 skip_build="${CPAMP_SMOKE_SKIP_BUILD:-false}"
 snapshot_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime13-smoke.XXXXXX")"
 initializer_name="${project}-cpamp-manager-init"
-# Explicit historical baseline; the normal Docker/Compose default is CPA v8.
-compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
+compose_override="${CPAMP_SMOKE_COMPOSE_OVERRIDE:-}"
+compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml")
+if [ -n "${compose_override}" ]; then
+  if [ ! -f "${compose_override}" ]; then
+    echo "CPAMP_SMOKE_COMPOSE_OVERRIDE does not exist or is not a regular file: ${compose_override}" >&2
+    exit 2
+  fi
+  export CPAMP_SMOKE_COMPOSE_OVERRIDE="${compose_override}"
+  compose+=(-f "${compose_override}")
+fi
+compose+=(-p "${project}")
 
 cleanup() {
   docker rm -f "${initializer_name}" >/dev/null 2>&1 || true
@@ -215,15 +224,14 @@ retry 30 "${compose[@]}" exec -T cpa-manager-plus sh -ec '
 "${compose[@]}" exec -T -u 10003:10003 cpa-manager-plus sh -ec '! test -r /data/usage.sqlite && ! test -r /data/data.key'
 "${compose[@]}" stop cpa-manager-plus >/dev/null
 "${compose[@]}" down --volumes --remove-orphans >/dev/null
-# Verify the one-shot Fresh admission/handoff contract, then convert only this
-# disposable CI volume to the explicit historical Manager baseline required by
-# the existing Runtime lifecycle smoke. Fresh itself must not select Embedded
-# Runtime or create runtime_desired_v1.
+# Verify the one-shot Fresh admission/handoff contract, then seed the disposable
+# Manager compatibility-reconciler volume while /data/runtime stays empty for
+# CPA v8.0.55 initialization. Fresh itself must not select Embedded Runtime or
+# create runtime_desired_v1.
 "${repo_root}/bin/ci/runtime-lifecycle-manager-baseline.sh" "${project}" "${initializer_name}"
 
-# The historical baseline retains the existing Runtime lifecycle checks:
-# normal Manager compatibility startup must create the desired state and start
-# CPA without a direct Supervisor mutation from the smoke test.
+# Normal Manager compatibility startup must create the desired state and start
+# CPA v8.0.55 without a direct Supervisor mutation from the smoke test.
 "${compose[@]}" up -d
 public_origin="http://127.0.0.1:${public_port}"
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
@@ -241,14 +249,20 @@ if [[ ! "$active_artifact_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 if [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.engine)" != "cpa" ] ||
-  [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.version)" != "7.3.3" ] ||
-  [ "$(printf '%s' "$ready_status" | json_field cpaObservedVersion)" != "7.3.3" ]; then
-  echo "Runtime status did not expose the trusted bundled CPA v7.3.3 artifact" >&2
+  [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.version)" != "8.0.55" ] ||
+  [ "$(printf '%s' "$ready_status" | json_field cpaObservedVersion)" != "8.0.55" ]; then
+  echo "Runtime status did not expose the trusted bundled CPA v8.0.55 artifact" >&2
+  exit 1
+fi
+manifest_json="$("${compose[@]}" exec -T cpa-manager-plus cat /usr/local/share/cpamp/runtime/cpa-artifact.json)"
+if [ "$(printf '%s' "$manifest_json" | json_field version)" != "8.0.55" ] ||
+  [ "$(printf '%s' "$manifest_json" | json_field artifactId)" != "$active_artifact_id" ]; then
+  echo "Runtime status does not match /usr/local/share/cpamp/runtime/cpa-artifact.json" >&2
   exit 1
 fi
 executable_artifact_id="sha256:$("${compose[@]}" exec -T cpa-manager-plus sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
 if [ "$active_artifact_id" != "$executable_artifact_id" ]; then
-  echo "Runtime active artifact ID does not match exact CPA executable bytes" >&2
+  echo "Runtime active artifact ID does not match exact CPA v8.0.55 executable bytes" >&2
   exit 1
 fi
 
@@ -263,8 +277,14 @@ fi
     done
   fi
   test "$(wc -c <"${token_file}" | tr -d " ")" -ge 32
+  test -f "${rt_root}/.cpamp-v8-bootstrap"
+  test "$(stat -c %u:%g:%a "${rt_root}/.cpamp-v8-bootstrap")" = "0:0:444"
+  seed_digest="$(sha256sum /usr/local/share/cpamp/runtime/config.seed.yaml | awk "{print \$1}")"
+  test "$(tr -d "\n" <"${rt_root}/.cpamp-v8-bootstrap")" = "official-cpa-v8-bootstrap:${seed_digest}"
   test -f "${rt_root}/gateway/config.yaml"
-  test "$(stat -c %a "${rt_root}/gateway/config.yaml")" = "600"
+  test "$(stat -c %u:%g:%a "${rt_root}/gateway/config.yaml")" = "10001:10001:600"
+  test "$(sha256sum "${rt_root}/gateway/config.yaml" | awk "{print \$1}")" = "${seed_digest}"
+  grep -q "^config-version: 8$" "${rt_root}/gateway/config.yaml"
   test -d "${rt_root}/supervisor"
   test -d "${rt_root}/gateway/auth"
   ! grep -Eq "secret-key: +[^\" ]|api-keys: +\[[^]]" "${rt_root}/gateway/config.yaml"
@@ -317,10 +337,13 @@ fi
 runtime_root="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'if [ -d /data/runtime ]; then printf /data/runtime; else printf /runtime; fi')"
 token_file="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do if [ -e "$c" ]; then printf "%s" "$c"; break; fi; done')"
 secret_before="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${token_file}" | awk '{print $1}')"
-"${compose[@]}" exec -T cpa-manager-plus sh -ec '
-  printf "\n# runtime13-smoke-existing-config-marker\n" >> "${1}/gateway/config.yaml"
-' sh "${runtime_root}"
+bootstrap_before="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/.cpamp-v8-bootstrap" | awk '{print $1}')"
 config_before="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/gateway/config.yaml" | awk '{print $1}')"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  printf "runtime13-smoke-gateway-state\n" > "${1}/gateway/logs/runtime13-smoke-state-marker"
+  chown 10001:10001 "${1}/gateway/logs/runtime13-smoke-state-marker"
+  chmod 600 "${1}/gateway/logs/runtime13-smoke-state-marker"
+' sh "${runtime_root}"
 
 copy_container_file cpa-manager-plus "${runtime_root}/supervisor/operations.sqlite" "${snapshot_root}/operations-before.sqlite"
 assert_reconcile_start_journal "${snapshot_root}/operations-before.sqlite" 1
@@ -340,16 +363,64 @@ fi
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
 secret_after="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${token_file}" | awk '{print $1}')"
+bootstrap_after="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/.cpamp-v8-bootstrap" | awk '{print $1}')"
 config_after="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/gateway/config.yaml" | awk '{print $1}')"
 if [ "$secret_before" != "$secret_after" ]; then
   echo "Runtime transport secret changed across Runtime recreate" >&2
   exit 1
 fi
-if [ "$config_before" != "$config_after" ]; then
-  echo "Existing Gateway configuration was overwritten across Runtime recreate" >&2
+if [ "$bootstrap_before" != "$bootstrap_after" ] || [ "$config_before" != "$config_after" ]; then
+  echo "CPA v8 bootstrap configuration changed across Runtime recreate" >&2
   exit 1
 fi
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  test "$(cat "${1}/gateway/logs/runtime13-smoke-state-marker")" = "runtime13-smoke-gateway-state"
+' sh "${runtime_root}"
 
 copy_container_file cpa-manager-plus "${runtime_root}/supervisor/operations.sqlite" "${snapshot_root}/operations-after.sqlite"
 assert_reconcile_start_journal "${snapshot_root}/operations-after.sqlite" 2
+
+# CPA v8 startup gate: any direct modification to bootstrap gateway/config.yaml
+# must fail closed on recreate without overwriting user bytes, and recover once
+# restored to the exact v8 seed.
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  printf "\n# runtime12-modified-bootstrap-config\n" >> "${1}/gateway/config.yaml"
+' sh "${runtime_root}"
+tampered_config_digest="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/gateway/config.yaml" | awk '{print $1}')"
+"${compose[@]}" stop cpa-manager-plus >/dev/null
+"${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null 2>&1 || true
+tamper_refused="false"
+for _ in $(seq 1 30); do
+  if "${compose[@]}" logs --no-color --tail 100 cpa-manager-plus 2>&1 |
+    grep -Fq "Default CPA v8 refuses existing or unknown Runtime data: modified or incompatible bootstrap config"; then
+    tamper_refused="true"
+    break
+  fi
+  sleep 1
+done
+if [ "$tamper_refused" != "true" ]; then
+  "${compose[@]}" logs --no-color --tail 100 cpa-manager-plus >&2 || true
+  echo "CPA v8 startup gate did not refuse modified bootstrap gateway/config.yaml" >&2
+  exit 1
+fi
+if runtime_cpa_pid >/dev/null 2>&1 || runtime_get /v1/runtime/status >/dev/null 2>&1; then
+  echo "Modified bootstrap gateway/config.yaml left CPA or Supervisor running" >&2
+  exit 1
+fi
+"${compose[@]}" stop cpa-manager-plus >/dev/null 2>&1 || true
+tampered_after="$("${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
+  sha256sum "${1}/gateway/config.yaml" | awk "{print \$1}"
+' sh "${runtime_root}")"
+if [ "$tampered_after" != "$tampered_config_digest" ]; then
+  echo "Fail-closed CPA v8 startup gate overwrote modified gateway/config.yaml" >&2
+  exit 1
+fi
+"${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
+  cp /usr/local/share/cpamp/runtime/config.seed.yaml "${1}/gateway/config.yaml"
+  chown 10001:10001 "${1}/gateway/config.yaml"
+  chmod 600 "${1}/gateway/config.yaml"
+' sh "${runtime_root}" >/dev/null
+"${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null
+wait_runtime_state ready 120 >/dev/null
+retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 echo "Runtime 13 Docker smoke passed: read-only Fresh discovery, explicit initialization, persistent desired state, stable healthy child across Manager lifecycle, generation-scoped Runtime recovery, single public ingress, and isolated health"

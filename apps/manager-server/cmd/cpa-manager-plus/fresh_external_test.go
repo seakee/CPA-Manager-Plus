@@ -37,7 +37,11 @@ func newA3TestApp(t *testing.T) (*freshApplication, func()) {
 		Qualification: bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true}})
 	op := opened.Record.Operation
 	if _, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -64,7 +68,7 @@ func a3PostWithAttempt(t *testing.T, app *freshApplication, revision uint64, url
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/strategy", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"strategy", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, request)
@@ -115,7 +119,7 @@ func TestExternalOptionalPrivatePermitAndAtomicCompletion(t *testing.T) {
 	if replay.Code != http.StatusConflict || sourceCalls.Load() != 1 {
 		t.Fatal("committed A3 replay accessed CPA", replay.Code)
 	}
-	complete := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	complete := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 	complete.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, complete)
@@ -355,7 +359,11 @@ func TestExternalRecoversOldValidatedStateAndCompletedSQLiteRestart(t *testing.T
 	app := newFreshApplication(opened, config.Config{}, nil)
 	op := opened.Record.Operation
 	_, err = app.store.Update(ctx, op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal, TargetIdentity: "external:sha256:" + strings.Repeat("a", 64), TargetGeneration: 1, Stage: "validated"}
 		return nil
 	})
@@ -383,7 +391,7 @@ func TestExternalRecoversOldValidatedStateAndCompletedSQLiteRestart(t *testing.T
 	if response.Code != http.StatusOK {
 		t.Fatal("restart recovery failed", response.Code, response.Body.String())
 	}
-	complete := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	complete := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 	complete.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response = httptest.NewRecorder()
 	app.canonicalAPI(response, complete)
@@ -407,7 +415,7 @@ func TestExternalRecoversOldValidatedStateAndCompletedSQLiteRestart(t *testing.T
 	if err != nil || key != "external-key" {
 		t.Fatal("encrypted connection did not survive restart", err)
 	}
-	status := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/status", nil)
+	status := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/status", nil)
 	status.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response = httptest.NewRecorder()
 	app.canonicalAPI(response, status)
@@ -496,14 +504,14 @@ func TestExternalRequiresAdminBeforeCPAReadOrCompletion(t *testing.T) {
 	op, _ := app.current(t.Context())
 	for _, resource := range []string{"strategy", "complete"} {
 		body, _ := json.Marshal(map[string]any{"identity": op.Identity, "expectedRevision": op.Revision, "attemptId": strings.Repeat("a", 32), "strategy": "connect_external", "baseUrl": source.URL, "managementKey": "test-secret"})
-		request := httptest.NewRequest(http.MethodPost, "/control/api/v2/"+resource, bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewReader(body))
 		response := httptest.NewRecorder()
 		app.canonicalAPI(response, request)
 		if response.Code != http.StatusUnauthorized || reads.Load() != 0 {
 			t.Fatal("unauthorized request escaped boundary", response.Code)
 		}
 	}
-	request := httptest.NewRequest(http.MethodPost, "/control/api/v2/complete", nil)
+	request := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"complete", nil)
 	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	response := httptest.NewRecorder()
 	app.canonicalAPI(response, request)

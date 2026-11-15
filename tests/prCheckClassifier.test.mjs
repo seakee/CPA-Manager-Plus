@@ -450,7 +450,8 @@ describe('PR check classifier', () => {
       'bin/ci/runtime19-phase1-exit-e2e.sh',
       'bin/ci/runtime-v8-default-smoke.py',
       'bin/ci/runtime-slim-acquire-smoke.py',
-      'bin/ci/runtime-v7-compatibility.compose.yml',
+      'bin/ci/runtime-lifecycle-manager-baseline.sh',
+      'bin/ci/runtime-v8-upload-stage.py',
       'bin/ci/validate-runtime12-compose.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({

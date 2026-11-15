@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,26 +33,31 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 // externalUsageCPA is the user's own CPA as these tests model it: one management
 // credential, one usage-statistics switch, and a usage queue the real Collector
 // polls.
 type externalUsageCPA struct {
-	management atomic.Value
-	enabled    atomic.Bool
-	rejects    atomic.Bool
-	statWrites atomic.Int32
-	failNextStatPut atomic.Bool
+	mu                          sync.Mutex
+	clientKeys                  []string
+	management                  atomic.Value
+	enabled                     atomic.Bool
+	rejects                     atomic.Bool
+	statWrites                  atomic.Int32
+	failNextStatPut             atomic.Bool
 	failNextStatPutKeepDisabled atomic.Bool
-	queueReads atomic.Int32
-	// refusals counts the requests this CPA answered 401 because the presented
-	// credential was not the current one. It is what proves a stopped Collector
-	// sends nothing more and a rebound one sends only the new credential.
+	queueReads                  atomic.Int32
+	// refusals counts the management requests this CPA answered 401 because the
+	// presented management credential was not the current one. It is what proves
+	// a stopped Collector sends nothing more and a rebound one sends only the new
+	// credential.
 	refusals atomic.Int32
 	// requests counts every request that reached the CPA, so a test can prove a
 	// stopped Collector issues no further traffic at all.
-	requests atomic.Int32
+	requests    atomic.Int32
 	version     atomic.Value
 	alsoAccept  atomic.Value
 	onQueueRead atomic.Value
@@ -62,6 +72,29 @@ func newExternalUsageCPA(t *testing.T, management string) *externalUsageCPA {
 	f.version.Store("v8.0.13")
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
+		if r.URL.Path == "/v1/models" {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			f.mu.Lock()
+			keys := slices.Clone(f.clientKeys)
+			f.mu.Unlock()
+			authHeader := r.Header.Get("Authorization")
+			authorized := false
+			if len(keys) == 0 {
+				authorized = authHeader == ""
+			} else if strings.HasPrefix(authHeader, "Bearer ") {
+				authorized = slices.Contains(keys, strings.TrimPrefix(authHeader, "Bearer "))
+			}
+			if !authorized {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4"}]}`))
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		primary := "Bearer " + f.management.Load().(string)
 		secondaryKey, _ := f.alsoAccept.Load().(string)
@@ -92,9 +125,49 @@ func newExternalUsageCPA(t *testing.T, management string) *externalUsageCPA {
 			}
 			_, _ = w.Write([]byte(`{"usage-statistics-enabled":` + boolText(f.enabled.Load()) + `}`))
 		case "/v8/management/config/access/api-keys":
-			_, _ = w.Write([]byte("[]"))
+			switch r.Method {
+			case http.MethodGet:
+				f.mu.Lock()
+				keys := slices.Clone(f.clientKeys)
+				f.mu.Unlock()
+				if keys == nil {
+					keys = []string{}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(keys)
+			case http.MethodPut:
+				var next []string
+				dec := json.NewDecoder(r.Body)
+				if dec.Decode(&next) != nil || dec.Decode(new(any)) != io.EOF {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				f.mu.Lock()
+				f.clientKeys = slices.Clone(next)
+				f.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
 		case "/v8/management/config.yaml":
-			_, _ = w.Write([]byte(`{"config-version":8}`))
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			f.mu.Lock()
+			keys := slices.Clone(f.clientKeys)
+			f.mu.Unlock()
+			if keys == nil {
+				keys = []string{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"config-version": 8,
+				"access": map[string]any{
+					"api-keys": keys,
+				},
+			})
 		case "/v0/management/usage-queue":
 			f.queueReads.Add(1)
 			if fn, _ := f.onQueueRead.Load().(func(string)); fn != nil {
@@ -155,9 +228,11 @@ func newExternalUsageHarness(t *testing.T) *externalUsageHarness {
 	}
 	op := opened.Record.Operation
 	if _, err = app.store.Update(hostCtx, op.Identity, op.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: freshkeyapply.ExternalIdentity(normalized), TargetGeneration: 1,
@@ -175,7 +250,7 @@ func newExternalUsageHarness(t *testing.T) *externalUsageHarness {
 
 func (h *externalUsageHarness) call(t *testing.T, method, resource, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
+	request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+""+resource, bytes.NewBufferString(body))
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -295,6 +370,34 @@ func TestExternalUsageCollectionBindsTheConnectionIdentity(t *testing.T) {
 	h := newExternalUsageHarness(t)
 	h.cpa.enabled.Store(true)
 	staged := stageClientKey(t, h.app)
+	if h.cpa.refusals.Load() != 0 {
+		t.Fatalf("ordinary POST key creation recorded %d management refusals", h.cpa.refusals.Load())
+	}
+	for _, tc := range []struct {
+		name string
+		auth string
+		want int
+	}{
+		{name: "anonymous", auth: "", want: http.StatusUnauthorized},
+		{name: "wrong_client_key", auth: "Bearer cpamp_sk_wrong", want: http.StatusUnauthorized},
+		{name: "active_client_key", auth: "Bearer " + staged.CreatedSecret, want: http.StatusOK},
+	} {
+		probeReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.cpa.server.URL+"/v1/models", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.auth != "" {
+			probeReq.Header.Set("Authorization", tc.auth)
+		}
+		probeResp, err := h.cpa.server.Client().Do(probeReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = probeResp.Body.Close()
+		if probeResp.StatusCode != tc.want {
+			t.Fatalf("/v1/models (%s) = %d, want %d", tc.name, probeResp.StatusCode, tc.want)
+		}
+	}
 	identity := h.operation(t).Strategy.TargetIdentity
 	if !strings.HasPrefix(identity, "external:sha256:") {
 		t.Fatalf("committed identity = %q", identity)
@@ -572,7 +675,7 @@ func TestExternalUsageStateRefusesAnIncompleteInstall(t *testing.T) {
 	op := h.operation(t)
 	op.ProductComplete = false
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		request := httptest.NewRequest(method, "/control/api/v2/external/usage",
+		request := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+"external/usage",
 			bytes.NewBufferString(`{"requestId":"`+strings.Repeat("a", 32)+`","confirmEnableStatistics":true}`))
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
@@ -880,7 +983,7 @@ func TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection(t *testing.
 
 			// Start with local monitoring switch disabled so PATCH {"enabled":true}
 			// triggers the first External CPA probe.
-			disableReq := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
+			disableReq := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
 			disableReq.Header.Set("Content-Type", "application/json")
 			disableReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 			disableResp := httptest.NewRecorder()
@@ -906,7 +1009,7 @@ func TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection(t *testing.
 			patchDone := make(chan struct{})
 			go func() {
 				defer close(patchDone)
-				req := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":true}`))
+				req := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/config", strings.NewReader(`{"enabled":true}`))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(patchResp, req)
@@ -924,7 +1027,7 @@ func TestExternalMonitoringConfigGetAndPatchRespectRecordedRejection(t *testing.
 			go func() {
 				defer close(modelDone)
 				ctx := &waitNotifyContext{Context: t.Context(), entered: modelWaiterEntered}
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil).WithContext(ctx)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(modelResp, req)
 			}()
@@ -1150,7 +1253,7 @@ func TestExternalUsageStateSerializesAndBindsSingleSnapshotUnderGate(t *testing.
 			firstDone := make(chan struct{})
 			go func() {
 				defer close(firstDone)
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/external/usage", nil)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"external/usage", nil)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(firstResp, req)
 			}()
@@ -1170,14 +1273,14 @@ func TestExternalUsageStateSerializesAndBindsSingleSnapshotUnderGate(t *testing.
 			go func() {
 				defer waiters.Done()
 				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterUsageEntered}
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/external/usage", nil).WithContext(ctx)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"external/usage", nil).WithContext(ctx)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(waiterUsageResp, req)
 			}()
 			go func() {
 				defer waiters.Done()
 				ctx := &waitNotifyContext{Context: t.Context(), entered: waiterModelsEntered}
-				req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+				req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil).WithContext(ctx)
 				req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 				app.canonicalAPI(waiterModelsResp, req)
 			}()
@@ -1249,7 +1352,7 @@ func TestExternalUsageStateSerializesAndBindsSingleSnapshotUnderGate(t *testing.
 			install, err := baseSource(ctx)
 			if err == nil {
 				rebindOnce.Do(func() {
-					rebindReq := httptest.NewRequest(http.MethodPost, "/control/api/v2/external/rebind", strings.NewReader(rebindBody("", reboundKey)))
+					rebindReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/rebind", strings.NewReader(rebindBody("", reboundKey)))
 					rebindReq.Header.Set("Content-Type", "application/json")
 					rebindReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 					rebindResp := httptest.NewRecorder()
@@ -1325,7 +1428,7 @@ func TestExternalCollectorStartHoldsGateAcrossUsageStatisticsReads(t *testing.T)
 	app.runCtx = hostCtx
 	app.store = uncancellableStore{app.store}
 
-	disableReq := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
+	disableReq := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
 	disableReq.Header.Set("Content-Type", "application/json")
 	disableReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 	disableResp := httptest.NewRecorder()
@@ -1348,7 +1451,7 @@ func TestExternalCollectorStartHoldsGateAcrossUsageStatisticsReads(t *testing.T)
 	patchDone := make(chan struct{})
 	go func() {
 		defer close(patchDone)
-		req := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":true}`))
+		req := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/config", strings.NewReader(`{"enabled":true}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		app.canonicalAPI(patchResp, req)
@@ -1366,7 +1469,7 @@ func TestExternalCollectorStartHoldsGateAcrossUsageStatisticsReads(t *testing.T)
 	go func() {
 		defer close(modelDone)
 		ctx := &waitNotifyContext{Context: t.Context(), entered: modelWaiterEntered}
-		req := httptest.NewRequest(http.MethodGet, "/control/api/v2/cpamp/v1/models", nil).WithContext(ctx)
+		req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v1/models", nil).WithContext(ctx)
 		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		app.canonicalAPI(modelResp, req)
 	}()
@@ -1648,9 +1751,11 @@ func TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle(t *testin
 				}
 				op := opened.Record.Operation
 				if _, err = app.store.Update(hostCtx, op.Identity, op.Revision, func(r *freshstore.Record) error {
-					r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-						OperationID: op.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-					}
+					r.Operation.Routing.OperationID = op.Identity.OperationID
+					r.Operation.Routing.Revision = 1
+					r.Operation.Routing.Target = "/cpamp-admin"
+					r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+					r.Operation.Routing.Committed = true
 					r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 						Strategy: bootstrap.ConnectExternal, Stage: "committed",
 						TargetIdentity: freshkeyapply.ExternalIdentity(normalized), TargetGeneration: 1,
@@ -1758,7 +1863,7 @@ func TestExternalRebindDurableDeleteFailurePreservesCollectorLifecycle(t *testin
 		h.app.startUsageCollection(h.operation(t))
 		awaitBearer(t, queueAuthCh, externalAuthorityManagement, "initial collector before switching Off")
 
-		patchReq := httptest.NewRequest(http.MethodPatch, "/control/api/v2/cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
+		patchReq := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/config", strings.NewReader(`{"enabled":false}`))
 		patchReq.Header.Set("Content-Type", "application/json")
 		patchReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
 		patchRes := httptest.NewRecorder()
@@ -1960,4 +2065,309 @@ func TestExternalUsageEnableRecoveryAndPostRebindState(t *testing.T) {
 			t.Fatalf("statWrites after retry while statistics read back false = %d, want 2 (second PUT executed)", got)
 		}
 	})
+}
+
+// TestExternalPostCreatedKeyAttributesImmediateUsageBeforeNextPollAndWakesProjection
+// verifies that in Fresh ConnectExternal mode:
+//  1. A key created via ordinary POST api-keys after collector startup immediately
+//     receives its canonical source binding at Key.CreatedAtMS bound to the
+//     verified persisted External identity (without waiting for collector poll).
+//  2. An immediate usage event arriving before the next collector poll maps via
+//     the real identity projection worker to the canonical Key (not unknown).
+//  3. Preparing and continuing a revoke operation retires the binding and wakes
+//     projection so pre-retirement usage stays mapped while post-retirement events
+//     do not misattribute to the retired key.
+func TestExternalPostCreatedKeyAttributesImmediateUsageBeforeNextPollAndWakesProjection(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "manager.sqlite"))
+	paths.Config = filepath.Join(filepath.Dir(paths.Database), "config.json")
+	opened, err := fresh.Open(hostCtx, paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		stopHost()
+		t.Fatal(err)
+	}
+
+	var (
+		mu         sync.Mutex
+		clientKeys []string
+		queueReads atomic.Int32
+	)
+	cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			mu.Lock()
+			accepted := token != "" && r.Header.Get("Authorization") == "Bearer "+token && slices.Contains(clientKeys, token)
+			mu.Unlock()
+			if !accepted {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.13")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/config":
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-statistics-enabled":
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-queue":
+			queueReads.Add(1)
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config":
+			mu.Lock()
+			rawKeys, _ := json.Marshal(append([]string(nil), clientKeys...))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"access":{"api-keys":` + string(rawKeys) + `}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config.yaml":
+			mu.Lock()
+			rawKeys, _ := json.Marshal(append([]string(nil), clientKeys...))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"config-version":8,"access":{"api-keys":` + string(rawKeys) + `}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/access/api-keys":
+			mu.Lock()
+			rawKeys, _ := json.Marshal(append([]string(nil), clientKeys...))
+			mu.Unlock()
+			_, _ = w.Write(rawKeys)
+		case r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/access/api-keys":
+			var updated []string
+			if json.NewDecoder(r.Body).Decode(&updated) != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			clientKeys = updated
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(cpaServer.Close)
+
+	app := newFreshApplication(opened, config.Config{
+		CollectorMode: "http",
+		PollInterval:  30 * time.Second,
+	}, nil)
+	app.runCtx = hostCtx
+	t.Cleanup(func() {
+		stopHost()
+		app.usageProjection.Wait()
+		_ = opened.Close()
+	})
+
+	normalized, err := cpa.NormalizeV8BaseURL(cpaServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedIdentity := freshkeyapply.ExternalIdentity(normalized)
+	protectedMgmt, err := opened.Protector.ProtectString(externalAuthorityManagement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := opened.Record.Operation
+	if _, err := app.store.Update(hostCtx, op.Identity, op.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.OperationID = op.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:         bootstrap.ConnectExternal,
+			Stage:            "committed",
+			TargetIdentity:   expectedIdentity,
+			TargetGeneration: 1,
+		}
+		r.Operation.ProductComplete = true
+		r.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: normalized, ManagementKey: protectedMgmt}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.externalSource = externalInstallSource(app.store, opened.Protector)
+	app.keyApply = freshkeyapply.NewExternal(app.keyRepo, app.keys, app.externalSource)
+
+	record, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.startUsageCollection(record.Operation)
+	waitForCondition(t, func() bool {
+		return queueReads.Load() >= 1 && app.collectionPhase() == usageapp.PhaseRunning
+	})
+	var startedRows int
+	waitForCondition(t, func() bool {
+		_ = opened.DB.QueryRow(`select count(*) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedRows)
+		return startedRows == 1
+	})
+	pollsAtStartup := queueReads.Load()
+
+	call := func(method, resource, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+resource, bytes.NewBufferString(body))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		rec := httptest.NewRecorder()
+		app.canonicalAPI(rec, req)
+		return rec
+	}
+
+	// Ordinary POST api-keys after collector startup must immediately bind at Key.CreatedAtMS.
+	req1 := strings.Repeat("1", 32)
+	createRes := call(http.MethodPost, "api-keys", `{"requestId":"`+req1+`"}`)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("POST api-keys = %d %s, want 201", createRes.Code, createRes.Body.String())
+	}
+	var created1 clientKeyCreateResponse
+	if err := json.Unmarshal(createRes.Body.Bytes(), &created1); err != nil {
+		t.Fatal(err)
+	}
+	if created1.Key.RuntimeState != "effective_observed" || created1.CreatedSecret == "" {
+		t.Fatalf("created key1 = %+v", created1)
+	}
+	if queueReads.Load() != pollsAtStartup {
+		t.Fatalf("unexpected collector poll during key creation: %d -> %d", pollsAtStartup, queueReads.Load())
+	}
+
+	sum1 := sha256.Sum256([]byte(created1.CreatedSecret))
+	hash1 := hex.EncodeToString(sum1[:])
+	var (
+		boundRuntime string
+		boundHash    string
+		firstSeenMS  int64
+		retiredMS    sql.NullInt64
+	)
+	if err := opened.DB.QueryRow(`select runtime_identity, api_key_hash, first_seen_at_ms, retired_at_ms
+		from gateway_api_key_source_bindings where api_key_id = ?`, string(created1.Key.ID)).
+		Scan(&boundRuntime, &boundHash, &firstSeenMS, &retiredMS); err != nil {
+		t.Fatalf("immediate binding missing for External POST key: %v", err)
+	}
+	if boundRuntime != expectedIdentity || boundHash != hash1 || firstSeenMS != created1.Key.CreatedAtMS || retiredMS.Valid {
+		t.Fatalf("immediate binding = runtime:%q hash:%q firstSeen:%d retired:%+v, want runtime:%q firstSeen:%d unretired",
+			boundRuntime, boundHash, firstSeenMS, retiredMS, expectedIdentity, created1.Key.CreatedAtMS)
+	}
+
+	// Immediate usage event before next collector poll maps to canonical Key.
+	legacyStore := store.New(opened.DB, opened.Protector)
+	raw1, _ := json.Marshal(map[string]any{
+		"request_id":    "ext-imm-1",
+		"timestamp":     strconv.FormatInt(created1.Key.CreatedAtMS, 10),
+		"model":         "gpt-4",
+		"api_key":       created1.CreatedSecret,
+		"input_tokens":  30,
+		"output_tokens": 12,
+		"total_tokens":  42,
+	})
+	ev1, err := usage.NormalizeRaw(raw1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := legacyStore.InsertEvents(hostCtx, []usage.Event{ev1}); err != nil || res.Inserted != 1 {
+		t.Fatalf("insert ev1 = %+v, err=%v", res, err)
+	}
+	app.usageProjection.HandleUsageEvents(hostCtx, []usage.Event{ev1})
+
+	waitForCondition(t, func() bool {
+		var state, keyID string
+		err := opened.DB.QueryRow(`select api_key_state, coalesce(api_key_id, '')
+			from gateway_usage_identity_projection_v1 where usage_event_id = 1`).Scan(&state, &keyID)
+		return err == nil && state == "mapped" && keyID == string(created1.Key.ID)
+	})
+	if queueReads.Load() != pollsAtStartup {
+		t.Fatalf("collector polled before projection attribution: %d -> %d", pollsAtStartup, queueReads.Load())
+	}
+
+	for time.Now().UnixMilli() <= ev1.TimestampMS {
+		time.Sleep(time.Millisecond)
+	}
+	summaryRes := call(http.MethodGet, "api-keys/usage-summary", "")
+	if summaryRes.Code != http.StatusOK {
+		t.Fatalf("GET usage-summary = %d %s", summaryRes.Code, summaryRes.Body.String())
+	}
+	summary := decodeUsage[usageapp.SummaryResponse](t, summaryRes)
+	var foundSummary bool
+	for _, item := range summary.Items {
+		if item.KeyID == string(created1.Key.ID) {
+			foundSummary = true
+			if item.Calls != 1 || item.LastUsedAtMS == nil || (item.Coverage.State != "partial" && item.Coverage.State != "complete") {
+				t.Fatalf("summary item = %+v", item)
+			}
+		}
+	}
+	if !foundSummary {
+		t.Fatalf("key1 %s missing from usage summary %+v", created1.Key.ID, summary)
+	}
+
+	detailRes := call(http.MethodGet, "api-keys/"+string(created1.Key.ID)+"/usage", "")
+	if detailRes.Code != http.StatusOK {
+		t.Fatalf("GET key usage = %d %s", detailRes.Code, detailRes.Body.String())
+	}
+	detail := decodeUsage[usageapp.DetailResponse](t, detailRes)
+	if detail.Totals == nil || detail.Totals.Calls != 1 || detail.Totals.TotalTokens != 42 {
+		t.Fatalf("key1 usage detail = %+v", detail)
+	}
+
+	// Create a second key so key1 can be revoked via Prepare + ContinueOperation;
+	// revocation commits retired_at_ms and wakes projection.
+	req2 := strings.Repeat("2", 32)
+	create2 := call(http.MethodPost, "api-keys", `{"requestId":"`+req2+`"}`)
+	if create2.Code != http.StatusCreated {
+		t.Fatalf("POST api-keys key2 = %d %s", create2.Code, create2.Body.String())
+	}
+	revokeOpID := strings.Repeat("3", 32)
+	prep := call(http.MethodPost, "api-keys/"+string(created1.Key.ID)+"/revocation", `{"requestId":"`+revokeOpID+`","mode":"revoke"}`)
+	if prep.Code != http.StatusOK {
+		t.Fatalf("prepare revoke = %d %s", prep.Code, prep.Body.String())
+	}
+	cont := call(http.MethodPost, "api-keys/operations/"+revokeOpID+"/continue", `{}`)
+	if cont.Code != http.StatusOK {
+		t.Fatalf("continue revoke = %d %s", cont.Code, cont.Body.String())
+	}
+	var retiredAtMS sql.NullInt64
+	if err := opened.DB.QueryRow(`select retired_at_ms from gateway_api_key_source_bindings where api_key_id = ?`, string(created1.Key.ID)).Scan(&retiredAtMS); err != nil || !retiredAtMS.Valid {
+		t.Fatalf("retired_at_ms after External revoke = %+v (%v)", retiredAtMS, err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	postRetireTS := time.Now().UnixMilli()
+	if postRetireTS <= retiredAtMS.Int64 {
+		postRetireTS = retiredAtMS.Int64 + 1
+	}
+	raw2, _ := json.Marshal(map[string]any{
+		"request_id":    "ext-post-retire-2",
+		"timestamp":     strconv.FormatInt(postRetireTS, 10),
+		"model":         "gpt-4",
+		"api_key":       created1.CreatedSecret,
+		"input_tokens":  50,
+		"output_tokens": 49,
+		"total_tokens":  99,
+	})
+	ev2, err := usage.NormalizeRaw(raw2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := legacyStore.InsertEvents(hostCtx, []usage.Event{ev2}); err != nil || res.Inserted != 1 {
+		t.Fatalf("insert ev2 = %+v, err=%v", res, err)
+	}
+	app.usageProjection.HandleUsageEvents(hostCtx, []usage.Event{ev2})
+
+	waitForCondition(t, func() bool {
+		var state string
+		err := opened.DB.QueryRow(`select api_key_state from gateway_usage_identity_projection_v1 where usage_event_id = 2`).Scan(&state)
+		return err == nil && state == "stale"
+	})
+	for time.Now().UnixMilli() <= ev2.TimestampMS {
+		time.Sleep(time.Millisecond)
+	}
+	detailAfter := decodeUsage[usageapp.DetailResponse](t, call(http.MethodGet, "api-keys/"+string(created1.Key.ID)+"/usage", ""))
+	if detailAfter.Totals == nil || detailAfter.Totals.Calls != 1 || detailAfter.Totals.TotalTokens != 42 {
+		t.Fatalf("key1 post-retirement usage leaked/changed = %+v", detailAfter)
+	}
 }

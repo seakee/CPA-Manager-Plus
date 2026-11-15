@@ -33,6 +33,13 @@ const (
 	verifyExternalAddress = "https://cpa.example"
 	verifyManagedAddress  = "http://127.0.0.1:28317"
 	verifyManagedSecret   = "managed-destination-secret"
+	// testControlBasePath and testInferenceBasePath are the explicit canonical
+	// pair these fixtures commit. The completion gate requires access routing
+	// for both target modes, so every legitimate completion states its own pair
+	// instead of inheriting a product default. An External target commits the
+	// control prefix only.
+	testControlBasePath   = "/test-control"
+	testInferenceBasePath = "/test-inference"
 )
 
 // verifyDestinationSource is the identity the managed source stamps: the
@@ -53,6 +60,10 @@ type verifyFixture struct {
 	// identity and artifact the recorded attempt names, so a test can change one
 	// of them and prove which comparison refused.
 	runtime *fakeVerifyRuntime
+	// managed is the target mode the recorded operation proves. A Managed
+	// operation commits an inference prefix with its control prefix; an External
+	// one must leave the inference prefix empty.
+	managed bool
 }
 
 // newVerifyFixture copies a real 1.x fixture into a fresh v2 data root. The
@@ -220,7 +231,7 @@ func (f *verifyFixture) connectExternal(t *testing.T) ExternalConnectResult {
 		BaseURL:       verifyExternalAddress,
 		ManagementKey: externalTestKey,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
-			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			return cpa.ClassifyExternalVersion("v8.0.55"), nil
 		},
 		readExternalKeys: func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 			return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
@@ -267,7 +278,7 @@ func (f *verifyFixture) handManagerConnection(t *testing.T, address, secret stri
 // below report, so the evidence the fixture records is the one the live re-proof
 // derives.
 func verifyManagedFingerprint() string {
-	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
+	return freshkeyapply.ExternalServerFingerprint("v8.0.55", strings.Repeat("a", 64))
 }
 
 // managedDestinationRecord is the destination attempt a completed Managed import
@@ -294,8 +305,8 @@ func managedDestinationRecord(t *testing.T) cpaImportDestinationRecord {
 		},
 		OperationID:   cpaImportDestinationOperationID(verifyDestinationSource, 1),
 		Attempt:       1,
-		SourceVersion: "7.3.4",
-		SourceLayout:  "v7",
+		SourceVersion: "8.0.55",
+		SourceLayout:  cpaLayoutV8Legacy,
 		ManualItems: []CPAImportManualItem{{
 			Item:        "section:ampcode",
 			Reason:      "reconfigure_after_adoption",
@@ -347,6 +358,7 @@ func newExternalVerifyFixture(t *testing.T) *verifyFixture {
 func newManagedVerifyFixture(t *testing.T) *verifyFixture {
 	t.Helper()
 	fixture := newVerifyFixture(t)
+	fixture.managed = true
 	fixture.reconcile(t)
 	fixture.recordManagedImport(t)
 	return fixture
@@ -355,13 +367,18 @@ func newManagedVerifyFixture(t *testing.T) *verifyFixture {
 // verifyOptions is the gate invocation with the same synthetic probe seams the
 // connect step used, so an offline test proves the recorded target without
 // dialing its address. Production leaves the seams nil.
+//
+// The invocation names the fixture's own canonical routing, because the gate
+// requires it for every completion: a Managed operation commits the control and
+// inference pair, an External one the control prefix alone.
 func (f *verifyFixture) verifyOptions() VerifyOptions {
-	return VerifyOptions{
-		LegacyRoot: f.volume.root,
-		TargetRoot: f.target,
-		Runtime:    f.runtime,
+	options := VerifyOptions{
+		LegacyRoot:      f.volume.root,
+		TargetRoot:      f.target,
+		Runtime:         f.runtime,
+		ControlBasePath: testControlBasePath,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
-			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			return cpa.ClassifyExternalVersion("v8.0.55"), nil
 		},
 		readExternalKeys: func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 			return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
@@ -371,6 +388,10 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 		},
 		proveModelSurface: func(context.Context, string, string) error { return nil },
 	}
+	if f.managed {
+		options.InferenceBasePath = testInferenceBasePath
+	}
+	return options
 }
 
 // fakeVerifyRuntime is the Supervisor the Managed gate observes. Its default
@@ -396,8 +417,8 @@ func newFakeVerifyRuntime(t *testing.T) *fakeVerifyRuntime {
 		Generation:            4,
 		ProtocolVersion:       "v1",
 		State:                 model.RuntimeStateReady,
-		CPAObservedVersion:    "v8.0.13",
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.13"},
+		CPAObservedVersion:    "v8.0.55",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.55"},
 		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart},
 	}}
 }
@@ -663,7 +684,7 @@ func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndC
 			contacted := 0
 			options.observeExternalVersion = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
 				contacted++
-				return cpa.ClassifyExternalVersion("v8.0.13"), nil
+				return cpa.ClassifyExternalVersion("v8.0.55"), nil
 			}
 			options.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
 				contacted++
@@ -702,7 +723,10 @@ func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndC
 func TestVerifyRefusesAnUnmountedSource(t *testing.T) {
 	fixture := newExternalVerifyFixture(t)
 	before := fixture.operation(t)
-	_, err := Verify(context.Background(), VerifyOptions{TargetRoot: fixture.target})
+	_, err := Verify(context.Background(), VerifyOptions{
+		TargetRoot:      fixture.target,
+		ControlBasePath: testControlBasePath,
+	})
 	if !errors.Is(err, ErrVerifySourceUnavailable) {
 		t.Fatalf("verify without a source error = %v, want ErrVerifySourceUnavailable", err)
 	}
@@ -1206,7 +1230,12 @@ func recordRawReconciliationBody(t *testing.T, fixture *verifyFixture, payload j
 func TestVerifyRefusesAStoreWithoutAnOperation(t *testing.T) {
 	target := canonicalTempDir(t)
 	volume := newLegacyVolume(t)
-	_, err := Verify(context.Background(), VerifyOptions{LegacyRoot: volume.root, TargetRoot: target})
+	_, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot:        volume.root,
+		TargetRoot:        target,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
+	})
 	if !errors.Is(err, ErrVerifyNotApplicable) {
 		t.Fatalf("verify on an empty v2 data root error = %v, want ErrVerifyNotApplicable", err)
 	}
@@ -1221,7 +1250,12 @@ func TestVerifyRefusesAStoreWithoutAnOperation(t *testing.T) {
 // verification writes.
 func TestVerifyRefusesOverlappingRoots(t *testing.T) {
 	fixture := newExternalVerifyFixture(t)
-	_, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.target, TargetRoot: fixture.target})
+	_, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot:        fixture.target,
+		TargetRoot:        fixture.target,
+		ControlBasePath:   testControlBasePath,
+		InferenceBasePath: testInferenceBasePath,
+	})
 	if err == nil {
 		t.Fatal("verify accepted the v2 data root as its own source")
 	}
@@ -1497,7 +1531,7 @@ func TestVerifyRefusesAManagerKeyTheConnectStepDidNotProve(t *testing.T) {
 // satisfied and the live authenticated read is not, so the gate must refuse
 // instead of recording a completion the restarted Manager cannot use.
 func TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts(t *testing.T) {
-	server := newExternalVerifyCPAServer(t, "v8.0.13")
+	server := newExternalVerifyCPAServer(t, "v8.0.55")
 	fixture := newVerifyFixture(t)
 	fixture.reconcile(t)
 	// The connect step runs against the real CPA, so the binding records the
@@ -1515,7 +1549,11 @@ func TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts(t *testing.T) {
 	before := fixture.operation(t)
 	// No seam is supplied, so the gate's own probes run against the CPA server:
 	// this is the production read that has to fail.
-	_, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target})
+	_, err := Verify(context.Background(), VerifyOptions{
+		LegacyRoot:      fixture.volume.root,
+		TargetRoot:      fixture.target,
+		ControlBasePath: testControlBasePath,
+	})
 	if !errors.Is(err, ErrVerifyConnectionUnproven) {
 		t.Fatalf("verify after the CPA rotated its key error = %v, want ErrVerifyConnectionUnproven", err)
 	}
@@ -1718,6 +1756,7 @@ func newManagedVerifyFixtureAt(t *testing.T, baseURL string) *verifyFixture {
 		t.Fatalf("record the CPA import completion: %v", err)
 	}
 	fixture.runtime = newFakeVerifyRuntime(t)
+	fixture.managed = true
 	return fixture
 }
 

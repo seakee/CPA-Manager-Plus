@@ -28,7 +28,7 @@ func TestAdoptionSourceClassUsesOnlyItsExplicitReadSurface(t *testing.T) {
 					_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client"]},"providers":{}}`))
 				case "/v0/management/config":
 					v0Calls.Add(1)
-					w.Header().Set("X-CPA-VERSION", "7.0.12")
+					w.Header().Set("X-CPA-VERSION", "8.0.55")
 					_, _ = w.Write([]byte(`{"tls":{"enable":false},"routing":{"strategy":"round-robin"},"gemini-api-key":[{"api-key":"private-provider-secret"}],"api-keys":["source-client"]}`))
 				default:
 					t.Errorf("unexpected source access: %s %s", r.Method, r.URL.Path)
@@ -190,7 +190,7 @@ func TestAdoptionRecordCoversEveryEnumeratedItemUnderTheReportedRoots(t *testing
 }
 
 func TestAdoptionRejectsUnacceptedLegacySourceProfileWithoutEffects(t *testing.T) {
-	for _, version := range []string{"", "7.0.11", "7.0.13", "8.0.13", "garbage"} {
+	for _, version := range []string{"", "6.9.15", "7.0.11", "7.0.12", "7.0.13", "7.3.3", "8.0.13", "8.0.54", "v8.0.55", "garbage"} {
 		t.Run("version="+version, func(t *testing.T) {
 			var calls atomic.Int32
 			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -224,7 +224,7 @@ func TestAdoptionRejectsUnacceptedLegacySourceProfileWithoutEffects(t *testing.T
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-CPA-VERSION", "7.0.12")
+		w.Header().Set("X-CPA-VERSION", "8.0.55")
 		_, _ = w.Write([]byte(`{"tls":{"enable":false},"api-keys":["source-client"]}`))
 	}))
 	defer source.Close()

@@ -35,7 +35,11 @@ func TestFreshUpdateChannelSQLiteAdminRestartAndFailure(t *testing.T) {
 	}()
 	app := newFreshApplication(opened, config.Config{}, nil)
 	_, err = app.store.Update(ctx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
-		r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{OperationID: r.Operation.Identity.OperationID, Revision: 1, Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true}
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
 		return nil
 	})
 	if err != nil {
@@ -43,13 +47,13 @@ func TestFreshUpdateChannelSQLiteAdminRestartAndFailure(t *testing.T) {
 	}
 	call := func(method, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		req := httptest.NewRequest(method, "/control/api/v2/settings/update-channel", strings.NewReader(body))
+		req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+"settings/update-channel", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		rec := httptest.NewRecorder()
-		httpapi.InitialFullWebHandler("/control", http.HandlerFunc(app.canonicalAPI)).ServeHTTP(rec, req)
+		httpapi.InitialFullWebHandler(currentInstallControlPrefix, http.HandlerFunc(app.canonicalAPI)).ServeHTTP(rec, req)
 		if rec.Header().Get("Cache-Control") != "no-store" || strings.Contains(rec.Body.String(), strategyTestAdmin) {
 			t.Fatal("cache or credential exposure")
 		}

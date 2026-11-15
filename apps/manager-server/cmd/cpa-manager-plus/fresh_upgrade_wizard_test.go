@@ -66,24 +66,35 @@ create table usage_events (id integer primary key autoincrement, event_hash text
 	return dir
 }
 
-// commitInstallationRouting gives the installation its committed control
-// prefix, which is what makes the continuation session usable. The session
-// issued before the commit stays valid across it.
-func commitInstallationRouting(t *testing.T, app *freshApplication) {
+// commitInstallationRouting gives the installation its committed dual prefixes,
+// which is what makes the continuation session usable and moves the canonical
+// API onto the committed control prefix. The session issued before the commit
+// stays valid across it, and the returned control prefix is the one the routes
+// are mounted under.
+func commitInstallationRouting(t *testing.T, app *freshApplication) string {
 	t.Helper()
 	record, err := app.store.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(next *freshstore.Record) error {
-		next.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
-			OperationID: next.Operation.Identity.OperationID, Revision: 1,
-			Target: "/control", Stage: bootstrap.PrefixCommitted, Committed: true,
-		}
+	control, inference := currentInstallControlPrefix, "/cpamp-api"
+	if _, err := app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = control
+		r.Operation.Routing.InferenceTarget = inference
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+	committed, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return committed.Operation.Routing.Target
 }
 
 // TestUpgradeWizardReadRoutesUseTheSourceAdministratorCredential is the route
@@ -114,6 +125,7 @@ func TestUpgradeWizardReadRoutesUseTheSourceAdministratorCredential(t *testing.T
 		t.Fatal("the entry page's verification never observed the source")
 	}
 
+	controlPrefix := ""
 	request := func(method, path, authorization string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, nil)
 		if authorization != "" {
@@ -123,7 +135,7 @@ func TestUpgradeWizardReadRoutesUseTheSourceAdministratorCredential(t *testing.T
 		app.ServeHTTP(w, r)
 		return w
 	}
-	canonical := func(resource string) string { return "/control/api/v2/" + resource }
+	canonical := func(resource string) string { return controlPrefix + "/api/v2/" + resource }
 	checkSurface := func(surface string, urlFor func(string) string, phase string) {
 		t.Helper()
 		for _, resource := range []string{"installation/upgrade/preflight", "installation/upgrade/status"} {
@@ -162,8 +174,9 @@ func TestUpgradeWizardReadRoutesUseTheSourceAdministratorCredential(t *testing.T
 	// 1. Before route cutover: the fixed Bootstrap API.
 	checkSurface("fixed", func(resource string) string { return bootstrap.FixedBootstrapAPIPath + resource }, "pre-cutover")
 
-	// 2. Canonical continuation after cutover, before completion.
-	commitInstallationRouting(t, app)
+	// 2. Canonical continuation after cutover, before completion: the routes
+	// follow the committed control prefix this installation published.
+	controlPrefix = commitInstallationRouting(t, app)
 	if w := request(http.MethodGet, bootstrap.FixedBootstrapAPIPath+"installation/upgrade/status", "Bearer "+upgradeWizardAdminKey); w.Code != http.StatusNotFound {
 		t.Fatalf("fixed surface survived cutover: %d", w.Code)
 	}
@@ -253,13 +266,13 @@ func TestUpgradeReadNamespaceAnswersTheCredentialBeforeThePath(t *testing.T) {
 	}
 
 	check("pre-cutover", bootstrap.FixedBootstrapAPIPath+"installation/upgrade/not-a-route")
-	commitInstallationRouting(t, app)
-	check("canonical", "/control/api/v2/installation/upgrade/not-a-route")
+	committedControl := commitInstallationRouting(t, app)
+	check("canonical", committedControl+"/api/v2/installation/upgrade/not-a-route")
 
 	// A completed installation stops serving the whole namespace, credential or
 	// not: there is no Upgrade step left to observe.
 	markFreshProductComplete(t, app)
-	if w := request(http.MethodGet, "/control/api/v2/installation/upgrade/not-a-route", "Bearer "+upgradeWizardAdminKey); w.Code != http.StatusNotFound {
+	if w := request(http.MethodGet, committedControl+"/api/v2/installation/upgrade/not-a-route", "Bearer "+upgradeWizardAdminKey); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown Upgrade route after completion = %d: %s", w.Code, w.Body.String())
 	}
 }
