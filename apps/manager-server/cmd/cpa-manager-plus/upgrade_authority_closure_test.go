@@ -312,14 +312,17 @@ func TestUpgradeProvenanceAndManagedRuntimeDestinationIdentityFences(t *testing.
 
 		// Source fingerprint drift on upgrade_operations also fails closed on loadCurrentOp.
 		driftedFpr := "sha256:" + strings.Repeat("9", 64)
-		driftedVer, _ := json.Marshal(model.UpgradeVerification{
+		driftedVer, err := json.Marshal(model.UpgradeVerification{
 			TargetMode:        model.UpgradeTargetManaged,
 			SourceFingerprint: driftedFpr,
 			Domains:           []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
 			ObservedAtMS:      2000,
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := st.SQLDB().Exec(
-			`update upgrade_operations set source_fingerprint_before = ?, source_fingerprint_after = ?, verification_json = ? where id = 1`,
+			`update upgrade_operations set source_fingerprint_before = ?, source_fingerprint_after = ?, verification = ? where id = 1`,
 			driftedFpr, driftedFpr, string(driftedVer)); err != nil {
 			t.Fatal(err)
 		}

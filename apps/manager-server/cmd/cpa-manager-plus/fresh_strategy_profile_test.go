@@ -43,7 +43,9 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		var routingStrategy atomic.Value
 		routingStrategy.Store("round-robin")
 		var authFileDeleted atomic.Bool
+		var externalHits atomic.Int32
 		externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			externalHits.Add(1)
 			if r.Header.Get("Authorization") != "Bearer "+management {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -165,9 +167,21 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		if _, srcErr := app.externalSource(t.Context()); !errors.Is(srcErr, freshkeyapply.ErrUnavailable) {
 			t.Fatalf("pre-complete externalSource err = %v, want ErrUnavailable", srcErr)
 		}
+		stagedKey, _, err := app.keys.Create(t.Context(), strings.Repeat("a", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
 		preKeys := callApp(app, http.MethodGet, "api-keys", "")
-		if preKeys.Code != http.StatusOK || !strings.Contains(preKeys.Body.String(), `"presenceUnverified":true`) {
-			t.Fatalf("pre-complete GET api-keys = %d %s, want 200 presenceUnverified", preKeys.Code, preKeys.Body.String())
+		if preKeys.Code != http.StatusOK || !strings.Contains(preKeys.Body.String(), `"presenceUnverified":true`) ||
+			!strings.Contains(preKeys.Body.String(), `"gatewayPending":true`) ||
+			!strings.Contains(preKeys.Body.String(), `"runtimeState":"effect_unknown"`) ||
+			strings.Contains(preKeys.Body.String(), `"runtimeState":"effective_observed"`) {
+			t.Fatalf("pre-complete GET api-keys = %d %s, want 200 presenceUnverified effect_unknown", preKeys.Code, preKeys.Body.String())
+		}
+		preDetail := callApp(app, http.MethodGet, "api-keys/"+string(stagedKey.Key.ID), "")
+		if preDetail.Code != http.StatusOK || !strings.Contains(preDetail.Body.String(), `"runtimeState":"effect_unknown"`) ||
+			strings.Contains(preDetail.Body.String(), `"runtimeState":"effective_observed"`) {
+			t.Fatalf("pre-complete GET api-keys/<id> = %d %s, want 200 effect_unknown", preDetail.Code, preDetail.Body.String())
 		}
 		preCfg := callApp(app, http.MethodGet, "gateway/config", "")
 		if preCfg.Code != http.StatusOK || !strings.Contains(preCfg.Body.String(), `"mode":"unavailable"`) {
@@ -181,6 +195,9 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 		}
 		if updRec := callApp(app, http.MethodGet, "cpamp/usage-service/runtime/updates", ""); updRec.Code != http.StatusPreconditionRequired && updRec.Code != http.StatusConflict {
 			t.Fatalf("pre-complete GET cpamp/usage-service/runtime/updates = %d %s, want 409/428", updRec.Code, updRec.Body.String())
+		}
+		if hits := externalHits.Load(); hits != 0 {
+			t.Fatalf("pre-complete External install contacted external CPA %d times, want 0", hits)
 		}
 
 		// 3. Complete installation in-process.

@@ -67,7 +67,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 | -------------------------------------------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------- |
 | 官方 [CLI Proxy API Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) | 希望继续使用 CPA 项目维护的上游原生 UI   | CPA `:8317/management.html`             |
 | CPAMP 轻量面板                                                                                           | 只替换界面，不增加额外服务或数据库       | CPA `:8317/management.html`             |
-| CPAMP 完整模式（v2 Beta）                                                                                | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server 控制台（默认 `/console`） |
+| CPAMP 完整模式（v2 Beta）                                                                                | 需要请求历史、成本分析、账号巡检和自动化 | 安装时配置的独立管理前缀 |
 | CPAMP 完整模式（1.x Stable）                                                                             | 需要请求历史、成本分析、账号巡检和自动化 | Manager Server `:18317/management.html` |
 
 详细区别见 [如何选择 CPA 面板](https://cpamp-docs.seakee.dev/next/guide/choosing-a-panel.html)，也可以直接查看 [CPAMP 轻量面板安装指南](https://cpamp-docs.seakee.dev/next/deployment/cpa-panel.html)。
@@ -79,6 +79,12 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 - 管理 CPA Provider 配置，包括 Gemini、Codex、Claude、Vertex、xAI 和 OpenAI-compatible Provider。
 - 维护认证文件、OAuth 登录、API Key、模型别名、优先级、插件、日志和系统配置。
 - 导入官方 Sub2API OpenAI OAuth 导出，并把多账号拆分为独立的 CPA Codex 认证文件。
+
+### v2 接入与客户端 Key
+
+- 首次安装、首次升级分别配置管理前缀和推理前缀；二者各自生成安全随机默认值，只有明确选择时才共享前缀。已有 v2 安装若只缺推理前缀，可一次性补齐，不改变已提交的管理入口。
+- 普通 Client Key 保存时加密持久化并应用到 CPA。工作区区分已观察到生效、待处理和结果未知；未知操作不要盲目重复提交。不再设置人为 Key 总量上限，但保留空 Key 集与最后一把 Key 的保护。
+- 从完成页或 Key 工作区复制对应客户端的协议地址。Managed 推理使用已提交的推理前缀；External 客户端直接使用外部 CPA 地址。详见[客户端接入](https://cpamp-docs.seakee.dev/next/gateway/clients.html)。
 
 ### 请求监控与失败诊断
 
@@ -110,7 +116,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 想先了解界面？可以打开[在线演示](https://cpamp-demo.seakee.dev/)。演示站只使用虚构数据，不是部署或运行模式，不能连接、管理或监控真实 CPA。
 
-CPAMP 管理和观测经过 CPA / CLIProxyAPI 的流量，本身不是模型代理，也不会独立转发模型请求。
+CPAMP 管理和观测 CPA / CLIProxyAPI。Managed Ingress 将带前缀的推理请求转交 CPA，由 CPA 执行模型 Provider 请求；External 客户端直接连接其 CPA 地址。
 
 ## 快速开始
 
@@ -160,7 +166,7 @@ volumes:
 docker compose up -d
 ```
 
-打开 1.x Stable 面板 `http://<host>:18317/management.html`，从 Manager Server 日志取得 CPAMP 管理员密钥，然后在 setup 填写 CPA 地址和 CPA Management Key。`:latest` 标签是 1.x Stable；使用 v2 Beta 镜像时入口是安装时设置的控制台地址（向导默认 `http://<host>:18317/console`，改过路径以向导完成页为准），`/management.html` 返回 404。
+打开 1.x Stable 面板 `http://<host>:18317/management.html`，从 Manager Server 日志取得 CPAMP 管理员密钥，然后在 setup 填写 CPA 地址和 CPA Management Key。`:latest` 标签是 1.x Stable。v2 Beta 请使用安装向导给出的管理入口及最终客户端地址：管理与推理默认使用不同的随机前缀，不再固定为 `/console`；`/management.html` 返回 404。
 
 ### 仅部署 CPAMP
 

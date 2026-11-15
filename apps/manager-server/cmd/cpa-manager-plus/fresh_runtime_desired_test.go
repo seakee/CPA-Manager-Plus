@@ -576,6 +576,8 @@ func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreserves
 func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerations(t *testing.T) {
 	incompleteManaged := func(r *freshstore.Record, env managedInstallEnv) {
 		completedManagedInstall(r, env)
+		r.Operation.Routing.InferenceTarget = ""
+		r.Operation.Routing.InferenceCommitted = false
 		r.Operation.ProductComplete = false
 	}
 	harness := newManagedInstallHarnessWith(t, incompleteManaged, true)
@@ -632,6 +634,17 @@ func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerat
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := app.store.Update(t.Context(), beforeExternal.Operation.Identity, beforeExternal.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.InferenceCommitted = true
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed",
+			TargetIdentity: freshkeyapply.ExternalIdentity(harness.endpoint), TargetGeneration: 1,
+		}
+		return nil
+	}); !errors.Is(err, freshstore.ErrNotFresh) {
+		t.Fatalf("ConnectExternal with managed inference target = %v, want ErrNotFresh", err)
+	}
 	externalRec, err := app.store.Update(t.Context(), beforeExternal.Operation.Identity, beforeExternal.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
@@ -652,6 +665,8 @@ func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerat
 
 	// Restore the incomplete NewManaged committed checkpoint.
 	if _, err := app.store.Update(t.Context(), externalRec.Operation.Identity, externalRec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.InferenceCommitted = true
 		r.Operation.Strategy = beforeExternal.Operation.Strategy
 		return nil
 	}); err != nil {

@@ -267,6 +267,14 @@ func projectKeyFromSnapshot(
 	return k
 }
 
+func degradableExternalAuthorityError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, ErrExternalUnavailable) || errors.Is(err, ErrUnavailable) ||
+		errors.Is(err, cpa.ErrApplyUnknown) || errors.Is(err, cpa.ErrSourceConflict)
+}
+
 // ObservedKeyList returns the workspace keys projected against live CPA
 // config readback, versioned /v1/models client-auth proofs, and any unsettled
 // durable key operation journal. It reconciles an unsettled latest operation
@@ -277,7 +285,7 @@ func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (obser
 		if ctx.Err() != nil {
 			observed = markUnverifiedKeys(observed, "key_operation_unknown")
 			unverified = true
-			if err == nil || errors.Is(err, cpa.ErrProofUnavailable) || errors.Is(err, cpa.ErrApplyUnknown) || errors.Is(err, ErrExternalUnavailable) {
+			if err == nil || errors.Is(err, cpa.ErrProofUnavailable) || degradableExternalAuthorityError(err) {
 				err = ctx.Err()
 			}
 		}
@@ -287,7 +295,7 @@ func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (obser
 		return nil, true, ErrUnavailable
 	}
 	if s.profile == ProfileExternal && generation != 0 {
-		if _, err := s.externalTarget(ctx, generation); err != nil {
+		if _, err := s.externalTarget(ctx, generation); err != nil && !degradableExternalAuthorityError(err) {
 			return nil, true, err
 		}
 	}
@@ -466,7 +474,7 @@ func (s *Service) observedExternalKeyList(
 		return nil, true, ErrGeneration
 	}
 	if err != nil {
-		if !errors.Is(err, ErrExternalUnavailable) && !errors.Is(err, cpa.ErrApplyUnknown) && !errors.Is(err, cpa.ErrSourceConflict) {
+		if !degradableExternalAuthorityError(err) {
 			return nil, true, err
 		}
 		return markUnverifiedKeys(keys, ""), true, nil
@@ -570,7 +578,7 @@ func (s *Service) ObserveKey(ctx context.Context, key freshkeys.Key, generation 
 	defer func() {
 		if ctx.Err() != nil {
 			observed.RuntimeState = "effect_unknown"
-			if err == nil || errors.Is(err, cpa.ErrProofUnavailable) || errors.Is(err, cpa.ErrApplyUnknown) || errors.Is(err, ErrExternalUnavailable) {
+			if err == nil || errors.Is(err, cpa.ErrProofUnavailable) || degradableExternalAuthorityError(err) {
 				err = ctx.Err()
 			}
 		}
@@ -580,7 +588,7 @@ func (s *Service) ObserveKey(ctx context.Context, key freshkeys.Key, generation 
 		return key, ErrUnavailable
 	}
 	if s.profile == ProfileExternal && generation != 0 {
-		if _, err := s.externalTarget(ctx, generation); err != nil {
+		if _, err := s.externalTarget(ctx, generation); err != nil && !degradableExternalAuthorityError(err) {
 			return key, err
 		}
 	}
@@ -753,7 +761,7 @@ func (s *Service) observeSingleExternalKey(ctx context.Context, key freshkeys.Ke
 		return key, ErrGeneration
 	}
 	if err != nil {
-		if !errors.Is(err, ErrExternalUnavailable) && !errors.Is(err, cpa.ErrApplyUnknown) && !errors.Is(err, cpa.ErrSourceConflict) {
+		if !degradableExternalAuthorityError(err) {
 			return key, err
 		}
 		key.RuntimeState = "effect_unknown"

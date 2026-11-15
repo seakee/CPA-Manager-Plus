@@ -55,8 +55,7 @@ func storeManagerConnection(t *testing.T, target, address, secret string) {
 func verifiedTarget(t *testing.T, cpaAddress string) (source, target string) {
 	t.Helper()
 	source = copyReadySource(t)
-	target = t.TempDir()
-	bundle := filepath.Join(t.TempDir(), "backup")
+	target, bundle := reconcileRoots(t)
 	if code, _, stderr := run(t, "run", "--legacy", source,
 		"--source-version", bootstrap.PlannedDirectRelease,
 		"--target", target, "--bundle", bundle); code != 0 {

@@ -296,6 +296,12 @@ func upgradeStartupProcessEnv(dataDir, dbPath string, extra map[string]string) [
 	if _, ok := merged["USAGE_POLL_INTERVAL_MS"]; !ok {
 		merged["USAGE_POLL_INTERVAL_MS"] = "50"
 	}
+	if _, ok := merged["CPAMP_RUNTIME_JOURNAL_PATH"]; !ok {
+		merged["CPAMP_RUNTIME_JOURNAL_PATH"] = "/runtime/supervisor/operations.sqlite"
+	}
+	if _, ok := merged["CPAMP_RUNTIME_DATA_DIR"]; !ok {
+		merged["CPAMP_RUNTIME_DATA_DIR"] = ""
+	}
 	out := make([]string, 0, len(base)+len(merged))
 	for _, entry := range base {
 		k, _, _ := strings.Cut(entry, "=")
@@ -673,7 +679,7 @@ func assertCreatedUpgradeKeyCollectsUsageViaHTTP(
 
 func TestUpgradeManagedStartupProvesCollectionStartAndServesUsageWithoutManualSeeding(t *testing.T) {
 	const (
-		mgmtSecret      = "managed-upgrade-startup-mgmt-secret"
+		mgmtSecret      = "managed-upgrade-startup-mgmt-secret-0123456789abcdef0123456789ab"
 		runtimeToken    = "runtime-supervisor-startup-token"
 		runtimeIdentity = "runtime-managed-upgrade-1"
 		controlPath     = "/upg-console"
@@ -760,7 +766,7 @@ func TestUpgradeExternalStartupProvesCollectionStartAndServesUsageWithoutManualS
 
 func TestUpgradeStartupDisabledAtBootThenEnabledLaterRecordsCollectionStart(t *testing.T) {
 	const (
-		mgmtSecret      = "managed-disabled-then-enabled-secret"
+		mgmtSecret      = "managed-disabled-then-enabled-secret-0123456789abcdef0123456789a"
 		runtimeToken    = "runtime-token-disabled-then-enabled"
 		runtimeIdentity = "runtime-managed-upgrade-toggle"
 		controlPath     = "/upg-console"
@@ -1627,7 +1633,7 @@ func TestUpgradeStartupProofConvergesAcrossDelayedReadinessAndFencesStaleRuns(t 
 			}
 			extID := freshkeyapply.ExternalIdentity("https://conflict.example")
 			if _, err := st.SQLDB().Exec(
-				`insert into upgrade_external_connect (id, base_url, identity, generation, management_key, observed_at_ms, client_keys, updated_at_ms) values (1, ?, ?, ?, ?, 1000, 1, 1000)`,
+				`insert into upgrade_external_connect (id, base_url, identity, generation, management_key, observed_at_ms, client_keys) values (1, ?, ?, ?, ?, 1000, 1)`,
 				"https://conflict.example", extID, extID, sealed,
 			); err != nil {
 				t.Fatal(err)

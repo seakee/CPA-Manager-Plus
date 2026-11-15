@@ -15,6 +15,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -1433,7 +1434,9 @@ func TestCompletedManagedUpgradeMountsConsoleResourcesAndIsolatesBridge(t *testi
 		},
 	}
 
-	serverApp := httpapi.New(cfg, st, nil)
+	manager := collector.NewManager(cfg, st)
+	t.Cleanup(func() { manager.Stop() })
+	serverApp := httpapi.New(cfg, st, manager)
 	if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, func(context.Context) bool { return true }, upgradeCanonicalDependencies{
 		Protector: protector,
 		Runtime:   rt,

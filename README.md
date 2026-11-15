@@ -69,7 +69,7 @@ CPA / CLIProxyAPI can serve either the official Management Center or the CPAMP L
 | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- | --------------------------------------- |
 | Official [CLI Proxy API Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) | Keeping the upstream UI maintained by the CPA project       | CPA `:8317/management.html`             |
 | CPAMP Lightweight Panel                                                                                      | Replacing only the UI without another service or database   | CPA `:8317/management.html`             |
-| CPAMP Full Mode (v2 Beta)                                                                                    | Request history, cost analytics, inspection, and automation | Manager Server console (default `/console`) |
+| CPAMP Full Mode (v2 Beta)                                                                                    | Request history, cost analytics, inspection, and automation | Installation-specific management prefix |
 | CPAMP Full Mode (1.x Stable)                                                                                 | Request history, cost analytics, inspection, and automation | Manager Server `:18317/management.html` |
 
 See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/next/en/guide/choosing-a-panel.html) for the comparison, or [install the CPAMP Lightweight Panel](https://cpamp-docs.seakee.dev/next/en/deployment/cpa-panel.html) directly in CPA.
@@ -81,6 +81,12 @@ See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/next/en/guide/choosing-
 - Manage CPA provider configurations, including Gemini, Codex, Claude, Vertex, xAI, and OpenAI-compatible providers.
 - Maintain auth files, OAuth logins, API keys, model aliases, priorities, plugins, logs, and system settings.
 - Import official Sub2API OpenAI OAuth exports and split multiple accounts into separate CPA Codex auth files.
+
+### v2 Access And Client Keys
+
+- First installation and first upgrade configure management and inference prefixes independently. Each has its own secure random default; sharing a prefix is an explicit choice. An existing v2 installation missing only its inference prefix completes it once without changing its management entry.
+- Saving an ordinary Client Key persists it encrypted and applies it to CPA. The workspace distinguishes observed activation from pending or unknown outcomes; do not blindly repeat an unknown mutation. There is no artificial total-Key cap; empty-keyset and last-Key protections remain.
+- Copy client-specific protocol addresses from the completion page or Key workspace. Managed inference uses its committed prefix; External clients use the external CPA URL directly. See [Client Access](https://cpamp-docs.seakee.dev/next/en/gateway/clients.html).
 
 ### Request Monitoring And Failure Diagnosis
 
@@ -112,7 +118,7 @@ See [Choosing A CPA Panel](https://cpamp-docs.seakee.dev/next/en/guide/choosing-
 
 Want to preview the interface first? Open the [Live Demo](https://cpamp-demo.seakee.dev/). The demo uses fictional data only. It is not a deployment or runtime mode and cannot connect to, manage, or monitor a real CPA instance.
 
-CPAMP manages and observes traffic through CPA / CLIProxyAPI. It is not a replacement proxy and does not forward model traffic by itself.
+CPAMP manages and observes CPA / CLIProxyAPI. Managed ingress routes prefixed inference requests to CPA, which executes model-provider traffic; External clients connect directly to their CPA URL.
 
 ## Quick Start
 
@@ -162,7 +168,7 @@ volumes:
 docker compose up -d
 ```
 
-Open the 1.x Stable panel at `http://<host>:18317/management.html`, retrieve the CPAMP Admin Key from the Manager Server log, then enter the CPA URL and CPA Management Key during setup. The `:latest` tag is 1.x Stable; on the v2 Beta image the entry is the control base path chosen at installation (the wizard defaults to `http://<host>:18317/console`, so trust the completion page if you changed it), and `/management.html` returns 404.
+Open the 1.x Stable panel at `http://<host>:18317/management.html`, retrieve the CPAMP Admin Key from the Manager Server log, then enter the CPA URL and CPA Management Key during setup. The `:latest` tag is 1.x Stable. On v2 Beta, use the installation wizard's management entry and final client addresses: management and inference default to different random prefixes, not a fixed `/console`. `/management.html` returns 404.
 
 ### CPAMP Only
 

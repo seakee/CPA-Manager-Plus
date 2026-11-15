@@ -1122,11 +1122,11 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 		if err != nil {
 			t.Fatal(err)
 		}
-		var failPut atomic.Bool
+		var failPreWrite atomic.Bool
 		proxy := httputil.NewSingleHostReverseProxy(destURL)
 		proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if failPut.Load() && r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/access/api-keys" {
-				http.Error(w, "temporary cpa write failure", http.StatusInternalServerError)
+			if failPreWrite.Load() && r.Method == http.MethodGet && r.URL.Path == "/v8/management/config" {
+				http.Error(w, "temporary cpa snapshot failure", http.StatusInternalServerError)
 				return
 			}
 			proxy.ServeHTTP(w, r)
@@ -1213,10 +1213,14 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 		}
 		opID := prepBody.Operation.ID
 
-		failPut.Store(true)
-		firstContinue := callWS(handler, http.MethodPost, "api-keys/operations/"+opID+"/continue", "")
-		if firstContinue.Code == http.StatusOK {
-			t.Fatalf("continue during CPA PUT failure unexpectedly succeeded: %s", firstContinue.Body.String())
+		if missingCT := callWS(handler, http.MethodPost, "api-keys/operations/"+opID+"/continue", ""); missingCT.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("POST continue without Content-Type = %d %s, want 415", missingCT.Code, missingCT.Body.String())
+		}
+
+		failPreWrite.Store(true)
+		firstContinue := callWS(handler, http.MethodPost, "api-keys/operations/"+opID+"/continue", `{}`)
+		if firstContinue.Code == http.StatusOK || firstContinue.Code == http.StatusUnsupportedMediaType {
+			t.Fatalf("continue during pre-write CPA failure = %d %s, want non-200 refusal", firstContinue.Code, firstContinue.Body.String())
 		}
 
 		// Simulate Supervisor restart with a smaller random non-zero runtimeGeneration (2),
@@ -1242,9 +1246,9 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 		restartedHigh := initialStatus
 		restartedHigh.Generation = 987654321
 		runtimeStatus.Store(restartedHigh)
-		failPut.Store(false)
+		failPreWrite.Store(false)
 
-		continueAfterRestart := callWS(handler2, http.MethodPost, "api-keys/operations/"+opID+"/continue", "")
+		continueAfterRestart := callWS(handler2, http.MethodPost, "api-keys/operations/"+opID+"/continue", `{}`)
 		if continueAfterRestart.Code != http.StatusOK || !strings.Contains(continueAfterRestart.Body.String(), `"outcome":"committed"`) {
 			t.Fatalf("POST continue after Supervisor restart = %d %s, want 200 committed", continueAfterRestart.Code, continueAfterRestart.Body.String())
 		}

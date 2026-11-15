@@ -393,6 +393,10 @@ func repairOrReplayCompletedRouting(
 		return AccessRoutingResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
 			"the access prefixes are already committed and preserved across upgrades", nil)
 	}
+	if controlBasePath == "" && inferenceBasePath == "" && !sharedEntry {
+		return AccessRoutingResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the access prefixes for this target mode have not been configured yet", nil)
+	}
 	ctrl := controlBasePath
 	if current.RoutingCommitted && strings.TrimSpace(current.ControlBasePath) != "" {
 		if ctrl != "" && ctrl != current.ControlBasePath {
@@ -401,17 +405,13 @@ func repairOrReplayCompletedRouting(
 		}
 		ctrl = current.ControlBasePath
 	}
-	if !current.InferenceCommitted && strings.TrimSpace(current.InferenceBasePath) != "" {
+	if !current.InferenceCommitted && current.InferenceBasePath != "" && (inferenceBasePath != "" || sharedEntry) {
 		if inferenceBasePath != current.InferenceBasePath || sharedEntry != current.SharedEntry {
 			return AccessRoutingResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
 				"a different staged inference prefix is already recorded on the completed upgrade", nil)
 		}
 	}
 	isExternal := mode == model.UpgradeTargetExternal
-	if strings.TrimSpace(ctrl) == "" || (!isExternal && strings.TrimSpace(inferenceBasePath) == "") {
-		return AccessRoutingResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
-			"the access prefixes for this target mode have not been configured yet", nil)
-	}
 	if err := routing.ValidateAccessPrefixPair(ctrl, inferenceBasePath, sharedEntry, isExternal); err != nil {
 		return AccessRoutingResult{}, mapAccessPrefixToUpgradeError(err)
 	}

@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -18,10 +20,20 @@ func TestManagedUpgradeRequiresAndPersistsTwoPrefixesAtomically(t *testing.T) {
 
 	// 1. Verify unconditionally refuses completion before prefixes are configured.
 	opts := fixture.verifyOptions()
+	opts.ControlBasePath = ""
+	opts.InferenceBasePath = ""
+	opts.SharedEntry = false
 	if _, err := Verify(ctx, opts); err == nil {
 		t.Fatal("Verify succeeded without configured Managed prefixes")
 	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyAccessPrefixRequired {
 		t.Fatalf("error code = %q (ok=%t), want %s (err=%v)", code, ok, UpgradeErrorVerifyAccessPrefixRequired, err)
+	}
+	singlePrefixOpts := opts
+	singlePrefixOpts.ControlBasePath = "/upgrade-admin"
+	if _, err := Verify(ctx, singlePrefixOpts); err == nil {
+		t.Fatal("Verify succeeded on Managed target without inferenceBasePath")
+	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(bootstrap.CodeInferencePrefixRequired) {
+		t.Fatalf("single-prefix Managed Verify code = %q (ok=%t), want %s (err=%v)", code, ok, bootstrap.CodeInferencePrefixRequired, err)
 	}
 	// 2. Managed mode refuses missing inference prefix and unconfirmed shared prefix.
 	if _, err := ConfigureAccessRouting(ctx, AccessRoutingOptions{
@@ -69,6 +81,14 @@ func TestManagedUpgradeRequiresAndPersistsTwoPrefixesAtomically(t *testing.T) {
 	if !verRes.Complete || !verRes.RoutingCommitted || !verRes.InferenceCommitted || verRes.ControlBasePath != "/upgrade-admin" || verRes.InferenceBasePath != "/upgrade-api" || verRes.ExternalBaseURL != "" {
 		t.Fatalf("unexpected VerifyResult: %+v", verRes)
 	}
+	completedManaged, found, err := ReadRecord(ctx, fixture.databasePath())
+	if err != nil || !found {
+		t.Fatalf("ReadRecord(Managed complete): found=%t err=%v", found, err)
+	}
+	if completedManaged.Stage != model.UpgradeStageComplete || !completedManaged.RoutingCommitted || !completedManaged.InferenceCommitted ||
+		completedManaged.ControlBasePath != "/upgrade-admin" || completedManaged.InferenceBasePath != "/upgrade-api" {
+		t.Fatalf("unexpected persisted completed Managed row: %+v", completedManaged)
+	}
 
 	// 5. Committed prefixes are preserved and cannot be overwritten.
 	if _, err := ConfigureAccessRouting(ctx, AccessRoutingOptions{
@@ -86,11 +106,25 @@ func TestExternalUpgradeForbidsInferencePrefixAndCommitsControlOnly(t *testing.T
 	fixture := newExternalVerifyFixture(t)
 	ctx := context.Background()
 
+	opts := fixture.verifyOptions()
+	opts.ControlBasePath = ""
+	opts.InferenceBasePath = ""
+	opts.SharedEntry = false
+
 	// Unconditional refusal when no control prefix is configured or passed.
-	if _, err := Verify(ctx, fixture.verifyOptions()); err == nil {
+	if _, err := Verify(ctx, opts); err == nil {
 		t.Fatal("External Verify succeeded without configured controlBasePath")
 	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyAccessPrefixRequired {
 		t.Fatalf("External missing prefix code = %q (ok=%t), want %s", code, ok, UpgradeErrorVerifyAccessPrefixRequired)
+	}
+
+	withInferenceOpts := opts
+	withInferenceOpts.ControlBasePath = "/ext-admin"
+	withInferenceOpts.InferenceBasePath = "/ext-api"
+	if _, err := Verify(ctx, withInferenceOpts); err == nil {
+		t.Fatal("External Verify accepted managed inferenceBasePath")
+	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(bootstrap.CodeExternalInferencePrefixForbidden) {
+		t.Fatalf("External inference prefix Verify code = %q (ok=%t), want %s", code, ok, bootstrap.CodeExternalInferencePrefixForbidden)
 	}
 
 	if _, err := ConfigureAccessRouting(ctx, AccessRoutingOptions{
@@ -112,7 +146,6 @@ func TestExternalUpgradeForbidsInferencePrefixAndCommitsControlOnly(t *testing.T
 		t.Fatalf("External ConfigureAccessRouting missing ExternalBaseURL: %+v", cfgRes)
 	}
 
-	opts := fixture.verifyOptions()
 	verRes, err := Verify(ctx, opts)
 	if err != nil {
 		t.Fatalf("External Verify failed: %v", err)
@@ -146,6 +179,10 @@ func TestExternalUpgradeForbidsInferencePrefixAndCommitsControlOnly(t *testing.T
 	completedRow, found, err := ReadRecord(ctx, fixture.databasePath())
 	if err != nil || !found {
 		t.Fatalf("ReadRecord(External complete): found=%t err=%v", found, err)
+	}
+	if completedRow.Stage != model.UpgradeStageComplete || !completedRow.RoutingCommitted || completedRow.InferenceCommitted ||
+		completedRow.ControlBasePath != "/ext-admin" || completedRow.InferenceBasePath != "" {
+		t.Fatalf("unexpected persisted completed External row: %+v", completedRow)
 	}
 	db, err := managersqlite.Open(fixture.databasePath())
 	if err != nil {
@@ -308,5 +345,96 @@ func TestExternalRoutingAddressFenceUsesCanonicalSettingsSchema(t *testing.T) {
 				t.Fatal("one settings authority accepted two different External URLs")
 			}
 		})
+	}
+}
+
+func TestCompletedVerifyReplayRejectsWhitespaceWhileTransactionOpen(t *testing.T) {
+	for _, mode := range []string{"managed", "external", "shared"} {
+		t.Run(mode, func(t *testing.T) {
+			factory := newManagedVerifyFixture
+			if mode == "external" {
+				factory = newExternalVerifyFixture
+			}
+			fixture := factory(t)
+			opts := fixture.verifyOptions()
+			if mode == "shared" {
+				opts.InferenceBasePath = opts.ControlBasePath
+				opts.SharedEntry = true
+			}
+			if _, err := Verify(t.Context(), opts); err != nil {
+				t.Fatal(err)
+			}
+			db, err := managersqlite.Open(fixture.databasePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			repo := upgradeoperation.New(db)
+			row, _, err := repo.Get(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, hasBinding, err := repo.ExternalBinding(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range []VerifyOptions{{TargetRoot: fixture.target}, opts, {TargetRoot: fixture.target, ControlBasePath: "   "}, {TargetRoot: fixture.target, InferenceBasePath: "   "}} {
+				wantConflict := input.ControlBasePath == "   " || input.InferenceBasePath == "   "
+				_, err := Verify(t.Context(), input)
+				if wantConflict {
+					if code, _ := UpgradeErrorCodeOf(err); code != UpgradeErrorPrefixesAlreadyCommitted {
+						t.Fatalf("public completed replay code=%q err=%v", code, err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				result, err := completedVerifyReplayResultForStore(ctx, db, fixture.paths, row, binding, hasBinding, input)
+				_ = tx.Rollback()
+				cancel()
+				if wantConflict {
+					if code, _ := UpgradeErrorCodeOf(err); code != UpgradeErrorPrefixesAlreadyCommitted {
+						t.Fatalf("in-transaction replay code=%q err=%v", code, err)
+					}
+				} else if err != nil || !result.Complete || !result.AlreadyVerified {
+					t.Fatalf("in-transaction completed replay=%+v err=%v", result, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCompletedManagedStagedInferenceEmptyReplayAndPartialRepair(t *testing.T) {
+	fixture := newManagedVerifyFixture(t)
+	opts := fixture.verifyOptions()
+	if _, err := Verify(t.Context(), opts); err != nil {
+		t.Fatal(err)
+	}
+	db, err := managersqlite.Open(fixture.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`update upgrade_operations set inference_committed=0 where id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(t.Context(), VerifyOptions{TargetRoot: fixture.target}); err == nil {
+		t.Fatal("empty replay accepted staged, uncommitted inference")
+	} else if code, _ := UpgradeErrorCodeOf(err); code != UpgradeErrorVerifyAccessPrefixRequired {
+		t.Fatalf("empty staged replay code=%q err=%v", code, err)
+	}
+	if _, err := Verify(t.Context(), VerifyOptions{TargetRoot: fixture.target, ControlBasePath: opts.ControlBasePath}); err == nil {
+		t.Fatal("Managed repair accepted missing inference")
+	} else if code, _ := UpgradeErrorCodeOf(err); code != UpgradeErrorCode(bootstrap.CodeInferencePrefixRequired) {
+		t.Fatalf("partial repair code=%q err=%v", code, err)
+	}
+	result, err := Verify(t.Context(), opts)
+	if err != nil || !result.InferenceCommitted || result.InferenceBasePath != opts.InferenceBasePath {
+		t.Fatalf("staged inference repair=%+v err=%v", result, err)
 	}
 }

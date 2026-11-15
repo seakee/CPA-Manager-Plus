@@ -268,7 +268,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
+		return completedVerifyReplayResultForStore(ctx, db, paths, recorded, binding, hasBinding, options)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -345,7 +345,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResultForStore(ctx, db, paths, current, binding, hasBinding)
+		return completedVerifyReplayResultForStore(ctx, db, paths, current, binding, hasBinding, options)
 	}
 	if err := verifyEntry(current); err != nil {
 		return VerifyResult{}, err
@@ -616,6 +616,40 @@ func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths target
 	return result, nil
 }
 
+func completedVerifyReplayResultForStore(
+	ctx context.Context,
+	db *sql.DB,
+	paths targetPaths,
+	recorded model.UpgradeOperation,
+	binding upgradeoperation.ExternalBinding,
+	hasBinding bool,
+	options VerifyOptions,
+) (VerifyResult, error) {
+	result, err := completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	fullyRouted, err := completedOperationFullyRouted(recorded, result.TargetMode)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if !fullyRouted {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the completed upgrade operation has missing access prefixes; supply mode-valid prefixes once to repair it", nil)
+	}
+	callerProvidedRouting := options.ControlBasePath != "" ||
+		options.InferenceBasePath != "" ||
+		options.SharedEntry
+	if callerProvidedRouting &&
+		(options.ControlBasePath != recorded.ControlBasePath ||
+			options.InferenceBasePath != recorded.InferenceBasePath ||
+			options.SharedEntry != recorded.SharedEntry) {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
+			"the upgrade access prefixes are already committed and preserved across upgrades; nothing was written", nil)
+	}
+	return result, nil
+}
+
 func handleCompletedVerify(
 	ctx context.Context,
 	snapshotDB *sql.DB,
@@ -632,8 +666,8 @@ func handleCompletedVerify(
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	callerProvidedRouting := strings.TrimSpace(options.ControlBasePath) != "" ||
-		strings.TrimSpace(options.InferenceBasePath) != "" ||
+	callerProvidedRouting := options.ControlBasePath != "" ||
+		options.InferenceBasePath != "" ||
 		options.SharedEntry
 	if fullyRouted {
 		if !callerProvidedRouting {
@@ -647,6 +681,10 @@ func handleCompletedVerify(
 		return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
 			"the upgrade access prefixes are already committed and preserved across upgrades; nothing was written", nil)
 	}
+	if !callerProvidedRouting {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
+			"the completed upgrade operation has missing access prefixes; supply mode-valid prefixes once to repair it", nil)
+	}
 
 	ctrl := options.ControlBasePath
 	if recorded.RoutingCommitted && strings.TrimSpace(recorded.ControlBasePath) != "" {
@@ -656,17 +694,14 @@ func handleCompletedVerify(
 		}
 		ctrl = recorded.ControlBasePath
 	}
-	if !recorded.InferenceCommitted && strings.TrimSpace(recorded.InferenceBasePath) != "" {
+	if !recorded.InferenceCommitted && recorded.InferenceBasePath != "" &&
+		(options.InferenceBasePath != "" || options.SharedEntry) {
 		if options.InferenceBasePath != recorded.InferenceBasePath || options.SharedEntry != recorded.SharedEntry {
 			return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
 				"a different staged inference prefix is already recorded on the completed upgrade; nothing was written", nil)
 		}
 	}
 	isExternal := result.TargetMode == model.UpgradeTargetExternal
-	if strings.TrimSpace(ctrl) == "" || (!isExternal && strings.TrimSpace(options.InferenceBasePath) == "") {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyAccessPrefixRequired,
-			"the completed upgrade operation has missing access prefixes; supply mode-valid prefixes once to repair it", nil)
-	}
 	if err := routing.ValidateAccessPrefixPair(ctrl, options.InferenceBasePath, options.SharedEntry, isExternal); err != nil {
 		return VerifyResult{}, mapAccessPrefixToUpgradeError(err)
 	}
@@ -702,6 +737,13 @@ func handleCompletedVerify(
 	verifiedNow, err := completedVerifyResultForStore(ctx, db, paths, current, binding, hasBinding)
 	if err != nil {
 		return VerifyResult{}, err
+	}
+	fullyRoutedNow, err := completedOperationFullyRouted(current, verifiedNow.TargetMode)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if fullyRoutedNow {
+		return completedVerifyReplayResultForStore(ctx, db, paths, current, binding, hasBinding, options)
 	}
 	sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
 	repaired, err := repo.RepairMissingRoutingOnCompletedUpgrade(
