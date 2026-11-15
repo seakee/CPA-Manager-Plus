@@ -991,7 +991,7 @@ export function FreshApiKeys({
         if (ownOp?.operation?.outcome === 'aborted') {
           let refreshed = targetKey;
           let resolvedCode = code === 'key_operation_unknown' ? '' : code;
-          let resolvedDetail = resolvedCode === 'external_management_key_rejected' ? detail : '';
+          const resolvedDetail = resolvedCode === 'external_management_key_rejected' ? detail : '';
           try {
             const canonical = await client.get<Key>('api-keys/' + targetKey.id, auth);
             if (!alive.current || ownerEpoch.current !== ownerAtStart) return;

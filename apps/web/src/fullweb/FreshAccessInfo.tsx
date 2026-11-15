@@ -218,10 +218,13 @@ export function parseAccessInfo(value: unknown): AccessInfo | null {
     if (
       typeof raw.label !== 'string' ||
       !raw.label.trim() ||
-      raw.label.length > MAX_PROTOCOL_LABEL_LEN ||
-      /[\x00-\x1f\x7f]/.test(raw.label)
+      raw.label.length > MAX_PROTOCOL_LABEL_LEN
     ) {
       return null;
+    }
+    for (let i = 0; i < raw.label.length; i += 1) {
+      const code = raw.label.charCodeAt(i);
+      if (code < 0x20 || code === 0x7f) return null;
     }
     if (typeof raw.basePath !== 'string' || typeof raw.examplePath !== 'string') return null;
     if (mode === 'connect_external') {
@@ -425,7 +428,10 @@ export function AccessInfoSummary({
 
     void (async () => {
       try {
-        const raw = await client.get<unknown>('api-keys/access-info', auth);
+        const raw = await client.get<unknown>('api-keys/access-info', {
+          kind: auth.kind,
+          value: auth.value,
+        });
         if (
           cancelled ||
           !activeRef.current ||

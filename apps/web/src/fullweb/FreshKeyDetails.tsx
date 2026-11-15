@@ -457,7 +457,7 @@ export function FreshKeyDetails({
         if (ownOp?.operation?.outcome === 'aborted') {
           let refreshed = baseKey;
           let resolvedCode = code === 'key_operation_unknown' ? '' : code;
-          let resolvedDetail = resolvedCode === 'external_management_key_rejected' ? detail : '';
+          const resolvedDetail = resolvedCode === 'external_management_key_rejected' ? detail : '';
           try {
             const canonical = validate(await client.get<Key>(resource, auth));
             if (!active.current || ownerEpoch.current !== ownerAtStart) return;
