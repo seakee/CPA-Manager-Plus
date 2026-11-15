@@ -114,6 +114,10 @@ func TestFreshCommittedStrategyReplayChecksTargetsWithoutUpdating(t *testing.T) 
 				r.Operation.Routing.Target = "/cpamp-admin"
 				r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 				r.Operation.Routing.Committed = true
+				if strategy == bootstrap.NewManaged {
+					r.Operation.Routing.InferenceTarget = "/cpamp-api"
+					r.Operation.Routing.InferenceCommitted = true
+				}
 				r.Connection = connection
 				return nil
 			})

@@ -101,6 +101,16 @@ different by default. Equal prefixes require explicit shared-entry intent;
 ancestor/descendant overlap is rejected. Shared entry disambiguates protocol
 paths from Control resources without exposing CPA management or Runtime paths.
 
+First-time New Managed and Adopt completion requires a valid, verified and
+committed inference prefix as well as the Control prefix. A control-only route
+prepared before strategy selection remains valid for Connect External, but
+cannot be used to select a Manager-owned strategy or mark its installation
+complete. Strategy selection, routing activation and completion re-check this
+invariant at their durable transaction boundaries. Already-completed historical
+v2 records with a missing inference prefix remain loadable and use the
+authenticated one-time completion path below; they are not reclassified as
+first-time installations.
+
 Inference forwarding preserves protocol paths, query strings, request streaming,
 SSE and WebSocket upgrades. Supported CPA protocol families include `/v1/`,
 `/v1beta/`, `/openai/v1/`, `/backend-api/codex/` and the bounded

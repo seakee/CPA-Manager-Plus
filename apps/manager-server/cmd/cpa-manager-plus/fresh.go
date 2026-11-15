@@ -1127,7 +1127,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			// The safe-read result and encrypted Manager configuration were saved
 			// atomically. Completing Manager setup does not activate model traffic
 			// or take ownership of the external CPA lifecycle.
-			if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil {
+			if op.Strategy.Stage != "committed" || record.Connection == nil || a.protector == nil ||
+				!op.Routing.Committed || op.Routing.OperationID == "" ||
+				freshrouting.ValidateCheckpointForStrategy(bootstrap.ConnectExternal, op.Routing) != nil {
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
@@ -1135,9 +1137,17 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-		} else if !a.managedInstallationReady(r.Context(), op) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+		} else {
+			if op.Strategy.Strategy == bootstrap.NewManaged &&
+				(!op.Routing.Committed || !op.Routing.InferenceCommitted || op.Routing.OperationID == "" ||
+					freshrouting.ValidateCheckpointForStrategy(bootstrap.NewManaged, op.Routing) != nil) {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			if !a.managedInstallationReady(r.Context(), op) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 		}
 		next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
 			if freshAuth {
@@ -1145,7 +1155,9 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 					return err
 				}
 			}
-			if record.Operation.Strategy.Stage != "committed" {
+			if record.Operation.Strategy.Stage != "committed" ||
+				!record.Operation.Routing.Committed || record.Operation.Routing.OperationID == "" ||
+				freshrouting.ValidateCheckpointForStrategy(record.Operation.Strategy.Strategy, record.Operation.Routing) != nil {
 				return freshstore.ErrConflict
 			}
 			record.Operation.ProductComplete = true
@@ -1258,6 +1270,16 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 			w.WriteHeader(http.StatusBadRequest)
 		}
 		return
+	}
+	if !op.ProductComplete && op.Routing.OperationID != "" {
+		if err := freshrouting.ValidateCheckpointForStrategy(request.Strategy, op.Routing); err != nil {
+			if code, ok := bootstrap.AccessPrefixCodeOf(err); ok {
+				writeFreshStrategyError(w, &freshstrategy.Blocker{Code: string(code)})
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 	}
 	var externalBaseURL string
 	if request.Strategy == bootstrap.ConnectExternal {
@@ -1388,6 +1410,11 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 		if token, freshAuth := freshbootstrap.SessionToken(r); freshAuth {
 			if err := a.validateInstallationSession(*record, token); err != nil {
 				return err
+			}
+		}
+		if !record.Operation.ProductComplete && record.Operation.Routing.OperationID != "" {
+			if err := freshrouting.ValidateCheckpointForStrategy(result.Checkpoint.Strategy, record.Operation.Routing); err != nil {
+				return freshstore.ErrConflict
 			}
 		}
 		record.Operation.Strategy = result.Checkpoint

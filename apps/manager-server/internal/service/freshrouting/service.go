@@ -177,6 +177,41 @@ func validateIntentForStrategy(strategy bootstrap.CPAStrategy, intent AccessInte
 	}
 }
 
+// ValidateCheckpointForStrategy enforces the access-prefix invariant between an
+// owned Fresh routing checkpoint and a first-time CPA strategy selection or
+// completion. Manager-owned strategies (NewManaged and AdoptExisting) require a
+// valid non-empty inference prefix — and once routing is committed, require
+// InferenceCommitted — whereas ConnectExternal requires control-only routing.
+func ValidateCheckpointForStrategy(strategy bootstrap.CPAStrategy, cp bootstrap.FreshRoutingCheckpoint) error {
+	if cp.OperationID == "" {
+		return nil
+	}
+	if err := validateIntentForStrategy(strategy, AccessIntent{
+		Target:          cp.Target,
+		InferenceTarget: cp.InferenceTarget,
+		SharedEntry:     cp.SharedEntry,
+	}); err != nil {
+		return err
+	}
+	switch strategy {
+	case bootstrap.NewManaged, bootstrap.AdoptExisting:
+		if cp.Committed && !cp.InferenceCommitted {
+			return &bootstrap.AccessPrefixError{
+				Code:   bootstrap.CodeInferencePrefixRequired,
+				Detail: "inferenceBasePath must be committed for managed inference",
+			}
+		}
+	case bootstrap.ConnectExternal:
+		if cp.InferenceCommitted {
+			return &bootstrap.AccessPrefixError{
+				Code:   bootstrap.CodeExternalInferencePrefixForbidden,
+				Detail: "external installations do not commit a managed inference prefix",
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) prepareAccess(ctx context.Context, id bootstrap.FreshIdentity, intent AccessIntent, validate func(freshstore.Record) error) (bootstrap.FreshOperation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,6 +270,9 @@ func (s *Service) prepareAccess(ctx context.Context, id bootstrap.FreshIdentity,
 				return err
 			}
 		}
+		if err := validateIntentForStrategy(cur.Operation.Strategy.Strategy, intent); err != nil {
+			return err
+		}
 		prev := cur.Operation.Routing
 		cur.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
 			OperationID:                id.OperationID,
@@ -280,6 +318,15 @@ func (s *Service) activate(ctx context.Context, id bootstrap.FreshIdentity, vali
 	}
 	if validate != nil {
 		if err := validate(r); err != nil {
+			return r.Operation, err
+		}
+	}
+	if !r.Operation.ProductComplete && !r.Operation.Routing.Committed {
+		if err := validateIntentForStrategy(r.Operation.Strategy.Strategy, AccessIntent{
+			Target:          r.Operation.Routing.Target,
+			InferenceTarget: r.Operation.Routing.InferenceTarget,
+			SharedEntry:     r.Operation.Routing.SharedEntry,
+		}); err != nil {
 			return r.Operation, err
 		}
 	}
@@ -339,6 +386,15 @@ func (s *Service) activate(ctx context.Context, id bootstrap.FreshIdentity, vali
 		}
 		if r.Operation.Routing.OperationID != id.OperationID || r.Operation.Routing.Target != wanted.Target || r.Operation.Routing.InferenceTarget != wanted.InferenceTarget || r.Operation.Routing.SharedEntry != wanted.SharedEntry {
 			return ErrConflict
+		}
+		if !r.Operation.ProductComplete {
+			if err := validateIntentForStrategy(r.Operation.Strategy.Strategy, AccessIntent{
+				Target:          r.Operation.Routing.Target,
+				InferenceTarget: r.Operation.Routing.InferenceTarget,
+				SharedEntry:     r.Operation.Routing.SharedEntry,
+			}); err != nil {
+				return err
+			}
 		}
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true

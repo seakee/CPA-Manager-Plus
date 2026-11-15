@@ -144,8 +144,10 @@ func newAdoptRetryFixture(t *testing.T) *adoptRetryFixture {
 		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
 		r.Operation.Routing.Revision = 1
 		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		return nil
 	})
 	if err != nil {
@@ -313,6 +315,17 @@ func TestFreshAdoptLostResponseForbidsDifferentParameters(t *testing.T) {
 func TestFreshAdoptAdmissionKeepsOnlyTheLegacyRefusal(t *testing.T) {
 	app, closeApp := newA3TestApp(t)
 	defer closeApp()
+	rec, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.InferenceCommitted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var sourceCalls int
 	source := adoptV8Source(t, &sourceCalls)
 	before, err := app.store.Load(t.Context())
@@ -483,8 +496,10 @@ func TestFreshAdoptProductionQualificationCannotAdmitLegacyClass(t *testing.T) {
 		r.Operation.Routing.OperationID = op.Identity.OperationID
 		r.Operation.Routing.Revision = 1
 		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)

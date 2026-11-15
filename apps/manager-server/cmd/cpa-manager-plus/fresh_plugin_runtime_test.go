@@ -320,13 +320,14 @@ func TestPluginRuntimeReconcilesAnUnknownReplyByReadBackOnly(t *testing.T) {
 // TestPluginRuntimeFailsClosedOutsideTheManagedAuthority proves the route refuses
 // a profile that does not own the Supervisor destination, on read and on write.
 func TestPluginRuntimeFailsClosedOutsideTheManagedAuthority(t *testing.T) {
-	app := newInstallationTestApplication(t)
-	markFreshProductComplete(t, app)
+	app, closeApp := newA3TestApp(t)
+	defer closeApp()
 	record, err := app.store.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.ConnectExternal, Stage: "committed",
 			TargetIdentity: "external:sha256:" + strings.Repeat("b", 64), TargetGeneration: 1,

@@ -91,6 +91,10 @@ func installManagedCheckpoint(t *testing.T, app *freshApplication, stage string)
 	}
 	s := validInstallationRuntime()
 	after, err := app.store.Update(t.Context(), before.Operation.Identity, before.Operation.Revision, func(r *freshstore.Record) error {
+		if r.Operation.Routing.Committed && r.Operation.Routing.InferenceTarget == "" {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+		}
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
 			Strategy: bootstrap.NewManaged, Stage: stage, TargetIdentity: string(s.Identity),
 			TargetGeneration: uint64(s.Generation), TargetArtifactID: string(s.ActiveGatewayArtifact.ArtifactID),

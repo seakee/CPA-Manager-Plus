@@ -3077,6 +3077,17 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 		}
 
 		// Switching to NewManaged (staged -> committed) must succeed.
+		curBeforeMgd, err := app.store.Load(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.store.Update(t.Context(), curBeforeMgd.Operation.Identity, curBeforeMgd.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		managedReq := freshstrategy.Request{
 			Strategy:                  bootstrap.NewManaged,
 			ExpectedRuntimeIdentity:   "runtime-01",
@@ -3288,6 +3299,14 @@ func TestFailedOrConflictingExternalCommitPreservesEmbeddedRuntime(t *testing.T)
 			extDone <- out
 		}()
 		<-externalEntered
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
+			r.Operation.Routing.InferenceCommitted = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Commit NewManaged (staged -> committed) while ConnectExternal is in flight.
 		postMgd := func(rev uint64) *httptest.ResponseRecorder {
@@ -3692,8 +3711,10 @@ func TestEmbeddedStartLedgerWriteFailureRefusesMutatingSupervisorRPCsAndRecovers
 			r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
 			r.Operation.Routing.Revision = 1
 			r.Operation.Routing.Target = "/cpamp-admin"
+			r.Operation.Routing.InferenceTarget = "/cpamp-api"
 			r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 			r.Operation.Routing.Committed = true
+			r.Operation.Routing.InferenceCommitted = true
 			return nil
 		})
 		if err != nil {

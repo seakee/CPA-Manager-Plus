@@ -291,3 +291,63 @@ func TestExistingV2MissingInferenceOneTimeAuthenticatedCompletionAndNoUnauthLeak
 		t.Fatalf("second POST = %d %s, want 409 %s", secondRec.Code, secondRec.Body.String(), bootstrap.CodeInferencePrefixAlreadyCommitted)
 	}
 }
+
+func TestActivateRefusesControlOnlyIntentWhenManagedStrategySelected(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		strategy    bootstrap.CPAStrategy
+		wantAllowed bool
+	}{
+		{name: "new_managed_refused", strategy: bootstrap.NewManaged, wantAllowed: false},
+		{name: "connect_external_allowed", strategy: bootstrap.ConnectExternal, wantAllowed: true},
+		{name: "unselected_allowed", strategy: "", wantAllowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, id, _ := newInitializedTwoPrefixStore(t, "")
+			drv := &routeDriver{}
+			svc := New(store, drv)
+			if _, err := svc.PrepareAccess(t.Context(), id, AccessIntent{Target: "/cpamp-admin"}); err != nil {
+				t.Fatalf("PrepareAccess control-only before strategy: %v", err)
+			}
+			if tc.strategy != "" {
+				selectedStore, _, _ := newInitializedTwoPrefixStore(t, tc.strategy)
+				selected, err := selectedStore.Load(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				cur, err := store.Load(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Update(t.Context(), id, cur.Operation.Revision, func(r *freshstore.Record) error {
+					r.Operation.Strategy = selected.Operation.Strategy
+					r.Connection = selected.Connection
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			op, err := svc.Activate(t.Context(), id)
+			if !tc.wantAllowed {
+				code, ok := bootstrap.AccessPrefixCodeOf(err)
+				if !ok || code != bootstrap.CodeInferencePrefixRequired {
+					t.Fatalf("Activate(%s) err = %v (code=%q, ok=%t), want %s", tc.strategy, err, code, ok, bootstrap.CodeInferencePrefixRequired)
+				}
+				reloaded, loadErr := store.Load(t.Context())
+				if loadErr != nil {
+					t.Fatal(loadErr)
+				}
+				if reloaded.Operation.Routing.Committed || reloaded.Operation.Routing.InferenceCommitted || drv.actual != (State{}) {
+					t.Fatalf("refused Activate mutated routing or driver: routing=%+v applied=%+v", reloaded.Operation.Routing, drv.actual)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Activate(%s) unexpected error: %v", tc.strategy, err)
+			}
+			if !op.Routing.Committed || op.Routing.InferenceCommitted || op.Routing.InferenceTarget != "" {
+				t.Fatalf("Activate(%s) unexpected routing = %+v", tc.strategy, op.Routing)
+			}
+		})
+	}
+}

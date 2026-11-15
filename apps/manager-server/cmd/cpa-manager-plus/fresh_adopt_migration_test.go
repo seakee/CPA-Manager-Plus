@@ -492,8 +492,10 @@ func newAdoptMigrationFixtureWithClientKeys(t *testing.T, clientKeys ...string) 
 		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
 		r.Operation.Routing.Revision = 1
 		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		return nil
 	})
 	if err != nil {

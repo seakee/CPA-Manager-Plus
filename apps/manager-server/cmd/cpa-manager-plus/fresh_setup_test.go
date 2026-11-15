@@ -63,8 +63,10 @@ func TestFreshSetupContinuationCannotBecomeConsoleAuthentication(t *testing.T) {
 		r.Operation.Routing.OperationID = op.Identity.OperationID
 		r.Operation.Routing.Revision = 1
 		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
 		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
 		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
 		s := validInstallationRuntime()
 		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: string(s.Identity), TargetGeneration: uint64(s.Generation), TargetArtifactID: string(s.ActiveGatewayArtifact.ArtifactID)}
 		return nil
