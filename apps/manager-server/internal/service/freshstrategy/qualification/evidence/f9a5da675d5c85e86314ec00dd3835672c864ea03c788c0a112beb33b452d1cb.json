@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "runId": "cpamp-fresh-adoption-resource-network-a9c58d4cc756",
+  "caseRef": "fresh-network-client-api-keys-read",
+  "sourceClass": "network_existing",
+  "consumerImplementationSha256": "817e3d8b620bd4c4e6837e02ea71b31ad4a5d7b2857f94842502e7b32a88876f",
+  "readVerified": true,
+  "clientKeyCount": 133,
+  "resourceCounts": {
+    "client-api-keys": 133,
+    "cpa-auth-files": 2,
+    "cpa-config-routing": 12,
+    "provider-state-api-keys": 5
+  },
+  "managementGeneration": "v8"
+}

@@ -14,47 +14,52 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [scoped access-prefix / multi-Key acceptance record](evidence/1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c.md)
-separates immutable upstream firmware AQ evidence from renewed product execution
-evidence. The three original AQ reports, their selected traces and their
-`implementationHead` remain at `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc`
-(tree `b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`); the six AQ tools are byte-identical
-to that revision, and the official CPA `v8.0.55` candidate is unchanged. Their
-original limited, unknown, failed and aborted boundaries are not promoted.
+The current [CPA v8-only scoped acceptance](evidence/a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1.md)
+binds the actual source and destination executions to official CPA `v8.0.55`.
+Both real-process producers passed from immutable implementation
+`a9c58d4cc756a9317fd8673e7067f300d5c6c23e`
+(tree `048822a09db7eac901859d60d69d8f377daa21cf`). The build read a clean
+`git archive` of that commit rather than concurrent UI worktree edits. Race-enabled
+Linux/amd64 test tools and the Runtime Supervisor were newly compiled under an
+unprivileged identity, then executed in task-owned network isolation. The base
+image supplied compatible loaders, not the tested Manager or Supervisor.
 
-The real Go destination and adoption producers were rebuilt and executed from
-clean implementation `77625e1804289a69beffdcb2b641a1ade9ac746c`
-(tree `c039a5e462c8e5cd304e4f64740634bd10fcedde`). Both producers passed with actual
-CPA `v8.0.55` / `v7.0.12` processes and the newly compiled Runtime Supervisor in
-task-owned network isolation. Each private adoption profile carried 133 Client
-Keys. The generated traces verify readback, client authentication, destination
-identity and preserved source state; `gatewayPending` remains true.
+Each private source profile carried 133 Client Keys. Both source and destination
+were actual pinned CPA `v8.0.55` processes; no v7 executable was mounted or run.
+Readback, effective client authentication, destination identity, Supervisor
+restart and preserved source state were verified. `gatewayPending` remains true.
+The private `legacy_managed` class now denotes a constrained legacy-layout v0
+safe read on CPA v8, not a supported pre-v8 runtime or public Fresh admission.
 
 The current consumer implementation SHA-256 is
-`c7a8dc1def60316a37e90f0a4246d466449f3c58d351805f52308cd5ff438187`, and the
-11-file Runtime execution-chain pin is
+`817e3d8b620bd4c4e6837e02ea71b31ad4a5d7b2857f94842502e7b32a88876f`.
+The unchanged 11-file Runtime execution-chain pin is
 `340686a6ad37b2a6843c943f6beb2a1339edc5abcf441f1ae2483ddaa63941d6`.
 
-| Renewed chain | Report SHA-256 | Original runner |
+| Current chain | Report SHA-256 | Executed source |
 | --- | --- | --- |
-| network resources | `755d0a52edfc8fc1e30561b97433454504b9fd37f2766cffea62d91765a6b054` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
-| legacy resources | `87bfcc272383120bfc62c0ebe98bce238fcbba077c92678ca8385934d9ba31ef` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
-| legacy transition | `9dfd548c2e6504767e32a12b02a9b9b0ba787bd9cb67e2b4e4efc5eb6279d2c1` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
+| network resources | `333a8ec55fc68fc48de6910e47704d4ca337381120a7595d8ca1ef2f0ca27076` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
+| legacy-layout v8 resources | `82e815d47903651052fa8b405c0630b3c3a0694a3a01758d0db96632c00f17bb` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
+| legacy-managed v8 transition | `9e5f8a5b25809c230a670f4c081b921575f43a4c4e49847b67833cd471eb24e3` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
 
-The acceptance record lists every renewed report, trace, observation and manifest
-digest. Existing qualification evidence and the previous
-[independent pre-Beta verification](evidence/025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d.md)
-remain historical audit records, including the earlier Argon and Sol reviews and
-Native NH2 evidence. This renewal does not claim a new Native, public Gateway,
-five-mode UI, SSE/WebSocket, online provider/OAuth, arm64 or cross-OS run. External
-acceptance still does not guarantee connectivity for every topology.
+Thirteen raw producer outputs were byte-verified; the network manifest was
+already identical and twelve content-addressed files are new. All 89 existing
+evidence files remain unchanged. The previous [acceptance](evidence/1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c.md)
+and its [final audit](evidence/f71b3d471ed1a1cd49901a4cfff5596162d6823e3434a0bac63efb2b80bd5773.md)
+are superseded historical records, not current v8-only support evidence.
+Historical v7 evidence is neither relabeled nor executed as a current positive.
 
-The [final independent artifact/loader/source audit](evidence/f71b3d471ed1a1cd49901a4cfff5596162d6823e3434a0bac63efb2b80bd5773.md)
-completed with GO and no findings. Its final model was verified from session
-provenance as `gemini-4-argon-high`, without fallback. It independently checked
-the 23 implementation inputs, 11-file Runtime pin, canonical consumer bytes,
-all 10 new JSON outputs and all 74 retained historical evidence files. It is a
-read-only artifact audit, not execution of the Manager suite or product acceptance.
+The three original fixed-CPA8 AQ reports retain their selected traces, original
+runner `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc` and tree
+`b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`. The six AQ tools were byte-compared
+with that revision and are unchanged. Their original limited, unknown, failed
+and aborted boundaries are not promoted. The separate [independent byte/provenance
+audit](evidence/17363ecbbe981be8798f5376aa6a74a3f629f2eb2394366e4d38fb443b31500b.md) completed with GO and no findings;
+session provenance confirms Argon without fallback.
+
+This private renewal does not certify public Gateway activation, five-mode UI,
+SSE/WebSocket, live provider/OAuth accounts, Native installation, arm64, other
+operating systems, arbitrary External topology or future CPA major versions.
 
 
 To accept a consumer, independent review must first identify the exact original
@@ -72,15 +77,15 @@ must separately accept legacy staging transition.
 | Dimension | Enforced values |
 | --- | --- |
 | `target` | `exact_cpa_v8_artifact`, `bounded_v8_management_surface`, `manager_owned_exact_v8_destination` |
-| `sourceTransport` | `none`, `bounded_v8_direct_safe_read`, `pinned_legacy_cpa_v7_0_12_direct_safe_read` |
+| `sourceTransport` | `none`, `bounded_v8_direct_safe_read`, `pinned_legacy_cpa_v8_0_55_direct_safe_read` |
 | `destinationTransport` | `external_connection`, `manager_runtime_private_v1` |
-| `config` | `cpa_v8`, `cpa_v7_0_12_source_to_cpa_v8_destination` |
+| `config` | `cpa_v8`, `cpa_v8_0_55_source_to_cpa_v8_destination` |
 | `mode` | `fresh_new_managed`, `fresh_connect_external`, `fresh_adopt_network_existing`, `fresh_adopt_legacy_managed` |
 
 The enforced limitation vocabulary is `management_generation_v8`,
 `exact_cpa_v8_artifact_identity`, `read_only_bounded_safe_read`,
 `direct_transport_no_proxy_no_redirect`, `client_api_keys_only`,
-`legacy_source_profile_cpa_v7_0_12`, `source_preserved` and `gateway_pending`,
+`legacy_source_profile_cpa_v8_0_55`, `source_preserved` and `gateway_pending`,
 with a fixed set per consumer. These keys map to facts the code actually checks;
 they are not review prose. `client_api_keys_only` is a `legacy_managed` limitation
 only: a network adoption migrates credentials, gateway configuration and the
@@ -139,13 +144,13 @@ digests and the observation digest. The loader verifies:
 
 ```
 consumer binding
-  -> transition manifest (case, profile, exact v7 source profile, target)
+  -> transition manifest (case, profile, exact pinned v8 legacy-layout source, target)
   -> transition report (manifest, runner head, completed PASS result, evidence ref)
   -> transition observation (source profile, exact target, implementation digest, facts)
 ```
 
 The checked-in manifest is content-addressed under
-`evidence/80fc3fea2d865edf50e3f2a87ae5109fb15e7c97bc3863a8589c39b50e974a5e.json`.
+`evidence/4aa6eaeda49ddfa624ea562f5b9425544f8abf5bf0343e34fc3b2b3d6235d4df.json`.
 The per-run report and sanitized observation are generated by the exact-CPA CI
 job as `fresh-legacy-transition-report.json` and
 `fresh-legacy-transition.json`; acceptance must pin those exact bytes. This case
@@ -154,18 +159,17 @@ r4 `CPA8-STAGE-r1` report case refs. `network_existing` must not carry the field
 and only a fully validated chain sets `StagingV8TransitionQualified`; ordinary
 profile evidence never does.
 
-The accepted legacy source profile is exact, not a version range: CPA `v7.0.12`
-(the official release reports `X-CPA-VERSION: 7.0.12`), archive SHA-256
-`8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74` and Linux
+The accepted legacy-managed source profile is exact, not a version range: CPA
+`v8.0.55` (`X-CPA-VERSION: 8.0.55`), archive SHA-256
+`4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123` and Linux
 amd64 executable SHA-256
-`1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a`. The runtime
-adapter checks the authenticated endpoint's declared `X-CPA-VERSION`
-and the constrained v0 response shape; it does **not** attest the remote source
-binary SHA. The reference binary hashes above identify the CI test executable,
-not arbitrary operator-selected production sources. The runtime adapter fails
-closed before interpreting any body when the declared version is missing or
-different. CPA v8.0.55 still serves `/v0/management/config` with a
-legacy-shaped body; it is rejected by version metadata, never treated as legacy.
+`e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7`.
+The adapter checks the authenticated endpoint's version header and constrained
+legacy-shaped v0 response; it does not remotely attest executable bytes. The
+binary hashes identify the CI executable, not arbitrary operator-selected
+servers. Missing, pre-v8 and nonmatching headers fail closed before parsing any
+body. The pinned v8 source is accepted only with this version and bounded body
+shape; it does not gain the network source class's wider replay authority.
 
 Client-key adoption resources use a separate, class-specific evidence chain
 instead of the retained r4 report's case refs:
@@ -185,7 +189,7 @@ and the new resource cases are not inserted into the immutable r4 report. The
 checked-in resource manifests are
 `evidence/41725ced527fa1221e32d4f0aabd9b3a7709dd454cc2761165e8e375bd9db6a2.json`
 (network) and
-`evidence/08d8c0163c77f235365b4d5f9149a6d3855062c642071eb99e5d12bfa69b49fe.json`
+`evidence/9305f4fa655d918079be6227113877cf28c22f234bead1daef0981dee67967ce.json`
 (legacy). CI emits per-class
 `fresh-adoption-resource-{network,legacy}-{manifest,report,read,replay,verify,authority}.json`
 from the real process run. Source read, destination replay, destination
@@ -203,9 +207,9 @@ migrate, while the remaining sections stay explicit manual or unsupported
 actions. The section item is a whole `api-keys.*` group or one of the copyable
 `oauth.*` children, which are provider configuration rather than the source's
 auth directory; both are gated under `provider-state-api-keys`. A `legacy_managed`
-source is a pre-v8 process with no v8 management
-surface, so its evidence authorizes `client-api-keys` only and its other kinds
-keep the manual action they had before. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
+source uses a pinned CPA v8 legacy-layout safe-read profile whose accepted
+evidence authorizes `client-api-keys` only; other kinds retain explicit manual
+actions. Unknown upstream sections collapse to the fixed `cpa-config-unknown`
 reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.
@@ -222,9 +226,10 @@ superseded re-verification record
 `5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5`, and the
 previous independent re-verification record
 `025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`, followed by
-the scoped 2026-11-15 renewal
-`1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c`, backed by
-real-process CPA `v8.0.55` source-read, destination-replay and destination-verify
+the historical 2026-11-15 renewal
+`1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c` and the current
+CPA v8-only acceptance `a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1`,
+backed by actual CPA `v8.0.55` source-read, destination-replay and verification
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for
 its own reference is `migrate`. The
@@ -255,13 +260,13 @@ destination/start/restart/recovery/private-protocol source files. The pin is par
 of `consumerImplementationSHA256`, so changing that execution chain invalidates
 any later accepted consumer record.
 
-Controlled real-process CI for `legacy_managed` uses a pinned real pre-v8 CPA
-source that remains live and byte-preserved. Fresh points at that v7 source URL
-and reads it only through the explicit legacy v0 adapter; the exact v8 candidate
-then runs as the Manager-owned destination created by the existing Supervisor
-`StageDestination` child operation. That destination is the staging-v8
-transition itself. Merely labelling a v8 process as `legacy_managed`, or letting
-a test pre-build a v8 source, is not transition evidence.
+Controlled real-process CI for `legacy_managed` launches official pinned CPA
+`v8.0.55` with a legacy-layout configuration. The source stays live and
+byte-preserved while Fresh reads its authenticated v0 compatibility endpoint.
+The existing Supervisor `StageDestination` child operation creates a separate
+Manager-owned destination using the same exact v8 candidate; its ownership,
+staging, readback and restart are independently verified. A class label or a
+configuration echo cannot substitute for those two real processes and proofs.
 
 Acceptance is based on the independently reviewed exact evidence bytes,
 not on CI success alone. Any implementation drift invalidates the record.
