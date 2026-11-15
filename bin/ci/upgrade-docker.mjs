@@ -134,7 +134,7 @@ const OWNERSHIP_HELPER_IMAGE = 'alpine:3.21';
 // The management and client keys the harness's synthetic v8 CPA accepts. They
 // are this run's own secrets, registered with the redactor beside the two
 // administrator keys.
-const OFFICIAL_CPA_V8_VERSION = '8.0.55';
+const CPA_V8_FIXTURE_VERSION = '8.0.55';
 const EXTERNAL_CONTROL_PREFIX = '/ext-console';
 const INGRESS_DIR = path.join(ROOT, 'apps', 'ingress');
 const SYNTHETIC_CPA_MANAGEMENT_KEY = 'Cpamp_U1D_Harness_CPA_Management_Key_0001';
@@ -2222,11 +2222,10 @@ async function startHostIngress({ name, ingressBin, publicPort, routingPort, man
   const child = spawn(ingressBin, [], {
     env: {
       ...process.env,
-      CPAMP_INGRESS_LISTEN_ADDR: `127.0.0.1:${publicPort}`,
-      CPAMP_INGRESS_ROUTING_ADDR: `127.0.0.1:${routingPort}`,
-      CPAMP_MANAGER_UPSTREAM_URL: `http://127.0.0.1:${managerPort}`,
-      CPAMP_CPA_UPSTREAM_URL: cpaUrl,
-      CPAMP_FRESH_MODE: 'true',
+      CPAMP_INGRESS_ADDR: `127.0.0.1:${publicPort}`,
+      CPAMP_INGRESS_CONTROL_ADDR: `127.0.0.1:${routingPort}`,
+      CPAMP_MANAGER_URL: `http://127.0.0.1:${managerPort}`,
+      CPAMP_GATEWAY_URL: cpaUrl,
     },
     stdio: ['ignore', out, out],
     detached: true,
@@ -2405,14 +2404,14 @@ async function completeThroughTheGate(binary, completedRoot, sourceRoot, databas
 // connection and then never answer it. The program serves the five authenticated
 // reads the step makes — the version probe, the v8 document, the client-key
 // list, the config YAML the step digests into the server fingerprint, and the
-// model surface — with the credential and official 8.0.55 version it expects.
+// model surface — as a controlled v8 API fixture, not official-runtime qualification.
 function syntheticCPAProgram({ port, model, configYAML }) {
   return `import http from 'node:http';
 
 const port = ${JSON.stringify(port)};
 const model = ${JSON.stringify(model)};
 const configYAML = ${JSON.stringify(configYAML)};
-const version = ${JSON.stringify('v' + OFFICIAL_CPA_V8_VERSION)};
+const version = ${JSON.stringify('v' + CPA_V8_FIXTURE_VERSION)};
 const management = process.env.CPA_MANAGEMENT_KEY;
 const clientKey = process.env.CPA_CLIENT_KEY;
 
@@ -2532,9 +2531,10 @@ function readRowJson(dbPath, sql) {
 }
 
 // proveCompletedAdmission proves External completion over real Ingress + Manager
-// both before and after restart: fixed bootstrap wizard routes and unprefixed
-// root endpoints return 404, the committed control prefix serves authenticated
-// v2 + bridged historical usage endpoints, and inference completion is refused.
+// both before and after restart: fixed bootstrap wizard routes return 404;
+// unprefixed inference and CPA management stay disabled (503), while the
+// external CPA base URL accepts its own client key. The committed control prefix
+// serves authenticated v2 + bridged usage; inference completion is refused.
 async function proveCompletedAdmission(binary, ingressBin, completedRoot, sourceRoot, cpaUrl) {
   const proveRound = async (suffix) => {
     const managerPort = ports.take();
@@ -2590,11 +2590,15 @@ async function proveCompletedAdmission(binary, ingressBin, completedRoot, source
         const rootModels = httpJson('GET', `${publicBase}/v1/models`, {
           headers: { Authorization: `Bearer ${SYNTHETIC_CPA_CLIENT_KEY}` },
         });
-        assertValue(rootModels.status !== 503 && rootModels.status === 404, `admission(external-${suffix}): root /v1/models = ${rootModels.status} want 404`);
+        assertValue(rootModels.status === 503, `admission(external-${suffix}): Manager-owned inference must remain disabled, got ${rootModels.status}`);
+        const externalModels = httpJson('GET', `${cpaUrl}/v1/models`, {
+          headers: { Authorization: `Bearer ${SYNTHETIC_CPA_CLIENT_KEY}` },
+        });
+        assertValue(externalModels.status === 200 && externalModels.body?.object === 'list', `admission(external-${suffix}): direct External CPA models = ${externalModels.status}`);
         const rootUsage = httpJson('GET', `${publicBase}/v0/management/usage`, {
           headers: { Authorization: `Bearer ${ADMIN_V1}` },
         });
-        assertValue(rootUsage.status === 404, `admission(external-${suffix}): root /v0/management/usage = ${rootUsage.status} want 404`);
+        assertValue(rootUsage.status === 503, `admission(external-${suffix}): unprefixed CPA management must remain disabled, got ${rootUsage.status}`);
 
         const opAnon = httpJson('GET', `${apiBase}/operation`);
         assertValue(opAnon.status === 401, `admission(external-${suffix}): anonymous operation = ${opAnon.status} want 401`);
@@ -2633,6 +2637,7 @@ async function proveCompletedAdmission(binary, ingressBin, completedRoot, source
           preflight: reads.preflight,
           status: reads.status,
           rootModels: rootModels.status,
+          externalModels: externalModels.status,
           rootUsage: rootUsage.status,
           controlBasePath: EXTERNAL_CONTROL_PREFIX,
           operationAnon: opAnon.status,
