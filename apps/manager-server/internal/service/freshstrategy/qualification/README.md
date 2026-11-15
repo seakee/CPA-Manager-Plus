@@ -14,31 +14,48 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [pre-Beta independent re-verification and maintainer acceptance record](evidence/025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d.md)
-records the completed read-only independent reviews (`QualReemitReviewArgon`
-`GO` at `evidence/85b7fbac90d2f4a843f2301ec0665a773630c7932011521cd817d15af8e20414.md`
-and `PreBetaReverifySolR2` `GO`, M1 closed, at
-`evidence/c01ba53261978ab3a74eab95309cada7e98e8ba2ee0d61d6d2ddd71958edc7c5.md`),
-the maintainer's formal report-bound provenance decision, the exact 23 directly
-hashed source files across both implementation pins, and each consumer's
-clean-source re-emitted evidence and limits for the pinned CPA `v8.0.55`
-candidate and the NH2 loopback-hardened Supervisor destination execution chain
-at committed `HEAD` `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc` (tree
-`b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`). External acceptance does not
-guarantee connectivity for every topology; Gateway remains pending.
+The current [scoped access-prefix / multi-Key acceptance record](evidence/1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c.md)
+separates immutable upstream firmware AQ evidence from renewed product execution
+evidence. The three original AQ reports, their selected traces and their
+`implementationHead` remain at `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc`
+(tree `b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`); the six AQ tools are byte-identical
+to that revision, and the official CPA `v8.0.55` candidate is unchanged. Their
+original limited, unknown, failed and aborted boundaries are not promoted.
 
-The pins below (`runtime_destination_implementation.sha256`,
-`implementationSha256`, the AQ profile evidence, the adoption resource chain and
-the legacy transition chain) are bound in `consumer.json` under acceptance
-record `025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`
-(2026-11-06) from the clean-worktree harness and real-process container runs
-against the pinned CPA `v8.0.55` and `v7.0.12` candidates. The superseded
-2026-11-06 re-verification record (`evidence/5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5.md`),
-the clean-source provenance re-emission addendum (`evidence/1eba18df2a5bb486e8f184ce4ba618f5d5a52097d7beb20c1a9b9d44df35e8d9.md`),
-the initial 2026-11-06 maintainer acceptance (`evidence/eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5.md`),
-the 2026-10-18 independent review (`evidence/65eb659a172c9075afeddc959a9ab825d208cc728487186cce2514dd8d27050a.md`)
-and the 2026-10-09 pre-4A review (`evidence/ae378022a8d32455c9a3b36f2b5ddb8e1eb18e9d1ee9072171429cdf11706da5.md`)
-remain retained in `qualification/evidence/` as historical audit records.
+The real Go destination and adoption producers were rebuilt and executed from
+clean implementation `77625e1804289a69beffdcb2b641a1ade9ac746c`
+(tree `c039a5e462c8e5cd304e4f64740634bd10fcedde`). Both producers passed with actual
+CPA `v8.0.55` / `v7.0.12` processes and the newly compiled Runtime Supervisor in
+task-owned network isolation. Each private adoption profile carried 133 Client
+Keys. The generated traces verify readback, client authentication, destination
+identity and preserved source state; `gatewayPending` remains true.
+
+The current consumer implementation SHA-256 is
+`c7a8dc1def60316a37e90f0a4246d466449f3c58d351805f52308cd5ff438187`, and the
+11-file Runtime execution-chain pin is
+`340686a6ad37b2a6843c943f6beb2a1339edc5abcf441f1ae2483ddaa63941d6`.
+
+| Renewed chain | Report SHA-256 | Original runner |
+| --- | --- | --- |
+| network resources | `755d0a52edfc8fc1e30561b97433454504b9fd37f2766cffea62d91765a6b054` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
+| legacy resources | `87bfcc272383120bfc62c0ebe98bce238fcbba077c92678ca8385934d9ba31ef` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
+| legacy transition | `9dfd548c2e6504767e32a12b02a9b9b0ba787bd9cb67e2b4e4efc5eb6279d2c1` | `77625e1804289a69beffdcb2b641a1ade9ac746c` |
+
+The acceptance record lists every renewed report, trace, observation and manifest
+digest. Existing qualification evidence and the previous
+[independent pre-Beta verification](evidence/025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d.md)
+remain historical audit records, including the earlier Argon and Sol reviews and
+Native NH2 evidence. This renewal does not claim a new Native, public Gateway,
+five-mode UI, SSE/WebSocket, online provider/OAuth, arm64 or cross-OS run. External
+acceptance still does not guarantee connectivity for every topology.
+
+The [final independent artifact/loader/source audit](evidence/f71b3d471ed1a1cd49901a4cfff5596162d6823e3434a0bac63efb2b80bd5773.md)
+completed with GO and no findings. Its final model was verified from session
+provenance as `gemini-4-argon-high`, without fallback. It independently checked
+the 23 implementation inputs, 11-file Runtime pin, canonical consumer bytes,
+all 10 new JSON outputs and all 74 retained historical evidence files. It is a
+read-only artifact audit, not execution of the Manager suite or product acceptance.
+
 
 To accept a consumer, independent review must first identify the exact original
 case subset and explicitly accept its applicability to that consumer's actual
@@ -203,8 +220,10 @@ clean-source provenance re-emission addendum
 `1eba18df2a5bb486e8f184ce4ba618f5d5a52097d7beb20c1a9b9d44df35e8d9`, the
 superseded re-verification record
 `5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5`, and the
-current independent re-verification record
-`025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`, backed by
+previous independent re-verification record
+`025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`, followed by
+the scoped 2026-11-15 renewal
+`1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c`, backed by
 real-process CPA `v8.0.55` source-read, destination-replay and destination-verify
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for
