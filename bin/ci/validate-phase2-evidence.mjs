@@ -414,37 +414,6 @@ export function loadAndValidateContract(contractPath = defaultContractPath) {
   return { contract, schema, ...indexes };
 }
 
-export function validateBundledDockerfile(
-  contract,
-  dockerfilePath = path.join(repoRoot, 'Dockerfile')
-) {
-  const dockerfile = readFileSync(dockerfilePath, 'utf8');
-  const current = contract.artifacts.find(
-    (artifact) => artifact.classification === 'current_bundled'
-  );
-  const candidate = contract.artifacts.find(
-    (artifact) => artifact.classification === 'candidate_release'
-  );
-  invariant(
-    dockerfile.includes('cpa_version="7.3.3"'),
-    'Dockerfile.runtime no longer bundles CPA v7.3.3'
-  );
-  for (const asset of current.releaseAssets)
-    invariant(
-      dockerfile.includes(asset.sha256),
-      `Dockerfile.runtime is missing ${asset.id} digest`
-    );
-  invariant(
-    !dockerfile.includes(candidate.cpaVersion.slice(1)),
-    'Dockerfile.runtime must not use the candidate CPA version'
-  );
-  for (const asset of candidate.releaseAssets)
-    invariant(
-      !dockerfile.includes(asset.sha256),
-      'Dockerfile.runtime must not use a candidate digest'
-    );
-}
-
 const releaseAssets = (contract) =>
   contract.artifacts.flatMap((artifact) =>
     artifact.releaseAssets.map((asset) => ({ ...asset, artifactId: artifact.id }))
@@ -566,7 +535,6 @@ const parseArtifactSpec = (spec) => {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const loaded = loadAndValidateContract(options.contract || defaultContractPath);
-  validateBundledDockerfile(loaded.contract);
 
   const summary = {
     contractId: loaded.contract.contractId,

@@ -1,41 +1,3 @@
-FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-download
-
-ARG VERSION
-ARG SOURCE_COMMIT
-# Fail closed on malformed identity before any package or network operation.
-# The format is the same one bin/release/image-evidence.py enforces.
-RUN set -eu; \
-    test -n "$VERSION"; \
-    test "${#VERSION}" -le 128; \
-    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
-    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
-    test "${#SOURCE_COMMIT}" -eq 40; \
-    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
-ARG TARGETOS
-ARG TARGETARCH
-RUN set -eu; \
-    test "$TARGETOS" = "linux"; \
-    cpa_version="7.3.3"; \
-    case "$TARGETARCH" in \
-      amd64) asset_arch="amd64"; asset_sha256="7af8c99cd08eee3ccc81d1596e8a31785674d3de6bd7ec61416d59493dd8fc01" ;; \
-      arm64) asset_arch="aarch64"; asset_sha256="5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883" ;; \
-      *) echo "unsupported CPA target architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac; \
-    asset_name="CLIProxyAPI_${cpa_version}_linux_${asset_arch}.tar.gz"; \
-    apk add --no-cache ca-certificates wget; \
-    wget -qO "/tmp/${asset_name}" "https://github.com/router-for-me/CLIProxyAPI/releases/download/v${cpa_version}/${asset_name}"; \
-    printf '%s  %s\n' "$asset_sha256" "/tmp/${asset_name}" | sha256sum -c -; \
-    mkdir -p /out; \
-    tar -xOzf "/tmp/${asset_name}" cli-proxy-api > /out/cli-proxy-api; \
-    tar -xOzf "/tmp/${asset_name}" LICENSE > /out/CPA-LICENSE; \
-    test -s /out/CPA-LICENSE; \
-    chmod 0444 /out/CPA-LICENSE; \
-    chmod 0755 /out/cli-proxy-api; \
-    binary_sha256="$(sha256sum /out/cli-proxy-api | awk '{print $1}')"; \
-    printf '{"schemaVersion":1,"engine":"cpa","version":"%s","artifactId":"sha256:%s"}\n' \
-      "$cpa_version" "$binary_sha256" > /out/cpa-artifact.json; \
-    chmod 0444 /out/cpa-artifact.json
-
 # Official v8 pin shared by the default bundle and private amd64 proofs.
 # No version/hash override is accepted for this pin.
 FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-v8-download
@@ -307,17 +269,6 @@ COPY --from=cpa-v8-download /out/CPA-LICENSE /image/usr/local/share/licenses/cli
 RUN python3 /tools/image-evidence.py --root /image --role cpamp --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
       --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
 
-FROM slim-evidence AS v7-evidence
-ARG VERSION
-ARG SOURCE_COMMIT
-ARG TARGETOS
-ARG TARGETARCH
-COPY --from=cpa-download /out/cli-proxy-api /image/usr/local/bin/cli-proxy-api
-COPY --from=cpa-download /out/cpa-artifact.json /image/usr/local/share/cpamp/runtime/cpa-artifact.json
-COPY --from=cpa-download /out/CPA-LICENSE /image/usr/local/share/licenses/cli-proxy-api/LICENSE
-RUN python3 /tools/image-evidence.py --root /image --role cpamp --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
-      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
-
 FROM cpamp-base AS slim
 ARG VERSION
 ARG SOURCE_COMMIT
@@ -344,14 +295,6 @@ ENV USAGE_DATA_DIR=/data \
 EXPOSE 18317
 HEALTHCHECK --interval=5s --timeout=3s --retries=3 CMD ["sh", "-c", "nc -z 127.0.0.1 18317 && nc -z 127.0.0.1 18319 && nc -z 127.0.0.1 9081"]
 ENTRYPOINT ["/usr/local/bin/cpamp-launcher"]
-
-# Historical lifecycle regressions only; never selected by normal Compose.
-FROM slim AS v7-compatibility
-COPY --from=cpa-download /out/cli-proxy-api /usr/local/bin/cli-proxy-api
-COPY --from=cpa-download /out/cpa-artifact.json /usr/local/share/cpamp/runtime/cpa-artifact.json
-COPY --from=v7-evidence /image/usr/local/share/licenses/cli-proxy-api/LICENSE /usr/local/share/licenses/cli-proxy-api/LICENSE
-COPY --from=v7-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
-COPY docker/runtime/config.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
 
 # Default v2 full bundle: slim + official pinned CPA v8.0.55.
 FROM slim AS full

@@ -10,7 +10,6 @@ import {
   CAPABILITY_STATUSES,
   FROZEN_BASELINE,
   loadAndValidateContract,
-  validateBundledDockerfile,
   validateCapabilityRecord,
   validateContract,
   validateEvidenceExtension,
@@ -49,13 +48,6 @@ describe('Phase2 evidence contract', () => {
       pluginAvailability: 'unknown',
     });
     expect(candidate.classification).not.toBe('current_bundled');
-  });
-
-  it('keeps Dockerfile on the current v7.3.3 compatibility bundle', () => {
-    const { contract } = loaded();
-    expect(() => validateBundledDockerfile(contract)).not.toThrow();
-    const dockerfile = readFileSync(path.join(repoRoot, 'Dockerfile'), 'utf8');
-    expect(dockerfile).not.toContain('cpa_version="7.3.8"');
   });
 
   it('freezes SchedulerAcrossPriorities ancestry and default/opt-in scenarios', () => {
