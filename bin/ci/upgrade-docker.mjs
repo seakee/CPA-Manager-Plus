@@ -134,6 +134,9 @@ const OWNERSHIP_HELPER_IMAGE = 'alpine:3.21';
 // The management and client keys the harness's synthetic v8 CPA accepts. They
 // are this run's own secrets, registered with the redactor beside the two
 // administrator keys.
+const OFFICIAL_CPA_V8_VERSION = '8.0.55';
+const EXTERNAL_CONTROL_PREFIX = '/ext-console';
+const INGRESS_DIR = path.join(ROOT, 'apps', 'ingress');
 const SYNTHETIC_CPA_MANAGEMENT_KEY = 'Cpamp_U1D_Harness_CPA_Management_Key_0001';
 const SYNTHETIC_CPA_CLIENT_KEY = 'cpampd-u1d-client-key-0001';
 
@@ -617,7 +620,12 @@ export function verifyEvidenceDocument(document, { expectHead = null } = {}) {
   return { ok: problems.length === 0, problems, expected, actual: document?.sha256 ?? null };
 }
 
-const redactor = createRedactor([ADMIN_V1, ADMIN_V2, SYNTHETIC_CPA_MANAGEMENT_KEY]);
+const redactor = createRedactor([
+  ADMIN_V1,
+  ADMIN_V2,
+  SYNTHETIC_CPA_MANAGEMENT_KEY,
+  SYNTHETIC_CPA_CLIENT_KEY,
+]);
 
 const evidence = {
   contract: UPGRADE_DOCKER_CONTRACT.contract,
@@ -1133,12 +1141,11 @@ function assertFixtureProvenance(tag, commit, labels) {
   }
 }
 
+
 function resolveTagCommit(tag) {
   const resolved = git(['rev-parse', `${tag}^{commit}`]);
   assertValue(resolved.code === 0, `resolve ${tag} to a commit: ${redactor.redact(resolved.stderr.trim())}`);
-  const commit = resolved.stdout.trim();
-  assertValue(SHA1_PATTERN.test(commit), `resolve ${tag} to a commit: got ${JSON.stringify(commit)}`);
-  return commit;
+  return resolved.stdout.trim();
 }
 
 // connectRollbackAlias makes this run's rollback reference resolve to exactly
@@ -2196,102 +2203,201 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
   }
 }
 
-// completeThroughTheGate finishes the operation the way an operator does. The
-// External connection is real (a synthetic v8 CPA this harness serves, with its
-// own management key and one client key), the Manager's own connection is
-// stored, and then `upgrade verify` runs — the same command the operator runs —
-// on the copied root. Both halves of the verdict are asserted: the CLI report
-// and the row the gate wrote, including the evidence beside the stage.
-async function completeThroughTheGate(binary, completedRoot, sourceRoot, databasePath) {
-  const cpa = await startSyntheticCPA();
-  try {
-    const keyFile = path.join(SCRATCH, 'work', 'admission', 'management-key');
-    fs.writeFileSync(keyFile, `${SYNTHETIC_CPA_MANAGEMENT_KEY}\n`, { mode: 0o600 });
-
-    const connect = runCli(
-      binary,
-      ['upgrade', 'external-connect', '--target', completedRoot, '--cpa-base-url', cpa.url, '--management-key-file', keyFile, '--json'],
-      'admission:connect',
-      { expectExit: 0 },
-    );
-    const connected = parseJson(connect.stdout, 'admission:connect');
-    assertValue(connected.result?.stage === 'external_connect', `admission:connect stage=${connected.result?.stage}`);
-
-    // The gate compares the recorded binding with the CPA the Manager itself
-    // resolves, so the Manager's own configuration has to name this CPA: the
-    // same command an operator runs, against the copied root's own store.
-    const configPath = path.join(SCRATCH, 'work', 'admission', 'manager-config.json');
-    fs.writeFileSync(configPath, JSON.stringify({ dataDir: '.' }));
-    runCli(
-      binary,
-      [
-        'store-cpa-connection',
-        '--cpa-base-url', cpa.url,
-        '--management-key-file', keyFile,
-        '--db-path', path.join(completedRoot, 'usage.sqlite'),
-        '--data-key-path', path.join(completedRoot, 'data.key'),
-      ],
-      'admission:store-connection',
-      { expectExit: 0, env: { CPA_MANAGER_CONFIG: configPath } },
-    );
-
-    const verify = runCli(
-      binary,
-      ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
-      'admission:verify',
-      { expectExit: 0 },
-    );
-    const report = parseJson(verify.stdout, 'admission:verify');
-    assertValue(report.result?.complete === true, `admission:verify complete=${report.result?.complete}`);
-    assertValue(report.result?.stage === 'complete', `admission:verify stage=${report.result?.stage}`);
-    assertValue(report.result?.targetMode === 'external', `admission:verify targetMode=${report.result?.targetMode}`);
-    assertValue(report.result?.alreadyVerified === false, 'admission:verify reported the first verdict as a repeat');
-    for (const domain of ['source_copy', 'cpa_config', 'identity']) {
-      assertValue(
-        (report.result?.domainsDone ?? []).includes(domain),
-        `admission:verify domainsDone=${JSON.stringify(report.result?.domainsDone)} is missing ${domain}`,
-      );
-    }
-
-    const row = readRowJson(databasePath, 'select stage, error_code, verification from upgrade_operations where id = 1');
-    assertValue(row?.stage === 'complete', `admission: the gate did not record complete (stage=${row?.stage})`);
-    const recorded = JSON.parse(String(row.verification ?? '{}'));
-    assertValue(recorded.targetMode === 'external', `admission: the recorded evidence target=${recorded.targetMode}`);
-    for (const domain of ['source_copy', 'cpa_config']) {
-      assertValue(
-        Array.isArray(recorded.domains) && recorded.domains.includes(domain),
-        `admission: the recorded evidence domains=${JSON.stringify(recorded.domains)} is missing ${domain}`,
-      );
-    }
-    assertValue(
-      typeof recorded.sourceFingerprint === 'string' && SHA256_PATTERN.test(recorded.sourceFingerprint),
-      'admission: the recorded evidence carries no source fingerprint',
-    );
-    // The verdict is repeatable and writes nothing the second time, which is
-    // what the wizard and the CLI both report.
-    const repeat = runCli(
-      binary,
-      ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
-      'admission:verify-repeat',
-      { expectExit: 0 },
-    );
-    const repeated = parseJson(repeat.stdout, 'admission:verify-repeat');
-    assertValue(repeated.result?.alreadyVerified === true, 'admission:verify repeat was not reported as already recorded');
-
-    return {
-      verify: {
-        exitCode: verify.code,
-        stage: report.result?.stage,
-        targetMode: report.result?.targetMode,
-        domainsDone: report.result?.domainsDone,
-      },
-      row: { stage: row.stage, errorCode: row.error_code ?? null, verificationKeys: Object.keys(recorded).sort() },
-      repeat: { exitCode: repeat.code, alreadyVerified: repeated.result?.alreadyVerified, updatedAtMs: repeated.result?.updatedAtMs },
-    };
-  } finally {
-    await cpa.close();
+// Compile the real Ingress so completed External admission checks use the
+// public control-prefix boundary rather than the Manager's internal listener.
+function buildIngressBinary() {
+  const out = path.join(SCRATCH, 'cpamp-ingress');
+  const build = sh('go', ['build', '-o', out, './cmd/cpamp-ingress'], { cwd: INGRESS_DIR });
+  if (build.code !== 0) {
+    throw new Error(`build the cpamp-ingress binary: ${redactor.redact(tail(build.stderr))}`);
   }
+  evidence.commands.push(commandRecord('go build ./cmd/cpamp-ingress', build.code));
+  return out;
 }
+
+async function startHostIngress({ name, ingressBin, publicPort, routingPort, managerPort, cpaUrl }) {
+  registry.assertCreationAllowed('hostProcess', name);
+  const logFile = path.join(SCRATCH, `${name}.log`);
+  const out = fs.openSync(logFile, 'w');
+  const child = spawn(ingressBin, [], {
+    env: {
+      ...process.env,
+      CPAMP_INGRESS_LISTEN_ADDR: `127.0.0.1:${publicPort}`,
+      CPAMP_INGRESS_ROUTING_ADDR: `127.0.0.1:${routingPort}`,
+      CPAMP_MANAGER_UPSTREAM_URL: `http://127.0.0.1:${managerPort}`,
+      CPAMP_CPA_UPSTREAM_URL: cpaUrl,
+      CPAMP_FRESH_MODE: 'true',
+    },
+    stdio: ['ignore', out, out],
+    detached: true,
+  });
+  child.unref();
+  hostManagers.set(name, { child, logFile, port: publicPort, extraPorts: [routingPort] });
+  registry.track('hostProcess', name, () => stopHostProcess(name), { pid: child.pid, port: publicPort });
+  await waitFor(async () => (await portOpen(publicPort)) && (await portOpen(routingPort)), `${name} listeners`, 30_000);
+}
+
+
+// completeThroughTheGate finishes an External upgrade the way an operator does.
+// Unrouted verify and inference-prefix verify both fail closed before a
+// control-only prefix commits the terminal row, and competing replay prefixes
+// are rejected as immutable.
+async function completeThroughTheGate(binary, completedRoot, sourceRoot, databasePath, cpa) {
+  const admissionWork = path.join(SCRATCH, 'work', 'admission');
+  fs.mkdirSync(admissionWork, { recursive: true });
+  const keyFile = path.join(admissionWork, 'management-key');
+  fs.writeFileSync(keyFile, `${SYNTHETIC_CPA_MANAGEMENT_KEY}\n`, { mode: 0o600 });
+
+  const connect = runCli(
+    binary,
+    ['upgrade', 'external-connect', '--target', completedRoot, '--cpa-base-url', cpa.url, '--management-key-file', keyFile, '--json'],
+    'admission:connect',
+    { expectExit: 0 },
+  );
+  const connected = parseJson(connect.stdout, 'admission:connect');
+  assertValue(connected.result?.stage === 'external_connect', `admission:connect stage=${connected.result?.stage}`);
+
+  const configPath = path.join(admissionWork, 'manager-config.json');
+  fs.writeFileSync(configPath, JSON.stringify({ dataDir: '.' }));
+  runCli(
+    binary,
+    [
+      'store-cpa-connection',
+      '--cpa-base-url', cpa.url,
+      '--management-key-file', keyFile,
+      '--db-path', path.join(completedRoot, 'usage.sqlite'),
+      '--data-key-path', path.join(completedRoot, 'data.key'),
+    ],
+    'admission:store-connection',
+    { expectExit: 0, env: { CPA_MANAGER_CONFIG: configPath } },
+  );
+
+  const missingPrefix = runCli(
+    binary,
+    ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
+    'admission:verify-missing-prefix',
+    { expectExit: 1 },
+  );
+  assertValue(
+    typedCode(missingPrefix) === 'upgrade_access_prefix_required',
+    `admission:verify without prefix code=${typedCode(missingPrefix)} want upgrade_access_prefix_required`,
+  );
+
+  const forbiddenInference = runCli(
+    binary,
+    [
+      'upgrade', 'verify',
+      '--legacy', sourceRoot,
+      '--target', completedRoot,
+      '--control-base-path', EXTERNAL_CONTROL_PREFIX,
+      '--inference-base-path', '/ext-inference',
+      '--json',
+    ],
+    'admission:verify-external-inference-refused',
+    { expectExit: 1 },
+  );
+  assertValue(
+    typedCode(forbiddenInference) === 'external_inference_prefix_forbidden',
+    `admission:verify external inference code=${typedCode(forbiddenInference)} want external_inference_prefix_forbidden`,
+  );
+
+  const verify = runCli(
+    binary,
+    ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--control-base-path', EXTERNAL_CONTROL_PREFIX, '--json'],
+    'admission:verify',
+    { expectExit: 0 },
+  );
+  const report = parseJson(verify.stdout, 'admission:verify');
+  assertValue(report.result?.complete === true, `admission:verify complete=${report.result?.complete}`);
+  assertValue(report.result?.stage === 'complete', `admission:verify stage=${report.result?.stage}`);
+  assertValue(report.result?.targetMode === 'external', `admission:verify targetMode=${report.result?.targetMode}`);
+  assertValue(report.result?.alreadyVerified === false, 'admission:verify reported the first verdict as a repeat');
+  assertValue(report.result?.controlBasePath === EXTERNAL_CONTROL_PREFIX, `admission:verify controlBasePath=${report.result?.controlBasePath}`);
+  assertValue(!report.result?.inferenceBasePath, `admission:verify external inferenceBasePath=${report.result?.inferenceBasePath}`);
+  assertValue(!report.result?.sharedEntry, `admission:verify external sharedEntry=${report.result?.sharedEntry}`);
+  assertValue(report.result?.routingCommitted === true, `admission:verify routingCommitted=${report.result?.routingCommitted}`);
+  assertValue(!report.result?.inferenceCommitted, `admission:verify external inferenceCommitted=${report.result?.inferenceCommitted}`);
+  assertValue(report.result?.externalBaseUrl === cpa.url, `admission:verify externalBaseUrl=${report.result?.externalBaseUrl}`);
+  for (const domain of ['source_copy', 'cpa_config', 'identity']) {
+    assertValue(
+      (report.result?.domainsDone ?? []).includes(domain),
+      `admission:verify domainsDone=${JSON.stringify(report.result?.domainsDone)} is missing ${domain}`,
+    );
+  }
+
+  const row = readRowJson(
+    databasePath,
+    'select stage, error_code, verification, control_base_path, inference_base_path, shared_entry, routing_committed, inference_committed from upgrade_operations where id = 1',
+  );
+  assertValue(row?.stage === 'complete', `admission: the gate did not record complete (stage=${row?.stage})`);
+  assertValue(row?.control_base_path === EXTERNAL_CONTROL_PREFIX, `admission: row control_base_path=${row?.control_base_path}`);
+  assertValue((row?.inference_base_path ?? '') === '', `admission: row inference_base_path=${row?.inference_base_path}`);
+  assertValue(Number(row?.shared_entry ?? 0) === 0, `admission: row shared_entry=${row?.shared_entry}`);
+  assertValue(Number(row?.routing_committed ?? 0) === 1, `admission: row routing_committed=${row?.routing_committed}`);
+  assertValue(Number(row?.inference_committed ?? 0) === 0, `admission: row inference_committed=${row?.inference_committed}`);
+  const recorded = JSON.parse(String(row.verification ?? '{}'));
+  assertValue(recorded.targetMode === 'external', `admission: the recorded evidence target=${recorded.targetMode}`);
+  for (const domain of ['source_copy', 'cpa_config']) {
+    assertValue(
+      Array.isArray(recorded.domains) && recorded.domains.includes(domain),
+      `admission: the recorded evidence domains=${JSON.stringify(recorded.domains)} is missing ${domain}`,
+    );
+  }
+  assertValue(
+    typeof recorded.sourceFingerprint === 'string' && SHA256_PATTERN.test(recorded.sourceFingerprint),
+    'admission: the recorded evidence carries no source fingerprint',
+  );
+
+  const repeat = runCli(
+    binary,
+    ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
+    'admission:verify-repeat',
+    { expectExit: 0 },
+  );
+  const repeated = parseJson(repeat.stdout, 'admission:verify-repeat');
+  assertValue(repeated.result?.alreadyVerified === true, 'admission:verify repeat was not reported as already recorded');
+  assertValue(repeated.result?.controlBasePath === EXTERNAL_CONTROL_PREFIX, `admission:verify repeat controlBasePath=${repeated.result?.controlBasePath}`);
+  assertValue(repeated.result?.routingCommitted === true, 'admission:verify repeat lost routingCommitted');
+
+  const immutable = runCli(
+    binary,
+    ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--control-base-path', '/other-ext-console', '--json'],
+    'admission:verify-immutable',
+    { expectExit: 1 },
+  );
+  assertValue(
+    typedCode(immutable) === 'upgrade_prefixes_already_committed',
+    `admission:verify competing prefix code=${typedCode(immutable)} want upgrade_prefixes_already_committed`,
+  );
+
+  return {
+    verify: {
+      exitCode: verify.code,
+      stage: report.result?.stage,
+      targetMode: report.result?.targetMode,
+      domainsDone: report.result?.domainsDone,
+      controlBasePath: report.result?.controlBasePath,
+      routingCommitted: report.result?.routingCommitted,
+      inferenceCommitted: Boolean(report.result?.inferenceCommitted),
+    },
+    refusals: {
+      missingPrefix: typedCode(missingPrefix),
+      externalInferenceForbidden: typedCode(forbiddenInference),
+      competingPrefix: typedCode(immutable),
+    },
+    row: {
+      stage: row.stage,
+      errorCode: row.error_code ?? null,
+      controlBasePath: row.control_base_path,
+      inferenceBasePath: row.inference_base_path ?? '',
+      routingCommitted: Number(row.routing_committed) === 1,
+      inferenceCommitted: Number(row.inference_committed) === 1,
+      verificationKeys: Object.keys(recorded).sort(),
+    },
+    repeat: { exitCode: repeat.code, alreadyVerified: repeated.result?.alreadyVerified, updatedAtMs: repeated.result?.updatedAtMs },
+  };
+}
+
 
 // syntheticCPAProgram is the standalone server the harness starts for the
 // External connect step: the CLI runs under spawnSync, which blocks this
@@ -2299,13 +2405,14 @@ async function completeThroughTheGate(binary, completedRoot, sourceRoot, databas
 // connection and then never answer it. The program serves the five authenticated
 // reads the step makes — the version probe, the v8 document, the client-key
 // list, the config YAML the step digests into the server fingerprint, and the
-// model surface — with the credential and version it expects.
+// model surface — with the credential and official 8.0.55 version it expects.
 function syntheticCPAProgram({ port, model, configYAML }) {
   return `import http from 'node:http';
 
 const port = ${JSON.stringify(port)};
 const model = ${JSON.stringify(model)};
 const configYAML = ${JSON.stringify(configYAML)};
+const version = ${JSON.stringify('v' + OFFICIAL_CPA_V8_VERSION)};
 const management = process.env.CPA_MANAGEMENT_KEY;
 const clientKey = process.env.CPA_CLIENT_KEY;
 
@@ -2316,10 +2423,12 @@ const send = (response, status, payload, headers = {}) => {
 
 const server = http.createServer((request, response) => {
   const url = request.url ?? '';
-  // The model surface is a gateway read with a client credential, not a
-  // management read: it answers before the management credential is checked.
-  if (url === '/v1/models') {
-    send(response, 200, JSON.stringify({ object: 'list', data: [{ id: model }] }));
+  if (url === '/v1/models' && request.method === 'GET') {
+    if (request.headers.authorization !== 'Bearer ' + clientKey) {
+      send(response, 401, JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    send(response, 200, JSON.stringify({ object: 'list', data: [{ id: model, object: 'model' }] }));
     return;
   }
   if (request.headers.authorization !== 'Bearer ' + management) {
@@ -2327,7 +2436,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url === '/v0/management/config') {
-    send(response, 200, '{}', { 'x-cpa-version': 'v8.0.13' });
+    send(response, 200, JSON.stringify({ version }), { 'x-cpa-version': version });
     return;
   }
   if (url === '/v8/management/config') {
@@ -2374,6 +2483,8 @@ function syntheticCPAConfigYAML(port) {
   ].join('\n');
 }
 
+
+
 // startSyntheticCPA starts the program above as its own process, on a port this
 // run allocated, and returns a handle that stops it. It is a host process in the
 // registry's vocabulary: nothing about it outlives the run.
@@ -2409,6 +2520,8 @@ async function startSyntheticCPA() {
   };
 }
 
+
+
 function readRowJson(dbPath, sql) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
@@ -2418,41 +2531,148 @@ function readRowJson(dbPath, sql) {
   }
 }
 
-// proveCompletedAdmission proves the reads end with the operation. The recorded
-// row is the terminal `complete` one, so admission serves the full writable
-// surface — /health 200 — and both fixed-surface reads answer 404 to every
-// caller, including the key they accepted a moment earlier.
-async function proveCompletedAdmission(binary, completedRoot, sourceRoot) {
-  const port = ports.take();
-  const name = `${PREFIX}-admission-complete`;
-  startHostManager({ name, binary, dataDir: completedRoot, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
-  try {
-    await waitForHealth(port, `${name} /health`, 200);
-    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
-    const reads = {};
-    for (const resource of ['preflight', 'status']) {
-      for (const [credential, headers] of [
-        ['anonymous', {}],
-        ['the source Admin key', { Authorization: `Bearer ${ADMIN_V1}` }],
-      ]) {
-        const read = httpJson('GET', `${base}/${resource}`, { headers });
-        assertValue(read.status === 404, `admission(complete): GET ${resource} with ${credential} = ${read.status} want 404 after ProductComplete`);
+// proveCompletedAdmission proves External completion over real Ingress + Manager
+// both before and after restart: fixed bootstrap wizard routes and unprefixed
+// root endpoints return 404, the committed control prefix serves authenticated
+// v2 + bridged historical usage endpoints, and inference completion is refused.
+async function proveCompletedAdmission(binary, ingressBin, completedRoot, sourceRoot, cpaUrl) {
+  const proveRound = async (suffix) => {
+    const managerPort = ports.take();
+    const publicPort = ports.take();
+    const routingPort = ports.take();
+    const ingressName = `${PREFIX}-admission-ext-ingress-${suffix}`;
+    const managerName = `${PREFIX}-admission-complete-${suffix}`;
+    await startHostIngress({
+      name: ingressName,
+      ingressBin,
+      publicPort,
+      routingPort,
+      managerPort,
+      cpaUrl,
+    });
+    try {
+      startHostManager({
+        name: managerName,
+        binary,
+        dataDir: completedRoot,
+        port: managerPort,
+        adminKey: ADMIN_V2,
+        legacyRoot: sourceRoot,
+        extraEnv: {
+          CPAMP_INGRESS_CONTROL_URL: `http://127.0.0.1:${routingPort}`,
+          CPAMP_PUBLIC_ORIGIN: `http://127.0.0.1:${publicPort}`,
+        },
+      });
+      try {
+        await waitForHealth(managerPort, `${managerName} /health`, 200);
+        await waitForHealth(publicPort, `${ingressName} /health`, 200);
+        const publicBase = `http://127.0.0.1:${publicPort}`;
+        const apiBase = `${publicBase}${EXTERNAL_CONTROL_PREFIX}/api/v2`;
+        await waitFor(
+          async () => httpJson('GET', `${apiBase}/bootstrap/identity`).status === 200,
+          `${ingressName} ${EXTERNAL_CONTROL_PREFIX} routing published`,
+          20_000,
+        );
+
+        const wizardBase = `${publicBase}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+        const reads = {};
+        for (const resource of ['preflight', 'status']) {
+          for (const [credential, headers] of [
+            ['anonymous', {}],
+            ['the source Admin key', { Authorization: `Bearer ${ADMIN_V1}` }],
+          ]) {
+            const read = httpJson('GET', `${wizardBase}/${resource}`, { headers });
+            assertValue(read.status === 404, `admission(external-${suffix}): GET ${resource} with ${credential} = ${read.status} want 404`);
+          }
+          reads[resource] = 404;
+        }
+
+        const rootModels = httpJson('GET', `${publicBase}/v1/models`, {
+          headers: { Authorization: `Bearer ${SYNTHETIC_CPA_CLIENT_KEY}` },
+        });
+        assertValue(rootModels.status !== 503 && rootModels.status === 404, `admission(external-${suffix}): root /v1/models = ${rootModels.status} want 404`);
+        const rootUsage = httpJson('GET', `${publicBase}/v0/management/usage`, {
+          headers: { Authorization: `Bearer ${ADMIN_V1}` },
+        });
+        assertValue(rootUsage.status === 404, `admission(external-${suffix}): root /v0/management/usage = ${rootUsage.status} want 404`);
+
+        const opAnon = httpJson('GET', `${apiBase}/operation`);
+        assertValue(opAnon.status === 401, `admission(external-${suffix}): anonymous operation = ${opAnon.status} want 401`);
+        const opWrong = httpJson('GET', `${apiBase}/operation`, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
+        assertValue(opWrong.status === 401, `admission(external-${suffix}): v2-env key operation = ${opWrong.status} want 401`);
+        const opOk = httpJson('GET', `${apiBase}/operation`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+        assertValue(opOk.status === 200, `admission(external-${suffix}): source Admin key operation = ${opOk.status}`);
+        assertValue(opOk.body?.productComplete === true, `admission(external-${suffix}): productComplete=${opOk.body?.productComplete}`);
+        assertValue(opOk.body?.routing?.target === EXTERNAL_CONTROL_PREFIX, `admission(external-${suffix}): routing.target=${opOk.body?.routing?.target}`);
+        assertValue(opOk.body?.routing?.committed === true, `admission(external-${suffix}): routing.committed=${opOk.body?.routing?.committed}`);
+        assertValue(!opOk.body?.routing?.inferenceTarget, `admission(external-${suffix}): routing.inferenceTarget=${opOk.body?.routing?.inferenceTarget}`);
+        assertValue(!opOk.body?.routing?.inferenceCommitted, `admission(external-${suffix}): routing.inferenceCommitted=${opOk.body?.routing?.inferenceCommitted}`);
+
+        const accessInfo = httpJson('GET', `${apiBase}/api-keys/access-info`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+        assertValue(accessInfo.status === 200, `admission(external-${suffix}): access-info = ${accessInfo.status}`);
+        assertValue(accessInfo.body?.mode === 'connect_external', `admission(external-${suffix}): access-info mode=${accessInfo.body?.mode}`);
+        assertValue(accessInfo.body?.managementBasePath === EXTERNAL_CONTROL_PREFIX, `admission(external-${suffix}): managementBasePath=${accessInfo.body?.managementBasePath}`);
+        assertValue((accessInfo.body?.inferenceBasePath ?? '') === '', `admission(external-${suffix}): inferenceBasePath=${accessInfo.body?.inferenceBasePath}`);
+        assertValue(accessInfo.body?.externalBaseUrl === cpaUrl, `admission(external-${suffix}): externalBaseUrl=${accessInfo.body?.externalBaseUrl}`);
+        assertValue(accessInfo.body?.ready === true, `admission(external-${suffix}): access-info ready=${accessInfo.body?.ready}`);
+
+        const completionWrite = httpJson('POST', `${apiBase}/installation/access/completion`, {
+          headers: { Authorization: `Bearer ${ADMIN_V1}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inferenceBasePath: '/ext-gw', sharedEntry: false }),
+        });
+        assertValue(
+          completionWrite.status === 400 && completionWrite.body?.code === 'external_inference_prefix_forbidden',
+          `admission(external-${suffix}): POST access/completion = ${completionWrite.status} ${JSON.stringify(completionWrite.body)}`,
+        );
+
+        const bridgedUsage = httpJson('GET', `${apiBase}/cpamp/usage`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+        assertValue(bridgedUsage.status === 200, `admission(external-${suffix}): bridged usage = ${bridgedUsage.status}`);
+
+        return {
+          health: 200,
+          preflight: reads.preflight,
+          status: reads.status,
+          rootModels: rootModels.status,
+          rootUsage: rootUsage.status,
+          controlBasePath: EXTERNAL_CONTROL_PREFIX,
+          operationAnon: opAnon.status,
+          operationWrongKey: opWrong.status,
+          operationAuth: opOk.status,
+          accessInfoReady: accessInfo.body?.ready === true,
+          externalInferenceRejected: completionWrite.status,
+          bridgedUsage: bridgedUsage.status,
+        };
+      } finally {
+        await stopHostManager(managerName);
       }
-      reads[resource] = 404;
+    } finally {
+      await stopHostManager(ingressName);
     }
-    return { health: 200, surface: 'full', preflight: reads.preflight, status: reads.status };
-  } finally {
-    await stopHostManager(name);
-  }
+  };
+
+  const beforeRestart = await proveRound('initial');
+  const afterRestart = await proveRound('restart');
+  return {
+    health: beforeRestart.health,
+    surface: 'full',
+    preflight: beforeRestart.preflight,
+    status: beforeRestart.status,
+    controlBasePath: EXTERNAL_CONTROL_PREFIX,
+    beforeRestart,
+    afterRestart,
+  };
 }
+
+
 
 // assertAdmission proves both sides of the Upgrade surface's admission: while
 // the recorded operation is unfinished (copy_in and reconcile) the fixed
 // Bootstrap carrier serves the wizard's two read routes beside the Upgrade entry
-// leaf under the source credential, and once the operation is complete the same
-// process serves the full surface and the reads are gone.
+// leaf under the source credential. Completed External upgrades serve only
+// their committed control prefix across process restarts.
 async function assertAdmission(binary, workspace) {
   const sourceRoot = workspace.main.source;
+  const ingressBin = buildIngressBinary();
   // The copy_in state: the same source the chain copied, stopped after `run`, so
   // the row is at a stage the wizard has to be able to show before reconcile.
   const copyInRoot = path.join(SCRATCH, 'work', 'admission', 'copy_in');
@@ -2466,34 +2686,30 @@ async function assertAdmission(binary, workspace) {
 
   const copyIn = await proveUnfinishedAdmission(binary, copyInRoot, sourceRoot, 'copy_in');
   const reconcile = await proveUnfinishedAdmission(binary, workspace.main.target, sourceRoot, 'reconcile');
-  // The same two roots with the source mount gone: the recorded stage is still
-  // readable, and the missing source is a typed marker on a 200 rather than a
-  // refusal to answer.
   const mountless = {
     copy_in: await proveMountlessStatus(binary, copyInRoot, 'copy_in'),
     reconcile: await proveMountlessStatus(binary, workspace.main.target, 'reconcile'),
   };
-  // And the same two roots with the mount present but refused by the shared
-  // database file policy (usage.sqlite is a link): the mount holds no database the
-  // surface may read, so the Manager store is the credential and the surface stays
-  // reachable while both projections name the condition.
   const refusedMount = {
     copy_in: await proveRefusedMountStatus(binary, copyInRoot, 'copy_in', sourceRoot),
     reconcile: await proveRefusedMountStatus(binary, workspace.main.target, 'reconcile', sourceRoot),
   };
 
-  // Completion is the product's own verdict. The operation on the copied root is
-  // connected to a real v8 CPA, the Manager's own connection is stored, and the
-  // built binary runs the completion gate on it. The gate records the stage and
-  // the evidence it rests on in one transaction; the harness writes no stage
-  // token and reads back only what the verdict recorded.
   const completedRoot = path.join(SCRATCH, 'work', 'admission', 'complete');
   fs.rmSync(completedRoot, { recursive: true, force: true });
   copyTree(workspace.main.target, completedRoot);
   fs.rmSync(path.join(completedRoot, 'usage.sqlite.manager.lock'), { force: true });
   const completedDatabase = path.join(completedRoot, 'usage.sqlite');
-  const completion = await completeThroughTheGate(binary, completedRoot, sourceRoot, completedDatabase);
-  const completed = await proveCompletedAdmission(binary, completedRoot, sourceRoot);
+  let completion;
+  let completed;
+  const externalCpa = await startSyntheticCPA();
+  try {
+    completion = await completeThroughTheGate(binary, completedRoot, sourceRoot, completedDatabase, externalCpa);
+    completed = await proveCompletedAdmission(binary, ingressBin, completedRoot, sourceRoot, externalCpa.url);
+  } finally {
+    await externalCpa.close();
+  }
+
 
   evidence.admission = {
     surface: 'upgrade-only',
@@ -2517,9 +2733,11 @@ async function assertAdmission(binary, workspace) {
   stableFacts.push(
     `admission:refused-mount:reconcile:${refusedMount.reconcile.health}:${refusedMount.reconcile.status.status}:${refusedMount.reconcile.status.stage}:${refusedMount.reconcile.status.nextAction}:${refusedMount.reconcile.status.sourceRoot}:${refusedMount.reconcile.preflight.status}:${refusedMount.reconcile.preflight.ready}:${refusedMount.reconcile.preflight.code}`,
   );
-  stableFacts.push(`admission:complete:${completed.health}:${completed.status}:${completed.preflight}`);
   stableFacts.push(
-    `admission:completion:${completion.verify.stage}:${completion.verify.targetMode}:${completion.row.stage}:${completion.row.verificationKeys.join(',')}`,
+    `admission:complete:external:${completed.health}:${completed.status}:${completed.preflight}:${completed.controlBasePath}:${completed.afterRestart.operationAuth}`,
+  );
+  stableFacts.push(
+    `admission:completion:external:${completion.verify.stage}:${completion.verify.targetMode}:${completion.verify.controlBasePath}:${completion.row.stage}:${completion.row.verificationKeys.join(',')}`,
   );
 }
 
@@ -3400,7 +3618,7 @@ async function proveRolledBackSurface(binary, target, sourceRoot) {
 // host processes
 // ---------------------------------------------------------------------------
 
-function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot }) {
+function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot, extraEnv = {} }) {
   // The only producer that spawns before it tracks; without this check a fence
   // hit between the spawn and `track` would leave an untracked process behind.
   registry.assertCreationAllowed('hostProcess', name);
@@ -3412,6 +3630,7 @@ function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot })
     CPA_MANAGER_DATA_KEY_PATH: path.join(dataDir, 'data.key'),
     CPA_MANAGER_ADMIN_KEY: adminKey,
     HTTP_ADDR: `127.0.0.1:${port}`,
+    ...extraEnv,
   };
   if (legacyRoot) env.CPAMP_LEGACY_ROOT = legacyRoot;
   const out = fs.openSync(logFile, 'w');
@@ -3427,6 +3646,13 @@ function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot })
 async function stopHostProcess(name) {
   const entry = hostManagers.get(name);
   if (!entry) return;
+  const allPorts = [entry.port, ...(entry.extraPorts ?? [])];
+  const waitAllClosed = async (timeout) => {
+    for (const candidate of allPorts) {
+      if (!(await waitForPortClosed(candidate, timeout))) return false;
+    }
+    return true;
+  };
   const signalGroup = (signal) => {
     try {
       process.kill(-entry.child.pid, signal);
@@ -3441,14 +3667,14 @@ async function stopHostProcess(name) {
     }
   };
   signalGroup('SIGTERM');
-  let closed = await waitForPortClosed(entry.port, 20_000);
+  let closed = await waitAllClosed(20_000);
   if (!closed) {
     signalGroup('SIGKILL');
-    closed = await waitForPortClosed(entry.port, 10_000);
+    closed = await waitAllClosed(10_000);
   }
   hostManagers.delete(name);
   if (!closed) {
-    throw new Error(`host manager ${name} still holds 127.0.0.1:${entry.port} after SIGTERM and SIGKILL`);
+    throw new Error(`host manager ${name} still holds one of [${allPorts.join(', ')}] after SIGTERM and SIGKILL`);
   }
 }
 
@@ -3505,25 +3731,49 @@ function containerUserArgv() {
   return uid === null || gid === null ? [] : ['--user', `${uid}:${gid}`];
 }
 
+export function dockerContainerRunArgvAndEnv({ name, image, port, dataDir, adminKey, userArgv = [] } = {}) {
+  const trimmedImage = typeof image === 'string' ? image.trim() : '';
+  if (trimmedImage === '' || /^seakee\//i.test(trimmedImage)) {
+    throw new Error(`startContainer refuses disallowed image reference ${JSON.stringify(image)}`);
+  }
+  if (typeof adminKey !== 'string' || adminKey === '') {
+    throw new Error('startContainer requires a non-empty adminKey');
+  }
+  return {
+    argv: [
+      'run', '-d',
+      '--name', name,
+      '-p', `127.0.0.1:${port}:${port}`,
+      '-e', `HTTP_ADDR=0.0.0.0:${port}`,
+      '-e', 'USAGE_DATA_DIR=/data',
+      '-e', 'USAGE_DB_PATH=/data/usage.sqlite',
+      '-e', 'CPA_MANAGER_DATA_KEY_PATH=/data/data.key',
+      '-e', 'CPA_MANAGER_ADMIN_KEY',
+      '-e', 'USAGE_COLLECTOR_MODE=disabled',
+      '-e', 'USAGE_CORS_ORIGINS=*',
+      ...userArgv,
+      '-v', `${dataDir}:/data`,
+      trimmedImage,
+    ],
+    env: {
+      CPA_MANAGER_ADMIN_KEY: adminKey,
+    },
+  };
+}
+
 function startContainer({ name, image, port, dataDir, adminKey }) {
   // Tracked before `docker run`: a command that fails after creating the
   // container still leaves it in the cleanup set.
-  registry.track('container', name, () => releaseDockerResource('container', name));
-  const result = sh('docker', [
-    'run', '-d',
-    '--name', name,
-    '-p', `127.0.0.1:${port}:${port}`,
-    '-e', `HTTP_ADDR=0.0.0.0:${port}`,
-    '-e', 'USAGE_DATA_DIR=/data',
-    '-e', 'USAGE_DB_PATH=/data/usage.sqlite',
-    '-e', 'CPA_MANAGER_DATA_KEY_PATH=/data/data.key',
-    '-e', `CPA_MANAGER_ADMIN_KEY=${adminKey}`,
-    '-e', 'USAGE_COLLECTOR_MODE=disabled',
-    '-e', 'USAGE_CORS_ORIGINS=*',
-    ...containerUserArgv(),
-    '-v', `${dataDir}:/data`,
+  const spec = dockerContainerRunArgvAndEnv({
+    name,
     image,
-  ]);
+    port,
+    dataDir,
+    adminKey,
+    userArgv: containerUserArgv(),
+  });
+  registry.track('container', name, () => releaseDockerResource('container', name));
+  const result = sh('docker', spec.argv, { env: spec.env });
   evidence.commands.push(commandRecord(`docker run ${name}`, result.code));
   if (result.code !== 0) {
     throw new Error(`start ${name}: ${redactor.redact(tail(result.stderr))}`);
@@ -3584,34 +3834,37 @@ async function v1JsonAt(port, method, pathName, body) {
   return { status: response.status, body: parsed };
 }
 
-function httpJson(method, url, { headers = {}, body } = {}) {
-  const result = spawnSync(
-    process.execPath,
-    [
+export function httpJsonSpawnSpec(method, url, { headers = {}, body } = {}) {
+  return {
+    args: [
       '-e',
       `
-      const [method, url, headersJSON, body] = process.argv.slice(1);
+      const fs = require('node:fs');
+      const { method, url, headers, body } = JSON.parse(fs.readFileSync(0, 'utf8'));
       (async () => {
         const response = await fetch(url, {
           method,
-          headers: JSON.parse(headersJSON),
+          headers,
           body: body ? body : undefined,
         });
         const text = await response.text();
-        // The Allow verdict is the 405 contract a proved credential sees, so it
-        // travels with the answer instead of being inferred from the status.
         process.stdout.write(JSON.stringify({ status: response.status, allow: response.headers.get('allow'), body: text }));
       })().catch((error) => {
         process.stdout.write(JSON.stringify({ status: 0, body: String(error) }));
       });
       `,
-      method,
-      url,
-      JSON.stringify(headers),
-      body ?? '',
     ],
-    { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
-  );
+    input: JSON.stringify({ method, url, headers, body: body ?? '' }),
+  };
+}
+
+function httpJson(method, url, { headers = {}, body } = {}) {
+  const spec = httpJsonSpawnSpec(method, url, { headers, body });
+  const result = spawnSync(process.execPath, spec.args, {
+    input: spec.input,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
   if (result.status !== 0) {
     return { status: 0, body: null, raw: result.stderr };
   }
@@ -3643,6 +3896,7 @@ export function withDeclaredSourceVersion(cliArgs, release) {
   }
   return [declared[0], declared[1], '--source-version', release, ...declared.slice(2)];
 }
+
 
 // shellTokens splits a printed command the way a shell reads the quoting
 // ShellQuote produces: single-quoted runs (including the '\'' escape) and

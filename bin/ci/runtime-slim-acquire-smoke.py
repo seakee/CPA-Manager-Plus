@@ -24,7 +24,8 @@ PINS = {
 REDACT_PATTERNS = [
     re.compile(r"(Authorization:\s*(?:Bearer|Fresh)\s+)[^\s\"']+", re.I),
     re.compile(r"(X-Management-Key:\s*)[^\s\"']+", re.I),
-    re.compile(r"([\"']?(?:secret-key|CPAMP_RUNTIME_TOKEN|managementKey|token|key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", re.I),
+    re.compile(r"([\"']?(?:secret-key|CPAMP_RUNTIME_TOKEN|managementKey|initialClientKey|createdSecret|secret|token|key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", re.I),
+    re.compile(r"(sk-)[A-Za-z0-9]{32,}"),
 ]
 
 
@@ -412,9 +413,19 @@ def main(argv):
         admin_key = gen_resp["key"]
         secret_values.append(admin_key)
 
+        control_prefix = "/console"
+        inference_prefix = "/inference"
         for resource, payload in (
             ("admin/commit", {"identity": handoff["identity"], "commitId": secrets.token_hex(16), "key": admin_key}),
-            ("routing/prepare", {"identity": handoff["identity"], "target": "/console"}),
+            (
+                "routing/prepare",
+                {
+                    "identity": handoff["identity"],
+                    "target": control_prefix,
+                    "inferenceTarget": inference_prefix,
+                    "sharedEntry": False,
+                },
+            ),
             ("routing/activate", {"identity": handoff["identity"]}),
         ):
             code, op_state = public_http(
@@ -427,7 +438,14 @@ def main(argv):
             )
             assert code == 200 and isinstance(op_state, dict), (resource, code, op_state)
 
-        console_api = "/console/api/v2/"
+        routing_state = op_state.get("routing") or {}
+        assert routing_state.get("target") == control_prefix, op_state
+        assert routing_state.get("inferenceTarget") == inference_prefix, op_state
+        assert routing_state.get("sharedEntry", False) is False, op_state
+        assert routing_state.get("committed") is True, op_state
+        assert routing_state.get("inferenceCommitted") is True, op_state
+
+        console_api = f"{control_prefix}/api/v2/"
         code, rt_info = public_http(
             slim_origin,
             console_api + "installation/runtime",
@@ -437,6 +455,7 @@ def main(argv):
         assert code == 200 and isinstance(rt_info, dict), (code, rt_info)
         assert (rt_info.get("activeGatewayArtifact") or {}).get("artifactId") == expected_artifact_id, rt_info
 
+        install_key = ""
         for _ in range(4):
             code, op_state = public_http(
                 slim_origin,
@@ -454,10 +473,13 @@ def main(argv):
                 auth_token=session_token,
             )
             assert code == 200 and isinstance(op_state, dict), ("strategy", code, op_state)
+            disclosed_key = op_state.get("initialClientKey")
+            if isinstance(disclosed_key, str) and disclosed_key:
+                secret_values.append(disclosed_key)
+                install_key = disclosed_key
             if (op_state.get("strategy") or {}).get("stage") == "committed":
                 break
         assert (op_state.get("strategy") or {}).get("stage") == "committed", op_state
-
         code, completed = public_http(
             slim_origin,
             console_api + "complete",
@@ -475,8 +497,20 @@ def main(argv):
         )
         health_code, health_body = public_http(slim_origin, "/health")
         assert health_code == 200, (health_code, health_body)
-        models_code, _ = public_http(slim_origin, "/v1/models", auth_scheme="Bearer", auth_token="invalid-client-key")
-        assert models_code == 401, models_code
+        retired_code, _ = public_http(
+            slim_origin,
+            bootstrap_api + "routing/prepare",
+            method="POST",
+            body={
+                "identity": handoff["identity"],
+                "target": "/other-console",
+                "inferenceTarget": "/other-inference",
+                "sharedEntry": False,
+            },
+            auth_scheme="Fresh",
+            auth_token=session_token,
+        )
+        assert retired_code == 404, retired_code
 
         code, rt_status = public_http(
             slim_origin,
@@ -485,6 +519,115 @@ def main(argv):
             auth_token=admin_key,
         )
         assert code == 200 and isinstance(rt_status, dict) and rt_status.get("status") == "ready", (code, rt_status)
+
+        def fetch_api_keys_admitted(origin):
+            keys_code, keys_body = public_http(
+                origin,
+                console_api + "api-keys",
+                auth_scheme="Bearer",
+                auth_token=admin_key,
+            )
+            if keys_code == 200 and isinstance(keys_body, dict) and keys_body.get("gatewayPending") is False:
+                return keys_body
+            return None
+
+        keys_view = wait_until(
+            lambda: fetch_api_keys_admitted(slim_origin),
+            "gateway admission ready on api-keys",
+            timeout=60,
+        )
+        installer_keys = [k for k in (keys_view.get("keys") or []) if isinstance(k, dict) and k.get("origin") == "installer"]
+        assert len(installer_keys) == 1 and installer_keys[0].get("id"), keys_view
+        installer_key_id = installer_keys[0]["id"]
+        secret_code, secret_resp = public_http(
+            slim_origin,
+            f"{console_api}api-keys/{installer_key_id}/secret",
+            method="POST",
+            body={},
+            auth_scheme="Bearer",
+            auth_token=admin_key,
+        )
+        assert secret_code == 200 and isinstance(secret_resp, dict) and isinstance(secret_resp.get("secret"), str) and secret_resp["secret"], (
+            secret_code,
+            secret_resp,
+        )
+        secret_values.append(secret_resp["secret"])
+        if install_key:
+            assert secret_resp["secret"] == install_key, "disclosed initialClientKey differed from stored installer key secret"
+        else:
+            install_key = secret_resp["secret"]
+
+        access_code, access_info = public_http(
+            slim_origin,
+            console_api + "api-keys/access-info",
+            auth_scheme="Bearer",
+            auth_token=admin_key,
+        )
+        assert access_code == 200 and isinstance(access_info, dict), (access_code, access_info)
+        assert access_info.get("ready") is True, access_info
+        assert access_info.get("managementBasePath") == control_prefix, access_info
+        assert access_info.get("inferenceBasePath") == inference_prefix, access_info
+
+        def assert_gateway_models(origin, stage_label):
+            wait_until(
+                lambda: fetch_api_keys_admitted(origin),
+                f"gateway admission ready before model probes ({stage_label})",
+                timeout=60,
+            )
+            root_anon, _ = public_http(origin, "/v1/models")
+            assert root_anon != 503 and root_anon == 404, (stage_label, "root_anon", root_anon)
+            root_invalid, _ = public_http(origin, "/v1/models", auth_scheme="Bearer", auth_token="invalid-client-key")
+            assert root_invalid != 503 and root_invalid == 404, (stage_label, "root_invalid", root_invalid)
+            root_valid, _ = public_http(origin, "/v1/models", auth_scheme="Bearer", auth_token=install_key)
+            assert root_valid != 503 and root_valid == 404, (stage_label, "root_valid", root_valid)
+
+            pref_anon, _ = public_http(origin, f"{inference_prefix}/v1/models")
+            assert pref_anon != 503 and pref_anon == 401, (stage_label, "pref_anon", pref_anon)
+            pref_invalid, _ = public_http(
+                origin,
+                f"{inference_prefix}/v1/models",
+                auth_scheme="Bearer",
+                auth_token="invalid-client-key",
+            )
+            assert pref_invalid != 503 and pref_invalid == 401, (stage_label, "pref_invalid", pref_invalid)
+            pref_valid, pref_body = public_http(
+                origin,
+                f"{inference_prefix}/v1/models",
+                auth_scheme="Bearer",
+                auth_token=install_key,
+            )
+            assert pref_valid != 503 and pref_valid == 200, (stage_label, "pref_valid", pref_valid, pref_body)
+            assert isinstance(pref_body, dict) and pref_body.get("object") == "list", (stage_label, pref_body)
+
+            mgmt_v0, _ = public_http(
+                origin,
+                f"{inference_prefix}/v0/management/config",
+                auth_scheme="Bearer",
+                auth_token=admin_key,
+            )
+            assert mgmt_v0 == 404, (stage_label, "mgmt_v0", mgmt_v0)
+            mgmt_v8, _ = public_http(
+                origin,
+                f"{inference_prefix}/v8/management/config",
+                auth_scheme="Bearer",
+                auth_token=admin_key,
+            )
+            assert mgmt_v8 == 404, (stage_label, "mgmt_v8", mgmt_v8)
+            return {
+                "controlBasePath": control_prefix,
+                "inferenceBasePath": inference_prefix,
+                "sharedEntry": False,
+                "rootAnonymousStatus": root_anon,
+                "rootInvalidKeyStatus": root_invalid,
+                "rootInstallKeyStatus": root_valid,
+                "prefixAnonymousStatus": pref_anon,
+                "prefixInvalidKeyStatus": pref_invalid,
+                "prefixInstallKeyStatus": pref_valid,
+                "prefixManagementV0Status": mgmt_v0,
+                "prefixManagementV8Status": mgmt_v8,
+            }
+
+        step_d_gateway = assert_gateway_models(slim_origin, "stepD_beforeRestart")
 
         proc_info = inspect_cpa_process(slim_dc)
         expected_staged_exe = f"{stage_dir}/cli-proxy-api"
@@ -495,9 +638,14 @@ def main(argv):
         evidence["stepD_freshNewHealthy"] = {
             "runtimeStatus": rt_status,
             "cpaProcess": proc_info,
-            "gatewayModelsInvalidKeyStatus": models_code,
+            "installerKeyId": installer_key_id,
+            "accessInfo": {
+                "ready": access_info.get("ready"),
+                "managementBasePath": access_info.get("managementBasePath"),
+                "inferenceBasePath": access_info.get("inferenceBasePath"),
+            },
+            "gatewayModels": step_d_gateway,
         }
-
         def fetch_runtime_status():
             status_code, status_body = public_http(
                 slim_origin,
@@ -557,14 +705,25 @@ def main(argv):
         # process that generation started, not the one observed before.
         assert restarted_gateway.get("generation") not in (None, committed_generation), restarted_status
         assert restarted_gateway.get("artifactId") == expected_artifact_id, restarted_status
-        restarted_models_code, _ = public_http(slim_origin, "/v1/models", auth_scheme="Bearer", auth_token="invalid-client-key")
-        assert restarted_models_code == 401, restarted_models_code
+        step_e_gateway = assert_gateway_models(slim_origin, "stepE_afterRestart")
+        restarted_op_code, restarted_op = public_http(
+            slim_origin,
+            console_api + "operation",
+            auth_scheme="Bearer",
+            auth_token=admin_key,
+        )
+        assert restarted_op_code == 200 and isinstance(restarted_op, dict), (restarted_op_code, restarted_op)
+        restarted_routing = restarted_op.get("routing") or {}
+        assert restarted_routing.get("target") == control_prefix, restarted_op
+        assert restarted_routing.get("inferenceTarget") == inference_prefix, restarted_op
+        assert restarted_routing.get("sharedEntry", False) is False, restarted_op
+        assert restarted_routing.get("committed") is True and restarted_routing.get("inferenceCommitted") is True, restarted_op
         restarted_proc = inspect_cpa_process(slim_dc)
         assert restarted_proc.get("EXE") == expected_staged_exe and restarted_proc.get("SHA") == pin, restarted_proc
         evidence["stepE_afterRestart"] = {
             "artifactStatus": restarted_artifact,
             "runtimeStatus": restarted_status,
-            "gatewayModelsInvalidKeyStatus": restarted_models_code,
+            "gatewayModels": step_e_gateway,
             "cpaProcess": restarted_proc,
         }
 
@@ -618,11 +777,13 @@ def main(argv):
             "Gateway ready after restarting a runtime the user started",
             timeout=120,
         )
+        step_g_gateway = assert_gateway_models(slim_origin, "stepG_restartAfterStart")
         started_proc = inspect_cpa_process(slim_dc)
         assert started_proc.get("EXE") == expected_staged_exe and started_proc.get("SHA") == pin, started_proc
         evidence["stepG_restartAfterStart"] = {
             "startOperation": start_op,
             "runtimeStatus": started_status,
+            "gatewayModels": step_g_gateway,
             "cpaProcess": started_proc,
         }
 
@@ -640,10 +801,12 @@ def main(argv):
             "Gateway ready after the Compose container was recreated on the same volume",
             timeout=180,
         )
+        step_h_gateway = assert_gateway_models(slim_origin, "stepH_recreatedContainer")
         recreated_proc = inspect_cpa_process(slim_dc)
         assert recreated_proc.get("EXE") == expected_staged_exe and recreated_proc.get("SHA") == pin, recreated_proc
         evidence["stepH_recreatedContainer"] = {
             "runtimeStatus": recreated_status,
+            "gatewayModels": step_h_gateway,
             "cpaProcess": recreated_proc,
         }
 
