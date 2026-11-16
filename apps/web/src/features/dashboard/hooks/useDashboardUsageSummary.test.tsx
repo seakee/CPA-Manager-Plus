@@ -2,22 +2,32 @@ import { useEffect } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dashboardApi, type DashboardSummaryResponse } from '@/services/api/usageService';
-import { useDashboardUsageSummary } from './useDashboardUsageSummary';
+import {
+  useDashboardUsageSummary,
+  type UseDashboardUsageSummaryReturn,
+} from './useDashboardUsageSummary';
 
-const state = vi.hoisted(() => ({ key: 'a', base: 'http://a' }));
+const state = vi.hoisted(() => ({
+  apiBase: 'http://gw-a:8317',
+  key: 'a',
+  base: 'http://a',
+  available: true,
+  checking: false,
+}));
 vi.mock('@/stores', () => ({
-  useAuthStore: (selector: (value: { managementKey: string }) => unknown) =>
-    selector({ managementKey: state.key }),
+  useAuthStore: (selector: (value: { apiBase: string; managementKey: string }) => unknown) =>
+    selector({ apiBase: state.apiBase, managementKey: state.key }),
 }));
 vi.mock('@/hooks/useRequestMonitoringAvailability', () => ({
   useRequestMonitoringAvailability: () => ({
-    available: true,
-    checking: false,
+    available: state.available,
+    checking: state.checking,
     serviceBase: state.base,
   }),
 }));
 vi.mock('@/services/api/usageService', () => ({ dashboardApi: { getSummary: vi.fn() } }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 const deferred = () => {
   let resolve!: (value: DashboardSummaryResponse) => void;
   let reject!: (error: Error) => void;
@@ -27,50 +37,97 @@ const deferred = () => {
   });
   return { promise, resolve, reject };
 };
+
 let renderer: ReactTestRenderer;
-let latest: ReturnType<typeof useDashboardUsageSummary>;
+let latest: UseDashboardUsageSummaryReturn;
 function Harness() {
   const result = useDashboardUsageSummary();
-  useEffect(() => { latest = result; }, [result]);
+  useEffect(() => {
+    latest = result;
+  }, [result]);
   return <span>{result.summary?.generated_at_ms}</span>;
 }
+
 afterEach(() => {
   act(() => renderer?.unmount());
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  state.apiBase = 'http://gw-a:8317';
   state.key = 'a';
   state.base = 'http://a';
+  state.available = true;
+  state.checking = false;
 });
 
 describe('dashboard summary revalidation', () => {
-  it('retains a successful snapshot through pending/failure and replaces it on success', async () => {
+  it('retains a successful snapshot and active error across an in-flight retry until the retry resolves (P1-3)', async () => {
     vi.stubGlobal('window', { setInterval, clearInterval });
     const snapshot = { generated_at_ms: 1 } as DashboardSummaryResponse;
     vi.mocked(dashboardApi.getSummary).mockResolvedValueOnce(snapshot);
     await act(async () => {
       renderer = create(<Harness />);
     });
-    const next = deferred();
-    vi.mocked(dashboardApi.getSummary).mockReturnValueOnce(next.promise);
-    let pending!: Promise<void>;
+    expect(latest.evidenceScope).toBe(JSON.stringify(['http://gw-a:8317', 'a']));
+
+    const failedPoll = deferred();
+    vi.mocked(dashboardApi.getSummary).mockReturnValueOnce(failedPoll.promise);
+    let pendingFailure!: Promise<void>;
     act(() => {
-      pending = latest.refresh();
+      pendingFailure = latest.refresh();
     });
     expect(latest.loading).toBe(true);
     expect(renderer.root.findByType('span').children).toEqual(['1']);
     await act(async () => {
-      next.reject(new Error('offline'));
-      await pending;
+      failedPoll.reject(new Error('offline'));
+      await pendingFailure;
     });
     expect(latest.error).toBe('offline');
     expect(renderer.root.findByType('span').children).toEqual(['1']);
-    vi.mocked(dashboardApi.getSummary).mockResolvedValueOnce({
-      generated_at_ms: 2,
-    } as DashboardSummaryResponse);
+
+    const retryPoll = deferred();
+    vi.mocked(dashboardApi.getSummary).mockReturnValueOnce(retryPoll.promise);
+    let pendingRetry!: Promise<void>;
+    act(() => {
+      pendingRetry = latest.refresh();
+    });
+    // P1-3: error MUST remain 'offline' while retry is still in flight
+    expect(latest.loading).toBe(true);
+    expect(latest.error).toBe('offline');
+
+    await act(async () => {
+      retryPoll.resolve({ generated_at_ms: 2 } as DashboardSummaryResponse);
+      await pendingRetry;
+    });
+    expect(latest.error).toBe('');
+    expect(renderer.root.findByType('span').children).toEqual(['2']);
+  });
+
+  it('retains same-connection snapshot and error during transient capability re-probe (checking=true)', async () => {
+    vi.stubGlobal('window', { setInterval, clearInterval });
+    vi.mocked(dashboardApi.getSummary)
+      .mockResolvedValueOnce({ generated_at_ms: 10 } as DashboardSummaryResponse)
+      .mockRejectedValueOnce(new Error('summary 502'));
+
+    await act(async () => {
+      renderer = create(<Harness />);
+    });
     await act(async () => {
       await latest.refresh();
     });
-    expect(renderer.root.findByType('span').children).toEqual(['2']);
+    expect(latest.summary?.generated_at_ms).toBe(10);
+    expect(latest.error).toBe('summary 502');
+
+    // Simulate refreshPanelFeatureAvailability() on the same gateway connection
+    state.checking = true;
+    state.available = false;
+    state.base = '';
+    await act(async () => {
+      renderer.update(<Harness />);
+    });
+    expect(latest.enabled).toBe(true);
+    expect(latest.summary?.generated_at_ms).toBe(10);
+    expect(latest.error).toBe('summary 502');
+    expect(latest.evidenceScope).toBe(JSON.stringify(['http://gw-a:8317', 'a']));
   });
 
   it('never lets a previous connection populate a new one', async () => {
@@ -83,6 +140,7 @@ describe('dashboard summary revalidation', () => {
     await act(async () => {
       renderer = create(<Harness />);
     });
+    state.apiBase = 'http://gw-b:8317';
     state.key = 'b';
     state.base = 'http://b';
     await act(async () => {
@@ -96,5 +154,6 @@ describe('dashboard summary revalidation', () => {
       next.resolve({ generated_at_ms: 2 } as DashboardSummaryResponse);
     });
     expect(latest.summary?.generated_at_ms).toBe(2);
+    expect(latest.evidenceScope).toBe(JSON.stringify(['http://gw-b:8317', 'b']));
   });
 });

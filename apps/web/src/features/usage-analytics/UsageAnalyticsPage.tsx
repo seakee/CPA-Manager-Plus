@@ -1612,11 +1612,6 @@ function HeatmapDetailPanel({
                 >
                   {item.value}
                 </strong>
-                <div className={styles.heatmapDetailMetricChart} aria-hidden="true">
-                  <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-                    <path d="M0,24 C18,8 28,22 42,16 S67,4 82,13 S94,22 100,10" />
-                  </svg>
-                </div>
               </div>
             ))}
           </div>

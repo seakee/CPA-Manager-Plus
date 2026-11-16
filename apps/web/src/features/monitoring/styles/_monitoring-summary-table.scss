@@ -242,32 +242,6 @@
     overflow-wrap: anywhere;
   }
 
-  .summaryCardChart {
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    z-index: 0;
-    width: calc(46% - 8px);
-    min-width: 72px;
-    height: 28px;
-    color: var(--summary-accent);
-    opacity: 0.5;
-    pointer-events: none;
-  }
-
-  .summaryCardChart svg {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-
-  .summaryCardChart path {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    opacity: 0.22;
-  }
-
   .summaryAccentBlue {
     --summary-accent: var(--data-blue-base);
   }

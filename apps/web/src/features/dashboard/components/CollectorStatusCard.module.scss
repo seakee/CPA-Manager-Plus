@@ -55,16 +55,28 @@
     .statusText { color: var(--text-primary); }
     .statusOk { color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary)); }
     .statusWarn { color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary)); }
+    .statusError { color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary)); }
+    .statusMuted { color: var(--text-tertiary); }
+
     .statusDot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
       background: var(--data-emerald-base);
       display: inline-block;
+      flex: 0 0 auto;
     }
 
     .statusWarn .statusDot {
       background: var(--color-warning);
+    }
+
+    .statusError .statusDot {
+      background: var(--color-danger);
+    }
+
+    .statusMuted .statusDot {
+      background: var(--text-muted);
     }
   }
 }
@@ -93,5 +105,14 @@
     color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
     font-weight: 600;
     overflow-wrap: anywhere;
+  }
+}
+
+.errorLineDanger {
+  border-color: var(--data-badge-danger-border);
+  background: var(--data-badge-danger-bg);
+
+  strong {
+    color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   }
 }
