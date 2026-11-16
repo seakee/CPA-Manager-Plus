@@ -2,8 +2,7 @@ import { fullWebLanguage } from './fullweb';
 
 const en = {
   title: 'API access endpoints',
-  subtitle:
-    'Copy the verified base URLs and protocol endpoints for your client tools. Keep client keys separate from your administrator credential.',
+  subtitle: 'Copy verified management and model inference URLs for your client tools.',
   pendingRestartSubtitle:
     'These saved access paths take effect only after the Manager process restarts.',
   loading: 'Loading verified API access endpoints…',
@@ -73,7 +72,7 @@ const en = {
 
 const zh: typeof en = {
   title: 'API 接入地址',
-  subtitle: '复制已验证的协议接入基址与示例端点供客户端使用。请将客户端 Key 与管理员密钥分开保管。',
+  subtitle: '复制已验证的管理入口与模型推理地址供客户端接入。',
   pendingRestartSubtitle: '以下已保存的接入路径将在 Manager 重启后生效。',
   loading: '正在加载已验证的 API 接入地址…',
   awaitingAuth: '请先使用管理员凭据登录后再查看 API 接入地址。',
@@ -135,7 +134,7 @@ const zh: typeof en = {
 
 const tw: typeof en = {
   title: 'API 接入位址',
-  subtitle: '複製已驗證的協議接入基址與範例端點供用戶端使用。請將用戶端 Key 與管理員金鑰分開保管。',
+  subtitle: '複製已驗證的管理入口與模型推論位址供用戶端接入。',
   pendingRestartSubtitle: '以下已儲存的接入路徑將於 Manager 重新啟動後生效。',
   loading: '正在載入已驗證的 API 接入位址…',
   awaitingAuth: '請先使用管理員憑證登入後再查看 API 接入位址。',
@@ -198,7 +197,7 @@ const tw: typeof en = {
 const ru: typeof en = {
   title: 'Адреса доступа к API',
   subtitle:
-    'Скопируйте подтверждённые базовые URL и конечные точки протоколов для ваших клиентов. Храните клиентские ключи отдельно от ключа администратора.',
+    'Скопируйте подтверждённые адреса панели управления и API инференса для ваших клиентов.',
   pendingRestartSubtitle:
     'Сохранённые пути доступа вступят в силу только после перезапуска Manager.',
   loading: 'Загрузка подтверждённых адресов доступа к API…',

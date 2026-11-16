@@ -13,7 +13,8 @@ const en = {
   sourceHelp:
     'Enter the address and management key of the CPA you are adopting from. It must be CPA v8.0.55 with remote management enabled.',
   baseURL: 'Source address',
-  baseURLHelp: 'For example http://cpa.internal:8317. The destination is always this Manager.',
+  baseURLHelp:
+    'For example http://127.0.0.1:8317 (requires CPA v8.0.55 with remote management enabled).',
   managementKey: 'Source management key',
   managementKeyHelp:
     'Used only to read the source and to verify this attempt. It stays in this page’s memory and is never saved.',
@@ -35,6 +36,9 @@ const en = {
   unsupportedGroup: 'Cannot be migrated',
   confirmInventory: 'I reviewed the inventory and want to copy it to this CPA.',
   confirmAndMigrate: 'Confirm and migrate',
+  inventoryCountsBanner:
+    'Detected {migrate} migratable source items · {manual} config categories stay under target control.',
+  credentialItemTitle: 'Credential file #{n}',
   migrationTitle: 'Migration',
   migrationHelp:
     'The destination is committed. The copy continues in the background and this page polls its recorded progress.',
@@ -79,6 +83,7 @@ const en = {
   // The settled-but-incomplete state: the run stopped, but the installation is
   // not complete. The title never says "complete", and the body names what is
   // left instead.
+  readyToCompleteTitle: 'Ready to finalize',
   settledTitle: 'Migration settled',
   settledHelp:
     'The copy has stopped before the installation was complete. Resume the migration to finish what is left.',
@@ -132,7 +137,7 @@ const zh: typeof en = {
   sourceHelp:
     '填写要接管来源 CPA 的地址与管理密钥。该 CPA 必须是已开启远程管理、版本为 v8.0.55 的 CPA。',
   baseURL: '源地址',
-  baseURLHelp: '例如 http://cpa.internal:8317。目标始终是本管理程序运行的 CPA。',
+  baseURLHelp: '例如 http://127.0.0.1:8317（需为已开启远程管理的 CPA v8.0.55）。',
   managementKey: '源管理密钥',
   managementKeyHelp: '仅用于读取源 CPA 与校验本次操作。只保留在当前页面内存中，不会被保存。',
   plugins: '在目标启用插件运行时',
@@ -149,6 +154,8 @@ const zh: typeof en = {
   unsupportedGroup: '无法迁移',
   confirmInventory: '我已确认清单，并同意复制到本 CPA。',
   confirmAndMigrate: '确认并开始迁移',
+  inventoryCountsBanner: '已探测到源端 {migrate} 项可自动迁移数据 · {manual} 类配置保留为目标侧独立管理',
+  credentialItemTitle: '凭证文件 #{n}',
   migrationTitle: '正在迁移',
   migrationHelp: '目标已提交。复制在后台继续，本页会轮询已记录的进度。',
   waiting: '正在读取迁移记录…',
@@ -181,6 +188,7 @@ const zh: typeof en = {
   partialTitle: '安装已完成，仍有迁移项需手动处理',
   partialHelp:
     '控制台已就绪，但仍有 {manual} 项需要手动处理，{failed} 项未能复制。下方分组列出了剩余工作。',
+  readyToCompleteTitle: '迁移条目已处理完毕',
   settledTitle: '迁移已停止复制',
   settledHelp: '复制在安装完成前停止。可以继续迁移以处理剩余条目。',
   remainingItems: '有 {count} 项计划中的条目从未处理。',
@@ -221,7 +229,7 @@ const tw: typeof en = {
   sourceHelp:
     '填寫要接管來源 CPA 的位址與管理金鑰。該 CPA 必須是已開啟遠端管理、版本為 v8.0.55 的 CPA。',
   baseURL: '來源位址',
-  baseURLHelp: '例如 http://cpa.internal:8317。目標一律是本管理程式執行的 CPA。',
+  baseURLHelp: '例如 http://127.0.0.1:8317（需為已開啟遠端管理的 CPA v8.0.55）。',
   managementKey: '來源管理金鑰',
   managementKeyHelp: '僅用於讀取來源 CPA 與驗證本次操作。只保留在目前頁面的記憶體中，不會被儲存。',
   plugins: '在目標啟用外掛執行環境',
@@ -239,6 +247,8 @@ const tw: typeof en = {
   confirmInventory: '我已確認清單，並同意複製到本 CPA。',
   confirmAndMigrate: '確認並開始遷移',
   migrationTitle: '正在遷移',
+  inventoryCountsBanner: '已偵測到來源端 {migrate} 項可自動遷移資料 · {manual} 類設定保留為目標側獨立管理',
+  credentialItemTitle: '憑證檔案 #{n}',
   migrationHelp: '目標已提交。複製會在背景繼續，本頁會輪詢已記錄的進度。',
   waiting: '正在讀取遷移記錄…',
   progress: '已處理 {settled} / {planned} 項',
@@ -270,6 +280,7 @@ const tw: typeof en = {
   partialTitle: '安裝已完成，仍有遷移項目需手動處理',
   partialHelp:
     '主控台已就緒，但仍有 {manual} 項需要手動處理，{failed} 項未能複製。下方分組列出了剩餘工作。',
+  readyToCompleteTitle: '遷移項目已處理完畢',
   settledTitle: '遷移已停止複製',
   settledHelp: '複製在安裝完成前停止。可以繼續遷移以處理剩餘項目。',
   remainingItems: '有 {count} 項計畫中的項目從未處理。',
@@ -310,7 +321,8 @@ const ru: typeof en = {
   sourceHelp:
     'Укажите адрес и ключ управления CPA, который вы подключаете. Это должен быть CPA v8.0.55 с включённым удалённым управлением.',
   baseURL: 'Адрес источника',
-  baseURLHelp: 'Например http://cpa.internal:8317. Целевым всегда является CPA этого Manager.',
+  baseURLHelp:
+    'Например http://127.0.0.1:8317 (требуется CPA v8.0.55 с включённым удалённым управлением).',
   managementKey: 'Ключ управления источника',
   managementKeyHelp:
     'Используется только для чтения источника и проверки этой попытки. Хранится в памяти страницы и не сохраняется.',
@@ -334,6 +346,9 @@ const ru: typeof en = {
   confirmInventory: 'Я проверил состав и хочу скопировать его в этот CPA.',
   confirmAndMigrate: 'Подтвердить и перенести',
   migrationTitle: 'Перенос',
+  inventoryCountsBanner:
+    'Обнаружено элементов для автопереноса: {migrate} · категорий под управлением цели: {manual}',
+  credentialItemTitle: 'Файл учётных данных #{n}',
   migrationHelp:
     'Целевой CPA зафиксирован. Копирование идёт в фоне, а страница опрашивает сохранённый прогресс.',
   waiting: 'Чтение записи о переносе…',
@@ -371,6 +386,7 @@ const ru: typeof en = {
   partialTitle: 'Установка завершена — остались ручные шаги',
   partialHelp:
     'Консоль готова, но {manual} элемент(ов) требуют ручной работы, а {failed} элемент(ов) скопировать не удалось. Группы ниже показывают, что осталось.',
+  readyToCompleteTitle: 'Элементы переноса обработаны',
   settledTitle: 'Перенос остановлен',
   settledHelp:
     'Копирование остановилось до завершения установки. Продолжите перенос, чтобы обработать оставшееся.',

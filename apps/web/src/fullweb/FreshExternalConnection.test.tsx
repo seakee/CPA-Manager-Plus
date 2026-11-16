@@ -382,4 +382,22 @@ describe('Fresh External initialization', () => {
     );
     expect(ui.unauthorized).toHaveBeenCalledOnce();
   });
+
+  it('toggles management key visibility on Step 1 and hides plaintext again on review and completion', async () => {
+    const ui = await mount();
+    await ui.field('external-base-url', 'http://cpa.private:8317');
+    await ui.field('external-management-key', 'source-secret');
+    expect(ui.node('external-management-key').props.type).toBe('password');
+    await ui.click('external-key-visibility');
+    expect(ui.node('external-management-key').props.type).toBe('text');
+    await ui.click('external-review');
+    expect(JSON.stringify(ui.renderer.toJSON())).not.toContain('source-secret');
+    await ui.click('external-connect');
+    ui.post.mockResolvedValue(completed);
+    ui.get.mockImplementation(async (resource: string) =>
+      resource === 'api-keys/access-info' ? externalAccessInfo : completed
+    );
+    await ui.click('external-complete');
+    expect(ui.has('external-complete-next-hint')).toBe(true);
+  });
 });

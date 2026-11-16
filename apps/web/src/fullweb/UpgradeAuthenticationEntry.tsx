@@ -212,51 +212,63 @@ export function UpgradeAuthenticationEntry() {
         data-testid={checking ? 'upgrade-revalidating' : 'upgrade-authenticated'}
         aria-busy={checking}
       >
-        <section className="upgrade-card" aria-labelledby="upgrade-title">
-          <div className="upgrade-body">
-            <div className="upgrade-heading">
-              <h1 id="upgrade-title" ref={heading} tabIndex={-1}>
-                {text('title', language)}
-              </h1>
-              <span className="badge">{text('mode', language)}</span>
-              <span className={checking ? 'badge' : 'badge badge-emerald'}>
-                <FullWebIcon name={checking ? 'refresh' : 'check'} size={16} />
-                {text(checking ? 'checkingShort' : 'verified', language)}
-              </span>
+        <div className="upgrade-shell-card">
+          <section className="upgrade-topbar" aria-labelledby="upgrade-title">
+            <div className="upgrade-card-top">
+              <div className="upgrade-heading">
+                <h1 id="upgrade-title" ref={heading} tabIndex={-1}>
+                  {text('title', language)}
+                </h1>
+                <span className={checking ? 'badge' : 'badge badge-emerald'}>
+                  <FullWebIcon name={checking ? 'refresh' : 'check'} size={13} />
+                  {text(checking ? 'checkingShort' : 'verified', language)}
+                </span>
+              </div>
+              <div className="upgrade-session-actions">
+                <button
+                  className="btn btn-ghost btn-xs"
+                  data-testid="upgrade-verify"
+                  disabled={checking}
+                  onClick={() => void authenticate(credential.current, false, revision)}
+                >
+                  <FullWebIcon name="refresh" size={13} /> {text('verify', language)}
+                </button>
+                <button className="btn btn-ghost btn-xs" onClick={() => revoke()}>
+                  {text('logout', language)}
+                </button>
+              </div>
             </div>
-            <p className="upgrade-subtitle">{text('retained', language)}</p>
             <div
-              className="upgrade-notice"
+              className={
+                checking || observation === 'observation_unavailable'
+                  ? 'upgrade-notice upgrade-entry-banner'
+                  : 'upgrade-sr-only'
+              }
               role="status"
               aria-live="polite"
               data-testid="upgrade-entry-status"
               data-observation={checking ? 'checking' : observation}
             >
-              <FullWebIcon
-                name={checking ? 'refresh' : observation === 'observation_unavailable' ? 'info' : 'alert'}
-                size={24}
-              />
+              <FullWebIcon name={checking ? 'refresh' : 'info'} size={16} />
               <div>
-                <h2>
-                  {text(
-                    checking
-                      ? 'checking'
-                      : observation === 'observation_unavailable'
-                        ? 'observationUnavailable'
-                        : 'blocked',
-                    language
-                  )}
-                </h2>
+                {(!recorded || checking || observation === 'observation_unavailable') && (
+                  <h2>
+                    {text(
+                      checking
+                        ? 'checking'
+                        : observation === 'observation_unavailable'
+                          ? 'observationUnavailable'
+                          : 'blocked',
+                      language
+                    )}
+                  </h2>
+                )}
                 <p>
                   {text(
                     checking
                       ? 'checkingHelp'
                       : observation === 'observation_unavailable'
-                        ? // The help sentence above asserts that nothing was
-                          // written. A wizard read that found a recorded
-                          // operation contradicts it, so that state gets the
-                          // sentence that names the record instead of both.
-                          recorded
+                        ? recorded
                           ? 'recordedObservationHelp'
                           : 'observationUnavailableHelp'
                         : recorded
@@ -267,35 +279,19 @@ export function UpgradeAuthenticationEntry() {
                 </p>
               </div>
             </div>
-            {/* The "further decisions will become available" line belongs to a
-                source with no migration path. A recorded operation already has
-                one, and the wizard below shows it. */}
-            {!recorded && <p className="upgrade-next">{text('next', language)}</p>}
-          </div>
-          <div className="upgrade-footer">
-            <button className="btn btn-secondary" onClick={() => revoke()}>
-              {text('logout', language)}
-            </button>
-            <button
-              className="btn btn-primary"
-              data-testid="upgrade-verify"
-              disabled={checking}
-              onClick={() => void authenticate(credential.current, false, revision)}
-            >
-              <FullWebIcon name="refresh" /> {text('verify', language)}
-            </button>
-          </div>
-        </section>
-        {/* The wizard is mounted only once the server has verified a session,
-            and it reads nothing but the two upgrade routes. */}
-        <FreshUpgradeFlow
-          read={wizardRead}
-          saveRouting={wizardSaveRouting}
-          verify={wizardVerify}
-          artifact={wizardArtifact}
-          language={language}
-          onRecordedOperation={setRecorded}
-        />
+            {!recorded && text('next', language) && (
+              <p className="upgrade-sr-only">{text('next', language)}</p>
+            )}
+          </section>
+          <FreshUpgradeFlow
+            read={wizardRead}
+            saveRouting={wizardSaveRouting}
+            verify={wizardVerify}
+            artifact={wizardArtifact}
+            language={language}
+            onRecordedOperation={setRecorded}
+          />
+        </div>
       </main>
       <footer className="journey-copyright">{text('footer', language)}</footer>
     </div>

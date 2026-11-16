@@ -1455,4 +1455,41 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     await act(async () => renderer.unmount());
   });
+
+  it('initializes dark theme from prefers-color-scheme without accessing storage', async () => {
+    const setAttribute = vi.fn();
+    const toggle = vi.fn();
+    vi.stubGlobal('document', {
+      documentElement: {
+        setAttribute,
+        classList: { toggle },
+      },
+    });
+    vi.stubGlobal('window', {
+      location: new URL('https://manager.example' + BOOTSTRAP_UI),
+      history: { replaceState: vi.fn() },
+      matchMedia: vi.fn((query: string) => ({
+        matches: query === '(prefers-color-scheme: dark)',
+      })),
+    });
+    const forbiddenStorage = {
+      getItem: vi.fn(() => {
+        throw new Error('unexpected storage read');
+      }),
+      setItem: vi.fn(() => {
+        throw new Error('unexpected storage write');
+      }),
+    };
+    vi.stubGlobal('localStorage', forbiddenStorage);
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    expect(setAttribute).toHaveBeenCalledWith('data-theme', 'dark');
+    expect(toggle).toHaveBeenCalledWith('light', false);
+    await act(async () => renderer.unmount());
+  });
 });

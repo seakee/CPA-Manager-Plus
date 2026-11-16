@@ -3,7 +3,11 @@ import { fullWebLanguage } from './fullweb';
 const en = {
   loginKeyPlaceholder: 'Enter your saved CPAMP administrator key',
   draftHelp:
-    'Configure your administrator key, Console address and CPA together. Nothing is saved until you confirm installation.',
+    'Set and save your administrator key. Random access prefixes are pre-generated; nothing is saved until you confirm installation.',
+  draftHelpAdopt:
+    'Set your administrator key and access prefixes. Continuing to the migration check saves the administrator key and prefix draft to this operation.',
+  draftHelpExternal:
+    'Set your CPAMP administrator key and enter the external CPA address and management key. The management prefix is pre-generated; nothing is saved until confirmation.',
   setupError:
     'Setup could not finish. Check the saved operation before continuing; your existing installation will not be recreated.',
   invalidSetup: 'Check the administrator key and Console path before continuing.',
@@ -17,7 +21,7 @@ const en = {
   advanced: 'Advanced options',
   supported: 'Linux/amd64 Embedded',
   installNotStarted: 'CPA installation has not started',
-  configureHeading: 'Set up your management entry',
+  configureHeading: 'Complete required setup',
   configurationSaved: 'Your administrator key and Console address are saved.',
   keyHidden: 'Saved, content hidden',
   creates: 'Will create',
@@ -112,7 +116,7 @@ const en = {
     'Open the secure installation link provided by your deployment host to begin or resume setup.',
   managementPrefix: 'Management entry prefix',
   managementPrefixHelp:
-    'Defaults to a random 16-character URL-safe prefix saved on the server. Serves the CPAMP Console and management API.',
+    'Defaults to a pre-generated 16-character URL-safe random prefix for the CPAMP Console and management API.',
   inferencePrefix: 'Inference entry prefix',
   inferencePrefixHelp:
     'Independent prefix for OpenAI, Responses, Anthropic, and Gemini model requests. Must not overlap with the management prefix unless shared mode is enabled.',
@@ -170,10 +174,34 @@ const en = {
     'The inference entry prefix is already committed for this installation.',
   inferenceCompletionLoadError:
     'Could not read the inference prefix completion state. Retry or verify Manager health.',
+  advancedOptions: 'Advanced options',
+  entryModeLabel: 'Entry mode',
+  pluginsOffSummary: 'Plugins off',
+  pluginsOnSummary: 'Plugins enabled',
+  keyReadyHint: 'Valid key — copy and store it securely.',
+  keyNeedsPrefix: 'Still needed: ',
+  keyRuleLength: '24–256 bytes',
+  keyRuleNoSpaces: 'No spaces',
+  keyRuleClasses: '≥ 3 character types',
+  keyRuleDistinct: '≥ 12 distinct chars',
+  prefixesLockedNote: 'Access prefixes are already locked for this operation and cannot be edited.',
+  urlCopied: 'Endpoint URL copied.',
+  externalUrlPlaceholder: 'http://cpa-host:8317',
+  externalKeyPlaceholder: 'Enter external CPA management key',
+  externalSectionTitle: 'Target external CPA',
+  externalSectionBadge: 'Lifecycle kept independent',
+  externalKeyReadySummary: 'Provided · encrypted on server',
+  externalDirectAddressBadge: 'Direct inference base',
+  externalCompleteNextHint:
+    'Existing client API keys on your external CPA continue to work directly. After signing in to the Console, open API Keys if you want to enable usage statistics collection.',
+  externalUrlPendingHint: 'Shown after entering external CPA URL',
 };
 const zh: typeof en = {
   loginKeyPlaceholder: '请输入已保存的 CPAMP 管理员密钥',
-  draftHelp: '一起设置管理员密钥、管理入口和 CPA。确认开始安装前不会保存这些配置。',
+  draftHelp: '设置并妥善保存管理员密钥；访问入口已预生成安全随机前缀，确认开始安装前不会保存。',
+  draftHelpAdopt: '设置管理员密钥与访问前缀。点击下一步进入迁移核对时，将先保存管理员密钥与前缀草稿。',
+  draftHelpExternal:
+    '设置 CPAMP 管理员密钥，并填写要连接的外部 CPA 地址与管理密钥；管理入口已预生成随机前缀，确认安装前不会保存。',
   setupError: '初始化尚未完成。请先检查原操作的已保存进度，再继续；不会重新创建已有安装。',
   invalidSetup: '请检查管理员密钥和管理入口路径后再继续。',
   waitingRuntime: 'CPA 正在启动。请检查原操作，待服务就绪后继续。',
@@ -186,7 +214,7 @@ const zh: typeof en = {
   advanced: '高级选项',
   supported: 'Linux/amd64 Embedded',
   installNotStarted: 'CPA 安装尚未开始',
-  configureHeading: '设置管理入口',
+  configureHeading: '完成必要配置',
   configurationSaved: '管理员密钥和控制台地址已保存。',
   keyHidden: '已设置，内容隐藏',
   creates: '将创建',
@@ -273,7 +301,7 @@ const zh: typeof en = {
   claimRequiredHelp: '请从部署主机提供的安全安装入口打开链接，开始或恢复设置。',
   managementPrefix: '管理入口前缀',
   managementPrefixHelp:
-    '默认由服务端生成并保存 16 位 URL 安全随机前缀，用于访问 CPAMP 控制台和管理 API。',
+    '默认由服务端预生成 16 位 URL 安全随机前缀，用于访问 CPAMP 控制台和管理 API。',
   inferencePrefix: '推理入口前缀',
   inferencePrefixHelp:
     '用于 OpenAI、Responses、Anthropic 与 Gemini 模型请求的独立入口前缀；未显式开启共用模式时不可与管理前缀重叠或嵌套。',
@@ -285,7 +313,7 @@ const zh: typeof en = {
   independentPrefixBadge: '独立双前缀',
   externalInferenceLabel: '外部 CPA 推理地址',
   externalInferenceNote:
-    'External 模式仅配置 CPAMP 管理入口前缀；模型推理仍直接使用所填写的外部 CPA 实际地址。',
+    '连接外部 CPA 模式仅配置 CPAMP 管理入口前缀；模型推理仍直接使用所填写的外部 CPA 实际地址。',
   finalUrlsPreview: '最终访问地址预览',
   previewConsoleUrl: '管理控制台地址',
   previewManagementApiUrl: '管理 API 基路径',
@@ -296,7 +324,7 @@ const zh: typeof en = {
   prefixDraftFailed: '前缀草稿保存失败，请重试后再离开当前页面。',
   prefixErrorInvalid: '请输入以 / 开头的规范路径，不能包含末尾斜杠、空白、百分号编码或点段。',
   prefixErrorInferenceRequired: 'Managed 与 Adopt 安装方式必须配置推理入口前缀。',
-  prefixErrorExternalInferenceForbidden: 'External 模式不允许配置本地推理前缀或开启共用模式。',
+  prefixErrorExternalInferenceForbidden: '连接外部 CPA 模式不允许配置本地推理前缀或开启共用模式。',
   prefixErrorSharedMismatch: '开启共用模式时，管理前缀与推理前缀必须完全一致。',
   prefixErrorSharedConfirmRequired:
     '管理前缀与推理前缀相同。如需使用相同路径，请显式勾选共用模式，或改用不同前缀。',
@@ -321,11 +349,35 @@ const zh: typeof en = {
     '管理入口与推理入口均已验证就绪。请确认下方各协议接入端点，然后进入控制台。',
   inferenceCompletionAlreadyCommitted: '该安装已完成推理入口前缀配置，无需重复设置。',
   inferenceCompletionLoadError: '无法读取推理前缀补齐状态，请重试或检查 Manager 服务状态。',
+  advancedOptions: '高级选项',
+  entryModeLabel: '入口模式',
+  pluginsOffSummary: '插件关闭',
+  pluginsOnSummary: '插件已启用',
+  keyReadyHint: '密钥符合安全要求，请复制并妥善保存。',
+  keyNeedsPrefix: '还需满足：',
+  keyRuleLength: '24～256 字节',
+  keyRuleNoSpaces: '无空白字符',
+  keyRuleClasses: '至少 3 类字符',
+  keyRuleDistinct: '至少 12 个不同字符',
+  prefixesLockedNote: '当前操作的访问前缀已锁定，不可再次修改。',
+  urlCopied: '访问地址已复制。',
+  externalUrlPlaceholder: 'http://cpa-host:8317',
+  externalKeyPlaceholder: '输入外部 CPA 管理密钥',
+  externalSectionTitle: '要连接的外部 CPA',
+  externalSectionBadge: '保持独立运维',
+  externalKeyReadySummary: '已填写 · 服务端加密保存',
+  externalDirectAddressBadge: '同时作为推理直连基址',
+  externalCompleteNextHint:
+    '外部 CPA 原有的客户端 API 密钥继续直接生效；登录控制台后，如需查看请求与用量统计，可在「API 密钥」页面按需开启采集。',
+  externalUrlPendingHint: '填写外部 CPA 地址后显示',
 };
 const tw: typeof en = {
   ...zh,
   loginKeyPlaceholder: '請輸入已儲存的 CPAMP 管理員金鑰',
-  draftHelp: '一起設定管理員金鑰、管理入口和 CPA。確認開始安裝前不會儲存這些設定。',
+  draftHelp: '設定並妥善儲存管理員金鑰；存取入口已預先產生安全隨機前綴，確認開始安裝前不會儲存。',
+  draftHelpAdopt: '設定管理員金鑰與存取前綴。點選下一步進入遷移核對時，將先儲存管理員金鑰與前綴草稿。',
+  draftHelpExternal:
+    '設定 CPAMP 管理員金鑰，並填寫要連接的外部 CPA 位址與管理金鑰；管理入口已預先產生隨機前綴，確認安裝前不會儲存。',
   setupError: '初始化尚未完成。請先檢查原操作的已儲存進度，再繼續；不會重新建立已有安裝。',
   invalidSetup: '請檢查管理員金鑰和管理入口路徑後再繼續。',
   waitingRuntime: 'CPA 正在啟動。請檢查原操作，待服務就緒後繼續。',
@@ -337,7 +389,7 @@ const tw: typeof en = {
   recommended: '推薦',
   advanced: '進階選項',
   installNotStarted: 'CPA 安裝尚未開始',
-  configureHeading: '設定管理入口',
+  configureHeading: '完成必要設定',
   configurationSaved: '管理員金鑰和控制台位址已儲存。',
   keyHidden: '已設定，內容隱藏',
   creates: '將建立',
@@ -424,7 +476,7 @@ const tw: typeof en = {
   claimRequiredHelp: '請從部署主機提供的安全安裝入口開啟連結，開始或恢復設定。',
   managementPrefix: '管理入口前綴',
   managementPrefixHelp:
-    '預設由伺服器產生並儲存 16 位元 URL 安全隨機前綴，用於存取 CPAMP 控制台與管理 API。',
+    '預設由伺服器預先產生 16 位元 URL 安全隨機前綴，用於存取 CPAMP 控制台與管理 API。',
   inferencePrefix: '推論入口前綴',
   inferencePrefixHelp:
     '用於 OpenAI、Responses、Anthropic 與 Gemini 模型請求的獨立入口前綴；未明確啟用共用模式時不可與管理前綴重疊或巢狀包含。',
@@ -436,7 +488,7 @@ const tw: typeof en = {
   independentPrefixBadge: '獨立雙前綴',
   externalInferenceLabel: '外部 CPA 推論位址',
   externalInferenceNote:
-    'External 模式僅設定 CPAMP 管理入口前綴；模型推論仍直接使用所填寫的外部 CPA 實際位址。',
+    '連接外部 CPA 模式僅設定 CPAMP 管理入口前綴；模型推論仍直接使用所填寫的外部 CPA 實際位址。',
   finalUrlsPreview: '最終存取位址預覽',
   previewConsoleUrl: '管理控制台位址',
   previewManagementApiUrl: '管理 API 基路徑',
@@ -447,7 +499,7 @@ const tw: typeof en = {
   prefixDraftFailed: '前綴草稿儲存失敗，請重試後再離開目前頁面。',
   prefixErrorInvalid: '請輸入以 / 開頭的規範路徑，不能包含結尾斜線、空白、百分比編碼或點區段。',
   prefixErrorInferenceRequired: 'Managed 與 Adopt 安裝方式必須設定推論入口前綴。',
-  prefixErrorExternalInferenceForbidden: 'External 模式不允許設定本機推論前綴或啟用共用模式。',
+  prefixErrorExternalInferenceForbidden: '連接外部 CPA 模式不允許設定本機推論前綴或啟用共用模式。',
   prefixErrorSharedMismatch: '啟用共用模式時，管理前綴與推論前綴必須完全一致。',
   prefixErrorSharedConfirmRequired:
     '管理前綴與推論前綴相同。如需使用相同路徑，請明確勾選共用模式，或改用不同前綴。',
@@ -472,11 +524,36 @@ const tw: typeof en = {
     '管理入口與推論入口均已驗證就緒。請確認下方各協定存取端點，然後進入控制台。',
   inferenceCompletionAlreadyCommitted: '此安裝已完成推論入口前綴設定，無需重複設定。',
   inferenceCompletionLoadError: '無法讀取推論前綴補齊狀態，請重試或檢查 Manager 服務狀態。',
+  advancedOptions: '進階選項',
+  entryModeLabel: '入口模式',
+  pluginsOffSummary: '外掛關閉',
+  pluginsOnSummary: '外掛已啟用',
+  keyReadyHint: '金鑰符合安全要求，請複製並妥善儲存。',
+  keyNeedsPrefix: '還需滿足：',
+  keyRuleLength: '24～256 位元組',
+  keyRuleNoSpaces: '無空白字元',
+  keyRuleClasses: '至少 3 類字元',
+  keyRuleDistinct: '至少 12 個不同字元',
+  prefixesLockedNote: '目前操作的存取前綴已鎖定，不可再次修改。',
+  urlCopied: '存取位址已複製。',
+  externalUrlPlaceholder: 'http://cpa-host:8317',
+  externalKeyPlaceholder: '輸入外部 CPA 管理金鑰',
+  externalSectionTitle: '要連接的外部 CPA',
+  externalSectionBadge: '保持獨立維運',
+  externalKeyReadySummary: '已填寫 · 伺服器加密儲存',
+  externalDirectAddressBadge: '同時作為推論直連基址',
+  externalCompleteNextHint:
+    '外部 CPA 原有的用戶端 API 金鑰繼續直接生效；登入控制台後，如需檢視請求與用量統計，可在「API 金鑰」頁面按需開啟擷取。',
+  externalUrlPendingHint: '填寫外部 CPA 位址後顯示',
 };
 const ru: typeof en = {
   loginKeyPlaceholder: 'Введите сохранённый ключ администратора CPAMP',
   draftHelp:
-    'Настройте ключ администратора, адрес консоли и CPA вместе. До подтверждения начала установки ничего не сохраняется.',
+    'Задайте и сохраните ключ администратора; префиксы доступа уже сгенерированы, до подтверждения установки ничего не сохраняется.',
+  draftHelpAdopt:
+    'Задайте ключ администратора и префиксы доступа. При переходе к проверке миграции ключ администратора и черновик префиксов будут сохранены.',
+  draftHelpExternal:
+    'Задайте ключ администратора CPAMP и укажите адрес и ключ управления внешнего CPA; префикс управления уже сгенерирован и не сохраняется до подтверждения.',
   setupError:
     'Установка не завершена. Перед продолжением проверьте сохранённую операцию; существующая установка не будет создана заново.',
   invalidSetup: 'Проверьте ключ администратора и путь к консоли перед продолжением.',
@@ -490,7 +567,7 @@ const ru: typeof en = {
   advanced: 'Дополнительные параметры',
   supported: 'Linux/amd64 Embedded',
   installNotStarted: 'Установка CPA не начата',
-  configureHeading: 'Настройте точку управления',
+  configureHeading: 'Заполните обязательные параметры',
   configurationSaved: 'Ключ администратора и адрес консоли сохранены.',
   keyHidden: 'Сохранено, содержимое скрыто',
   creates: 'Будет создано',
@@ -585,7 +662,7 @@ const ru: typeof en = {
     'Откройте защищённую ссылку установки, выданную хостом развёртывания, чтобы начать или возобновить настройку.',
   managementPrefix: 'Префикс входа управления',
   managementPrefixHelp:
-    'По умолчанию сервер создаёт и сохраняет случайный 16-символьный URL-безопасный префикс для консоли CPAMP и API управления.',
+    'По умолчанию сервер заранее генерирует случайный 16-символьный URL-безопасный префикс для консоли CPAMP и API управления.',
   inferencePrefix: 'Префикс входа инференса',
   inferencePrefixHelp:
     'Независимый префикс для запросов OpenAI, Responses, Anthropic и Gemini. Не должен пересекаться с префиксом управления без явного общего режима.',
@@ -642,6 +719,28 @@ const ru: typeof en = {
     'Префикс входа инференса для этой установки уже настроен.',
   inferenceCompletionLoadError:
     'Не удалось прочитать состояние настройки префикса инференса. Повторите попытку или проверьте состояние Manager.',
+  advancedOptions: 'Дополнительные параметры',
+  entryModeLabel: 'Режим входа',
+  pluginsOffSummary: 'Плагины выкл.',
+  pluginsOnSummary: 'Плагины вкл.',
+  keyReadyHint: 'Ключ соответствует требованиям — скопируйте и сохраните его.',
+  keyNeedsPrefix: 'Осталось выполнить: ',
+  keyRuleLength: '24–256 байт',
+  keyRuleNoSpaces: 'Без пробелов',
+  keyRuleClasses: '≥ 3 типов символов',
+  keyRuleDistinct: '≥ 12 разных символов',
+  prefixesLockedNote:
+    'Префиксы доступа для этой операции уже зафиксированы и недоступны для изменения.',
+  urlCopied: 'Адрес скопирован.',
+  externalUrlPlaceholder: 'http://cpa-host:8317',
+  externalKeyPlaceholder: 'Введите ключ управления внешнего CPA',
+  externalSectionTitle: 'Подключаемый внешний CPA',
+  externalSectionBadge: 'Независимое управление',
+  externalKeyReadySummary: 'Указан · шифруется на сервере',
+  externalDirectAddressBadge: 'Прямой базовый адрес инференса',
+  externalCompleteNextHint:
+    'Существующие клиентские API-ключи внешнего CPA продолжают работать напрямую. После входа в консоль при необходимости включите сбор статистики на странице API-ключей.',
+  externalUrlPendingHint: 'Появится после ввода адреса CPA',
 };
 export function bootstrapJourneyText(
   key: keyof typeof en,

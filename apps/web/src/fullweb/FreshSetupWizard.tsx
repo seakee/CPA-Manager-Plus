@@ -221,6 +221,9 @@ export function FreshSetupWizard({
   const [accessSessionExpired, setAccessSessionExpired] = useState(false);
   const [baseURL, setBaseURL] = useState('');
   const [cpaKey, setCPAKey] = useState('');
+  const [externalKeyVisible, setExternalKeyVisible] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(() => Boolean(initialOperation.adminInitialized));
+  const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [savedKey, setSavedKey] = useState(false);
   // The plugin opt-in is the operator's explicit decision, so it starts off and
   // is submitted with the operation that owns it. The Supervisor only ever reads
@@ -248,12 +251,22 @@ export function FreshSetupWizard({
   const alive = useRef(true);
   const pending = useRef<Pending | null>(null);
   const commitID = useRef(`commit_${attemptID()}`);
+  const copyTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      clearTimeout(copyTimer.current);
     };
   }, []);
+  function flashCopied(targetId: string, noteKey: 'copied' | 'urlCopied') {
+    clearTimeout(copyTimer.current);
+    setCopiedTarget(targetId);
+    setNote({ from: 'journey', key: noteKey });
+    copyTimer.current = setTimeout(() => {
+      if (alive.current) setCopiedTarget(null);
+    }, 2000) as unknown as number;
+  }
   const accessClient = useMemo<PublicApiClient>(
     () => ({
       get: async <T = unknown>(resource: string, credential?: FullWebCredential) => {
@@ -276,6 +289,51 @@ export function FreshSetupWizard({
   const effectiveInferencePath =
     strategy === 'connect_external' ? '' : sharedEntry ? path : inferencePath;
   const prefixesLocked = !!operation.routing.target || operation.routing.committed;
+  const keyValidation = validateFreshAdminKey(key);
+  const keyRules = [
+    {
+      key: 'keyRuleLength' as const,
+      met: key.length > 0 && keyValidation.byteLength >= 24 && keyValidation.byteLength <= 256,
+    },
+    {
+      key: 'keyRuleNoSpaces' as const,
+      met: key.length > 0 && !keyValidation.hasForbiddenChar,
+    },
+    {
+      key: 'keyRuleClasses' as const,
+      met: key.length > 0 && keyValidation.classCount >= 3,
+    },
+    {
+      key: 'keyRuleDistinct' as const,
+      met: key.length > 0 && keyValidation.distinctCount >= 12,
+    },
+  ];
+  const unmetKeyRules = keyRules.filter((rule) => !rule.met).map((rule) => j(rule.key));
+  const keyInvalidVisible =
+    !operation.adminInitialized &&
+    !keyValidation.valid &&
+    (key.length > 0 || (error?.from === 'journey' && error.key === 'invalidSetup'));
+  const livePrefixValidation = validatePrefixPair({
+    controlBasePath: path,
+    inferenceBasePath: effectiveInferencePath,
+    sharedEntry: strategy === 'connect_external' ? false : sharedEntry,
+    requireInference: strategy !== 'connect_external',
+  });
+  const livePrefixErrorKey = !livePrefixValidation.valid
+    ? prefixCodeToJourneyKey(
+        livePrefixValidation.controlError ||
+          livePrefixValidation.inferenceError ||
+          livePrefixValidation.pairError
+      )
+    : null;
+  const advancedSummary =
+    strategy === 'connect_external'
+      ? `${j('managementPrefix')} · ${path}`
+      : strategy === 'new_managed'
+        ? `${j(sharedEntry ? 'sharedPrefixBadge' : 'independentPrefixBadge')} · ${j(
+            plugins ? 'pluginsOnSummary' : 'pluginsOffSummary'
+          )}`
+        : j(sharedEntry ? 'sharedPrefixBadge' : 'independentPrefixBadge');
 
   function accept(next: FreshOperation) {
     if (!alive.current) throw new Error('Installation closed');
@@ -719,6 +777,7 @@ export function FreshSetupWizard({
             onOperation={accept}
             onComplete={(completed) => setAdoptSummary(completed)}
             onStage={(stage) => setAdoptStep(stage === 'migration' ? 3 : 2)}
+            onExit={!operation.strategy?.strategy ? () => setStep(1) : undefined}
           />
         </div>
       </section>
@@ -730,34 +789,60 @@ export function FreshSetupWizard({
     strategy === 'connect_external' ? undefined : effectiveInferencePath,
     strategy === 'connect_external' ? baseURL : undefined
   );
-  const summary = [
-    [
-      s('choiceTitle'),
-      strategy === 'new_managed'
-        ? s('newManaged')
-        : strategy === 'adopt_existing'
-          ? s('adopt')
-          : s('external'),
-    ],
-    [j('key'), operation.adminInitialized ? j('keepKey') : j('keyHidden')],
-    [j('managementPrefix'), path],
+  const summary: Array<{
+    label: string;
+    value: string;
+    mono?: boolean;
+    badge?: string;
+    testID?: string;
+  }> = [
+    {
+      label: s('choiceTitle'),
+      value:
+        strategy === 'new_managed'
+          ? s('newManaged')
+          : strategy === 'adopt_existing'
+            ? s('adopt')
+            : s('external'),
+    },
+    {
+      label: j('key'),
+      value: operation.adminInitialized ? j('keepKey') : j('keyHidden'),
+    },
+    { label: j('managementPrefix'), value: path, mono: true },
     ...(strategy !== 'connect_external'
       ? [
-          [j('inferencePrefix'), effectiveInferencePath],
-          [
-            j('sharedPrefixBadge'),
-            sharedEntry ? j('sharedPrefixBadge') : j('independentPrefixBadge'),
-          ],
+          { label: j('inferencePrefix'), value: effectiveInferencePath, mono: true },
+          {
+            label: j('entryModeLabel'),
+            value: sharedEntry ? j('sharedPrefixBadge') : j('independentPrefixBadge'),
+          },
         ]
       : []),
     ...(strategy === 'connect_external' && baseURL
       ? [
-          [t('externalBaseURL'), baseURL],
-          [j('externalInferenceLabel'), baseURL],
+          {
+            label: t('externalBaseURL'),
+            value: baseURL,
+            mono: true,
+            badge: j('externalDirectAddressBadge'),
+            testID: 'review-external-url',
+          },
+          {
+            label: t('externalManagementKey'),
+            value: j('externalKeyReadySummary'),
+            testID: 'review-external-key',
+          },
         ]
       : []),
     ...(strategy === 'new_managed'
-      ? [[j('plugins'), plugins ? j('enabled') : j('disabled'), 'review-plugins']]
+      ? [
+          {
+            label: j('plugins'),
+            value: plugins ? j('enabled') : j('disabled'),
+            testID: 'review-plugins',
+          },
+        ]
       : []),
   ];
   // The engine step is the confirmation step's content whenever the image ships
@@ -817,7 +902,13 @@ export function FreshSetupWizard({
                   : step === 0
                     ? j('chooseHelp')
                     : step === 1
-                      ? j('draftHelp')
+                    ? j(
+                        strategy === 'adopt_existing'
+                          ? 'draftHelpAdopt'
+                          : strategy === 'connect_external'
+                            ? 'draftHelpExternal'
+                            : 'draftHelp'
+                      )
                       : step === 2
                         ? engineGate
                           ? s('engineGateHelp')
@@ -831,11 +922,18 @@ export function FreshSetupWizard({
               {wizardMessageText(error)}
             </p>
           )}
-          {note && (
-            <p role="status" className="alert alert-info">
-              {wizardMessageText(note)}
-            </p>
-          )}
+          {note &&
+            (step === 1 &&
+            note.from === 'journey' &&
+            (note.key === 'copied' || note.key === 'urlCopied') ? (
+              <span role="status" className="sr-only">
+                {wizardMessageText(note)}
+              </span>
+            ) : (
+              <p role="status" className="alert alert-info">
+                {wizardMessageText(note)}
+              </p>
+            ))}
           {unknown && (
             <p role="status" className="alert alert-warn">
               {s('unknownHelp')}
@@ -910,31 +1008,18 @@ export function FreshSetupWizard({
             <div className="journey-configuration">
               {operation.adminInitialized ? (
                 <p className="journey-key-strip">
-                  {j('key')} · {j('keepKey')}
+                  <FullWebIcon name="check" size={18} />
+                  <span>
+                    <strong>{j('key')}</strong> · {j('keepKey')}
+                  </span>
                 </p>
               ) : (
                 <div className="journey-field">
-                  <label className="form-label" htmlFor="fresh-admin-key">
-                    {j('key')}
-                  </label>
-                  <input
-                    id="fresh-admin-key"
-                    data-testid="admin-key-input"
-                    className="form-input"
-                    type={visible ? 'text' : 'password'}
-                    value={key}
-                    autoComplete="off"
-                    spellCheck={false}
-                    onChange={(e) => {
-                      setKey(e.target.value);
-                      setSavedKey(false);
-                    }}
-                  />
-                  <p className="journey-help">{j('keyRules')}</p>
-                  <div className="header-actions">
+                  <div className="form-label">
+                    <label htmlFor="fresh-admin-key">{j('key')}</label>
                     <button
                       type="button"
-                      className="btn btn-secondary"
+                      className="btn btn-secondary btn-xs"
                       disabled={busy}
                       data-testid="generate-key-btn"
                       onClick={() =>
@@ -942,151 +1027,262 @@ export function FreshSetupWizard({
                           setKey(await transport.generateAdminKey());
                           setVisible(true);
                           setSavedKey(false);
+                          setError(null);
                         })
                       }
                     >
                       {j('generate')}
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => setVisible(!visible)}
-                    >
-                      {j(visible ? 'hide' : 'show')}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={!key}
-                      onClick={() =>
-                        void task(async () => {
-                          try {
-                            await navigator.clipboard.writeText(key);
-                            setNote({ from: 'journey', key: 'copied' });
-                          } catch {
-                            setVisible(true);
-                            setError({ from: 'journey', key: 'copyFailed' });
-                          }
-                        })
-                      }
-                    >
-                      {j('copy')}
-                    </button>
                   </div>
-                </div>
-              )}
-              {strategy === 'new_managed' && (
-                <div className="journey-field">
-                  <label className="journey-checkline" htmlFor="setup-plugin-optin">
+                  <div className={`input-wrap ${keyInvalidVisible ? 'input-wrap-invalid' : ''}`}>
                     <input
-                      id="setup-plugin-optin"
-                      data-testid="plugin-optin-checkbox"
-                      type="checkbox"
-                      checked={plugins}
-                      disabled={!!operation.strategy?.strategy}
-                      onChange={(e) => setPlugins(e.target.checked)}
+                      id="fresh-admin-key"
+                      data-testid="admin-key-input"
+                      className={`form-input ${visible ? 'form-input-mono' : ''}`}
+                      type={visible ? 'text' : 'password'}
+                      value={key}
+                      placeholder={j('keyPlaceholder')}
+                      autoComplete="off"
+                      spellCheck={false}
+                      aria-describedby="fresh-admin-key-rules"
+                      aria-invalid={keyInvalidVisible || undefined}
+                      onChange={(e) => {
+                        setKey(e.target.value);
+                        setSavedKey(false);
+                        setCopiedTarget(null);
+                        setError(null);
+                      }}
                     />
-                    <span>{j('pluginsOptIn')}</span>
-                  </label>
-                  <p className="journey-help">{j('pluginsOptInHelp')}</p>
+                    <div className="input-actions input-actions-divided">
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs"
+                        aria-pressed={visible}
+                        onClick={() => setVisible(!visible)}
+                      >
+                        <FullWebIcon name={visible ? 'eyeOff' : 'eye'} size={14} />
+                        {j(visible ? 'hide' : 'show')}
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn-ghost btn-xs ${
+                          copiedTarget === 'admin-key' ? 'is-copied' : ''
+                        }`}
+                        disabled={!key}
+                        onClick={() =>
+                          void task(async () => {
+                            try {
+                              await navigator.clipboard.writeText(key);
+                              flashCopied('admin-key', 'copied');
+                            } catch {
+                              setVisible(true);
+                              setError({ from: 'journey', key: 'copyFailed' });
+                            }
+                          })
+                        }
+                      >
+                        <FullWebIcon
+                          name={copiedTarget === 'admin-key' ? 'check' : 'copy'}
+                          size={14}
+                        />
+                        {j('copy')}
+                      </button>
+                    </div>
+                  </div>
+                  {keyValidation.valid ? (
+                    <p id="fresh-admin-key-rules" className="journey-help journey-help-ok">
+                      <FullWebIcon name="check" size={13} />
+                      <span>{j('keyReadyHint')}</span>
+                    </p>
+                  ) : keyInvalidVisible ? (
+                    <p id="fresh-admin-key-rules" className="journey-help journey-help-warn">
+                      {j('keyNeedsPrefix')}
+                      {unmetKeyRules.join(' · ')}
+                    </p>
+                  ) : (
+                    <p id="fresh-admin-key-rules" className="journey-help">
+                      {j('keyRules')}
+                    </p>
+                  )}
                 </div>
               )}
-              <div className="journey-field">
-                <label className="form-label" htmlFor="setup-control-path">
-                  {j('managementPrefix')}
-                </label>
-                <div className="input-wrap">
-                  <input
-                    id="setup-control-path"
-                    data-testid="route-target-input"
-                    className="form-input"
-                    value={path}
-                    disabled={prefixesLocked}
-                    onChange={(e) => {
-                      setPath(e.target.value);
-                      setError(null);
-                      setNote((prev) =>
-                        prev?.from === 'journey' && prev.key === 'prefixDraftSaved' ? null : prev
-                      );
-                    }}
-                  />
-                  <div className="input-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      data-testid="randomize-control-prefix"
-                      disabled={busy || prefixesLocked}
-                      onClick={() => {
-                        const avoid =
-                          strategy !== 'connect_external' && !sharedEntry
-                            ? [path, inferencePath]
-                            : [path];
-                        const nextControl = generateRandomAccessPrefix(avoid);
-                        setPath(nextControl);
-                        setError(null);
-                        setNote((prev) =>
-                          prev?.from === 'journey' && prev.key === 'prefixDraftSaved' ? null : prev
-                        );
-                        if (operation.adminInitialized) {
-                          void persistPrefixDraft(
-                            nextControl,
-                            sharedEntry ? nextControl : inferencePath,
-                            sharedEntry
-                          );
-                        }
-                      }}
-                    >
-                      {j('randomizePrefix')}
-                    </button>
+
+              {strategy === 'connect_external' && (
+                <div
+                  className="journey-external-fields journey-external-card"
+                  data-testid="external-connection-card"
+                >
+                  <div className="journey-external-head">
+                    <h3 className="journey-external-title">
+                      <FullWebIcon name="link" size={16} />
+                      <span>{j('externalSectionTitle')}</span>
+                    </h3>
+                    <span className="badge badge-neutral">{j('externalSectionBadge')}</span>
                   </div>
-                </div>
-                <p className="journey-help">{j('managementPrefixHelp')}</p>
-              </div>
-              {strategy !== 'connect_external' ? (
-                <>
                   <div className="journey-field">
-                    <label className="journey-checkline" htmlFor="setup-shared-prefix">
-                      <input
-                        id="setup-shared-prefix"
-                        data-testid="shared-prefix-checkbox"
-                        type="checkbox"
-                        checked={sharedEntry}
-                        disabled={busy || prefixesLocked}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setSharedEntry(checked);
-                          if (
-                            !checked &&
-                            (!validAccessPrefix(inferencePath) ||
-                              (path && isSameOrNestedPrefix(inferencePath, path)))
-                          ) {
-                            setInferencePath(generateRandomAccessPrefix(path ? [path] : []));
-                          }
-                          setError(null);
-                          setNote((prev) =>
-                            prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
-                              ? null
-                              : prev
-                          );
-                        }}
-                      />
-                      <span>{j('sharedPrefixToggle')}</span>
+                    <label className="form-label" htmlFor="setup-cpa-url">
+                      {t('externalBaseURL')}
                     </label>
-                    <p className="journey-help">{j('sharedPrefixHelp')}</p>
+                    <input
+                      id="setup-cpa-url"
+                      data-testid="external-base-url"
+                      className="form-input form-input-mono"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder={j('externalUrlPlaceholder')}
+                      value={baseURL}
+                      aria-describedby="setup-external-help"
+                      onChange={(e) => {
+                        setBaseURL(e.target.value);
+                        setError(null);
+                      }}
+                    />
                   </div>
                   <div className="journey-field">
-                    <label className="form-label" htmlFor="setup-inference-path">
-                      {j('inferencePrefix')}
+                    <label className="form-label" htmlFor="setup-cpa-key">
+                      {t('externalManagementKey')}
                     </label>
                     <div className="input-wrap">
                       <input
-                        id="setup-inference-path"
-                        data-testid="inference-target-input"
-                        className="form-input"
-                        value={sharedEntry ? path : inferencePath}
-                        disabled={prefixesLocked || sharedEntry}
+                        id="setup-cpa-key"
+                        data-testid="external-management-key"
+                        className={`form-input ${externalKeyVisible ? 'form-input-mono' : ''}`}
+                        type={externalKeyVisible ? 'text' : 'password'}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={j('externalKeyPlaceholder')}
+                        value={cpaKey}
+                        aria-describedby="setup-external-help"
                         onChange={(e) => {
-                          setInferencePath(e.target.value);
+                          setCPAKey(e.target.value);
+                          setError(null);
+                        }}
+                      />
+                      <div className="input-actions input-actions-divided">
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs"
+                          aria-pressed={externalKeyVisible}
+                          onClick={() => setExternalKeyVisible((prev) => !prev)}
+                        >
+                          <FullWebIcon name={externalKeyVisible ? 'eyeOff' : 'eye'} size={14} />
+                          {j(externalKeyVisible ? 'hide' : 'show')}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <p id="setup-external-help" className="journey-help">
+                    {t('externalHelp')}
+                  </p>
+                </div>
+              )}
+
+              <div className="info-card prefix-preview-card" data-testid="prefix-url-preview">
+                {[
+                  {
+                    id: 'console',
+                    label: j('previewConsoleUrl'),
+                    urlValue: previewUrls.consoleUrl,
+                    primary: true,
+                  },
+                  strategy !== 'connect_external'
+                    ? {
+                        id: 'inference',
+                        label: j('previewInferenceUrl'),
+                        urlValue: previewUrls.inferenceUrl,
+                        primary: false,
+                      }
+                    : {
+                        id: 'external',
+                        label: j('previewExternalInferenceUrl'),
+                        urlValue: previewUrls.externalUrl,
+                        primary: false,
+                      },
+                ].map(({ id, label, urlValue, primary }) => (
+                  <div key={id} className={`info-row ${primary ? 'info-row-primary' : ''}`}>
+                    <span className="info-key">{label}</span>
+                    <span className="info-val-group">
+                      {urlValue === '—' ? (
+                        <span className="info-val-placeholder">{j('externalUrlPendingHint')}</span>
+                      ) : (
+                        <code className="info-val">{urlValue}</code>
+                      )}
+                      {urlValue !== '—' && (
+                        <button
+                          type="button"
+                          className={`btn btn-ghost btn-xs btn-icon-only ${
+                            copiedTarget === id ? 'is-copied' : ''
+                          }`}
+                          aria-label={`${j('copy')}: ${label}`}
+                          title={j('copy')}
+                          onClick={() =>
+                            void task(async () => {
+                              try {
+                                await navigator.clipboard.writeText(urlValue);
+                                flashCopied(id, 'urlCopied');
+                              } catch {
+                                setError({ from: 'journey', key: 'copyFailed' });
+                              }
+                            })
+                          }
+                        >
+                          <FullWebIcon name={copiedTarget === id ? 'check' : 'copy'} size={14} />
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <details
+                className="journey-advanced"
+                open={advancedOpen || Boolean(livePrefixErrorKey)}
+                data-testid="step2-advanced-options"
+              >
+                <summary
+                  className="journey-advanced-summary"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setAdvancedOpen((prev) => !prev);
+                  }}
+                >
+                  <span className="journey-advanced-title">
+                    <FullWebIcon
+                      name="chevronRight"
+                      size={15}
+                      className="journey-advanced-chevron"
+                    />
+                    {j('advancedOptions')}
+                  </span>
+                  <span className="journey-advanced-meta">{advancedSummary}</span>
+                </summary>
+
+                <div className="journey-advanced-body">
+                  {prefixesLocked && (
+                    <p className="journey-lock-note">{j('prefixesLockedNote')}</p>
+                  )}
+
+                  <div className="journey-field">
+                    <label className="form-label" htmlFor="setup-control-path">
+                      {j('managementPrefix')}
+                    </label>
+                    <div
+                      className={`input-wrap ${
+                        livePrefixValidation.controlError ? 'input-wrap-invalid' : ''
+                      }`}
+                    >
+                      <input
+                        id="setup-control-path"
+                        data-testid="route-target-input"
+                        className="form-input form-input-mono"
+                        value={path}
+                        disabled={prefixesLocked}
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-describedby="setup-control-path-help"
+                        aria-invalid={Boolean(livePrefixValidation.controlError) || undefined}
+                        onChange={(e) => {
+                          setPath(e.target.value);
                           setError(null);
                           setNote((prev) =>
                             prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
@@ -1098,12 +1294,16 @@ export function FreshSetupWizard({
                       <div className="input-actions">
                         <button
                           type="button"
-                          className="btn btn-secondary btn-sm"
-                          data-testid="randomize-inference-prefix"
-                          disabled={busy || prefixesLocked || sharedEntry}
+                          className="btn btn-secondary btn-xs"
+                          data-testid="randomize-control-prefix"
+                          disabled={busy || prefixesLocked}
                           onClick={() => {
-                            const nextInference = generateRandomAccessPrefix([path, inferencePath]);
-                            setInferencePath(nextInference);
+                            const avoid =
+                              strategy !== 'connect_external' && !sharedEntry
+                                ? [path, inferencePath]
+                                : [path];
+                            const nextControl = generateRandomAccessPrefix(avoid);
+                            setPath(nextControl);
                             setError(null);
                             setNote((prev) =>
                               prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
@@ -1111,126 +1311,272 @@ export function FreshSetupWizard({
                                 : prev
                             );
                             if (operation.adminInitialized) {
-                              void persistPrefixDraft(path, nextInference, false);
+                              void persistPrefixDraft(
+                                nextControl,
+                                sharedEntry ? nextControl : inferencePath,
+                                sharedEntry
+                              );
                             }
                           }}
                         >
+                          <FullWebIcon name="refresh" size={13} />
                           {j('randomizePrefix')}
                         </button>
                       </div>
                     </div>
-                    <p className="journey-help">{j('inferencePrefixHelp')}</p>
+                    <p id="setup-control-path-help" className="journey-help">
+                      {j('managementPrefixHelp')}
+                    </p>
                   </div>
-                </>
-              ) : (
-                <p className="alert alert-info" data-testid="external-inference-note">
-                  {j('externalInferenceNote')}
-                </p>
-              )}
-              <div className="info-card" data-testid="prefix-url-preview">
-                <div className="info-row">
-                  <span className="info-key">{j('finalUrlsPreview')}</span>
-                  <span className="badge badge-neutral">
-                    {strategy === 'connect_external'
-                      ? s('external')
-                      : sharedEntry
-                        ? j('sharedPrefixBadge')
-                        : j('independentPrefixBadge')}
-                  </span>
+
+                  {strategy !== 'connect_external' ? (
+                    <>
+                      <div className="journey-field">
+                        <label className="form-label" htmlFor="setup-inference-path">
+                          {j('inferencePrefix')}
+                        </label>
+                        <div
+                          className={`input-wrap ${
+                            livePrefixValidation.inferenceError || livePrefixValidation.pairError
+                              ? 'input-wrap-invalid'
+                              : ''
+                          }`}
+                        >
+                          <input
+                            id="setup-inference-path"
+                            data-testid="inference-target-input"
+                            className="form-input form-input-mono"
+                            value={sharedEntry ? path : inferencePath}
+                            disabled={prefixesLocked || sharedEntry}
+                            autoComplete="off"
+                            spellCheck={false}
+                            aria-describedby="setup-inference-path-help"
+                            aria-invalid={
+                              Boolean(
+                                livePrefixValidation.inferenceError ||
+                                  livePrefixValidation.pairError
+                              ) || undefined
+                            }
+                            onChange={(e) => {
+                              setInferencePath(e.target.value);
+                              setError(null);
+                              setNote((prev) =>
+                                prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                                  ? null
+                                  : prev
+                              );
+                            }}
+                          />
+                          <div className="input-actions">
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-xs"
+                              data-testid="randomize-inference-prefix"
+                              disabled={busy || prefixesLocked || sharedEntry}
+                              onClick={() => {
+                                const nextInference = generateRandomAccessPrefix([
+                                  path,
+                                  inferencePath,
+                                ]);
+                                setInferencePath(nextInference);
+                                setError(null);
+                                setNote((prev) =>
+                                  prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                                    ? null
+                                    : prev
+                                );
+                                if (operation.adminInitialized) {
+                                  void persistPrefixDraft(path, nextInference, false);
+                                }
+                              }}
+                            >
+                              <FullWebIcon name="refresh" size={13} />
+                              {j('randomizePrefix')}
+                            </button>
+                          </div>
+                        </div>
+                        <p id="setup-inference-path-help" className="journey-help">
+                          {j('inferencePrefixHelp')}
+                        </p>
+                      </div>
+
+                      <div className="journey-check-block">
+                        <label className="journey-checkline" htmlFor="setup-shared-prefix">
+                          <span className="journey-checkbox-control">
+                            <input
+                              id="setup-shared-prefix"
+                              data-testid="shared-prefix-checkbox"
+                              type="checkbox"
+                              checked={sharedEntry}
+                              disabled={busy || prefixesLocked}
+                              aria-describedby="setup-shared-prefix-help"
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setSharedEntry(checked);
+                                if (
+                                  !checked &&
+                                  (!validAccessPrefix(inferencePath) ||
+                                    (path && isSameOrNestedPrefix(inferencePath, path)))
+                                ) {
+                                  setInferencePath(generateRandomAccessPrefix(path ? [path] : []));
+                                }
+                                setError(null);
+                                setNote((prev) =>
+                                  prev?.from === 'journey' && prev.key === 'prefixDraftSaved'
+                                    ? null
+                                    : prev
+                                );
+                              }}
+                            />
+                            <span className="journey-checkbox-box" aria-hidden="true">
+                              <FullWebIcon name="check" size={13} />
+                            </span>
+                          </span>
+                          <span className="journey-check-title">{j('sharedPrefixToggle')}</span>
+                        </label>
+                        <p id="setup-shared-prefix-help" className="journey-help journey-check-help">
+                          {j('sharedPrefixHelp')}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="journey-help" data-testid="external-inference-note">
+                      {j('externalInferenceNote')}
+                    </p>
+                  )}
+
+                  {livePrefixErrorKey && (
+                    <p className="journey-inline-error" aria-live="polite">
+                      {j(livePrefixErrorKey)}
+                    </p>
+                  )}
+
+                  {strategy === 'new_managed' && (
+                    <div
+                      className={`journey-check-block ${
+                        plugins ? 'journey-check-block-warn' : ''
+                      }`}
+                    >
+                      <label className="journey-checkline" htmlFor="setup-plugin-optin">
+                        <span className="journey-checkbox-control">
+                          <input
+                            id="setup-plugin-optin"
+                            data-testid="plugin-optin-checkbox"
+                            type="checkbox"
+                            checked={plugins}
+                            disabled={!!operation.strategy?.strategy}
+                            aria-describedby="setup-plugin-optin-help"
+                            onChange={(e) => setPlugins(e.target.checked)}
+                          />
+                          <span className="journey-checkbox-box" aria-hidden="true">
+                            <FullWebIcon name="check" size={13} />
+                          </span>
+                        </span>
+                        <span className="journey-check-title">{j('pluginsOptIn')}</span>
+                      </label>
+                      <p id="setup-plugin-optin-help" className="journey-help journey-check-help">
+                        {j('pluginsOptInHelp')}
+                      </p>
+                    </div>
+                  )}
+
+                  {operation.adminInitialized && !prefixesLocked && (
+                    <div className="journey-section-actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        data-testid="save-prefix-draft"
+                        disabled={busy}
+                        onClick={() =>
+                          void persistPrefixDraft(path, effectiveInferencePath, sharedEntry)
+                        }
+                      >
+                        {j('savePrefixDraft')}
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="info-row">
-                  <span className="info-key">{j('previewConsoleUrl')}</span>
-                  <code className="info-val">{previewUrls.consoleUrl}</code>
-                </div>
-                <div className="info-row">
-                  <span className="info-key">{j('previewManagementApiUrl')}</span>
-                  <code className="info-val">{previewUrls.managementApiUrl}</code>
-                </div>
-                {strategy !== 'connect_external' ? (
-                  <div className="info-row">
-                    <span className="info-key">{j('previewInferenceUrl')}</span>
-                    <code className="info-val">{previewUrls.inferenceUrl}</code>
-                  </div>
-                ) : (
-                  <div className="info-row">
-                    <span className="info-key">{j('previewExternalInferenceUrl')}</span>
-                    <code className="info-val">{previewUrls.externalUrl}</code>
-                  </div>
-                )}
-              </div>
-              {!prefixesLocked && (
-                <div className="header-actions">
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    data-testid="save-prefix-draft"
-                    disabled={busy || !operation.adminInitialized}
-                    onClick={() => void persistPrefixDraft(path, effectiveInferencePath, sharedEntry)}
-                  >
-                    {j('savePrefixDraft')}
-                  </button>
-                </div>
-              )}
-              {strategy === 'connect_external' && (
-                <>
-                  <div className="journey-field">
-                    <label className="form-label" htmlFor="setup-cpa-url">
-                      {t('externalBaseURL')}
-                    </label>
-                    <input
-                      id="setup-cpa-url"
-                      data-testid="external-base-url"
-                      className="form-input"
-                      autoComplete="off"
-                      value={baseURL}
-                      onChange={(e) => setBaseURL(e.target.value)}
-                    />
-                  </div>
-                  <div className="journey-field">
-                    <label className="form-label" htmlFor="setup-cpa-key">
-                      {t('externalManagementKey')}
-                    </label>
-                    <input
-                      id="setup-cpa-key"
-                      data-testid="external-management-key"
-                      className="form-input"
-                      type="password"
-                      autoComplete="off"
-                      value={cpaKey}
-                      onChange={(e) => setCPAKey(e.target.value)}
-                    />
-                  </div>
-                  <p className="journey-help">{t('externalHelp')}</p>
-                </>
-              )}
+              </details>
             </div>
           )}
           {step === 2 && !complete && artifactGate && (
             <FreshArtifactStep
+              hideHeader
               transport={transport}
               initialStatus={artifactGate}
+              leadingAction={
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    setStep(1);
+                    setSavedKey(false);
+                    setArtifactGate(null);
+                    setError(null);
+                  }}
+                >
+                  <FullWebIcon name="arrowLeft" size={18} />
+                  {s('back')}
+                </button>
+              }
               onReady={() => {
                 void review();
               }}
             />
           )}
-          {((step === 2 && !artifactGate) || complete) && (
+          {step === 2 && !artifactGate && !complete && (
             <>
               <dl className="journey-summary">
-                {summary.map(([label, value, testID]) => (
+                {summary.map(({ label, value, mono, badge, testID }) => (
                   <div
                     className="journey-summary-row"
                     key={label}
                     {...(testID ? { 'data-testid': testID } : {})}
                   >
-                    <FullWebIcon name="check" size={22} />
+                    <FullWebIcon name="check" size={16} />
                     <dt>{label}</dt>
-                    <dd>{value}</dd>
+                    <dd className={mono ? 'journey-summary-mono' : undefined}>
+                      <span>{value}</span>
+                      {badge && <span className="badge badge-neutral journey-summary-badge">{badge}</span>}
+                    </dd>
                   </div>
                 ))}
               </dl>
-              {complete && adoptionPartial && (
-                <section className="journey-field" data-testid="adopt-remaining-work">
+              <p className="alert alert-info">
+                {strategy === 'connect_external'
+                  ? x('setupExternalNoMigration')
+                  : j('noMigration')}
+              </p>
+              <label
+                className="journey-checkline journey-confirm-checkline"
+                htmlFor="confirm-key-saved"
+              >
+                <span className="journey-checkbox-control">
+                  <input
+                    id="confirm-key-saved"
+                    type="checkbox"
+                    data-testid="confirm-key-saved-checkbox"
+                    checked={savedKey}
+                    onChange={(e) => setSavedKey(e.target.checked)}
+                  />
+                  <span className="journey-checkbox-box" aria-hidden="true">
+                    <FullWebIcon name="check" size={13} />
+                  </span>
+                </span>
+                <span>
+                  {operation.adminInitialized ? s('acknowledgement') : j('savedConfirm')}
+                </span>
+              </label>
+            </>
+          )}
+          {complete && (
+            <div className="journey-complete-stack">
+              {adoptionPartial && (
+                <section
+                  className="journey-field adopt-remaining-card"
+                  data-testid="adopt-remaining-work"
+                >
                   <h2 className="form-label">{adoptText('details')}</h2>
                   {needsCredentialFileNote(adoptionRemainder) && (
                     // The same sentence as the flow's group: the credentials
@@ -1255,25 +1601,7 @@ export function FreshSetupWizard({
                   </ul>
                 </section>
               )}
-              {!complete && (
-                <>
-                  <p className="alert alert-info">
-                    {strategy === 'connect_external'
-                      ? x('setupExternalNoMigration')
-                      : j('noMigration')}
-                  </p>
-                  <label className="journey-checkline">
-                    <input
-                      type="checkbox"
-                      data-testid="confirm-key-saved-checkbox"
-                      checked={savedKey}
-                      onChange={(e) => setSavedKey(e.target.checked)}
-                    />
-                    {operation.adminInitialized ? s('acknowledgement') : j('savedConfirm')}
-                  </label>
-                </>
-              )}
-              {complete && installKey && (
+              {installKey && (
                 <section
                   className="journey-key"
                   data-testid="install-client-key"
@@ -1325,23 +1653,34 @@ export function FreshSetupWizard({
                   <p className="journey-quiet">{k('installKeyLater')}</p>
                 </section>
               )}
-              {complete && <p className="journey-quiet">{j('bookmark')}</p>}
-              {complete && (
-                <AccessInfoSummary
-                  client={accessClient}
-                  auth={{ kind: 'session', value: transport.sessionToken() }}
-                  onUnauthorized={() => setAccessSessionExpired(true)}
-                />
+              <AccessInfoSummary
+                client={accessClient}
+                auth={{ kind: 'session', value: transport.sessionToken() }}
+                onUnauthorized={() => setAccessSessionExpired(true)}
+                defaultProtocolsCollapsed
+                subtitleNote={j('bookmark')}
+              />
+              {strategy === 'connect_external' && (
+                <div
+                  className="journey-external-next-hint"
+                  data-testid="external-complete-next-hint"
+                >
+                  <FullWebIcon name="info" size={16} />
+                  <span>{j('externalCompleteNextHint')}</span>
+                </div>
               )}
-              {complete && accessSessionExpired && (
-                <p className="alert alert-info" role="alert" data-testid="access-session-expired">
-                  <strong>{j('accessSessionExpired')}:</strong> {j('accessSessionExpiredHelp')}
-                </p>
+              {accessSessionExpired && (
+                <>
+                  <p className="journey-help">{j('bookmark')}</p>
+                  <p className="alert alert-info" role="alert" data-testid="access-session-expired">
+                    <strong>{j('accessSessionExpired')}:</strong> {j('accessSessionExpiredHelp')}
+                  </p>
+                </>
               )}
-            </>
+            </div>
           )}
           {step === 3 && !complete && (
-            <ol className="journey-stages" aria-live="polite">
+            <ol className="journey-stages journey-exec-stages" aria-live="polite">
               {[
                 [j('administrator'), operation.adminInitialized],
                 [
@@ -1351,9 +1690,13 @@ export function FreshSetupWizard({
                 [j('routeTitle'), operation.routing.committed],
                 [s('complete'), complete],
               ].map(([label, done]) => (
-                <li key={String(label)}>
-                  <span className="journey-stage-mark">
-                    <FullWebIcon name={done ? 'check' : 'clock'} size={22} />
+                <li key={String(label)} className={done ? 'done' : ''}>
+                  <span
+                    className={`adopt-stage-mark ${
+                      done ? 'adopt-stage-mark-emerald' : 'adopt-stage-mark-neutral'
+                    }`}
+                  >
+                    <FullWebIcon name={done ? 'check' : 'clock'} size={15} />
                   </span>
                   <strong>{label}</strong>
                   <small>{s(done ? 'done' : 'pending')}</small>
@@ -1362,7 +1705,7 @@ export function FreshSetupWizard({
             </ol>
           )}
         </div>
-        <footer className="journey-footer">
+        <footer className={engineGate ? 'journey-sr-only' : 'journey-footer'}>
           {complete ? (
             <a
               className="btn btn-primary"
@@ -1390,6 +1733,7 @@ export function FreshSetupWizard({
                     setError(null);
                   }}
                 >
+                  <FullWebIcon name="arrowLeft" size={18} />
                   {s('back')}
                 </button>
               )}
@@ -1401,6 +1745,7 @@ export function FreshSetupWizard({
                   onClick={() => setStep(1)}
                 >
                   {s('next')}
+                  <FullWebIcon name="arrowRight" size={18} />
                 </button>
               )}
               {step === 1 && (
@@ -1412,6 +1757,7 @@ export function FreshSetupWizard({
                   onClick={() => void review()}
                 >
                   {s('next')}
+                  <FullWebIcon name="arrowRight" size={18} />
                 </button>
               )}
               {step === 2 && !engineGate && (
@@ -1423,6 +1769,7 @@ export function FreshSetupWizard({
                   onClick={() => void execute()}
                 >
                   {s('submit')}
+                  <FullWebIcon name="arrowRight" size={18} />
                 </button>
               )}
               {engineGate && (

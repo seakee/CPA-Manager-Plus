@@ -296,4 +296,24 @@ describe('FreshAccessInfo', () => {
     expect(hasID('access-info-protocols')).toBe(false);
   });
 
+  it('supports default-collapsed protocol disclosure while keeping protocol endpoints mounted', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: '' },
+      {
+        info: managedInfo,
+        defaultProtocolsCollapsed: true,
+        subtitleNote: 'Bookmark the console URL.',
+      }
+    );
+    const disclosure = byID('access-info-protocols-disclosure');
+    expect(disclosure.type).toBe('details');
+    expect(disclosure.props.open).toBeUndefined();
+    expect(byID('access-info-protocol-base-openai').props.children).toBe(
+      'https://manager.example/my-api/v1'
+    );
+    expect(JSON.stringify(renderer.toJSON())).toContain('Bookmark the console URL.');
+  });
+
 });

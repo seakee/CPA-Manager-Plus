@@ -72,7 +72,7 @@ const en = {
     'Check the destination before installing. The existing operation will be used throughout.',
   engineGateTitle: 'Prepare the CPA engine',
   engineGateHelp:
-    'This image does not carry the embedded CPA, so the engine is prepared first. Finish the engine step below and the installation summary appears.',
+    'This slim image ships without the embedded CPA binary. Download or upload the official pinned release below (SHA-256 verified) before reviewing installation.',
   engineGateNext:
     'Continue with the engine step above; the install button returns once the engine is ready.',
   routingVerificationFailed:
@@ -185,7 +185,7 @@ const zh: typeof en = {
   reviewHelp: '请确认目标；提交后会沿用同一个安装操作执行和恢复。',
   engineGateTitle: '准备 CPA 引擎',
   engineGateHelp:
-    '本镜像未自带内嵌 CPA，需要先准备引擎。完成下面的引擎步骤后，会出现安装信息确认。',
+    '当前精简镜像未附带内置 CPA 二进制文件，请先下载或上传官方引擎包（自动校验 SHA-256），就绪后继续确认安装。',
   engineGateNext: '请先完成上面的引擎步骤；引擎就绪后即可继续安装。',
   routingVerificationFailed:
     '控制台地址没有按预期响应，无法完成路由校验。请确认当前公开地址在容器内可以访问，然后重试。',
@@ -277,7 +277,7 @@ const tw: typeof en = {
   reviewHelp: '請確認目標；提交後會沿用同一個安裝操作執行和復原。',
   engineGateTitle: '準備 CPA 引擎',
   engineGateHelp:
-    '本映像未自帶內嵌 CPA，需要先準備引擎。完成下方的引擎步驟後，會出現安裝資訊確認。',
+    '目前精簡映像未附帶內建 CPA 二進位檔，請先下載或上傳官方引擎套件（自動校驗 SHA-256），就緒後繼續確認安裝。',
   engineGateNext: '請先完成上方的引擎步驟；引擎就緒後即可繼續安裝。',
   routingVerificationFailed:
     '控制台位址沒有按預期回應，無法完成路由驗證。請確認目前公開位址在容器內可以存取，然後重試。',
@@ -372,7 +372,7 @@ const ru: typeof en = {
   reviewHelp: 'Проверьте место установки. Выполнение и восстановление продолжат ту же операцию.',
   engineGateTitle: 'Подготовка движка CPA',
   engineGateHelp:
-    'Этот образ поставляется без встроенного CPA, поэтому сначала готовится движок. Завершите шаг движка ниже — затем появится сводка установки.',
+    'Этот образ slim не включает встроенный бинарный файл CPA. Скачайте или загрузите официальный релиз ниже (с проверкой SHA-256) перед проверкой установки.',
   engineGateNext:
     'Сначала завершите шаг движка выше; кнопка установки вернётся, когда движок будет готов.',
   routingVerificationFailed:

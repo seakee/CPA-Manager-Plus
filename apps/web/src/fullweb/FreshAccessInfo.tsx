@@ -44,6 +44,8 @@ export interface AccessInfoSummaryProps {
   className?: string;
   testIdPrefix?: string;
   onLoaded?: (info: AccessInfo) => void;
+  defaultProtocolsCollapsed?: boolean;
+  subtitleNote?: string;
 }
 
 const VALID_MODES: Record<AccessMode, true> = {
@@ -367,6 +369,8 @@ export function AccessInfoSummary({
   className,
   testIdPrefix = 'access-info',
   onLoaded,
+  defaultProtocolsCollapsed = false,
+  subtitleNote,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
   const [fetched, setFetched] = useState<AccessInfo | null>(null);
@@ -377,6 +381,8 @@ export function AccessInfoSummary({
     target: string;
     state: 'copied' | 'failed';
   } | null>(null);
+  const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeRef = useRef(true);
   const requestSeqRef = useRef(0);
@@ -393,6 +399,10 @@ export function AccessInfoSummary({
     activeRef.current = true;
     return () => {
       activeRef.current = false;
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -405,6 +415,11 @@ export function AccessInfoSummary({
 
   useEffect(() => {
     setCopyFeedback(null);
+    setCopiedTarget(null);
+    if (copyTimerRef.current !== null) {
+      clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = null;
+    }
     if (info !== undefined) {
       requestSeqRef.current += 1;
       setLoading(false);
@@ -497,9 +512,24 @@ export function AccessInfoSummary({
         throw new Error('clipboard_unavailable');
       }
       await navigator.clipboard.writeText(textValue);
-      if (activeRef.current) setCopyFeedback({ target, state: 'copied' });
+      if (activeRef.current) {
+        setCopyFeedback({ target, state: 'copied' });
+        setCopiedTarget(target);
+        if (copyTimerRef.current !== null) {
+          clearTimeout(copyTimerRef.current);
+        }
+        copyTimerRef.current = setTimeout(() => {
+          if (activeRef.current) {
+            setCopiedTarget((prev) => (prev === target ? null : prev));
+          }
+          copyTimerRef.current = null;
+        }, 1500);
+      }
     } catch {
-      if (activeRef.current) setCopyFeedback({ target, state: 'failed' });
+      if (activeRef.current) {
+        setCopiedTarget(null);
+        setCopyFeedback({ target, state: 'failed' });
+      }
     }
   }
 
@@ -594,51 +624,172 @@ export function AccessInfoSummary({
       )
     : null;
 
+  const hasCoreEntry = Boolean(
+    managementUrl ||
+      (effective.mode === 'connect_external' && externalUrl) ||
+      (effective.mode !== 'connect_external' && inferenceUrl)
+  );
+  const subtitleText = isPendingRestart
+    ? a('pendingRestartSubtitle', language)
+    : subtitleNote
+      ? `${a('subtitle', language)} ${subtitleNote}`
+      : a('subtitle', language);
+
+  const protocolsCard =
+    effective.protocols.length > 0 ? (
+      <div className="info-card access-protocols-card" data-testid={`${testIdPrefix}-protocols`}>
+        {effective.protocols.map((protocol) => {
+          const baseUrl = formatAccessEndpointUrl(
+            protocol.basePath,
+            effective.mode,
+            resolvedOrigin
+          );
+          const exampleUrl = formatAccessEndpointUrl(
+            protocol.examplePath,
+            effective.mode,
+            resolvedOrigin
+          );
+          const hasDistinctExample = Boolean(exampleUrl && exampleUrl !== baseUrl);
+          const meta = protocolHelpAndHeader(protocol.id, language);
+          const baseCopied = copiedTarget === `protocol-${protocol.id}`;
+          const exampleCopied = copiedTarget === `protocol-example-${protocol.id}`;
+          return (
+            <div
+              key={protocol.id}
+              className="access-protocol-item"
+              data-testid={`${testIdPrefix}-protocol-${protocol.id}`}
+            >
+              <div className="access-protocol-head">
+                <strong className="access-protocol-name">
+                  {protocol.label}
+                  {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
+                </strong>
+                {!compact && (
+                  <code
+                    className="access-protocol-header-chip"
+                    data-testid={`${testIdPrefix}-protocol-snippet-${protocol.id}`}
+                  >
+                    {meta.header}
+                  </code>
+                )}
+              </div>
+              {!compact && <p className="journey-help access-protocol-hint">{meta.hint}</p>}
+              <div className="access-protocol-urls">
+                <div className="access-protocol-url-row">
+                  <span className="access-protocol-url-label">{a('baseUrlLabel', language)}</span>
+                  <span className="info-val-group">
+                    <code
+                      className="info-val"
+                      data-testid={`${testIdPrefix}-protocol-base-${protocol.id}`}
+                    >
+                      {baseUrl}
+                    </code>
+                    <button
+                      type="button"
+                      className={`btn btn-ghost btn-xs btn-icon-only ${
+                        baseCopied ? 'is-copied' : ''
+                      }`}
+                      aria-label={`${a('copyUrl', language)}: ${protocol.label}`}
+                      title={a('copyUrl', language)}
+                      data-testid={`${testIdPrefix}-copy-${protocol.id}`}
+                      onClick={() => void copyValue(`protocol-${protocol.id}`, baseUrl)}
+                    >
+                      <FullWebIcon name={baseCopied ? 'check' : 'copy'} size={14} />
+                    </button>
+                  </span>
+                </div>
+                {hasDistinctExample && (
+                  <div className="access-protocol-url-row">
+                    <span className="access-protocol-url-label">
+                      {a('exampleEndpointLabel', language)}
+                    </span>
+                    <span className="info-val-group">
+                      <code
+                        className="info-val"
+                        data-testid={`${testIdPrefix}-protocol-example-${protocol.id}`}
+                      >
+                        {exampleUrl}
+                      </code>
+                      <button
+                        type="button"
+                        className={`btn btn-ghost btn-xs btn-icon-only ${
+                          exampleCopied ? 'is-copied' : ''
+                        }`}
+                        aria-label={`${a('copyExample', language)}: ${protocol.label}`}
+                        title={a('copyExample', language)}
+                        data-testid={`${testIdPrefix}-copy-example-${protocol.id}`}
+                        onClick={() =>
+                          void copyValue(`protocol-example-${protocol.id}`, exampleUrl)
+                        }
+                      >
+                        <FullWebIcon name={exampleCopied ? 'check' : 'copy'} size={14} />
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    ) : null;
+
   return (
     <section
-      className={rootClassName}
+      className={`${rootClassName} access-info-section`}
       data-testid={`${testIdPrefix}-summary`}
       aria-busy={loading || undefined}
     >
-      <div className="console-keys-heading">
-        <div>
+      <div className="access-info-header">
+        <div className="access-info-title-row">
           <h3>{a('title', language)}</h3>
-          <p className="journey-help">
-            {isPendingRestart ? a('pendingRestartSubtitle', language) : a('subtitle', language)}
-          </p>
-        </div>
-        <div className="header-actions">
-          <span className="badge badge-indigo" data-testid={`${testIdPrefix}-mode`}>
-            {a(modeTextKey(effective.mode), language)}
-          </span>
-          <span
-            className={`badge ${effective.ready ? 'badge-emerald' : 'badge-amber'}`}
-            data-testid={`${testIdPrefix}-status`}
-          >
-            {effective.ready
-              ? a('statusReady', language)
-              : isPendingRestart
-                ? a('statusPendingRestart', language)
-                : a('statusNotReady', language)}
-          </span>
-          {isSharedPrefix && (
-            <span className="badge badge-amber" data-testid={`${testIdPrefix}-shared-badge`}>
-              {a('sharedBadge', language)}
+          <div className="access-info-badges">
+            <span className="badge badge-indigo" data-testid={`${testIdPrefix}-mode`}>
+              {a(modeTextKey(effective.mode), language)}
             </span>
-          )}
-          {info === undefined && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              data-testid={`${testIdPrefix}-retry`}
-              disabled={loading}
-              onClick={() => setManualRetry((n) => n + 1)}
+            <span
+              className={`badge ${effective.ready ? 'badge-emerald' : 'badge-amber'}`}
+              data-testid={`${testIdPrefix}-status`}
             >
-              <FullWebIcon name="refresh" size={16} />
-              {a('retry', language)}
-            </button>
-          )}
+              {effective.ready
+                ? a('statusReady', language)
+                : isPendingRestart
+                  ? a('statusPendingRestart', language)
+                  : a('statusNotReady', language)}
+            </span>
+            {isSharedPrefix && (
+              <span className="badge badge-amber" data-testid={`${testIdPrefix}-shared-badge`}>
+                {a('sharedBadge', language)}
+              </span>
+            )}
+            {info === undefined &&
+              (effective.ready ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-xs btn-icon-only"
+                  aria-label={a('retry', language)}
+                  title={a('retry', language)}
+                  data-testid={`${testIdPrefix}-retry`}
+                  disabled={loading}
+                  onClick={() => setManualRetry((n) => n + 1)}
+                >
+                  <FullWebIcon name="refresh" size={14} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  data-testid={`${testIdPrefix}-retry`}
+                  disabled={loading}
+                  onClick={() => setManualRetry((n) => n + 1)}
+                >
+                  <FullWebIcon name="refresh" size={15} />
+                  {a('retry', language)}
+                </button>
+              ))}
+          </div>
         </div>
+        <p className="journey-help access-info-subtitle">{subtitleText}</p>
       </div>
 
       {notReadyCopy && (
@@ -669,76 +820,87 @@ export function AccessInfoSummary({
         </div>
       )}
 
-      <div className="info-card">
-        {managementUrl && (
-          <div className="info-row">
-            <span className="info-key">
-              {a('managementEntry', language)}
-              {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
-            </span>
-            <div className="header-actions">
-              <code className="info-val" data-testid={`${testIdPrefix}-management`}>
-                {managementUrl}
-              </code>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                data-testid={`${testIdPrefix}-copy-management`}
-                onClick={() => void copyValue('management', managementUrl)}
-              >
-                <FullWebIcon name="copy" size={16} />
-                {a('copyUrl', language)}
-              </button>
+      {hasCoreEntry && (
+        <div className="info-card prefix-preview-card">
+          {managementUrl && (
+            <div className="info-row info-row-primary">
+              <span className="info-key">
+                {a('managementEntry', language)}
+                {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
+              </span>
+              <span className="info-val-group">
+                <code className="info-val" data-testid={`${testIdPrefix}-management`}>
+                  {managementUrl}
+                </code>
+                <button
+                  type="button"
+                  className={`btn btn-ghost btn-xs btn-icon-only ${
+                    copiedTarget === 'management' ? 'is-copied' : ''
+                  }`}
+                  aria-label={`${a('copyUrl', language)}: ${a('managementEntry', language)}`}
+                  title={a('copyUrl', language)}
+                  data-testid={`${testIdPrefix}-copy-management`}
+                  onClick={() => void copyValue('management', managementUrl)}
+                >
+                  <FullWebIcon name={copiedTarget === 'management' ? 'check' : 'copy'} size={14} />
+                </button>
+              </span>
             </div>
-          </div>
-        )}
+          )}
 
-        {effective.mode === 'connect_external' && externalUrl && (
-          <div className="info-row">
-            <span className="info-key">
-              {a('externalBase', language)}
-              {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
-            </span>
-            <div className="header-actions">
-              <code className="info-val" data-testid={`${testIdPrefix}-external`}>
-                {externalUrl}
-              </code>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                data-testid={`${testIdPrefix}-copy-external`}
-                onClick={() => void copyValue('external', externalUrl)}
-              >
-                <FullWebIcon name="copy" size={16} />
-                {a('copyUrl', language)}
-              </button>
+          {effective.mode === 'connect_external' && externalUrl && (
+            <div className="info-row">
+              <span className="info-key">
+                {a('externalBase', language)}
+                {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
+              </span>
+              <span className="info-val-group">
+                <code className="info-val" data-testid={`${testIdPrefix}-external`}>
+                  {externalUrl}
+                </code>
+                <button
+                  type="button"
+                  className={`btn btn-ghost btn-xs btn-icon-only ${
+                    copiedTarget === 'external' ? 'is-copied' : ''
+                  }`}
+                  aria-label={`${a('copyUrl', language)}: ${a('externalBase', language)}`}
+                  title={a('copyUrl', language)}
+                  data-testid={`${testIdPrefix}-copy-external`}
+                  onClick={() => void copyValue('external', externalUrl)}
+                >
+                  <FullWebIcon name={copiedTarget === 'external' ? 'check' : 'copy'} size={14} />
+                </button>
+              </span>
             </div>
-          </div>
-        )}
+          )}
 
-        {effective.mode !== 'connect_external' && inferenceUrl && (
-          <div className="info-row">
-            <span className="info-key">
-              {a('inferenceBase', language)}
-              {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
-            </span>
-            <div className="header-actions">
-              <code className="info-val" data-testid={`${testIdPrefix}-inference`}>
-                {inferenceUrl}
-              </code>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                data-testid={`${testIdPrefix}-copy-inference`}
-                onClick={() => void copyValue('inference', inferenceUrl)}
-              >
-                <FullWebIcon name="copy" size={16} />
-                {a('copyUrl', language)}
-              </button>
+          {effective.mode !== 'connect_external' && inferenceUrl && (
+            <div className="info-row">
+              <span className="info-key">
+                {a('inferenceBase', language)}
+                {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
+              </span>
+              <span className="info-val-group">
+                <code className="info-val" data-testid={`${testIdPrefix}-inference`}>
+                  {inferenceUrl}
+                </code>
+                <button
+                  type="button"
+                  className={`btn btn-ghost btn-xs btn-icon-only ${
+                    copiedTarget === 'inference' ? 'is-copied' : ''
+                  }`}
+                  aria-label={`${a('copyUrl', language)}: ${a('inferenceBase', language)}`}
+                  title={a('copyUrl', language)}
+                  data-testid={`${testIdPrefix}-copy-inference`}
+                  onClick={() => void copyValue('inference', inferenceUrl)}
+                >
+                  <FullWebIcon name={copiedTarget === 'inference' ? 'check' : 'copy'} size={14} />
+                </button>
+              </span>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {effective.mode === 'connect_external' && externalUrl && (
         <p className="journey-help" data-testid={`${testIdPrefix}-external-note`}>
@@ -746,80 +908,30 @@ export function AccessInfoSummary({
         </p>
       )}
 
-      {effective.protocols.length > 0 ? (
-        <div className="info-card" data-testid={`${testIdPrefix}-protocols`}>
-          {effective.protocols.map((protocol) => {
-            const baseUrl = formatAccessEndpointUrl(
-              protocol.basePath,
-              effective.mode,
-              resolvedOrigin
-            );
-            const exampleUrl = formatAccessEndpointUrl(
-              protocol.examplePath,
-              effective.mode,
-              resolvedOrigin
-            );
-            const meta = protocolHelpAndHeader(protocol.id, language);
-            return (
-              <div
-                key={protocol.id}
-                className="info-row"
-                data-testid={`${testIdPrefix}-protocol-${protocol.id}`}
-              >
-                <div>
-                  <div className="info-key">
-                    <strong>{protocol.label}</strong>
-                    {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
-                  </div>
-                  {!compact && <p className="journey-help">{meta.hint}</p>}
-                  {!compact && (
-                    <pre
-                      className="code-block"
-                      data-testid={`${testIdPrefix}-protocol-snippet-${protocol.id}`}
-                    >
-                      {`${meta.header}\n${exampleUrl || baseUrl}`}
-                    </pre>
-                  )}
-                </div>
-                <div className="header-actions">
-                  <code className="info-val" data-testid={`${testIdPrefix}-protocol-base-${protocol.id}`}>
-                    {baseUrl}
-                  </code>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    data-testid={`${testIdPrefix}-copy-${protocol.id}`}
-                    onClick={() => void copyValue(`protocol-${protocol.id}`, baseUrl)}
-                  >
-                    <FullWebIcon name="copy" size={16} />
-                    {a('copyUrl', language)}
-                  </button>
-                  {exampleUrl && exampleUrl !== baseUrl && (
-                    <>
-                      <code
-                        className="info-val"
-                        data-testid={`${testIdPrefix}-protocol-example-${protocol.id}`}
-                      >
-                        {exampleUrl}
-                      </code>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        data-testid={`${testIdPrefix}-copy-example-${protocol.id}`}
-                        onClick={() =>
-                          void copyValue(`protocol-example-${protocol.id}`, exampleUrl)
-                        }
-                      >
-                        <FullWebIcon name="copy" size={16} />
-                        {a('copyExample', language)}
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+      {protocolsCard ? (
+        defaultProtocolsCollapsed ? (
+          <details
+            className="journey-advanced access-protocols-disclosure"
+            data-testid={`${testIdPrefix}-protocols-disclosure`}
+          >
+            <summary className="journey-advanced-summary">
+              <span className="journey-advanced-title">
+                <FullWebIcon
+                  name="chevronRight"
+                  size={15}
+                  className="journey-advanced-chevron"
+                />
+                {a('protocolsTitle', language)}
+              </span>
+              <span className="journey-advanced-meta">
+                {effective.protocols.map((item) => item.label).join(' · ')}
+              </span>
+            </summary>
+            <div className="journey-advanced-body access-protocols-body">{protocolsCard}</div>
+          </details>
+        ) : (
+          protocolsCard
+        )
       ) : (
         <p className="journey-quiet" data-testid={`${testIdPrefix}-protocols-empty`}>
           {a('protocolsEmpty', language)}
@@ -828,7 +940,7 @@ export function AccessInfoSummary({
 
       {copyFeedback && (
         <p
-          className="journey-quiet"
+          className={copyFeedback.state === 'copied' ? 'sr-only' : 'journey-inline-error'}
           role="status"
           data-testid={`${testIdPrefix}-copy-feedback`}
         >
@@ -836,7 +948,7 @@ export function AccessInfoSummary({
         </p>
       )}
 
-      <p className="journey-quiet">{a('clientKeyNote', language)}</p>
+      <p className="journey-help access-client-key-note">{a('clientKeyNote', language)}</p>
     </section>
   );
 }

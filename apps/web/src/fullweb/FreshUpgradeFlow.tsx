@@ -687,6 +687,18 @@ export function FreshUpgradeFlow({
   const [routingSaving, setRoutingSaving] = useState(false);
   const [routingSaved, setRoutingSaved] = useState(false);
   const [routingError, setRoutingError] = useState('');
+  const [routingDrawerOpen, setRoutingDrawerOpen] = useState(false);
+  const [copiedPreviewId, setCopiedPreviewId] = useState<string | null>(null);
+  const copyPreviewUrl = (id: string, value: string) => {
+    if (!value || value === '—') return;
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(value);
+    }
+    setCopiedPreviewId(id);
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+      window.setTimeout(() => setCopiedPreviewId((cur) => (cur === id ? null : cur)), 1800);
+    }
+  };
   const delayFor = useCallback(
     (index: number) => pollDelays[Math.min(index, pollDelays.length - 1)] ?? 15_000,
     [pollDelays]
@@ -804,6 +816,18 @@ export function FreshUpgradeFlow({
   const showArtifactStep =
     Boolean(artifact) && Boolean(record?.recorded) && record?.nextAction === 'cpa_import';
 
+  const [guideMode, setGuideMode] = useState<'managed' | 'external'>('managed');
+  const guideModeTouchedRef = useRef(false);
+
+  useEffect(() => {
+    if (guideModeTouchedRef.current) return;
+    const detectedExternal =
+      record?.nextAction === 'external_connect' ||
+      preflightReport?.checks.some(
+        (c) => c.name === 'cpa_classification' && c.detail.includes('kind=external')
+      ) === true;
+    setGuideMode(detectedExternal ? 'external' : 'managed');
+  }, [preflightReport, record?.nextAction]);
   useEffect(() => {
     if (!showArtifactStep) {
       setArtifactReady(false);
@@ -1039,15 +1063,26 @@ export function FreshUpgradeFlow({
           <ol className="upgrade-steps" data-testid="upgrade-flow-steps">
             {STEP_ORDER.map((key, index) => {
               const current = STEP_ORDER.indexOf(shownStep);
+              const isDone = index < current;
+              const isCompleteResult =
+                key === 'result' &&
+                shownStep === 'result' &&
+                record?.stage === 'complete' &&
+                record?.stageKnown === true;
               return (
                 <li
                   key={key}
                   data-testid={`upgrade-step-${key}`}
-                  data-state={index < current ? 'done' : key === shownStep ? 'current' : 'pending'}
+                  data-state={isDone ? 'done' : key === shownStep ? 'current' : 'pending'}
+                  data-complete={isCompleteResult ? 'true' : undefined}
                   aria-current={key === shownStep ? 'step' : undefined}
                 >
                   <span className="upgrade-step-index" aria-hidden="true">
-                    {index + 1}
+                    {isDone || isCompleteResult ? (
+                      <FullWebIcon name="check" size={15} />
+                    ) : (
+                      index + 1
+                    )}
                   </span>
                   <span>{t(STEP_TEXT[key], language)}</span>
                 </li>
@@ -1055,7 +1090,7 @@ export function FreshUpgradeFlow({
             })}
           </ol>
           {boot.resumed && (
-            <p className="upgrade-step-help" data-testid="upgrade-resumed">
+            <p className="upgrade-sr-only" data-testid="upgrade-resumed">
               {t('resumeNotice', language)}
             </p>
           )}
@@ -1064,8 +1099,10 @@ export function FreshUpgradeFlow({
 
       {boot.phase === 'ready' && shownStep === 'preflight' && (
         <div className="upgrade-step-body" data-testid="upgrade-preflight">
-          <h2>{t('preflightTitle', language)}</h2>
-          <p className="upgrade-step-help">{t('preflightHelp', language)}</p>
+          <div className="upgrade-step-head">
+            <h2>{t('preflightTitle', language)}</h2>
+            <p className="upgrade-step-help">{t('preflightHelp', language)}</p>
+          </div>
           {preflight.phase === 'idle' && (
             <p className="upgrade-step-status" role="status" data-testid="upgrade-preflight-reading">
               <FullWebIcon name="refresh" size={18} />
@@ -1074,7 +1111,7 @@ export function FreshUpgradeFlow({
           )}
           {preflight.phase === 'failed' && (
             <div className="upgrade-notice" role="alert" data-testid="upgrade-preflight-error">
-              <FullWebIcon name="alert" size={24} />
+              <FullWebIcon name="alert" size={20} />
               <div>
                 <h3>{t('errorUnavailable', language)}</h3>
                 <p>{errorText(preflight.error, language)}</p>
@@ -1084,11 +1121,11 @@ export function FreshUpgradeFlow({
           )}
           {preflightReport && (
             <>
-              <dl className="upgrade-facts">
+              <dl className="upgrade-facts upgrade-facts-inline">
                 <div>
                   <dt>{t('preflightSourceKind', language)}</dt>
                   <dd data-testid="upgrade-preflight-kind">
-                    {preflightReport.sourceKind || t('preflightUnknown', language)}
+                    {formatSourceKind(preflightReport.sourceKind, language)}
                   </dd>
                 </div>
                 <div>
@@ -1099,13 +1136,17 @@ export function FreshUpgradeFlow({
                 </div>
                 <div>
                   <dt>{t('preflightFingerprint', language)}</dt>
-                  <dd data-testid="upgrade-preflight-fingerprint">
+                  <dd className="upgrade-fact-mono" data-testid="upgrade-preflight-fingerprint">
                     {preflightReport.fingerprint || t('preflightUnknown', language)}
                   </dd>
                 </div>
               </dl>
               {preflightReport.pendingDeclaration && (
-                <div className="upgrade-pending" role="note" data-testid="upgrade-preflight-pending-declaration">
+                <div
+                  className={preflightReport.ready ? 'upgrade-sr-only' : 'upgrade-pending'}
+                  role="note"
+                  data-testid="upgrade-preflight-pending-declaration"
+                >
                   <h3>{t('preflightPendingTitle', language)}</h3>
                   <p>
                     {t('preflightPendingHelp', language)}{' '}
@@ -1114,26 +1155,69 @@ export function FreshUpgradeFlow({
                   <p>{t('preflightPendingTail', language)}</p>
                 </div>
               )}
-              <h3>{t('preflightChecks', language)}</h3>
-              <ul className="upgrade-checks">
-                {preflightReport.checks.map((check) => (
-                  <li
-                    key={check.name}
-                    data-testid={`upgrade-check-${check.name}`}
-                    data-status={check.status}
-                  >
-                    <span className="upgrade-check-name">{checkNameText(check.name, language)}</span>
-                    <span className={`upgrade-check-outcome is-${check.status}`}>
-                      {checkOutcomeText(check.status, language)}
-                    </span>
-                    {check.code && <code>{check.code}</code>}
-                    {check.detail && <span className="upgrade-check-detail">{check.detail}</span>}
-                  </li>
-                ))}
-              </ul>
+              <div className="upgrade-checks-card">
+                <ul className="upgrade-checks">
+                  {preflightReport.checks.map((check) => {
+                    const summary = summarizePreflightCheck(check, language);
+                    return (
+                      <li
+                        key={check.name}
+                        className={`upgrade-check-row is-${check.status}`}
+                        data-testid={`upgrade-check-${check.name}`}
+                        data-status={check.status}
+                      >
+                        <div className="upgrade-check-left">
+                          <span className={`upgrade-check-dot is-${check.status}`} aria-hidden="true">
+                            <FullWebIcon
+                              name={
+                                check.status === 'pass'
+                                  ? 'check'
+                                  : check.status === 'pending'
+                                    ? 'clock'
+                                    : 'alert'
+                              }
+                              size={13}
+                            />
+                          </span>
+                          <span className="upgrade-check-name">{checkNameText(check.name, language)}</span>
+                        </div>
+                        <div className="upgrade-check-right">
+                          {summary && <span className="upgrade-check-summary">{summary}</span>}
+                          <span className={`upgrade-check-outcome is-${check.status}`}>
+                            {checkOutcomeText(check.status, language)}
+                          </span>
+                        </div>
+                        {!summary && (check.code || check.detail) && (
+                          <div className="upgrade-check-issue">
+                            {check.code && <code>{check.code}</code>}
+                            {check.detail && <span className="upgrade-check-detail">{check.detail}</span>}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {preflightReport.checks.some((c) => c.code || c.detail) && (
+                  <details className="upgrade-raw-drawer">
+                    <summary>{t('techDetails', language)}</summary>
+                    <div className="upgrade-raw-list">
+                      {preflightReport.checks.map(
+                        (check) =>
+                          (check.code || check.detail) && (
+                            <div key={check.name} className="upgrade-raw-item">
+                              <strong>{checkNameText(check.name, language)}</strong>
+                              {check.code && <code>{check.code}</code>}
+                              {check.detail && <span>{check.detail}</span>}
+                            </div>
+                          )
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
               {preflightReport.blocked.length > 0 ? (
                 <div className="upgrade-notice" role="alert" data-testid="upgrade-preflight-blocked">
-                  <FullWebIcon name="alert" size={24} />
+                  <FullWebIcon name="alert" size={20} />
                   <div>
                     <h3>{t('preflightBlockedTitle', language)}</h3>
                     <p>{t('preflightBlockedHelp', language)}</p>
@@ -1149,12 +1233,12 @@ export function FreshUpgradeFlow({
                 </div>
               ) : (
                 <div
-                  className="upgrade-notice upgrade-notice-ready"
+                  className="upgrade-ready-strip"
                   role="status"
                   data-testid="upgrade-preflight-ready"
                 >
-                  <FullWebIcon name="check" size={24} />
-                  <div>
+                  <FullWebIcon name="check" size={18} />
+                  <div className="upgrade-ready-strip-text">
                     <h3>
                       {t(
                         preflightReport.pendingDeclaration ||
@@ -1186,7 +1270,7 @@ export function FreshUpgradeFlow({
               disabled={preflight.phase === 'idle'}
               onClick={() => setPreflight({ phase: 'idle' })}
             >
-              <FullWebIcon name="refresh" size={18} /> {t('preflightRetry', language)}
+              <FullWebIcon name="refresh" size={16} /> {t('preflightRetry', language)}
             </button>
             <button
               className="btn btn-primary"
@@ -1194,7 +1278,7 @@ export function FreshUpgradeFlow({
               disabled={!preflightReport?.ready}
               onClick={() => setStep('confirm')}
             >
-              {t('continue', language)} <FullWebIcon name="arrowRight" size={18} />
+              {t('continue', language)} <FullWebIcon name="arrowRight" size={16} />
             </button>
           </div>
         </div>
@@ -1202,13 +1286,15 @@ export function FreshUpgradeFlow({
 
       {boot.phase === 'ready' && shownStep === 'confirm' && (
         <div className="upgrade-step-body" data-testid="upgrade-confirm">
-          <h2>{t('confirmTitle', language)}</h2>
-          <p className="upgrade-step-help">{t('confirmHelp', language)}</p>
-          <dl className="upgrade-facts">
+          <div className="upgrade-step-head">
+            <h2>{t('confirmTitle', language)}</h2>
+            <p className="upgrade-step-help">{t('confirmHelp', language)}</p>
+          </div>
+          <dl className="upgrade-facts upgrade-facts-inline">
             <div>
               <dt>{t('confirmSourceKind', language)}</dt>
               <dd data-testid="upgrade-confirm-kind">
-                {preflightReport?.sourceKind || t('preflightUnknown', language)}
+                {formatSourceKind(preflightReport?.sourceKind, language)}
               </dd>
             </div>
             <div>
@@ -1218,34 +1304,58 @@ export function FreshUpgradeFlow({
               </dd>
             </div>
           </dl>
-          <div className="upgrade-notice upgrade-notice-ready">
-            <FullWebIcon name="shield" size={24} />
-            <div>
-              <h3>{t('confirmReadOnlyTitle', language)}</h3>
-              <p>{t('confirmReadOnlyHelp', language)}</p>
+          <div className="upgrade-promise-card">
+            <div className="upgrade-promise-row">
+              <span className="upgrade-promise-icon" aria-hidden="true">
+                <FullWebIcon name="shield" size={16} />
+              </span>
+              <div>
+                <strong>{t('confirmReadOnlyTitle', language)}</strong>
+                <p>{t('confirmReadOnlyHelp', language)}</p>
+              </div>
             </div>
-          </div>
-          <div className="upgrade-notice upgrade-notice-ready">
-            <FullWebIcon name="server" size={24} />
-            <div>
-              <h3>{t('confirmBackupTitle', language)}</h3>
-              <p>{t('confirmBackupHelp', language)}</p>
+            <div className="upgrade-promise-row">
+              <span className="upgrade-promise-icon" aria-hidden="true">
+                <FullWebIcon name="server" size={16} />
+              </span>
+              <div>
+                <strong>{t('confirmBackupTitle', language)}</strong>
+                <p>{t('confirmBackupHelp', language)}</p>
+              </div>
             </div>
+            <div className="upgrade-promise-row">
+              <span className="upgrade-promise-icon" aria-hidden="true">
+                <FullWebIcon name="check" size={16} />
+              </span>
+              <div>
+                <strong>{t('confirmAutoTitle', language)}</strong>
+                <p>{t('confirmAutoHelp', language)}</p>
+              </div>
+            </div>
+            <details className="upgrade-raw-drawer">
+              <summary>{t('confirmEdgeToggle', language)}</summary>
+              <div className="upgrade-edge-body">
+                <ul className="upgrade-list" data-testid="upgrade-confirm-manual">
+                  {CONFIRM_MANUAL.map((key) => (
+                    <li key={key}>{t(key, language)}</li>
+                  ))}
+                </ul>
+              </div>
+            </details>
           </div>
-          <h3>{t('confirmManualTitle', language)}</h3>
-          <p className="upgrade-step-help">{t('confirmManualHelp', language)}</p>
-          <ul className="upgrade-list" data-testid="upgrade-confirm-manual">
-            {CONFIRM_MANUAL.map((key) => (
-              <li key={key}>{t(key, language)}</li>
-            ))}
-          </ul>
-          <label className="upgrade-ack">
-            <input
-              type="checkbox"
-              data-testid="upgrade-confirm-ack"
-              checked={acknowledged}
-              onChange={(event) => setAcknowledged(event.target.checked)}
-            />
+          <label className="upgrade-ack" htmlFor="upgrade-confirm-ack-input">
+            <span className="journey-checkbox-control">
+              <input
+                id="upgrade-confirm-ack-input"
+                type="checkbox"
+                data-testid="upgrade-confirm-ack"
+                checked={acknowledged}
+                onChange={(event) => setAcknowledged(event.target.checked)}
+              />
+              <span className="journey-checkbox-box" aria-hidden="true">
+                <FullWebIcon name="check" size={13} />
+              </span>
+            </span>
             <span>{t('confirmAck', language)}</span>
           </label>
           <div className="upgrade-actions">
@@ -1254,7 +1364,7 @@ export function FreshUpgradeFlow({
               data-testid="upgrade-confirm-back"
               onClick={() => setStep('preflight')}
             >
-              <FullWebIcon name="arrowLeft" size={18} /> {t('back', language)}
+              <FullWebIcon name="arrowLeft" size={16} /> {t('back', language)}
             </button>
             <button
               className="btn btn-primary"
@@ -1262,260 +1372,234 @@ export function FreshUpgradeFlow({
               disabled={!acknowledged}
               onClick={() => setStep('progress')}
             >
-              {t('confirmContinue', language)} <FullWebIcon name="arrowRight" size={18} />
+              {t('confirmContinue', language)} <FullWebIcon name="arrowRight" size={16} />
             </button>
           </div>
         </div>
       )}
 
-      {boot.phase === 'ready' && shownStep === 'progress' && (
-        <div className="upgrade-step-body" data-testid="upgrade-progress">
-          <h2>{t('progressTitle', language)}</h2>
-          <p className="upgrade-step-help">{t('progressHelp', language)}</p>
-          {!record && (
-            <p className="upgrade-step-status" role="status" data-testid="upgrade-progress-reading">
-              <FullWebIcon name="refresh" size={18} />
-              {t('progressReading', language)}
-            </p>
-          )}
-          {record && !record.recorded && (
-            <p className="upgrade-step-status" role="status" data-testid="upgrade-progress-unrecorded">
-              <FullWebIcon name="clock" size={18} />
-              {t('progressUnrecorded', language)}
-            </p>
-          )}
-          {record?.recorded && (
-            <>
-              <StageLine status={record} language={language} testid="upgrade-progress-stage" />
-              <h3>{t('progressDomains', language)}</h3>
-              {record.domainsDone.length === 0 ? (
-                <p className="upgrade-step-help" data-testid="upgrade-progress-domains">
-                  {t('progressDomainsNone', language)}
-                </p>
-              ) : (
-                <ul className="upgrade-domains" data-testid="upgrade-progress-domains">
-                  {record.domainsDone.map((domain) => (
-                    <li key={domain}>{domainText(domain, language)}</li>
-                  ))}
-                </ul>
-              )}
-              <Reconciliation status={record} language={language} />
-              <ManualItems status={record} language={language} />
-              {record.errorCode && (
-                // The recorded refusal is the operation's own statement about
-                // why it stopped. The verification of a Managed target records
-                // one here too — the position it may not promote — so the
-                // operator reads the reason from the row, not from a page.
-                <div
-                  className="upgrade-notice"
-                  role="status"
-                  data-testid="upgrade-progress-reason"
-                >
-                  <FullWebIcon name="info" size={24} />
-                  <div>
-                    <h3>{t('verifyReasonLabel', language)}</h3>
-                    <p>{record.errorDetail}</p>
-                    <code>{record.errorCode}</code>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-          {showArtifactStep && artifact && (
-            <div className="upgrade-artifact" data-testid="upgrade-cpa-import-artifact">
-              <FreshArtifactStep
-                transport={artifact}
-                onReady={() => setArtifactReady(true)}
-              />
-              {artifactReady && (
-                <div
-                  className="upgrade-notice upgrade-notice-ready"
-                  role="status"
-                  data-testid="upgrade-cpa-import-ready"
-                >
-                  <FullWebIcon name="check" size={24} />
-                  <div>
-                    <h3>{t('cpaImportReadyTitle', language)}</h3>
-                    <p>
-                      {t('cpaImportReadyHelp', language)} <code>upgrade cpa-import</code>
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {showPreservedRouting && record?.routing && (
-            <div className="upgrade-notice" data-testid="upgrade-preserved-routing">
-              <FullWebIcon name="shield" size={24} />
-              <div>
-                <h3>{t('routingPreservedTitle', language)}</h3>
-                <p>{t('routingPreservedHelp', language)}</p>
-                <dl className="upgrade-facts">
-                  <div>
-                    <dt>{t('routingControlLabel', language)}</dt>
-                    <dd data-testid="upgrade-preserved-control">
-                      <code>{record.routing.controlBasePath}</code>
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>
-                      {record.targetMode === 'external'
-                        ? t('routingExternalInferenceLabel', language)
-                        : t('routingInferenceLabel', language)}
-                    </dt>
-                    <dd data-testid="upgrade-preserved-inference">
-                      <code>
-                        {record.targetMode === 'external'
-                          ? effectiveExternalBaseUrl || t('preflightUnknown', language)
-                          : record.routing.inferenceBasePath}
-                      </code>
-                    </dd>
-                  </div>
-                  {record.targetMode === 'managed' && (
-                    <div>
-                      <dt>{t('routingSharedToggle', language)}</dt>
-                      <dd data-testid="upgrade-preserved-mode">
-                        {record.routing.sharedEntry
-                          ? t('routingSharedLabel', language)
-                          : t('routingIndependentLabel', language)}
-                      </dd>
-                    </div>
-                  )}
-                </dl>
-                {record.targetMode === 'external' && externalProtocols.length > 0 && (
-                  <ul className="access-protocol-list" data-testid="upgrade-external-protocols">
-                    {externalProtocols.map((protocol) => (
-                      <li key={protocol.id || protocol.label || protocol.basePath}>
-                        <span>{protocol.label || protocol.id}</span>{' '}
-                        <code>{protocol.basePath}</code>{' '}
-                        {protocol.examplePath && <code>{protocol.examplePath}</code>}
-                      </li>
-                    ))}
-                  </ul>
+      {boot.phase === 'ready' && shownStep === 'progress' && (() => {
+        const isReadyToVerify = Boolean(record?.recorded && record.nextAction === 'verify');
+        const showCliGuide = Boolean(
+          record &&
+            (!record.recorded ||
+              record.nextAction === 'reconcile' ||
+              record.nextAction === 'cpa_import' ||
+              record.nextAction === 'external_connect')
+        );
+        const hasHardProgressAnomalies = Boolean(
+          record && (record.mismatchDays.length > 0 || Boolean(record.errorCode))
+        );
+        return (
+          <div className="upgrade-step-body" data-testid="upgrade-progress">
+            <div className="upgrade-step-head">
+              <h2>
+                {t(
+                  isReadyToVerify
+                    ? 'progressVerifyTitle'
+                    : showCliGuide
+                      ? 'progressCliTitle'
+                      : 'progressTitle',
+                  language
                 )}
-              </div>
-            </div>
-          )}
-          {showRoutingEditor && (
-            <div className="info-card" data-testid="upgrade-routing-config">
-              <h3>{t('routingTitle', language)}</h3>
+              </h2>
               <p className="upgrade-step-help">
-                {isManagedTarget ? t('routingHelpManaged', language) : t('routingHelpExternal', language)}
+                {t(
+                  isReadyToVerify
+                    ? 'progressVerifySubtitle'
+                    : showCliGuide
+                      ? 'progressCliHelp'
+                      : 'progressHelp',
+                  language
+                )}
               </p>
-              <div className="form-group">
-                <div className="form-label">
-                  <label htmlFor="upgrade-control-prefix">{t('routingControlLabel', language)}</label>
-                </div>
-                <div className="input-wrap">
-                  <input
-                    id="upgrade-control-prefix"
-                    className="form-input"
-                    data-testid="upgrade-control-prefix-input"
-                    value={controlPrefix}
-                    onChange={(event) => {
-                      setControlPrefix(event.target.value);
-                      setRoutingDirty(true);
-                      setRoutingSaved(false);
-                      setRoutingError('');
-                    }}
-                    disabled={routingSaving || verification.phase === 'running'}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    data-testid="upgrade-randomize-control-prefix"
-                    disabled={routingSaving || verification.phase === 'running'}
-                    onClick={() => {
-                      const avoid =
-                        isManagedTarget && !effectiveShared && inferencePrefix
-                          ? [inferencePrefix]
-                          : [];
-                      setControlPrefix(generateRandomAccessPrefix(avoid));
-                      setRoutingDirty(true);
-                      setRoutingSaved(false);
-                      setRoutingError('');
-                    }}
-                  >
-                    {t('routingRandomize', language)}
-                  </button>
-                </div>
-                <p className="upgrade-step-help">{t('routingControlHelp', language)}</p>
-              </div>
-              {isManagedTarget ? (
+            </div>
+            {!record && (
+              <p className="upgrade-step-status" role="status" data-testid="upgrade-progress-reading">
+                <FullWebIcon name="refresh" size={18} />
+                {t('progressReading', language)}
+              </p>
+            )}
+            {record && !record.recorded && (
+              <p
+                className={showCliGuide ? 'upgrade-sr-only' : 'upgrade-step-status'}
+                role="status"
+                data-testid="upgrade-progress-unrecorded"
+              >
+                <FullWebIcon name="clock" size={18} />
+                {t('progressUnrecorded', language)}
+              </p>
+            )}
+            {record?.recorded && (
+              !hasHardProgressAnomalies && (isReadyToVerify || showCliGuide) ? (
                 <>
-                  <label className="upgrade-ack" htmlFor="upgrade-shared-prefix">
-                    <input
-                      id="upgrade-shared-prefix"
-                      type="checkbox"
-                      data-testid="upgrade-shared-prefix-checkbox"
-                      checked={sharedPrefix}
-                      disabled={routingSaving || verification.phase === 'running'}
-                      onChange={(event) => {
-                        const nextShared = event.target.checked;
-                        setSharedPrefix(nextShared);
-                        if (!nextShared && (!isCanonicalPrefix(inferencePrefix) || isSameOrNestedPrefix(inferencePrefix, controlPrefix))) {
-                          setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
-                        }
-                        setRoutingDirty(true);
-                        setRoutingSaved(false);
-                        setRoutingError('');
-                      }}
-                    />
-                    <span>
-                      <strong>{t('routingSharedToggle', language)}</strong>
-                      <br />
-                      {t('routingSharedHelp', language)}
-                    </span>
-                  </label>
-                  <div className="form-group">
-                    <div className="form-label">
-                      <label htmlFor="upgrade-inference-prefix">{t('routingInferenceLabel', language)}</label>
+                  <details className="upgrade-summary-disclosure">
+                    <summary>
+                      <span className="upgrade-summary-main">
+                        <FullWebIcon name="check" size={15} />
+                        <span>
+                          {t(
+                            record.manualItems.length > 0
+                              ? 'migrationReadyWithManual'
+                              : 'migrationReadySummary',
+                            language
+                          ).replace('{count}', String(record.domainsDone.length))}
+                        </span>
+                      </span>
+                      <span className="upgrade-summary-toggle">
+                        {t('migrationDetailsToggle', language)}
+                      </span>
+                    </summary>
+                    <div className="upgrade-summary-body">
+                      <StageLine status={record} language={language} testid="upgrade-progress-stage" />
+                      {record.domainsDone.length === 0 ? (
+                        <p className="upgrade-step-help" data-testid="upgrade-progress-domains">
+                          {t('progressDomainsNone', language)}
+                        </p>
+                      ) : (
+                        <ul className="upgrade-domains" data-testid="upgrade-progress-domains">
+                          {record.domainsDone.map((domain) => (
+                            <li key={domain}>
+                              <FullWebIcon name="check" size={13} />
+                              <span>{domainText(domain, language)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <Reconciliation status={record} language={language} />
+                      {record.manualItems.length === 0 && (
+                        <ManualItems status={record} language={language} />
+                      )}
                     </div>
-                    <div className="input-wrap">
-                      <input
-                        id="upgrade-inference-prefix"
-                        className="form-input"
-                        data-testid="upgrade-inference-prefix-input"
-                        value={effectiveShared ? controlPrefix : inferencePrefix}
-                        onChange={(event) => {
-                          setInferencePrefix(event.target.value);
-                          setRoutingDirty(true);
-                          setRoutingSaved(false);
-                          setRoutingError('');
-                        }}
-                        disabled={effectiveShared || routingSaving || verification.phase === 'running'}
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        data-testid="upgrade-randomize-inference-prefix"
-                        disabled={effectiveShared || routingSaving || verification.phase === 'running'}
-                        onClick={() => {
-                          setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
-                          setRoutingDirty(true);
-                          setRoutingSaved(false);
-                          setRoutingError('');
-                        }}
-                      >
-                        {t('routingRandomize', language)}
-                      </button>
-                    </div>
-                    <p className="upgrade-step-help">{t('routingInferenceHelp', language)}</p>
-                  </div>
+                  </details>
+                  {record.manualItems.length > 0 && (
+                    <ManualItems status={record} language={language} collapsible />
+                  )}
                 </>
               ) : (
-                <div data-testid="upgrade-external-inference-info">
-                  <dl className="upgrade-facts">
+                <>
+                  <StageLine status={record} language={language} testid="upgrade-progress-stage" />
+                  {record.domainsDone.length === 0 ? (
+                    <p className="upgrade-step-help" data-testid="upgrade-progress-domains">
+                      {t('progressDomainsNone', language)}
+                    </p>
+                  ) : (
+                    <ul className="upgrade-domains" data-testid="upgrade-progress-domains">
+                      {record.domainsDone.map((domain) => (
+                        <li key={domain}>
+                          <FullWebIcon name="check" size={13} />
+                          <span>{domainText(domain, language)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <Reconciliation status={record} language={language} />
+                  <ManualItems status={record} language={language} />
+                  {record.errorCode && (
+                    <div
+                      className="upgrade-notice"
+                      role="status"
+                      data-testid="upgrade-progress-reason"
+                    >
+                      <FullWebIcon name="info" size={20} />
+                      <div>
+                        <h3>{t('verifyReasonLabel', language)}</h3>
+                        <p>{record.errorDetail}</p>
+                        <code>{record.errorCode}</code>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )
+            )}
+            {showArtifactStep && artifact && guideMode === 'managed' && (
+              <div className="upgrade-artifact" data-testid="upgrade-cpa-import-artifact">
+                <div className={artifactReady ? 'upgrade-sr-only' : 'upgrade-artifact-card'}>
+                  <div className="upgrade-artifact-head">
+                    <span className="upgrade-artifact-badge">
+                      {t('slimEngineStepBadge', language)}
+                    </span>
+                    <h3>{t('slimEngineTitle', language)}</h3>
+                    <p className="upgrade-step-help">{t('slimEngineHelp', language)}</p>
+                  </div>
+                  <FreshArtifactStep
+                    hideHeader
+                    transport={artifact}
+                    onReady={() => setArtifactReady(true)}
+                  />
+                </div>
+                {artifactReady && (
+                  <div
+                    className="upgrade-ready-strip"
+                    role="status"
+                    data-testid="upgrade-cpa-import-ready"
+                  >
+                    <FullWebIcon name="check" size={18} />
+                    <div className="upgrade-ready-strip-text">
+                      <h3>{t('cpaImportReadyTitle', language)}</h3>
+                      <p>
+                        {t('cpaImportReadyHelp', language)} <code>upgrade cpa-import</code>
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {showCliGuide && record && (
+              <HostCliGuide
+                record={record}
+                preflightReport={preflightReport}
+                language={language}
+                guideMode={guideMode}
+                onGuideModeChange={(nextMode) => {
+                  guideModeTouchedRef.current = true;
+                  setGuideMode(nextMode);
+                }}
+                waitingForEngine={Boolean(
+                  showArtifactStep && guideMode === 'managed' && !artifactReady
+                )}
+              />
+            )}
+            {showPreservedRouting && record?.routing && (
+              <div className="upgrade-notice upgrade-notice-info" data-testid="upgrade-preserved-routing">
+                <FullWebIcon name="shield" size={18} />
+                <div>
+                  <h3>{t('routingPreservedTitle', language)}</h3>
+                  <p>{t('routingPreservedHelp', language)}</p>
+                  <dl className="upgrade-facts upgrade-facts-inline">
                     <div>
-                      <dt>{t('routingExternalInferenceLabel', language)}</dt>
-                      <dd>
-                        <code>{effectiveExternalBaseUrl || t('preflightUnknown', language)}</code>
+                      <dt>{t('routingControlLabel', language)}</dt>
+                      <dd data-testid="upgrade-preserved-control">
+                        <code>{record.routing.controlBasePath}</code>
                       </dd>
                     </div>
+                    <div>
+                      <dt>
+                        {record.targetMode === 'external'
+                          ? t('routingExternalInferenceLabel', language)
+                          : t('routingInferenceLabel', language)}
+                      </dt>
+                      <dd data-testid="upgrade-preserved-inference">
+                        <code>
+                          {record.targetMode === 'external'
+                            ? effectiveExternalBaseUrl || t('preflightUnknown', language)
+                            : record.routing.inferenceBasePath}
+                        </code>
+                      </dd>
+                    </div>
+                    {record.targetMode === 'managed' && (
+                      <div>
+                        <dt>{t('routingSharedToggle', language)}</dt>
+                        <dd data-testid="upgrade-preserved-mode">
+                          {record.routing.sharedEntry
+                            ? t('routingSharedLabel', language)
+                            : t('routingIndependentLabel', language)}
+                        </dd>
+                      </div>
+                    )}
                   </dl>
-                  <p className="upgrade-step-help">{t('routingExternalInferenceHelp', language)}</p>
-                  {externalProtocols.length > 0 && (
-                    <ul className="access-protocol-list" data-testid="upgrade-external-protocols">
+                  {record.targetMode === 'external' && externalProtocols.length > 0 && (
+                    <ul className="upgrade-sr-only" data-testid="upgrade-external-protocols">
                       {externalProtocols.map((protocol) => (
                         <li key={protocol.id || protocol.label || protocol.basePath}>
                           <span>{protocol.label || protocol.id}</span>{' '}
@@ -1526,261 +1610,550 @@ export function FreshUpgradeFlow({
                     </ul>
                   )}
                 </div>
-              )}
-              <div className="upgrade-notice" data-testid="upgrade-prefix-url-preview">
-                <div>
-                  <h3>{t('routingPreviewTitle', language)}</h3>
-                  <dl className="upgrade-facts">
-                    <div>
-                      <dt>{t('routingPreviewConsole', language)}</dt>
-                      <dd data-testid="upgrade-preview-console">
+              </div>
+            )}
+            {showRoutingEditor && (
+              <div className="upgrade-routing-section" data-testid="upgrade-routing-config">
+                <div className="upgrade-url-card" data-testid="upgrade-prefix-url-preview">
+                  <div className="upgrade-url-card-head">
+                    <span>{t('routingPreviewTitle', language)}</span>
+                    <span className="badge badge-neutral">
+                      {isManagedTarget
+                        ? t('modeBadgeManaged', language)
+                        : t('modeBadgeExternal', language)}
+                    </span>
+                  </div>
+                  <div className="upgrade-url-rows">
+                    <div className="upgrade-url-row is-primary">
+                      <span className="upgrade-url-key">{t('routingPreviewConsole', language)}</span>
+                      <span className="upgrade-url-val" data-testid="upgrade-preview-console">
                         <code>{previewUrls.consoleUrl || '—'}</code>
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{t('routingPreviewApi', language)}</dt>
-                      <dd data-testid="upgrade-preview-api">
-                        <code>{previewUrls.managementApiUrl || '—'}</code>
-                      </dd>
+                        {previewUrls.consoleUrl && previewUrls.consoleUrl !== '—' && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs btn-icon-only"
+                            aria-label={t('copyAction', language)}
+                            onClick={() => copyPreviewUrl('console', previewUrls.consoleUrl)}
+                          >
+                            <FullWebIcon
+                              name={copiedPreviewId === 'console' ? 'check' : 'copy'}
+                              size={14}
+                            />
+                          </button>
+                        )}
+                      </span>
                     </div>
                     {isManagedTarget ? (
-                      <div>
-                        <dt>{t('routingPreviewInference', language)}</dt>
-                        <dd data-testid="upgrade-preview-inference">
+                      <div className="upgrade-url-row">
+                        <span className="upgrade-url-key">{t('routingPreviewInference', language)}</span>
+                        <span className="upgrade-url-val" data-testid="upgrade-preview-inference">
                           <code>{previewUrls.inferenceUrl || '—'}</code>
-                        </dd>
+                          {previewUrls.inferenceUrl && previewUrls.inferenceUrl !== '—' && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs btn-icon-only"
+                              aria-label={t('copyAction', language)}
+                              onClick={() => copyPreviewUrl('inference', previewUrls.inferenceUrl)}
+                            >
+                              <FullWebIcon
+                                name={copiedPreviewId === 'inference' ? 'check' : 'copy'}
+                                size={14}
+                              />
+                            </button>
+                          )}
+                        </span>
                       </div>
                     ) : (
-                      <div>
-                        <dt>{t('routingPreviewExternal', language)}</dt>
-                        <dd data-testid="upgrade-preview-external">
+                      <div className="upgrade-url-row">
+                        <span className="upgrade-url-key">{t('routingPreviewExternal', language)}</span>
+                        <span className="upgrade-url-val" data-testid="upgrade-preview-external">
                           <code>{previewUrls.externalUrl || '—'}</code>
-                        </dd>
+                          {previewUrls.externalUrl && previewUrls.externalUrl !== '—' && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs btn-icon-only"
+                              aria-label={t('copyAction', language)}
+                              onClick={() => copyPreviewUrl('external', previewUrls.externalUrl)}
+                            >
+                              <FullWebIcon
+                                name={copiedPreviewId === 'external' ? 'check' : 'copy'}
+                                size={14}
+                              />
+                            </button>
+                          )}
+                        </span>
                       </div>
                     )}
-                  </dl>
-                </div>
-              </div>
-              {routingError && (
-                <div className="upgrade-notice" role="alert" data-testid="upgrade-routing-error">
-                  <FullWebIcon name="alert" size={24} />
-                  <div>
-                    <p>{routingError}</p>
                   </div>
                 </div>
-              )}
-              {routingSaved && (
-                <p className="upgrade-step-help" data-testid="upgrade-routing-saved">
-                  {t('routingSavedNotice', language)}
-                </p>
-              )}
-              {saveRouting && (
-                <div className="upgrade-actions">
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    data-testid="upgrade-save-routing"
-                    disabled={routingSaving || verification.phase === 'running'}
-                    onClick={saveUpgradeRouting}
+
+                <details
+                  className="upgrade-routing-drawer"
+                  open={routingDrawerOpen || Boolean(routingError)}
+                >
+                  <summary
+                    onClick={(event) => {
+                      event.preventDefault();
+                      setRoutingDrawerOpen((prev) => !prev);
+                    }}
                   >
-                    {routingSaving ? t('routingSaving', language) : t('routingSave', language)}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-          {record?.recorded && record.nextAction === 'verify' && verify && (
-            <div className="upgrade-notice" data-testid="upgrade-verify-offer">
-              <FullWebIcon name="shield" size={24} />
-              <div>
-                <h3>{t('verifyTitle', language)}</h3>
-                <p>{t('verifyHelp', language)}</p>
-                <p>{t('verifySourceRequired', language)}</p>
-              </div>
-            </div>
-          )}
-          {verification.phase === 'running' && (
-            <p className="upgrade-step-status" role="status" data-testid="upgrade-verify-running">
-              <FullWebIcon name="refresh" size={18} />
-              {t('verifyRunning', language)}
-            </p>
-          )}
-          {verification.phase === 'done' && (
-            <div
-              className="upgrade-notice upgrade-notice-ready"
-              role="status"
-              data-testid="upgrade-verify-done"
-            >
-              <FullWebIcon name="check" size={24} />
-              <div>
-                <h3>{t('verifyDoneTitle', language)}</h3>
-                <p data-testid="upgrade-verify-outcome">{t('verifyComplete', language)}</p>
-                {verification.value.alreadyVerified && (
-                  <p data-testid="upgrade-verify-already">{t('verifyAlready', language)}</p>
+                    <span className="upgrade-drawer-title">
+                      <FullWebIcon
+                        name="chevronRight"
+                        size={15}
+                        className="upgrade-drawer-chevron"
+                      />
+                      {t('routingCustomizeToggle', language)}
+                    </span>
+                    <code className="upgrade-drawer-meta">
+                      {isManagedTarget
+                        ? `${controlPrefix || '—'} · ${effectiveInference || '—'}`
+                        : controlPrefix || '—'}
+                    </code>
+                  </summary>
+                  <div className="upgrade-routing-drawer-body">
+                    <div className="upgrade-prefix-group">
+                      <label htmlFor="upgrade-control-prefix">{t('routingControlLabel', language)}</label>
+                      <div className="upgrade-prefix-row">
+                        <input
+                          id="upgrade-control-prefix"
+                          className="form-input form-input-mono"
+                          data-testid="upgrade-control-prefix-input"
+                          value={controlPrefix}
+                          onChange={(event) => {
+                            setControlPrefix(event.target.value);
+                            setRoutingDirty(true);
+                            setRoutingSaved(false);
+                            setRoutingError('');
+                          }}
+                          disabled={routingSaving || verification.phase === 'running'}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          data-testid="upgrade-randomize-control-prefix"
+                          disabled={routingSaving || verification.phase === 'running'}
+                          onClick={() => {
+                            const avoid =
+                              isManagedTarget && !effectiveShared && inferencePrefix
+                                ? [inferencePrefix]
+                                : [];
+                            setControlPrefix(generateRandomAccessPrefix(avoid));
+                            setRoutingDirty(true);
+                            setRoutingSaved(false);
+                            setRoutingError('');
+                          }}
+                        >
+                          <FullWebIcon name="refresh" size={14} />
+                          {t('routingRandomize', language)}
+                        </button>
+                      </div>
+                    </div>
+                    {isManagedTarget ? (
+                      <>
+                        <div className="upgrade-prefix-group">
+                          <label htmlFor="upgrade-inference-prefix">
+                            {t('routingInferenceLabel', language)}
+                          </label>
+                          <div className="upgrade-prefix-row">
+                            <input
+                              id="upgrade-inference-prefix"
+                              className="form-input form-input-mono"
+                              data-testid="upgrade-inference-prefix-input"
+                              value={effectiveShared ? controlPrefix : inferencePrefix}
+                              onChange={(event) => {
+                                setInferencePrefix(event.target.value);
+                                setRoutingDirty(true);
+                                setRoutingSaved(false);
+                                setRoutingError('');
+                              }}
+                              disabled={
+                                effectiveShared || routingSaving || verification.phase === 'running'
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              data-testid="upgrade-randomize-inference-prefix"
+                              disabled={
+                                effectiveShared || routingSaving || verification.phase === 'running'
+                              }
+                              onClick={() => {
+                                setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                                setRoutingDirty(true);
+                                setRoutingSaved(false);
+                                setRoutingError('');
+                              }}
+                            >
+                              <FullWebIcon name="refresh" size={14} />
+                              {t('routingRandomize', language)}
+                            </button>
+                          </div>
+                        </div>
+                        <label className="upgrade-ack" htmlFor="upgrade-shared-prefix">
+                          <span className="journey-checkbox-control">
+                            <input
+                              id="upgrade-shared-prefix"
+                              type="checkbox"
+                              data-testid="upgrade-shared-prefix-checkbox"
+                              checked={sharedPrefix}
+                              disabled={routingSaving || verification.phase === 'running'}
+                              onChange={(event) => {
+                                const nextShared = event.target.checked;
+                                setSharedPrefix(nextShared);
+                                if (
+                                  !nextShared &&
+                                  (!isCanonicalPrefix(inferencePrefix) ||
+                                    isSameOrNestedPrefix(inferencePrefix, controlPrefix))
+                                ) {
+                                  setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                                }
+                                setRoutingDirty(true);
+                                setRoutingSaved(false);
+                                setRoutingError('');
+                              }}
+                            />
+                            <span className="journey-checkbox-box" aria-hidden="true">
+                              <FullWebIcon name="check" size={13} />
+                            </span>
+                          </span>
+                          <span>{t('routingSharedToggle', language)}</span>
+                        </label>
+                      </>
+                    ) : (
+                      externalProtocols.length > 0 && (
+                        <div className="upgrade-sr-only" data-testid="upgrade-external-inference-info">
+                          <ul data-testid="upgrade-external-protocols">
+                            {externalProtocols.map((protocol) => (
+                              <li key={protocol.id || protocol.label || protocol.basePath}>
+                                <span>{protocol.label || protocol.id}</span>{' '}
+                                <code>{protocol.basePath}</code>{' '}
+                                {protocol.examplePath && <code>{protocol.examplePath}</code>}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )
+                    )}
+                    <div className="upgrade-drawer-foot">
+                      {routingSaved ? (
+                        <span className="upgrade-saved-hint" data-testid="upgrade-routing-saved">
+                          <FullWebIcon name="check" size={14} /> {t('routingSavedNotice', language)}
+                        </span>
+                      ) : !isManagedTarget ? (
+                        <span className="upgrade-drawer-note">
+                          {t('routingExternalInferenceHelp', language)}
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      {saveRouting && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          data-testid="upgrade-save-routing"
+                          disabled={routingSaving || verification.phase === 'running'}
+                          onClick={saveUpgradeRouting}
+                        >
+                          {routingSaving ? t('routingSaving', language) : t('routingSave', language)}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </details>
+
+                {routingError && (
+                  <div className="upgrade-notice" role="alert" data-testid="upgrade-routing-error">
+                    <FullWebIcon name="alert" size={20} />
+                    <div>
+                      <p>{routingError}</p>
+                    </div>
+                  </div>
                 )}
-                {verification.value.targetMode && (
-                  <p data-testid="upgrade-verify-target">
-                    {verification.value.targetMode === 'external'
-                      ? t('verifyTargetExternal', language)
-                      : t('verifyTargetManaged', language)}
-                  </p>
-                )}
               </div>
-            </div>
-          )}
-          {verification.phase === 'failed' && (
-            <div className="upgrade-notice" role="alert" data-testid="upgrade-verify-failed">
-              <FullWebIcon name="alert" size={24} />
-              <div>
-                <h3>{t('verifyFailedTitle', language)}</h3>
-                <p>{errorText(verification.error, language)}</p>
-                {verification.error.code && <code>{verification.error.code}</code>}
-              </div>
-            </div>
-          )}
-          {record?.recorded && record.nextAction === 'verify' && verify && (
-            <div className="upgrade-actions">
-              <button
-                className="btn btn-primary"
-                data-testid="upgrade-verify-action"
-                disabled={routingSaving || verification.phase === 'running'}
-                onClick={runVerification}
+            )}
+            {verification.phase === 'running' && (
+              <p className="upgrade-step-status" role="status" data-testid="upgrade-verify-running">
+                <FullWebIcon name="refresh" size={18} />
+                {t('verifyRunning', language)}
+              </p>
+            )}
+            {verification.phase === 'done' && (
+              <div
+                className="upgrade-notice upgrade-notice-ready"
+                role="status"
+                data-testid="upgrade-verify-done"
               >
-                <FullWebIcon name="shield" size={18} />{' '}
-                {verification.phase === 'done'
-                  ? t('verifyRetry', language)
-                  : t('verifyAction', language)}
-              </button>
-            </div>
-          )}
-          {record && status.phase !== 'stalled' && (
-            <p className="upgrade-step-help" data-testid="upgrade-progress-waiting">
-              {t('progressWaiting', language)}
-            </p>
-          )}
-          {status.phase === 'stalled' && (
-            <div className="upgrade-notice" role="alert" data-testid="upgrade-progress-stalled">
-              <FullWebIcon name="alert" size={24} />
-              <div>
-                <h3>{t('progressStalledTitle', language)}</h3>
-                <p>{t('progressStalledHelp', language)}</p>
-                <p>{errorText(status.error, language)}</p>
-                {status.error?.code && <code>{status.error.code}</code>}
+                <FullWebIcon name="check" size={20} />
+                <div>
+                  <h3>{t('verifyDoneTitle', language)}</h3>
+                  <p data-testid="upgrade-verify-outcome">{t('verifyComplete', language)}</p>
+                  {verification.value.alreadyVerified && (
+                    <p data-testid="upgrade-verify-already">{t('verifyAlready', language)}</p>
+                  )}
+                  {verification.value.targetMode && (
+                    <p data-testid="upgrade-verify-target">
+                      {verification.value.targetMode === 'external'
+                        ? t('verifyTargetExternal', language)
+                        : t('verifyTargetManaged', language)}
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-          {status.phase === 'stalled' && (
+            )}
+            {verification.phase === 'failed' && (
+              <div className="upgrade-notice" role="alert" data-testid="upgrade-verify-failed">
+                <FullWebIcon name="alert" size={20} />
+                <div>
+                  <h3>{t('verifyFailedTitle', language)}</h3>
+                  <p>{errorText(verification.error, language)}</p>
+                  {verification.error.code && <code>{verification.error.code}</code>}
+                </div>
+              </div>
+            )}
+            {isReadyToVerify && verify && (
+              <div className="upgrade-verify-footer">
+                <p className="upgrade-verify-hint" data-testid="upgrade-verify-offer">
+                  <FullWebIcon name="info" size={15} />
+                  <span>{t('verifyInlineHint', language)}</span>
+                </p>
+                <button
+                  className="btn btn-primary"
+                  data-testid="upgrade-verify-action"
+                  disabled={routingSaving || verification.phase === 'running'}
+                  onClick={runVerification}
+                >
+                  {verification.phase === 'done'
+                    ? t('verifyRetry', language)
+                    : t('verifyAction', language)}
+                  <FullWebIcon name="arrowRight" size={16} />
+                </button>
+              </div>
+            )}
+            {record && status.phase !== 'stalled' && (
+              isReadyToVerify ? (
+                <p className="upgrade-sr-only" data-testid="upgrade-progress-waiting">
+                  {t('progressWaiting', language)}
+                </p>
+              ) : (
+                <div className="upgrade-poll-footer">
+                  <p className="upgrade-poll-caption" data-testid="upgrade-progress-waiting">
+                    <FullWebIcon name="clock" size={14} />
+                    <span>{t('progressWaiting', language)}</span>
+                  </p>
+                  <div className="upgrade-actions">
+                    {!record.recorded && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        data-testid="upgrade-progress-back"
+                        onClick={() => setStep('confirm')}
+                      >
+                        <FullWebIcon name="arrowLeft" size={16} /> {t('back', language)}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      data-testid="upgrade-progress-refresh"
+                      onClick={reread}
+                    >
+                      <FullWebIcon name="refresh" size={16} /> {t('progressRefreshNow', language)}
+                    </button>
+                  </div>
+                </div>
+              )
+            )}
+            {status.phase === 'stalled' && (
+              <div className="upgrade-notice" role="alert" data-testid="upgrade-progress-stalled">
+                <FullWebIcon name="alert" size={20} />
+                <div>
+                  <h3>{t('progressStalledTitle', language)}</h3>
+                  <p>{t('progressStalledHelp', language)}</p>
+                  <p>{errorText(status.error, language)}</p>
+                  {status.error?.code && <code>{status.error.code}</code>}
+                </div>
+              </div>
+            )}
+            {status.phase === 'stalled' && (
+              <div className="upgrade-actions">
+                <button
+                  className="btn btn-primary"
+                  data-testid="upgrade-progress-retry"
+                  onClick={reread}
+                >
+                  <FullWebIcon name="refresh" size={16} /> {t('progressRetry', language)}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {boot.phase === 'ready' && shownStep === 'result' && (() => {
+        const isCleanComplete = Boolean(record?.stage === 'complete' && record.stageKnown);
+        const hasResultAnomalies = Boolean(
+          record && (record.mismatchDays.length > 0 || record.manualItems.length > 0)
+        );
+        const sourceSummary = record
+          ? [formatSourceKind(record.sourceKind, language), record.sourceVersion]
+              .filter(Boolean)
+              .join(' · ')
+          : '';
+        return (
+          <div className="upgrade-step-body" data-testid="upgrade-result">
+            <ResultHeadline status={record} language={language} />
+            <p className="upgrade-step-help">
+              {isCleanComplete && !hasResultAnomalies
+                ? t('resultCompleteSummary', language).replace(
+                    '{source}',
+                    sourceSummary || t('sourceKindLegacyManager', language)
+                  )
+                : record?.stage === 'complete'
+                  ? t('resultCompleteHelp', language)
+                  : t('resultIncompleteHelp', language)}
+            </p>
+            {record && (
+              <>
+                {record.stage === 'rolled_back' && (
+                  <div className="upgrade-notice" role="alert" data-testid="upgrade-result-rollback">
+                    <FullWebIcon name="alert" size={20} />
+                    <div>
+                      <h3>{t('resultRolledBackTitle', language)}</h3>
+                      <p>
+                        {t('resultRollbackReason', language)}:{' '}
+                        {record.errorDetail || t('resultRollbackReasonUnknown', language)}
+                      </p>
+                      {record.errorDetail && record.errorCode && <code>{record.errorCode}</code>}
+                      <p>{t('resultRollbackRestart', language)}</p>
+                    </div>
+                  </div>
+                )}
+                {record.stage === 'failed' && (
+                  <div className="upgrade-notice" role="alert" data-testid="upgrade-result-failed">
+                    <FullWebIcon name="alert" size={20} />
+                    <div>
+                      <h3>{t('resultFailedTitle', language)}</h3>
+                      <p>{t('resultFailedHelp', language)}</p>
+                      {record.errorDetail && <p>{record.errorDetail}</p>}
+                      {record.errorCode && <code>{record.errorCode}</code>}
+                    </div>
+                  </div>
+                )}
+                {!record.stageKnown && (
+                  <div className="upgrade-notice" data-testid="upgrade-result-unreadable">
+                    <FullWebIcon name="info" size={20} />
+                    <div>
+                      <h3>{t('resultUnreadableTitle', language)}</h3>
+                      <p>{t('resultUnreadableHelp', language)}</p>
+                    </div>
+                  </div>
+                )}
+                {isCleanComplete ? (
+                  <>
+                    {hasResultAnomalies && (
+                      <>
+                        {record.mismatchDays.length > 0 && (
+                          <Reconciliation status={record} language={language} />
+                        )}
+                        {record.manualItems.length > 0 && (
+                          <ManualItems status={record} language={language} collapsible />
+                        )}
+                      </>
+                    )}
+                    <details className="upgrade-summary-disclosure is-neutral">
+                      <summary>
+                        <span className="upgrade-summary-main">
+                          <span>{t('resultAuditToggle', language)}</span>
+                        </span>
+                        <span className="upgrade-summary-toggle">
+                          {sourceSummary || t('migrationDetailsToggle', language)}
+                        </span>
+                      </summary>
+                      <div className="upgrade-summary-body">
+                        <StageLine status={record} language={language} testid="upgrade-result-stage" />
+                        {(record.sourceKind || record.sourceVersion) && (
+                          <dl className="upgrade-facts upgrade-facts-inline">
+                            <div>
+                              <dt>{t('resultSource', language)}</dt>
+                              <dd data-testid="upgrade-result-source">{sourceSummary}</dd>
+                            </div>
+                          </dl>
+                        )}
+                        {record.mismatchDays.length === 0 && (
+                          <Reconciliation status={record} language={language} />
+                        )}
+                        {record.manualItems.length === 0 && (
+                          <ManualItems status={record} language={language} />
+                        )}
+                        {nextActionText(record.nextAction, language) && (
+                          <p className="upgrade-sr-only" data-testid="upgrade-result-next">
+                            {t('resultNext', language)}: {nextActionText(record.nextAction, language)}
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  </>
+                ) : (
+                  <>
+                    <StageLine status={record} language={language} testid="upgrade-result-stage" />
+                    {(record.sourceKind || record.sourceVersion) && (
+                      <dl className="upgrade-facts upgrade-facts-inline">
+                        <div>
+                          <dt>{t('resultSource', language)}</dt>
+                          <dd data-testid="upgrade-result-source">{sourceSummary}</dd>
+                        </div>
+                      </dl>
+                    )}
+                    <Reconciliation status={record} language={language} />
+                    <ManualItems status={record} language={language} />
+                    {nextActionText(record.nextAction, language) && (
+                      <p className="upgrade-step-help" data-testid="upgrade-result-next">
+                        {t('resultNext', language)}: {nextActionText(record.nextAction, language)}
+                      </p>
+                    )}
+                  </>
+                )}
+                {isCleanComplete && resultAccessInfo && (
+                  <div className="upgrade-result-access-wrap" data-testid="upgrade-result-access">
+                    {resultAccessInfo.ready ? (
+                      <p className="upgrade-sr-only" data-testid="upgrade-access-active">
+                        {t('resultAccessActive', language)}
+                      </p>
+                    ) : (
+                      (resultAccessInfo.code === 'upgrade_restart_required' ||
+                        !resultAccessInfo.code) && (
+                        <p className="upgrade-sr-only" data-testid="upgrade-access-pending-restart">
+                          {t('resultAccessPendingRestart', language)}
+                        </p>
+                      )
+                    )}
+                    <AccessInfoSummary
+                      client={FAIL_CLOSED_ACCESS_CLIENT}
+                      auth={{ kind: 'admin', value: '' }}
+                      info={resultAccessInfo}
+                      defaultProtocolsCollapsed
+                      pendingRestart={
+                        !resultAccessInfo.ready &&
+                        resultAccessInfo.code === 'upgrade_restart_required'
+                      }
+                    />
+                  </div>
+                )}
+              </>
+            )}
             <div className="upgrade-actions">
               <button
-                className="btn btn-primary"
-                data-testid="upgrade-progress-retry"
+                className={isCleanComplete ? 'btn btn-secondary btn-sm' : 'btn btn-primary'}
+                data-testid="upgrade-result-reread"
                 onClick={reread}
               >
-                <FullWebIcon name="refresh" size={18} /> {t('progressRetry', language)}
+                <FullWebIcon name="refresh" size={15} /> {t('resultReread', language)}
               </button>
             </div>
-          )}
-        </div>
-      )}
-
-      {boot.phase === 'ready' && shownStep === 'result' && (
-        <div className="upgrade-step-body" data-testid="upgrade-result">
-          <ResultHeadline status={record} language={language} />
-          <p className="upgrade-step-help">
-            {record
-              ? record.stage === 'complete'
-                ? t('resultCompleteHelp', language)
-                : t('resultIncompleteHelp', language)
-              : t('resultIncompleteHelp', language)}
-          </p>
-          {record && (
-            <>
-              <StageLine status={record} language={language} testid="upgrade-result-stage" />
-              {record.stage === 'rolled_back' && (
-                <div className="upgrade-notice" role="alert" data-testid="upgrade-result-rollback">
-                  <FullWebIcon name="alert" size={24} />
-                  <div>
-                    <h3>{t('resultRolledBackTitle', language)}</h3>
-                    <p>
-                      {t('resultRollbackReason', language)}:{' '}
-                      {record.errorDetail || t('resultRollbackReasonUnknown', language)}
-                    </p>
-                    {record.errorDetail && record.errorCode && <code>{record.errorCode}</code>}
-                    <p>{t('resultRollbackRestart', language)}</p>
-                  </div>
-                </div>
-              )}
-              {record.stage === 'failed' && (
-                <div className="upgrade-notice" role="alert" data-testid="upgrade-result-failed">
-                  <FullWebIcon name="alert" size={24} />
-                  <div>
-                    <h3>{t('resultFailedTitle', language)}</h3>
-                    <p>{t('resultFailedHelp', language)}</p>
-                    {record.errorDetail && <p>{record.errorDetail}</p>}
-                    {record.errorCode && <code>{record.errorCode}</code>}
-                  </div>
-                </div>
-              )}
-              {!record.stageKnown && (
-                <div className="upgrade-notice" data-testid="upgrade-result-unreadable">
-                  <FullWebIcon name="info" size={24} />
-                  <div>
-                    <h3>{t('resultUnreadableTitle', language)}</h3>
-                    <p>{t('resultUnreadableHelp', language)}</p>
-                  </div>
-                </div>
-              )}
-              {(record.sourceKind || record.sourceVersion) && (
-                <dl className="upgrade-facts">
-                  <div>
-                    <dt>{t('resultSource', language)}</dt>
-                    <dd data-testid="upgrade-result-source">
-                      {[record.sourceKind, record.sourceVersion].filter(Boolean).join(' · ')}
-                    </dd>
-                  </div>
-                </dl>
-              )}
-              <Reconciliation status={record} language={language} />
-              <ManualItems status={record} language={language} />
-              {nextActionText(record.nextAction, language) && (
-                <p className="upgrade-step-help" data-testid="upgrade-result-next">
-                  {t('resultNext', language)}: {nextActionText(record.nextAction, language)}
-                </p>
-              )}
-              {record.stage === 'complete' && record.stageKnown && resultAccessInfo && (
-                <div data-testid="upgrade-result-access">
-                  <h3>{t('resultAccessTitle', language)}</h3>
-                  {resultAccessInfo.ready ? (
-                    <p className="alert alert-info" data-testid="upgrade-access-active">
-                      {t('resultAccessActive', language)}
-                    </p>
-                  ) : (
-                    (resultAccessInfo.code === 'upgrade_restart_required' || !resultAccessInfo.code) && (
-                      <p className="alert alert-warn" data-testid="upgrade-access-pending-restart">
-                        {t('resultAccessPendingRestart', language)}
-                      </p>
-                    )
-                  )}
-                  <AccessInfoSummary
-                    client={FAIL_CLOSED_ACCESS_CLIENT}
-                    auth={{ kind: 'admin', value: '' }}
-                    info={resultAccessInfo}
-                    pendingRestart={
-                      !resultAccessInfo.ready &&
-                      resultAccessInfo.code === 'upgrade_restart_required'
-                    }
-                  />
-                </div>
-              )}
-            </>
-          )}
-          <div className="upgrade-actions">
-            <button className="btn btn-primary" data-testid="upgrade-result-reread" onClick={reread}>
-              <FullWebIcon name="refresh" size={18} /> {t('resultReread', language)}
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </section>
   );
 }
@@ -1790,9 +2163,21 @@ export function FreshUpgradeFlow({
 function ResultHeadline({ status, language }: { status?: UpgradeStatus; language: string }) {
   if (status?.stage === 'complete' && status.stageKnown) {
     return (
-      <h2 className="upgrade-result-headline is-complete" data-testid="upgrade-result-complete">
-        {t('resultCompleteTitle', language)}
-      </h2>
+      <div className="upgrade-result-hero">
+        <span className="upgrade-complete-badge" aria-hidden="true">
+          <FullWebIcon name="check" size={20} />
+        </span>
+        <h2 className="upgrade-result-headline is-complete" data-testid="upgrade-result-complete">
+          {t('resultCompleteTitle', language)}
+        </h2>
+        {(status.targetMode === 'managed' || status.targetMode === 'external') && (
+          <span className="badge badge-neutral">
+            {status.targetMode === 'external'
+              ? t('modeBadgeExternal', language)
+              : t('modeBadgeManaged', language)}
+          </span>
+        )}
+      </div>
     );
   }
   return (
@@ -1812,13 +2197,14 @@ function StageLine({
   testid: string;
 }) {
   const label = stageText(status.stage, language);
+  const note = t('progressStageNote', language);
   return (
     <div className="upgrade-stage" data-testid={testid}>
       <span className="upgrade-stage-label">{t('progressStage', language)}</span>
       <span className="upgrade-stage-value">
         {label ? label : status.stage ? <code>{status.stage}</code> : t('preflightUnknown', language)}
       </span>
-      <span className="upgrade-stage-note">{t('progressStageNote', language)}</span>
+      {note && <span className="upgrade-stage-note">{note}</span>}
     </div>
   );
 }
@@ -1852,14 +2238,18 @@ function ParityGaps({ gaps, language }: { gaps: PreflightGaps; language: string 
 }
 
 function Reconciliation({ status, language }: { status: UpgradeStatus; language: string }) {
+  const isEmpty = status.mismatchDays.length === 0;
   return (
-    <div className="upgrade-reconciliation" data-testid="upgrade-reconciliation">
+    <div
+      className={`upgrade-reconciliation ${isEmpty ? 'is-empty' : ''}`.trim()}
+      data-testid="upgrade-reconciliation"
+    >
       <h3>{t('resultReconciliationTitle', language)}</h3>
-      <p className="upgrade-step-help">{t('resultReconciliationHelp', language)}</p>
-      {status.mismatchDays.length === 0 ? (
+      {isEmpty ? (
         <p data-testid="upgrade-reconciliation-none">{t('resultReconciliationNone', language)}</p>
       ) : (
         <>
+          <p className="upgrade-step-help">{t('resultReconciliationHelp', language)}</p>
           {/* The total is rendered independently of the list: a window is never
               presented as the whole history. */}
           <p className="upgrade-step-help" data-testid="upgrade-reconciliation-total">
@@ -1886,19 +2276,304 @@ function Reconciliation({ status, language }: { status: UpgradeStatus; language:
 // Manual items are recorded by the operation in its own vocabulary. They are
 // listed exactly as recorded: this page has no mapping for a value it has not
 // seen, and dropping one would hide work the operator still owes.
-function ManualItems({ status, language }: { status: UpgradeStatus; language: string }) {
+function formatManualItem(item: string, language: string) {
+  if (language.startsWith('en')) return <span>{item}</span>;
+  const match = item.match(/^(section|config|credential|key):([^:]+):\s*(.+?)\s*\(([a-z0-9_]+)\)$/i);
+  if (!match) return <span>{item}</span>;
+  const [, , targetName, , reasonCode] = match;
+  let reasonLabel = '';
+  if (reasonCode === 'not_in_import_scope') {
+    reasonLabel = t('manualReasonNotInScope', language);
+  } else if (reasonCode === 'reconfigure_after_adoption') {
+    reasonLabel = t('manualReasonReconfigure', language);
+  } else if (
+    reasonCode === 'reauthenticate_after_adoption' ||
+    reasonCode === 'runtime_only_credential'
+  ) {
+    reasonLabel = t('manualReasonReauth', language);
+  } else if (reasonCode === 'removed_upstream') {
+    reasonLabel = t('manualReasonRemoved', language);
+  }
+  if (!reasonLabel) return <span>{item}</span>;
   return (
-    <div className="upgrade-manual" data-testid="upgrade-manual-items">
+    <span>
+      <code>{targetName.trim()}</code> — {reasonLabel}
+      <span className="upgrade-sr-only"> {item}</span>
+    </span>
+  );
+}
+
+function ManualItems({
+  status,
+  language,
+  collapsible = false,
+}: {
+  status: UpgradeStatus;
+  language: string;
+  collapsible?: boolean;
+}) {
+  const isEmpty = status.manualItems.length === 0;
+  if (!isEmpty && collapsible) {
+    return (
+      <details className="upgrade-summary-disclosure is-neutral" data-testid="upgrade-manual-items">
+        <summary>
+          <span className="upgrade-summary-main">
+            <span>
+              {t('manualDisclosureSummary', language).replace(
+                '{count}',
+                String(status.manualItems.length)
+              )}
+            </span>
+          </span>
+          <span className="upgrade-summary-toggle">{t('migrationDetailsToggle', language)}</span>
+        </summary>
+        <div className="upgrade-summary-body">
+          <ul className="upgrade-list">
+            {status.manualItems.map((item) => (
+              <li key={item}>{formatManualItem(item, language)}</li>
+            ))}
+          </ul>
+        </div>
+      </details>
+    );
+  }
+  return (
+    <div
+      className={`upgrade-manual ${isEmpty ? 'is-empty' : ''}`.trim()}
+      data-testid="upgrade-manual-items"
+    >
       <h3>{t('resultManualTitle', language)}</h3>
-      {status.manualItems.length === 0 ? (
+      {isEmpty ? (
         <p data-testid="upgrade-manual-none">{t('resultManualNone', language)}</p>
       ) : (
         <ul className="upgrade-list">
           {status.manualItems.map((item) => (
-            <li key={item}>{item}</li>
+            <li key={item}>{formatManualItem(item, language)}</li>
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+function formatSourceKind(kind: string | undefined, language: string): string {
+  if (!kind) return t('preflightUnknown', language);
+  if (kind === 'legacy-manager') return t('sourceKindLegacyManager', language);
+  if (kind === 'upgraded-legacy') return t('sourceKindUpgradedLegacy', language);
+  return kind;
+}
+
+function formatHumanBytes(rawBytes: number): string {
+  if (!Number.isFinite(rawBytes) || rawBytes < 0) return String(rawBytes);
+  if (rawBytes < 1024) return `${rawBytes} B`;
+  const kb = rawBytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
+
+function summarizePreflightCheck(check: PreflightCheck, language: string): string | null {
+  if (check.status !== 'pass' && check.status !== 'pending') return null;
+  const detail = check.detail || '';
+  if (check.name === 'source_ownership' && check.status === 'pass') {
+    return t('checkSummaryOwnershipPass', language);
+  }
+  if (check.name === 'source_version') {
+    if (check.status === 'pending') {
+      const m = detail.match(/expected=([^\s;]+)/);
+      const ver = m?.[1] || 'v1.14.10';
+      return t('checkSummaryVersionPending', language).replace('{version}', ver);
+    }
+    return t('checkSummaryVersionPass', language);
+  }
+  if (check.name === 'fingerprint' && check.status === 'pass') {
+    const m = detail.match(/sourceBytes=(\d+)/);
+    if (m) {
+      return t('checkSummaryFingerprintPass', language).replace(
+        '{size}',
+        formatHumanBytes(Number(m[1]))
+      );
+    }
+    return t('checkSummaryFingerprintPlain', language);
+  }
+  if (check.name === 'disk' && check.status === 'pass') {
+    const req = detail.match(/requiredBytes=(\d+)/);
+    const avail = detail.match(/availableBytes=(\d+)/);
+    if (req && avail) {
+      return t('checkSummaryDiskPass', language)
+        .replace('{required}', formatHumanBytes(Number(req[1])))
+        .replace('{available}', formatHumanBytes(Number(avail[1])));
+    }
+    return null;
+  }
+  if (check.name === 'cpa_classification' && check.status === 'pass') {
+    if (detail.includes('kind=external')) return t('checkSummaryCpaExternal', language);
+    if (detail.includes('kind=managed_stack')) return t('checkSummaryCpaManaged', language);
+    return null;
+  }
+  if (check.name === 'parity' && check.status === 'pass') {
+    if (
+      detail.includes('deletedEventRefs=0') &&
+      detail.includes('missingProjection=0') &&
+      detail.includes('mismatchedProjection=0') &&
+      detail.includes('coverageDaysWithGaps=0')
+    ) {
+      return t('checkSummaryParityPass', language);
+    }
+    return null;
+  }
+  return null;
+}
+
+function HostCliGuide({
+  record,
+  preflightReport,
+  language,
+  guideMode,
+  onGuideModeChange,
+  waitingForEngine = false,
+}: {
+  record: UpgradeStatus;
+  preflightReport: UpgradePreflight | undefined;
+  language: string;
+  guideMode: 'managed' | 'external';
+  onGuideModeChange: (mode: 'managed' | 'external') => void;
+  waitingForEngine?: boolean;
+}) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  const sourceVer =
+    preflightReport?.expectedVersion ||
+    (record.sourceVersion && record.sourceVersion !== 'unknown'
+      ? record.sourceVersion
+      : 'v1.14.10');
+
+  const step1Done = record.recorded;
+  const step2Done = record.recorded && record.stage !== 'copy_in';
+  const currentStep = !step1Done ? 1 : !step2Done ? 2 : 3;
+  const defaultOpenStep = currentStep === 3 && waitingForEngine ? 0 : currentStep;
+  const [openStep, setOpenStep] = useState<number>(defaultOpenStep);
+
+  useEffect(() => {
+    setOpenStep(defaultOpenStep);
+  }, [defaultOpenStep]);
+  const cmd1 = `docker run --rm -u 10002:10002 --entrypoint /usr/local/bin/cpa-manager-plus \\\n  -v <1x_data_vol>:/legacy:ro -v <v2_data_vol>:/data -v <backup_vol>:/bundle \\\n  <cpamp_v2_image> upgrade run --legacy /legacy --source-version ${sourceVer} --target /data --bundle /bundle/backup-1`;
+  const cmd2 = `docker run --rm -u 10002:10002 --entrypoint /usr/local/bin/cpa-manager-plus \\\n  -v <1x_data_vol>:/legacy:ro -v <v2_data_vol>:/data -v <backup_vol>:/bundle \\\n  <cpamp_v2_image> upgrade reconcile --legacy /legacy --source-version ${sourceVer} --target /data --bundle /bundle/backup-1`;
+  const cmd3 =
+    guideMode === 'managed'
+      ? `docker exec -u 10002:10002 -e CPAMP_RUNTIME_URL=http://127.0.0.1:9081 \\\n  -e CPAMP_RUNTIME_TOKEN_FILE=/data/runtime-secret/token <v2_container> \\\n  /usr/local/bin/cpa-manager-plus upgrade cpa-import --legacy /legacy \\\n  --cpa-dir /legacy-cpa --cpa-version 8.0.55 --plugins false --target /data --destination-url http://127.0.0.1:8317`
+      : `docker exec -u 10002:10002 <v2_container> \\\n  /usr/local/bin/cpa-manager-plus upgrade external-connect \\\n  --cpa-base-url http://<external-cpa>:8317 --management-key-file /path/to/cpa.key --target /data`;
+
+  const steps = [
+    { idx: 1, title: t('cliStep1Title', language), cmd: cmd1, done: step1Done },
+    { idx: 2, title: t('cliStep2Title', language), cmd: cmd2, done: step2Done },
+    {
+      idx: 3,
+      title: t(
+        guideMode === 'managed' ? 'cliStep3ManagedTitle' : 'cliStep3ExternalTitle',
+        language
+      ),
+      cmd: cmd3,
+      done: false,
+    },
+  ];
+
+  const copyCmd = (idx: number, textToCopy: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(textToCopy);
+    }
+    setCopiedIdx(idx);
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+      window.setTimeout(() => setCopiedIdx((cur) => (cur === idx ? null : cur)), 1800);
+    }
+  };
+
+  return (
+    <div className="upgrade-cli-guide" data-testid="upgrade-host-cli-guide">
+      <div className="upgrade-cli-guide-head">
+        <span className="upgrade-cli-mode-label">{t('cliGuideTitle', language)}</span>
+        <div className="upgrade-cli-mode-tabs" role="group">
+          <button
+            type="button"
+            className={`btn btn-xs ${guideMode === 'managed' ? 'btn-primary' : 'btn-secondary'}`}
+            data-testid="upgrade-cli-tab-managed"
+            onClick={() => onGuideModeChange('managed')}
+          >
+            {t('modeBadgeManaged', language)}
+          </button>
+          <button
+            type="button"
+            className={`btn btn-xs ${guideMode === 'external' ? 'btn-primary' : 'btn-secondary'}`}
+            data-testid="upgrade-cli-tab-external"
+            onClick={() => onGuideModeChange('external')}
+          >
+            {t('modeBadgeExternal', language)}
+          </button>
+        </div>
+      </div>
+      <ol className="upgrade-cli-steps">
+        {steps.map(({ idx, title, cmd, done }) => {
+          const isBlockedByEngine = idx === 3 && waitingForEngine;
+          const isCurrent = idx === currentStep && !isBlockedByEngine;
+          const isOpen = openStep === idx;
+          return (
+            <li
+              key={idx}
+              className={`upgrade-cli-step ${done ? 'is-done' : isCurrent ? 'is-current' : ''}`.trim()}
+              data-testid={`upgrade-cli-step-${idx}`}
+            >
+              <div
+                className="upgrade-cli-step-top"
+                onClick={() => setOpenStep((prev) => (prev === idx ? 0 : idx))}
+              >
+                <span className="upgrade-cli-step-title">
+                  <FullWebIcon
+                    name="chevronRight"
+                    size={14}
+                    className={`upgrade-drawer-chevron ${isOpen ? 'is-open' : ''}`.trim()}
+                  />
+                  <strong>{title}</strong>
+                </span>
+                <div
+                  className="upgrade-cli-step-actions"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <span
+                    className={`upgrade-check-outcome ${
+                      done ? 'is-pass' : isCurrent ? 'is-pending' : ''
+                    }`.trim()}
+                  >
+                    {done
+                      ? t('cliStepDone', language)
+                      : isBlockedByEngine
+                        ? t('cliStepWaitEngine', language)
+                        : isCurrent
+                          ? t('cliStepCurrent', language)
+                          : t('cliStepPending', language)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-xs"
+                    data-testid={`upgrade-cli-copy-${idx}`}
+                    onClick={() => copyCmd(idx, cmd)}
+                  >
+                    <FullWebIcon name={copiedIdx === idx ? 'check' : 'copy'} size={13} />
+                    {t(copiedIdx === idx ? 'cliCopied' : 'cliCopy', language)}
+                  </button>
+                </div>
+              </div>
+              <details className="upgrade-cli-details" open={isOpen}>
+                <summary className="upgrade-sr-only">{title}</summary>
+                <pre className="upgrade-cli-code">
+                  <code>{cmd}</code>
+                </pre>
+              </details>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

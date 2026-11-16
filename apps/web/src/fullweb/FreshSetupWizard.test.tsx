@@ -405,7 +405,7 @@ async function setup(
 
 it('does not offer a durable prefix draft write before administrator initialization', async () => {
   await setup();
-  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'save-prefix-draft' })).toHaveLength(0);
   await click('setup-review');
   expect(byID('setup-execute').props.disabled).toBe(true);
   await input('confirm-key-saved-checkbox', true);
@@ -1320,7 +1320,7 @@ it('initializes distinct 16-char CSPRNG dual prefixes by default, randomizes loc
   expect(defaultInference).toMatch(/^\/[a-z][a-z0-9]{15}$/);
   expect(defaultInference).not.toBe('/private');
   expect(byID('shared-prefix-checkbox').props.checked).toBe(false);
-  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'save-prefix-draft' })).toHaveLength(0);
 
   // Language switch does not regenerate or wipe operator prefixes
   await switchLanguage('en');
@@ -1879,7 +1879,7 @@ it('keeps immutable server suggestions untouched before admin commit and persist
   await click('setup-next');
   expect(byID('route-target-input').props.value).toBe(suggestedControl);
   expect(byID('inference-target-input').props.value).toBe(suggestedInference);
-  expect(byID('save-prefix-draft').props.disabled).toBe(true);
+  expect(renderer.root.findAllByProps({ 'data-testid': 'save-prefix-draft' })).toHaveLength(0);
 
   // Pre-admin randomization never calls routing/draft or admin/commit and never mutates server suggestions
   await click('randomize-control-prefix');
@@ -1970,4 +1970,44 @@ it('keeps immutable server suggestions untouched before admin commit and persist
   expect(byID('inference-target-input').props.value).toBe(postAdminShared);
   expect(byID('shared-prefix-checkbox').props.checked).toBe(true);
   expect(byID('inference-target-input').props.disabled).toBe(true);
+});
+
+it('defaults advanced options collapsed, clears admin key errors on edit, orders External fields before preview, and discloses Adopt Step 2 persistence', async () => {
+  await setup();
+  expect(byID('step2-advanced-options').props.open).toBe(false);
+  await input('admin-key-input', 'weak');
+  await click('setup-review');
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(1);
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('keyNeedsPrefix'));
+  await input('admin-key-input', admin);
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+  expect(JSON.stringify(renderer.toJSON())).toContain(j('keyReadyHint'));
+  await act(async () => renderer.unmount());
+  await setup({ external: true });
+  const serializedExternal = JSON.stringify(renderer.toJSON());
+  expect(serializedExternal.indexOf('"external-base-url"')).toBeGreaterThan(-1);
+  expect(serializedExternal.indexOf('"external-base-url"')).toBeLessThan(
+    serializedExternal.indexOf('"prefix-url-preview"')
+  );
+  expect(byID('external-management-key').props.type).toBe('password');
+  const externalToggle = renderer.root
+    .findAllByType('button')
+    .filter((node) => node.children.includes(j('show')))[1];
+  await act(async () => externalToggle.props.onClick());
+  expect(byID('external-management-key').props.type).toBe('text');
+  expect(serializedExternal).toContain(j('draftHelpExternal'));
+  expect(serializedExternal).not.toContain(j('draftHelp'));
+  expect(byID('external-connection-card')).toBeTruthy();
+  await click('setup-review');
+  expect(byID('review-external-url')).toBeTruthy();
+  expect(byID('review-external-key')).toBeTruthy();
+  await input('confirm-key-saved-checkbox', true);
+  await click('setup-execute');
+  expect(byID('external-complete-next-hint')).toBeTruthy();
+  await act(async () => renderer.unmount());
+
+  await setup({ adopt: true });
+  const serializedAdopt = JSON.stringify(renderer.toJSON());
+  expect(serializedAdopt).toContain(j('draftHelpAdopt'));
+  expect(serializedAdopt).not.toContain(j('draftHelp'));
 });

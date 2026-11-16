@@ -8,7 +8,7 @@ import {
   adoptText,
 } from '../i18n/freshAdopt';
 import { shellText as s } from '../i18n/consoleShell';
-import { bootstrapPrefixCodeText } from '../i18n/bootstrapJourney';
+import { bootstrapJourneyText, bootstrapPrefixCodeText } from '../i18n/bootstrapJourney';
 import {
   BootstrapTransportError,
   type AdoptionFence,
@@ -98,10 +98,23 @@ const outcomeGroups: ReadonlyArray<{
   icon: FullWebIconName;
 }> = [
   { outcome: 'migrated', label: 'migratedGroup', icon: 'check' },
-  { outcome: 'manual', label: 'manualBadge', icon: 'info' },
+  { outcome: 'manual', label: 'manualBadge', icon: 'settings' },
   { outcome: 'failed', label: 'failedGroup', icon: 'alert' },
-  { outcome: 'absent_at_source', label: 'absentBadge', icon: 'info' },
+  { outcome: 'absent_at_source', label: 'absentBadge', icon: 'minus' },
 ];
+
+function formatAdoptItemLabel(raw: string): string {
+  const credMatch = /^Credential file #(\d+)$/.exec(raw);
+  if (credMatch) {
+    return adoptText('credentialItemTitle', { n: Number(credMatch[1]) });
+  }
+  for (const prefix of ['config:', 'section:', 'rules:']) {
+    if (raw.startsWith(prefix)) {
+      return raw.slice(prefix.length);
+    }
+  }
+  return raw;
+}
 
 function groupDecisions(list: AdoptionDecision[]) {
   const groups: Record<'migrate' | 'manual_action' | 'unsupported', AdoptionDecision[]> = {
@@ -196,6 +209,10 @@ export function FreshAdoptFlow({
   );
   const [baseUrl, setBaseUrl] = useState('');
   const [managementKey, setManagementKey] = useState('');
+  const [keyVisible, setKeyVisible] = useState(false);
+  const [inventoryCounts, setInventoryCounts] = useState<
+    Readonly<Record<string, number>> | undefined
+  >(operation.inventoryCounts);
   const [plugins, setPlugins] = useState(checkpoint?.pluginsEnabled === true);
   // The exact body of the first POST. It is kept so the second POST is byte
   // identical, which is what makes the commit the same attempt rather than a new
@@ -476,6 +493,9 @@ export function FreshAdoptFlow({
       });
       if (!alive.current) return;
       onOperation(result);
+      if (result.inventoryCounts) {
+        setInventoryCounts(result.inventoryCounts);
+      }
       setConfirmed(false);
       if (result.strategy?.stage === 'committed') {
         // The server may have committed the same attempt already; the record,
@@ -751,8 +771,10 @@ export function FreshAdoptFlow({
                 title: adoptText('partialTitle'),
                 help: adoptText('partialHelp', { manual: manualCount, failed: failedCount }),
               }
-            : settledRun
-              ? { title: adoptText('settledTitle'), help: adoptText('settledHelp') }
+            : settledRun && !needingResume && failedCount === 0
+              ? { title: adoptText('readyToCompleteTitle'), help: adoptText('completeHelp') }
+              : settledRun
+                ? { title: adoptText('settledTitle'), help: adoptText('settledHelp') }
               : { title: adoptText('migrationTitle'), help: adoptText('migrationHelp') }
         : { title: adoptText('title'), help: adoptText('help') };
 
@@ -760,13 +782,8 @@ export function FreshAdoptFlow({
     <>
       <div className="journey-body">
         <div className="journey-heading">
-          <span className="journey-tile-icon">
-            <FullWebIcon name="copy" size={30} />
-          </span>
-          <div>
-            <h1 className="wizard-title">{headline.title}</h1>
-            <p className="wizard-desc">{headline.help}</p>
-          </div>
+          <h1 className="wizard-title">{headline.title}</h1>
+          <p className="wizard-desc">{headline.help}</p>
         </div>
         {error && (
           <p role="alert" className="alert alert-warn">
@@ -789,9 +806,7 @@ export function FreshAdoptFlow({
               <p className="journey-help">{adoptText('resumeKeyNotice')}</p>
             ) : inventoryKeyForm ? (
               <p className="journey-help">{adoptText('inventoryKeyNotice')}</p>
-            ) : (
-              <p className="journey-help">{adoptText('sourceHelp')}</p>
-            )}
+            ) : null}
             <div className="journey-field">
               <label className="form-label" htmlFor="adopt-source-url">
                 {adoptText('baseURL')}
@@ -799,15 +814,11 @@ export function FreshAdoptFlow({
               <input
                 id="adopt-source-url"
                 data-testid="adopt-source-url"
-                className="form-input"
+                className="form-input form-input-mono"
+                placeholder="http://127.0.0.1:8317"
                 autoComplete="off"
                 spellCheck={false}
                 value={baseUrl}
-                // The body a confirmation sends is built from these fields, and
-                // building it awaits the destination read. Editing while that
-                // read runs would leave the page showing one address and holding
-                // another, so the fields are closed for the duration of an
-                // action, exactly like the buttons that start one.
                 disabled={busy}
                 onChange={(event) => setBaseUrl(event.target.value)}
               />
@@ -817,46 +828,65 @@ export function FreshAdoptFlow({
               <label className="form-label" htmlFor="adopt-management-key">
                 {adoptText('managementKey')}
               </label>
-              <input
-                id="adopt-management-key"
-                data-testid="adopt-management-key"
-                className="form-input"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                value={managementKey}
-                // Same rule as the address: the key in the body being built is
-                // this field's value, and a value typed into a field that is
-                // already being read is not the one that would be sent.
-                disabled={busy}
-                onChange={(event) => setManagementKey(event.target.value)}
-              />
+              <div className="input-wrap">
+                <input
+                  id="adopt-management-key"
+                  data-testid="adopt-management-key"
+                  className={`form-input ${keyVisible ? 'form-input-mono' : ''}`}
+                  type={keyVisible ? 'text' : 'password'}
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={managementKey}
+                  disabled={busy}
+                  onChange={(event) => setManagementKey(event.target.value)}
+                />
+                <div className="input-actions input-actions-divided">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-xs"
+                    aria-pressed={keyVisible}
+                    disabled={busy}
+                    onClick={() => setKeyVisible((prev) => !prev)}
+                  >
+                    <FullWebIcon name={keyVisible ? 'eyeOff' : 'eye'} size={14} />
+                    {bootstrapJourneyText(keyVisible ? 'hide' : 'show')}
+                  </button>
+                </div>
+              </div>
               <p className="journey-help">{adoptText('managementKeyHelp')}</p>
             </div>
             <div className="journey-field">
               <label className="journey-checkline" htmlFor="adopt-plugin-optin">
-                <input
-                  id="adopt-plugin-optin"
-                  data-testid="adopt-plugin-optin"
-                  type="checkbox"
-                  checked={pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins}
-                  disabled={pluginsLocked || busy}
-                  onChange={(event) => setPlugins(event.target.checked)}
-                />
-                <span>{adoptText('plugins')}</span>
+                <span className="journey-checkbox-control">
+                  <input
+                    id="adopt-plugin-optin"
+                    data-testid="adopt-plugin-optin"
+                    type="checkbox"
+                    checked={pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins}
+                    disabled={pluginsLocked || busy}
+                    onChange={(event) => setPlugins(event.target.checked)}
+                  />
+                  <span className="journey-checkbox-box" aria-hidden="true">
+                    <FullWebIcon name="check" size={13} />
+                  </span>
+                </span>
+                <span className="journey-check-title">{adoptText('plugins')}</span>
               </label>
-              <p className="journey-help">
+              <p className="journey-help journey-check-help">
                 {adoptText(pluginsLocked ? 'pluginsLocked' : 'pluginsHelp')}
               </p>
             </div>
-            <div className="journey-preview">
-              <FullWebIcon name="info" size={22} />
-              <div>
-                <strong>{adoptText('scopeTitle')}</strong>
-                <p>{adoptText('scopeMigrate')}</p>
-                <p>{adoptText('scopeKeep')}</p>
+            {stage === 'source' && !resumeForm && !inventoryKeyForm && (
+              <div className="journey-preview adopt-scope-note">
+                <FullWebIcon name="info" size={18} />
+                <div>
+                  <strong>{adoptText('scopeTitle')}</strong>
+                  <p>
+                    {adoptText('scopeMigrate')} {adoptText('scopeKeep')}
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
             {inventoryKeyForm && (
               <button
                 type="button"
@@ -871,46 +901,95 @@ export function FreshAdoptFlow({
             )}
           </div>
         )}
-        {stage === 'inventory' && (
-          <div className="adopt-inventory" data-testid="adopt-inventory">
-            <p className="journey-help">{adoptText('inventoryHelp')}</p>
-            <dl className="adopt-decisions">
-              {(
-                [
-                  ['migrate', adoptText('migrateGroup')],
-                  ['manual_action', adoptText('manualGroup')],
-                  ['unsupported', adoptText('unsupportedGroup')],
-                ] as const
-              ).map(([disposition, label]) => (
-                <div className="adopt-decision-group" key={disposition}>
-                  <dt>{label}</dt>
-                  <dd>
-                    {inventory[disposition].length === 0 ? (
-                      <span className="journey-quiet">—</span>
-                    ) : (
-                      <ul>
-                        {inventory[disposition].map((decision) => (
-                          <li key={decision.ResourceRef}>
-                            {adoptResourceText(decision.ResourceRef)}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </dd>
+        {stage === 'inventory' && (() => {
+          const countsMap = inventoryCounts ?? operation.inventoryCounts;
+          const hasCounts = Boolean(countsMap && Object.keys(countsMap).length > 0);
+          const migrateTotal = hasCounts
+            ? inventory.migrate.reduce(
+                (acc, decision) => acc + (countsMap?.[decision.ResourceRef] ?? 0),
+                0
+              )
+            : null;
+          return (
+            <div className="adopt-inventory" data-testid="adopt-inventory">
+              {migrateTotal !== null && (
+                <div
+                  className="adopt-inventory-banner"
+                  data-testid="adopt-inventory-counts-banner"
+                >
+                  <span className="adopt-stage-mark adopt-stage-mark-emerald" aria-hidden="true">
+                    <FullWebIcon name="sparkle" size={14} />
+                  </span>
+                  <span>
+                    {adoptText('inventoryCountsBanner', {
+                      migrate: migrateTotal,
+                      manual: inventory.manual_action.length,
+                    })}
+                  </span>
                 </div>
-              ))}
-            </dl>
-            <label className="journey-checkline">
-              <input
-                type="checkbox"
-                data-testid="adopt-confirm-inventory"
-                checked={confirmed}
-                onChange={(event) => setConfirmed(event.target.checked)}
-              />
-              {adoptText('confirmInventory')}
-            </label>
-          </div>
-        )}
+              )}
+              <dl className="adopt-decisions">
+                {(
+                  [
+                    ['migrate', adoptText('migrateGroup')],
+                    ['manual_action', adoptText('manualGroup')],
+                    ['unsupported', adoptText('unsupportedGroup')],
+                  ] as const
+                ).map(([disposition, label]) => (
+                  <div className="adopt-decision-group adopt-decision-row" key={disposition}>
+                    <dt>{label}</dt>
+                    <dd className="adopt-decision-tags">
+                      {inventory[disposition].length === 0 ? (
+                        <span className="adopt-decision-empty">—</span>
+                      ) : (
+                        <ul>
+                          {inventory[disposition].map((decision) => {
+                            const refCount = countsMap?.[decision.ResourceRef];
+                            return (
+                              <li key={decision.ResourceRef} className="adopt-resource-pill">
+                                <span>{adoptResourceText(decision.ResourceRef)}</span>
+                                {typeof refCount === 'number' && (
+                                  <strong
+                                    className={`adopt-resource-count ${
+                                      disposition === 'migrate'
+                                        ? 'adopt-resource-count-migrate'
+                                        : ''
+                                    }`.trim()}
+                                    data-testid={`adopt-resource-count-${decision.ResourceRef}`}
+                                  >
+                                    {refCount}
+                                  </strong>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <label
+                className="journey-checkline journey-confirm-checkline"
+                htmlFor="adopt-confirm-inventory"
+              >
+                <span className="journey-checkbox-control">
+                  <input
+                    id="adopt-confirm-inventory"
+                    type="checkbox"
+                    data-testid="adopt-confirm-inventory"
+                    checked={confirmed}
+                    onChange={(event) => setConfirmed(event.target.checked)}
+                  />
+                  <span className="journey-checkbox-box" aria-hidden="true">
+                    <FullWebIcon name="check" size={13} />
+                  </span>
+                </span>
+                <span>{adoptText('confirmInventory')}</span>
+              </label>
+            </div>
+          );
+        })()}
         {stage === 'migration' && (
           <div className="adopt-migration" data-testid="adopt-migration">
             {progressFailure && (
@@ -927,86 +1006,204 @@ export function FreshAdoptFlow({
                 </button>
               </p>
             )}
-            {!summary ? (
-              <p className="journey-quiet" role="status" data-testid="adopt-progress">
-                {adoptText('waiting')}
-              </p>
+            {!summary || (summary.running && planned === 0) ? (
+              <div
+                className="adopt-progress-card adopt-progress-card-running"
+                data-testid="adopt-progress-card"
+              >
+                <div className="adopt-progress-head">
+                  <p className="journey-quiet adopt-progress-line" role="status" data-testid="adopt-progress">
+                    {adoptText('waiting')}
+                  </p>
+                </div>
+                <div className="adopt-progress-track" aria-hidden="true">
+                  <span className="adopt-progress-fill adopt-progress-fill-indeterminate" />
+                </div>
+              </div>
             ) : (
               <>
-                <p className="journey-quiet" data-testid="adopt-progress">
-                  {adoptText('progress', { settled: processed, planned })}
-                </p>
+                {(() => {
+                  const indeterminate = summary.running && planned === 0;
+                  const progressPct =
+                    planned > 0
+                      ? Math.min(100, Math.round((processed / planned) * 100))
+                      : summary.running
+                        ? 0
+                        : 100;
+                  const isHealthySettled =
+                    settledRun && !needingResume && failedCount === 0;
+                  return (
+                    <div
+                      className={`adopt-progress-card ${
+                        summary.running
+                          ? 'adopt-progress-card-running'
+                          : isHealthySettled
+                            ? 'adopt-progress-card-done'
+                            : ''
+                      }`.trim()}
+                      data-testid="adopt-progress-card"
+                    >
+                      <div className="adopt-progress-head">
+                        <p className="journey-quiet adopt-progress-line" data-testid="adopt-progress">
+                          {adoptText('progress', { settled: processed, planned })}
+                        </p>
+                        {!indeterminate && (
+                          <strong className="adopt-progress-pct">{progressPct}%</strong>
+                        )}
+                      </div>
+                      <div className="adopt-progress-track" aria-hidden="true">
+                        {indeterminate ? (
+                          <span className="adopt-progress-fill adopt-progress-fill-indeterminate" />
+                        ) : (
+                          <span
+                            className="adopt-progress-fill"
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
                 {groups && (
-                  <ol className="journey-stages" data-testid="adopt-items">
+                  <ol className="journey-stages adopt-stage-list" data-testid="adopt-items">
                     {outcomeGroups.map(({ outcome, label, icon }) => {
                       const items = groups[outcome];
-                      return (
-                        <li key={outcome} data-testid={`adopt-group-${outcome}`}>
-                          <span className="journey-stage-mark">
-                            <FullWebIcon name={icon} size={22} />
-                          </span>
-                          <div>
-                            <strong>{adoptText(label)}</strong>
-                            <p data-testid={`adopt-count-${outcome}`}>
-                              {items.length === 0 ? '—' : items.length}
-                            </p>
-                            {needsCredentialFileNote(items) && (
-                              // Once per group: the credentials in it are shown
-                              // as record ordinals, so the group states what the
-                              // number is and how to find the files it stands
-                              // for. Saying it per item would repeat the same
-                              // paragraph for every credential.
-                              <p
-                                className="journey-help"
-                                data-testid={`adopt-credential-note-${outcome}`}
+                      const defaultExpanded = outcome === 'manual' || outcome === 'failed';
+                      const markToneClass =
+                        outcome === 'migrated'
+                          ? 'adopt-stage-mark-emerald'
+                          : outcome === 'manual' || outcome === 'failed'
+                            ? 'adopt-stage-mark-amber'
+                            : 'adopt-stage-mark-neutral';
+                      const cardToneClass =
+                        outcome === 'migrated'
+                          ? 'done'
+                          : outcome === 'manual' || outcome === 'failed'
+                            ? 'warn'
+                            : 'adopt-stage-card-muted';
+                      const scrollableBody =
+                        outcome === 'migrated' || outcome === 'absent_at_source';
+                      const countBadgeClass =
+                        outcome === 'failed'
+                          ? 'badge badge-amber adopt-group-count'
+                          : outcome === 'migrated'
+                            ? 'badge badge-emerald adopt-group-count'
+                            : 'badge badge-neutral adopt-group-count';
+                      if (items.length === 0) {
+                        return (
+                          <li
+                            key={outcome}
+                            className="adopt-stage-card adopt-stage-card-empty"
+                            data-testid={`adopt-group-${outcome}`}
+                          >
+                            <div className="adopt-group-summary adopt-group-summary-static">
+                              <span className="adopt-group-title-wrap">
+                                <span className="adopt-stage-mark adopt-stage-mark-empty">
+                                  <FullWebIcon name="minus" size={14} />
+                                </span>
+                                <strong className="adopt-group-title">{adoptText(label)}</strong>
+                              </span>
+                              <span
+                                className="adopt-group-empty-count"
+                                data-testid={`adopt-count-${outcome}`}
                               >
-                                {adoptText('credentialNote')}
-                              </p>
-                            )}
-                            {items.length > 0 && (
+                                —
+                              </span>
+                            </div>
+                          </li>
+                        );
+                      }
+                      return (
+                        <li
+                          key={outcome}
+                          className={`adopt-stage-card ${cardToneClass}`.trim()}
+                          data-testid={`adopt-group-${outcome}`}
+                        >
+                          <details
+                            className="adopt-group-details"
+                            open={defaultExpanded || undefined}
+                          >
+                            <summary className="adopt-group-summary">
+                              <span className="adopt-group-title-wrap">
+                                <span className={`adopt-stage-mark ${markToneClass}`}>
+                                  <FullWebIcon name={icon} size={15} />
+                                </span>
+                                <strong className="adopt-group-title">{adoptText(label)}</strong>
+                              </span>
+                              <span className="adopt-group-meta">
+                                <span
+                                  className={countBadgeClass}
+                                  data-testid={`adopt-count-${outcome}`}
+                                >
+                                  {items.length}
+                                </span>
+                                <FullWebIcon
+                                  name="chevronRight"
+                                  size={15}
+                                  className="adopt-group-chevron"
+                                />
+                              </span>
+                            </summary>
+                            <div
+                              className={`adopt-group-body ${
+                                scrollableBody ? 'adopt-group-body-scroll' : ''
+                              }`.trim()}
+                            >
+                              {needsCredentialFileNote(items) && (
+                                <p
+                                  className="journey-help"
+                                  data-testid={`adopt-credential-note-${outcome}`}
+                                >
+                                  {adoptText('credentialNote')}
+                                </p>
+                              )}
                               <ul className="adopt-items">
-                                {items.map((item) => (
-                                  <li
-                                    // The identity is the record's own, not the
-                                    // text this page shows: two items whose
-                                    // public labels coincide are still two
-                                    // items, and the id is what an
-                                    // acknowledgement names.
-                                    key={item.id}
-                                    data-testid={`adopt-item-${item.id}`}
-                                  >
-                                    <span className="adopt-item-name">{item.item}</span>
-                                    <span className="badge badge-neutral">
-                                      {adoptKindText(item.kind)}
-                                    </span>
-                                    {item.reason && (
-                                      <span className="adopt-item-reason">
-                                        {adoptReasonText(item.reason)}
+                                {items.map((item) => {
+                                  const readableLabel = formatAdoptItemLabel(item.item);
+                                  const isHumanized = readableLabel !== item.item;
+                                  return (
+                                    <li
+                                      key={item.id}
+                                      data-testid={`adopt-item-${item.id}`}
+                                      data-humanized={isHumanized ? 'true' : undefined}
+                                    >
+                                      {isHumanized && (
+                                        <span className="adopt-item-readable">{readableLabel}</span>
+                                      )}
+                                      <span className="adopt-item-name">{item.item}</span>
+                                      <span className="badge badge-neutral">
+                                        {adoptKindText(item.kind)}
                                       </span>
-                                    )}
-                                    {item.outcome === 'failed' && (
-                                      <span
-                                        className={`badge ${item.retryable ? 'badge-amber' : 'badge-neutral'}`}
-                                      >
-                                        {adoptText(
-                                          item.retryable ? 'retryableBadge' : 'failedGroup'
-                                        )}
-                                      </span>
-                                    )}
-                                    {(item.outcome === 'manual' || item.outcome === 'failed') && (
-                                      <details className="journey-disclosure">
-                                        <summary>{adoptText('details')}</summary>
-                                        <p data-testid={`adopt-guidance-${item.kind}`}>
-                                          {adoptGuidanceText(item.kind, item.reason, item.left)}
-                                        </p>
-                                      </details>
-                                    )}
-                                  </li>
-                                ))}
+                                      {item.outcome === 'failed' && (
+                                        <span
+                                          className={`badge ${
+                                            item.retryable ? 'badge-amber' : 'badge-neutral'
+                                          }`}
+                                        >
+                                          {adoptText(
+                                            item.retryable ? 'retryableBadge' : 'failedGroup'
+                                          )}
+                                        </span>
+                                      )}
+                                      {item.reason && (
+                                        <span className="adopt-item-reason">
+                                          {adoptReasonText(item.reason)}
+                                        </span>
+                                      )}
+                                      {(item.outcome === 'manual' || item.outcome === 'failed') && (
+                                        <details className="adopt-item-details">
+                                          <summary>{adoptText('details')}</summary>
+                                          <p data-testid={`adopt-guidance-${item.kind}`}>
+                                            {adoptGuidanceText(item.kind, item.reason, item.left)}
+                                          </p>
+                                        </details>
+                                      )}
+                                    </li>
+                                  );
+                                })}
                               </ul>
-                            )}
-                          </div>
-                          <small>{items.length}</small>
+                            </div>
+                          </details>
                         </li>
                       );
                     })}
@@ -1063,10 +1260,7 @@ export function FreshAdoptFlow({
                 {s('back')}
               </button>
             )}
-            <span className="journey-quiet">
-              <FullWebIcon name="shield" size={20} />
-              {adoptText('scopeKeep')}
-            </span>
+            {/* Scope retention is already stated once in .adopt-scope-note above */}
             <button
               type="button"
               className="btn btn-primary"
@@ -1151,22 +1345,27 @@ export function FreshAdoptFlow({
               </button>
             )}
             {retryableRefused && retryableRunTracked && (
-              <label className="journey-checkline">
-                <input
-                  type="checkbox"
-                  data-testid="adopt-accept-retryable"
-                  checked={acceptRetryable}
-                  onChange={(event) => {
-                    setAcceptRetryable(event.target.checked);
-                    // The acknowledgement covers this run and the retryable
-                    // items on screen right now, item for item, and only those:
-                    // the completion carries the run identity it was given for,
-                    // and a record without one is refused by the server itself.
-                    acceptedRetryable.current =
-                      event.target.checked && summary ? retryableIdentity(summary) : null;
-                  }}
-                />
-                {adoptText('acceptRetryable')}
+              <label
+                className="journey-checkline journey-confirm-checkline"
+                htmlFor="adopt-accept-retryable"
+              >
+                <span className="journey-checkbox-control">
+                  <input
+                    id="adopt-accept-retryable"
+                    type="checkbox"
+                    data-testid="adopt-accept-retryable"
+                    checked={acceptRetryable}
+                    onChange={(event) => {
+                      setAcceptRetryable(event.target.checked);
+                      acceptedRetryable.current =
+                        event.target.checked && summary ? retryableIdentity(summary) : null;
+                    }}
+                  />
+                  <span className="journey-checkbox-box" aria-hidden="true">
+                    <FullWebIcon name="check" size={13} />
+                  </span>
+                </span>
+                <span>{adoptText('acceptRetryable')}</span>
               </label>
             )}
             <button
