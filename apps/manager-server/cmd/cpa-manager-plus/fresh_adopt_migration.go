@@ -819,3 +819,20 @@ func adoptionMigrationCode(err error) error {
 		return errors.New("migration_unavailable")
 	}
 }
+
+// readStagedAdoptionCounts reads bounded, non-secret source resource counts for
+// the staged Adopt inventory preview. Failure or absence degrades to nil so the
+// durable staged checkpoint response never depends on optional count telemetry.
+func readStagedAdoptionCounts(parent context.Context, sourceBaseURL, sourceManagementKey string) map[string]int {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	source, err := freshadopt.NewSource(ctx, freshadopt.Endpoint{
+		BaseURL:       sourceBaseURL,
+		ManagementKey: sourceManagementKey,
+	})
+	if err != nil {
+		return nil
+	}
+	defer source.Close()
+	return freshadopt.CountSourceInventory(ctx, source)
+}
