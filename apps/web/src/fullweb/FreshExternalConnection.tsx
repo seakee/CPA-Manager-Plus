@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { fullWebText as t } from '../i18n/fullweb';
 import { shellText as s } from '../i18n/consoleShell';
 import { externalSetupBlockerKey, externalWorkspaceText as x } from '../i18n/freshExternal';
+import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
 import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
@@ -44,6 +45,7 @@ export function FreshExternalConnection({
   const [baseURL, setBaseURL] = useState('');
   const [managementKey, setManagementKey] = useState('');
   const [step, setStep] = useState(1);
+  const [keyVisible, setKeyVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(false);
   // The message keeps the key that names it, not the rendered sentence, so a
@@ -117,6 +119,7 @@ export function FreshExternalConnection({
       return;
     }
     setBaseURL(url);
+    setKeyVisible(false);
     setError(null);
     setStep(2);
   }
@@ -136,6 +139,7 @@ export function FreshExternalConnection({
         const attemptId = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
         const key = managementKey;
         setManagementKey('');
+        setKeyVisible(false);
         setStep(3);
         dispatched = true;
         const post = accept(
@@ -254,7 +258,7 @@ export function FreshExternalConnection({
           <div className={complete ? 'journey-heading journey-success-heading' : 'journey-heading'}>
             {complete && (
               <span className="journey-success-symbol">
-                <FullWebIcon name="check" size={34} />
+                <FullWebIcon name="check" size={28} />
               </span>
             )}
             <div>
@@ -267,7 +271,7 @@ export function FreshExternalConnection({
                       ? s('reviewTitle')
                       : t('externalTitle')}
               </h1>
-              <p className="wizard-desc">{t('externalHelp')}</p>
+              <p className="wizard-desc">{complete ? j('successHelp') : t('externalHelp')}</p>
             </div>
           </div>
           {error && (
@@ -290,12 +294,12 @@ export function FreshExternalConnection({
                   {t('externalBaseURL')}
                 </label>
                 <input
-                  className="form-input"
+                  className="form-input form-input-mono"
                   id="fresh-external-base-url"
                   data-testid="external-base-url"
                   value={baseURL}
                   onChange={(event) => setBaseURL(event.target.value)}
-                  placeholder="http://cpa:8317"
+                  placeholder={j('externalUrlPlaceholder')}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -304,37 +308,57 @@ export function FreshExternalConnection({
                 <label className="form-label" htmlFor="fresh-external-management-key">
                   {t('externalManagementKey')}
                 </label>
-                <input
-                  className="form-input"
-                  id="fresh-external-management-key"
-                  type="password"
-                  data-testid="external-management-key"
-                  value={managementKey}
-                  onChange={(event) => setManagementKey(event.target.value)}
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
+                <div className="input-wrap">
+                  <input
+                    className={`form-input ${keyVisible ? 'form-input-mono' : ''}`.trim()}
+                    id="fresh-external-management-key"
+                    type={keyVisible ? 'text' : 'password'}
+                    data-testid="external-management-key"
+                    value={managementKey}
+                    onChange={(event) => setManagementKey(event.target.value)}
+                    placeholder={j('externalKeyPlaceholder')}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                  />
+                  <div className="input-actions input-actions-divided">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs"
+                      data-testid="external-key-visibility"
+                      aria-pressed={keyVisible}
+                      onClick={() => setKeyVisible((prev) => !prev)}
+                    >
+                      <FullWebIcon name={keyVisible ? 'eyeOff' : 'eye'} size={14} />
+                      {j(keyVisible ? 'hide' : 'show')}
+                    </button>
+                  </div>
+                </div>
               </div>
             </>
           )}
           {step === 2 && !saved && !busy && !unknown && (
             <dl className="journey-summary">
               <div className="journey-summary-row">
-                <FullWebIcon name="link" size={22} />
+                <FullWebIcon name="check" size={16} />
                 <dt>{t('externalBaseURL')}</dt>
-                <dd>{baseURL}</dd>
+                <dd className="journey-summary-mono">
+                  <span>{baseURL}</span>
+                  <span className="badge badge-neutral journey-summary-badge">
+                    {j('externalDirectAddressBadge')}
+                  </span>
+                </dd>
               </div>
               <div className="journey-summary-row">
-                <FullWebIcon name="shield" size={22} />
+                <FullWebIcon name="check" size={16} />
                 <dt>{t('externalManagementKey')}</dt>
-                <dd>••••••••</dd>
+                <dd>{j('externalKeyReadySummary')}</dd>
               </div>
               <div className="journey-summary-row">
-                <FullWebIcon name="link" size={22} />
+                <FullWebIcon name="check" size={16} />
                 <dt>{s('consoleAddress')}</dt>
-                <dd>{operation.routing.target}</dd>
+                <dd className="journey-summary-mono">{operation.routing.target}</dd>
               </div>
             </dl>
           )}
@@ -344,17 +368,34 @@ export function FreshExternalConnection({
               {t('externalSubmitting')}
             </p>
           )}
-          {saved && (
+          {saved && !complete && (
             <p role="status" className="alert alert-info">
               {t('externalExisting')}
             </p>
           )}
-          <p className="journey-quiet">
-            <FullWebIcon name="info" size={20} />
-            {t('externalBoundary')}
-          </p>
+          {!complete && (
+            <p className="journey-help external-boundary-note">
+              <FullWebIcon name="info" size={15} />
+              <span>{t('externalBoundary')}</span>
+            </p>
+          )}
           {complete && (
-            <AccessInfoSummary client={client} auth={auth} onUnauthorized={onUnauthorized} />
+            <div className="journey-complete-stack">
+              <AccessInfoSummary
+                client={client}
+                auth={auth}
+                onUnauthorized={onUnauthorized}
+                defaultProtocolsCollapsed
+                subtitleNote={j('bookmark')}
+              />
+              <div
+                className="journey-external-next-hint"
+                data-testid="external-complete-next-hint"
+              >
+                <FullWebIcon name="info" size={16} />
+                <span>{j('externalCompleteNextHint')}</span>
+              </div>
+            </div>
           )}
           <details className="journey-disclosure installation-diagnostics">
             <summary>{s('technical')}</summary>
@@ -379,6 +420,7 @@ export function FreshExternalConnection({
                 disabled={busy || !!operation.strategy?.strategy}
                 onClick={onBack}
               >
+                <FullWebIcon name="arrowLeft" size={18} />
                 {s('back')}
               </button>
               <button
@@ -401,6 +443,7 @@ export function FreshExternalConnection({
                 disabled={busy}
                 onClick={() => setStep(1)}
               >
+                <FullWebIcon name="arrowLeft" size={18} />
                 {s('back')}
               </button>
               <button
@@ -411,6 +454,7 @@ export function FreshExternalConnection({
                 onClick={() => void act('connect')}
               >
                 {t('externalSubmit')}
+                <FullWebIcon name="arrowRight" size={18} />
               </button>
             </>
           )}
@@ -422,6 +466,7 @@ export function FreshExternalConnection({
               disabled={busy}
               onClick={() => void act('refresh')}
             >
+              <FullWebIcon name="refresh" size={16} />
               {t('refresh')}
             </button>
           )}
@@ -434,6 +479,7 @@ export function FreshExternalConnection({
               onClick={() => void act('complete')}
             >
               {t('externalComplete')}
+              <FullWebIcon name="arrowRight" size={18} />
             </button>
           )}
           {complete && (

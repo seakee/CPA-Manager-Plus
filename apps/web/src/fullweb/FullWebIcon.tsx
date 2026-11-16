@@ -7,6 +7,7 @@ import {
   IconCopy,
   IconDownload,
   IconEye,
+  IconEyeOff,
   IconInfo,
   IconKey,
   IconLayoutDashboard,
@@ -39,6 +40,7 @@ const sharedIconComponents = {
   clock: IconClock,
   copy: IconCopy,
   eye: IconEye,
+  eyeOff: IconEyeOff,
   plus: IconPlus,
   search: IconSearch,
   chevronRight: IconChevronRight,
@@ -57,6 +59,7 @@ const localPaths = {
   arrowLeft: 'M20 12H4 M10 6l-6 6 6 6',
   sparkle:
     'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3 M5 17v4 M3 19h4 M19 3v4 M17 5h4',
+  minus: 'M5 12h14',
 } as const;
 
 export type FullWebIconName = keyof typeof sharedIconComponents | keyof typeof localPaths;

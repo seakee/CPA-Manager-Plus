@@ -1688,4 +1688,153 @@ describe('Full Web upgrade wizard', () => {
     expect(cb3).toHaveBeenCalledWith(true);
     expect(byTestId('upgrade-result-complete')).toBeTruthy();
   });
+
+  it('marks completed result step as complete and collapses result protocol details by default', async () => {
+    const completedManaged = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      accessInfo: {
+        mode: 'migrate_legacy',
+        managementBasePath: '/ctl1234567890abcd',
+        inferenceBasePath: '/inf1234567890abcd',
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: '/inf1234567890abcd/v1',
+            examplePath: '/inf1234567890abcd/v1/chat/completions',
+          },
+        ],
+        ready: true,
+        code: '',
+      },
+    });
+    await mount(resumeRead(() => completedManaged));
+    expect(byTestId('upgrade-step-result').props['data-complete']).toBe('true');
+    expect(byTestId('access-info-protocols-disclosure').props.open).toBeUndefined();
+    expect(view()).toContain(t('modeBadgeManaged', 'en'));
+  });
+
+  it('formats preflight key-value diagnostics into human-readable summaries and shows host CLI guide on unrecorded progress', async () => {
+    await mount(
+      wizardRead({
+        recorded: () => unrecordedStatus(),
+        preflight: () =>
+          preflightDocument({
+            sourceKind: 'legacy-manager',
+            checks: [
+              { name: 'source_ownership', status: 'pass', code: '', detail: 'source lock held read-only' },
+              { name: 'source_version', status: 'pending', code: 'upgrade_source_version_declared_at_copy_in', detail: 'expected=v1.14.10 declared=none' },
+              { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest; sourceBytes=667705' },
+              { name: 'disk', status: 'pass', code: '', detail: 'requiredBytes=801246 availableBytes=1701408768' },
+              { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=managed_stack cpaVersion=unknown' },
+              { name: 'parity', status: 'pass', code: '', detail: 'deletedEventRefs=0 missingProjection=0 mismatchedProjection=0 staleProjection=0 pastWatermark=0 coverageDaysWithGaps=0' },
+            ],
+            pendingDeclaration: true,
+            expectedVersion: 'v1.14.10',
+          }),
+      })
+    );
+    expect(byTestId('upgrade-preflight-kind').children.join('')).toBe('CPAMP 1.x Manager');
+    expect(view()).toContain('782.5 KB');
+    expect(view()).toContain('1.58 GB');
+
+    await press('upgrade-continue');
+    await acknowledge();
+    await press('upgrade-confirm-continue');
+    expect(byTestId('upgrade-host-cli-guide')).toBeTruthy();
+    expect(view()).toContain('upgrade cpa-import');
+    await press('upgrade-cli-tab-external');
+    expect(view()).toContain('upgrade external-connect');
+    expect(byTestId('upgrade-progress-refresh')).toBeTruthy();
+    await press('upgrade-progress-back');
+    expect(byTestId('upgrade-confirm')).toBeTruthy();
+  });
+
+  it('keeps custom prefix drawer and clean migration disclosures collapsed by default while auto-opening on routing errors', async () => {
+    const read = resumeRead(() =>
+      statusDocument({
+        stage: 'cpa_import',
+        nextAction: 'verify',
+        targetMode: 'managed',
+        routing: {
+          configured: false,
+          committed: false,
+          existingPrefixesPreserved: false,
+          controlBasePath: '',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '/ctl1234567890abcd',
+          suggestedInferenceBasePath: '/inf1234567890abcd',
+        },
+      })
+    );
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>();
+    await mount(read, vi.fn(), undefined, saveRouting);
+
+    const drawer = renderer!.root.findByProps({ className: 'upgrade-routing-drawer' });
+    expect(drawer.props.open).toBe(false);
+
+    await act(async () => {
+      byTestId('upgrade-control-prefix-input').props.onChange({ target: { value: 'bad-prefix' } });
+    });
+    await press('upgrade-verify-action');
+    expect(byTestId('upgrade-routing-error')).toBeTruthy();
+    expect(renderer!.root.findByProps({ className: 'upgrade-routing-drawer' }).props.open).toBe(
+      true
+    );
+  });
+
+  it('prioritizes slim engine preparation above host CLI guide, syncs with External tab, and opens step 3 once engine is ready', async () => {
+    const digest = 'sha256:' + 'd'.repeat(64);
+    const artifactTransport: ArtifactTransport = {
+      readStatus: vi.fn<ArtifactTransport['readStatus']>(async () => ({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: digest },
+        active: null,
+        required: true,
+        operation: null,
+        cdnPresets: [],
+      })),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-slim-upg',
+        source: 'github',
+        phase: 'succeeded',
+        receivedBytes: 100,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+
+    await mount(
+      resumeRead(() => statusDocument({ stage: 'reconcile', nextAction: 'cpa_import' })),
+      vi.fn(),
+      artifactTransport
+    );
+
+    const serializedBefore = view();
+    expect(serializedBefore.indexOf('upgrade-cpa-import-artifact')).toBeLessThan(
+      serializedBefore.indexOf('upgrade-host-cli-guide')
+    );
+    expect(serializedBefore).toContain('Waiting for engine');
+    expect(
+      byTestId('upgrade-cli-step-3').findByType('details').props.open
+    ).toBe(false);
+
+    await press('upgrade-cli-tab-external');
+    expect(allByTestId('upgrade-cpa-import-artifact')).toHaveLength(0);
+
+    await press('upgrade-cli-tab-managed');
+    expect(byTestId('upgrade-cpa-import-artifact')).toBeTruthy();
+
+    await press('artifact-acquire-btn');
+    expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+    expect(
+      byTestId('upgrade-cli-step-3').findByType('details').props.open
+    ).toBe(true);
+  });
 });

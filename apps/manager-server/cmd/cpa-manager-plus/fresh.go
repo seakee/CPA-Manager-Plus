@@ -1475,6 +1475,15 @@ func (a *freshApplication) executeStrategy(w http.ResponseWriter, r *http.Reques
 			MigrationState: a.runAdoptionMigration(r.Context(), next, request.BaseURL, request.ManagementKey, token)})
 		return
 	}
+	if next.Operation.Strategy.Strategy == bootstrap.AdoptExisting && next.Operation.Strategy.Stage == "staged" {
+		if counts := readStagedAdoptionCounts(r.Context(), request.BaseURL, request.ManagementKey); len(counts) > 0 {
+			writeFreshJSON(w, struct {
+				bootstrap.FreshOperation
+				InventoryCounts map[string]int `json:"inventoryCounts,omitempty"`
+			}{next.Operation, counts})
+			return
+		}
+	}
 	writeFreshJSON(w, next.Operation)
 }
 

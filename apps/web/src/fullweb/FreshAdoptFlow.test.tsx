@@ -428,6 +428,7 @@ async function adoptServer(
     // The lost first POST's staging lands on the next destination observation,
     // i.e. strictly between the page's decision read and its staging POST.
     stageOnRuntime?: boolean;
+    inventoryCounts?: Record<string, number>;
   } = {}
 ) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
@@ -634,7 +635,11 @@ async function adoptServer(
         revision: operation.revision + 1,
         strategy: { ...adoptCheckpoint, pluginsEnabled: body.pluginsEnabled === true },
       };
-      return Response.json(operation);
+      return Response.json(
+        options.inventoryCounts
+          ? { ...operation, inventoryCounts: options.inventoryCounts }
+          : operation
+      );
     }
     if (resource === 'installation/adoption') {
       summaryReads += 1;
@@ -2374,4 +2379,38 @@ it('renders AccessInfoSummary after standalone Adopt completion in FreshManagedR
   // action: it is above it in the same stage.
   expect(maybe('adopt-migration')).toHaveLength(1);
   expect(get.mock.calls.map(([resource]) => resource)).toContain('api-keys/access-info');
+});
+
+it('shows ready-to-finalize copy and collapses settled copy/absent groups while keeping manual groups open', async () => {
+  await adoptServer({ summaries: [allOutcomes] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+
+  expect(text()).toContain(adoptText('readyToCompleteTitle'));
+  expect(text()).toContain(adoptText('completeHelp'));
+  expect(text()).not.toContain(adoptText('settledTitle'));
+
+  const migratedDetails = byID('adopt-group-migrated').findByType('details');
+  const absentDetails = byID('adopt-group-absent_at_source').findByType('details');
+  const manualDetails = byID('adopt-group-manual').findByType('details');
+  expect(migratedDetails.props.open).toBeUndefined();
+  expect(absentDetails.props.open).toBeUndefined();
+  expect(manualDetails.props.open).toBe(true);
+});
+
+it('renders per-resource source counts and summary banner on the staged inventory screen', async () => {
+  await adoptServer({
+    inventoryCounts: {
+      'client-api-keys': 3,
+      'cpa-config-plugins': 2,
+    },
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  expect(byID('adopt-resource-count-client-api-keys').props.children).toBe(3);
+  expect(byID('adopt-resource-count-cpa-config-plugins').props.children).toBe(2);
+  expect(byID('adopt-inventory-counts-banner')).toBeTruthy();
 });

@@ -816,4 +816,48 @@ describe('FreshArtifactStep', () => {
       expect(pollCount).toBe(2);
     }
   );
+
+  it('interpolates pinned version in upload copy, supports dropzone file drop, and honors hideHeader + leadingAction', async () => {
+    const validArchive = new Blob([new Uint8Array([0x1f, 0x8b])], { type: 'application/gzip' });
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => makeStatus()),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn(),
+      upload: vi.fn<ArtifactTransport['upload']>(async () => ({
+        id: 'op-drop',
+        source: 'upload',
+        phase: 'succeeded',
+        receivedBytes: 2,
+        totalBytes: 2,
+        code: '',
+      })),
+    };
+    const onReady = vi.fn();
+
+    await act(async () => {
+      renderer = create(
+        <FreshArtifactStep
+          hideHeader
+          leadingAction={<span data-testid="custom-leading-action">Back</span>}
+          transport={transport}
+          onReady={onReady}
+        />
+      );
+    });
+
+    expect(renderer!.root.findAllByProps({ className: 'artifact-step-header' })).toHaveLength(0);
+    expect(byID('custom-leading-action')).toBeTruthy();
+    expect(JSON.stringify(renderer!.toJSON())).toContain('CLIProxyAPI_8.0.55_linux_<arch>.tar.gz');
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain('CLIProxyAPI_<version>');
+
+    await click('artifact-source-upload');
+    await act(async () => {
+      byID('artifact-dropzone').props.onDrop({
+        preventDefault: vi.fn(),
+        dataTransfer: { files: [validArchive] },
+      });
+    });
+    expect(transport.upload).toHaveBeenCalledWith(validArchive);
+    expect(onReady).toHaveBeenCalledTimes(1);
+  });
 });

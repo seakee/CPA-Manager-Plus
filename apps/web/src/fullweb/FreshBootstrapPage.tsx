@@ -245,7 +245,13 @@ function describeBootstrapError(
 }
 
 export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPageProps) {
-  const [lightTheme, setLightTheme] = useState(true);
+  const [lightTheme, setLightTheme] = useState(
+    () =>
+      !(
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-color-scheme: dark)')?.matches
+      )
+  );
   const [phase, setPhase] = useState<BootPhase>(handoff ? 'connecting' : 'no_handoff');
   const [operation, setOperation] = useState<FreshOperation | null>(null);
   const [initError, setInitError] = useState<ActionFeedback | null>(null);

@@ -90,6 +90,8 @@ export interface FreshOperation {
   gatewayPending: boolean;
   routing: FreshRoutingCheckpoint;
   strategy?: FreshStrategyCheckpoint;
+  /** Ephemeral per-resource source counts returned on staged Adopt preview. */
+  inventoryCounts?: Readonly<Record<string, number>>;
 }
 
 /**
@@ -674,6 +676,15 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       if (!validOperationState(next, operation)) {
         throw new BootstrapTransportError('Bootstrap response unavailable', 'response');
       }
+      if (
+        !next.inventoryCounts &&
+        operation.inventoryCounts &&
+        next.strategy?.strategy === 'adopt_existing' &&
+        next.strategy.stage === 'staged' &&
+        next.strategy.sourceIdentity === operation.strategy?.sourceIdentity
+      ) {
+        next = { ...next, inventoryCounts: operation.inventoryCounts };
+      }
       operation = next;
       return next;
     },
@@ -879,7 +890,9 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
         // A fence of another installation is not this operation's fact.
         throw new BootstrapTransportError('Installation response unavailable', 'authority');
       }
-      const next = await request<FreshOperation & { initialClientKey?: unknown }>('strategy', {
+      const next = await request<
+        FreshOperation & { initialClientKey?: unknown; inventoryCounts?: unknown }
+      >('strategy', {
         ...body,
         identity: expected.identity,
         expectedRevision: expected.revision,
@@ -902,8 +915,25 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       ) {
         throw new BootstrapTransportError('Installation response unavailable', 'mismatch');
       }
-      operation = next;
-      return { operation: next, initialClientKey: delivered ?? '' };
+      let sanitizedCounts: Record<string, number> | undefined;
+      if (
+        next.inventoryCounts &&
+        typeof next.inventoryCounts === 'object' &&
+        !Array.isArray(next.inventoryCounts)
+      ) {
+        const parsed: Record<string, number> = {};
+        for (const [k, v] of Object.entries(next.inventoryCounts as Record<string, unknown>)) {
+          if (k.length <= 64 && typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) {
+            parsed[k] = v;
+          }
+        }
+        if (Object.keys(parsed).length > 0) sanitizedCounts = parsed;
+      }
+      const normalizedNext: FreshOperation = sanitizedCounts
+        ? { ...next, inventoryCounts: sanitizedCounts }
+        : next;
+      operation = normalizedNext;
+      return { operation: normalizedNext, initialClientKey: delivered ?? '' };
     },
     async complete(body: AdoptCompletionBody = {}): Promise<FreshOperation> {
       if (!canonicalBase || !operation?.adminInitialized) {
