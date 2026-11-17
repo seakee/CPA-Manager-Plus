@@ -20,6 +20,19 @@ Operate providers, credentials, OAuth, plugins, and configuration while keeping 
 
 </div>
 
+## Sponsors
+
+<small>Sponsor placement · Affiliate link</small>
+
+<table>
+  <tr>
+    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
+    <td valign="middle"><p><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer">Infistar.cc</a>: Access Claude, GPT, Gemini, DeepSeek and more with one API key, at prices as low as 1% of official rates. 100% genuine models with 1,000+ redundant routes and automatic failover. CPAMP users get CNY 5 in free credit when signing up through the exclusive link.</p></td>
+  </tr>
+</table>
+
+<sub><strong>Disclaimer:</strong> Sponsor information and promotional claims are provided by the sponsor. This section contains an affiliate link. CPAMP makes no warranties regarding the sponsor's services, product quality, security, reliability, or advertised claims. Sponsorship does not imply endorsement or certification by CPAMP.</sub>
+
 ## What Can CPAMP Help You Answer?
 
 - **Why are requests failing?** Inspect failure rates, status codes, affected models/accounts, and redacted evidence in persistent request history.
