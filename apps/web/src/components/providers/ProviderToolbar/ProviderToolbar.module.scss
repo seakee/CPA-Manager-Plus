@@ -82,7 +82,7 @@ $toolbar-control-height: var(--control-height-sm);
 .kindTabButtonActive:hover:not(:disabled) {
   border-left-color: transparent;
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -139,7 +139,7 @@ $toolbar-control-height: var(--control-height-sm);
 
 .kindTabButtonActive .kindTabBadge {
   background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
-  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
+  color: var(--primary-text);
 }
 
 .controls {
@@ -602,7 +602,7 @@ $toolbar-control-height: var(--control-height-sm);
 }
 
 .sortDropdownItemSelected {
-  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -612,7 +612,7 @@ $toolbar-control-height: var(--control-height-sm);
 }
 
 .sortDropdownItemSelected.sortDropdownItemHighlighted {
-  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
+  color: var(--primary-text);
 }
 
 .sortControls:focus-within {

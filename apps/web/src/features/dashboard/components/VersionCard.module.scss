@@ -54,7 +54,10 @@
   color: inherit;
   text-decoration: none;
   transition: all 0.2s;
+}
 
+a.item,
+.healthLink {
   &:hover {
     background: var(--app-accent-soft);
     border-color: var(--color-primary);
@@ -97,19 +100,19 @@
 
   &.ok {
     background: var(--data-badge-success-bg);
-    color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+    color: var(--data-badge-success-text);
     border: 1px solid var(--data-badge-success-border);
   }
 
   &.warn {
     background: var(--data-badge-warning-bg);
-    color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+    color: var(--data-badge-warning-text);
     border: 1px solid var(--data-badge-warning-border);
   }
 
   &.error {
     background: var(--data-badge-danger-bg);
-    color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+    color: var(--data-badge-danger-text);
     border: 1px solid var(--data-badge-danger-border);
   }
 
@@ -247,13 +250,13 @@
   }
 
   .okText {
-    color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+    color: var(--data-badge-success-text);
   }
   .warnText {
-    color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+    color: var(--data-badge-warning-text);
   }
   .errorText {
-    color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+    color: var(--data-badge-danger-text);
   }
   .mutedText {
     color: var(--text-tertiary);
@@ -268,7 +271,7 @@
   padding: 2px 6px;
   border-radius: var(--app-radius-xs);
   background: var(--data-badge-info-bg);
-  color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+  color: var(--data-badge-info-text);
   text-decoration: none;
   white-space: nowrap;
 
@@ -298,7 +301,7 @@
 
   &.badgeLatest {
     background: var(--data-badge-success-bg);
-    color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+    color: var(--data-badge-success-text);
     border: 1px solid var(--data-badge-success-border);
   }
 }

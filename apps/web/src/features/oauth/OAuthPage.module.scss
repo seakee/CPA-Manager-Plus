@@ -94,12 +94,12 @@
 
   &.success {
     background-color: var(--data-badge-success-bg);
-    color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+    color: var(--data-badge-success-text);
   }
 
   &.error {
     background-color: var(--data-badge-danger-bg);
-    color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+    color: var(--data-badge-danger-text);
   }
 
   &.waiting {

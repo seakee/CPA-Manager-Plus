@@ -139,10 +139,10 @@ export function AutocompleteInput({
                 zIndex: 1000,
                 backgroundColor: 'var(--bg-primary)',
                 border: '1px solid var(--border-subtle)',
-                borderRadius: 'var(--radius-md)',
+                borderRadius: 'var(--app-radius-sm)',
                 maxHeight: 200,
                 overflowY: 'auto',
-                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
+                boxShadow: 'var(--floating-shadow-lg)'
             }}>
                 {filteredOptions.map((opt, index) => (
                     <div

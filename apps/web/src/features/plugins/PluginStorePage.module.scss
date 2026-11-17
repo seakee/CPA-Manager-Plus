@@ -1,9 +1,9 @@
 @mixin warning-status-text {
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 @mixin danger-status-text {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .page {
@@ -348,7 +348,7 @@
     background: var(--data-badge-success-bg);
 
     strong {
-      color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+      color: var(--data-badge-success-text);
     }
   }
 
@@ -503,13 +503,13 @@
 }
 
 .filterChipActive {
-  color: color-mix(in srgb, var(--primary-active) 76%, var(--text-primary));
+  color: var(--primary-text);
   border-left-color: transparent;
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
   font-weight: 700;
 
   span {
-    color: color-mix(in srgb, var(--primary-active) 76%, var(--text-primary));
+    color: var(--primary-text);
   }
 }
 
@@ -664,7 +664,7 @@
 }
 
 .badgeOn {
-  color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+  color: var(--data-badge-success-text);
   border-color: var(--data-badge-success-border);
   background: var(--data-badge-success-bg);
 }
@@ -739,11 +739,11 @@
   }
 
   &[data-tone='author']::before {
-    background: var(--success-color);
+    background: var(--data-green-base);
   }
 
   &[data-tone='license']::before {
-    background: var(--warning-text);
+    background: var(--data-amber-base);
   }
 
   &[data-tone='source']::before {

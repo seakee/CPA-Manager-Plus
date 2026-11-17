@@ -96,10 +96,10 @@ function StatusLoadingIcon() {
 function StatusSuccessIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="8" fill="var(--success-color, #22c55e)" />
+      <circle cx="8" cy="8" r="8" fill="var(--success-color)" />
       <path
         d="M4.5 8L7 10.5L11.5 6"
-        stroke="white"
+        stroke="var(--primary-contrast)"
         strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -111,10 +111,10 @@ function StatusSuccessIcon() {
 function StatusErrorIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="8" fill="var(--danger-color, #f56c6c)" />
+      <circle cx="8" cy="8" r="8" fill="var(--danger-color)" />
       <path
         d="M5 5L11 11M11 5L5 11"
-        stroke="white"
+        stroke="var(--primary-contrast)"
         strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -126,7 +126,7 @@ function StatusErrorIcon() {
 function StatusIdleIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="7" stroke="var(--text-tertiary, #9ca3af)" strokeWidth="2" />
+      <circle cx="8" cy="8" r="7" stroke="var(--text-tertiary)" strokeWidth="2" />
     </svg>
   );
 }

@@ -430,7 +430,7 @@
 .usageSummaryValue {
   min-width: 0;
   max-width: 100%;
-  color: var(--text-primary);
+  color: var(--kpi-value-color);
   font-size: 24px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -462,6 +462,7 @@
   max-width: min(280px, calc(100vw - 32px));
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--summary-accent) 42%, var(--border-color));
+  border-top: 3px solid var(--summary-accent);
   border-radius: var(--app-radius-md);
   background: var(--app-surface-strong);
   color: var(--text-primary);
@@ -580,6 +581,12 @@
 
 .tonebad {
   color: var(--error-color);
+}
+
+.usageSummaryValue.tonegood,
+.usageSummaryValue.tonewarn,
+.usageSummaryValue.tonebad {
+  color: var(--kpi-value-color);
 }
 
 .chartPanel,
@@ -1238,10 +1245,9 @@
   color: var(--data-badge-neutral-text);
 }
 
-// Warning pair; text mixed toward --text-primary: 5.0:1 light, 8.2:1 dark.
 .severitymedium {
   background: var(--data-badge-warning-bg);
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 .severityhigh {
@@ -1586,7 +1592,7 @@
 }
 
 .insightwarning {
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 .insightdanger {
@@ -1735,7 +1741,7 @@
 
 .quotawarning {
   background: var(--data-badge-warning-bg);
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 .quotaexhausted {
@@ -2234,12 +2240,12 @@
   border-color: color-mix(in srgb, var(--data-red-dark-2) 18%, var(--border-color));
 
   &::before {
-    background: var(--data-red-dark-2);
+    background: var(--data-red-base);
   }
 
   b,
   em {
-    color: var(--data-red-dark-2);
+    color: var(--error-color);
   }
 }
 
@@ -2247,7 +2253,7 @@
   border-color: color-mix(in srgb, var(--success-color) 16%, var(--border-color));
 
   &::before {
-    background: var(--success-color);
+    background: var(--data-green-base);
   }
 
   b,

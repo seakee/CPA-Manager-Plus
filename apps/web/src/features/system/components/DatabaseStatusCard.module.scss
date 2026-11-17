@@ -101,11 +101,19 @@
 }
 
 .statusOk {
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
+
+  .statusDot {
+    background: var(--status-graphic-success);
+  }
 }
 
 .statusWarn {
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
+
+  .statusDot {
+    background: var(--status-graphic-warning);
+  }
 }
 
 .statusPending {
@@ -154,7 +162,7 @@
 
   strong {
     overflow-wrap: anywhere;
-    color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+    color: var(--data-badge-warning-text);
     font-weight: 600;
   }
 }

@@ -150,24 +150,40 @@
   color: var(--data-badge-info-text);
   border-color: var(--data-badge-info-border);
   background: var(--data-badge-info-bg);
+
+  .statusDot {
+    background: var(--status-graphic-info);
+  }
 }
 
 .tone-good {
   color: var(--data-badge-success-text);
   border-color: var(--data-badge-success-border);
   background: var(--data-badge-success-bg);
+
+  .statusDot {
+    background: var(--status-graphic-success);
+  }
 }
 
 .tone-warn {
   color: var(--data-badge-warning-text);
   border-color: var(--data-badge-warning-border);
   background: var(--data-badge-warning-bg);
+
+  .statusDot {
+    background: var(--status-graphic-warning);
+  }
 }
 
 .tone-bad {
   color: var(--data-badge-danger-text);
   border-color: var(--data-badge-danger-border);
   background: var(--data-badge-danger-bg);
+
+  .statusDot {
+    background: var(--status-graphic-danger);
+  }
 }
 
 .statusMeta {
@@ -630,10 +646,18 @@
 
 .probeToneSuccess {
   color: var(--success-color);
+
+  .probeStateDot {
+    background: var(--status-graphic-success);
+  }
 }
 
 .probeToneFailed {
   color: var(--error-color);
+
+  .probeStateDot {
+    background: var(--status-graphic-danger);
+  }
 }
 
 .probeToneSkipped {
@@ -850,20 +874,20 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--success-color);
+  background: var(--data-green-base);
   transition: width 0.2s ease;
 }
 
 .quotaWindowBarFillHigh {
-  background: var(--success-color);
+  background: var(--data-green-base);
 }
 
 .quotaWindowBarFillMedium {
-  background: var(--quota-medium-color, var(--warning-color));
+  background: var(--data-amber-base);
 }
 
 .quotaWindowBarFillLow {
-  background: var(--error-color);
+  background: var(--data-red-base);
 }
 
 .quotaWindowReset {
@@ -982,15 +1006,15 @@
 }
 
 .logSuccess::before {
-  background: var(--success-color);
+  background: var(--data-green-base);
 }
 
 .logWarning::before {
-  background: var(--warning-color);
+  background: var(--data-amber-base);
 }
 
 .logError::before {
-  background: var(--error-color);
+  background: var(--data-red-base);
 }
 
 .logTime {
@@ -1640,15 +1664,15 @@
 }
 
 .configOverviewItem.tone-good {
-  --overview-accent: var(--success-color);
+  --overview-accent: var(--status-display-success);
 }
 
 .configOverviewItem.tone-warn {
-  --overview-accent: var(--warning-color);
+  --overview-accent: var(--status-display-warning);
 }
 
 .configOverviewItem.tone-bad {
-  --overview-accent: var(--error-color);
+  --overview-accent: var(--status-display-danger);
 }
 
 .configOverviewItem.tone-info {
@@ -1675,16 +1699,10 @@
   white-space: nowrap;
 }
 
-.configOverviewItem.tone-good .configOverviewValue {
-  color: var(--success-color);
-}
-
-.configOverviewItem.tone-warn .configOverviewValue {
-  color: var(--warning-color);
-}
-
+.configOverviewItem.tone-good .configOverviewValue,
+.configOverviewItem.tone-warn .configOverviewValue,
 .configOverviewItem.tone-bad .configOverviewValue {
-  color: var(--error-color);
+  color: var(--kpi-value-color);
 }
 
 .configOverviewHint {

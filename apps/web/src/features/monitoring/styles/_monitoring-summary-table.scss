@@ -135,7 +135,7 @@
   .summaryValue {
     min-width: 0;
     max-width: 100%;
-    color: var(--text-primary);
+    color: var(--kpi-value-color);
     font-size: 24px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -178,7 +178,8 @@
     min-width: min(160px, 100%);
     max-width: min(280px, calc(100vw - 32px));
     padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
+    border: 1px solid color-mix(in srgb, var(--data-blue-base) 42%, var(--border-color));
+    border-top: 3px solid var(--data-blue-base);
     border-radius: var(--app-radius-md);
     background: var(--app-surface-strong);
     color: var(--text-primary);
@@ -220,7 +221,7 @@
   }
 
   .summaryValueTooltipValue {
-    color: var(--text-primary);
+    color: var(--primary-text);
     font-size: 13px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -318,6 +319,12 @@
 
   .tonebad {
     color: var(--error-color);
+  }
+
+  .summaryValue.tonegood,
+  .summaryValue.tonewarn,
+  .summaryValue.tonebad {
+    color: var(--kpi-value-color);
   }
 
   .statusBadge.tonegood {
@@ -1092,8 +1099,13 @@
   .realtimeRequestStatus {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
-    min-height: 20px;
+    min-height: 24px;
+    padding: 2px 10px;
+    border-radius: var(--app-radius-pill);
+    border: 1px solid var(--data-badge-neutral-border);
+    background: var(--data-badge-neutral-bg);
     font-size: 12px;
     font-weight: 700;
     line-height: 1.2;
@@ -1102,21 +1114,66 @@
 
   .realtimeRequestStatus::before {
     content: '';
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--data-badge-neutral-dot);
     flex-shrink: 0;
   }
 
   .realtimeRequestStatusGood {
-    color: var(--success-color);
+    border-color: var(--data-badge-success-border);
+    background: var(--data-badge-success-bg);
+    color: var(--data-badge-success-text);
+  }
+
+  .realtimeRequestStatusGood::before {
+    background: var(--status-graphic-success);
   }
 
   .realtimeRequestStatusBad {
-    color: var(--error-color);
+    border-color: var(--data-badge-danger-border);
+    background: var(--data-badge-danger-bg);
+    color: var(--data-badge-danger-text);
   }
 
+  .realtimeRequestStatusBad::before {
+    background: var(--status-graphic-danger);
+  }
+
+  .realtimeSuccessRateBadge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 2px 10px;
+    border-radius: var(--app-radius-pill);
+    border: 1px solid var(--data-badge-neutral-border);
+    background: var(--data-badge-neutral-bg);
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .realtimeSuccessRateBadge.goodText {
+    border-color: var(--data-badge-success-border);
+    background: var(--data-badge-success-bg);
+    color: var(--data-badge-success-text);
+  }
+
+  .realtimeSuccessRateBadge.warnText {
+    border-color: var(--data-badge-warning-border);
+    background: var(--data-badge-warning-bg);
+    color: var(--data-badge-warning-text);
+  }
+
+  .realtimeSuccessRateBadge.badText {
+    border-color: var(--data-badge-danger-border);
+    background: var(--data-badge-danger-bg);
+    color: var(--data-badge-danger-text);
+  }
   .realtimeFailureTooltip {
     --monitor-surface-elevated: var(--app-surface-strong);
     --monitor-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));

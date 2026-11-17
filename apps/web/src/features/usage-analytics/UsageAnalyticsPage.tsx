@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/icons';
 import { useNotificationStore, useThemeStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
+import { getDataPalette, hexToRgba } from '@/utils/dataPalette';
 import { getPlanPresentation } from '@/utils/plans';
 import {
   buildUsageHeatmapChartData,
@@ -190,90 +191,57 @@ type UsageChartTheme = {
   tokenStructureColors: string[];
 };
 
-const lightUsageChartTheme: UsageChartTheme = {
-  axisColors: {
-    requests: '#409eff',
-    tokens: '#14b8a6',
-    cost: '#f59e0b',
-  },
-  categoryPalette: ['#409eff', '#14b8a6', '#f59e0b', '#f56c6c', '#94a3b8'],
-  heatmapColors: ['#eff6ff', '#93c5fd', '#409eff', '#0f766e'],
-  healthColors: {
-    failure: '#f56c6c',
-    latency: '#0ea5e9',
-    success: '#67c23a',
-  },
-  metricColors: {
-    cachedTokens: '#06b6d4',
-    estimatedCost: '#f59e0b',
-    inputTokens: '#60a5fa',
-    outputTokens: '#22c55e',
-    requestCount: '#409eff',
-    totalTokens: '#14b8a6',
-  },
-  surface: {
-    axisLabel: '#475569',
-    axisLine: '#d8e5f2',
-    axisPointer: '#767f8f',
-    barBackground: 'rgba(139, 149, 166, 0.14)',
-    heatmapCellBorder: '#ffffff',
-    heatmapEmphasisBorder: '#2c3e50',
-    pieBorder: '#ffffff',
-    pieShadow: 'rgba(15, 23, 42, 0.18)',
-    selectedLine: '#767f8f',
-    splitLine: '#d3e1ef',
-    tooltipBackground: 'rgba(255, 255, 255, 0.96)',
-    tooltipBorder: '#d8e5f2',
-    tooltipMuted: '#475569',
-    tooltipShadow: 'box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);',
-    tooltipText: '#2c3e50',
-  },
-  tokenStructureColors: ['#60a5fa', '#22c55e', '#06b6d4', '#f59e0b'],
-};
+const getUsageChartTheme = (resolvedTheme: 'light' | 'dark'): UsageChartTheme => {
+  const palette = getDataPalette(resolvedTheme);
+  const inputTokenColor = resolvedTheme === 'dark' ? palette.blue : palette.blueSoft;
 
-const darkUsageChartTheme: UsageChartTheme = {
-  axisColors: {
-    requests: '#79bbff',
-    tokens: '#2dd4bf',
-    cost: '#fbbf24',
-  },
-  categoryPalette: ['#79bbff', '#2dd4bf', '#fbbf24', '#fab6b6', '#a3a6ad'],
-  heatmapColors: ['#102f4f', '#1d5f98', '#409eff', '#79bbff'],
-  healthColors: {
-    failure: '#fab6b6',
-    latency: '#7dd3fc',
-    success: '#95d475',
-  },
-  metricColors: {
-    cachedTokens: '#22d3ee',
-    estimatedCost: '#fbbf24',
-    inputTokens: '#60a5fa',
-    outputTokens: '#95d475',
-    requestCount: '#79bbff',
-    totalTokens: '#2dd4bf',
-  },
-  surface: {
-    axisLabel: '#bcbcbc',
-    axisLine: 'rgba(255, 255, 255, 0.12)',
-    axisPointer: '#7a7a7a',
-    barBackground: 'rgba(255, 255, 255, 0.08)',
-    heatmapCellBorder: '#1b1f2a',
-    heatmapEmphasisBorder: '#e5e5e5',
-    pieBorder: '#1b1f2a',
-    pieShadow: 'rgba(0, 0, 0, 0.36)',
-    selectedLine: '#7a7a7a',
-    splitLine: 'rgba(255, 255, 255, 0.1)',
-    tooltipBackground: 'rgba(24, 28, 40, 0.96)',
-    tooltipBorder: 'rgba(255, 255, 255, 0.12)',
-    tooltipMuted: '#bcbcbc',
-    tooltipShadow: 'box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);',
-    tooltipText: '#e5e5e5',
-  },
-  tokenStructureColors: ['#60a5fa', '#95d475', '#22d3ee', '#fbbf24'],
+  return {
+    axisColors: {
+      requests: palette.blue,
+      tokens: palette.teal,
+      cost: palette.amber,
+    },
+    categoryPalette: [
+      palette.blue,
+      palette.teal,
+      palette.amber,
+      palette.red,
+      resolvedTheme === 'dark' ? palette.slate : palette.slateMuted,
+    ],
+    heatmapColors: [...palette.heatmap],
+    healthColors: {
+      failure: palette.red,
+      latency: palette.cyan,
+      success: palette.green,
+    },
+    metricColors: {
+      cachedTokens: palette.cyan,
+      estimatedCost: palette.amber,
+      inputTokens: inputTokenColor,
+      outputTokens: palette.green,
+      requestCount: palette.blue,
+      totalTokens: palette.teal,
+    },
+    surface: {
+      axisLabel: palette.surface.axisLabel,
+      axisLine: palette.surface.usageAxisLine,
+      axisPointer: palette.surface.axisPointer,
+      barBackground: palette.surface.barBackground,
+      heatmapCellBorder: palette.surface.cellBorder,
+      heatmapEmphasisBorder: palette.surface.emphasisBorder,
+      pieBorder: palette.surface.cellBorder,
+      pieShadow: palette.surface.pieShadow,
+      selectedLine: palette.surface.axisPointer,
+      splitLine: palette.surface.usageSplitLine,
+      tooltipBackground: palette.surface.tooltipBackground,
+      tooltipBorder: palette.surface.usageTooltipBorder,
+      tooltipMuted: palette.surface.tooltipMuted,
+      tooltipShadow: palette.surface.tooltipShadow,
+      tooltipText: palette.surface.usageTooltipText,
+    },
+    tokenStructureColors: [inputTokenColor, palette.green, palette.cyan, palette.amber],
+  };
 };
-
-const getUsageChartTheme = (resolvedTheme: 'light' | 'dark'): UsageChartTheme =>
-  resolvedTheme === 'dark' ? darkUsageChartTheme : lightUsageChartTheme;
 
 const useUsageChartTheme = () => {
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -281,8 +249,7 @@ const useUsageChartTheme = () => {
 };
 
 const appendHexAlpha = (color: string, alphaHex: string) =>
-  /^#[\da-f]{6}$/i.test(color) ? `${color}${alphaHex}` : color;
-
+  hexToRgba(color, Number.parseInt(alphaHex, 16) / 255);
 const getThemedUsageMetrics = (chartTheme: UsageChartTheme): typeof USAGE_METRICS =>
   USAGE_METRICS.map((metric) => ({
     ...metric,

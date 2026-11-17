@@ -112,7 +112,7 @@
   &.selected {
     border-color: var(--primary-color);
     background-color: var(--surface-subtle-strong);
-    box-shadow: 0 0 0 2px rgba($primary-color, 0.18);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 18%, transparent);
   }
 }
 

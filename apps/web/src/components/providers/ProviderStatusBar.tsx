@@ -2,28 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { StatusBarData, StatusBlockDetail } from '@/utils/recentRequests';
 import defaultStyles from '@/features/aiProviders/AiProvidersPage.module.scss';
-
-/**
- * 根据成功率 (0–1) 在三个色标之间做 RGB 线性插值
- * 0 → 红 (#ef4444)  →  0.5 → 金黄 (#facc15)  →  1 → 绿 (#22c55e)
- */
-const COLOR_STOPS = [
-  { r: 239, g: 68, b: 68 },   // #ef4444
-  { r: 250, g: 204, b: 21 },  // #facc15
-  { r: 34, g: 197, b: 94 },   // #22c55e
-] as const;
-
-function rateToColor(rate: number): string {
-  const t = Math.max(0, Math.min(1, rate));
-  const segment = t < 0.5 ? 0 : 1;
-  const localT = segment === 0 ? t * 2 : (t - 0.5) * 2;
-  const from = COLOR_STOPS[segment];
-  const to = COLOR_STOPS[segment + 1];
-  const r = Math.round(from.r + (to.r - from.r) * localT);
-  const g = Math.round(from.g + (to.g - from.g) * localT);
-  const b = Math.round(from.b + (to.b - from.b) * localT);
-  return `rgb(${r}, ${g}, ${b})`;
-}
+import { interpolateStatusBarColor } from '@/utils/statusBarColor';
 
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -122,7 +101,7 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
       <div className={s.statusBlocks} ref={blocksRef}>
         {statusData.blockDetails.map((detail, idx) => {
           const isIdle = detail.rate === -1;
-          const blockStyle = isIdle ? undefined : { backgroundColor: rateToColor(detail.rate) };
+          const blockStyle = isIdle ? undefined : { backgroundColor: interpolateStatusBarColor(detail.rate) };
           const isActive = activeTooltip === idx;
 
           return (
