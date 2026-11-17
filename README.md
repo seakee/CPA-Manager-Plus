@@ -26,8 +26,8 @@ Operate providers, credentials, OAuth, plugins, and configuration while keeping 
 
 <table>
   <tr>
-    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
-    <td valign="middle"><strong><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link">Infistar.cc</a></strong><p>Infistar.cc: Access Claude, GPT, Gemini, DeepSeek and more with one API key, at prices as low as 1% of official rates. 100% genuine models with 1,000+ redundant routes and automatic failover. CPAMP users get CNY 5 in free credit when signing up through the exclusive link.</p></td>
+    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
+    <td valign="middle"><p><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer">Infistar.cc</a>: Access Claude, GPT, Gemini, DeepSeek and more with one API key, at prices as low as 1% of official rates. 100% genuine models with 1,000+ redundant routes and automatic failover. CPAMP users get CNY 5 in free credit when signing up through the exclusive link.</p></td>
   </tr>
 </table>
 
