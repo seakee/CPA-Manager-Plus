@@ -114,6 +114,9 @@ const EMPTY_ACCOUNT_AUTH_STATE: MonitoringAccountAuthState = {
 };
 
 const getAccountColumnInfo = (columnKey: string, t: TFunction) => {
+  if (columnKey === 'average-output-tps') {
+    return t('monitoring.average_output_tps_hint');
+  }
   if (columnKey === 'status') {
     return t('monitoring.account_overview_status_hint');
   }
@@ -406,6 +409,7 @@ export function AccountOverviewPanel({
                         {formatPercent(row.successRate)}
                       </td>
                       <td>{metricByKey.get('total-tokens')?.value ?? '--'}</td>
+                      <td>{metricByKey.get('average-output-tps')?.value ?? '—'}</td>
                       <td>{metricByKey.get('estimated-cost')?.value ?? '--'}</td>
                       <td>{metricByKey.get('latest-request-time')?.value ?? '--'}</td>
                       <td>

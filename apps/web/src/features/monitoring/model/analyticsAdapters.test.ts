@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  MonitoringAnalyticsAccountStatRow,
   MonitoringAnalyticsChannelShareRow,
   MonitoringAnalyticsEventRow,
 } from '@/services/api/usageService';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
 import {
   buildAnalyticsFilters,
+  buildAccountRowsFromAnalytics,
   buildMonitoringAccountFilterValue,
   buildChannelRowsFromAnalytics,
   buildFailureRowsFromAnalytics,
@@ -921,5 +923,27 @@ describe('analytics failure source display', () => {
     expect(rows[0].label).toBe('Team Auth');
     expect(rows[0].channel).toBe('Production Relay');
     expect(rows[0].label).not.toBe('source-hash');
+  });
+});
+
+describe('account average output TPS analytics adaptation', () => {
+  it.each([55, null, undefined])('maps account and model TPS %s without deriving it from totals', (value) => {
+    const totals = {
+      calls: 2, success_calls: 2, failure_calls: 0, success_rate: 1,
+      input_tokens: 0, output_tokens: 200, cached_tokens: 0,
+      cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 200,
+      cost: 0, last_seen_ms: 1,
+    };
+    const tps = value === undefined ? {} : { average_output_tps: value };
+    const source: MonitoringAnalyticsAccountStatRow = {
+      ...totals, ...tps, id: 'account', account_snapshot: 'test@example.com',
+      average_latency_ms: 5500,
+      models: [{ ...totals, ...tps, model: 'model' }],
+    };
+    const [row] = buildAccountRowsFromAnalytics(
+      [source], new Map(), new Map(), buildSourceInfoMap({}), new Map()
+    );
+    expect(row.averageOutputTps).toBe(value ?? null);
+    expect(row.models[0].averageOutputTps).toBe(value ?? null);
   });
 });

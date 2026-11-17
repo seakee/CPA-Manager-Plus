@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatQuotaResetTime } from '@/utils/quota/formatters';
-import { formatAccountQuotaResetDisplay } from './accountOverviewPresentation';
+import { formatAccountQuotaResetDisplay, formatAverageOutputTps } from './accountOverviewPresentation';
 
 describe('accountOverviewPresentation reset display', () => {
   it('prefers the canonical timestamp over a legacy reset label', () => {
@@ -30,5 +30,16 @@ describe('accountOverviewPresentation reset display', () => {
   it('returns the empty reset marker when neither source has a value', () => {
     expect(formatAccountQuotaResetDisplay(null, '-')).toBe('-');
     expect(formatAccountQuotaResetDisplay(null, null)).toBe('-');
+  });
+});
+
+describe('average output TPS display', () => {
+  it('uses two decimals and an em dash for missing samples', () => {
+    expect(formatAverageOutputTps(55)).toBe('55.00');
+    expect(formatAverageOutputTps(1.236)).toBe('1.24');
+    expect(formatAverageOutputTps(0.001)).toBe('0.00');
+    for (const value of [null, undefined, NaN, Infinity]) {
+      expect(formatAverageOutputTps(value)).toBe('—');
+    }
   });
 });

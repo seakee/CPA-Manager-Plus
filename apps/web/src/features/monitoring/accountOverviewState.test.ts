@@ -275,6 +275,7 @@ describe('accountOverviewState', () => {
       'input-tokens',
       'output-tokens',
       'cached-tokens',
+      'average-output-tps',
     ]);
   });
 

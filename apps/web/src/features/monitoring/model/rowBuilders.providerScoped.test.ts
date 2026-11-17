@@ -119,3 +119,47 @@ describe('provider-scoped monitoring account fallback filters', () => {
     expect(filtered.map((item) => item.id)).toEqual(['persisted-label-event']);
   });
 });
+
+describe('account average output TPS', () => {
+  it('averages per-request rates instead of dividing token and duration totals', () => {
+    const [row] = buildAccountRows([
+      eventRow({ outputTokens: 100, latencyMs: 1000, ttftMs: 900 }),
+      eventRow({ outputTokens: 100, latencyMs: 10000, tokensPerSecond: 999 }),
+    ]);
+    expect(row.averageOutputTps).toBe(55);
+    expect(row.models[0].averageOutputTps).toBe(55);
+  });
+
+  it.each([
+    { failed: true },
+    { outputTokens: 0 },
+    { outputTokens: -1 },
+    { outputTokens: Infinity },
+    { outputTokens: NaN },
+    { latencyMs: 0 },
+    { latencyMs: null },
+    { latencyMs: undefined },
+    { latencyMs: -100 },
+    { latencyMs: Infinity },
+    { latencyMs: NaN },
+  ])('excludes invalid samples %j', (invalid) => {
+    const sample = eventRow({ outputTokens: 100, latencyMs: 1000, ...invalid });
+    const [empty] = buildAccountRows([sample]);
+    expect(empty.averageOutputTps).toBeNull();
+    expect(empty.models[0].averageOutputTps).toBeNull();
+    const [mixed] = buildAccountRows([sample, eventRow({ outputTokens: 100, latencyMs: 10000 })]);
+    expect(mixed.averageOutputTps).toBe(10);
+  });
+
+  it('weights different models by valid sample counts and respects model filtering', () => {
+    const samples = [
+      eventRow({ model: 'fast', outputTokens: 100, latencyMs: 1000 }),
+      eventRow({ model: 'fast', outputTokens: 100, latencyMs: 1000 }),
+      eventRow({ model: 'slow', outputTokens: 100, latencyMs: 10000 }),
+    ];
+    const [row] = buildAccountRows(samples);
+    expect(row.averageOutputTps).toBe(70);
+    expect(row.models.map((model) => model.averageOutputTps)).toEqual([100, 10]);
+    expect(buildAccountRows(buildScopeFilteredRows(samples, { model: 'slow' }))[0].averageOutputTps).toBe(10);
+  });
+});

@@ -63,6 +63,9 @@ export type CacheTokenPresentation = {
 
 export const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
+export const formatAverageOutputTps = (value: number | null | undefined) =>
+  typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '—';
+
 export const formatAccountQuotaResetDisplay = (
   resetAtMs: number | null | undefined,
   resetLabel: string | null | undefined,
@@ -216,6 +219,12 @@ export const buildAccountSummaryMetrics = (
     label: shortLabel(t, 'monitoring.output_tokens_short', 'monitoring.output_tokens'),
     fullLabel: t('monitoring.output_tokens'),
     value: formatCompactNumber(row.outputTokens),
+  },
+  {
+    key: 'average-output-tps',
+    label: t('monitoring.average_output_tps'),
+    fullLabel: t('monitoring.average_output_tps_hint'),
+    value: formatAverageOutputTps(row.averageOutputTps),
   },
   buildAccountCacheSummaryMetric(row, t),
   {

@@ -3339,6 +3339,8 @@
     "account_overview_health_hint": "基於目前篩選範圍內的請求統計。",
     "account_overview_status_hint": "帳號目前啟用狀態，基於關聯驗證檔案彙總。",
     "account_overview_success_rate_hint": "目前篩選範圍內成功呼叫數占總呼叫數的比例。",
+    "average_output_tps": "平均 TPS",
+    "average_output_tps_hint": "成功請求的輸出 token 數 / 總耗時（秒）的算術平均值，包含首 token 等待時間。僅統計輸出 token 數和總耗時均為正數且有限的有效樣本。",
     "account_overview_scope_current_filters": "統計範圍：目前篩選條件",
     "account_overview_scope_range": "統計範圍：{{range}}",
     "account_overview_tokens_title": "Tokens 使用",

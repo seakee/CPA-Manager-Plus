@@ -307,7 +307,9 @@ func mergeStoredAccountStats(
 		sum(total_tokens),
 		max(last_seen_ms),
 		sum(latency_sum_ms),
-		sum(latency_samples)
+		sum(latency_samples),
+		sum(output_tps_sum),
+		sum(output_tps_samples)
 	from usage_monitoring_account_daily_rollups_v1
 	where `+strings.Join(conditions, " and ")+`
 	group by account_snapshot, auth_label_snapshot,
@@ -395,7 +397,9 @@ func mergeProjectedAccountStats(
 		coalesce(sum(total_tokens), 0),
 		max(timestamp_ms),
 		coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
-		count(nullif(latency_ms, 0))
+		count(nullif(latency_ms, 0)),
+		coalesce(sum(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then output_tokens * 1000.0 / latency_ms else 0 end), 0),
+		count(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then 1 end)
 	from banded_events
 	group by account_snapshot, auth_label_snapshot,
 		coalesce(nullif(auth_provider_snapshot, ''), provider, ''), auth_account_id_snapshot, auth_index,
@@ -589,6 +593,8 @@ func scanAccountStats(rows *sql.Rows, grouped map[accountStatKey]*accountStatAcc
 			&row.LastSeenMS,
 			&latencySumMS,
 			&row.LatencySamples,
+			&row.OutputTPSSum,
+			&row.OutputTPSSamples,
 		); err != nil {
 			return err
 		}
@@ -717,6 +723,8 @@ func mergeAccountValues(target *AccountModelStat, row AccountModelStat) {
 	target.TotalTokens += row.TotalTokens
 	target.LatencySumMS += row.LatencySumMS
 	target.LatencySamples += row.LatencySamples
+	target.OutputTPSSum += row.OutputTPSSum
+	target.OutputTPSSamples += row.OutputTPSSamples
 	if row.LastSeenMS > target.LastSeenMS {
 		target.LastSeenMS = row.LastSeenMS
 	}
