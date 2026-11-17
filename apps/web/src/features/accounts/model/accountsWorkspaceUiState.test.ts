@@ -41,9 +41,17 @@ describe('accountsWorkspaceUiState', () => {
       pageSize: 20,
       accountDisplayMode: 'full' as const,
       layoutMode: 'grid' as const,
+      quotaWindowOrder: 'weekly-first' as const,
     };
     writeAccountsWorkspaceUiState(state);
     expect(readAccountsWorkspaceUiState()).toEqual(state);
+  });
+
+  it('keeps shortest-first for old and invalid preferences', () => {
+    expect(readAccountsWorkspaceUiState().quotaWindowOrder).toBe('shortest-first');
+    expect(normalizeAccountsWorkspaceUiState({}).quotaWindowOrder).toBe('shortest-first');
+    expect(normalizeAccountsWorkspaceUiState({ quotaWindowOrder: 'longest-first' }).quotaWindowOrder)
+      .toBe('shortest-first');
   });
 
   it('drops unsupported persisted values', () => {

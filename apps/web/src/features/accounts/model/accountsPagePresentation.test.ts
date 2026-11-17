@@ -627,6 +627,32 @@ describe('accountsPagePresentation', () => {
       expect(selected).toEqual([fiveHour]);
     });
 
+    it('reorders only selected Codex windows while preserving candidates, limits, and metric identity', () => {
+      const fiveHour = makeQuotaWindow({ key: '5h', kind: 'five_hour', limitWindowSeconds: 18000, remainingPercent: 21 });
+      const weekly = makeQuotaWindow({ key: '7d', kind: 'weekly', limitWindowSeconds: 604800, remainingPercent: 73 });
+      const monthly = makeQuotaWindow({ key: '30d', kind: 'monthly', limitWindowSeconds: 2592000 });
+      const review = makeQuotaWindow({ key: 'review', kind: 'weekly', modelScope: { kind: 'family', key: 'code-review', complete: true }, limitWindowSeconds: 604800 });
+      const windows = [monthly, weekly, review, fiveHour];
+
+      expect(selectAccountQuotaMainListWindows(makeRow(), windows)).toEqual([fiveHour, weekly]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), windows, 2, 'weekly-first')).toEqual([weekly, fiveHour]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), windows, 3, 'weekly-first')).toEqual([weekly, fiveHour, monthly]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), windows, 1, 'weekly-first')).toEqual([fiveHour]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), windows, 0, 'weekly-first')).toEqual([]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), [weekly], 2, 'weekly-first')).toEqual([weekly]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), [monthly, fiveHour], 2, 'weekly-first')).toEqual([fiveHour, monthly]);
+      expect(selectAccountQuotaMainListWindows(makeRow(), [monthly, weekly], 2, 'weekly-first')).toEqual([weekly, monthly]);
+      expect(windows).toEqual([monthly, weekly, review, fiveHour]);
+    });
+
+    it.each(['claude', 'kimi', 'antigravity', 'xai', 'meta'])('ignores weekly-first for %s', (provider) => {
+      const fiveHour = makeQuotaWindow({ key: '5h', kind: 'five_hour', windowMode: 'fixed', limitWindowSeconds: 18000 });
+      const weekly = makeQuotaWindow({ key: '7d', kind: 'weekly', windowMode: 'fixed', limitWindowSeconds: 604800 });
+      const windows = [weekly, fiveHour];
+      expect(selectAccountQuotaMainListWindows(makeRow(provider), windows, 2, 'weekly-first'))
+        .toEqual(selectAccountQuotaMainListWindows(makeRow(provider), windows, 2));
+    });
+
     it('defaults main-list selection to maximum 2 windows', () => {
       const w1 = makeQuotaWindow({
         key: 'w1',

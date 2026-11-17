@@ -9914,7 +9914,7 @@ describe('AccountsPage replacement flows', () => {
       'accounts.list_header_availability',
       'accounts.list_header_recent_requests',
       'accounts.list_header_historical_usage',
-      'accounts.list_header_quota',
+      'accounts.list_header_quota5h → 7d',
       'accounts.list_header_actions',
     ]);
 
@@ -9922,6 +9922,61 @@ describe('AccountsPage replacement flows', () => {
     expect(treeText(renderer)).toContain('accounts.quota_source_none');
     expect(treeText(renderer)).not.toContain('accounts.quota_details_only');
     expect(treeText(renderer)).not.toContain('SUM');
+  });
+
+  it('toggles Codex quota order from the header and persists it across rerenders and remounts', async () => {
+    const storage = new Map<string, string>();
+    const events = new EventTarget();
+    vi.stubGlobal('window', {
+      location: { hash: '' },
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+        clear: () => storage.clear(),
+      },
+      addEventListener: events.addEventListener.bind(events),
+      removeEventListener: events.removeEventListener.bind(events),
+    });
+    const file = mocks.files[0];
+    const now = Date.now();
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [
+        { id: 'five-hour', label: 'Five hours', kind: 'five_hour', usedPercent: 21, resetLabel: '5h', resetAtMs: now + 18000000, limitWindowSeconds: 18000, windowMode: 'fixed', modelScope: CODEX_MAIN_SCOPE },
+        { id: 'weekly', label: 'Weekly', kind: 'weekly', usedPercent: 73, resetLabel: '7d', resetAtMs: now + 604800000, limitWindowSeconds: 604800, windowMode: 'fixed', modelScope: CODEX_MAIN_SCOPE },
+      ],
+    });
+    try {
+      const renderer = await renderAccountsPage();
+      const headerButton = () => renderer.root.findByProps({ 'data-account-list-header': 'true' }).findByType('button');
+      const windows = (view: ReactTestRenderer) => findAccountCardByKey(view, getAuthFileSelectionKey(file))
+        .findAll((node) => typeof node.props['data-account-quota-window'] === 'string');
+      const original = windows(renderer).map((node) => ({ key: node.props['data-account-quota-window'], text: readText(node) }));
+      expect(original).toHaveLength(2);
+      expect(original[0].text).toContain('79%');
+      expect(original[1].text).toContain('27%');
+      expect(headerButton().props.type).toBe('button');
+      expect(headerButton().props['aria-pressed']).toBe(false);
+      expect(headerButton().props.title).toContain('accounts.quota_window_order_shortest_first_hint');
+      await act(async () => { headerButton().props.onClick(); });
+      expect(headerButton().props['aria-pressed']).toBe(true);
+      expect(headerButton().props.title).toContain('accounts.quota_window_order_weekly_first_hint');
+      expect(windows(renderer).map((node) => ({ key: node.props['data-account-quota-window'], text: readText(node) }))).toEqual([original[1], original[0]]);
+      expect(JSON.parse(storage.get('cpa_manager_accounts_workspace_ui_v1')!).quotaWindowOrder).toBe('weekly-first');
+      await act(async () => { renderer.update(<AccountsPage />); });
+      expect(headerButton().props['aria-pressed']).toBe(true);
+      await act(async () => { renderer.unmount(); });
+      const remounted = await renderAccountsPage();
+      const button = remounted.root.findByProps({ 'data-account-list-header': 'true' }).findByType('button');
+      expect(button.props['aria-pressed']).toBe(true);
+      expect(windows(remounted).map((node) => node.props['data-account-quota-window'])).toEqual([original[1].key, original[0].key]);
+      await act(async () => { button.props.onClick(); });
+      expect(windows(remounted).map((node) => node.props['data-account-quota-window'])).toEqual([original[0].key, original[1].key]);
+      expect(JSON.parse(storage.get('cpa_manager_accounts_workspace_ui_v1')!).quotaWindowOrder).toBe('shortest-first');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('renders historical usage alongside the quota trigger', async () => {
