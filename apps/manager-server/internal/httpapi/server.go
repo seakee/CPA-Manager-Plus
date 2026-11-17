@@ -10,6 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
+	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -18,9 +19,9 @@ var embeddedPanel embed.FS
 
 const serviceID = "cpa-manager-plus"
 
-var modelsDevModelPriceSyncURL = "https://models.dev/catalog.json"
-var modelPriceSyncURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-var openRouterModelPriceSyncURL = "https://openrouter.ai/api/v1/models"
+var modelsDevModelPriceSyncURL = modelpricesvc.DefaultModelsDevSyncURL
+var modelPriceSyncURL = modelpricesvc.DefaultLiteLLMSyncURL
+var openRouterModelPriceSyncURL = modelpricesvc.DefaultOpenRouterSyncURL
 
 type Server struct {
 	handler http.Handler

@@ -38,6 +38,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
@@ -298,6 +299,12 @@ type freshApplication struct {
 	shutdownWriteGrace             time.Duration
 }
 
+var (
+	freshModelsDevModelPriceSyncURL  = modelpricesvc.DefaultModelsDevSyncURL
+	freshModelPriceSyncURL           = modelpricesvc.DefaultLiteLLMSyncURL
+	freshOpenRouterModelPriceSyncURL = modelpricesvc.DefaultOpenRouterSyncURL
+)
+
 func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshrouting.Driver) *freshApplication {
 	st := freshstore.New(opened.DB)
 	settings := setting.New(opened.DB, opened.Protector)
@@ -323,7 +330,17 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	}
 	legacyCollector := collector.NewManager(cfg, legacyStore)
 	legacyCollectorService := collectorservice.New(legacyCollector)
-	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
+	legacyContext := app.FromExistingWithModelsDev(
+		cfg,
+		legacyStore,
+		legacyCollector,
+		time.Now().UnixMilli(),
+		nil,
+		&freshModelsDevModelPriceSyncURL,
+		&freshModelPriceSyncURL,
+		&freshOpenRouterModelPriceSyncURL,
+		"cpa-manager-plus",
+	)
 	a.legacyCollector = legacyCollectorService
 	a.legacyApp = legacyContext
 	// Fresh owns Collector lifecycle on a.runCtx: narrow monitoring-switch PATCH
