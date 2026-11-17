@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -258,5 +260,81 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 				t.Fatalf("legacyBridgePathAllowed(%q, %q)=%v, want %v", test.resource, test.method, got, test.allowed)
 			}
 		})
+	}
+}
+
+func TestFreshCanonicalModelPricesSyncUsesDefaultSources(t *testing.T) {
+	if freshModelsDevModelPriceSyncURL == "" || freshModelPriceSyncURL == "" || freshOpenRouterModelPriceSyncURL == "" {
+		t.Fatalf("fresh model price sync default URLs must be configured: models.dev=%q litellm=%q openrouter=%q",
+			freshModelsDevModelPriceSyncURL, freshModelPriceSyncURL, freshOpenRouterModelPriceSyncURL)
+	}
+
+	modelsDevServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openai":{"models":{"gpt-5.2-codex":{"cost":{"input":1.75,"output":14}}}}}`))
+	}))
+	t.Cleanup(modelsDevServer.Close)
+	liteLLMServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"litellm-only":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000006}}`))
+	}))
+	t.Cleanup(liteLLMServer.Close)
+	openRouterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"openrouter-only","pricing":{"prompt":"0.000003","completion":"0.000009"}}]}`))
+	}))
+	t.Cleanup(openRouterServer.Close)
+
+	oldModelsDev := freshModelsDevModelPriceSyncURL
+	oldLiteLLM := freshModelPriceSyncURL
+	oldOpenRouter := freshOpenRouterModelPriceSyncURL
+	freshModelsDevModelPriceSyncURL = modelsDevServer.URL
+	freshModelPriceSyncURL = liteLLMServer.URL
+	freshOpenRouterModelPriceSyncURL = openRouterServer.URL
+	t.Cleanup(func() {
+		freshModelsDevModelPriceSyncURL = oldModelsDev
+		freshModelPriceSyncURL = oldLiteLLM
+		freshOpenRouterModelPriceSyncURL = oldOpenRouter
+	})
+
+	app := newInstallationTestApplication(t)
+	markFreshProductComplete(t, app)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		currentInstallManagementAPIV2Prefix+"cpamp/v0/management/model-prices/sync",
+		strings.NewReader(`{"models":["gpt-5.2-codex","litellm-only","openrouter-only"]}`),
+	)
+	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	app.canonicalAPI(response, req)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("model-prices/sync returned %d: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Sources  []string `json:"sources"`
+		Imported int      `json:"imported"`
+		Prices   map[string]struct {
+			Source string  `json:"source"`
+			Prompt float64 `json:"prompt"`
+		} `json:"prices"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode sync response: %v", err)
+	}
+	if payload.Imported != 3 {
+		t.Fatalf("imported = %d, want 3; body = %s", payload.Imported, response.Body.String())
+	}
+	for _, expected := range []string{"models.dev", "litellm", "openrouter"} {
+		if !slices.Contains(payload.Sources, expected) {
+			t.Fatalf("sources = %v, missing %q", payload.Sources, expected)
+		}
+	}
+	if payload.Prices["gpt-5.2-codex"].Source != "models.dev" ||
+		payload.Prices["litellm-only"].Source != "litellm" ||
+		payload.Prices["openrouter-only"].Source != "openrouter" {
+		t.Fatalf("synced prices = %#v", payload.Prices)
 	}
 }
