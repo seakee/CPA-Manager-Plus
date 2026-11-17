@@ -1,3 +1,6 @@
+import { useCredentialLabels } from '@/hooks/useCredentialLabels';
+import { CredentialLabelEditor } from '@/components/providers/CredentialLabelEditor';
+import { withCredentialLabels } from '@/components/providers/ProviderTable/rowData';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -56,6 +59,13 @@ const DEFAULT_CLOAK_CONFIG: CloakConfig = {
 
 export function AiProvidersPage() {
   const { t } = useTranslation();
+  const credentialLabels = useCredentialLabels();
+  const refreshCredentialLabels = credentialLabels.refresh;
+  const [labelEditor, setLabelEditor] = useState<{
+    row: ProviderRow;
+    scope: typeof credentialLabels.scope;
+  } | null>(null);
+
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -228,8 +238,8 @@ export function AiProvidersPage() {
   ]);
 
   const handleRecentRequestsRefresh = useCallback(async () => {
-    await refreshRecentRequests();
-  }, [refreshRecentRequests]);
+    await Promise.all([refreshRecentRequests(), refreshCredentialLabels()]);
+  }, [refreshRecentRequests, refreshCredentialLabels]);
 
   useHeaderRefresh(handleRecentRequestsRefresh, isCurrentLayer);
 
@@ -251,18 +261,22 @@ export function AiProvidersPage() {
   // 统一行集合与派生数据
   const rows = useMemo(
     () =>
-      buildProviderRows({
-        gemini: geminiKeys,
-        interactions: interactionsKeys,
-        codex: codexConfigs,
-        xai: xaiConfigs,
-        meta: metaConfigs,
-        claude: claudeConfigs,
-        vertex: vertexConfigs,
-        openai: openaiProviders,
-        usageByProvider,
-      }),
+      withCredentialLabels(
+        buildProviderRows({
+          gemini: geminiKeys,
+          interactions: interactionsKeys,
+          codex: codexConfigs,
+          xai: xaiConfigs,
+          meta: metaConfigs,
+          claude: claudeConfigs,
+          vertex: vertexConfigs,
+          openai: openaiProviders,
+          usageByProvider,
+        }),
+        credentialLabels.labels
+      ),
     [
+      credentialLabels.labels,
       claudeConfigs,
       codexConfigs,
       geminiKeys,
@@ -1631,6 +1645,12 @@ export function AiProvidersPage() {
               onDelete={handleRowDelete}
               onToggle={handleRowToggle}
               onPriorityChange={handleRowPriorityChange}
+              onEditLabel={
+                credentialLabels.available
+                  ? (row) => setLabelEditor({ row, scope: credentialLabels.scope })
+                  : undefined
+              }
+              labelEditingDisabled={!credentialLabels.ready || credentialLabels.saving}
             />
             {visibleRows.length > 0 &&
               (visibleRows.length > PROVIDER_TABLE_DEFAULT_PAGE_SIZE ||
@@ -1685,6 +1705,16 @@ export function AiProvidersPage() {
         </div>
       </div>
 
+      {labelEditor && labelEditor.scope === credentialLabels.scope && credentialLabels.ready && (
+        <CredentialLabelEditor
+          key={labelEditor.row.credentialHash}
+          initialLabel={credentialLabels.labels[labelEditor.row.credentialHash!] || ''}
+          maskedKey={labelEditor.row.maskedKey || labelEditor.row.label}
+          saving={credentialLabels.saving}
+          onClose={() => setLabelEditor(null)}
+          onSave={(label) => credentialLabels.setLabel(labelEditor.row.credentialHash!, label)}
+        />
+      )}
       <ProviderDetailDrawer
         row={detailRow}
         open={detailRowKey !== null}

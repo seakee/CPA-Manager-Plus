@@ -996,6 +996,11 @@
     "delete_confirm": "Are you sure you want to delete this API key?"
   },
   "ai_providers": {
+    "credential_label": "Credential label",
+    "credential_label_edit": "Edit credential label",
+    "credential_label_hint": "Email or account note, up to 120 characters. Leave empty to remove. Stored by Manager Server; does not change routing.",
+    "credential_label_invalid": "Use at most 120 characters without control characters.",
+    "credential_label_save_error": "Could not save the label. Your changes have been kept.",
     "title": "AI Providers Configuration",
     "delete_second_title": "Confirm permanent deletion",
     "delete_second_confirm": "Final confirmation: permanently delete {{provider}} configuration {{target}}? This action cannot be undone.",

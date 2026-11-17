@@ -951,7 +951,10 @@ export const buildTaskBucketsFromAnalytics = (
     const sourceMeta = resolveSourceDisplay(row.source, authIndex, sourceInfoMap, authFileMap);
     const { channelMeta } = resolveChannelMeta(authIndex, authMetaMap, channelByAuthIndex);
     const sourceLabel =
-      authMeta?.label || sourceMeta.displayName || shortHashLabel(row.source_hash);
+      sourceMeta.credentialLabel ||
+      authMeta?.label ||
+      sourceMeta.displayName ||
+      shortHashLabel(row.source_hash);
     return {
       id: row.bucket_key,
       timestampMs: row.first_ms,

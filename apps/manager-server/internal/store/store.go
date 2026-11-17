@@ -14,6 +14,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/accountaction"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/credentiallabel"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/deadletter"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
@@ -150,6 +151,7 @@ type Store struct {
 	DeadLetters      deadletter.Repository
 	ModelPrices      modelprice.Repository
 	APIKeyAliases    apikeyalias.Repository
+	CredentialLabels credentiallabel.Repository
 	AccountActions   accountaction.Repository
 	CodexInspections codexinspection.Repository
 	DataMigrations   datamigration.Repository
@@ -178,6 +180,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		DeadLetters:      deadletter.New(db),
 		ModelPrices:      modelprice.New(db),
 		APIKeyAliases:    apikeyalias.New(db),
+		CredentialLabels: credentiallabel.New(db),
 		AccountActions:   accountaction.New(db),
 		CodexInspections: codexinspection.New(db),
 		DataMigrations:   datamigration.New(db),

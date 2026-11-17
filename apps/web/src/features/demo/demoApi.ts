@@ -1,3 +1,4 @@
+import { sha256Hex } from '@/utils/apiKeyHash';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { parse as parseYaml, parseDocument } from 'yaml';
 import {
@@ -499,6 +500,10 @@ export const resetDemoConfigState = () => {
   demoConfigYamlOverride = null;
 };
 
+const demoCredentialLabels = new Map<string, string>([
+  [sha256Hex('codex-demo-team-pool'), 'dev-team@example.com'],
+]);
+
 export async function handleDemoApiRequest<T = unknown>(
   method: DemoMethod,
   url: string,
@@ -508,6 +513,22 @@ export async function handleDemoApiRequest<T = unknown>(
   const { pathname, params } = normalizeDemoUrl(url, config);
   const rawConfig = getCurrentDemoRawConfig();
 
+  if (pathname === '/credential-labels' && method === 'get') {
+    return {
+      items: [...demoCredentialLabels].map(([keyHash, label]) => ({
+        keyHash,
+        label,
+        updatedAtMs: Date.now(),
+      })),
+    } as T;
+  }
+  if (pathname.startsWith('/credential-labels/') && method === 'put') {
+    const keyHash = pathname.slice('/credential-labels/'.length);
+    const label = String((data as { label?: string })?.label || '').trim();
+    if (label) demoCredentialLabels.set(keyHash, label);
+    else demoCredentialLabels.delete(keyHash);
+    return { keyHash, label, updatedAtMs: Date.now() } as T;
+  }
   if (pathname === '/config') return rawConfig as T;
   if (pathname === '/latest-version') return getDemoLatestVersion() as T;
   if (pathname === '/config.yaml') {
