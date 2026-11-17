@@ -24,8 +24,8 @@
 
 <table>
   <tr>
-    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
-    <td valign="middle"><strong><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link">Infistar.cc</a></strong><p>Infistar.cc：Claude、GPT、Gemini、DeepSeek 等模型，一个 Key 接入，低至官方 0.1 折，省 99%。100% 官方纯血模型，上千线路安全冗余自动切换；CPAMP 用户通过专属链接注册送人民币 5 元体验额度。</p></td>
+    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
+    <td valign="middle"><p><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link" target="_blank" rel="noopener noreferrer">Infistar.cc</a>：Claude、GPT、Gemini、DeepSeek 等模型，一个 Key 接入，低至官方 0.1 折，省 99%。100% 官方纯血模型，上千线路安全冗余自动切换；CPAMP 用户通过专属链接注册送人民币 5 元体验额度。</p></td>
   </tr>
 </table>
 
