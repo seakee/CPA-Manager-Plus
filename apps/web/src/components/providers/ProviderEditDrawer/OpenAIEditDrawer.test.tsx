@@ -101,6 +101,27 @@ describe('OpenAIEditDrawer model discovery', () => {
     mocks.apiCallRequest.mockResolvedValue({ statusCode: 200, body: '{}' });
   });
 
+  it.each(['gpt-6.1-terra', 'gpt-6.1-sol'])('tests %s without a legacy model', async (model) => {
+    mocks.getOpenAIProviders.mockResolvedValue([{
+      name: 'official-test', baseUrl: 'https://api.openai.com/v1',
+      apiKeyEntries: [{ apiKey: 'test-key' }], models: [{ name: model }],
+    }]);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />);
+    });
+    const label = i18n.t('ai_providers.openai_test_single_action');
+    const button = renderer.root.findAllByType('button').find((node) =>
+      node.findAllByType('span').some((span) => span.children.join('') === label));
+    expect(button).toBeDefined();
+    await act(async () => { await button?.props.onClick(); });
+    expect(mocks.apiCallRequest).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(mocks.apiCallRequest.mock.calls[0][0].data);
+    expect(body).toMatchObject({ model, max_completion_tokens: 128 });
+    expect(body).not.toHaveProperty('max_tokens');
+    act(() => renderer.unmount());
+  });
+
   it('tests and saves an OpenAI-compatible provider without an API key', async () => {
     mocks.getOpenAIProviders.mockResolvedValue([{
       name: 'local-anonymous',

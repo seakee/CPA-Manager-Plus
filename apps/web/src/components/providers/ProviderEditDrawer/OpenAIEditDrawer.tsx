@@ -23,6 +23,7 @@ import {
 } from '@/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { requestOpenAIConnectivityTest } from '@/utils/openAIConnectivityTest';
 import {
   getOpenAIKeyCount,
   getOpenAIModelDiscoveryEntry,
@@ -562,20 +563,16 @@ export function OpenAIEditDrawer({
         return next;
       });
       try {
-        const result = await apiCallApi.request(
+        const result = await requestOpenAIConnectivityTest(
+          apiCallApi.request,
           {
             authIndex: keyAuthIndex,
             proxyUrl: keyEntry.proxyUrl?.trim() || undefined,
             method: 'POST',
             url: endpoint,
             header: Object.keys(headers).length ? headers : undefined,
-            data: JSON.stringify({
-              model: modelName,
-              messages: [{ role: 'user', content: 'Hi' }],
-              stream: false,
-              max_tokens: 5,
-            }),
           },
+          modelName,
           { timeout: OPENAI_TEST_TIMEOUT_MS }
         );
         if (result.statusCode < 200 || result.statusCode >= 300)
@@ -832,7 +829,8 @@ export function OpenAIEditDrawer({
             const keyStatus = keyTestStatuses[index]?.status ?? 'idle';
             const weightError = getCredentialWeightError(entry.weight);
             const canTestKey =
-              hasConfiguredModels && getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
+              hasConfiguredModels &&
+              getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
             return (
               <div key={index} className={styles.keyTableRow}>
                 <div className={styles.keyTableColIndex}>{index + 1}</div>
