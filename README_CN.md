@@ -18,6 +18,19 @@
 
 </div>
 
+## 赞助商
+
+<small>商业赞助 · 含推广链接</small>
+
+<table>
+  <tr>
+    <td width="128" align="center" valign="middle"><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link"><img src="assets/sponsors/infistar-logo.svg" alt="Infistar.cc logo" width="104"></a></td>
+    <td valign="middle"><strong><a href="https://infistar.cc/register?aff=PC3AZUBX&amp;ref_source=link">Infistar.cc</a></strong><p>Infistar.cc：Claude、GPT、Gemini、DeepSeek 等模型，一个 Key 接入，低至官方 0.1 折，省 99%。100% 官方纯血模型，上千线路安全冗余自动切换；CPAMP 用户通过专属链接注册送人民币 5 元体验额度。</p></td>
+  </tr>
+</table>
+
+<sub><strong>免责声明：</strong>赞助商信息及宣传内容由赞助商提供。本区域包含商业推广返佣链接。CPAMP 不对赞助商提供的第三方服务、产品质量、安全性、稳定性及宣传承诺作出任何保证。赞助展示不代表 CPAMP 对相关服务的官方认证或推荐。</sub>
+
 ## CPAMP 可以帮你回答什么问题？
 
 - **请求为什么失败？** 在持久化请求历史中查看失败率、状态码、受影响的模型/账号和脱敏证据。
