@@ -44,13 +44,13 @@ button:disabled {
     background: var(--primary-solid, var(--primary-color));
     color: var(--primary-contrast);
     border-color: var(--primary-solid, var(--primary-color));
-    box-shadow: none;
+    box-shadow: 0 6px 14px -10px color-mix(in srgb, var(--primary-solid, var(--primary-color)) 65%, transparent);
 
     &:hover {
       background: var(--primary-solid-hover, var(--primary-hover));
       transform: translateY(-1px);
       border-color: var(--primary-solid-hover, var(--primary-hover));
-      box-shadow: none;
+      box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--primary-solid, var(--primary-color)) 72%, transparent);
     }
 
     &:active {
@@ -492,10 +492,115 @@ textarea {
   white-space: nowrap;
 }
 
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--data-badge-neutral-dot);
+
+  &.is-success {
+    background: var(--status-graphic-success);
+  }
+
+  &.is-warning {
+    background: var(--status-graphic-warning);
+  }
+
+  &.is-danger {
+    background: var(--status-graphic-danger);
+  }
+
+  &.is-info {
+    background: var(--status-graphic-info);
+  }
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: var(--app-radius-pill);
+  border: 1px solid var(--data-badge-neutral-border);
+  background: var(--data-badge-neutral-bg);
+  color: var(--data-badge-neutral-text);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  white-space: nowrap;
+
+  &.is-success {
+    border-color: var(--data-badge-success-border);
+    background: var(--data-badge-success-bg);
+    color: var(--data-badge-success-text);
+  }
+
+  &.is-warning {
+    border-color: var(--data-badge-warning-border);
+    background: var(--data-badge-warning-bg);
+    color: var(--data-badge-warning-text);
+  }
+
+  &.is-danger {
+    border-color: var(--data-badge-danger-border);
+    background: var(--data-badge-danger-bg);
+    color: var(--data-badge-danger-text);
+  }
+
+  &.is-info {
+    border-color: var(--data-badge-info-border);
+    background: var(--data-badge-info-bg);
+    color: var(--data-badge-info-text);
+  }
+}
+
+.toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    color 0.16s ease;
+
+  &:hover {
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+  }
+
+  &.is-active-danger {
+    border-color: var(--data-badge-danger-border);
+    background: var(--data-badge-danger-bg);
+    color: var(--data-badge-danger-text);
+  }
+
+  &.is-active-primary {
+    border-color: var(--data-badge-info-border);
+    background: var(--data-badge-info-bg);
+    color: var(--data-badge-info-text);
+  }
+}
+
 .loading-spinner {
-  // Fallback without color-mix: themed border ring with a contrast-colour top arc.
+  // Fallback without color-mix: themed border ring with currentColor top arc.
   border: 3px solid var(--border-color);
-  border-top-color: var(--primary-contrast);
+  border-top-color: currentColor;
   border-radius: 50%;
   width: 16px;
   height: 16px;
@@ -827,7 +932,7 @@ textarea {
   border: 1px solid var(--data-badge-danger-border);
   border-radius: var(--app-radius-sm);
   padding: $spacing-sm $spacing-md;
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .stack {

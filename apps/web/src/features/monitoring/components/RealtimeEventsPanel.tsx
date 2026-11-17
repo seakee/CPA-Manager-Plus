@@ -1242,17 +1242,19 @@ export function RealtimeEventsPanel({
                       )}
                     </div>
                   </td>
-                  <td
-                    className={[
-                      styles.realtimeCenteredColumn,
-                      row.successRate >= 0.95
-                        ? styles.goodText
-                        : row.successRate >= 0.85
-                          ? styles.warnText
-                          : styles.badText,
-                    ].join(' ')}
-                  >
-                    {formatPercent(row.successRate)}
+                  <td className={styles.realtimeCenteredColumn}>
+                    <span
+                      className={[
+                        styles.realtimeSuccessRateBadge,
+                        row.successRate >= 0.95
+                          ? styles.goodText
+                          : row.successRate >= 0.85
+                            ? styles.warnText
+                            : styles.badText,
+                      ].join(' ')}
+                    >
+                      {formatPercent(row.successRate)}
+                    </span>
                   </td>
                   <td className={styles.realtimeCenteredColumn}>
                     {formatCompactNumber(row.requestCount)}

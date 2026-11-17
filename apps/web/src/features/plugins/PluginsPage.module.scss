@@ -1,5 +1,5 @@
 @mixin warning-status-text {
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 .page {
@@ -17,7 +17,7 @@
 }
 
 .errorBox {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   border: 1px solid var(--data-badge-danger-border);
   background: var(--data-badge-danger-bg);
 }
@@ -105,7 +105,7 @@
     background: var(--data-badge-success-bg);
 
     strong {
-      color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+      color: var(--data-badge-success-text);
     }
   }
 
@@ -319,7 +319,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .badgeOn {
-  color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+  color: var(--data-badge-success-text);
   border-color: var(--data-badge-success-border);
   background: var(--data-badge-success-bg);
 }
@@ -510,7 +510,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .fieldError {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .formField {

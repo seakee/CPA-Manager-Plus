@@ -23,7 +23,7 @@
   height: 24px;
   border: 1px solid color-mix(in srgb, var(--warning-color) 52%, transparent);
   border-radius: 50%;
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
   font-weight: 700;
   line-height: 1;
 }
@@ -65,7 +65,7 @@
 }
 
 .safeNote {
-  color: color-mix(in srgb, var(--text-secondary) 88%, var(--success-color));
+  color: var(--text-secondary);
 }
 
 .badge {
@@ -73,7 +73,7 @@
   padding: 3px 8px;
   border: 1px solid color-mix(in srgb, var(--warning-color) 40%, transparent);
   border-radius: var(--app-radius-pill);
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -89,7 +89,7 @@
 
 .details summary {
   width: fit-content;
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
   cursor: pointer;
   font-size: 13px;
   font-weight: 700;

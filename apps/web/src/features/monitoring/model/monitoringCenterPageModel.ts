@@ -630,7 +630,7 @@ export const buildPrimarySummaryCards = ({
     value: hasPrices ? formatUsd(summary.totalCost) : '--',
     valueTitle: hasPrices ? formatUsd(summary.totalCost) : undefined,
     meta: hasPrices ? t('monitoring.estimated_cost_hint') : t('monitoring.estimated_cost_missing'),
-    tone: hasPrices ? undefined : 'warn',
+    tone: undefined,
     icon: 'cost',
     accent: 'amber',
   },

@@ -51,13 +51,13 @@
 }
 
 .statusBarSuccess {
-  background: var(--success-color);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--success-color) 14%, transparent);
+  background: var(--data-green-base);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--data-green-base) 18%, transparent);
 }
 
 .statusBarFailed {
-  background: var(--error-color);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--error-color) 14%, transparent);
+  background: var(--data-red-base);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--data-red-base) 18%, transparent);
   cursor: help;
 }
 

@@ -54,7 +54,7 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
+  color: var(--warning-text);
 }
 
 .switchControls {

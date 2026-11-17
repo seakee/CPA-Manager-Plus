@@ -44,7 +44,7 @@
   padding: 2px 10px;
   border-radius: var(--app-radius-pill);
   background: var(--warning-bg);
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
   white-space: nowrap;
 }
 
@@ -191,7 +191,7 @@
   height: 18px;
   border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-  color: color-mix(in srgb, var(--data-badge-info-text) 72%, var(--text-primary));
+  color: var(--data-badge-info-text);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
@@ -231,14 +231,14 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
 }
 
 .statFailure {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .footerToggle {

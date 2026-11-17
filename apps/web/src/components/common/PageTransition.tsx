@@ -24,7 +24,7 @@ const IOS_EXIT_TO_X_PERCENT_FORWARD = -30;
 const IOS_EXIT_TO_X_PERCENT_BACKWARD = 100;
 const IOS_ENTER_FROM_X_PERCENT_BACKWARD = -30;
 const IOS_EXIT_DIM_OPACITY = 0.72;
-const IOS_SHADOW_VALUE = '-14px 0 24px rgba(0, 0, 0, 0.16)';
+const IOS_SHADOW_VALUE = 'var(--floating-shadow-drawer)';
 
 const easePower2Out = (progress: number) => 1 - (1 - progress) ** 3;
 const easeCircOut = (progress: number) => Math.sqrt(1 - (progress - 1) ** 2);

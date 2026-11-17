@@ -132,17 +132,17 @@
 
 .statusSuccess {
   background: var(--data-badge-success-bg);
-  color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
+  color: var(--data-badge-success-text);
 }
 
 .statusError {
   background: var(--data-badge-danger-bg);
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .statusWarning {
   background: var(--data-badge-warning-bg);
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
 }
 
 .footer {

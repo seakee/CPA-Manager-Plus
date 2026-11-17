@@ -422,7 +422,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   align-items: center;
   gap: 3px;
   min-width: 0;
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
   flex-shrink: 0;
 }
 
@@ -431,7 +431,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   align-items: center;
   gap: 3px;
   min-width: 0;
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   flex-shrink: 0;
 }
 

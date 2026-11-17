@@ -1251,33 +1251,208 @@ describe('design token checker', () => {
       ]).toEqual(['--danger-solid', '--danger-solid-hover', '--danger-solid-active']);
     }
 
-    // (b) Counterexample 1: injecting `background-color: var(--data-red-base);` into dark `.btn.btn-danger`
-    // overrides the base danger backgrounds in dark theme and drops contrast below 4.5:1 (~2.77:1).
-    const componentsWithDarkRedBg = componentsRaw.replace(
+    // (b) Counterexample 1: injecting `background-color: var(--bg-error-light);` into dark `.btn.btn-danger`
+    // overrides the base danger backgrounds in dark theme and drops contrast with `#0b1324` below 4.5:1.
+    const componentsWithDarkMutedRedBg = componentsRaw.replace(
       /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*color:\s*var\(--primary-contrast\);)/,
-      '$1\n    background-color: var(--data-red-base);'
+      '$1\n    background-color: var(--bg-error-light);'
     );
-    expect(componentsWithDarkRedBg).not.toBe(componentsRaw);
-    const darkRedBgResults = evaluateDangerButtonContrast(themesRaw, componentsWithDarkRedBg);
-    expect(darkRedBgResults.dark.resting.bgToken).toBe('--data-red-base');
-    expect(darkRedBgResults.dark.hover.bgToken).toBe('--data-red-base');
-    expect(darkRedBgResults.dark.active.bgToken).toBe('--data-red-base');
+    expect(componentsWithDarkMutedRedBg).not.toBe(componentsRaw);
+    const darkRedBgResults = evaluateDangerButtonContrast(
+      themesRaw,
+      componentsWithDarkMutedRedBg
+    );
+    expect(darkRedBgResults.dark.resting.bgToken).toBe('--bg-error-light');
+    expect(darkRedBgResults.dark.hover.bgToken).toBe('--bg-error-light');
+    expect(darkRedBgResults.dark.active.bgToken).toBe('--bg-error-light');
     expect(darkRedBgResults.dark.resting.ratio).toBeLessThan(4.5);
     expect(darkRedBgResults.dark.hover.ratio).toBeLessThan(4.5);
     expect(darkRedBgResults.dark.active.ratio).toBeLessThan(4.5);
 
-    // (b) Counterexample 2: changing dark `.btn.btn-danger` text colour to `var(--app-bg)`
-    // drops dark resting contrast below 4.5:1 (~4.10:1).
-    const componentsWithDarkAppBgText = componentsRaw.replace(
+    // (b) Counterexample 2: changing dark `.btn.btn-danger` text colour to `var(--text-primary)` (`#e5e5e5`)
+    // on the bright `#f87171` fill drops dark resting contrast below 4.5:1 (~2.23:1).
+    const componentsWithDarkLightText = componentsRaw.replace(
       /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*)color:\s*var\(--primary-contrast\);/,
-      '$1color: var(--app-bg);'
+      '$1color: var(--text-primary);'
     );
-    expect(componentsWithDarkAppBgText).not.toBe(componentsRaw);
-    const darkAppBgTextResults = evaluateDangerButtonContrast(
+    expect(componentsWithDarkLightText).not.toBe(componentsRaw);
+    const darkLightTextResults = evaluateDangerButtonContrast(
       themesRaw,
-      componentsWithDarkAppBgText
+      componentsWithDarkLightText
     );
-    expect(darkAppBgTextResults.dark.resting.textExpr).toBe('var(--app-bg)');
-    expect(darkAppBgTextResults.dark.resting.ratio).toBeLessThan(4.5);
+    expect(darkLightTextResults.dark.resting.textExpr).toBe('var(--text-primary)');
+    expect(darkLightTextResults.dark.resting.ratio).toBeLessThan(4.5);
+  });
+
+  it('enforces 4-tier global semantic contrast (>= 3.0:1 display icons and vibrant light status badges, >= 4.5:1 info/neutral and dark badges) and neutral KPI / resting toggle chip invariants across light and dark themes', () => {
+    const themesRaw = stripComments(
+      readFileSync(path.join(repoRoot, 'apps/web/src/styles/themes.scss'), 'utf8'),
+      { isScript: false, allowLineComments: true }
+    );
+    const monitoringSummaryRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/features/monitoring/styles/_monitoring-summary-table.scss'),
+      'utf8'
+    );
+    const monitoringPageRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/features/monitoring/MonitoringCenterPage.module.scss'),
+      'utf8'
+    );
+    const usagePageRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss'),
+      'utf8'
+    );
+
+    const extractBlockMap = (source, selectorPattern) => {
+      const decls = {};
+      const regex = new RegExp(`${selectorPattern}\\s*\\{([\\s\\S]*?)\\n\\}`, 'g');
+      for (const match of source.matchAll(regex)) {
+        for (const propMatch of match[1].matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;]+);/g)) {
+          decls[propMatch[1]] = propMatch[2].trim();
+        }
+      }
+      return decls;
+    };
+
+    const rootTokens = extractBlockMap(themesRaw, ':root');
+    const darkTokens = { ...rootTokens, ...extractBlockMap(themesRaw, "\\[data-theme='dark'\\]") };
+
+    const parseRgba = (raw) => {
+      const value = raw.trim();
+      const hex6 = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(value);
+      if (hex6) {
+        return [
+          Number.parseInt(hex6[1], 16),
+          Number.parseInt(hex6[2], 16),
+          Number.parseInt(hex6[3], 16),
+          1,
+        ];
+      }
+      const rgba =
+        /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9.]+))?\s*\)$/.exec(
+          value
+        );
+      if (rgba) {
+        return [
+          Number.parseInt(rgba[1], 10),
+          Number.parseInt(rgba[2], 10),
+          Number.parseInt(rgba[3], 10),
+          rgba[4] === undefined ? 1 : Number.parseFloat(rgba[4]),
+        ];
+      }
+      throw new Error(`Unsupported colour literal: ${value}`);
+    };
+
+    const resolveRgba = (exprOrToken, map, baseRgb = [255, 255, 255]) => {
+      let current = exprOrToken.trim();
+      if (current.startsWith('--')) current = `var(${current})`;
+      const seen = new Set();
+      while (true) {
+        const m = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*([^)]+))?\)$/.exec(current);
+        if (!m) break;
+        if (seen.has(m[1])) throw new Error(`Cycle: ${m[1]}`);
+        seen.add(m[1]);
+        current = map[m[1]] ?? m[2]?.trim() ?? '';
+        if (!current) throw new Error(`Missing token: ${m[1]}`);
+      }
+      const [r, g, b, a] = parseRgba(current);
+      if (a >= 1) return [r, g, b];
+      return [
+        Math.round(r * a + baseRgb[0] * (1 - a)),
+        Math.round(g * a + baseRgb[1] * (1 - a)),
+        Math.round(b * a + baseRgb[2] * (1 - a)),
+      ];
+    };
+
+    const lin = (c) => {
+      const s = c / 255;
+      return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    };
+    const lum = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    const ratio = (fg, bg) => {
+      const a = lum(fg);
+      const b = lum(bg);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    };
+
+    for (const [themeName, map] of [
+      ['light', rootTokens],
+      ['dark', darkTokens],
+    ]) {
+      const canvas = resolveRgba('--app-bg', map);
+      const surface = resolveRgba('--bg-primary', map, canvas);
+      for (const role of ['success', 'warning', 'danger', 'info', 'emerald']) {
+        const displayFg = resolveRgba(`--status-display-${role}`, map, surface);
+        const displayRatio = ratio(displayFg, surface);
+        expect(
+          displayRatio,
+          `${themeName} --status-display-${role} vs --bg-primary must be >= 3.0:1 (got ${displayRatio.toFixed(2)})`
+        ).toBeGreaterThanOrEqual(3.0);
+      }
+
+      for (const role of ['success', 'warning', 'danger', 'info', 'neutral']) {
+        const badgeBg = resolveRgba(`--data-badge-${role}-bg`, map, surface);
+        const badgeFg = resolveRgba(`--data-badge-${role}-text`, map, badgeBg);
+        const badgeRatio = ratio(badgeFg, badgeBg);
+        const surfaceRatio = ratio(badgeFg, surface);
+        const minRatio =
+          themeName === 'light' && (role === 'success' || role === 'warning' || role === 'danger')
+            ? 3.0
+            : 4.5;
+        expect(
+          badgeRatio,
+          `${themeName} --data-badge-${role}-text vs --data-badge-${role}-bg must be >= ${minRatio}:1 (got ${badgeRatio.toFixed(2)})`
+        ).toBeGreaterThanOrEqual(minRatio);
+        expect(
+          surfaceRatio,
+          `${themeName} --data-badge-${role}-text vs --bg-primary must be >= ${minRatio}:1 (got ${surfaceRatio.toFixed(2)})`
+        ).toBeGreaterThanOrEqual(minRatio);
+      }
+    }
+
+    expect(monitoringSummaryRaw).toMatch(/\.summaryValue\s*\{[^}]*color:\s*var\(--kpi-value-color\)/);
+    expect(usagePageRaw).toMatch(/\.usageSummaryValue\s*\{[^}]*color:\s*var\(--kpi-value-color\)/);
+    expect(monitoringPageRaw).toMatch(
+      /\.filterToggleChip\s*\{[^}]*color:\s*var\(--text-secondary\)/
+    );
+  });
+
+  it('prevents stray hex or rgb/rgba color literals in non-test TS/TSX runtime files outside dataPalette.ts and pluginHostStyle.ts', async () => {
+    const { readdirSync, statSync } = await import('node:fs');
+    const srcRoot = path.join(repoRoot, 'apps/web/src');
+    const allowedFiles = new Set([
+      'utils/dataPalette.ts',
+      'features/plugins/pluginHostStyle.ts',
+    ]);
+    const violations = [];
+
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) {
+          if (entry === '__tests__' || entry === 'assets') continue;
+          walk(full);
+          continue;
+        }
+        if (!/\.(ts|tsx)$/.test(entry) || /\.(test|spec)\.(ts|tsx)$|\.d\.ts$/.test(entry)) {
+          continue;
+        }
+        const rel = path.relative(srcRoot, full).replace(/\\/g, '/');
+        if (allowedFiles.has(rel)) continue;
+        const content = stripComments(readFileSync(full, 'utf8'), {
+          isScript: true,
+          allowLineComments: true,
+        });
+        if (
+          /['"`][^'"`]*#[0-9a-fA-F]{3,8}\b[^'"`]*['"`]/.test(content) ||
+          /['"`][^'"`]*\brgba?\(\s*\d{1,3}\s*,/i.test(content)
+        ) {
+          violations.push(rel);
+        }
+      }
+    };
+
+    walk(srcRoot);
+    expect(violations).toEqual([]);
   });
 });

@@ -142,16 +142,16 @@
       color: var(--text-tertiary);
 
       &[data-rank="1"] {
-        background: var(--data-amber-light-8);
-        color: color-mix(in srgb, var(--data-badge-warning-text) 58%, var(--text-primary));
+        background: var(--data-rank-1-bg);
+        color: var(--data-rank-1-text);
       }
       &[data-rank="2"] {
-        background: var(--data-slate-light-7);
-        color: color-mix(in srgb, var(--data-badge-neutral-text) 70%, var(--text-primary));
+        background: var(--data-rank-2-bg);
+        color: var(--data-rank-2-text);
       }
       &[data-rank="3"] {
-        background: var(--data-amber-light-9);
-        color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+        background: var(--data-rank-3-bg);
+        color: var(--data-rank-3-text);
       }
     }
 

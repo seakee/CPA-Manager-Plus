@@ -289,7 +289,7 @@
   }
 
   .accountStatusDotEnabled {
-    color: var(--success-color);
+    color: var(--status-graphic-success);
   }
 
   .accountStatusDotDisabled,
@@ -298,7 +298,7 @@
   }
 
   .accountStatusDotMixed {
-    color: var(--warning-color);
+    color: var(--status-graphic-warning);
   }
 
   .accountOverviewCardGrid {
@@ -490,14 +490,14 @@
     background: color-mix(in srgb, var(--data-green-base) 14%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowInput .tokenStructureRowIcon {
-    color: var(--success-color);
+    color: var(--status-display-success);
   }
 
   .tokenStructureRowOutput {
     background: color-mix(in srgb, var(--data-amber-base) 16%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowOutput .tokenStructureRowIcon {
-    color: var(--warning-color);
+    color: var(--status-display-warning);
   }
 
   .tokenStructureRowCached {
@@ -837,12 +837,12 @@
 
   .accountMetricIconInput {
     background: color-mix(in srgb, var(--data-green-base) 13%, var(--bg-primary));
-    color: var(--success-color);
+    color: var(--status-display-success);
   }
 
   .accountMetricIconOutput {
     background: color-mix(in srgb, var(--data-amber-base) 17%, var(--bg-primary));
-    color: var(--warning-color);
+    color: var(--status-display-warning);
   }
 
   .accountMetricIconCached {

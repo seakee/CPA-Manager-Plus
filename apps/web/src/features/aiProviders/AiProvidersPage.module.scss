@@ -395,11 +395,11 @@
 }
 
 .tooltipSuccess {
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
 }
 
 .tooltipFailure {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .tooltipRate {
@@ -424,17 +424,17 @@
 }
 
 .statusRateHigh {
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
   background: var(--success-badge-bg);
 }
 
 .statusRateMedium {
-  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  color: var(--data-badge-warning-text);
   background: var(--warning-bg);
 }
 
 .statusRateLow {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   background: var(--failure-badge-bg);
 }
 
@@ -638,13 +638,13 @@
 }
 
 .connectivitySuccess {
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
   border: 1px solid color-mix(in srgb, var(--success-color) 32%, var(--border-color));
   background: color-mix(in srgb, var(--success-color) 8%, var(--bg-primary));
 }
 
 .connectivityError {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   border: 1px solid color-mix(in srgb, var(--danger-color) 32%, var(--border-color));
   background: color-mix(in srgb, var(--danger-color) 8%, var(--bg-primary));
 }
@@ -881,7 +881,7 @@
 }
 
 .keyTableWeightError {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   font-size: 10px;
   line-height: 1.25;
   text-align: left;

@@ -24,6 +24,7 @@ import { buildMonitoringSourceDisplay } from '@/features/monitoring/model/source
 import type { MonitoringAuthMeta, MonitoringChannelMeta } from '@/features/monitoring/model/types';
 import type { CredentialInfo } from '@/types/sourceInfo';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
+import { lightDataPalette } from '@/utils/dataPalette';
 import {
   calculateCacheHitRate,
   calculateCacheHitRateFromTotals,
@@ -514,37 +515,37 @@ export const USAGE_METRICS: UsageMetricDefinition[] = [
   {
     key: 'requestCount',
     labelKey: 'usage_analytics.metric_request_count',
-    color: '#2563eb',
+    color: lightDataPalette.blue,
     axis: 'requests',
   },
   {
     key: 'totalTokens',
     labelKey: 'usage_analytics.metric_total_tokens',
-    color: '#0ea5a7',
+    color: lightDataPalette.teal,
     axis: 'tokens',
   },
   {
     key: 'inputTokens',
     labelKey: 'usage_analytics.metric_input_tokens',
-    color: '#3b82f6',
+    color: lightDataPalette.blue,
     axis: 'tokens',
   },
   {
     key: 'outputTokens',
     labelKey: 'usage_analytics.metric_output_tokens',
-    color: '#22c55e',
+    color: lightDataPalette.green,
     axis: 'tokens',
   },
   {
     key: 'cachedTokens',
     labelKey: 'usage_analytics.metric_cached_tokens',
-    color: '#06b6d4',
+    color: lightDataPalette.cyan,
     axis: 'tokens',
   },
   {
     key: 'estimatedCost',
     labelKey: 'usage_analytics.metric_estimated_cost',
-    color: '#f97316',
+    color: lightDataPalette.amber,
     axis: 'cost',
   },
 ];
@@ -1950,7 +1951,13 @@ export const buildEntityTrendSeries = (
   shareRows = rows
 ): UsageEntityTrendSeries[] => {
   const total = sumUsageRows(shareRows, metric);
-  const colors = ['#2563eb', '#0ea5a7', '#f59e0b', '#ef4444', '#64748b'];
+  const colors = [
+    lightDataPalette.blue,
+    lightDataPalette.teal,
+    lightDataPalette.amber,
+    lightDataPalette.red,
+    lightDataPalette.slate,
+  ];
   return rows
     .filter((row) => usageRankMetricValue(row, metric) > 0)
     .slice(0, limit)
@@ -1995,7 +2002,13 @@ export const buildApiKeyTrendSeries = (
     }
     valuesByBucket.set(point.bucketMs, point);
   });
-  const colors = ['#2563eb', '#0ea5a7', '#f59e0b', '#ef4444', '#64748b'];
+  const colors = [
+    lightDataPalette.blue,
+    lightDataPalette.teal,
+    lightDataPalette.amber,
+    lightDataPalette.red,
+    lightDataPalette.slate,
+  ];
   return rows
     .filter((row) => {
       const apiKeyHash = normalizeApiKeyHash(row.apiKeyHash || row.id);
@@ -2047,7 +2060,7 @@ export const buildSelectedApiKeyTrendSeries = (
     {
       id: selectedApiKey.apiKeyHash || selectedApiKey.id,
       label: selectedApiKey.label,
-      color: '#2563eb',
+      color: lightDataPalette.blue,
       points: timeline
         .slice()
         .sort((left, right) => left.bucketMs - right.bucketMs)
@@ -2082,7 +2095,7 @@ export const buildSelectedCredentialTrendSeries = (
     {
       id: selectedCredential.id,
       label: selectedCredential.label,
-      color: '#2563eb',
+      color: lightDataPalette.blue,
       points,
     },
   ];

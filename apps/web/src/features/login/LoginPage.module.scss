@@ -525,7 +525,7 @@
   border: 1px solid var(--data-badge-danger-border);
   border-radius: var(--app-radius-sm);
   background: var(--data-badge-danger-bg);
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   font-size: 13px;
   line-height: 1.5;
 }
