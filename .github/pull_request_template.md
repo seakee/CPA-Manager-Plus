@@ -73,12 +73,14 @@ Commands / evidence:
 ## Docs
 
 - [ ] README / README_CN updated for user-visible capabilities
-- [ ] Matching docs manual and navigation updated
-- [ ] Demo fixtures, screenshots, and deep links reviewed
+- [ ] Linked `cpamp-hq/docs` PR (1.x → `main`, v2 → `next`)
 - [ ] Release notes needed
 - [ ] Not needed — explanation included below
 
 Docs decision:
+
+Link the [`cpamp-hq/docs`](https://github.com/cpamp-hq/docs) PR (1.x → `main`,
+v2 → `next`) or state not needed.
 
 ## Related
 

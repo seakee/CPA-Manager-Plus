@@ -16,7 +16,7 @@ const noChecks = {
   windows_sqlite: false,
   native_control: false,
   docker: false,
-  demo_docs: false,
+  demo: false,
   release_content: false,
 };
 
@@ -28,7 +28,7 @@ describe('PR check classifier', () => {
       windows_sqlite: true,
       native_control: true,
       docker: true,
-      demo_docs: true,
+      demo: true,
       release_content: true,
     });
   });
@@ -42,24 +42,30 @@ describe('PR check classifier', () => {
       ...noChecks,
       frontend: true,
       docker: true,
-      demo_docs: true,
+      demo: true,
     });
   });
 
-  it('runs frontend checks for docs-site and README changes', () => {
-    expect(classifyChangedFiles(['apps/docs/index.md', 'README.md'])).toEqual({
+  it('runs frontend checks for README changes', () => {
+    expect(classifyChangedFiles(['README.md'])).toEqual({
       ...noChecks,
       frontend: true,
-      demo_docs: true,
     });
   });
 
-  it('runs Demo and Docs checks for web and docs-site changes', () => {
-    expect(classifyChangedFiles(['apps/docs/index.md', 'apps/web/src/App.tsx'])).toEqual({
+  it('runs frontend, Docker, and demo builds for web changes', () => {
+    expect(classifyChangedFiles(['apps/web/src/App.tsx'])).toEqual({
       ...noChecks,
       frontend: true,
       docker: true,
-      demo_docs: true,
+      demo: true,
+    });
+  });
+
+  it('runs frontend checks for the legacy Pages redirect site', () => {
+    expect(classifyChangedFiles(['bin/pages-redirect/redirect.mjs'])).toEqual({
+      ...noChecks,
+      frontend: true,
     });
   });
 
@@ -144,7 +150,7 @@ describe('PR check classifier', () => {
       frontend: true,
       native_control: true,
       docker: true,
-      demo_docs: true,
+      demo: true,
     });
   });
 
@@ -154,6 +160,7 @@ describe('PR check classifier', () => {
       '.github/workflows/release.yml',
       'bin/ci/classify-pr-checks.mjs',
       'tests/prCheckClassifier.test.mjs',
+      'tests/pagesRedirect.test.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({
         frontend: true,
@@ -161,7 +168,7 @@ describe('PR check classifier', () => {
         windows_sqlite: true,
         native_control: true,
         docker: true,
-        demo_docs: true,
+        demo: true,
         release_content: true,
       });
     }
@@ -181,7 +188,7 @@ describe('PR check classifier', () => {
       manager_server: true,
       windows_sqlite: true,
       docker: true,
-      demo_docs: true,
+      demo: true,
     });
   });
 

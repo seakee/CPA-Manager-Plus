@@ -7,6 +7,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        **Security vulnerabilities / 安全漏洞：** Do not disclose an unpatched vulnerability, exploit steps, or sensitive data in this public form. Please [report security vulnerabilities privately](https://github.com/seakee/CPA-Manager-Plus/security/advisories/new). / 请勿通过公开 Issue 提交未修复安全漏洞或利用细节，请使用私密报告入口。
+
         Thanks for reporting a bug. Please fill in the details below as completely as possible so we can determine whether the issue is caused by CPA, CPA Manager Plus, networking, Docker, or configuration.
 
   - type: dropdown
@@ -133,4 +135,6 @@ body:
         - label: I have searched existing Issues and did not find a duplicate.
           required: true
         - label: I have removed sensitive information such as tokens, keys, and account details.
+          required: true
+        - label: I understand that suspected security vulnerabilities should be reported privately and this public Issue contains no unpatched exploit details.
           required: true

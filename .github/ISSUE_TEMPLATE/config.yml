@@ -1,6 +1,9 @@
 blank_issues_enabled: false
 
 contact_links:
+  - name: 安全漏洞报告 / Security Vulnerability (Private)
+    url: https://github.com/seakee/CPA-Manager-Plus/security/advisories/new
+    about: 请私密报告疑似安全漏洞，不要在公开 Issue 中披露利用细节。Report suspected vulnerabilities privately, not in public Issues.
   - name: 使用交流 / 非结构化讨论
     url: https://t.me/cpa_mp
     about: 如果不是明确 Bug 或功能需求，可以先到 Telegram 群组讨论。

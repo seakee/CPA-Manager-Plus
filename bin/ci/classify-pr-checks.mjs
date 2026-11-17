@@ -8,7 +8,7 @@ const CHECK_NAMES = [
   'windows_sqlite',
   'native_control',
   'docker',
-  'demo_docs',
+  'demo',
   'release_content',
 ];
 
@@ -34,11 +34,11 @@ const allChecks = (enabled) =>
 const triggersAllChecks = (filePath) =>
   startsWithPath(filePath, '.github/workflows') ||
   filePath === 'bin/ci/classify-pr-checks.mjs' ||
-  filePath === 'tests/prCheckClassifier.test.mjs';
+  filePath === 'tests/prCheckClassifier.test.mjs' ||
+  filePath === 'tests/pagesRedirect.test.mjs';
 
 const triggersFrontend = (filePath) =>
   startsWithPath(filePath, 'apps/web') ||
-  startsWithPath(filePath, 'apps/docs') ||
   startsWithPath(filePath, 'tests') ||
   filePath === 'README.md' ||
   filePath === 'README_CN.md' ||
@@ -47,6 +47,7 @@ const triggersFrontend = (filePath) =>
   filePath === '.github/dependabot.yml' ||
   filePath === 'eslint.config.js' ||
   filePath === 'bin/install-cpamp.sh' ||
+  startsWithPath(filePath, 'bin/pages-redirect') ||
   startsWithPath(filePath, 'bin/release');
 
 const triggersManagerServer = (filePath) =>
@@ -68,9 +69,8 @@ const triggersDocker = (filePath) =>
   filePath === 'package.json' ||
   filePath === 'package-lock.json';
 
-const triggersDemoDocs = (filePath) =>
+const triggersDemo = (filePath) =>
   startsWithPath(filePath, 'apps/web') ||
-  startsWithPath(filePath, 'apps/docs') ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json';
 
@@ -93,7 +93,7 @@ export const classifyChangedFiles = (changedFiles) => {
     windows_sqlite: managerServer,
     native_control: files.some(triggersNativeControl),
     docker: files.some(triggersDocker),
-    demo_docs: files.some(triggersDemoDocs),
+    demo: files.some(triggersDemo),
     release_content: files.some(triggersReleaseContent),
   };
 };
