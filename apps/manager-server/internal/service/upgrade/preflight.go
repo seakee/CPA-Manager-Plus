@@ -170,12 +170,6 @@ type Options struct {
 	// writes the store, and a live Manager or a second reconciliation must not
 	// share it. CopyIn does not use it.
 	TargetLock *processlock.Lock
-	// AcceptUndeclaredVersion makes an undeclared 1.x release a pending
-	// observation instead of a blocking refusal. It exists for a read-only
-	// caller that cannot declare a release: the copy-in declares it, so the
-	// report says so and stays usable. The command line never sets it, so a CLI
-	// preflight without --source-version still blocks.
-	AcceptUndeclaredVersion bool
 	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
 	// accepts as permanently incomplete. Reconcile only.
 	Acknowledged []string
@@ -184,6 +178,10 @@ type Options struct {
 	// are still written into the report, so the record names them. Reconcile
 	// only.
 	AcknowledgeParityGaps bool
+	// ReconcileTargetReady reports that CopyIn has already materialized 1.0x
+	// sourceBytes on TargetDir, so Preflight's disk check only requires 0.2x
+	// WAL/mark headroom on TargetDir while verifying 1.0x sourceBytes on scratch.
+	ReconcileTargetReady bool
 	// checkpoint is a package-private synchronous test seam. Production never
 	// sets it; every returned error aborts the copy-in at that phase.
 	checkpoint func(phase string) error
@@ -281,8 +279,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	// release string is a broken build contract, not a source condition: it
 	// must fail the preflight outright instead of degrading the newer-marker
 	// rule to an empty list that accepts everything.
-	ladder, err := newVersionLadder(pinnedSourceVersion())
-	if err != nil {
+	if _, err := newVersionLadder(pinnedSourceVersion()); err != nil {
 		return Report{}, fmt.Errorf("upgrade preflight: %w", err)
 	}
 	report := Report{
@@ -304,27 +301,56 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 
 	scratchBase := strings.TrimSpace(options.ScratchDir)
 	targetDir := strings.TrimSpace(options.TargetDir)
+	bundleDir := strings.TrimSpace(options.BundleDir)
+	if targetDir != "" {
+		if _, err := canonicalDirectoryCandidate(targetDir, "the v2 data root"); err != nil {
+			return Report{}, err
+		}
+		if bundleDir != "" {
+			if _, err := canonicalDirectoryCandidate(bundleDir, "the backup destination"); err != nil {
+				return Report{}, err
+			}
+		}
+		effectiveBundle := bundleDir
+		if effectiveBundle == "" {
+			effectiveBundle = DefaultBundleDirectory(targetDir)
+		}
+		if err := RefuseOverlappingRoots(root, targetDir, effectiveBundle); err != nil {
+			return Report{}, err
+		}
+	} else if bundleDir != "" {
+		resolvedBundle, err := resolveBundleDir(bundleDir)
+		if err != nil {
+			return Report{}, err
+		}
+		canonSource, err := canonicalPathStrict(root)
+		if err != nil {
+			return Report{}, fmt.Errorf("resolve the 1.x source root: %w", err)
+		}
+		canonBundle, err := canonicalDirectoryCandidate(resolvedBundle, "the backup destination")
+		if err != nil {
+			return Report{}, err
+		}
+		if within(canonSource, canonBundle) {
+			return Report{}, errors.New("the backup destination must not sit inside the 1.x source root")
+		}
+		if within(canonBundle, canonSource) {
+			return Report{}, errors.New("the 1.x source root must not sit inside the backup destination")
+		}
+	}
 
 	databasePath := filepath.Join(root, databaseFileName)
-	// An absent database and an empty one are the same operator condition: the
-	// file the credential read applies its policy to holds nothing to read.
-	databaseMissing := false
-	switch info, statErr := os.Lstat(databasePath); {
-	case os.IsNotExist(statErr):
-		databaseMissing = true
-	case statErr == nil && info.Mode().IsRegular() && info.Size() == 0:
-		databaseMissing = true
-	}
-	if databaseMissing {
-		report.SourceKind = SourceKindMissingDatabase
-	}
+	// An absent database and an empty one without a populated regular WAL are the
+	// same operator condition: the file the credential read applies its policy to
+	// holds nothing to read.
+	databaseMissing := isDatabaseFileMissingOrEmpty(databasePath)
 
 	// A scratch copy inside the source root would write the whole database back
 	// into the tree this command promises to preserve, and one inside the target
 	// root would leave upgrade scratch in the volume the copy is measured
 	// against. Both are refused before a single directory is created. This is a
 	// path question only: nothing under the source root is opened to answer it.
-	scratchErr := ValidateScratchDir(scratchBase, root, targetDir)
+	scratchErr := ValidateScratchDirWithBackup(scratchBase, root, targetDir, bundleDir)
 
 	// The fence is taken before anything under the source root is read: the
 	// existing read-only lock is acquired first and held until every observation
@@ -337,7 +363,12 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		defer func() { _ = lock.Close() }()
 	}
 	fenced := lockErr == nil
-
+	if databaseMissing &&
+		!errors.Is(lockErr, processlock.ErrLocked) &&
+		!errors.Is(lockErr, processlock.ErrHardLinked) &&
+		!errors.Is(lockErr, processlock.ErrSymlinkedDatabase) {
+		report.SourceKind = SourceKindMissingDatabase
+	}
 	var before sourceFingerprint
 	var fingerprintErr error
 	var snapshot *Snapshot
@@ -425,20 +456,20 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		block(code)
 	}
 
-	// 2. Declared source version against the pinned contract and the v1.14
-	// structural lower bound, plus the v2-only table guard and the markers the
-	// pinned release genuinely lacks.
+	// 2. Source compatibility against the supported v1.14.x family and its
+	// proven schema, format, and semantic revision profile, plus the v2-only
+	// table guard.
 	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceVersion, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
-		report.SourceVersion = declaredVersion(options.DeclaredVersion)
 		report.MissingTables = schema.missingTables(requiredLegacyTables)
-		check := versionCheck(
-			report.SourceKind, schema.v2OnlyTables(), report.MissingTables, ladder.newer(schema),
-			options.DeclaredVersion, pinnedSourceVersion(), options.AcceptUndeclaredVersion,
-		)
+		resolvedVersion, check, compatErr := evaluateSourceCompatibility(report.SourceKind, schema, options.DeclaredVersion)
+		if compatErr != nil {
+			return Report{}, fmt.Errorf("upgrade preflight: %w", compatErr)
+		}
+		report.SourceVersion = resolvedVersion
 		if check.Status == StatusBlocked {
 			block(check.Code)
 		}
@@ -495,7 +526,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		})
 	} else {
 		options.observed(observationDisk)
-		check, diskBlocked := diskCheck(before.Bytes, targetDir, options)
+		check, diskBlocked := diskCheck(before.Bytes, targetDir, options, snapshot)
 		if diskBlocked {
 			block(check.Code)
 		}
@@ -511,7 +542,11 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		})
 	} else {
 		options.observed(observationCPA)
-		report.Checks = append(report.Checks, classifyCPA(root))
+		cpaCheck := classifyCPA(root)
+		if cpaCheck.Status == StatusBlocked {
+			block(cpaCheck.Code)
+		}
+		report.Checks = append(report.Checks, cpaCheck)
 	}
 
 	// 6. Parity gaps. Reported for confirmation; computable gaps never block. A
@@ -592,13 +627,15 @@ func ownershipCode(databaseMissing bool, lockErr, openErr error) string {
 // same way on both paths.
 func ownershipFailureOf(databaseMissing bool, lockErr, openErr error) (string, string) {
 	switch {
-	case databaseMissing, errors.Is(openErr, ErrSourceDatabaseMissing), errors.Is(lockErr, os.ErrNotExist):
-		return CodeSourceMissing, "source database is missing"
 	case errors.Is(lockErr, processlock.ErrSymlinkedDatabase), errors.Is(openErr, ErrSourceSymlinked):
 		return CodeSourceSymlinked, symlinkedSourceDetail()
 	case errors.Is(lockErr, processlock.ErrLocked):
 		return CodeSourceBusy, ownershipDetail(lockErr)
-	case errors.Is(lockErr, processlock.ErrNoExistingLock), errors.Is(lockErr, processlock.ErrHardLinked):
+	case errors.Is(lockErr, processlock.ErrHardLinked):
+		return CodeSourceLockUnavailable, lockUnavailableDetail(lockErr)
+	case databaseMissing, errors.Is(openErr, ErrSourceDatabaseMissing), errors.Is(lockErr, os.ErrNotExist):
+		return CodeSourceMissing, "source database is missing"
+	case errors.Is(lockErr, processlock.ErrNoExistingLock):
 		return CodeSourceLockUnavailable, lockUnavailableDetail(lockErr)
 	case errors.Is(lockErr, os.ErrPermission):
 		// A database this account cannot read is an unreadable source, not an
@@ -616,6 +653,10 @@ func ownershipFailureOf(databaseMissing bool, lockErr, openErr error) (string, s
 
 func ownershipFailure(err error) (string, string) {
 	switch {
+	case errors.Is(err, ErrSourceSymlinked):
+		return fingerprintFailure(err, "")
+	case errors.Is(err, processlock.ErrHardLinked):
+		return CodeSourceLockUnavailable, lockUnavailableDetail(err)
 	case errors.Is(err, errDatabaseMissing), errors.Is(err, ErrSourceDatabaseMissing):
 		return CodeSourceMissing, "source database is missing"
 	case errors.Is(err, errSourceIntegrity):
@@ -835,13 +876,9 @@ func MountDatabase(legacyRoot string) (string, string) {
 			return "", CodeSourceMissing
 		case errors.Is(err, ErrSourceSymlinked):
 			return "", CodeSourceSymlinked
+		case errors.Is(err, os.ErrPermission), errors.Is(err, errInvalidSourceSidecar):
+			return "", CodeSourceUnreadable
 		default:
-			// A hard-linked, non-regular or unreadable database is refused by the
-			// shared file policy before anything is opened. The preflight's
-			// ownership probe maps the same refusals to upgrade_source_lock_unavailable
-			// (ownershipFailureOf), so the status marker and the preflight name one
-			// condition for one mount instead of busy on one surface and
-			// lock_unavailable on the other.
 			return "", CodeSourceLockUnavailable
 		}
 	}
@@ -897,7 +934,9 @@ func EntryCredentialDatabase(legacyRoot, managerDatabase string) string {
 	}
 	if root := strings.TrimSpace(legacyRoot); root != "" {
 		database := filepath.Join(root, databaseFileName)
-		if info, err := processlock.InspectRegularSingleLink(database); err == nil && info.Size() > 0 {
+		if info, err := processlock.InspectRegularSingleLink(database); err == nil &&
+			auditSidecarsRegularSingleLink(database) == nil &&
+			(info.Size() > 0 || !isDatabaseFileMissingOrEmpty(database)) {
 			if _, inspectErr := inspectSourceDatabase(database); errors.Is(inspectErr, os.ErrPermission) {
 				return database
 			}
@@ -943,13 +982,13 @@ type CredentialSnapshotRoots struct {
 	Target      string
 	Source      string
 	SourceKnown bool
-	// SourceTimedOut reports that Source is the root a mount lookup published
-	// before the lookup itself outlived its bound. The root must still be
-	// excluded, but it was never inspected and resolving it for that comparison
-	// would put the filesystem call the bound exists to stop back on the request.
-	// A read that needs a snapshot therefore fails closed with
-	// ErrSnapshotRootTimedOut instead of touching the root again. It is ignored
-	// when SourceKnown is false: an unnamed root already fails closed.
+	// SourceTimedOut reports that the mount lookup outlived its bound (either
+	// before naming Source or before inspecting it). Resolving the root for the
+	// exclusion check would repeat the filesystem call the bound exists to stop,
+	// and when SourceKnown is false the root could not even be named before the
+	// deadline expired. A read that needs a snapshot therefore fails closed with
+	// ErrSnapshotRootTimedOut instead of touching the root again or misreporting
+	// the mount deadline as an unreadable database.
 	SourceTimedOut bool
 	// PreserveTarget treats databasePath as an unadmitted or protected source
 	// (for example a 1.x volume mounted at /data during read-only discovery) so
@@ -1014,20 +1053,21 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 		return err
 	}
 	if materializing || roots.PreserveTarget {
+		if roots.SourceTimedOut {
+			// The lookup that would have resolved or inspected the configured
+			// source root outlived its bound, and the bound exists to stop
+			// exactly the filesystem call that resolving the root for the
+			// exclusion check would repeat. The deadline is the answer even
+			// when the lookup timed out before naming the root, and the
+			// operator's next move is a retry once the mount responds.
+			return fmt.Errorf("%w: the configured source root did not answer within its bound", ErrSnapshotRootTimedOut)
+		}
 		if !roots.SourceKnown {
 			// A snapshot under a root this process cannot name could land inside
 			// the tree the copy-in is preserving. Refusing before the read is the
 			// only answer that keeps the promise; the caller's next poll can
 			// retry once the mount answers.
 			return fmt.Errorf("%w: the configured source root was not resolved", ErrSnapshotRootUnknown)
-		}
-		if roots.SourceTimedOut {
-			// The root is named but was never inspected: the lookup that would
-			// have inspected it outlived its bound, and the bound exists to stop
-			// exactly the filesystem call that resolving the root for the
-			// exclusion check would repeat. The deadline is the answer, and the
-			// operator's next move is a retry once the mount responds.
-			return fmt.Errorf("%w: the configured source root did not answer within its bound", ErrSnapshotRootTimedOut)
 		}
 		return verifyPreservedCredential(ctx, PreservedSource{Database: databasePath, DataKey: roots.DataKey},
 			key,

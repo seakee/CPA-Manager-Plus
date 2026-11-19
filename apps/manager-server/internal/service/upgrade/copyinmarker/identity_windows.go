@@ -25,7 +25,7 @@ func identity(path string) (FileIdentity, error) {
 	}
 	handle, err := windows.CreateFile(pointer, windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return FileIdentity{}, err
 	}
@@ -33,6 +33,9 @@ func identity(path string) (FileIdentity, error) {
 	var information windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
 		return FileIdentity{}, err
+	}
+	if information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return FileIdentity{}, ErrSymlink
 	}
 	return FileIdentity{
 		Device: uint64(information.VolumeSerialNumber),
@@ -50,7 +53,7 @@ func ChangeStamp(path string) (string, error) {
 	}
 	handle, err := windows.CreateFile(pointer, windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return "", err
 	}
@@ -62,6 +65,9 @@ func ChangeStamp(path string) (string, error) {
 	if err := windows.GetFileInformationByHandleEx(handle, windows.FileBasicInfo,
 		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
 		return "", ErrChangeStampUnavailable
+	}
+	if basic.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return "", ErrSymlink
 	}
 	if basic.ChangeTime == 0 {
 		return "", ErrChangeStampUnavailable

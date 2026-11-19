@@ -73,6 +73,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -85,10 +86,16 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 // cpaImportManualItemLimit bounds one manual item line in the operation row.
 const cpaImportManualItemLimit = 400
+
+var (
+	cpaImportDestinationReadyTimeout = 15 * time.Second
+	cpaImportDestinationReadyPoll    = 25 * time.Millisecond
+)
 
 // qualifiedUpgradeAdoption is the authorization this step copies under, rebuilt
 // from the compiled record on every run.
@@ -138,6 +145,13 @@ type CPAImportOptions struct {
 	CPAVersion string
 	// TargetRoot is the v2 data directory that holds the operation row.
 	TargetRoot string
+	// ScratchDir is the writable base for transient snapshot reads of the
+	// target and preserved source databases; empty uses the OS temporary
+	// directory.
+	ScratchDir string
+	// BundleDir names an external backup snapshot directory when placed outside
+	// TargetRoot so overlap and scratch validation exclude it.
+	BundleDir string
 	// Runtime observes and stages the Manager-owned destination CPA.
 	Runtime CPAImportRuntime
 	// DestinationURL is the destination CPA's base URL, as the Runtime serves it.
@@ -266,21 +280,31 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	// unmounted or absent root still yields the path this run would use.
 	targetRoot = canonicalPath(targetRoot)
 	paths := newTargetPaths(targetRoot)
-	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
+	effectiveBundle := strings.TrimSpace(options.BundleDir)
+	if effectiveBundle == "" {
+		effectiveBundle = DefaultBundleDirectory(targetRoot)
+	}
+	if err := RefuseCPAImportOverlappingRoots(options.LegacyRoot, options.CPADirectory, options.CPAAuthDirectory, targetRoot, effectiveBundle); err != nil {
+		return result, err
+	}
+	if err := ValidateCPAImportScratchDir(options.ScratchDir, options.LegacyRoot, options.CPADirectory, options.CPAAuthDirectory, targetRoot, effectiveBundle); err != nil {
+		return result, snapshotReadError(ctx, err)
+	}
+	if err := RequireActionStageWithBackup(ctx, paths.Database, options.ScratchDir, options.LegacyRoot, effectiveBundle, "cpa-import", nil); err != nil {
+		return result, err
+	}
+	recorded, found, err := readRecordedCopyInWithBackup(ctx, paths.Database, options.ScratchDir, options.LegacyRoot, targetRoot, effectiveBundle)
 	if err != nil {
 		return result, err
 	}
 	if !found {
-		return result, errors.New("the v2 data root holds no recorded copy-in, so there is no CPA state to import")
+		return result, RequireCPAImportStage(ctx, nil, recorded, false)
 	}
 	// The import already ran and was recorded. Its result is the row, and
 	// re-running it would rewrite a destination a later step may already have
-	// advanced. It is checked before the entry gate because a recorded import is
-	// not a position to refuse — but the recorded verdict is only reported after
-	// the destination evidence and the Manager's own sealed connection are
-	// re-read and the live destination is re-proved, so a store whose handoff did
-	// not survive, and a destination whose configuration moved after the import,
-	// are not answered as a finished import.
+	// advanced. The recorded verdict is only reported after durable
+	// reconciliation, destination evidence, and the Manager's own sealed
+	// connection are re-read and the live destination is re-proved.
 	if recorded.Stage == model.UpgradeStageCPAImport && recorded.HasDomain(model.UpgradeDomainCPAConfig) {
 		if err := replayRecordedManagedImport(ctx, paths, options, recorded, &result); err != nil {
 			return result, err
@@ -290,14 +314,6 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 		result.UpdatedAtMS = recorded.UpdatedAtMS
 		result.AlreadyComplete = true
 		return result, nil
-	}
-	// The step may only run where it could still record its result, and only from
-	// the position the pipeline leaves for it: reconciliation. Entering from
-	// copy_in would move the row past reconcile, and reconcile refuses a stage it
-	// cannot enter, so one misplaced run would make usage reconciliation
-	// permanently unreachable.
-	if err := requireCPAImportEntry(recorded); err != nil {
-		return result, err
 	}
 
 	// The import reads the tree the copy-in recorded and nothing else. The
@@ -339,6 +355,12 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	})
 	if err != nil {
 		return result, err
+	}
+	if err := RefuseCPAImportOverlappingRoots(options.LegacyRoot, source.directory, source.authDirectory, targetRoot, effectiveBundle); err != nil {
+		return result, err
+	}
+	if err := ValidateCPAImportScratchDir(options.ScratchDir, options.LegacyRoot, source.directory, source.authDirectory, targetRoot, effectiveBundle); err != nil {
+		return result, snapshotReadError(ctx, err)
 	}
 	run := &cpaImportRun{
 		options: options, source: source, databasePath: paths.Database, dataKeyPath: paths.DataKey, auth: auth,
@@ -394,7 +416,15 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	// reason: a rerun that has not recorded `cpa_config` must replay the recorded
 	// request and the recorded secret rather than mint a new one.
 	result.ServerFingerprint = run.serverFingerprint
-	if err := handDestinationConnection(ctx, paths.Database, paths.DataKey, result.DestinationURL, run.managementKey); err != nil {
+	if err := handDestinationConnection(ctx, paths.Database, paths.DataKey, result.DestinationURL, run.managementKey, sourceConnectionProvenance{
+		recorded:   recorded,
+		sourceRoot: options.LegacyRoot,
+		cpaDir:     source.directory,
+		cpaAuthDir: source.authDirectory,
+		targetRoot: paths.Root,
+		bundleDir:  effectiveBundle,
+		scratchDir: options.ScratchDir,
+	}); err != nil {
 		return result, err
 	}
 	recorded, err = recordCPAImportCompletion(ctx, paths.Database, result)
@@ -491,20 +521,16 @@ func replayRecordedManagedImport(
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the Manager-owned Runtime did not report a staged destination CPA, so this run cannot confirm the artifact the recorded import was qualified against; nothing was written", err)
 	}
-	// The Supervisor reports its observed artifact in every state, so the artifact
-	// comparison below would accept an offline or starting Supervisor running the
-	// qualified artifact. Only a Ready Supervisor is administering the destination
-	// CPA that the fingerprint refresh contacts, and the completion gate refuses
-	// the other states for that reason; a replay that refreshed the recorded
-	// fingerprint and reported the import complete from a status the gate would
-	// refuse would publish a verdict the gate cannot repeat.
-	if reason := managedRuntimeReadyFailure(status); reason != "" {
-		return newUpgradeError(UpgradeErrorCPAImportUnproven, reason+"; nothing was written", nil)
-	}
 	if artifact := status.ActiveGatewayArtifact.ArtifactID; artifact != qualifiedArtifact {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
 			"the Runtime's active gateway artifact is %q, and this build's accepted CPA adoption record is for %q; the recorded import copied only into the artifact its staging transition and replay chain were qualified against, so this run cannot report it as complete and nothing was written",
 			artifact, qualifiedArtifact), nil)
+	}
+	restartOfflineReplay := status.State == model.RuntimeStateOffline && status.Capabilities.Supports(model.RuntimeCapabilityStart)
+	if !restartOfflineReplay {
+		if reason := managedRuntimeReadyFailure(status); reason != "" {
+			return newUpgradeError(UpgradeErrorCPAImportUnproven, reason+"; nothing was written", nil)
+		}
 	}
 	// The source root is not part of the attempt row, so it is compared with the
 	// operation's own record: a run pointed at another installation's tree would
@@ -548,6 +574,9 @@ func replayRecordedManagedImport(
 			"the recorded destination attempt was staged on Runtime %q, and the Supervisor running now reports %q; the recorded request belongs to an authority this run cannot address, so it cannot be replayed and nothing was written",
 			identity, status.Identity), nil)
 	}
+	if restartOfflineReplay && status.Generation == target.attempt.Intent.ExpectedRuntimeGeneration {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven, managedRuntimeReadyFailure(status)+"; nothing was written", nil)
+	}
 	// What the next start reads is the envelope on disk, not the plaintext a store
 	// happens to return. A handoff whose sealed credential was removed or replaced
 	// is not one this step may answer as finished.
@@ -555,6 +584,7 @@ func replayRecordedManagedImport(
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the Manager's stored CPA connection is not the sealed credential the CPA import handed the destination, so this run cannot report the handoff as complete; nothing was written", err)
 	}
+	_ = db.Close()
 	// The recorded import staged one request, and the Supervisor never applies
 	// another under it. A replay that named different inputs would report that
 	// request's verdict for a run the operator did not ask for, so each immutable
@@ -562,7 +592,26 @@ func replayRecordedManagedImport(
 	if err := requireRecordedReplayRequest(target, options); err != nil {
 		return err
 	}
-	fingerprint, err := refreshRecordedManagedDestination(ctx, paths, target, strings.TrimSpace(target.connection.ManagementKey))
+	managementKey := strings.TrimSpace(target.connection.ManagementKey)
+	if restartOfflineReplay {
+		nextRecord := nextCPAImportDestinationStart(target.attempt)
+		nextRecord.TerminalFailure = false
+		nextRecord.StartDispatched = true
+		if err := saveCPAImportDestinationRecord(ctx, paths.Database, paths.DataKey, nextRecord, managementKey); err != nil {
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the next destination start attempt could not be recorded, so nothing was started", err)
+		}
+		startIntent := nextRecord.Intent
+		startIntent.ExpectedRuntimeIdentity = status.Identity
+		startIntent.ExpectedRuntimeGeneration = status.Generation
+		startIntent.ExpectedActiveArtifactID = qualifiedArtifact
+		startRun := &cpaImportRun{options: options, databasePath: paths.Database, dataKeyPath: paths.DataKey}
+		if err := startRun.startStagedDestination(ctx, &nextRecord, managementKey, startIntent); err != nil {
+			return err
+		}
+		target.attempt = nextRecord
+	}
+	fingerprint, err := refreshRecordedManagedDestination(ctx, paths, target, managementKey)
 	if err != nil {
 		return err
 	}
@@ -656,57 +705,6 @@ func requireCPAImportSourceLock(lock *processlock.Lock, legacyRoot string) error
 			"the held ownership lock does not belong to the 1.x source this operation recorded, so the source is not provably stopped; nothing was read from it and nothing was written", err)
 	}
 	return nil
-}
-
-// requireCPAImportEntry reports whether the recorded operation stands where this
-// step may be entered from.
-//
-// The import follows the reconciliation: it may be entered from `reconcile`, and
-// it may resume from its own stage while the cpa_config domain is unrecorded.
-// Anything else — a copy-in that never reconciled, a later stage, a rollback — is
-// refused before the source is read, because moving such a row to cpa_import
-// would claim a position the pipeline never granted and make the skipped step
-// permanently unreachable. A `failed` park resumes only when the operation
-// already records a domain reconciliation establishes.
-func requireCPAImportEntry(recorded model.UpgradeOperation) error {
-	refuse := func() error {
-		return newUpgradeError(UpgradeErrorCPAStageConflict, fmt.Sprintf(
-			"the recorded operation is at stage %q, which cannot enter the CPA import; the import runs after reconciliation, and this run read and wrote nothing",
-			recorded.Stage), nil)
-	}
-	switch recorded.Stage {
-	case model.UpgradeStageReconcile:
-		return nil
-	case model.UpgradeStageCPAImport:
-		if !recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-			return nil
-		}
-	case model.UpgradeStageFailed:
-		if cpaImportReconciledDomainsRecorded(recorded) {
-			return nil
-		}
-	}
-	return refuse()
-}
-
-// cpaImportReconciledDomains are the domains the reconciliation step establishes.
-// They are the evidence that a `failed` operation was parked after reconciliation
-// rather than before it, so the import may still resume there.
-var cpaImportReconciledDomains = []string{
-	model.UpgradeDomainUsageEvents,
-	model.UpgradeDomainRetainedProjection,
-	model.UpgradeDomainPricing,
-	model.UpgradeDomainCoverage,
-	model.UpgradeDomainIdentity,
-}
-
-func cpaImportReconciledDomainsRecorded(recorded model.UpgradeOperation) bool {
-	for _, domain := range cpaImportReconciledDomains {
-		if recorded.HasDomain(domain) {
-			return true
-		}
-	}
-	return false
 }
 
 // stageDestination proves the destination is observable, then stages and starts
@@ -831,25 +829,204 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 					"the recorded destination attempt could not be completed with this run's request, so nothing was staged", err)
 			}
 		}
-		if err := requireSameDestinationRequest(record, intent, baseURL, recordedKey, supplied, r.source.sourceCredentialsDigest(), status.State == model.RuntimeStateReady); err != nil {
+		allowGenerationChange := status.State == model.RuntimeStateReady ||
+			status.State == model.RuntimeStateOffline ||
+			(status.State == model.RuntimeStateStarting && record.hasDispatchedStart() && record.StartRuntimeGeneration == uint64(intent.ExpectedRuntimeGeneration))
+		if err := requireSameDestinationRequest(record, intent, baseURL, recordedKey, supplied, r.source.sourceCredentialsDigest(), allowGenerationChange); err != nil {
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
 			return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
 		}
+		if record.Intent.ExpectedRuntimeGeneration != intent.ExpectedRuntimeGeneration {
+			if record.hasDispatchedStart() {
+				wasOffline := status.State == model.RuntimeStateOffline
+				if record.StartRuntimeGeneration != uint64(intent.ExpectedRuntimeGeneration) || record.StartAttempt < 1 {
+					record = nextCPAImportDestinationStart(record)
+					record.TerminalFailure = false
+					record.StartDispatched = true
+					record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+					if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+						return newUpgradeError(UpgradeErrorCPADestinationUnready,
+							"the next destination start attempt could not be recorded, so nothing was started", err)
+					}
+					wasOffline = false
+				}
+				err := r.startStagedDestination(ctx, &record, recordedKey, intent)
+				if err != nil && wasOffline && errors.Is(err, errDestinationLeftStartingOffline) {
+					record = nextCPAImportDestinationStart(record)
+					record.TerminalFailure = false
+					record.StartDispatched = true
+					record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+					if saveErr := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); saveErr != nil {
+						return newUpgradeError(UpgradeErrorCPADestinationUnready,
+							"the next destination start attempt could not be recorded, so nothing was started", saveErr)
+					}
+					err = r.startStagedDestination(ctx, &record, recordedKey, intent)
+				}
+				if err != nil {
+					return err
+				}
+				return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
+			}
+			//StartDispatched was not yet recorded before Supervisor restarted.
+			// Probe StageDestination under the recorded OperationID on the current
+			// generation:
+			// - If the earlier run never reached Supervisor, StageDestination stages
+			//   the recorded OperationID cleanly on the current generation.
+			// - If the earlier run already published stage.json on disk under the
+			//   older generation, the pinned Supervisor returns operation_id_conflict
+			//   without mutating stage.json or the journal; Start("<base>:start") on
+			//   the current generation then verifies stage.State == StateSucceeded
+			//   via requireStagedDestination, records "<base>:start", and spawns CPA.
+			if intent.PluginsEnabled == nil {
+				return newUpgradeError(UpgradeErrorCPADestinationRequestChanged,
+					"the recorded destination attempt carries no plugin choice, so this build cannot prove the replacement is the request the Supervisor published; nothing was staged", nil)
+			}
+			if record.Attempt < 1 {
+				record.Attempt = 1
+			}
+			probeStageReq := model.RuntimeDestinationRequest{
+				OperationID:               record.OperationID,
+				ExpectedRuntimeIdentity:   intent.ExpectedRuntimeIdentity,
+				ExpectedRuntimeGeneration: intent.ExpectedRuntimeGeneration,
+				ExpectedActiveArtifactID:  intent.ExpectedActiveArtifactID,
+				SourceIdentity:            intent.SourceIdentity,
+				SourceClass:               intent.SourceClass,
+				APIKeys:                   slices.Clone(intent.APIKeys),
+				ManagementKey:             recordedKey,
+				PluginsEnabled:            *intent.PluginsEnabled,
+			}
+			staged, stageErr := r.options.Runtime.StageDestination(ctx, probeStageReq)
+			if stageErr != nil {
+				if isRuntimeOperationIDConflict(stageErr) {
+					previousRecord := record
+					record.TerminalFailure = false
+					record.StartAttempt = 1
+					record.StartDispatched = true
+					record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+					if saveErr := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); saveErr != nil {
+						return newUpgradeError(UpgradeErrorCPADestinationUnready,
+							"the destination start attempt could not be recorded before submission, so nothing was started", saveErr)
+					}
+					if err := r.startStagedDestination(ctx, &record, recordedKey, intent); err != nil {
+						if isRuntimeOperationStateConflict(err) {
+							if restoreErr := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, previousRecord, recordedKey); restoreErr != nil {
+								return errors.Join(
+									err,
+									newUpgradeError(UpgradeErrorCPADestinationUnready,
+										"the previous destination attempt could not be restored after the Runtime rejected start", restoreErr),
+								)
+							}
+							latestStatus, stErr := r.options.Runtime.Status(ctx)
+							if stErr == nil && latestStatus.State == model.RuntimeStateOffline {
+								nextRecord := nextCPAImportDestinationAttempt(previousRecord)
+								nextRecord.Intent = intent
+								if saveNextErr := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, nextRecord, recordedKey); saveNextErr != nil {
+									return newUpgradeError(UpgradeErrorCPADestinationUnready,
+										"the next destination attempt could not be recorded, so nothing was staged", saveNextErr)
+								}
+								if submitErr := r.submitDestination(ctx, &nextRecord, recordedKey); submitErr != nil {
+									if isRuntimeOperationIDConflict(submitErr) {
+										if restoreErr := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, previousRecord, recordedKey); restoreErr != nil {
+											return errors.Join(
+												submitErr,
+												newUpgradeError(UpgradeErrorCPADestinationUnready,
+													"the previous destination attempt could not be restored after cross-generation supersede conflict", restoreErr),
+											)
+										}
+										return newUpgradeError(UpgradeErrorCPADestinationUnready,
+											"the Runtime retains a failed destination stage from an earlier generation and rejected cross-generation supersede; clear or restart the Runtime destination staging state and re-run cpa-import", submitErr)
+									}
+									return submitErr
+								}
+								return r.proveStagedDestination(ctx, nextRecord, baseURL, recordedKey, clientKeys, nextRecord.bindsURL(baseURL))
+							}
+						}
+						return err
+					}
+					return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
+				}
+				return newUpgradeError(UpgradeErrorCPADestinationUnready, "the destination stage was not confirmed by the Runtime", stageErr)
+			}
+			if staged.Validate() != nil || staged.OperationID != probeStageReq.OperationID ||
+				staged.OperationType != model.RuntimeOperationStageDestination || staged.RuntimeIdentity != probeStageReq.ExpectedRuntimeIdentity {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready, "the destination stage was not confirmed by the Runtime", nil)
+			}
+			if staged.RuntimeGeneration != probeStageReq.ExpectedRuntimeGeneration {
+				// Prior generation recorded terminal failure without publishing stage.json.
+				record = nextCPAImportDestinationAttempt(record)
+				record.Intent = intent
+				if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+					return newUpgradeError(UpgradeErrorCPADestinationUnready,
+						"the next destination attempt could not be recorded, so nothing was staged", err)
+				}
+				if err := r.submitDestination(ctx, &record, recordedKey); err != nil {
+					return err
+				}
+				return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
+			}
+			record.Intent = intent
+			if staged.State == model.RuntimeOperationFailed {
+				return errors.Join(
+					r.markDestinationAttemptTerminal(ctx, record, recordedKey),
+					newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination stage as failed", nil),
+				)
+			}
+			if staged.State != model.RuntimeOperationSucceeded {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+					"the Runtime left the destination stage in state %q rather than succeeded", staged.State), nil)
+			}
+			record.StartAttempt = 1
+			record.StartDispatched = true
+			record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"the destination start attempt could not be recorded before submission, so nothing was started", err)
+			}
+			if err := r.startStagedDestination(ctx, &record, recordedKey, intent); err != nil {
+				return err
+			}
+			return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
+		}
 		if record.TerminalFailure {
+			if status.State != model.RuntimeStateOffline {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+					"the Manager-owned Runtime is in state %q rather than offline, so the failed destination attempt cannot be superseded yet; wait for the Runtime to settle or stop the destination, and nothing was staged",
+					status.State), nil)
+			}
 			// The Supervisor never resumes a terminal operation, so the only way to
 			// stage the identical destination again is a new attempt ID, and that
 			// is exactly the supersede contract: same request, new ID, after the
 			// old stage/start is known to be terminal. The intent is copied, so the
 			// new ID is the only difference.
+			if record.Attempt < 1 {
+				record.Attempt = 1
+			}
 			record = nextCPAImportDestinationAttempt(record)
 			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
 				return newUpgradeError(UpgradeErrorCPADestinationUnready,
 					"the next destination attempt could not be recorded, so nothing was staged", err)
 			}
+		} else {
+			switch status.State {
+			case model.RuntimeStateStarting:
+			case model.RuntimeStateOffline:
+				if record.hasDispatchedStart() {
+					record = nextCPAImportDestinationStart(record)
+					record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+					if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+						return newUpgradeError(UpgradeErrorCPADestinationUnready,
+							"the next destination start attempt could not be recorded, so nothing was started", err)
+					}
+				}
+			default:
+				return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+					"the Manager-owned Runtime is in state %q rather than ready, starting, or offline, so cpa-import cannot resume or restart the destination; wait for the Runtime to settle, and nothing was staged or written",
+					status.State), nil)
+			}
 		}
-		if err := r.submitDestination(ctx, record, recordedKey); err != nil {
+		if err := r.submitDestination(ctx, &record, recordedKey); err != nil {
 			return err
 		}
 		return r.proveStagedDestination(ctx, record, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL))
@@ -870,6 +1047,11 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		}
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination CPA is already running, but this upgrade holds no recorded Supervisor staging attempt for it; stop the destination so cpa-import can stage and bind it under a per-attempt secret, and nothing was written", nil)
+	}
+	if status.State != model.RuntimeStateOffline {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+			"the Manager-owned Runtime is in state %q rather than offline, so cpa-import cannot stage a clean destination; wait for the Runtime to settle or stop the destination, and nothing was staged or written",
+			status.State), nil)
 	}
 
 	// An initial stage from a stopped state mints its own secret and never accepts
@@ -903,7 +1085,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination management secret could not be recorded, so the destination was not staged", err)
 	}
-	if err := r.submitDestination(ctx, record, managementKey); err != nil {
+	if err := r.submitDestination(ctx, &record, managementKey); err != nil {
 		return err
 	}
 	// The stage is the Supervisor's, not yet proof that the URL this run will
@@ -1119,7 +1301,7 @@ func classifyDestinationProofFailure(ctx context.Context, baseURL string, proofE
 // still belong to an operation the Supervisor is running.
 func (r *cpaImportRun) submitDestination(
 	ctx context.Context,
-	record cpaImportDestinationRecord,
+	record *cpaImportDestinationRecord,
 	managementKey string,
 ) error {
 	intent := record.Intent
@@ -1149,12 +1331,41 @@ func (r *cpaImportRun) submitDestination(
 	}
 	if staged.State == model.RuntimeOperationFailed {
 		return errors.Join(
-			r.markDestinationAttemptTerminal(ctx, record, managementKey),
+			r.markDestinationAttemptTerminal(ctx, *record, managementKey),
 			newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination stage as failed", nil),
 		)
 	}
+	if staged.State != model.RuntimeOperationSucceeded {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+			"the Runtime left the destination stage in state %q rather than succeeded", staged.State), nil)
+	}
+	if !record.StartDispatched {
+		if record.StartAttempt < 1 {
+			record.StartAttempt = 1
+		}
+		record.StartDispatched = true
+		record.StartRuntimeGeneration = uint64(intent.ExpectedRuntimeGeneration)
+		if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, *record, managementKey); err != nil {
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the destination start attempt could not be recorded before submission, so nothing was started", err)
+		}
+	}
+	return r.startStagedDestination(ctx, record, managementKey, intent)
+}
+
+func (r *cpaImportRun) startStagedDestination(
+	ctx context.Context,
+	record *cpaImportDestinationRecord,
+	managementKey string,
+	intent cpaImportDestinationIntent,
+) error {
+	startOperationID := record.startOperationID()
+	if len(startOperationID) > 128 {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready,
+			"the destination start operation ID exceeded the Runtime protocol limit", nil)
+	}
 	startRequest := model.RuntimeMutationRequest{
-		OperationID:               record.OperationID + ":start",
+		OperationID:               startOperationID,
 		ExpectedRuntimeIdentity:   intent.ExpectedRuntimeIdentity,
 		ExpectedRuntimeGeneration: intent.ExpectedRuntimeGeneration,
 		ExpectedActiveArtifactID:  intent.ExpectedActiveArtifactID,
@@ -1166,13 +1377,107 @@ func (r *cpaImportRun) submitDestination(
 		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the destination start was not confirmed by the Runtime", err)
 	}
 	if started.State == model.RuntimeOperationFailed {
+		if record.StartAttempt <= 1 {
+			return errors.Join(
+				r.markDestinationAttemptTerminal(ctx, *record, managementKey),
+				newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination start as failed", nil),
+			)
+		}
+		record.StartRuntimeGeneration = 0
 		return errors.Join(
-			r.markDestinationAttemptTerminal(ctx, record, managementKey),
-			newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination start as failed", nil),
+			saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, *record, managementKey),
+			newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination restart as failed", nil),
 		)
+	}
+	if started.State != model.RuntimeOperationSucceeded {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+			"the Runtime left the destination start in state %q rather than succeeded", started.State), nil)
+	}
+	if err := r.awaitRuntimeDestinationReady(ctx, intent); err != nil {
+		return err
 	}
 	r.managementKey = managementKey
 	return nil
+}
+
+var errDestinationLeftStartingOffline = errors.New("staged destination CPA is offline after start")
+
+func isRuntimeOperationIDConflict(err error) bool {
+	if code, ok := runtimeservice.ErrorCode(err); ok {
+		return code == runtimeservice.ProtocolErrorOperationIDConflict
+	}
+	return err != nil && strings.Contains(err.Error(), "operation ID conflict")
+}
+
+func isRuntimeOperationStateConflict(err error) bool {
+	if code, ok := runtimeservice.ErrorCode(err); ok {
+		return code == runtimeservice.ProtocolErrorOperationStateConflict
+	}
+	return err != nil && strings.Contains(err.Error(), "operation state conflict")
+}
+
+// awaitRuntimeDestinationReady waits for the Supervisor's own health observer
+// to report RuntimeStateReady after Start spawns the destination CPA process.
+// Runtime.Start succeeds on OS process spawn rather than HTTP readiness, so
+// probing the listener before RuntimeStateReady would race process startup and
+// fail the first import as target_unreachable.
+func (r *cpaImportRun) awaitRuntimeDestinationReady(ctx context.Context, intent cpaImportDestinationIntent) error {
+	waitCtx, cancel := context.WithTimeout(ctx, cpaImportDestinationReadyTimeout)
+	defer cancel()
+	for {
+		observed, err := r.options.Runtime.Status(waitCtx)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"waiting for the staged destination CPA was interrupted before the Runtime reported ready", ctxErr)
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"the staged destination CPA is still starting and did not report ready within the readiness budget", err)
+			}
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the Manager-owned Runtime did not answer while starting the destination CPA", err)
+		}
+		if observed.Validate() != nil || observed.ProtocolVersion != "v1" || observed.ActiveGatewayArtifact == nil {
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the Manager-owned Runtime reported an invalid status while starting the destination CPA", nil)
+		}
+		if observed.Identity != intent.ExpectedRuntimeIdentity || observed.Generation != intent.ExpectedRuntimeGeneration {
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the Manager-owned Runtime restarted while starting the destination CPA", nil)
+		}
+		if artifact := observed.ActiveGatewayArtifact.ArtifactID; artifact != "" && artifact != intent.ExpectedActiveArtifactID {
+			return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
+				"the Runtime's active gateway artifact changed to %q while starting the destination CPA (expected %q)",
+				artifact, intent.ExpectedActiveArtifactID), nil)
+		}
+		switch observed.State {
+		case model.RuntimeStateReady:
+			return nil
+		case model.RuntimeStateStarting:
+		default:
+			var cause error
+			if observed.State == model.RuntimeStateOffline {
+				cause = errDestinationLeftStartingOffline
+			}
+			return newUpgradeError(UpgradeErrorCPADestinationUnready, fmt.Sprintf(
+				"the staged destination CPA left starting in state %q before becoming ready",
+				observed.State), cause)
+		}
+
+		timer := time.NewTimer(cpaImportDestinationReadyPoll)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"waiting for the staged destination CPA was interrupted before the Runtime reported ready", ctxErr)
+			}
+			return newUpgradeError(UpgradeErrorCPADestinationUnready,
+				"the staged destination CPA is still starting and did not report ready within the readiness budget", waitCtx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 // markDestinationAttemptTerminal records that the attempt reached a terminal
@@ -1209,7 +1514,7 @@ func requireSameDestinationRequest(
 	managementKey string,
 	supplied string,
 	sourceCredentialsDigest string,
-	ready bool,
+	allowGenerationChange bool,
 ) error {
 	refuse := func(what string) error {
 		return newUpgradeError(UpgradeErrorCPADestinationRequestChanged, fmt.Sprintf(
@@ -1267,11 +1572,7 @@ func requireSameDestinationRequest(
 	if record.Intent.ExpectedActiveArtifactID != intent.ExpectedActiveArtifactID {
 		return refuse("a different active Runtime artifact")
 	}
-	if ready {
-		// A destination that is already answering is proved by
-		// requireStagedDestinationIdentity, not resubmitted. A restarted Supervisor
-		// reports a new generation and the destination resumes; that is a recovery
-		// this run can still make because it submits nothing.
+	if allowGenerationChange {
 		return nil
 	}
 	if record.Intent.ExpectedRuntimeGeneration != intent.ExpectedRuntimeGeneration {
@@ -1365,6 +1666,13 @@ func enterCPAImportStage(ctx context.Context, databasePath string) error {
 		return fmt.Errorf("begin the CPA import transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	current, found, err := upgradeoperation.GetTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("read the operation row before entering CPA import: %w", err)
+	}
+	if err := RequireCPAImportStage(ctx, tx, current, found && copyInRecorded(current)); err != nil {
+		return err
+	}
 	if _, err := upgradeoperation.AdvanceTx(ctx, tx, "", model.UpgradeStageCPAImport); err != nil {
 		return fmt.Errorf("record the CPA import stage: %w", err)
 	}
@@ -1407,6 +1715,13 @@ func recordCPAImportCompletion(ctx context.Context, databasePath string, result 
 		return model.UpgradeOperation{}, fmt.Errorf("begin the CPA import transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	current, found, err := upgradeoperation.GetTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("read the operation row before recording CPA import: %w", err)
+	}
+	if err := RequireCPAImportStage(ctx, tx, current, found && copyInRecorded(current)); err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	if _, err := upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainCPAConfig, model.UpgradeStageCPAImport); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import: %w; the manual items, the cpa_config domain and the destination evidence commit together, so the store is unchanged and a rerun records all of them", err)
 	}

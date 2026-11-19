@@ -38,6 +38,10 @@ const (
 	tempSuffix     = ".next"
 )
 
+// ErrSymlink is returned when file identity or metadata change time is queried
+// on a symbolic link or reparse point.
+var ErrSymlink = errors.New("symbolic links are not accepted for file identity")
+
 // Marker is what the copy-in placed in the v2 layout and where it came from.
 // It always names its phase, target, source kind, the source fingerprint the
 // copy started from and the backup manifest digest; a marker that cannot do so

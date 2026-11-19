@@ -469,6 +469,12 @@ func (p *publication) finish() error {
 // destination. It never removes or replaces a destination, adopts an untracked
 // directory, scans sibling operations, or grants writer/upgrade authority.
 func RecoverPublication(ctx context.Context, destination string) (string, error) {
+	return RecoverPublicationWithScratch(ctx, destination, "")
+}
+
+// RecoverPublicationWithScratch resolves an unfinished publication using
+// scratchDir (or os.TempDir when empty) for transient SQLite validation copies.
+func RecoverPublicationWithScratch(ctx context.Context, destination, scratchDir string) (string, error) {
 	dest, err := filepath.Abs(destination)
 	if err != nil {
 		return "", err
@@ -527,7 +533,7 @@ func RecoverPublication(ctx context.Context, destination string) (string, error)
 	if !reflect.DeepEqual(m, *p.record.Manifest) {
 		return "", errors.New("target does not match recorded publication")
 	}
-	if err := ValidateMatchingEvidence(ctx, BundleLayout(dest)); err != nil {
+	if err := validateMatchingEvidence(ctx, BundleLayout(dest), scratchDir, dest, p.root); err != nil {
 		return "", err
 	}
 	if err := syncTree(ctx, dest, syncDirectory); err != nil {

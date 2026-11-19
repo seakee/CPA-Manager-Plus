@@ -2,7 +2,9 @@ package upgrade
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -107,6 +110,15 @@ type ExternalConnectOptions struct {
 	// TargetRoot is the v2 data directory holding usage.sqlite and the copy-in
 	// work area.
 	TargetRoot string
+	// ScratchDir is the writable base for the transient pre-fence stage
+	// snapshot; empty uses the OS temporary directory.
+	ScratchDir string
+	// LegacyRoot optionally names the 1.x source directory so overlap and
+	// scratch validation exclude it alongside configured environment roots.
+	LegacyRoot string
+	// BundleDir optionally names an external backup directory so overlap and
+	// scratch validation exclude it.
+	BundleDir string
 	// BaseURL is the address of the owner's CPA.
 	BaseURL string
 	// ManagementKey is the credential the owner supplied for that CPA. It is
@@ -200,12 +212,51 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
 			"no usable management key was supplied for the CPA; nothing was connected and the operation did not advance", nil)
 	}
-	paths := newTargetPaths(targetRoot)
-	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
-	if err != nil {
-		return ExternalConnectResult{}, err
+	bundleDir := strings.TrimSpace(options.BundleDir)
+	effectiveBundle := bundleDir
+	if effectiveBundle == "" {
+		effectiveBundle = DefaultBundleDirectory(targetRoot)
 	}
-	if err := externalConnectEntry(recorded, found); err != nil {
+	if strings.TrimSpace(options.LegacyRoot) != "" {
+		if err := RefuseOverlappingRoots(options.LegacyRoot, targetRoot, effectiveBundle); err != nil {
+			return ExternalConnectResult{}, err
+		}
+	} else if bundleDir != "" {
+		absBundle, err := filepath.Abs(bundleDir)
+		if err != nil {
+			return ExternalConnectResult{}, fmt.Errorf("resolve the backup destination: %w", err)
+		}
+		canonBundle, err := canonicalPathStrict(absBundle)
+		if err != nil {
+			return ExternalConnectResult{}, fmt.Errorf("resolve the backup destination: %w", err)
+		}
+		canonTarget, err := canonicalDirectoryCandidate(targetRoot, "the v2 data root")
+		if err != nil {
+			return ExternalConnectResult{}, err
+		}
+		if within(canonBundle, canonTarget) {
+			return ExternalConnectResult{}, errors.New("the v2 data root must not sit inside the backup destination")
+		}
+		if within(canonTarget, canonBundle) && canonBundle != canonicalPath(DefaultBundleDirectory(canonTarget)) {
+			return ExternalConnectResult{}, errors.New("the backup snapshot inside the v2 data root must be the canonical upgrade-backup directory")
+		}
+	}
+	scratchRoots := []ScratchRoot{
+		{Label: "the legacy source root", Dir: strings.TrimSpace(options.LegacyRoot)},
+		{Label: "the target root", Dir: targetRoot},
+		{Label: "the backup directory", Dir: bundleDir},
+	}
+	for _, cfgLegacy := range ConfiguredLegacyRoots() {
+		scratchRoots = append(scratchRoots, ScratchRoot{Label: "the configured legacy source root", Dir: cfgLegacy})
+	}
+	for _, cfgBundle := range ConfiguredBundleRoots() {
+		scratchRoots = append(scratchRoots, ScratchRoot{Label: "the configured backup directory", Dir: cfgBundle})
+	}
+	paths := newTargetPaths(targetRoot)
+	if err := ValidateScratchRoots(options.ScratchDir, scratchRoots...); err != nil {
+		return ExternalConnectResult{}, snapshotReadError(ctx, err)
+	}
+	if err := RequireActionStageWithBackup(ctx, paths.Database, options.ScratchDir, options.LegacyRoot, bundleDir, "external-connect", nil); err != nil {
 		return ExternalConnectResult{}, err
 	}
 	// This step writes the v2 store, so it holds the same ownership fence a
@@ -234,11 +285,11 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 	defer func() { _ = db.Close() }()
 	repository := upgradeoperation.New(db)
-	recorded, found, err = readRecordedCopyInFrom(ctx, repository)
+	recorded, found, err := readRecordedCopyInFrom(ctx, repository)
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
-	if err := externalConnectEntry(recorded, found); err != nil {
+	if err := externalConnectEntry(ctx, db, recorded, found); err != nil {
 		return ExternalConnectResult{}, err
 	}
 
@@ -294,7 +345,7 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 			return ExternalConnectResult{}, err
 		}
 		if recorded.Stage == model.UpgradeStageExternalConnect {
-			return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding)
+			return externalConnectAlreadyConnected(ctx, db, protector, targetRoot, binding, baseURL, managementKey)
 		}
 	}
 
@@ -394,7 +445,7 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 	recordedBinding := externalConnectBinding(evidence)
 	recordedBinding.ManagementKey = sealedKey
-	operation, err := recordExternalConnect(ctx, db, recordedBinding)
+	operation, err := recordExternalConnect(ctx, db, protector, recordedBinding, baseURL, managementKey)
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
@@ -405,22 +456,222 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	return externalConnectResult(operation, evidence, false), nil
 }
 
-// externalConnectEntry proves the recorded operation can still take this step:
-// it is a recorded copy-in and its stage has not moved past the one this step
-// records. It is asked once before the fence, so a root that holds no operation
-// never gets a lock marker, and once under it, because the authoritative state is
-// the one the transaction will write into.
-func externalConnectEntry(recorded model.UpgradeOperation, found bool) error {
-	if !found {
-		return newUpgradeError(UpgradeErrorExternalNotApplicable,
-			"the v2 data root holds no recorded copy-in, so there is no operation for the External connect step to continue; nothing was written", nil)
+// canonicalizeMatchingLegacyExternalSettingsTx upgrades raw 1.x settings URLs
+// (schemeless host:port, /v0, /v0/management) to canonical v2 form inside the
+// recording transaction after stage eligibility and binding checks pass, when
+// the store's legacy connection already names the same endpoint and management
+// key this External connect step proved.
+func canonicalizeMatchingLegacyExternalSettingsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	protector *security.Protector,
+	baseURL, managementKey string,
+) error {
+	rawManagerStr, managerOK, err := readSettingsRowTx(ctx, tx, "manager_config_v1")
+	if err != nil {
+		return fmt.Errorf("load manager_config_v1 for External CPA settings canonicalization: %w", err)
 	}
-	if !recorded.Stage.CanAdvanceTo(model.UpgradeStageExternalConnect) ||
-		(recorded.Stage == model.UpgradeStageFailed && !recorded.CanLeaveFailedTo(model.UpgradeStageExternalConnect)) {
-		return newUpgradeError(UpgradeErrorExternalNotApplicable,
-			fmt.Sprintf("the recorded operation is at stage %q, which cannot enter the External connect step; nothing was written", recorded.Stage), nil)
+	var rawManagerCfg model.ManagerConfig
+	var managerCfg model.ManagerConfig
+	if managerOK {
+		if err := json.Unmarshal([]byte(rawManagerStr), &rawManagerCfg); err != nil {
+			return fmt.Errorf("load manager_config_v1 for External CPA settings canonicalization: %w", err)
+		}
+		managerCfg = rawManagerCfg
+		if protector != nil {
+			unprotected, err := protector.UnprotectString(managerCfg.CPAConnection.ManagementKey)
+			if err != nil {
+				return fmt.Errorf("load manager_config_v1 for External CPA settings canonicalization: %w", err)
+			}
+			managerCfg.CPAConnection.ManagementKey = unprotected
+		}
+	}
+	rawSetupStr, setupOK, err := readSettingsRowTx(ctx, tx, "setup")
+	if err != nil {
+		return fmt.Errorf("load setup for External CPA settings canonicalization: %w", err)
+	}
+	var rawSetupCfg model.Setup
+	var setup model.Setup
+	if setupOK {
+		if err := json.Unmarshal([]byte(rawSetupStr), &rawSetupCfg); err != nil {
+			return fmt.Errorf("load setup for External CPA settings canonicalization: %w", err)
+		}
+		setup = rawSetupCfg
+		if protector != nil {
+			unprotected, err := protector.UnprotectString(setup.ManagementKey)
+			if err != nil {
+				return fmt.Errorf("load setup for External CPA settings canonicalization: %w", err)
+			}
+			setup.ManagementKey = unprotected
+		}
+	}
+	matched := false
+	if strictConn, hasStrict, strictErr := resolveStrictStoredConnection(managerCfg, managerOK, setup, setupOK); strictErr == nil && hasStrict {
+		if strictCanonical, canonErr := canonicalVerifyAddress(strictConn.BaseURL); canonErr == nil &&
+			strictCanonical == baseURL &&
+			security.EqualHMAC(strings.TrimSpace(strictConn.ManagementKey), managementKey) {
+			matched = true
+		}
+	}
+	if !matched {
+		resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, setupOK)
+		if err != nil || resolution.Authority == managerconfig.LegacyConnectionAuthorityNone {
+			return nil
+		}
+		legacyBase := cpa.NormalizeBaseURL(resolution.Connection.BaseURL)
+		legacyNormalized, err := cpa.NormalizeV8BaseURL(legacyBase)
+		if err != nil {
+			return nil
+		}
+		legacyCanonical, err := identity.CanonicalExternalURL(legacyNormalized)
+		if err != nil || legacyCanonical != baseURL {
+			return nil
+		}
+		if !security.EqualHMAC(strings.TrimSpace(resolution.Connection.ManagementKey), managementKey) {
+			return nil
+		}
+	}
+	next := managerCfg
+	managerconfig.MergeLegacyCollectorSettings(&next, setup, setupOK)
+	next.CPAConnection.CPABaseURL = baseURL
+	next.CPAConnection.ManagementKey = managementKey
+	nextSetup := managerconfig.CanonicalSetupFromManagerConfig(next, setup, setupOK)
+
+	rawRevStr, revOK, err := readSettingsRowTx(ctx, tx, "cpa_connection_revision_v1")
+	if err != nil {
+		return fmt.Errorf("load cpa_connection_revision_v1 for External CPA settings canonicalization: %w", err)
+	}
+	revValid := revOK && isValidConnectionRevisionHex(rawRevStr)
+	managerCanonical := managerOK &&
+		strings.TrimSpace(rawManagerCfg.CPAConnection.CPABaseURL) == baseURL &&
+		(protector == nil || security.IsValidProtectedEnvelope(strings.TrimSpace(rawManagerCfg.CPAConnection.ManagementKey))) &&
+		security.EqualHMAC(strings.TrimSpace(managerCfg.CPAConnection.ManagementKey), managementKey) &&
+		strings.TrimSpace(rawManagerCfg.Collector.Queue) == strings.TrimSpace(next.Collector.Queue) &&
+		strings.TrimSpace(rawManagerCfg.Collector.PopSide) == strings.TrimSpace(next.Collector.PopSide)
+	setupCanonical := setupOK &&
+		strings.TrimSpace(rawSetupCfg.CPAUpstreamURL) == baseURL &&
+		(protector == nil || security.IsValidProtectedEnvelope(strings.TrimSpace(rawSetupCfg.ManagementKey))) &&
+		security.EqualHMAC(strings.TrimSpace(setup.ManagementKey), managementKey)
+	if managerCanonical && setupCanonical && revValid {
+		return nil
+	}
+	return saveCanonicalManagerConfigAndSetupTx(
+		ctx,
+		tx,
+		protector,
+		next,
+		nextSetup,
+		rawManagerCfg,
+		managerCfg,
+		managerOK,
+		rawSetupCfg,
+		setup,
+		setupOK,
+		rawRevStr,
+		revValid,
+	)
+}
+
+func readSettingsRowTx(ctx context.Context, tx *sql.Tx, key string) (string, bool, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, "select value from settings where key = ?", key).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return raw, true, nil
+}
+
+func upsertSettingsRowTx(ctx context.Context, tx *sql.Tx, key, value string, updatedAtMS int64) error {
+	_, err := tx.ExecContext(ctx, `
+		insert into settings (key, value, updated_at_ms)
+		values (?, ?, ?)
+		on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms
+	`, key, value, updatedAtMS)
+	return err
+}
+
+func isValidConnectionRevisionHex(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) != 32 {
+		return false
+	}
+	decoded, err := hex.DecodeString(trimmed)
+	return err == nil && len(decoded) == 16
+}
+
+func saveCanonicalManagerConfigAndSetupTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	protector *security.Protector,
+	cfg model.ManagerConfig,
+	setup model.Setup,
+	prevRawCfg model.ManagerConfig,
+	prevCfg model.ManagerConfig,
+	prevCfgOK bool,
+	prevRawSetup model.Setup,
+	prevSetup model.Setup,
+	prevSetupOK bool,
+	prevRevision string,
+	prevRevValid bool,
+) error {
+	nowMS := time.Now().UnixMilli()
+	cfg.UpdatedAtMS = nowMS
+	plainKey := cfg.CPAConnection.ManagementKey
+	if protector != nil {
+		protected, err := protector.ProtectString(cfg.CPAConnection.ManagementKey)
+		if err != nil {
+			return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+		}
+		cfg.CPAConnection.ManagementKey = protected
+	}
+	cfgBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+	}
+	if protector != nil && strings.TrimSpace(setup.ManagementKey) != "" {
+		protected, err := protector.ProtectString(setup.ManagementKey)
+		if err != nil {
+			return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+		}
+		setup.ManagementKey = protected
+	}
+	setupBytes, err := json.Marshal(setup)
+	if err != nil {
+		return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+	}
+	if err := upsertSettingsRowTx(ctx, tx, "manager_config_v1", string(cfgBytes), nowMS); err != nil {
+		return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+	}
+	if err := upsertSettingsRowTx(ctx, tx, "setup", string(setupBytes), nowMS); err != nil {
+		return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+	}
+	samePreviousSnapshot := prevCfgOK && prevSetupOK && prevRevValid &&
+		strings.TrimSpace(prevRawCfg.CPAConnection.CPABaseURL) == cfg.CPAConnection.CPABaseURL &&
+		strings.TrimSpace(prevRawSetup.CPAUpstreamURL) == cfg.CPAConnection.CPABaseURL &&
+		security.EqualHMAC(prevCfg.CPAConnection.ManagementKey, plainKey) &&
+		security.EqualHMAC(prevSetup.ManagementKey, plainKey)
+	if !samePreviousSnapshot {
+		var buf [16]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+		}
+		if err := upsertSettingsRowTx(ctx, tx, "cpa_connection_revision_v1", hex.EncodeToString(buf[:]), nowMS); err != nil {
+			return fmt.Errorf("canonicalize legacy External CPA settings: %w", err)
+		}
+	} else if strings.TrimSpace(prevRevision) != "" {
+		_ = prevRevision
 	}
 	return nil
+}
+
+// externalConnectEntry proves the recorded operation can take this step:
+// copy-in and durable reconciliation have completed, no pending reconciliation
+// dates remain unacknowledged, and no conflicting Managed CPA target exists.
+func externalConnectEntry(ctx context.Context, q rowQueryer, recorded model.UpgradeOperation, found bool) error {
+	return RequireExternalConnectStage(ctx, q, recorded, found)
 }
 
 // readRecordedCopyInFrom reads the operation row through an open connection and
@@ -470,16 +721,50 @@ func requireRecordedManagementKey(binding upgradeoperation.ExternalBinding, prot
 	return nil
 }
 
-func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation,
-	binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
+func externalConnectAlreadyConnected(
+	ctx context.Context,
+	db *sql.DB,
+	protector *security.Protector,
+	targetRoot string,
+	binding upgradeoperation.ExternalBinding,
+	baseURL, managementKey string,
+) (ExternalConnectResult, error) {
 	evidence := externalConnectEvidence(binding)
-	operation := recorded
-	if externalConnectRefusalRecorded(recorded.ErrorCode) {
-		cleared, err := clearExternalConnectRefusal(ctx, db)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("begin verifying the recorded External connection: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, found, err := upgradeoperation.GetTx(ctx, tx)
+	if err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("read the operation row for recorded External connection: %w", err)
+	}
+	if err := externalConnectEntry(ctx, tx, current, found && copyInRecorded(current)); err != nil {
+		return ExternalConnectResult{}, err
+	}
+	if current.Stage != model.UpgradeStageExternalConnect {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
+			"the operation advanced past the External connect step; nothing was connected", nil)
+	}
+	operation := current
+	if externalConnectRefusalRecorded(current.ErrorCode) {
+		if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
+			return ExternalConnectResult{}, fmt.Errorf("clear the External refusal: %w", err)
+		}
+		cleared, clearedFound, err := upgradeoperation.GetTx(ctx, tx)
 		if err != nil {
-			return ExternalConnectResult{}, err
+			return ExternalConnectResult{}, fmt.Errorf("read the cleared operation: %w", err)
+		}
+		if !clearedFound {
+			return ExternalConnectResult{}, errors.New("clear the External refusal: no operation row")
 		}
 		operation = cleared
+	}
+	if err := canonicalizeMatchingLegacyExternalSettingsTx(ctx, tx, protector, baseURL, managementKey); err != nil {
+		return ExternalConnectResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("commit the recorded External connection check: %w", err)
 	}
 	if err := ensureExternalConnectEvidence(targetRoot, evidence); err != nil {
 		return ExternalConnectResult{}, fmt.Errorf(
@@ -499,31 +784,6 @@ func externalConnectProtector(paths targetPaths) (*security.Protector, error) {
 	}
 	return nil, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
 		"the Manager data key is missing or unreadable, so the proved management secret cannot be sealed for the Manager store; nothing was connected and the operation did not advance", err)
-}
-
-// clearExternalConnectRefusal removes a stale refusal this step left on the row.
-// It reads the cleared row in the same transaction, so the caller reports the
-// stamp the commit stored instead of a value read around it.
-func clearExternalConnectRefusal(ctx context.Context, db *sql.DB) (model.UpgradeOperation, error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
-	}
-	operation, found, err := upgradeoperation.GetTx(ctx, tx)
-	if err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("read the cleared operation: %w", err)
-	}
-	if !found {
-		return model.UpgradeOperation{}, errors.New("clear the External refusal: no operation row")
-	}
-	if err := tx.Commit(); err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
-	}
-	return operation, nil
 }
 
 // externalConnectRefusalRecorded reports whether a recorded error code is this
@@ -784,12 +1044,19 @@ func externalConnectRefusalDetail(err error) string {
 // target binding commit beside the marks for the same reason: a row that carries
 // external_connect always names the CPA it connected, and no later run has to
 // trust a file for that fact.
-func recordExternalConnect(ctx context.Context, db *sql.DB, binding upgradeoperation.ExternalBinding) (model.UpgradeOperation, error) {
+func recordExternalConnect(ctx context.Context, db *sql.DB, protector *security.Protector, binding upgradeoperation.ExternalBinding, baseURL, managementKey string) (model.UpgradeOperation, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("begin recording the External connection: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	current, found, err := upgradeoperation.GetTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("read the operation row before recording External connection: %w", err)
+	}
+	if err := externalConnectEntry(ctx, tx, current, found && copyInRecorded(current)); err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	operation, err := upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainCPAConfig, model.UpgradeStageExternalConnect)
 	if err != nil {
 		return model.UpgradeOperation{}, mapExternalConnectRecordError(err)
@@ -803,6 +1070,9 @@ func recordExternalConnect(ctx context.Context, db *sql.DB, binding upgradeopera
 	}
 	if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the External connection: %w", err)
+	}
+	if err := canonicalizeMatchingLegacyExternalSettingsTx(ctx, tx, protector, baseURL, managementKey); err != nil {
+		return model.UpgradeOperation{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the External connection: %w", err)
@@ -851,7 +1121,7 @@ func externalConnectIdentity(options ExternalConnectOptions, baseURL string) str
 // redactExternalAddress names the target in operator text without carrying the
 // path it may have been configured with.
 func redactExternalAddress(baseURL string) string {
-	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	trimmed := strings.TrimRight(redactURLUserinfo(baseURL), "/")
 	if index := strings.Index(trimmed, "://"); index >= 0 {
 		return trimmed[:index+3] + strings.SplitN(trimmed[index+3:], "/", 2)[0]
 	}

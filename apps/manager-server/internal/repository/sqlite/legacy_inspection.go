@@ -794,9 +794,10 @@ func (r *inspectionContextReader) Read(p []byte) (int, error) {
 }
 
 // ValidateWALHeader checks the 32-byte WAL header magic, format version, page
-// size, checksum words, and database header page-size agreement before SQLite
-// opens a non-empty WAL copy. A malformed or truncated WAL header must fail
-// closed rather than silently falling back to pre-WAL main-database pages.
+// size, checksum words, database header page-size agreement, and active-cycle
+// WAL frame integrity before SQLite opens a non-empty WAL copy. A malformed,
+// truncated, or corrupted active WAL header or frame must fail closed rather
+// than silently falling back to pre-WAL main-database pages.
 func ValidateWALHeader(databasePath string) error {
 	wal, err := os.Open(databasePath + "-wal")
 	if err != nil {
@@ -828,10 +829,11 @@ func ValidateWALHeader(databasePath string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
 	var dbHeader [18]byte
-	if _, err := io.ReadFull(db, dbHeader[:]); err != nil {
-		return err
+	_, dbReadErr := io.ReadFull(db, dbHeader[:])
+	_ = db.Close()
+	if dbReadErr != nil {
+		return dbReadErr
 	}
 	if string(dbHeader[:16]) != "SQLite format 3\x00" {
 		return errors.New("SQLite header invalid")
@@ -842,6 +844,73 @@ func ValidateWALHeader(databasePath string) error {
 	}
 	if dbPageSize != pageSize {
 		return errors.New("WAL/database page size mismatch")
+	}
+
+	salt1 := binary.BigEndian.Uint32(header[16:20])
+	salt2 := binary.BigEndian.Uint32(header[20:24])
+	frameSize := 24 + int(pageSize)
+	frame := make([]byte, frameSize)
+	for {
+		n, err := io.ReadFull(wal, frame)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			if n < 12 {
+				return errors.New("truncated WAL frame header")
+			}
+			if binary.BigEndian.Uint32(frame[8:12]) == salt1 {
+				return errors.New("truncated active WAL frame")
+			}
+			break
+		}
+		if err != nil {
+			return err
+		}
+		frameSalt1 := binary.BigEndian.Uint32(frame[8:12])
+		frameSalt2 := binary.BigEndian.Uint32(frame[12:16])
+		if frameSalt1 == salt1 && frameSalt2 != salt2 {
+			return errors.New("corrupt WAL frame")
+		}
+		if frameSalt1 != salt1 {
+			var hdr [24]byte
+			for {
+				hn, herr := io.ReadFull(wal, hdr[:])
+				if errors.Is(herr, io.EOF) {
+					break
+				}
+				if errors.Is(herr, io.ErrUnexpectedEOF) {
+					if hn >= 12 && binary.BigEndian.Uint32(hdr[8:12]) == salt1 {
+						return errors.New("corrupt WAL frame")
+					}
+					break
+				}
+				if herr != nil {
+					return herr
+				}
+				if binary.BigEndian.Uint32(hdr[8:12]) == salt1 {
+					return errors.New("corrupt WAL frame")
+				}
+				if _, serr := wal.Seek(int64(pageSize), io.SeekCurrent); serr != nil {
+					return serr
+				}
+			}
+			break
+		}
+		pageNumber := binary.BigEndian.Uint32(frame[:4])
+		if pageNumber == 0 {
+			return errors.New("corrupt WAL frame")
+		}
+		s1 += order.Uint32(frame[0:4]) + s2
+		s2 += order.Uint32(frame[4:8]) + s1
+		page := frame[24:frameSize]
+		for i := 0; i < len(page); i += 8 {
+			s1 += order.Uint32(page[i:i+4]) + s2
+			s2 += order.Uint32(page[i+4:i+8]) + s1
+		}
+		if s1 != binary.BigEndian.Uint32(frame[16:20]) || s2 != binary.BigEndian.Uint32(frame[20:24]) {
+			return errors.New("corrupt WAL frame")
+		}
 	}
 	return nil
 }

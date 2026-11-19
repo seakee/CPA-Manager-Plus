@@ -45,23 +45,28 @@ var (
 // VersionUnknown is reported when the operator declared no source release.
 const VersionUnknown = "unknown"
 
-// sourceSchema is the bounded schema vocabulary a preflight is allowed to
-// observe. Nothing here is a profile, a version proof or a grant.
+// sourceSchema is the bounded schema, format, and semantic revision vocabulary
+// preflight and copy-in inspect on a stopped 1.x source.
 //
-// The schema cannot identify a 1.x release: v1.14.0 through v1.14.10 create the
-// same tables, and the only per-release values v1 writes into settings are
-// format revisions of derived rollups, each shared by several releases. The
-// cache-accounting semantics revision, for one, is 2 in v1.14.4 and v1.14.5 and
-// 3 from v1.14.6 on, so a settings value is a floor at release granularity and
-// never an identity. Preflight therefore never infers a release from DDL. It
-// requires a structural lower bound — a source below the v1.14 shape is refused
-// no matter what release it declares — and it refuses a source that carries a
-// marker the pinned release genuinely lacks, because that source has already
-// moved past the pin.
+// Manager 1.x never persisted an exact release tag, and v1.14.0 through
+// v1.14.10 share the same core DDL while advancing derived-rollup revisions at
+// known boundaries (for example usage_cache_accounting_semantics_revision=2 in
+// v1.14.0..v1.14.5 and 3 from v1.14.6..v1.14.10). Admission therefore verifies
+// the genuine v1.14.x family profile:
+//   - an unlabeled source passes as VersionUnknown ("unknown") only when its
+//     tables, columns, format versions, archive runs, and semantic revisions
+//     stay inside the proven v1.14.x profile;
+//   - an explicit declaration outside v1.14.x is refused;
+//   - an explicit v1.14.<patch> declaration (including an unknown patch) is
+//     admitted only when the source satisfies the proven v1.14.x profile and
+//     carries no marker introduced after that declared patch.
 type sourceSchema struct {
-	tables   map[string]bool
-	indexes  map[string]bool
-	settings map[string]string
+	tables            map[string]bool
+	indexes           map[string]bool
+	columns           map[string]map[string]bool
+	settings          map[string]string
+	archiveFormats    []string
+	unknownMigrations []string
 }
 
 // requiredLegacyTables is the structural lower bound a v1.14.x source must
@@ -108,7 +113,7 @@ func (s sourceSchema) sourceKind() string {
 // v2OnlyTablePrefixes are the tables only the v2 Manager migration creates:
 // the Fresh/gateway workspaces and the upgrade operation row itself. A source
 // that already carries one has been opened by v2 and cannot be imported again.
-var v2OnlyTablePrefixes = []string{"gateway_", "fresh_", "upgrade_operations"}
+var v2OnlyTablePrefixes = []string{"gateway_", "fresh_", "upgrade_"}
 
 // v2OnlyTables returns the v2-only tables found in the source, in lexical order.
 func (s sourceSchema) v2OnlyTables() []string {
@@ -139,7 +144,12 @@ func quickCheckSource(ctx context.Context, db *sql.DB) error {
 }
 
 func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
-	schema := sourceSchema{tables: map[string]bool{}, indexes: map[string]bool{}, settings: map[string]string{}}
+	schema := sourceSchema{
+		tables:   map[string]bool{},
+		indexes:  map[string]bool{},
+		columns:  map[string]map[string]bool{},
+		settings: map[string]string{},
+	}
 
 	rows, err := db.QueryContext(ctx, `select type, name from sqlite_master where type in ('table', 'index')`)
 	if err != nil {
@@ -165,24 +175,121 @@ func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 	if !schema.tables["settings"] {
 		return schema, nil
 	}
-	marks := make([]string, len(sourceMarkerKeys))
-	for index := range sourceMarkerKeys {
-		marks[index] = "?"
-	}
-	settingRows, err := db.QueryContext(ctx,
-		`select key, value from settings where key in (`+strings.Join(marks, ", ")+`)`, stringArgs(sourceMarkerKeys)...)
-	if err != nil {
-		return sourceSchema{}, err
-	}
-	defer settingRows.Close()
-	for settingRows.Next() {
-		var key, value string
-		if err := settingRows.Scan(&key, &value); err != nil {
+	for _, table := range v114ProfileCheckedTableOrder {
+		if !schema.tables[table] {
+			continue
+		}
+		cols, err := readTableColumns(ctx, db, table)
+		if err != nil {
 			return sourceSchema{}, err
 		}
-		schema.settings[key] = value
+		schema.columns[table] = cols
 	}
-	return schema, settingRows.Err()
+	if schema.columns["settings"]["key"] && schema.columns["settings"]["value"] {
+		marks := make([]string, len(sourceMarkerKeys))
+		for index := range sourceMarkerKeys {
+			marks[index] = "?"
+		}
+		settingRows, err := db.QueryContext(ctx,
+			`select key, value from settings where key in (`+strings.Join(marks, ", ")+`)`, stringArgs(sourceMarkerKeys)...)
+		if err != nil {
+			return sourceSchema{}, err
+		}
+		defer settingRows.Close()
+		for settingRows.Next() {
+			var key, value string
+			if err := settingRows.Scan(&key, &value); err != nil {
+				return sourceSchema{}, err
+			}
+			schema.settings[key] = value
+		}
+		if err := settingRows.Err(); err != nil {
+			return sourceSchema{}, err
+		}
+	}
+	if schema.tables["usage_archive_runs"] &&
+		schema.columns["usage_archive_runs"]["schema_version"] &&
+		schema.columns["usage_archive_runs"]["format"] {
+		archiveRows, err := db.QueryContext(ctx,
+			`select distinct schema_version, format from usage_archive_runs order by schema_version asc, format asc`)
+		if err != nil {
+			return sourceSchema{}, err
+		}
+		defer archiveRows.Close()
+		for archiveRows.Next() {
+			var schemaVersion int
+			var format string
+			if err := archiveRows.Scan(&schemaVersion, &format); err != nil {
+				return sourceSchema{}, err
+			}
+			if schemaVersion != v114ArchiveSchemaVersion || format != v114ArchiveFormat {
+				schema.archiveFormats = append(schema.archiveFormats,
+					fmt.Sprintf("schema_version=%d format=%q", schemaVersion, format))
+			}
+		}
+		if err := archiveRows.Err(); err != nil {
+			return sourceSchema{}, err
+		}
+	}
+	if schema.tables["usage_data_migrations"] {
+		migrationCols, err := readTableColumns(ctx, db, "usage_data_migrations")
+		if err != nil {
+			return sourceSchema{}, err
+		}
+		if migrationCols["name"] {
+			migrationRows, err := db.QueryContext(ctx,
+				`select distinct name from usage_data_migrations order by name asc`)
+			if err != nil {
+				return sourceSchema{}, err
+			}
+			defer migrationRows.Close()
+			for migrationRows.Next() {
+				var name string
+				if err := migrationRows.Scan(&name); err != nil {
+					return sourceSchema{}, err
+				}
+				switch name {
+				case datamigration.UsageCacheAccountingMigrationName,
+					"usage_cache_accounting_v1", "quota_snapshot_lifecycle_v1":
+					// Both historical markers exist in the released v1.14.4 and
+					// v1.14.10 migrations; neither denotes an unknown format.
+				default:
+					schema.unknownMigrations = append(schema.unknownMigrations, name)
+				}
+			}
+			if err := migrationRows.Err(); err != nil {
+				return sourceSchema{}, err
+			}
+		}
+	}
+	return schema, nil
+}
+
+func readTableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `pragma table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return cols, nil
 }
 
 // openImmutableSource reads a byte-for-byte snapshot nobody writes, such as a
@@ -229,7 +336,10 @@ func inspectSourceDatabase(path string) (os.FileInfo, error) {
 		}
 		return nil, err
 	}
-	if info.Size() == 0 {
+	if err := AuditSourceSidecars(path); err != nil {
+		return nil, err
+	}
+	if info.Size() == 0 && isDatabaseFileMissingOrEmpty(path) {
 		return nil, ErrSourceDatabaseMissing
 	}
 	return info, nil
@@ -338,35 +448,67 @@ func stringArgs(values []string) []any {
 	return args
 }
 
-// pinnedSourceVersion is the accepted source release. It is read from the
-// bootstrap contract so this package never holds a second copy of the literal.
+// pinnedSourceVersion is the verified reference release fixture ceiling
+// (v1.14.10) from the bootstrap contract. Product admission accepts the proven
+// v1.14.x family rather than only this single patch tag.
 func pinnedSourceVersion() string { return bootstrap.PlannedDirectRelease }
 
-// declaredVersion normalizes the operator's declaration. It is deliberately not
-// parsed, retried or compared loosely: equality with the pinned release is the
-// whole check.
+// declaredVersion normalizes an operator declaration into its canonical vX.Y.Z
+// tag when valid, or VersionUnknown ("unknown") when omitted. It never invents
+// a patch tag for an unlabeled source.
 func declaredVersion(declared string) string {
 	trimmed := strings.TrimSpace(declared)
 	if trimmed == "" {
 		return VersionUnknown
 	}
+	if parsed, ok := bootstrap.ParseUpgradeSourceRelease(trimmed); ok {
+		return parsed.Canonical
+	}
 	return trimmed
 }
 
-// versionCheck decides the source version check from the declaration plus the
-// structural lower bound. The release is never read out of the database: v1
-// never persisted it, so a value inferred from DDL would be a guess dressed as
-// evidence. The required tables, by contrast, are real evidence, and a source
-// that lacks one is refused even when the declaration matches. So is a source
-// that carries a marker the pinned release genuinely lacks: the declaration
-// claims a release, and that claim cannot survive evidence of a later one.
-//
-// The newer branch deliberately repeats neither the pin nor the declaration.
-// Printing "expected=v1.14.4 declared=v1.14.4" next to a refusal reads as if the
-// check contradicted itself; what actually decided it is the marker, so the
-// detail names the marker and the release that introduced it.
-func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string, acceptUndeclared bool) Check {
+// evaluateSourceCompatibility evaluates a stopped source against the supported
+// v1.14.x family and its proven schema, format, and semantic revision profile.
+func evaluateSourceCompatibility(kind string, schema sourceSchema, declared string) (string, Check, error) {
+	resolved := declaredVersion(declared)
+	missing := schema.missingTables(requiredLegacyTables)
+	trimmed := strings.TrimSpace(declared)
+	if kind == SourceKindNativeV2 || kind != SourceKindLegacyManager || len(missing) != 0 {
+		return resolved, versionCheck(kind, schema.v2OnlyTables(), missing, nil, trimmed, pinnedSourceVersion(), false), nil
+	}
+	var ladderTarget string
+	if trimmed != "" {
+		parsed, ok := bootstrap.ParseUpgradeSourceRelease(trimmed)
+		if !ok || !parsed.InSupportedUpgradeFamily() {
+			return resolved, versionCheck(kind, nil, nil, nil, trimmed, pinnedSourceVersion(), false), nil
+		}
+		resolved = parsed.Canonical
+		ladderTarget = parsed.Canonical
+	} else {
+		ladderTarget = pinnedSourceVersion()
+	}
+	if unproven := schema.unprovenProfileObservations(); len(unproven) != 0 {
+		return resolved, Check{
+			Name:   CheckSourceVersion,
+			Status: StatusBlocked,
+			Code:   CodeSourceVersionUnsupported,
+			Detail: fmt.Sprintf("source carries unproven schema or format markers outside %s: %s",
+				bootstrap.SupportedUpgradeSourceFamily, strings.Join(unproven, ", ")),
+		}, nil
+	}
+	ladder, err := newVersionLadder(ladderTarget)
+	if err != nil {
+		return resolved, Check{}, err
+	}
+	return resolved, versionCheck(kind, nil, nil, ladder.newer(schema), trimmed, ladderTarget, false), nil
+}
+
+// versionCheck decides the source version check from the v1.14.x family
+// contract, structural lower bound, and post-pin / post-family marker observations.
+func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, _ string, _ bool) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
+	trimmed := strings.TrimSpace(declared)
+	expectedFamily := bootstrap.SupportedUpgradeSourceFamily
 	switch {
 	case kind == SourceKindNativeV2:
 		check.Status = StatusBlocked
@@ -380,11 +522,11 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s missingTables=%s; the source does not carry the v1.14 structure",
-			pinned, declaredVersion(declared), strings.Join(missingTables, ","))
-	case strings.TrimSpace(declared) != "" && declared != pinned:
+			expectedFamily, declaredVersion(trimmed), strings.Join(missingTables, ","))
+	case trimmed != "" && !bootstrap.IsSupportedUpgradeSourceRelease(trimmed):
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
-		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
+		check.Detail = fmt.Sprintf("expected=%s declared=%s", expectedFamily, trimmed)
 	case len(newer) != 0:
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
@@ -392,24 +534,18 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		for index, evidence := range newer {
 			labels[index] = evidence.String()
 		}
-		check.Detail = fmt.Sprintf("source is newer than the pinned release %s; markers from later releases: %s",
-			pinned, strings.Join(labels, ", "))
-	case strings.TrimSpace(declared) == "" && acceptUndeclared:
-		// A read-only caller cannot declare the release, and the version is not
-		// recoverable from the database. Saying so is the honest answer once the
-		// schema itself carries no newer or corrupt marker; calling it a refusal
-		// would make a source that is otherwise sound unusable from the one
-		// surface that can finish the operation.
-		check.Status = StatusPending
-		check.Code = CodeSourceVersionDeclaredAtCopyIn
-		check.ExpectedVersion = pinned
-		check.Detail = fmt.Sprintf("expected=%s declared=none; a read-only check cannot declare it — the CLI copy-in declares the release with --source-version %s", pinned, pinned)
-	case strings.TrimSpace(declared) == "":
-		check.Status = StatusBlocked
-		check.Code = CodeSourceVersionUndeclared
-		check.Detail = fmt.Sprintf("expected=%s declared=none; pass the 1.x release the source was running", pinned)
+		if trimmed == "" {
+			check.Detail = fmt.Sprintf("source carries markers beyond supported family %s: %s",
+				expectedFamily, strings.Join(labels, ", "))
+		} else {
+			check.Detail = fmt.Sprintf("source is newer than the pinned release %s; markers from later releases: %s",
+				declaredVersion(trimmed), strings.Join(labels, ", "))
+		}
+	case trimmed == "":
+		check.Detail = fmt.Sprintf("expected=%s declared=none; compatible v1.14.x profile verified", expectedFamily)
 	default:
-		check.Detail = fmt.Sprintf("expected=%s declared=%s; structural lower bound satisfied", pinned, declared)
+		check.Detail = fmt.Sprintf("expected=%s declared=%s; compatible v1.14.x profile verified",
+			expectedFamily, declaredVersion(trimmed))
 	}
 	return check
 }
@@ -465,9 +601,347 @@ func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool, bool) {
 	}
 }
 
-// sourceMarkerKeys are the settings rows the version check reads. The v1 code
-// writes them itself; they are revision facts, not credentials.
-var sourceMarkerKeys = []string{datamigration.UsageCacheAccountingSemanticsRevisionKey}
+const (
+	settingMonitoringModelFormatVersion        = "usage_monitoring_model_format_version"
+	settingAccountHistoryIdentityFormatVersion = "usage_account_history_identity_format_version"
+	settingDashboardHourlyFormatVersion        = "usage_dashboard_hourly_format_version"
+
+	v114MonitoringModelFormatVersion        = "1"
+	v114AccountHistoryIdentityFormatVersion = "identity-3:codex-2:model-1"
+	v114ArchiveSchemaVersion                = 1
+	v114ArchiveFormat                       = "gzip-jsonl-v1"
+)
+
+// sourceMarkerKeys are the settings rows the version and format profile checks
+// read. The 1.x code writes them itself; they are format/revision facts, not
+// credentials.
+var sourceMarkerKeys = []string{
+	datamigration.UsageCacheAccountingSemanticsRevisionKey,
+	settingMonitoringModelFormatVersion,
+	settingAccountHistoryIdentityFormatVersion,
+	settingDashboardHourlyFormatVersion,
+}
+
+type tableColumnProfile struct {
+	required []string
+	allowed  map[string]bool
+}
+
+func columnSet(names ...string) map[string]bool {
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		out[name] = true
+	}
+	return out
+}
+
+var v114ProfileCheckedTableOrder = []string{
+	"settings",
+	"usage_events",
+	"usage_event_identity_ledger",
+	"usage_monitoring_rollup_state",
+	"usage_monitoring_event_projection_v1",
+	"usage_archive_runs",
+	"usage_archive_segments",
+	"usage_archive_event_refs",
+	"usage_archive_deleted_coverage_daily",
+}
+
+var v114TableColumnProfiles = map[string]tableColumnProfile{
+	"settings": {
+		required: []string{"key", "value"},
+		allowed:  columnSet("key", "value", "updated_at_ms"),
+	},
+	"usage_events": {
+		required: []string{"id", "event_hash", "timestamp_ms"},
+		allowed: columnSet(
+			"id", "request_id", "event_hash", "timestamp_ms", "timestamp",
+			"provider", "executor_type", "model", "endpoint", "method", "path",
+			"client_ip", "x_forwarded_for", "user_agent", "auth_type", "auth_index",
+			"source", "source_hash", "api_key_hash", "account_snapshot",
+			"auth_label_snapshot", "auth_file_snapshot", "auth_provider_snapshot",
+			"auth_account_id_snapshot", "auth_project_id_snapshot", "auth_snapshot_at_ms",
+			"requested_model", "resolved_model", "reasoning_effort", "service_tier",
+			"request_service_tier", "response_service_tier", "cache_input_mode",
+			"input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
+			"cache_tokens", "cache_read_tokens", "cache_creation_tokens",
+			"normalized_uncached_input_tokens", "normalized_total_input_tokens",
+			"normalized_cache_read_tokens", "normalized_cache_creation_tokens",
+			"total_tokens", "latency_ms", "ttft_ms", "failed", "fail_status_code",
+			"fail_summary", "response_metadata_json", "header_quota_recover_at_ms",
+			"header_quota_used_percent", "header_quota_plan_type", "header_error_kind",
+			"header_error_code", "header_trace_id", "fail_body", "raw_json",
+			"response_model", "session_id", "parent_session_id", "access_token_sha256",
+			"generate", "stream", "created_at_ms",
+		),
+	},
+	"usage_event_identity_ledger": {
+		required: []string{"event_hash"},
+		allowed: columnSet(
+			"event_hash", "raw_event_id", "timestamp_ms", "bucket_ms",
+			"aggregate_schema_version", "aggregate_structure_revision",
+			"first_seen_at_ms", "updated_at_ms",
+		),
+	},
+	"usage_monitoring_rollup_state": {
+		required: []string{"rollup_name", "schema_version", "structure_revision", "status", "coverage_event_id"},
+		allowed: columnSet(
+			"rollup_name", "schema_version", "structure_revision", "status",
+			"backfill_last_event_id", "coverage_event_id", "target_event_id",
+			"processed_events", "last_run_started_at_ms", "updated_at_ms",
+			"finished_at_ms", "last_error",
+		),
+	},
+	"usage_monitoring_event_projection_v1": {
+		required: []string{"event_id", "timestamp_ms"},
+		allowed: columnSet(
+			"event_id", "timestamp_ms", "search_text", "account_key", "provider",
+			"executor_type", "model", "requested_model", "analytics_model",
+			"resolved_model", "auth_index", "source", "source_hash", "api_key_hash",
+			"account_snapshot", "auth_label_snapshot", "auth_file_snapshot",
+			"auth_provider_snapshot", "auth_account_id_snapshot", "auth_project_id_snapshot",
+			"reasoning_effort", "service_tier", "failed", "latency_ms", "input_tokens",
+			"output_tokens", "reasoning_tokens", "cached_tokens", "cache_tokens",
+			"cache_read_tokens", "cache_creation_tokens", "normalized_total_input_tokens",
+			"total_tokens", "header_quota_plan_type", "header_error_kind",
+			"header_error_code", "header_trace_id", "updated_at_ms",
+		),
+	},
+	"usage_archive_runs": {
+		required: []string{"id", "schema_version", "format", "status"},
+		allowed: columnSet(
+			"id", "mode", "schema_version", "format", "status", "resume_status",
+			"requested_stage", "progress_phase", "progress_current", "progress_total",
+			"progress_unit", "progress_updated_at_ms", "cutoff_timestamp_ms",
+			"target_event_id", "event_count", "estimated_bytes", "last_archived_event_id",
+			"archived_event_count", "archived_uncompressed_bytes",
+			"archived_compressed_bytes", "archive_digest", "manifest_file",
+			"manifest_sha256", "last_deleted_event_id", "deleted_event_count",
+			"created_at_ms", "updated_at_ms", "started_at_ms", "archived_at_ms",
+			"verified_at_ms", "delete_started_at_ms", "completed_at_ms", "last_error",
+		),
+	},
+	"usage_archive_segments": {
+		required: []string{"run_id", "sequence", "file_name"},
+		allowed: columnSet(
+			"run_id", "sequence", "status", "file_name", "first_event_id",
+			"last_event_id", "min_timestamp_ms", "max_timestamp_ms", "event_count",
+			"uncompressed_bytes", "compressed_bytes", "content_sha256",
+			"event_hash_digest", "created_at_ms", "verified_at_ms",
+		),
+	},
+	"usage_archive_event_refs": {
+		required: []string{"event_hash", "raw_event_id", "timestamp_ms", "raw_deleted_at_ms"},
+		allowed: columnSet(
+			"event_hash", "run_id", "segment_sequence", "raw_event_id",
+			"timestamp_ms", "archived_at_ms", "raw_deleted_at_ms",
+		),
+	},
+	"usage_archive_deleted_coverage_daily": {
+		required: []string{"utc_day", "deleted_event_count"},
+		allowed: columnSet(
+			"utc_day", "deleted_event_count", "min_timestamp_ms", "max_timestamp_ms",
+		),
+	},
+}
+
+var knownV114SourceTables = columnSet(
+	"settings",
+	"usage_events",
+	"usage_rollup_checkpoints",
+	"usage_hourly_aggregate_v1",
+	"usage_hourly_aggregate_state",
+	"usage_account_model_rollups",
+	"usage_pricing_account_rollups_v1",
+	"usage_dashboard_hourly_rollups",
+	"usage_rollup_rebuild_state",
+	"usage_pricing_hourly_rollups_v1",
+	"usage_pricing_rollup_state",
+	"usage_monitoring_account_daily_rollups_v1",
+	"usage_monitoring_api_key_daily_rollups_v1",
+	"usage_monitoring_selector_daily_rollups_v1",
+	"usage_monitoring_event_projection_v1",
+	"usage_monitoring_header_latest_v1",
+	"usage_monitoring_rollup_state",
+	"usage_monitoring_search_index_state",
+	"usage_event_identity_ledger",
+	"usage_archive_runs",
+	"usage_archive_segments",
+	"usage_archive_event_refs",
+	"usage_archive_deleted_coverage_daily",
+	"usage_maintenance_locks",
+	"usage_data_migrations",
+	"usage_cache_accounting_v2_changes",
+	"usage_codex_legacy_identity_evidence_v1",
+	"usage_derived_cleanup_jobs",
+	"usage_derived_cleanup_cursors",
+	"usage_derived_deferred_indexes",
+	"dead_letter_events",
+	"model_prices",
+	"model_price_context_tiers",
+	"model_price_service_tiers",
+	"api_key_aliases",
+	"account_action_candidates",
+	"codex_inspection_runs",
+	"codex_inspection_leases",
+	"codex_inspection_results",
+	"codex_inspection_logs",
+	"codex_inspection_disable_ownership",
+	"codex_inspection_disable_ownership_v2",
+	"quota_cooldowns",
+	"account_quota_observations",
+	"account_quota_windows",
+	"account_quota_window_activations",
+	"account_quota_cycles",
+	"account_quota_snapshots",
+	// Parked 1.x derived rollup tables retained until offline cleanup-derived.
+	"usage_account_model_rollups_legacy_v1120_rc2",
+	"usage_account_model_rollups_legacy_identity_v3",
+	"usage_account_model_rollups_legacy_identity_v3_codex_v2",
+	"usage_pricing_account_rollups_v1_legacy_v1120_rc2",
+	"usage_dashboard_hourly_rollups_legacy_v1120_rc2",
+	"usage_hourly_aggregate_v1_legacy_v1120_rc2",
+	"usage_monitoring_account_daily_rollups_v1_legacy_recovery",
+	"usage_monitoring_api_key_daily_rollups_v1_legacy_recovery",
+	"usage_monitoring_account_daily_rollups_v1_legacy_identity_v3",
+	"usage_monitoring_api_key_daily_rollups_v1_legacy_identity_v3",
+	"usage_monitoring_account_daily_rollups_v1_legacy_identity_v3_codex_v2",
+	"usage_monitoring_api_key_daily_rollups_v1_legacy_identity_v3_codex_v2",
+	"usage_monitoring_selector_daily_rollups_v1_legacy_recovery",
+	"usage_monitoring_header_latest_v1_legacy_recovery",
+	"usage_monitoring_event_projection_v1_legacy_recovery",
+	"usage_dashboard_hourly_rollups_legacy_source_recovery",
+	"usage_pricing_hourly_rollups_v1_legacy_source_recovery",
+	"usage_cache_accounting_v2_changes_legacy_source_recovery",
+	"usage_account_model_rollups_legacy_source_recovery",
+	"usage_pricing_account_rollups_v1_legacy_source_recovery",
+	"usage_codex_legacy_identity_evidence_v1_legacy_recovery",
+)
+
+var v114FTSShadowSuffixes = []string{"", "_data", "_idx", "_content", "_docsize", "_config"}
+
+func isDigitsOnly(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isKnownV114FTSTable(name string) bool {
+	for _, base := range []string{
+		"usage_monitoring_event_search_v1",
+		"usage_monitoring_event_search_v1_legacy_v1120_rc2",
+	} {
+		for _, suffix := range v114FTSShadowSuffixes {
+			if name == base+suffix {
+				return true
+			}
+		}
+	}
+	const genPrefix = "usage_monitoring_event_search_v1_legacy_g"
+	if strings.HasPrefix(name, genPrefix) {
+		rest := strings.TrimPrefix(name, genPrefix)
+		for _, suffix := range v114FTSShadowSuffixes {
+			if suffix == "" {
+				if isDigitsOnly(rest) {
+					return true
+				}
+				continue
+			}
+			if strings.HasSuffix(rest, suffix) && isDigitsOnly(strings.TrimSuffix(rest, suffix)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isKnownV114SourceTable(name string) bool {
+	if knownV114SourceTables[name] || isKnownV114FTSTable(name) {
+		return true
+	}
+	const projectionGenPrefix = "usage_monitoring_event_projection_v1_legacy_g"
+	if strings.HasPrefix(name, projectionGenPrefix) {
+		return isDigitsOnly(strings.TrimPrefix(name, projectionGenPrefix))
+	}
+	return false
+}
+
+// unprovenProfileObservations returns any schema, column, format-revision,
+// archive-format, or semantic-migration observations that fall outside the
+// proven v1.14.x family profile.
+func (s sourceSchema) unprovenProfileObservations() []string {
+	observations := []string{}
+
+	unexpectedTables := []string{}
+	for name := range s.tables {
+		if strings.HasPrefix(name, "sqlite_") {
+			continue
+		}
+		isV2 := false
+		for _, prefix := range v2OnlyTablePrefixes {
+			if strings.HasPrefix(name, prefix) {
+				isV2 = true
+				break
+			}
+		}
+		if isV2 || isKnownV114SourceTable(name) {
+			continue
+		}
+		unexpectedTables = append(unexpectedTables, name)
+	}
+	sort.Strings(unexpectedTables)
+	for _, name := range unexpectedTables {
+		observations = append(observations, "unexpectedTable="+name)
+	}
+
+	if len(s.columns) > 0 {
+		for _, table := range v114ProfileCheckedTableOrder {
+			presentCols, ok := s.columns[table]
+			if !ok {
+				continue
+			}
+			profile := v114TableColumnProfiles[table]
+			for _, reqCol := range profile.required {
+				if !presentCols[reqCol] {
+					observations = append(observations, fmt.Sprintf("missingColumn=%s.%s", table, reqCol))
+				}
+			}
+			extraCols := []string{}
+			for col := range presentCols {
+				if !profile.allowed[col] {
+					extraCols = append(extraCols, col)
+				}
+			}
+			sort.Strings(extraCols)
+			for _, col := range extraCols {
+				observations = append(observations, fmt.Sprintf("unexpectedColumn=%s.%s", table, col))
+			}
+		}
+	}
+
+	if val, found := s.settings[settingMonitoringModelFormatVersion]; found && val != v114MonitoringModelFormatVersion {
+		observations = append(observations, fmt.Sprintf("%s=%q", settingMonitoringModelFormatVersion, val))
+	}
+	if val, found := s.settings[settingAccountHistoryIdentityFormatVersion]; found && val != v114AccountHistoryIdentityFormatVersion {
+		observations = append(observations, fmt.Sprintf("%s=%q", settingAccountHistoryIdentityFormatVersion, val))
+	}
+	if val, found := s.settings[settingDashboardHourlyFormatVersion]; found && val != "1" && val != "2" && val != "3" {
+		observations = append(observations, fmt.Sprintf("%s=%q", settingDashboardHourlyFormatVersion, val))
+	}
+	for _, entry := range s.archiveFormats {
+		observations = append(observations, "usage_archive_runs("+entry+")")
+	}
+	for _, name := range s.unknownMigrations {
+		observations = append(observations, fmt.Sprintf("usage_data_migrations=%q", name))
+	}
+	return observations
+}
 
 type versionMarker struct {
 	// release is the 1.x release that introduced the marker. It is carried so

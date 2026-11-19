@@ -23,21 +23,18 @@ import (
 // R4 ---------------------------------------------------------------------
 
 // TestPreflightBlocksWhenParityInspectionFails keeps the parity check honest in
-// the failing direction: every required table name is present and quick_check
-// passes, so the structural gate accepts the source, but the retained refs
-// table lost the column the inspection reads. An inspection that cannot run is
-// not evidence that history is intact, so the report blocks with a fixed
-// nonsensitive detail instead of the SQL error text.
+// the failing direction: every v1.14.x table and column is present and
+// quick_check passes, so ownership and v1.14.x schema admission accept the
+// source, while a non-integer value stored under SQLite dynamic typing makes the
+// parity scan fail. An inspection that cannot run is not evidence that history
+// is intact, so the report blocks with a fixed nonsensitive detail instead of
+// leaking column names, row values or SQL error text.
 func TestPreflightBlocksWhenParityInspectionFails(t *testing.T) {
 	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
-		execFixture(t, db, `drop table usage_archive_event_refs`)
-		execFixture(t, db, `create table usage_archive_event_refs (
-			event_hash text primary key,
-			run_id text not null,
-			segment_sequence integer not null,
-			raw_event_id integer not null,
-			timestamp_ms integer not null,
-			archived_at_ms integer not null
+		execFixture(t, db, `insert into usage_archive_event_refs (
+			event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+		) values (
+			'corrupt-ref-hash', 'run-1', 1, 'corrupt-raw-event-id', 1712102400000, 1712188800000, 1712188800000
 		)`)
 	})
 	report := preflight(t, fixture.root, declared())
@@ -47,6 +44,10 @@ func TestPreflightBlocksWhenParityInspectionFails(t *testing.T) {
 	if !found || ownership.Status != StatusPass {
 		t.Fatalf("ownership check = %+v, want pass: the database itself was readable", ownership)
 	}
+	version, found := checkByName(report, CheckSourceVersion)
+	if !found || version.Status != StatusPass {
+		t.Fatalf("version check = %+v, want pass: the v1.14.x schema profile held", version)
+	}
 	check, found := checkByName(report, CheckParity)
 	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
 		t.Fatalf("parity check = %+v, want blocked %s", check, CodeSourceUnreadable)
@@ -54,7 +55,7 @@ func TestPreflightBlocksWhenParityInspectionFails(t *testing.T) {
 	if check.Detail != parityInspectionFailedDetail {
 		t.Fatalf("parity detail = %q, want the fixed %q", check.Detail, parityInspectionFailedDetail)
 	}
-	for _, leak := range []string{"raw_deleted_at_ms", "select", "sqlite"} {
+	for _, leak := range []string{"raw_event_id", "corrupt-raw-event-id", "raw_deleted_at_ms", "select", "sqlite"} {
 		if strings.Contains(strings.ToLower(check.Detail), leak) {
 			t.Fatalf("parity detail %q leaks inspection internals (%q)", check.Detail, leak)
 		}
@@ -65,6 +66,22 @@ func TestPreflightBlocksWhenParityInspectionFails(t *testing.T) {
 	if report.Ready {
 		t.Fatal("ready = true after the parity inspection failed")
 	}
+
+	// Dropping a required v1.14.x column is also refused by the structural
+	// profile check rather than passing CheckSourceVersion.
+	missingColFixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `drop table usage_archive_event_refs`)
+		execFixture(t, db, `create table usage_archive_event_refs (
+			event_hash text primary key,
+			run_id text not null,
+			segment_sequence integer not null,
+			raw_event_id integer not null,
+			timestamp_ms integer not null,
+			archived_at_ms integer not null
+		)`)
+	})
+	missingColReport := preflight(t, missingColFixture.root, declared())
+	requireBlocked(t, missingColReport, CodeSourceVersionUnsupported, CodeSourceUnreadable)
 }
 
 // R5 ---------------------------------------------------------------------

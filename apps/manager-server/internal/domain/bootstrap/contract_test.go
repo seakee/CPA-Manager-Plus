@@ -147,7 +147,7 @@ type classificationJSON struct {
 	AdminCredential     bootstrap.AdminCredentialState
 	Session             bootstrap.SessionState
 	RequiredCheckpoints bootstrap.RequiredMigrationCheckpoints
-	HistoricalEvidence *bootstrap.HistoricalEvidence
+	HistoricalEvidence  *bootstrap.HistoricalEvidence
 	ExpectedMode        bootstrap.Mode
 }
 
@@ -231,25 +231,25 @@ func (o prefixObservationJSON) domain() bootstrap.PrefixRecoveryObservation {
 }
 
 type prefixAssertionJSON struct {
-	ID                             string
-	OperationID                    bootstrap.OperationID
-	InstallationID                 string
-	CurrentInstallationID          string
-	ExpectedRoutingRevision        uint64
-	CurrentRoutingRevision         uint64
-	PreviousVerifiedEffectivePath  string
-	DesiredControlBasePath         string
-	VerifiedEffectivePath          string
-	Impact                         bootstrap.PrefixImpact
-	Stage                          bootstrap.PrefixOperationStage
-	AuthorityQualified             bool
-	CollisionFree                  bool
-	PublicIdentityHealthy          bool
-	StaticAssetsHealthy            bool
-	APIAuthenticationHealthy       bool
-	Result                         bootstrap.PrefixOperationResult
-	ExpectedAction                 bootstrap.PrefixRecoveryAction
-	Observation                    *prefixObservationJSON
+	ID                               string
+	OperationID                      bootstrap.OperationID
+	InstallationID                   string
+	CurrentInstallationID            string
+	ExpectedRoutingRevision          uint64
+	CurrentRoutingRevision           uint64
+	PreviousVerifiedEffectivePath    string
+	DesiredControlBasePath           string
+	VerifiedEffectivePath            string
+	Impact                           bootstrap.PrefixImpact
+	Stage                            bootstrap.PrefixOperationStage
+	AuthorityQualified               bool
+	CollisionFree                    bool
+	PublicIdentityHealthy            bool
+	StaticAssetsHealthy              bool
+	APIAuthenticationHealthy         bool
+	Result                           bootstrap.PrefixOperationResult
+	ExpectedAction                   bootstrap.PrefixRecoveryAction
+	Observation                      *prefixObservationJSON
 	ExpectedCompleteAfterObservation bool
 	ExpectedConditionalRestore       bool
 }
@@ -278,15 +278,15 @@ func (p prefixAssertionJSON) domain() bootstrap.PrefixOperation {
 type fixture struct {
 	Schema                      string `json:"$schema"`
 	SchemaVersion               int
-	ContractID               string
-	ExecutionBaseline        string
-	PlannedCandidate         candidateJSON
-	CPACore                  coreJSON
-	Ownership                ownershipJSON
-	UpgradeOrdering          []bootstrap.MigrationStage
-	BootstrapModes           []bootstrap.Mode
-	CPAStrategies            []bootstrap.CPAStrategy
-	Paths                    []pathJSON
+	ContractID                  string
+	ExecutionBaseline           string
+	PlannedCandidate            candidateJSON
+	CPACore                     coreJSON
+	Ownership                   ownershipJSON
+	UpgradeOrdering             []bootstrap.MigrationStage
+	BootstrapModes              []bootstrap.Mode
+	CPAStrategies               []bootstrap.CPAStrategy
+	Paths                       []pathJSON
 	ClassificationAssertions    []classificationJSON
 	OperationConflictAssertions []operationConflictJSON
 	CollectorAssertions         []collectorAssertionJSON
@@ -599,12 +599,12 @@ func TestCheckedInContract(t *testing.T) {
 		t.Fatalf("got %d paths, want 5", len(f.Paths))
 	}
 	type pathSignature struct {
-		Mode       bootstrap.Mode
-		Strategy   bootstrap.CPAStrategy
-		Action     bootstrap.CPAMPAction
-		Usage      bootstrap.UsageAction
-		Backup     bool
-		Runtime    bootstrap.RuntimeMode
+		Mode     bootstrap.Mode
+		Strategy bootstrap.CPAStrategy
+		Action   bootstrap.CPAMPAction
+		Usage    bootstrap.UsageAction
+		Backup   bool
+		Runtime  bootstrap.RuntimeMode
 	}
 	wantPaths := map[string]pathSignature{
 		"P4-BOOT-01": {bootstrap.Fresh, bootstrap.NewManaged, bootstrap.Initialize, bootstrap.NoUsageAction, false, bootstrap.Embedded},
@@ -641,17 +641,17 @@ func TestCheckedInContract(t *testing.T) {
 	}
 	wantClassificationIDs := map[string]bool{
 		"no_v1_is_fresh": true,
-		"schema_c_without_authority_is_unsupported": true,
-		"verified_exact_ready_is_upgrade": true,
-		"verified_hop_ready_is_upgrade": true,
-		"verified_but_blocked_is_recovery": true,
-		"offline_required_is_recovery": true,
-		"unknown_newer_same_shape_is_unsupported": true,
-		"damaged_state_overrides": true,
-		"completed_is_terminal": true,
-		"checkpoint_incomplete_is_recovery": true,
-		"historical_authority_incomplete_is_recovery": true,
-		"administrator_unverifiable_is_recovery": true,
+		"schema_c_without_authority_is_unsupported":      true,
+		"verified_exact_ready_is_upgrade":                true,
+		"verified_hop_ready_is_upgrade":                  true,
+		"verified_but_blocked_is_recovery":               true,
+		"offline_required_is_recovery":                   true,
+		"unknown_newer_same_shape_is_unsupported":        true,
+		"damaged_state_overrides":                        true,
+		"completed_is_terminal":                          true,
+		"checkpoint_incomplete_is_recovery":              true,
+		"historical_authority_incomplete_is_recovery":    true,
+		"administrator_unverifiable_is_recovery":         true,
 		"completed_with_uninitialized_admin_is_recovery": true,
 	}
 	if len(f.ClassificationAssertions) != len(wantClassificationIDs) {
@@ -669,14 +669,14 @@ func TestCheckedInContract(t *testing.T) {
 			admission = &value
 		}
 		got, err := bootstrap.Classify(bootstrap.ClassificationEvidence{
-			HasV1ProductState: assertion.HasV1ProductState,
-			Admission:         admission,
-			RecoveryReason:    assertion.RecoveryReason,
-			BootstrapComplete: assertion.BootstrapComplete,
+			HasV1ProductState:   assertion.HasV1ProductState,
+			Admission:           admission,
+			RecoveryReason:      assertion.RecoveryReason,
+			BootstrapComplete:   assertion.BootstrapComplete,
 			AdminCredential:     assertion.AdminCredential,
 			Session:             assertion.Session,
 			RequiredCheckpoints: assertion.RequiredCheckpoints,
-			HistoricalEvidence: assertion.HistoricalEvidence,
+			HistoricalEvidence:  assertion.HistoricalEvidence,
 		})
 		if err != nil || got != assertion.ExpectedMode {
 			t.Fatalf("%s: got %q err=%v want %q", assertion.ID, got, err, assertion.ExpectedMode)
@@ -686,10 +686,10 @@ func TestCheckedInContract(t *testing.T) {
 		t.Fatal("operation conflict and Collector assertions must be explicit")
 	}
 	wantConflictIDs := map[string]bool{
-		"install_vs_restore": true,
-		"migration_vs_maintenance": true,
-		"cpa_update_vs_cutover": true,
-		"cutover_vs_prefix_apply": true,
+		"install_vs_restore":                 true,
+		"migration_vs_maintenance":           true,
+		"cpa_update_vs_cutover":              true,
+		"cutover_vs_prefix_apply":            true,
 		"same_migration_operation_reobserve": true,
 	}
 	if len(f.OperationConflictAssertions) != len(wantConflictIDs) {
@@ -711,8 +711,8 @@ func TestCheckedInContract(t *testing.T) {
 		}
 	}
 	wantCollectorIDs := map[string]bool{
-		"backup_quiescence_pauses_collector": true,
-		"verified_retention_is_queue_window": true,
+		"backup_quiescence_pauses_collector":        true,
+		"verified_retention_is_queue_window":        true,
 		"unproven_or_outside_window_is_gap_unknown": true,
 	}
 	if len(f.CollectorAssertions) != len(wantCollectorIDs) {
@@ -730,13 +730,13 @@ func TestCheckedInContract(t *testing.T) {
 		}
 	}
 	wantPrefixIDs := map[string]bool{
-		"lost_result_healthy_target_can_complete": true,
-		"lost_result_unhealthy_target_can_restore": true,
-		"stale_revision_refuses_prefix_recovery": true,
-		"authority_reobservation_refuses_recovery": true,
+		"lost_result_healthy_target_can_complete":       true,
+		"lost_result_unhealthy_target_can_restore":      true,
+		"stale_revision_refuses_prefix_recovery":        true,
+		"authority_reobservation_refuses_recovery":      true,
 		"restore_snapshot_unqualified_refuses_recovery": true,
-		"committed_applied_prefix_is_complete": true,
-		"effective_mismatch_requires_resolution": true,
+		"committed_applied_prefix_is_complete":          true,
+		"effective_mismatch_requires_resolution":        true,
 	}
 	if len(f.PrefixAssertions) != len(wantPrefixIDs) {
 		t.Fatalf("got %d prefix cases, want %d", len(f.PrefixAssertions), len(wantPrefixIDs))
@@ -845,7 +845,7 @@ func baseClassification(admission *bootstrap.UpgradeAdmission) bootstrap.Classif
 		Session:           bootstrap.SessionMissing,
 		RequiredCheckpoints: bootstrap.RequiredMigrationCheckpoints{
 			CacheAccounting: bootstrap.CheckpointComplete,
-			QuotaSnapshot: bootstrap.CheckpointComplete,
+			QuotaSnapshot:   bootstrap.CheckpointComplete,
 		},
 		HistoricalEvidence: &history,
 	}
@@ -909,7 +909,7 @@ func TestEvidenceReadinessAndGrantRemainIndependent(t *testing.T) {
 		bootstrap.WritableMigration,
 	}
 	history := bootstrap.HistoricalEvidence{
-		SourceState: bootstrap.HistoryFullRaw,
+		SourceState:     bootstrap.HistoryFullRaw,
 		AuthorityStatus: bootstrap.HistoryAvailable,
 	}
 	base := bootstrap.WritablePreconditions{
@@ -919,7 +919,7 @@ func TestEvidenceReadinessAndGrantRemainIndependent(t *testing.T) {
 		SourceRevalidated: true,
 		RequiredCheckpoints: bootstrap.RequiredMigrationCheckpoints{
 			CacheAccounting: bootstrap.CheckpointComplete,
-			QuotaSnapshot: bootstrap.CheckpointComplete,
+			QuotaSnapshot:   bootstrap.CheckpointComplete,
 		},
 		HistoricalEvidence:        &history,
 		ManagerAuthorityQualified: true,
@@ -935,8 +935,12 @@ func TestEvidenceReadinessAndGrantRemainIndependent(t *testing.T) {
 		{"backup missing", func(p *bootstrap.WritablePreconditions) { p.BackupVerified = false }},
 		{"source not revalidated", func(p *bootstrap.WritablePreconditions) { p.SourceRevalidated = false }},
 		{"authority unqualified", func(p *bootstrap.WritablePreconditions) { p.ManagerAuthorityQualified = false }},
-		{"cache checkpoint incomplete", func(p *bootstrap.WritablePreconditions) { p.RequiredCheckpoints.CacheAccounting = bootstrap.CheckpointPending }},
-		{"quota checkpoint incomplete", func(p *bootstrap.WritablePreconditions) { p.RequiredCheckpoints.QuotaSnapshot = bootstrap.CheckpointPending }},
+		{"cache checkpoint incomplete", func(p *bootstrap.WritablePreconditions) {
+			p.RequiredCheckpoints.CacheAccounting = bootstrap.CheckpointPending
+		}},
+		{"quota checkpoint incomplete", func(p *bootstrap.WritablePreconditions) {
+			p.RequiredCheckpoints.QuotaSnapshot = bootstrap.CheckpointPending
+		}},
 		{"historical authority missing", func(p *bootstrap.WritablePreconditions) { p.HistoricalEvidence = nil }},
 		{"historical authority incomplete", func(p *bootstrap.WritablePreconditions) {
 			value := bootstrap.HistoricalEvidence{SourceState: bootstrap.HistoryIncomplete, AuthorityStatus: bootstrap.HistoryIndeterminate}
@@ -970,7 +974,7 @@ func TestForwardHopGrantRequiresTrustedReceiptQualification(t *testing.T) {
 	admission.EvidenceStatus = bootstrap.ForwardHopVerified
 	admission.ForwardHopEvidenceRef = "evidence:hop"
 	history := bootstrap.HistoricalEvidence{
-		SourceState: bootstrap.HistoryFullRaw,
+		SourceState:     bootstrap.HistoryFullRaw,
 		AuthorityStatus: bootstrap.HistoryAvailable,
 	}
 	base := bootstrap.WritablePreconditions{
@@ -980,7 +984,7 @@ func TestForwardHopGrantRequiresTrustedReceiptQualification(t *testing.T) {
 		SourceRevalidated: true,
 		RequiredCheckpoints: bootstrap.RequiredMigrationCheckpoints{
 			CacheAccounting: bootstrap.CheckpointComplete,
-			QuotaSnapshot: bootstrap.CheckpointComplete,
+			QuotaSnapshot:   bootstrap.CheckpointComplete,
 		},
 		HistoricalEvidence:        &history,
 		ManagerAuthorityQualified: true,
@@ -1025,27 +1029,27 @@ func TestActualOperationRecordRequiresPersistentIdentityFields(t *testing.T) {
 
 func TestTrustedReceiptBindingIsExactAndReplaySafe(t *testing.T) {
 	binding := bootstrap.ReceiptBinding{
-		OperationID:          "operation-0001",
-		TargetFingerprint:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		InputManifestDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		OutputManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		OperationID:           "operation-0001",
+		TargetFingerprint:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		InputManifestDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		OutputManifestDigest:  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		ArtifactArchiveDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		ExecutableDigest:      "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 	}
 	base := bootstrap.TrustedReceiptPreconditions{
-		Receipt:                     binding,
-		CurrentOperationID:          binding.OperationID,
-		CurrentTargetFingerprint:    binding.TargetFingerprint,
-		CurrentInputManifestDigest:  binding.InputManifestDigest,
-		CurrentOutputManifestDigest:   binding.OutputManifestDigest,
+		Receipt:                      binding,
+		CurrentOperationID:           binding.OperationID,
+		CurrentTargetFingerprint:     binding.TargetFingerprint,
+		CurrentInputManifestDigest:   binding.InputManifestDigest,
+		CurrentOutputManifestDigest:  binding.OutputManifestDigest,
 		CurrentArtifactArchiveDigest: binding.ArtifactArchiveDigest,
 		CurrentExecutableDigest:      binding.ExecutableDigest,
 		ManagerAuthenticityVerified:  true,
-		JournalRecordPresent:        true,
-		ProcessExited:               true,
-		ProcessExitCode:             0,
-		ProcessHandlesReleased:      true,
-		ProcessReaped:               true,
+		JournalRecordPresent:         true,
+		ProcessExited:                true,
+		ProcessExitCode:              0,
+		ProcessHandlesReleased:       true,
+		ProcessReaped:                true,
 	}
 	if !bootstrap.CanAcceptTrustedHopReceipt(base) {
 		t.Fatal("matching trusted receipt preconditions were rejected")
@@ -1058,11 +1062,21 @@ func TestTrustedReceiptBindingIsExactAndReplaySafe(t *testing.T) {
 		{"journal missing", func(p *bootstrap.TrustedReceiptPreconditions) { p.JournalRecordPresent = false }},
 		{"revoked", func(p *bootstrap.TrustedReceiptPreconditions) { p.JournalRevoked = true }},
 		{"operation replay", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentOperationID = "operation-9999" }},
-		{"target mismatch", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentTargetFingerprint = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }},
-		{"input mismatch", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentInputManifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }},
-		{"output mismatch", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentOutputManifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }},
-		{"archive mismatch", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentArtifactArchiveDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }},
-		{"executable mismatch", func(p *bootstrap.TrustedReceiptPreconditions) { p.CurrentExecutableDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }},
+		{"target mismatch", func(p *bootstrap.TrustedReceiptPreconditions) {
+			p.CurrentTargetFingerprint = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		}},
+		{"input mismatch", func(p *bootstrap.TrustedReceiptPreconditions) {
+			p.CurrentInputManifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		}},
+		{"output mismatch", func(p *bootstrap.TrustedReceiptPreconditions) {
+			p.CurrentOutputManifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		}},
+		{"archive mismatch", func(p *bootstrap.TrustedReceiptPreconditions) {
+			p.CurrentArtifactArchiveDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		}},
+		{"executable mismatch", func(p *bootstrap.TrustedReceiptPreconditions) {
+			p.CurrentExecutableDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		}},
 		{"process not exited", func(p *bootstrap.TrustedReceiptPreconditions) { p.ProcessExited = false }},
 		{"nonzero exit", func(p *bootstrap.TrustedReceiptPreconditions) { p.ProcessExitCode = 1 }},
 		{"handles not released", func(p *bootstrap.TrustedReceiptPreconditions) { p.ProcessHandlesReleased = false }},
@@ -1480,12 +1494,12 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 	}
 
 	prefix := bootstrap.PrefixOperation{
-		OperationID: "operation-1000",
+		OperationID:    "operation-1000",
 		InstallationID: "install-a", CurrentInstallationID: "install-a",
 		ExpectedRoutingRevision: 7, CurrentRoutingRevision: 7,
 		PreviousVerifiedEffectivePath: "/admin-old",
-		DesiredControlBasePath: "/admin-x",
-		Impact: bootstrap.PrefixControlRouteOnly, Stage: bootstrap.PrefixHealthVerified,
+		DesiredControlBasePath:        "/admin-x",
+		Impact:                        bootstrap.PrefixControlRouteOnly, Stage: bootstrap.PrefixHealthVerified,
 		AuthorityQualified: true, CollisionFree: true,
 		PublicIdentityHealthy: true, StaticAssetsHealthy: true, APIAuthenticationHealthy: true,
 		Result: bootstrap.PrefixPending,
@@ -1506,11 +1520,11 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 	}
 
 	type journalCase struct {
-		name       string
-		record     bootstrap.JournalRecord
+		name        string
+		record      bootstrap.JournalRecord
 		observation bootstrap.JournalObservation
-		mismatch   func(*bootstrap.JournalObservation)
-		foreign    func(*bootstrap.JournalObservation)
+		mismatch    func(*bootstrap.JournalObservation)
+		foreign     func(*bootstrap.JournalObservation)
 	}
 	cases := []journalCase{
 		{
@@ -1520,8 +1534,11 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 				ObservedProductRevision: 7,
 			},
 			observation: bootstrap.JournalObservation{CurrentProductRevision: 7, CurrentGenerationID: "generation-a", CurrentRoutingRevision: 11},
-			mismatch: func(o *bootstrap.JournalObservation) { o.CurrentProductRevision = 8 },
-			foreign: func(o *bootstrap.JournalObservation) { o.CurrentGenerationID = "generation-b"; o.CurrentRoutingRevision = 12 },
+			mismatch:    func(o *bootstrap.JournalObservation) { o.CurrentProductRevision = 8 },
+			foreign: func(o *bootstrap.JournalObservation) {
+				o.CurrentGenerationID = "generation-b"
+				o.CurrentRoutingRevision = 12
+			},
 		},
 		{
 			name: "cpa",
@@ -1530,8 +1547,8 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 				ObservedGenerationID: "generation-a",
 			},
 			observation: bootstrap.JournalObservation{CurrentProductRevision: 7, CurrentGenerationID: "generation-a", CurrentRoutingRevision: 11},
-			mismatch: func(o *bootstrap.JournalObservation) { o.CurrentGenerationID = "generation-b" },
-			foreign: func(o *bootstrap.JournalObservation) { o.CurrentProductRevision = 8; o.CurrentRoutingRevision = 12 },
+			mismatch:    func(o *bootstrap.JournalObservation) { o.CurrentGenerationID = "generation-b" },
+			foreign:     func(o *bootstrap.JournalObservation) { o.CurrentProductRevision = 8; o.CurrentRoutingRevision = 12 },
 		},
 		{
 			name: "routing",
@@ -1540,8 +1557,11 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 				ObservedRoutingRevision: 11,
 			},
 			observation: bootstrap.JournalObservation{CurrentProductRevision: 7, CurrentGenerationID: "generation-a", CurrentRoutingRevision: 11},
-			mismatch: func(o *bootstrap.JournalObservation) { o.CurrentRoutingRevision = 12 },
-			foreign: func(o *bootstrap.JournalObservation) { o.CurrentProductRevision = 8; o.CurrentGenerationID = "generation-b" },
+			mismatch:    func(o *bootstrap.JournalObservation) { o.CurrentRoutingRevision = 12 },
+			foreign: func(o *bootstrap.JournalObservation) {
+				o.CurrentProductRevision = 8
+				o.CurrentGenerationID = "generation-b"
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -1605,27 +1625,27 @@ func TestDiscoveryPrefixAndJournalFailClosed(t *testing.T) {
 
 func TestPrefixRecoveryRequiresCurrentAuthorityAndSnapshot(t *testing.T) {
 	op := bootstrap.PrefixOperation{
-		OperationID: "operation-recovery-1000",
+		OperationID:    "operation-recovery-1000",
 		InstallationID: "install-a", CurrentInstallationID: "install-a",
 		ExpectedRoutingRevision: 7, CurrentRoutingRevision: 7,
 		PreviousVerifiedEffectivePath: "/old-control",
-		DesiredControlBasePath: "/new-control",
-		Impact: bootstrap.PrefixControlRouteOnly,
-		Stage: bootstrap.PrefixRouteActivated,
-		AuthorityQualified: true,
-		CollisionFree: true,
-		Result: bootstrap.PrefixUnknown,
+		DesiredControlBasePath:        "/new-control",
+		Impact:                        bootstrap.PrefixControlRouteOnly,
+		Stage:                         bootstrap.PrefixRouteActivated,
+		AuthorityQualified:            true,
+		CollisionFree:                 true,
+		Result:                        bootstrap.PrefixUnknown,
 	}
 	healthy := bootstrap.PrefixRecoveryObservation{
-		CurrentInstallationID: "install-a",
-		CurrentRoutingRevision: 7,
-		CurrentEffectivePath: "/new-control",
+		CurrentInstallationID:          "install-a",
+		CurrentRoutingRevision:         7,
+		CurrentEffectivePath:           "/new-control",
 		CurrentOperationOwnerQualified: true,
-		CurrentCollisionFree: true,
-		CurrentSourceQualified: true,
-		PublicIdentityHealthy: true,
-		StaticAssetsHealthy: true,
-		APIAuthenticationHealthy: true,
+		CurrentCollisionFree:           true,
+		CurrentSourceQualified:         true,
+		PublicIdentityHealthy:          true,
+		StaticAssetsHealthy:            true,
+		APIAuthenticationHealthy:       true,
 	}
 	if !bootstrap.CanCompletePrefixAfterObservation(op, healthy) {
 		t.Fatal("qualified recovery observation could not complete prefix")
@@ -1673,14 +1693,14 @@ func TestPrefixRecoveryRequiresCurrentAuthorityAndSnapshot(t *testing.T) {
 
 func TestControlBasePathRejectsEncodedAndBackslashBypasses(t *testing.T) {
 	base := bootstrap.PrefixOperation{
-		OperationID: "operation-2000",
+		OperationID:    "operation-2000",
 		InstallationID: "install-a", CurrentInstallationID: "install-a",
 		ExpectedRoutingRevision: 9, CurrentRoutingRevision: 9,
 		PreviousVerifiedEffectivePath: "/old-control",
-		DesiredControlBasePath: "/valid-control",
-		Impact: bootstrap.PrefixControlRouteOnly,
-		Stage: bootstrap.PrefixIntentPersisted,
-		Result: bootstrap.PrefixPending,
+		DesiredControlBasePath:        "/valid-control",
+		Impact:                        bootstrap.PrefixControlRouteOnly,
+		Stage:                         bootstrap.PrefixIntentPersisted,
+		Result:                        bootstrap.PrefixPending,
 	}
 	for _, target := range []string{
 		"", "/", "/admin/", "/admin//x", "/admin/../x", "/admin/./x",
@@ -1716,5 +1736,72 @@ func TestContractSchemaIsClosedV2(t *testing.T) {
 	version, ok := properties["schemaVersion"].(map[string]any)
 	if !ok || version["const"] != float64(2) {
 		t.Fatal("schemaVersion must remain 2")
+	}
+}
+
+func TestSupportedUpgradeSourceFamilyProfileAndReleaseParsing(t *testing.T) {
+	if bootstrap.SupportedUpgradeSourceFamily != "v1.14.x" {
+		t.Fatalf("SupportedUpgradeSourceFamily = %q, want v1.14.x", bootstrap.SupportedUpgradeSourceFamily)
+	}
+	if bootstrap.PlannedDirectRelease != "v1.14.10" {
+		t.Fatalf("PlannedDirectRelease = %q, want v1.14.10 reference fixture tag", bootstrap.PlannedDirectRelease)
+	}
+	for _, valid := range []struct {
+		input string
+		want  string
+		patch int
+	}{
+		{input: "v1.14.0", want: "v1.14.0", patch: 0},
+		{input: "v1.14.4", want: "v1.14.4", patch: 4},
+		{input: "1.14.7", want: "v1.14.7", patch: 7},
+		{input: " v1.14.10\n", want: "v1.14.10", patch: 10},
+		{input: "v1.14.15", want: "v1.14.15", patch: 15},
+	} {
+		parsed, ok := bootstrap.ParseUpgradeSourceRelease(valid.input)
+		if !ok || !parsed.InSupportedUpgradeFamily() || !bootstrap.IsSupportedUpgradeSourceRelease(valid.input) {
+			t.Fatalf("ParseUpgradeSourceRelease(%q) = %+v, %t; want supported v1.14.x release", valid.input, parsed, ok)
+		}
+		if parsed.Canonical != valid.want || parsed.Patch != valid.patch {
+			t.Fatalf("ParseUpgradeSourceRelease(%q) = %+v, want canonical %q patch %d", valid.input, parsed, valid.want, valid.patch)
+		}
+	}
+
+	for _, rejected := range []string{
+		"", "unknown", "latest", "v1.14", "v1.14.x", "v1.13.9", "1.13.10",
+		"v1.15.0", "v2.0.0", "v1.14.10-rc1", "v1.14.10+build1", "vv1.14.10",
+		"v1.14.01", "v1.14.10.1", "v1.14.1000",
+	} {
+		if bootstrap.IsSupportedUpgradeSourceRelease(rejected) {
+			t.Fatalf("IsSupportedUpgradeSourceRelease(%q) = true, want false", rejected)
+		}
+	}
+
+	// Unlabeled compatible v1.14.x family admission classifies as Upgrade when
+	// provenance and LegacySchemaC profile are verified, without fabricating an
+	// exact patch tag.
+	unlabeledAdmission := bootstrap.UpgradeAdmission{
+		Shape:               bootstrap.LegacySchemaC,
+		SourceProvenanceRef: "evidence:source-profile-v114x",
+		EvidenceStatus:      bootstrap.CompatibleFamilyVerified,
+		Readiness:           bootstrap.BridgeReady,
+	}
+	if err := unlabeledAdmission.Validate(); err != nil {
+		t.Fatalf("unlabeled CompatibleFamilyVerified admission rejected: %v", err)
+	}
+	got, err := bootstrap.Classify(baseClassification(&unlabeledAdmission))
+	if err != nil || got != bootstrap.Upgrade {
+		t.Fatalf("Classify(unlabeled CompatibleFamilyVerified) = %q, %v; want %q", got, err, bootstrap.Upgrade)
+	}
+
+	// Wrong-family candidate or non-SchemaC shape is refused.
+	wrongFamily := unlabeledAdmission
+	wrongFamily.PlannedCandidate = bootstrap.PlannedCandidate{Release: "v1.13.9"}
+	if err := wrongFamily.Validate(); err == nil {
+		t.Fatal("wrong-family CompatibleFamilyVerified candidate was accepted")
+	}
+	wrongShape := unlabeledAdmission
+	wrongShape.Shape = bootstrap.LegacySchemaB
+	if err := wrongShape.Validate(); err == nil {
+		t.Fatal("non-SchemaC CompatibleFamilyVerified admission was accepted")
 	}
 }

@@ -767,91 +767,43 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 	}
 }
 
-func TestPreflightBlocksUndeclaredSourceVersion(t *testing.T) {
+func TestPreflightAdmitsCompatibleUnlabeledV114SourceWithoutFabricatedTag(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	report := preflight(t, fixture.root, Options{})
-	requireBlocked(t, report, CodeSourceVersionUndeclared)
-	check, found := checkByName(report, CheckSourceVersion)
-	if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUndeclared {
-		t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUndeclared)
-	}
-	if report.SourceVersion != VersionUnknown {
-		t.Fatalf("source version = %q, want %q", report.SourceVersion, VersionUnknown)
-	}
-}
-
-// TestPreflightPendsAnUndeclaredVersionForAReadOnlyCaller is the wizard's
-// reading of the same source: the read cannot declare the release, the copy-in
-// declares it, so the check reports the pending declaration with the version it
-// expects instead of blocking a source that is otherwise sound.
-func TestPreflightPendsAnUndeclaredVersionForAReadOnlyCaller(t *testing.T) {
-	fixture := newSourceFixture(t, nil)
-	report := preflight(t, fixture.root, Options{AcceptUndeclaredVersion: true})
-	if !report.Ready {
-		t.Fatalf("ready = false, blocked = %v, checks = %+v", report.Blocked, report.Checks)
-	}
-	if len(report.Blocked) != 0 {
-		t.Fatalf("blocked = %v, want none", report.Blocked)
+	if !report.Ready || len(report.Blocked) != 0 {
+		t.Fatalf("ready = %t, blocked = %v, checks = %+v", report.Ready, report.Blocked, report.Checks)
 	}
 	check, found := checkByName(report, CheckSourceVersion)
-	if !found || check.Status != StatusPending || check.Code != CodeSourceVersionDeclaredAtCopyIn {
-		t.Fatalf("version check = %+v, want pending %s", check, CodeSourceVersionDeclaredAtCopyIn)
+	if !found || check.Status != StatusPass || check.Code != "" || check.ExpectedVersion != "" {
+		t.Fatalf("version check = %+v, want pass with empty code and expectedVersion", check)
 	}
-	if check.ExpectedVersion != pinnedSourceVersion() {
-		t.Fatalf("expected version = %q, want %q", check.ExpectedVersion, pinnedSourceVersion())
-	}
-	if !strings.Contains(check.Detail, "--source-version "+pinnedSourceVersion()) {
-		t.Fatalf("version detail %q does not name the declaration the copy-in takes", check.Detail)
-	}
-	// The source version is still unknown: the pending check names what the
-	// copy-in must be told, never a value inferred from the database.
 	if report.SourceVersion != VersionUnknown {
-		t.Fatalf("source version = %q, want %q", report.SourceVersion, VersionUnknown)
+		t.Fatalf("source version = %q, want %q (never fabricated)", report.SourceVersion, VersionUnknown)
 	}
-	// The pending check is the only non-pass observation: nothing else lost its
-	// blocking power.
 	for _, other := range report.Checks {
-		if other.Name == CheckSourceVersion {
-			continue
-		}
 		if other.Status == StatusBlocked || other.Status == StatusPending {
-			t.Fatalf("check %q = %+v, want an answered check", other.Name, other)
+			t.Fatalf("check %q = %+v, want pass", other.Name, other)
 		}
 	}
 }
 
-// TestPreflightKeepsExactEqualityWhenTheVersionIsDeclared: accepting a pending
-// declaration must not soften the comparison for a caller that did declare one.
-func TestPreflightKeepsExactEqualityWhenTheVersionIsDeclared(t *testing.T) {
+func TestPreflightKeepsFamilyGateWhenVersionIsDeclared(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
-	other := "v9.9.9"
-	if other == pinnedSourceVersion() {
-		t.Fatal("the fixture's pin cannot be used as the mismatch")
-	}
-	report := preflight(t, fixture.root, Options{DeclaredVersion: other, AcceptUndeclaredVersion: true})
-	requireBlocked(t, report, CodeSourceVersionUnsupported)
-	if report.Ready {
-		t.Fatal("a declared mismatch was reported ready")
-	}
-}
-
-func TestPreflightBlocksDeclaredVersionThatIsNotPinned(t *testing.T) {
-	fixture := newSourceFixture(t, nil)
-	pinned := pinnedSourceVersion()
-	other := "v9.9.9"
-	if pinned == other {
-		other = "v0.0.1"
-	}
-	report := preflight(t, fixture.root, Options{DeclaredVersion: other})
-	requireBlocked(t, report, CodeSourceVersionUnsupported)
-	check, found := checkByName(report, CheckSourceVersion)
-	if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
-		t.Fatalf("version check = %+v", check)
-	}
-	for _, want := range []string{pinned, other} {
-		if !strings.Contains(check.Detail, want) {
-			t.Fatalf("version detail %q does not carry %q", check.Detail, want)
-		}
+	for _, rejected := range []string{
+		"v9.9.9", "v1.13.9", "v1.15.0", "v2.0.0", "v1.14.10-rc1",
+		"vv1.14.10", "v1.14", "v1.14.01", "latest",
+	} {
+		t.Run(rejected, func(t *testing.T) {
+			report := preflight(t, fixture.root, Options{DeclaredVersion: rejected})
+			requireBlocked(t, report, CodeSourceVersionUnsupported)
+			if report.Ready {
+				t.Fatalf("declared %q was reported ready", rejected)
+			}
+			check, found := checkByName(report, CheckSourceVersion)
+			if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
+				t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
+			}
+		})
 	}
 }
 
@@ -876,29 +828,24 @@ func TestPreflightBlocksDeclaredVersionThatIsNotPinned(t *testing.T) {
 // used to read as if the check contradicted itself.
 func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
 	livePinCases := []struct {
-		name       string
-		revision   string
-		wantDetail string
+		name     string
+		revision string
 	}{
 		{
-			name:       "revision above the pin's own",
-			revision:   "4",
-			wantDetail: "usage_cache_accounting_semantics_revision=4 (after v1.14.10)",
+			name:     "revision above the pin's own",
+			revision: "4",
 		},
 		{
-			name:       "non-integer revision",
-			revision:   "corrupt",
-			wantDetail: `usage_cache_accounting_semantics_revision="corrupt" (invalid)`,
+			name:     "non-integer revision",
+			revision: "corrupt",
 		},
 		{
-			name:       "zero revision",
-			revision:   "0",
-			wantDetail: `usage_cache_accounting_semantics_revision="0" (invalid)`,
+			name:     "zero revision",
+			revision: "0",
 		},
 		{
-			name:       "negative revision",
-			revision:   "-1",
-			wantDetail: `usage_cache_accounting_semantics_revision="-1" (invalid)`,
+			name:     "negative revision",
+			revision: "-1",
 		},
 	}
 	for _, testCase := range livePinCases {
@@ -906,13 +853,18 @@ func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
 			fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
 				setCacheAccountingRevision(t, db, testCase.revision)
 			})
-			wantFullDetail := "source is newer than the pinned release " + pinnedSourceVersion() + "; markers from later releases: " + testCase.wantDetail
 			for _, mode := range []struct {
 				name string
 				opts Options
 			}{
-				{name: "declared", opts: declared()},
-				{name: "read-only undeclared", opts: Options{AcceptUndeclaredVersion: true}},
+				{
+					name: "declared",
+					opts: declared(),
+				},
+				{
+					name: "read-only undeclared",
+					opts: Options{},
+				},
 			} {
 				t.Run(mode.name, func(t *testing.T) {
 					report := preflight(t, fixture.root, mode.opts)
@@ -923,9 +875,6 @@ func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
 					check, found := checkByName(report, CheckSourceVersion)
 					if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
 						t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
-					}
-					if check.Detail != wantFullDetail {
-						t.Fatalf("version detail = %q, want %q", check.Detail, wantFullDetail)
 					}
 				})
 			}
@@ -1069,8 +1018,11 @@ func TestPreflightAcceptsBothLegitimatePinnedShapes(t *testing.T) {
 		})
 	}
 
-	// Declaring the release the contract replaced is refused by the declaration,
-	// not by a marker: the detail names the pin that is expected now.
+	// Declaring v1.14.4 against a v1.14.10-shaped database (carrying v1.14.6
+	// revision 3 and v1.14.7 index) is refused by the contradictory later markers,
+	// whereas a genuine v1.14.4-shaped database (revision 2, no v1.14.7 index) or
+	// an unknown compatible patch (v1.14.12) is admitted with its exact canonical
+	// release tag.
 	fixture := newSourceFixture(t, nil)
 	report := preflight(t, fixture.root, Options{DeclaredVersion: "v1.14.4"})
 	requireBlocked(t, report, CodeSourceVersionUnsupported)
@@ -1078,8 +1030,8 @@ func TestPreflightAcceptsBothLegitimatePinnedShapes(t *testing.T) {
 	if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
 		t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
 	}
-	if want := "expected=v1.14.10 declared=v1.14.4"; check.Detail != want {
-		t.Fatalf("version detail = %q, want %q", check.Detail, want)
+	if !strings.Contains(check.Detail, "source is newer than the pinned release v1.14.4") {
+		t.Fatalf("version detail = %q, want newer-than-v1.14.4 refusal", check.Detail)
 	}
 }
 
@@ -1967,6 +1919,258 @@ func TestVerifyAdminUsesTheSourceCredential(t *testing.T) {
 	}
 }
 
+func TestPreflightReconcileTargetReadyDiskCheck(t *testing.T) {
+	fixture := newLegacyVolume(t)
+	fp, err := fingerprintSource(context.Background(), fixture.root)
+	if err != nil {
+		t.Fatalf("fingerprintSource: %v", err)
+	}
+	srcBytes := fp.Bytes
+	if srcBytes <= 0 {
+		t.Fatalf("sourceBytes = %d, want > 0", srcBytes)
+	}
+	targetDir := canonicalTempDir(t)
+	scratchDir := canonicalTempDir(t)
+
+	targetFree := srcBytes + srcBytes/2 // 1.5x before CopyIn
+	scratchFree := 3 * srcBytes
+	probe := func(dir string) (int64, error) {
+		if within(canonicalPath(targetDir), canonicalPath(dir)) {
+			return targetFree, nil
+		}
+		return scratchFree, nil
+	}
+
+	// Before CopyIn materializes a non-empty usage.sqlite on targetDir,
+	// ReconcileTargetReady must fall back to the full 1.2x check.
+	targetFree = srcBytes / 2
+	uncopied := preflight(t, fixture.root, Options{
+		TargetDir:            targetDir,
+		ScratchDir:           scratchDir,
+		AvailableBytes:       probe,
+		ReconcileTargetReady: true,
+	})
+	if uncopied.Ready || !slices.Contains(uncopied.Blocked, CodeDiskInsufficient) {
+		t.Fatalf("ReconcileTargetReady without target db should require 1.2x and block with %s, got ready=%t blocked=%v",
+			CodeDiskInsufficient, uncopied.Ready, uncopied.Blocked)
+	}
+	emptyDB := TargetDatabasePath(targetDir)
+	if err := os.WriteFile(emptyDB, nil, 0o600); err != nil {
+		t.Fatalf("write empty target db: %v", err)
+	}
+	emptyTargetDB := preflight(t, fixture.root, Options{
+		TargetDir:            targetDir,
+		ScratchDir:           scratchDir,
+		AvailableBytes:       probe,
+		ReconcileTargetReady: true,
+	})
+	if emptyTargetDB.Ready || !slices.Contains(emptyTargetDB.Blocked, CodeDiskInsufficient) {
+		t.Fatalf("ReconcileTargetReady with 0-byte target db should require 1.2x and block with %s, got ready=%t blocked=%v",
+			CodeDiskInsufficient, emptyTargetDB.Ready, emptyTargetDB.Blocked)
+	}
+	if err := os.Remove(emptyDB); err != nil {
+		t.Fatalf("remove empty target db: %v", err)
+	}
+	targetFree = srcBytes + srcBytes/2
+
+	bundleDir := filepath.Join(canonicalTempDir(t), "bundle")
+	initial := preflight(t, fixture.root, Options{
+		TargetDir:      targetDir,
+		ScratchDir:     scratchDir,
+		AvailableBytes: probe,
+	})
+	if !initial.Ready {
+		t.Fatalf("initial 1.5x preflight blocked: %+v", initial)
+	}
+	lock, err := processlock.AcquireExisting(filepath.Join(fixture.root, databaseFileName))
+	if err != nil {
+		t.Fatalf("AcquireExisting: %v", err)
+	}
+	if _, err := CopyIn(context.Background(), Options{
+		LegacyRoot: fixture.root,
+		TargetRoot: targetDir,
+		BundleDir:  bundleDir,
+		ScratchDir: scratchDir,
+		Lock:       lock,
+	}); err != nil {
+		_ = lock.Close()
+		t.Fatalf("CopyIn: %v", err)
+	}
+	_ = lock.Close()
+
+	// CopyIn consumed 1.0x sourceBytes on /data, leaving 0.5x free.
+	targetFree = srcBytes / 2
+
+	// Without ReconcileTargetReady, 0.5x on targetDir is < 1.2x and blocks.
+	unready := preflight(t, fixture.root, Options{
+		TargetDir:      targetDir,
+		ScratchDir:     scratchDir,
+		AvailableBytes: probe,
+	})
+	if unready.Ready || !slices.Contains(unready.Blocked, CodeDiskInsufficient) {
+		t.Fatalf("expected non-reconcile preflight at 0.5x free to block with %s, got ready=%t blocked=%v",
+			CodeDiskInsufficient, unready.Ready, unready.Blocked)
+	}
+
+	// With ReconcileTargetReady, 0.5x >= 0.2x headroom and scratch has 3.0x >= 1.0x.
+	readyForReconcile := preflight(t, fixture.root, Options{
+		TargetDir:            targetDir,
+		ScratchDir:           scratchDir,
+		AvailableBytes:       probe,
+		ReconcileTargetReady: true,
+	})
+	if !readyForReconcile.Ready {
+		t.Fatalf("ReconcileTargetReady preflight at 0.5x free blocked: %+v", readyForReconcile)
+	}
+
+	// Reconcile itself succeeds on that target + scratch budget.
+	srcLock, err := processlock.AcquireExisting(filepath.Join(fixture.root, databaseFileName))
+	if err != nil {
+		t.Fatalf("re-acquire source lock: %v", err)
+	}
+	tgtLock, err := processlock.Acquire(TargetDatabasePath(targetDir))
+	if err != nil {
+		_ = srcLock.Close()
+		t.Fatalf("acquire target lock: %v", err)
+	}
+	if _, err := Reconcile(context.Background(), Options{
+		LegacyRoot: fixture.root,
+		TargetRoot: targetDir,
+		BundleDir:  bundleDir,
+		ScratchDir: scratchDir,
+		Lock:       srcLock,
+		TargetLock: tgtLock,
+	}); err != nil {
+		_ = tgtLock.Close()
+		_ = srcLock.Close()
+		t.Fatalf("Reconcile after CopyIn: %v", err)
+	}
+	_ = tgtLock.Close()
+	_ = srcLock.Close()
+
+	// Dropping scratch below 1.0x sourceBytes still blocks ReconcileTargetReady.
+	scratchFree = srcBytes - 1
+	lowScratch := preflight(t, fixture.root, Options{
+		TargetDir:            targetDir,
+		ScratchDir:           scratchDir,
+		AvailableBytes:       probe,
+		ReconcileTargetReady: true,
+	})
+	if lowScratch.Ready || !slices.Contains(lowScratch.Blocked, CodeDiskInsufficient) {
+		t.Fatalf("expected low scratch to block with %s, got ready=%t blocked=%v",
+			CodeDiskInsufficient, lowScratch.Ready, lowScratch.Blocked)
+	}
+
+	// Dropping targetDir below (sourceBytes+4)/5 also blocks ReconcileTargetReady.
+	scratchFree = 3 * srcBytes
+	targetFree = (srcBytes+4)/5 - 1
+	lowTarget := preflight(t, fixture.root, Options{
+		TargetDir:            targetDir,
+		ScratchDir:           scratchDir,
+		AvailableBytes:       probe,
+		ReconcileTargetReady: true,
+	})
+	if lowTarget.Ready || !slices.Contains(lowTarget.Blocked, CodeDiskInsufficient) {
+		t.Fatalf("expected low target headroom to block with %s, got ready=%t blocked=%v",
+			CodeDiskInsufficient, lowTarget.Ready, lowTarget.Blocked)
+	}
+}
+
+func captureFixtureActiveWAL(t *testing.T) (sourceFixture, []byte, uint32) {
+	t.Helper()
+	fixture := newSourceFixture(t, nil)
+	dbPath := filepath.Join(fixture.root, databaseFileName)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	if _, err := db.Exec(`pragma journal_mode = wal`); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable wal: %v", err)
+	}
+	if _, err := db.Exec(`pragma wal_autocheckpoint = 0`); err != nil {
+		_ = db.Close()
+		t.Fatalf("disable autocheckpoint: %v", err)
+	}
+	if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('wal_live_key', 'wal_live_val', 2)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert wal row: %v", err)
+	}
+	walBytes, err := os.ReadFile(dbPath + "-wal")
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read active wal: %v", err)
+	}
+	_ = db.Close()
+	_ = os.Remove(dbPath + "-shm")
+	if len(walBytes) < 32+24+512 {
+		t.Fatalf("unexpected WAL length %d", len(walBytes))
+	}
+	pageSize := binary.BigEndian.Uint32(walBytes[8:12])
+	return fixture, walBytes, pageSize
+}
+
+func TestPreflightWALFrameValidation(t *testing.T) {
+	t.Run("intact committed WAL without shm succeeds", func(t *testing.T) {
+		fixture, walBytes, _ := captureFixtureActiveWAL(t)
+		dbPath := filepath.Join(fixture.root, databaseFileName)
+		if err := os.WriteFile(dbPath+"-wal", walBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		report := preflight(t, fixture.root, Options{})
+		if !report.Ready {
+			t.Fatalf("expected intact WAL without -shm to succeed, got blocked=%v checks=%+v", report.Blocked, report.Checks)
+		}
+	})
+
+	t.Run("recycled WAL with trailing old-salt frames succeeds", func(t *testing.T) {
+		fixture, walBytes, pageSize := captureFixtureActiveWAL(t)
+		dbPath := filepath.Join(fixture.root, databaseFileName)
+		frameSize := 24 + int(pageSize)
+		oldFrame := make([]byte, frameSize)
+		binary.BigEndian.PutUint32(oldFrame[0:4], 1)
+		binary.BigEndian.PutUint32(oldFrame[8:12], binary.BigEndian.Uint32(walBytes[16:20])-1)
+		binary.BigEndian.PutUint32(oldFrame[12:16], binary.BigEndian.Uint32(walBytes[20:24])^0xdeadbeef)
+		recycled := append(append([]byte(nil), walBytes...), oldFrame...)
+		if err := os.WriteFile(dbPath+"-wal", recycled, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		report := preflight(t, fixture.root, Options{})
+		if !report.Ready {
+			t.Fatalf("expected recycled trailing old-salt frame to succeed, got blocked=%v checks=%+v", report.Blocked, report.Checks)
+		}
+	})
+
+	t.Run("corrupted byte in committed active-salt WAL frame blocks", func(t *testing.T) {
+		fixture, walBytes, _ := captureFixtureActiveWAL(t)
+		dbPath := filepath.Join(fixture.root, databaseFileName)
+		corrupt := append([]byte(nil), walBytes...)
+		corrupt[32+24+32] ^= 0xff
+		if err := os.WriteFile(dbPath+"-wal", corrupt, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		report := preflight(t, fixture.root, Options{})
+		if report.Ready || !slices.Contains(report.Blocked, CodeSourceUnreadable) {
+			t.Fatalf("expected corrupt active WAL frame to block with %s, got ready=%t blocked=%v",
+				CodeSourceUnreadable, report.Ready, report.Blocked)
+		}
+	})
+
+	t.Run("truncated active-salt WAL frame blocks", func(t *testing.T) {
+		fixture, walBytes, _ := captureFixtureActiveWAL(t)
+		dbPath := filepath.Join(fixture.root, databaseFileName)
+		truncated := walBytes[:32+24+128]
+		if err := os.WriteFile(dbPath+"-wal", truncated, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		report := preflight(t, fixture.root, Options{})
+		if report.Ready || !slices.Contains(report.Blocked, CodeSourceUnreadable) {
+			t.Fatalf("expected truncated active WAL frame to block with %s, got ready=%t blocked=%v",
+				CodeSourceUnreadable, report.Ready, report.Blocked)
+		}
+	})
+}
+
 // largeCredentialSource builds a source whose database is large enough for a
 // whole-file integrity scan to dominate, then corrupts the root page of its
 // padding table. The integrity check must fail while the pages the credential
@@ -2530,4 +2734,392 @@ func TestVerifyAdminReportsADeadlineAsATimeout(t *testing.T) {
 	if errors.Is(err, ErrSourceDatabaseMissing) || errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseChanged) {
 		t.Fatalf("a deadline was misreported as %v", err)
 	}
+}
+
+func TestPreflightAdmitsV114FamilyPatchesAndRefusesUnprovenFormatProfiles(t *testing.T) {
+	// Genuine v1.14.4 shape (cache-accounting revision 2, without v1.14.7 index)
+	// passes whether declared as v1.14.4, 1.14.0, or left unlabeled.
+	v1144Fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		setCacheAccountingRevision(t, db, "2")
+		execFixture(t, db, `drop index if exists idx_usage_events_ts_latency_ttft_cover`)
+	})
+	for _, tc := range []struct {
+		declared    string
+		wantVersion string
+	}{
+		{declared: "", wantVersion: VersionUnknown},
+		{declared: "v1.14.0", wantVersion: "v1.14.0"},
+		{declared: "1.14.4", wantVersion: "v1.14.4"},
+		{declared: "v1.14.5", wantVersion: "v1.14.5"},
+	} {
+		report := preflight(t, v1144Fixture.root, Options{DeclaredVersion: tc.declared})
+		if !report.Ready || report.SourceVersion != tc.wantVersion {
+			t.Fatalf("preflight(declared=%q) ready=%t sourceVersion=%q, want true/%q (checks=%+v)",
+				tc.declared, report.Ready, report.SourceVersion, tc.wantVersion, report.Checks)
+		}
+	}
+
+	// An unknown v1.14.x patch (for example v1.14.12) is admitted when the
+	// proven v1.14.x profile holds, and preserves its exact canonical tag.
+	compatibleFixture := newSourceFixture(t, nil)
+	unknownPatchReport := preflight(t, compatibleFixture.root, Options{DeclaredVersion: "v1.14.12"})
+	if !unknownPatchReport.Ready || unknownPatchReport.SourceVersion != "v1.14.12" {
+		t.Fatalf("preflight(v1.14.12) = ready=%t version=%q, want true/v1.14.12",
+			unknownPatchReport.Ready, unknownPatchReport.SourceVersion)
+	}
+
+	// A false v1.14.10 or v1.14.12 label — or omitting the label — never admits
+	// an unproven schema, column, format revision, archive format, or migration.
+	unprovenCases := []struct {
+		name      string
+		configure func(t *testing.T, db *sql.DB)
+		wantToken string
+	}{
+		{
+			name: "unexpected user table",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `create table usage_future_v3_table (id integer primary key)`)
+			},
+			wantToken: "unexpectedTable=usage_future_v3_table",
+		},
+		{
+			name: "unexpected column on usage_events",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `alter table usage_events add column future_v3_column text`)
+			},
+			wantToken: "unexpectedColumn=usage_events.future_v3_column",
+		},
+		{
+			name: "unsupported monitoring model format version",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `update settings set value = '2' where key = 'usage_monitoring_model_format_version'`)
+			},
+			wantToken: `usage_monitoring_model_format_version="2"`,
+		},
+		{
+			name: "unsupported account history identity format version",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `update settings set value = 'identity-9:codex-9:model-1' where key = 'usage_account_history_identity_format_version'`)
+			},
+			wantToken: `usage_account_history_identity_format_version="identity-9:codex-9:model-1"`,
+		},
+		{
+			name: "unsupported dashboard hourly format version",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `update settings set value = '4' where key = 'usage_dashboard_hourly_format_version'`)
+			},
+			wantToken: `usage_dashboard_hourly_format_version="4"`,
+		},
+		{
+			name: "unsupported archive run format",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `update usage_archive_runs set format = 'parquet-v2' where id = 'run-1'`)
+			},
+			wantToken: `usage_archive_runs(schema_version=1 format="parquet-v2")`,
+		},
+		{
+			name: "unknown data migration row",
+			configure: func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, `create table usage_data_migrations (name text primary key, status text not null)`)
+				execFixture(t, db, `insert into usage_data_migrations (name, status) values ('usage_cache_accounting_v3', 'completed')`)
+			},
+			wantToken: `usage_data_migrations="usage_cache_accounting_v3"`,
+		},
+		{
+			name: "cache accounting semantics revision above v1.14 ceiling under unknown patch",
+			configure: func(t *testing.T, db *sql.DB) {
+				setCacheAccountingRevision(t, db, "4")
+			},
+			wantToken: "usage_cache_accounting_semantics_revision=4",
+		},
+	}
+	for _, tc := range unprovenCases {
+		t.Run(tc.name, func(t *testing.T) {
+			badFixture := newSourceFixture(t, tc.configure)
+			for _, declaredVer := range []string{"", "v1.14.10", "v1.14.12"} {
+				rep := preflight(t, badFixture.root, Options{DeclaredVersion: declaredVer})
+				requireBlocked(t, rep, CodeSourceVersionUnsupported)
+				chk, ok := checkByName(rep, CheckSourceVersion)
+				if !ok || chk.Status != StatusBlocked || !strings.Contains(chk.Detail, tc.wantToken) {
+					t.Fatalf("declared=%q check=%+v, want blocked containing %q", declaredVer, chk, tc.wantToken)
+				}
+			}
+		})
+	}
+}
+
+func TestPreflightAdmitsReleasedHistoricalMigrationMarkersWithoutDeclaredPatch(t *testing.T) {
+	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `create table usage_data_migrations (name text primary key, status text not null)`)
+		execFixture(t, db, `insert into usage_data_migrations (name, status) values
+			('usage_cache_accounting_v1', 'completed'),
+			('usage_cache_accounting_v2', 'completed'),
+			('quota_snapshot_lifecycle_v1', 'completed')`)
+	})
+	report := preflight(t, fixture.root, Options{})
+	if !report.Ready || report.SourceVersion != VersionUnknown {
+		t.Fatalf("released historical markers refused or patch fabricated: %+v", report)
+	}
+}
+
+func TestPreflightPlatformDiskProbeAccountsForOpenTemporarySnapshotBytes(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	// Seed an archive payload larger than SQLite's 32 KiB -shm sidecar so
+	// sourceBytes exceeds the open snapshot directory's footprint on disk,
+	// keeping pre-snapshot budgets (sourceBytes - 1, required - 1) strictly
+	// larger than the active snapshot occupancy.
+	if err := os.WriteFile(filepath.Join(fixture.root, archivesDirName, "2026-02-rollover.jsonl.gz"), make([]byte, 256*1024), 0o600); err != nil {
+		t.Fatalf("seed archive payload: %v", err)
+	}
+	sourceBytes := coveredBytes(t, fixture.root)
+	required := sourceBytes + (sourceBytes+4)/5
+	scratchDir := canonicalTempDir(t)
+	targetDir := canonicalTempDir(t)
+
+	snap, err := OpenSnapshot(context.Background(), filepath.Join(fixture.root, databaseFileName), scratchDir)
+	if err != nil {
+		t.Fatalf("OpenSnapshot: %v", err)
+	}
+	if snap.Dir() == "" || snap.Bytes() <= 0 {
+		_ = snap.Close()
+		t.Fatalf("open Snapshot Dir=%q Bytes=%d, want non-empty dir and positive bytes", snap.Dir(), snap.Bytes())
+	}
+	if err := snap.Close(); err != nil {
+		t.Fatalf("snap.Close: %v", err)
+	}
+	if snap.Dir() != "" || snap.Bytes() != 0 {
+		t.Fatalf("closed Snapshot Dir=%q Bytes=%d, want empty dir and 0 bytes", snap.Dir(), snap.Bytes())
+	}
+
+	measureTreeRegularBytes := func(root string) int64 {
+		var total int64
+		_ = filepath.WalkDir(root, func(_ string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || !entry.Type().IsRegular() {
+				return nil
+			}
+			if info, infoErr := entry.Info(); infoErr == nil {
+				total += info.Size()
+			}
+			return nil
+		})
+		return total
+	}
+
+	oldPlatformProbe := platformAvailableBytes
+	oldIdentity := filesystemIdentity
+	t.Cleanup(func() {
+		platformAvailableBytes = oldPlatformProbe
+		filesystemIdentity = oldIdentity
+	})
+
+	t.Run("same-volume statfs credits back active snapshot bytes without inflating below requirement", func(t *testing.T) {
+		// Simulate an OS statfs reading where the volume has `budget` bytes free
+		// before Preflight starts, so while Preflight's snapshot is open in
+		// scratchDir the kernel reports `budget - occupiedInScratch`.
+		var budget int64
+		var observedOccupied int64
+		platformAvailableBytes = func(string) (int64, error) {
+			occupied := measureTreeRegularBytes(scratchDir)
+			observedOccupied = occupied
+			if occupied >= budget {
+				return 0, nil
+			}
+			return budget - occupied, nil
+		}
+
+		budget = required
+		report := preflight(t, fixture.root, Options{
+			DeclaredVersion: pinnedSourceVersion(),
+			TargetDir:       targetDir,
+			ScratchDir:      scratchDir,
+		})
+		if observedOccupied <= 0 {
+			t.Fatalf("expected active snapshot bytes in scratchDir during diskCheck, got %d", observedOccupied)
+		}
+		if !report.Ready {
+			t.Fatalf("same-volume preflight at exact pre-snapshot requirement blocked: %+v", report)
+		}
+
+		budget = required - 1
+		insufficient := preflight(t, fixture.root, Options{
+			DeclaredVersion: pinnedSourceVersion(),
+			TargetDir:       targetDir,
+			ScratchDir:      scratchDir,
+		})
+		requireBlocked(t, insufficient, CodeDiskInsufficient)
+	})
+
+	t.Run("separate-volume target does not receive scratch snapshot credit while scratch probe does", func(t *testing.T) {
+		filesystemIdentity = func(path string) (copyinmarker.FileIdentity, error) {
+			cleaned := canonicalPath(path)
+			if within(targetDir, cleaned) {
+				return copyinmarker.FileIdentity{Device: 101, Inode: 1}, nil
+			}
+			if within(scratchDir, cleaned) {
+				return copyinmarker.FileIdentity{Device: 202, Inode: 2}, nil
+			}
+			return copyinmarker.FileIdentity{Device: 303, Inode: 3}, nil
+		}
+
+		var targetBudget int64
+		var scratchBudget int64
+		platformAvailableBytes = func(dir string) (int64, error) {
+			cleaned := canonicalPath(dir)
+			if within(targetDir, cleaned) {
+				return targetBudget, nil
+			}
+			occupied := measureTreeRegularBytes(scratchDir)
+			if occupied >= scratchBudget {
+				return 0, nil
+			}
+			return scratchBudget - occupied, nil
+		}
+
+		// Non-reconcile preflight: targetDir is on Device 101, snapshot is on
+		// Device 202. Target at required-1 must still block (zero false credit).
+		targetBudget = required - 1
+		scratchBudget = 3 * sourceBytes
+		separateInsufficient := preflight(t, fixture.root, Options{
+			DeclaredVersion: pinnedSourceVersion(),
+			TargetDir:       targetDir,
+			ScratchDir:      scratchDir,
+		})
+		requireBlocked(t, separateInsufficient, CodeDiskInsufficient)
+
+		// ReconcileTargetReady: target has 0.2x headroom on Device 101, and
+		// scratch has exact 1.0x sourceBytes before Preflight's snapshot on
+		// Device 202 (so raw statfs during Preflight is < 1.0x, and crediting the
+		// open snapshot restores exact 1.0x).
+		if err := os.WriteFile(TargetDatabasePath(targetDir), []byte("copied-db"), 0o600); err != nil {
+			t.Fatalf("seed target db: %v", err)
+		}
+		targetBudget = (sourceBytes + 4) / 5
+		scratchBudget = sourceBytes
+		reconcileReady := preflight(t, fixture.root, Options{
+			DeclaredVersion:      pinnedSourceVersion(),
+			TargetDir:            targetDir,
+			ScratchDir:           scratchDir,
+			ReconcileTargetReady: true,
+		})
+		if !reconcileReady.Ready {
+			t.Fatalf("ReconcileTargetReady with exact 1.0x pre-snapshot scratch budget blocked: %+v", reconcileReady)
+		}
+
+		scratchBudget = sourceBytes - 1
+		reconcileScratchShort := preflight(t, fixture.root, Options{
+			DeclaredVersion:      pinnedSourceVersion(),
+			TargetDir:            targetDir,
+			ScratchDir:           scratchDir,
+			ReconcileTargetReady: true,
+		})
+		requireBlocked(t, reconcileScratchShort, CodeDiskInsufficient)
+	})
+}
+
+func TestPreflightRefusesUnreservedSymlinksArchiveSymlinksAndNonRegularEntries(t *testing.T) {
+	t.Run("unreserved symlink in legacy root reports CodeSourceSymlinked", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		outside := filepath.Join(t.TempDir(), "outside.txt")
+		if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+			t.Fatalf("write external file: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(fixture.root, "extra.bak")); err != nil {
+			t.Fatalf("create unreserved symlink: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceSymlinked)
+	})
+
+	t.Run("symlinked usage-archives root reports CodeSourceSymlinked", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		outsideArchives := t.TempDir()
+		if err := os.RemoveAll(filepath.Join(fixture.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+		if err := os.Symlink(outsideArchives, filepath.Join(fixture.root, archivesDirName)); err != nil {
+			t.Fatalf("symlink usage-archives: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceSymlinked)
+	})
+
+	t.Run("symlinked file inside usage-archives reports CodeSourceSymlinked", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		outside := filepath.Join(t.TempDir(), "segment.jsonl")
+		if err := os.WriteFile(outside, []byte("{\"events\":1}\n"), 0o600); err != nil {
+			t.Fatalf("write external archive: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(fixture.root, archivesDirName, "2026-03", "linked.jsonl")); err != nil {
+			t.Fatalf("symlink archive entry: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceSymlinked)
+	})
+
+	t.Run("unreserved FIFO in legacy root fails fast without blocking", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("FIFO special files require a Unix filesystem")
+		}
+		fixture := newSourceFixture(t, nil)
+		makeTestFIFO(t, filepath.Join(fixture.root, "extra.fifo"))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		type result struct {
+			report Report
+			err    error
+		}
+		done := make(chan result, 1)
+		go func() {
+			opts := declared()
+			opts.LegacyRoot = fixture.root
+			r, err := Preflight(ctx, opts)
+			done <- result{report: r, err: err}
+		}()
+		select {
+		case res := <-done:
+			if res.err != nil {
+				t.Fatalf("Preflight(unreserved FIFO) returned error: %v", res.err)
+			}
+			requireBlocked(t, res.report, CodeSourceUnreadable)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Preflight blocked on unreserved FIFO")
+		}
+	})
+}
+
+func TestPreflightAlignsZeroByteDatabaseSidecarClassificationWithCopyIn(t *testing.T) {
+	t.Run("0-byte usage.sqlite with non-empty usage.sqlite-wal reports CodeSourceUnreadable", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		if err := os.Truncate(fixture.dbPath, 0); err != nil {
+			t.Fatalf("truncate usage.sqlite to 0 bytes: %v", err)
+		}
+		if err := os.WriteFile(fixture.dbPath+"-wal", []byte("non-empty-uncheckpointed-wal-bytes"), 0o600); err != nil {
+			t.Fatalf("write non-empty usage.sqlite-wal: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceUnreadable)
+		if report.SourceKind == SourceKindMissingDatabase {
+			t.Fatalf("report.SourceKind = %q, must not classify 0-byte db + non-empty -wal as missing", report.SourceKind)
+		}
+	})
+
+	t.Run("0-byte usage.sqlite with symlinked usage.sqlite-wal reports CodeSourceSymlinked", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		if err := os.Truncate(fixture.dbPath, 0); err != nil {
+			t.Fatalf("truncate usage.sqlite to 0 bytes: %v", err)
+		}
+		outsideWal := filepath.Join(t.TempDir(), "outside-wal")
+		if err := os.WriteFile(outsideWal, []byte("outside-wal"), 0o600); err != nil {
+			t.Fatalf("write external wal target: %v", err)
+		}
+		if err := os.Symlink(outsideWal, fixture.dbPath+"-wal"); err != nil {
+			t.Fatalf("symlink usage.sqlite-wal: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceSymlinked)
+		if report.SourceKind == SourceKindMissingDatabase {
+			t.Fatalf("report.SourceKind = %q, must not hide symlinked -wal behind missing-database", report.SourceKind)
+		}
+	})
 }

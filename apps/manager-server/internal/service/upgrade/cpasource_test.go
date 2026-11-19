@@ -822,11 +822,12 @@ func TestCPASourceRefusesAnUnusableConfiguration(t *testing.T) {
 	if err := os.Symlink(outsideDir, filepath.Join(cpaDirectory, "linked-outside")); err != nil {
 		t.Skipf("this platform does not create symbolic links: %v", err)
 	}
-	aliasDir := filepath.Join(t.TempDir(), "cpa-alias")
-	if err := os.Symlink(cpaDirectory, aliasDir); err != nil {
-		t.Fatalf("create symlinked CPA directory: %v", err)
+	parentAlias := filepath.Join(t.TempDir(), "parent-alias")
+	if err := os.Symlink(filepath.Dir(cpaDirectory), parentAlias); err != nil {
+		t.Fatalf("create symlinked parent directory: %v", err)
 	}
-	fencedSource, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPADirectory: aliasDir, CPAVersion: "8.0.55"})
+	aliasedDir := filepath.Join(parentAlias, filepath.Base(cpaDirectory))
+	fencedSource, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPADirectory: aliasedDir, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatalf("open fenced source: %v", err)
 	}

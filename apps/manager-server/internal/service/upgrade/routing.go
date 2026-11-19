@@ -3,7 +3,6 @@ package upgrade
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -137,6 +136,13 @@ func FencedExternalBaseURLForStore(
 		return canonical
 	}
 	if protector != nil {
+		var tbl int
+		if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'settings'`).Scan(&tbl); err != nil {
+			return ""
+		}
+		if tbl == 0 {
+			return canonical
+		}
 		st := store.New(db, protector)
 		managerCfg, managerOK, err := st.LoadManagerConfig(ctx)
 		if err != nil {
@@ -146,17 +152,37 @@ func FencedExternalBaseURLForStore(
 		if err != nil {
 			return ""
 		}
-		resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setupCfg, setupOK)
+		conn, hasAuthority, err := resolveStrictStoredConnection(managerCfg, managerOK, setupCfg, setupOK)
 		if err != nil {
 			return ""
 		}
-		if resolution.Authority != managerconfig.LegacyConnectionAuthorityNone {
-			storedNorm, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(resolution.Connection.BaseURL))
-			if err != nil {
+		checkStrictURL := func(rawURL string) bool {
+			trimmed := strings.TrimSpace(rawURL)
+			if trimmed == "" {
+				return true
+			}
+			storedCanon, err := canonicalVerifyAddress(trimmed)
+			return err == nil && storedCanon == canonical
+		}
+		if hasAuthority {
+			if !checkStrictURL(conn.BaseURL) || !security.EqualHMAC(strings.TrimSpace(conn.ManagementKey), secret) {
 				return ""
 			}
-			storedCanon, err := identity.CanonicalExternalURL(storedNorm)
-			if err != nil || storedCanon != canonical || !security.EqualHMAC(strings.TrimSpace(resolution.Connection.ManagementKey), secret) {
+			return canonical
+		}
+		if managerOK {
+			if !checkStrictURL(managerCfg.CPAConnection.CPABaseURL) {
+				return ""
+			}
+			if k := strings.TrimSpace(managerCfg.CPAConnection.ManagementKey); k != "" && !security.EqualHMAC(k, secret) {
+				return ""
+			}
+		}
+		if setupOK {
+			if !checkStrictURL(setupCfg.CPAUpstreamURL) {
+				return ""
+			}
+			if k := strings.TrimSpace(setupCfg.ManagementKey); k != "" && !security.EqualHMAC(k, secret) {
 				return ""
 			}
 		}
@@ -166,6 +192,62 @@ func FencedExternalBaseURLForStore(
 		return ""
 	}
 	return canonical
+}
+
+// resolveStrictStoredConnection resolves the stored CPA connection from raw
+// manager_config_v1 and setup rows without applying legacy 1.x URL stripping
+// (/v0, /v0/management) or schemeless http:// insertion.
+func resolveStrictStoredConnection(
+	managerCfg model.ManagerConfig,
+	managerOK bool,
+	setup model.Setup,
+	setupOK bool,
+) (managerconfig.LegacyConnection, bool, error) {
+	var mURL, mKey string
+	if managerOK {
+		mURL = strings.TrimSpace(managerCfg.CPAConnection.CPABaseURL)
+		mKey = strings.TrimSpace(managerCfg.CPAConnection.ManagementKey)
+	}
+	var sURL, sKey string
+	if setupOK {
+		sURL = strings.TrimSpace(setup.CPAUpstreamURL)
+		sKey = strings.TrimSpace(setup.ManagementKey)
+	}
+	if mURL != "" && mKey != "" {
+		return managerconfig.LegacyConnection{BaseURL: mURL, ManagementKey: mKey}, true, nil
+	}
+	strictEqual := func(u1, u2 string) bool {
+		c1, err1 := canonicalVerifyAddress(u1)
+		c2, err2 := canonicalVerifyAddress(u2)
+		if err1 != nil || err2 != nil {
+			return strings.TrimSpace(u1) == strings.TrimSpace(u2)
+		}
+		return c1 == c2
+	}
+	if sURL == "" || sKey == "" {
+		if mURL != "" && sURL != "" && !strictEqual(mURL, sURL) {
+			return managerconfig.LegacyConnection{}, false, errors.New(
+				"manager_config_v1 contains a partial CPA connection whose URL conflicts with the legacy setup",
+			)
+		}
+		if mKey != "" && sKey != "" && !security.EqualHMAC(mKey, sKey) {
+			return managerconfig.LegacyConnection{}, false, errors.New(
+				"manager_config_v1 contains a partial CPA connection whose key conflicts with the legacy setup",
+			)
+		}
+		return managerconfig.LegacyConnection{}, false, nil
+	}
+	if mURL != "" && !strictEqual(mURL, sURL) {
+		return managerconfig.LegacyConnection{}, false, errors.New(
+			"legacy setup CPA connection conflicts with the present manager_config_v1 URL",
+		)
+	}
+	if mKey != "" && !security.EqualHMAC(mKey, sKey) {
+		return managerconfig.LegacyConnection{}, false, errors.New(
+			"legacy setup CPA connection conflicts with the present manager_config_v1 key",
+		)
+	}
+	return managerconfig.LegacyConnection{BaseURL: sURL, ManagementKey: sKey}, true, nil
 }
 
 func storedSettingsConnectionAddressesMatch(ctx context.Context, db *sql.DB, canonical string) bool {
@@ -298,8 +380,10 @@ func ConfigureAccessRouting(ctx context.Context, options AccessRoutingOptions) (
 	if err := routing.ValidateAccessPrefixPair(options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, external); err != nil {
 		return AccessRoutingResult{}, mapAccessPrefixToUpgradeError(err)
 	}
-	sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
-	updated, err := repo.RecordRouting(ctx, options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, sugCtrl, sugInf)
+	if err := ensureSuggestedPrefixes(&current); err != nil {
+		return AccessRoutingResult{}, err
+	}
+	updated, err := repo.RecordRouting(ctx, options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, current.SuggestedControlBasePath, current.SuggestedInferenceBasePath)
 	if err != nil {
 		if errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
 			return AccessRoutingResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
@@ -415,8 +499,10 @@ func repairOrReplayCompletedRouting(
 	if err := routing.ValidateAccessPrefixPair(ctrl, inferenceBasePath, sharedEntry, isExternal); err != nil {
 		return AccessRoutingResult{}, mapAccessPrefixToUpgradeError(err)
 	}
-	sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
-	updated, err := repo.RepairMissingRoutingOnCompletedUpgrade(ctx, current.Revision, ctrl, inferenceBasePath, sharedEntry, sugCtrl, sugInf)
+	if err := ensureSuggestedPrefixes(&current); err != nil {
+		return AccessRoutingResult{}, err
+	}
+	updated, err := repo.RepairMissingRoutingOnCompletedUpgrade(ctx, current.Revision, ctrl, inferenceBasePath, sharedEntry, current.SuggestedControlBasePath, current.SuggestedInferenceBasePath)
 	if err != nil {
 		if errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
 			return AccessRoutingResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
@@ -434,43 +520,31 @@ func mapAccessPrefixToUpgradeError(err error) error {
 	return newUpgradeError(UpgradeErrorCode(bootstrap.CodeInvalidAccessPrefix), "the requested access prefix configuration is not valid", err)
 }
 
-// DeterministicSuggestedPrefixes derives stable, collision-free 16-character
-// prefix suggestions for a read-only status projection when the stored row has
-// not persisted explicit suggestions yet, keeping GET/HEAD strictly pure reads.
-func DeterministicSuggestedPrefixes(op model.UpgradeOperation) (string, string) {
-	ctrl := strings.TrimSpace(op.SuggestedControlBasePath)
-	inf := strings.TrimSpace(op.SuggestedInferenceBasePath)
-	if ctrl != "" && inf != "" && ctrl != inf {
-		return ctrl, inf
+// Suggestions are created only on a writable upgrade path and persisted with
+// the operation, just like Fresh. Reads never derive or apply default routes.
+func ensureSuggestedPrefixes(op *model.UpgradeOperation) error {
+	if op.SuggestedControlBasePath != "" && op.SuggestedInferenceBasePath != "" {
+		return nil
 	}
-	seed := fmt.Sprintf("%s|%s|%d", op.SourceFingerprintAfter, op.BackupManifestSHA256, op.CreatedAtMS)
-	derive := func(tag string, exclude string) string {
-		for nonce := range 64 {
-			sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", seed, tag, nonce)))
-			const first = "abcdefghijklmnopqrstuvwxyz"
-			const rest = "abcdefghijklmnopqrstuvwxyz0123456789"
-			var b strings.Builder
-			b.Grow(17)
-			b.WriteByte('/')
-			b.WriteByte(first[int(sum[0])%len(first)])
-			for i := 1; i < 16; i++ {
-				b.WriteByte(rest[int(sum[i])%len(rest)])
-			}
-			cand := b.String()
-			if cand != exclude && bootstrap.ValidControlBasePath(cand) && !routing.ReservedNamespaceCollision(cand) {
-				return cand
+	control, inference, err := bootstrap.GenerateSuggestedPrefixPair(func(candidate string) bool {
+		if routing.ReservedNamespaceCollision(candidate) {
+			return true
+		}
+		for _, existing := range []string{op.ControlBasePath, op.SuggestedControlBasePath, op.SuggestedInferenceBasePath} {
+			if existing != "" && bootstrap.SameOrNestedBasePath(existing, candidate) {
+				return true
 			}
 		}
-		if tag == "ctrl" {
-			return "/cpampadminroute1"
-		}
-		return "/cpampinferroute1"
+		return false
+	})
+	if err != nil {
+		return fmt.Errorf("generate upgrade access prefix suggestions: %w", err)
 	}
-	if ctrl == "" {
-		ctrl = derive("ctrl", inf)
+	if op.SuggestedControlBasePath == "" {
+		op.SuggestedControlBasePath = control
 	}
-	if inf == "" || inf == ctrl {
-		inf = derive("inf", ctrl)
+	if op.SuggestedInferenceBasePath == "" {
+		op.SuggestedInferenceBasePath = inference
 	}
-	return ctrl, inf
+	return nil
 }

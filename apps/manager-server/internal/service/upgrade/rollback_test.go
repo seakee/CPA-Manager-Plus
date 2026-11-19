@@ -35,6 +35,7 @@ type rollbackFixture struct {
 	volume     legacyVolume
 	targetRoot string
 	bundleDir  string
+	port       int
 	recorded   model.UpgradeOperation
 }
 
@@ -56,11 +57,17 @@ func newRollbackFixture(t *testing.T) rollbackFixture {
 	if recorded.SourceRoot == "" || recorded.BackupManifestSHA256 == "" {
 		t.Fatalf("the copy-in recorded no source root or backup: %+v", recorded)
 	}
-	return rollbackFixture{volume: volume, targetRoot: targetRoot, bundleDir: result.BackupDirectory, recorded: recorded}
+	return rollbackFixture{
+		volume:     volume,
+		targetRoot: targetRoot,
+		bundleDir:  result.BackupDirectory,
+		port:       freePort(t),
+		recorded:   recorded,
+	}
 }
 
 func (f rollbackFixture) options() RollbackOptions {
-	return RollbackOptions{LegacyRoot: f.volume.root, TargetRoot: f.targetRoot}
+	return RollbackOptions{LegacyRoot: f.volume.root, TargetRoot: f.targetRoot, Port: f.port}
 }
 
 func (f rollbackFixture) recordedRow(t *testing.T) model.UpgradeOperation {
@@ -354,8 +361,8 @@ func TestPrepareRollbackPinsTheExactLegacyImage(t *testing.T) {
 	// The plan proves health with the unauthenticated endpoint and its identity,
 	// never with the credentialed /status.
 	checks := strings.Join(plan.HealthChecks, "\n")
-	if !strings.Contains(checks, LegacyHealthURL()) || !strings.Contains(checks, LegacyServiceID) {
-		t.Fatalf("health checks = %v, want %s and the %s identity", plan.HealthChecks, LegacyHealthURL(), LegacyServiceID)
+	if !strings.Contains(checks, RollbackHealthURL(plan.Port)) || !strings.Contains(checks, LegacyServiceID) {
+		t.Fatalf("health checks = %v, want %s and the %s identity", plan.HealthChecks, RollbackHealthURL(plan.Port), LegacyServiceID)
 	}
 	if strings.Contains(checks, "/status") || strings.Contains(plan.ComposeFile, "/status") {
 		t.Fatalf("plan still proves health with /status: %v", plan.HealthChecks)
@@ -855,8 +862,8 @@ func TestPrepareRollbackPublishesItsOwnPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare the rollback plan: %v", err)
 	}
-	if plan.Port != LegacyRollbackPort || plan.Port == ManagerDefaultPort {
-		t.Fatalf("plan port = %d, want %d beside the Manager's %d", plan.Port, LegacyRollbackPort, ManagerDefaultPort)
+	if plan.Port != fixture.port || plan.Port == ManagerDefaultPort {
+		t.Fatalf("plan port = %d, want %d beside the Manager's %d", plan.Port, fixture.port, ManagerDefaultPort)
 	}
 	if plan.ManagerPort != ManagerDefaultPort {
 		t.Fatalf("plan manager port = %d, want the Manager default %d", plan.ManagerPort, ManagerDefaultPort)
@@ -976,7 +983,7 @@ func TestCheckLegacyHealthRequiresTheDocumentedIdentity(t *testing.T) {
 func TestRollbackReadsTheVolumeWithoutWritingIt(t *testing.T) {
 	fixture := newRollbackFixture(t)
 	sourceBefore := fingerprintTree(t, fixture.volume.root)
-	if err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded); err != nil {
+	if err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, "", fixture.recorded); err != nil {
 		t.Fatalf("verify the install: %v", err)
 	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
@@ -999,7 +1006,7 @@ func TestVerifyRollbackInstallRefusesAScratchDirectoryInsideTheV2Root(t *testing
 		t.Fatalf("create the scratch directory: %v", err)
 	}
 	setOSTempDir(t, scratch)
-	err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded)
+	err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, "", fixture.recorded)
 	if !errors.Is(err, ErrSnapshotFailed) {
 		t.Fatalf("scratch inside the v2 data root = %v, want %v", err, ErrSnapshotFailed)
 	}
@@ -1223,15 +1230,21 @@ func TestReadRecordReportsATerminalRowWithoutEvidence(t *testing.T) {
 // free at the moment it is asked.
 func freePort(t *testing.T) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve a port: %v", err)
+	for range 16 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a port: %v", err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release the port: %v", err)
+		}
+		if port != ManagerDefaultPort && port != LegacyRollbackPort {
+			return port
+		}
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release the port: %v", err)
-	}
-	return port
+	t.Fatal("failed to allocate an isolated ephemeral rollback port")
+	return 0
 }
 
 // emptyV1AndWrite puts the fixture volume in the state a restarted 1.x manager
@@ -1397,7 +1410,7 @@ func TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef(t *test
 			t.Fatalf("finish the 1.x raw delete: %v", err)
 		}
 	})
-	if err := verifyRollbackInstall(ctx, volume.root, targetRoot, result.BackupDirectory, recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, volume.root, targetRoot, result.BackupDirectory, "", recorded); err != nil {
 		t.Fatalf("the same install was refused: %v", err)
 	}
 }
@@ -1436,7 +1449,7 @@ func TestVerifyRollbackInstallReadsTheLiveWAL(t *testing.T) {
 	// The v1 is serving while the verdict is proven: no source lock is taken and
 	// no in-place open is made.
 	sourceBefore := fingerprintTree(t, fixture.volume.root)
-	if err := verifyRollbackInstall(ctx, fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, fixture.volume.root, fixture.targetRoot, fixture.bundleDir, "", fixture.recorded); err != nil {
 		_ = writer.Close()
 		t.Fatalf("the same install was refused: %v", err)
 	}
@@ -1945,4 +1958,192 @@ func TestPrepareRollbackMarksADerivedImageAsDerived(t *testing.T) {
 	if !strings.Contains(plan.IdentityStatement, "operator-verified") {
 		t.Fatalf("plan lost its identity statement: %s", plan.IdentityStatement)
 	}
+}
+
+func TestPrepareRollbackAllowsInFamilyOverrideWhenSourceVersionWasUnlabeled(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	fixture.writeRow(t, func(record *model.UpgradeOperation) {
+		record.SourceVersion = VersionUnknown
+	})
+
+	// Explicit v1.14.x image override succeeds without AllowImageFamilyMismatch.
+	opts := fixture.options()
+	opts.TagOverride = "v1.14.7"
+	plan, err := PrepareRollback(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("PrepareRollback(unlabeled + v1.14.7 override) failed: %v", err)
+	}
+	if plan.ImageSource != RollbackImageSourceOperator || !strings.HasSuffix(plan.Image, ":v1.14.7") {
+		t.Fatalf("plan image = %q (%q), want operator :v1.14.7", plan.Image, plan.ImageSource)
+	}
+
+	// Explicit outside-family override still requires AllowImageFamilyMismatch.
+	opts.TagOverride = "v1.13.9"
+	_, err = PrepareRollback(context.Background(), opts)
+	if !errors.Is(err, ErrRollbackImageFamily) {
+		t.Fatalf("PrepareRollback(unlabeled + v1.13.9) = %v, want %v", err, ErrRollbackImageFamily)
+	}
+}
+
+func TestRecordRollbackCountsUncheckpointedBackupWALRetainedRows(t *testing.T) {
+	volume := newLegacyVolume(t)
+	writeUncheckpointedWALFixtures(t, volume.databasePath(),
+		`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+			values ('wal-retained-event-1', 4000, '4000', 'gpt-test', 'gpt-test', 4000)`,
+	)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.DeclaredVersion = bootstrap.PlannedDirectRelease
+	options.Lock = volume.lock(t)
+	result, err := CopyIn(context.Background(), options)
+	if err != nil {
+		t.Fatalf("CopyIn(WAL fixture): %v", err)
+	}
+	recorded, found, err := ReadRecord(context.Background(), filepath.Join(targetRoot, databaseFileName))
+	if err != nil || !found {
+		t.Fatalf("ReadRecord: found=%t err=%v", found, err)
+	}
+	fixture := rollbackFixture{
+		volume:     volume,
+		targetRoot: targetRoot,
+		bundleDir:  result.BackupDirectory,
+		port:       freePort(t),
+		recorded:   recorded,
+	}
+
+	// Remove only the live -wal sidecar so the live main DB holds 2 usage_events
+	// while the recorded backup (database + database-wal) retains 3 rows.
+	savedWAL, err := os.ReadFile(volume.databasePath() + "-wal")
+	if err != nil || len(savedWAL) == 0 {
+		t.Fatalf("expected non-empty live WAL: %v", err)
+	}
+	if err := os.Remove(volume.databasePath() + "-wal"); err != nil {
+		t.Fatalf("remove live WAL: %v", err)
+	}
+	obs := fixture.observation(t)
+	_, err = RecordRollback(context.Background(), obs)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorRollbackIdentityForeign {
+		t.Fatalf("RecordRollback missing backup WAL-only rows = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorRollbackIdentityForeign)
+	}
+
+	// Restore the live -wal sidecar so live retains all 3 backup rows -> succeeds.
+	if err := os.WriteFile(volume.databasePath()+"-wal", savedWAL, 0o600); err != nil {
+		t.Fatalf("restore live WAL: %v", err)
+	}
+	recordedAfter, err := RecordRollback(context.Background(), obs)
+	if err != nil {
+		t.Fatalf("RecordRollback with retained WAL rows failed: %v", err)
+	}
+	if recordedAfter.Stage != model.UpgradeStageRolledBack {
+		t.Fatalf("stage = %q, want %s", recordedAfter.Stage, model.UpgradeStageRolledBack)
+	}
+}
+
+func TestPrepareAndRecordRollbackScratchDirOverridesTMPDIRInsideLegacy(t *testing.T) {
+	t.Run("PrepareRollback refuses TMPDIR inside --legacy and succeeds with explicit ScratchDir", func(t *testing.T) {
+		fixture := newRollbackFixture(t)
+		sourceBefore := fingerprintTree(t, fixture.volume.root)
+		t.Setenv("TMPDIR", fixture.volume.root)
+
+		_, err := PrepareRollback(context.Background(), fixture.options())
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("PrepareRollback with TMPDIR in legacy = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+		assertTreeUnchanged(t, "1.x source after refused PrepareRollback", sourceBefore, fingerprintTree(t, fixture.volume.root))
+
+		opts := fixture.options()
+		opts.ScratchDir = canonicalTempDir(t)
+		plan, err := PrepareRollback(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("PrepareRollback with explicit ScratchDir overriding TMPDIR failed: %v", err)
+		}
+		if plan.SourceFingerprint == "" {
+			t.Fatal("PrepareRollback returned empty source fingerprint")
+		}
+		assertTreeUnchanged(t, "1.x source after PrepareRollback with ScratchDir", sourceBefore, fingerprintTree(t, fixture.volume.root))
+	})
+
+	t.Run("RecordRollback refuses TMPDIR inside --legacy and succeeds with explicit ScratchDir", func(t *testing.T) {
+		fixture := newRollbackFixture(t)
+		sourceBefore := fingerprintTree(t, fixture.volume.root)
+		t.Setenv("TMPDIR", fixture.volume.root)
+
+		obs := fixture.observation(t)
+		_, err := RecordRollback(context.Background(), obs)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("RecordRollback with TMPDIR in legacy = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "1.x source after refused RecordRollback", sourceBefore, fingerprintTree(t, fixture.volume.root))
+
+		obs.ScratchDir = canonicalTempDir(t)
+		recorded, err := RecordRollback(context.Background(), obs)
+		if err != nil {
+			t.Fatalf("RecordRollback with explicit ScratchDir overriding TMPDIR failed: %v", err)
+		}
+		if recorded.Stage != model.UpgradeStageRolledBack {
+			t.Fatalf("stage = %q, want %s", recorded.Stage, model.UpgradeStageRolledBack)
+		}
+		assertTreeUnchanged(t, "1.x source after RecordRollback with ScratchDir", sourceBefore, fingerprintTree(t, fixture.volume.root))
+	})
+}
+
+func TestPrepareAndRecordRollbackRefuseScratchInsideExternalBackupDirectory(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	extBackup := filepath.Join(canonicalTempDir(t), "external-backup")
+	copyOpts := copyInOptions(volume, targetRoot)
+	copyOpts.DeclaredVersion = bootstrap.PlannedDirectRelease
+	copyOpts.BundleDir = extBackup
+	copyOpts.Lock = volume.lock(t)
+	if _, err := CopyIn(context.Background(), copyOpts); err != nil {
+		t.Fatalf("CopyIn with external backup: %v", err)
+	}
+
+	backupBefore := fingerprintTree(t, extBackup)
+
+	t.Run("PrepareRollback refuses explicit ScratchDir and TMPDIR inside external BackupDir", func(t *testing.T) {
+		opts := RollbackOptions{
+			LegacyRoot: volume.root,
+			TargetRoot: targetRoot,
+			BackupDir:  extBackup,
+			ScratchDir: filepath.Join(extBackup, "scratch"),
+			Port:       LegacyRollbackPort,
+		}
+		_, err := PrepareRollback(context.Background(), opts)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("PrepareRollback(ScratchDir in BackupDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup after PrepareRollback explicit ScratchDir", backupBefore, fingerprintTree(t, extBackup))
+
+		setOSTempDir(t, extBackup)
+		opts.ScratchDir = ""
+		_, err = PrepareRollback(context.Background(), opts)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("PrepareRollback(TMPDIR=BackupDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup after PrepareRollback TMPDIR", backupBefore, fingerprintTree(t, extBackup))
+	})
+
+	t.Run("RecordRollback refuses explicit ScratchDir and TMPDIR inside external BackupDir", func(t *testing.T) {
+		obs := RollbackObservation{
+			LegacyRoot: volume.root,
+			TargetRoot: targetRoot,
+			BackupDir:  extBackup,
+			ScratchDir: filepath.Join(extBackup, "scratch"),
+		}
+		_, err := RecordRollback(context.Background(), obs)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("RecordRollback(ScratchDir in BackupDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup after RecordRollback explicit ScratchDir", backupBefore, fingerprintTree(t, extBackup))
+
+		setOSTempDir(t, extBackup)
+		obs.ScratchDir = ""
+		_, err = RecordRollback(context.Background(), obs)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("RecordRollback(TMPDIR=BackupDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup after RecordRollback TMPDIR", backupBefore, fingerprintTree(t, extBackup))
+	})
 }

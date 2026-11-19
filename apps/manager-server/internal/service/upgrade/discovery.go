@@ -106,6 +106,9 @@ func InspectReadOnlyLegacySource(
 	extraExcludedRoot string,
 	consume func(LegacyDiscoveryObservation),
 ) (LegacyDiscoveryObservation, bool) {
+	if consume == nil {
+		consume = func(LegacyDiscoveryObservation) {}
+	}
 	if ctx.Err() != nil {
 		consume(LegacyDiscoveryNone)
 		return LegacyDiscoveryNone, false
@@ -123,11 +126,18 @@ func InspectReadOnlyLegacySource(
 		consume(LegacyDiscoveryNone)
 		return LegacyDiscoveryNone, false
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		consume(LegacyDiscoveryNone)
 		return LegacyDiscoveryNone, false
 	}
-
+	if err := AuditSourceSidecars(dbPath); err != nil {
+		consume(LegacyDiscoveryNone)
+		return LegacyDiscoveryNone, false
+	}
+	if info.Size() <= 0 && isDatabaseFileMissingOrEmpty(dbPath) {
+		consume(LegacyDiscoveryNone)
+		return LegacyDiscoveryNone, false
+	}
 	lock, lockErr := processlock.AcquireExistingShared(dbPath)
 	if lockErr != nil {
 		if errors.Is(lockErr, os.ErrPermission) {
@@ -217,7 +227,10 @@ func SetAfterUnfenceableSnapshotOpenForTest(hook func(databasePath string)) func
 // root-owned yields the host ownership recovery condition.
 func classifyUnfenceableSource(ctx context.Context, source PreservedSource, inspected os.FileInfo, extraRoots ...ScratchRoot) LegacyDiscoveryObservation {
 	databasePath := strings.TrimSpace(source.Database)
-	if databasePath == "" || ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
+	if databasePath == "" || ctx.Err() != nil || inspected == nil {
+		return LegacyDiscoveryNone
+	}
+	if inspected.Size() > 0 && !readableSQLiteHeader(databasePath, inspected) {
 		return LegacyDiscoveryNone
 	}
 	// The database is not the only file this verdict speaks for. A sidecar beside
@@ -234,9 +247,16 @@ func classifyUnfenceableSource(ctx context.Context, source PreservedSource, insp
 	if err != nil || before.uncacheable {
 		return LegacyDiscoveryNone
 	}
+	if inspected.Size() == 0 && (!before.wal.present || before.wal.size <= 0) {
+		return LegacyDiscoveryNone
+	}
 	var verdict LegacyDiscoveryObservation
 	if before.wal.present && before.wal.size > 0 {
-		if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
+		if inspected.Size() == 0 {
+			if err := validateZeroByteDatabaseWAL(databasePath); err != nil {
+				return LegacyDiscoveryNone
+			}
+		} else if err := managersqlite.ValidateWALHeader(databasePath); err != nil {
 			return LegacyDiscoveryNone
 		}
 		if err := ValidatePreservedScratchDir("", source, extraRoots...); err != nil {
@@ -294,7 +314,7 @@ func ProvenUnfenceableLegacySource(ctx context.Context, source PreservedSource, 
 		return false
 	}
 	info, err := processlock.InspectRegularSingleLink(databasePath)
-	if err != nil || info.Size() <= 0 {
+	if err != nil || (info.Size() <= 0 && isDatabaseFileMissingOrEmpty(databasePath)) {
 		return false
 	}
 	return classifyUnfenceableSource(ctx, source, info, extraRoots...) == LegacyDiscoveryOwnershipUnavailable

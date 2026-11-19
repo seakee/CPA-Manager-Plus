@@ -1261,6 +1261,7 @@ func Migrate(db *sql.DB) error {
 			source_fingerprint_after text,
 			backup_manifest_sha256 text,
 			reconciliation text not null default '{}',
+			pending_reconcile_days text not null default '[]',
 			verification text not null default '{}',
 			manual_items text not null default '[]',
 			error_code text,
@@ -1340,6 +1341,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUpgradeOperationRoutingColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationPendingReconcileColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUpgradeExternalConnectColumns(db); err != nil {
@@ -3266,6 +3270,24 @@ func ensureUpgradeOperationRoutingColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureUpgradeOperationPendingReconcileColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	found, err := tableHasColumn(tx, "upgrade_operations", "pending_reconcile_days")
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := tx.Exec(`alter table upgrade_operations add column pending_reconcile_days text not null default '[]'`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ensureUpgradeExternalConnectColumns adds the encrypted management secret the

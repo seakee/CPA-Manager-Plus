@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,26 +21,26 @@ const externalTestKey = "external-management-key"
 
 // externalTarget is one invocation's inputs plus the seams a test replaces.
 type externalTarget struct {
-	copied    copiedVolume
-	options   ExternalConnectOptions
-	version   cpa.ExternalVersionReport
-	probErr   error
+	copied       copiedVolume
+	options      ExternalConnectOptions
+	version      cpa.ExternalVersionReport
+	probErr      error
 	keys         []string
 	configSHA256 string
 	keyErr       error
-	configErr error
-	modelErr  error
-	probes    int
+	configErr    error
+	modelErr     error
+	probes       int
 }
 
 // newExternalTarget builds a recorded copy-in and an External connect pointing
 // at a synthetic v8 CPA. Every probe is a seam, so no test reaches the network.
 func newExternalTarget(t *testing.T) *externalTarget {
 	t.Helper()
-	copied := newCopiedVolumeUnlocked(t)
+	copied := newReconciledVolumeUnlocked(t)
 	target := &externalTarget{
-		copied:  copied,
-		version: cpa.ClassifyExternalVersion("v8.0.13"),
+		copied:       copied,
+		version:      cpa.ClassifyExternalVersion("v8.0.13"),
 		keys:         []string{"client-key-1"},
 		configSHA256: strings.Repeat("a", 64),
 	}
@@ -165,8 +166,8 @@ func TestExternalConnectV7Stops(t *testing.T) {
 		}
 	}
 	recorded := operationRow(t, target.databasePath())
-	if recorded.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("stage advanced to %q", recorded.Stage)
+	if recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage moved from reconcile to %q", recorded.Stage)
 	}
 	if recorded.HasDomain(model.UpgradeDomainCPAConfig) || recorded.HasDomain(model.UpgradeDomainIdentity) {
 		t.Fatalf("a v7 stop marked domains: %v", recorded.DomainsDone)
@@ -200,8 +201,8 @@ func TestExternalConnectRejectedKeyIsNotAVersionProblem(t *testing.T) {
 				t.Fatalf("a rejected key was reported as a version problem: %v", err)
 			}
 			recorded := operationRow(t, target.databasePath())
-			if recorded.Stage != model.UpgradeStageCopyIn {
-				t.Fatalf("stage advanced to %q", recorded.Stage)
+			if recorded.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("stage moved from reconcile to %q", recorded.Stage)
 			}
 			if recorded.ErrorCode != string(UpgradeErrorExternalManagementRejected) {
 				t.Fatalf("recorded error code = %q", recorded.ErrorCode)
@@ -320,8 +321,8 @@ func TestExternalConnectModelSurfaceGap(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	recorded := operationRow(t, target.databasePath())
-	if recorded.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("stage advanced to %q", recorded.Stage)
+	if recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage moved from reconcile to %q", recorded.Stage)
 	}
 	if _, found, err := readExternalConnectEvidence(target.copied.target); err != nil || found {
 		t.Fatalf("a model-surface gap recorded evidence: found %t, err %v", found, err)
@@ -502,6 +503,87 @@ func TestExternalConnectRefusesARotatedKeyWithoutReprove(t *testing.T) {
 	if after := operationRow(t, target.databasePath()); after.Stage != before.Stage {
 		t.Fatalf("the refusal moved the stage: %q -> %q", before.Stage, after.Stage)
 	}
+}
+
+func TestExternalConnectRequiresDurableReconciliationBeforeMutation(t *testing.T) {
+	t.Run("copy_in without reconciliation is refused without probing or mutating", func(t *testing.T) {
+		copied := newCopiedVolumeUnlocked(t)
+		probes := 0
+		before := operationRow(t, copied.databasePath())
+		_, err := ExternalConnect(context.Background(), ExternalConnectOptions{
+			TargetRoot:    copied.target,
+			BaseURL:       "https://cpa.example",
+			ManagementKey: externalTestKey,
+			observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				probes++
+				return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			},
+		})
+		if !errors.Is(err, ErrExternalNotApplicable) {
+			t.Fatalf("copy_in ExternalConnect = %v, want ErrExternalNotApplicable", err)
+		}
+		if probes != 0 {
+			t.Fatalf("ExternalConnect probed CPA %d times before reconciliation", probes)
+		}
+		after := operationRow(t, copied.databasePath())
+		if after.Revision != before.Revision || after.Stage != model.UpgradeStageCopyIn || after.ErrorCode != "" {
+			t.Fatalf("copy_in refusal mutated operation: %+v -> %+v", before, after)
+		}
+		if _, found, evidenceErr := readExternalConnectEvidence(copied.target); evidenceErr != nil || found {
+			t.Fatalf("copy_in refusal wrote evidence: found=%t err=%v", found, evidenceErr)
+		}
+	})
+
+	t.Run("reconcile stage without durable reconciliation evidence is refused", func(t *testing.T) {
+		target := newExternalTarget(t)
+		execTarget(t, target.databasePath(), `update upgrade_operations set reconciliation = '{}' where id = 1`)
+		before := operationRow(t, target.databasePath())
+		if _, err := target.connect(t); !errors.Is(err, ErrExternalNotApplicable) {
+			t.Fatalf("missing reconciliation evidence = %v, want ErrExternalNotApplicable", err)
+		}
+		if target.probes != 0 {
+			t.Fatalf("probed CPA %d times without durable reconciliation", target.probes)
+		}
+		if after := operationRow(t, target.databasePath()); after.Revision != before.Revision {
+			t.Fatalf("operation mutated without durable reconciliation: %+v -> %+v", before, after)
+		}
+	})
+
+	t.Run("persisted pending reconciliation dates block ExternalConnect with mismatch error", func(t *testing.T) {
+		target := newExternalTarget(t)
+		if err := RecordPendingReconcileDays(context.Background(), target.databasePath(), []string{"2026-03-01"}); err != nil {
+			t.Fatalf("RecordPendingReconcileDays: %v", err)
+		}
+		before := operationRow(t, target.databasePath())
+		if _, err := target.connect(t); !errors.Is(err, ErrReconcileMismatch) {
+			t.Fatalf("ExternalConnect with pending dates = %v, want ErrReconcileMismatch", err)
+		}
+		if target.probes != 0 {
+			t.Fatalf("probed CPA %d times while reconciliation dates pending", target.probes)
+		}
+		if after := operationRow(t, target.databasePath()); after.Revision != before.Revision {
+			t.Fatalf("operation mutated while reconciliation dates pending: %+v -> %+v", before, after)
+		}
+	})
+
+	t.Run("cpa_import stage and Managed destination attempt are mutually exclusive with ExternalConnect", func(t *testing.T) {
+		target := newExternalTarget(t)
+		execTarget(t, target.databasePath(),
+			fmt.Sprintf(`insert into settings (key, value, updated_at_ms) values (%q, '{"operationId":"op-1"}', 1)`, cpaImportDestinationKeySetting))
+		if _, err := target.connect(t); !errors.Is(err, ErrExternalNotApplicable) {
+			t.Fatalf("ExternalConnect with Managed destination attempt = %v, want ErrExternalNotApplicable", err)
+		}
+		if target.probes != 0 {
+			t.Fatalf("probed CPA %d times with Managed destination attempt present", target.probes)
+		}
+
+		targetStage := newExternalTarget(t)
+		execTarget(t, targetStage.databasePath(),
+			`update upgrade_operations set stage = 'cpa_import', last_forward_stage = 'cpa_import' where id = 1`)
+		if _, err := targetStage.connect(t); !errors.Is(err, ErrExternalNotApplicable) {
+			t.Fatalf("ExternalConnect at cpa_import = %v, want ErrExternalNotApplicable", err)
+		}
+	})
 }
 
 func copyinmarkerDirectory(targetRoot string) string {

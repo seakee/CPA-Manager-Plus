@@ -33,8 +33,8 @@ import (
 // path cannot observe it locally.
 func TestExternalConnectNeverRewindsAConcurrentAdvance(t *testing.T) {
 	target := newExternalTarget(t)
-	if got := operationRow(t, target.databasePath()); got.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("the fixture did not start at copy_in: %q", got.Stage)
+	if got := operationRow(t, target.databasePath()); got.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("the fixture did not start at reconcile: %q", got.Stage)
 	}
 	target.options.proveModelSurface = func(context.Context, string, string) error {
 		db, err := managersqlite.Open(target.databasePath())
@@ -87,8 +87,8 @@ func TestExternalConnectRefusesATranslatedV7Document(t *testing.T) {
 		t.Fatalf("the refusal carries a credential: %v", err)
 	}
 	recorded := operationRow(t, target.databasePath())
-	if recorded.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("stage advanced to %q", recorded.Stage)
+	if recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage moved from reconcile to %q", recorded.Stage)
 	}
 	if recorded.ErrorCode != string(UpgradeErrorExternalVersionUnsupported) {
 		t.Fatalf("recorded error code = %q", recorded.ErrorCode)
@@ -122,8 +122,8 @@ func TestExternalConnectRefusesATargetOwnedByAnotherWriter(t *testing.T) {
 		t.Fatalf("the step probed the CPA %d time(s) while another writer owned the store", target.probes)
 	}
 	recorded := operationRow(t, target.databasePath())
-	if recorded.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("an owned store advanced to %q", recorded.Stage)
+	if recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("an owned store moved from reconcile to %q", recorded.Stage)
 	}
 	if recorded.ErrorCode != "" {
 		t.Fatalf("an owned store recorded the refusal durably: %q", recorded.ErrorCode)
@@ -482,8 +482,8 @@ func TestExternalConnectReadsTheConfigurationStrictly(t *testing.T) {
 			if recorded.ErrorCode != string(wantCode) {
 				t.Fatalf("recorded error code = %q, want %q", recorded.ErrorCode, wantCode)
 			}
-			if recorded.Stage != model.UpgradeStageCopyIn {
-				t.Fatalf("a refusal advanced the stage to %q", recorded.Stage)
+			if recorded.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("a refusal moved the stage from reconcile to %q", recorded.Stage)
 			}
 			if recorded.HasDomain(model.UpgradeDomainCPAConfig) || recorded.HasDomain(model.UpgradeDomainIdentity) {
 				t.Fatalf("a refusal marked domains: %v", recorded.DomainsDone)
@@ -646,7 +646,7 @@ func runExternalConnectProxyChild(t *testing.T) {
 	}
 	before := proxied.Load()
 
-	copied := newCopiedVolumeUnlocked(t)
+	copied := newReconciledVolumeUnlocked(t)
 	if _, err := ExternalConnect(context.Background(), ExternalConnectOptions{
 		TargetRoot:    copied.target,
 		BaseURL:       address,

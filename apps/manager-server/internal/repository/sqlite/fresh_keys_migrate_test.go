@@ -1,9 +1,9 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
-	"context"
 	"path/filepath"
 	"slices"
 	"strconv"

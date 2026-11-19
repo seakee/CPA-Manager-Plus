@@ -64,11 +64,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -98,6 +98,9 @@ type VerifyOptions struct {
 	// the OS temporary directory, subject to the same two-root validation.
 	ScratchDir string
 
+	// BundleDir names an external backup snapshot directory when placed outside
+	// TargetRoot so scratch validation never stages inside it.
+	BundleDir string
 	// The four seams below are the ones ExternalConnectOptions exposes. Production
 	// leaves them nil and the cpa package's probes run on the External transport,
 	// so the gate proves the recorded target with the same reads the connect step
@@ -175,22 +178,57 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 			"the v2 data root is not usable, so there is no recorded operation to verify; nothing was written", err)
 	}
 	sourceRoot := strings.TrimSpace(options.LegacyRoot)
+	bundleDir := strings.TrimSpace(options.BundleDir)
+	effectiveBundle := bundleDir
+	if effectiveBundle == "" {
+		effectiveBundle = DefaultBundleDirectory(targetRoot)
+	}
 	paths := newTargetPaths(targetRoot)
 	if sourceRoot != "" {
 		// The 1.x volume is a read-only input, so no root may contain another: a
 		// source inside the v2 data root would put the verification's own writes in
 		// the tree it fingerprints.
-		if err := RefuseOverlappingRoots(sourceRoot, targetRoot, DefaultBundleDirectory(targetRoot)); err != nil {
+		if err := RefuseOverlappingRoots(sourceRoot, targetRoot, effectiveBundle); err != nil {
 			return VerifyResult{}, err
+		}
+	} else if bundleDir != "" {
+		absBundle, err := filepath.Abs(bundleDir)
+		if err != nil {
+			return VerifyResult{}, fmt.Errorf("resolve the backup destination: %w", err)
+		}
+		canonBundle, err := canonicalPathStrict(absBundle)
+		if err != nil {
+			return VerifyResult{}, fmt.Errorf("resolve the backup destination: %w", err)
+		}
+		canonTarget, err := canonicalDirectoryCandidate(targetRoot, "the v2 data root")
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		if within(canonBundle, canonTarget) {
+			return VerifyResult{}, errors.New("the v2 data root must not sit inside the backup destination")
+		}
+		if within(canonTarget, canonBundle) && canonBundle != canonicalPath(DefaultBundleDirectory(canonTarget)) {
+			return VerifyResult{}, errors.New("the backup snapshot inside the v2 data root must be the canonical upgrade-backup directory")
 		}
 	}
 	if err := requireRecoveredCopyIn(paths.Database); err != nil {
 		return VerifyResult{}, err
 	}
-	if err := ValidateScratchDir(options.ScratchDir, sourceRoot, targetRoot); err != nil {
+	scratchRoots := []ScratchRoot{
+		{Label: "the legacy source root", Dir: sourceRoot},
+		{Label: "the target root", Dir: targetRoot},
+		{Label: "the backup directory", Dir: bundleDir},
+	}
+	for _, cfgLegacy := range ConfiguredLegacyRoots() {
+		scratchRoots = append(scratchRoots, ScratchRoot{Label: "the configured legacy source root", Dir: cfgLegacy})
+	}
+	for _, cfgBundle := range ConfiguredBundleRoots() {
+		scratchRoots = append(scratchRoots, ScratchRoot{Label: "the configured backup directory", Dir: cfgBundle})
+	}
+	if err := ValidateScratchRoots(options.ScratchDir, scratchRoots...); err != nil {
 		return VerifyResult{}, snapshotReadError(ctx, err)
 	}
-	recorded, found, snapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
+	recorded, found, snapshot, err := readCopyInCandidateWithBackup(ctx, paths.Database, sourceRoot, targetRoot, bundleDir, options.ScratchDir)
 	closeSnapshot := func() {
 		if snapshot != nil {
 			_ = snapshot.Close()
@@ -222,7 +260,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifySourceUnavailable,
 			"no 1.x data directory is mounted, so the source the operation copied cannot be observed; the verification needs the volume to prove it was not written, and nothing was written", nil)
 	}
-	if err := verifyEntry(recorded); err != nil {
+	if err := RequireVerifyStage(ctx, snapshot.DB(), recorded, found); err != nil {
 		return VerifyResult{}, err
 	}
 	closeSnapshot()
@@ -391,8 +429,10 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err := routing.ValidateAccessPrefixPair(options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, mode == model.UpgradeTargetExternal); err != nil {
 			return VerifyResult{}, mapAccessPrefixToUpgradeError(err)
 		}
-		sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
-		updated, routeErr := upgradeoperation.RecordRoutingTx(ctx, tx, options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, sugCtrl, sugInf)
+		if err := ensureSuggestedPrefixes(&current); err != nil {
+			return VerifyResult{}, err
+		}
+		updated, routeErr := upgradeoperation.RecordRoutingTx(ctx, tx, options.ControlBasePath, options.InferenceBasePath, options.SharedEntry, current.SuggestedControlBasePath, current.SuggestedInferenceBasePath)
 		if routeErr != nil {
 			if errors.Is(routeErr, upgradeoperation.ErrRoutingAlreadyCommitted) {
 				return VerifyResult{}, newUpgradeError(UpgradeErrorPrefixesAlreadyCommitted,
@@ -583,9 +623,32 @@ func completedVerifyResultFromStore(ctx context.Context, db *sql.DB, paths targe
 // too, from the same read-only handle: nothing is written either way.
 func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths targetPaths, recorded model.UpgradeOperation,
 	binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
+	if err := RequirePendingReconcileClear(recorded, "verify"); err != nil {
+		return VerifyResult{}, err
+	}
 	result, err := completedVerifyResult(recorded, binding, hasBinding)
 	if err != nil {
 		return VerifyResult{}, err
+	}
+	_, established, err := validateDurableReconciliationFrom(ctx, db, recorded, strings.TrimSpace(recorded.SourceFingerprintAfter), durableReconcileCodes{
+		invalid:     UpgradeErrorVerifyReconciliationInvalid,
+		unacked:     UpgradeErrorVerifyReconciliationUnacknowledged,
+		fingerprint: UpgradeErrorVerifySourceMismatch,
+	})
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	required := verifyRequiredDomains(result.TargetMode, established)
+	if err := requireVerifyDomains(recorded, required); err != nil {
+		return VerifyResult{}, err
+	}
+	if evidence, err := recorded.VerificationEvidence(); err == nil {
+		for _, domain := range required {
+			if !containsVerifyDomain(evidence.Domains, domain) {
+				return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyDomainsIncomplete,
+					fmt.Sprintf("the recorded verification evidence omits established domain %q; restore the v2 store from its backup", domain), nil)
+			}
+		}
 	}
 	switch result.TargetMode {
 	case model.UpgradeTargetExternal:
@@ -745,15 +808,17 @@ func handleCompletedVerify(
 	if fullyRoutedNow {
 		return completedVerifyReplayResultForStore(ctx, db, paths, current, binding, hasBinding, options)
 	}
-	sugCtrl, sugInf, _ := bootstrap.GenerateSuggestedPrefixPair(routing.ReservedNamespaceCollision)
+	if err := ensureSuggestedPrefixes(&current); err != nil {
+		return VerifyResult{}, err
+	}
 	repaired, err := repo.RepairMissingRoutingOnCompletedUpgrade(
 		ctx,
 		current.Revision,
 		ctrl,
 		options.InferenceBasePath,
 		options.SharedEntry,
-		sugCtrl,
-		sugInf,
+		current.SuggestedControlBasePath,
+		current.SuggestedInferenceBasePath,
 	)
 	if err != nil {
 		if errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
@@ -815,13 +880,13 @@ func verifyEntry(recorded model.UpgradeOperation) error {
 	switch recorded.Stage {
 	case model.UpgradeStageReconcile, model.UpgradeStageCPAImport,
 		model.UpgradeStageExternalConnect, model.UpgradeStageVerify:
-		return nil
+		return RequirePendingReconcileClear(recorded, "verify")
 	case model.UpgradeStageFailed:
 		if recorded.HighWater() == "" {
 			return newUpgradeError(UpgradeErrorVerifyNotApplicable,
 				"the recorded operation failed before any forward stage was reached, so the position it may resume from is unknown; nothing was written", nil)
 		}
-		return nil
+		return RequirePendingReconcileClear(recorded, "verify")
 	}
 	return newUpgradeError(UpgradeErrorVerifyNotApplicable, fmt.Sprintf(
 		"the recorded operation is at stage %q, which cannot enter the verification; nothing was written", recorded.Stage), nil)
@@ -898,7 +963,7 @@ func verifyTargetConfiguration(ctx context.Context, db *sql.DB, paths targetPath
 		return target, newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the stored Manager configuration could not be read, so the CPA this installation uses cannot be confirmed; nothing was written", err)
 	}
-	resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, setupOK)
+	conn, hasAuthority, err := resolveStrictStoredConnection(managerCfg, managerOK, setup, setupOK)
 	code := UpgradeErrorVerifyBindingDrifted
 	if mode == model.UpgradeTargetManaged {
 		code = UpgradeErrorVerifyConnectionUnproven
@@ -907,12 +972,11 @@ func verifyTargetConfiguration(ctx context.Context, db *sql.DB, paths targetPath
 		return target, newUpgradeError(code,
 			"the Manager stores two CPA connections that disagree, so the target this installation uses cannot be confirmed; nothing was written", err)
 	}
-	switch resolution.Authority {
-	case managerconfig.LegacyConnectionAuthorityNone:
+	if !hasAuthority {
 		return target, newUpgradeError(code,
 			"the Manager stores no CPA connection, so the target this installation uses cannot be confirmed; nothing was written", nil)
 	}
-	target.connection = resolution.Connection
+	target.connection = conn
 	target.found = true
 	target.protector = protector
 	if mode != model.UpgradeTargetManaged {
@@ -1473,91 +1537,14 @@ func canonicalVerifyAddress(address string) (string, error) {
 // pass, and the coverage marks are checked on disk so accepting a day cannot
 // drop the mark that records it.
 func verifyReconciliation(ctx context.Context, tx upgradeoperation.Tx, operation model.UpgradeOperation, fingerprint string) (ReconcileEvidence, []string, error) {
-	var evidence ReconcileEvidence
-	if len(operation.Reconciliation) == 0 {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-			"the recorded operation carries no reconciliation, so nothing proves the copied store holds the source's usage; nothing was written", nil)
+	if err := RequirePendingReconcileClear(operation, "verify"); err != nil {
+		return ReconcileEvidence{}, nil, err
 	}
-	if err := json.Unmarshal(operation.Reconciliation, &evidence); err != nil {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-			"the recorded reconciliation is not a comparison this build can read, so nothing proves the copied store holds the source's usage; nothing was written", err)
-	}
-	if len(evidence.Domains) == 0 {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-			"the recorded reconciliation compared no domain, so it establishes nothing to verify; nothing was written", nil)
-	}
-	if digest := strings.TrimSpace(evidence.SourceFingerprint); digest == "" {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-			"the recorded reconciliation names no source fingerprint, so it cannot be tied to a volume; nothing was written", nil)
-	} else if digest != fingerprint {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifySourceMismatch,
-			"the mounted 1.x source is not the volume the recorded reconciliation compared; nothing was written", nil)
-	}
-	for _, domain := range evidence.Domains {
-		if !domain.Applicable {
-			// A domain that did not apply is honest evidence only when it says
-			// why: a blank one is a comparison nobody can re-check.
-			if strings.TrimSpace(domain.Reason) == "" {
-				return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid, fmt.Sprintf(
-					"the recorded reconciliation reports the %q domain as not applicable without saying why; nothing was written", domain.Domain), nil)
-			}
-			continue
-		}
-		if err := domain.targetIncompleteError(); err != nil {
-			return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged, fmt.Sprintf(
-				"the recorded reconciliation holds a domain the v2 store could not show: %v; nothing was written", err), err)
-		}
-	}
-	established := establishedDomains(evidence.Domains)
-	if len(established) == 0 {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-			"the recorded reconciliation established no operation domain, so it proves no copied data; nothing was written", nil)
-	}
-	if len(evidence.UnacknowledgedDays) > 0 {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged, fmt.Sprintf(
-			"the recorded reconciliation left %s undecided: %s; acknowledge them and run the reconciliation again, and nothing was written",
-			plural(len(evidence.UnacknowledgedDays), "day", "days"), strings.Join(evidence.UnacknowledgedDays, ", ")), nil)
-	}
-	acknowledged := make(map[string]bool, len(evidence.AcknowledgedDays))
-	for _, day := range evidence.AcknowledgedDays {
-		acknowledged[day] = true
-	}
-	for _, day := range unionDays(evidence.MismatchDays, evidence.ParityGapDays) {
-		if !acknowledged[day] {
-			return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged, fmt.Sprintf(
-				"the recorded reconciliation reports %s without an acknowledgement, so it was never accepted; nothing was written", day), nil)
-		}
-	}
-	if len(evidence.IncompleteDays) != len(evidence.AcknowledgedDays) {
-		return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged,
-			"the recorded reconciliation accepted days without recording which of them are permanently incomplete, so its marks cannot be re-checked; nothing was written", nil)
-	}
-	marked := make(map[string]bool, len(evidence.IncompleteDays))
-	for _, day := range evidence.IncompleteDays {
-		if !isReconcileDay(day.Day) || !markedReason(day.Reason) {
-			return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationInvalid,
-				"the recorded reconciliation names a permanently incomplete day without a day and a reason this build can re-check; nothing was written", nil)
-		}
-		marked[day.Day] = true
-		// The mark is the durable half of the acknowledgement. Accepting the day
-		// while the store lost its mark would present a covered number as exact.
-		var stored int
-		if err := tx.QueryRowContext(ctx,
-			`select count(*) from usage_coverage_incomplete_days where day = ? and reason <> ''`, day.Day).Scan(&stored); err != nil {
-			return evidence, nil, fmt.Errorf("read the recorded coverage mark for %s: %w", day.Day, err)
-		}
-		if stored == 0 {
-			return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged, fmt.Sprintf(
-				"the recorded reconciliation accepted %s as permanently incomplete but the store holds no such coverage mark; nothing was written", day.Day), nil)
-		}
-	}
-	for _, day := range evidence.AcknowledgedDays {
-		if !marked[day] {
-			return evidence, nil, newUpgradeError(UpgradeErrorVerifyReconciliationUnacknowledged, fmt.Sprintf(
-				"the recorded reconciliation accepted %s without recording it as permanently incomplete; nothing was written", day), nil)
-		}
-	}
-	return evidence, established, nil
+	return validateDurableReconciliationFrom(ctx, tx, operation, fingerprint, durableReconcileCodes{
+		invalid:     UpgradeErrorVerifyReconciliationInvalid,
+		unacked:     UpgradeErrorVerifyReconciliationUnacknowledged,
+		fingerprint: UpgradeErrorVerifySourceMismatch,
+	})
 }
 
 // isReconcileDay reports whether a value is a UTC day the reconcile step writes.
