@@ -119,6 +119,7 @@ export type UpgradeEntryObservation = 'unsupported_upgrade' | 'observation_unava
 export interface VerifiedUpgradeCredential {
   revision: string;
   observation: UpgradeEntryObservation;
+  operationRevision?: string;
 }
 
 export async function verifyUpgradeCredential(
@@ -208,9 +209,257 @@ export async function verifyUpgradeCredential(
     result.expires_in_seconds !== 60 ||
     typeof result.source_revision !== 'string' ||
     !/^[a-f0-9]{64}$/.test(result.source_revision) ||
-    (source && result.source_revision !== source)
+    (result.operation_revision !== undefined &&
+      (typeof result.operation_revision !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(result.operation_revision)))
   ) {
     throw new UpgradeAuthenticationError('network');
   }
-  return { revision: result.source_revision, observation };
+  return {
+    revision: result.source_revision,
+    observation,
+    ...(typeof result.operation_revision === 'string'
+      ? { operationRevision: result.operation_revision }
+      : {}),
+  };
+}
+
+export const UPGRADE_COMMITTED_STATUS_KEY = 'cpamp.upgrade.committed_status.v1';
+
+export interface PersistedCommittedUpgradeStatus {
+  controlBasePath: string;
+  revision?: string;
+  activationRequested?: boolean;
+  snapshot: Record<string, unknown>;
+}
+
+export interface RememberCommittedUpgradeStatusOptions {
+  revision?: string;
+  activationRequested?: boolean;
+}
+
+function normalizeCommittedRevision(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed !== value || /\s/.test(trimmed) || trimmed.length > 128) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function committedStatusStorage(): Storage | null {
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage) {
+      return sessionStorage;
+    }
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      return window.sessionStorage;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isSafeCommittedPrefix(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed !== value) return false;
+  if (!trimmed.startsWith('/') || trimmed === '/' || trimmed.endsWith('/')) return false;
+  if (trimmed.includes('//') || /[\s?#%]/.test(trimmed)) return false;
+  return true;
+}
+
+function stripUrlCredentials(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/+$/, '') || parsed.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeCommittedRouting(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const doc = raw as Record<string, unknown>;
+  if (doc.committed !== true || !isSafeCommittedPrefix(doc.controlBasePath)) return undefined;
+  const routing: Record<string, unknown> = {
+    configured: Boolean(doc.configured),
+    committed: true,
+    controlBasePath: doc.controlBasePath,
+  };
+  if (typeof doc.existingPrefixesPreserved === 'boolean') {
+    routing.existingPrefixesPreserved = doc.existingPrefixesPreserved;
+  }
+  if (typeof doc.inferenceBasePath === 'string') {
+    routing.inferenceBasePath = doc.inferenceBasePath;
+  }
+  if (typeof doc.sharedEntry === 'boolean') {
+    routing.sharedEntry = doc.sharedEntry;
+  }
+  const safeExternalUrl = stripUrlCredentials(doc.externalBaseUrl);
+  if (safeExternalUrl) {
+    routing.externalBaseUrl = safeExternalUrl;
+  }
+  if (typeof doc.suggestedControlBasePath === 'string') {
+    routing.suggestedControlBasePath = doc.suggestedControlBasePath;
+  }
+  if (typeof doc.suggestedInferenceBasePath === 'string') {
+    routing.suggestedInferenceBasePath = doc.suggestedInferenceBasePath;
+  }
+  return routing;
+}
+
+function sanitizeCommittedAccessInfo(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const doc = raw as Record<string, unknown>;
+  if (typeof doc.mode !== 'string' || typeof doc.managementBasePath !== 'string') return undefined;
+  const accessInfo: Record<string, unknown> = {
+    mode: doc.mode,
+    managementBasePath: doc.managementBasePath,
+    inferenceBasePath: typeof doc.inferenceBasePath === 'string' ? doc.inferenceBasePath : '',
+    protocols: Array.isArray(doc.protocols) ? doc.protocols : [],
+    ready: Boolean(doc.ready),
+  };
+  const safeExternalUrl = stripUrlCredentials(doc.externalBaseUrl);
+  if (safeExternalUrl) {
+    accessInfo.externalBaseUrl = safeExternalUrl;
+  }
+  if (typeof doc.sharedEntry === 'boolean') {
+    accessInfo.sharedEntry = doc.sharedEntry;
+  }
+  if (typeof doc.code === 'string' && doc.code) {
+    accessInfo.code = doc.code;
+  }
+  return accessInfo;
+}
+
+function sanitizeCommittedSnapshot(
+  raw: unknown
+): PersistedCommittedUpgradeStatus | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const doc = raw as Record<string, unknown>;
+  if (doc.stage !== 'complete' || doc.stageKnown !== true) return undefined;
+  const routing = sanitizeCommittedRouting(doc.routing);
+  if (!routing) return undefined;
+  const controlBasePath = routing.controlBasePath as string;
+  const snapshot: Record<string, unknown> = {
+    contractVersion: doc.contractVersion,
+    recorded: Boolean(doc.recorded),
+    stage: 'complete',
+    stageKnown: true,
+    nextAction: typeof doc.nextAction === 'string' ? doc.nextAction : 'complete',
+    domainsDone: Array.isArray(doc.domainsDone) ? doc.domainsDone : [],
+    sourceKind: typeof doc.sourceKind === 'string' ? doc.sourceKind : '',
+    sourceVersion: typeof doc.sourceVersion === 'string' ? doc.sourceVersion : '',
+    reconciliation:
+      doc.reconciliation && typeof doc.reconciliation === 'object' ? doc.reconciliation : {},
+    manualItems: Array.isArray(doc.manualItems) ? doc.manualItems : [],
+    routing,
+  };
+  if (typeof doc.errorCode === 'string') snapshot.errorCode = doc.errorCode;
+  if (typeof doc.errorDetail === 'string') snapshot.errorDetail = doc.errorDetail;
+  if (typeof doc.targetMode === 'string') snapshot.targetMode = doc.targetMode;
+  if (typeof doc.updatedAtMs === 'number') snapshot.updatedAtMs = doc.updatedAtMs;
+  const accessInfo = sanitizeCommittedAccessInfo(doc.accessInfo);
+  if (accessInfo) snapshot.accessInfo = accessInfo;
+  return { controlBasePath, snapshot };
+}
+
+export function rememberCommittedUpgradeStatus(
+  snapshot: Record<string, unknown>,
+  options?: RememberCommittedUpgradeStatusOptions
+): PersistedCommittedUpgradeStatus | undefined {
+  const sanitized = sanitizeCommittedSnapshot(snapshot);
+  if (!sanitized) return undefined;
+  const storage = committedStatusStorage();
+  const existing = storage ? rememberedCommittedUpgradeStatus() : undefined;
+  const explicitRevision = normalizeCommittedRevision(options?.revision);
+  const sameScope = Boolean(
+    existing &&
+      existing.controlBasePath === sanitized.controlBasePath &&
+      existing.revision === explicitRevision
+  );
+  const activationRequested =
+    typeof options?.activationRequested === 'boolean'
+      ? options.activationRequested
+      : sameScope
+        ? existing?.activationRequested
+        : undefined;
+  const next: PersistedCommittedUpgradeStatus = {
+    controlBasePath: sanitized.controlBasePath,
+    ...(explicitRevision ? { revision: explicitRevision } : {}),
+    ...(typeof activationRequested === 'boolean' ? { activationRequested } : {}),
+    snapshot: sanitized.snapshot,
+  };
+  if (storage) {
+    try {
+      storage.setItem(UPGRADE_COMMITTED_STATUS_KEY, JSON.stringify(next));
+    } catch {
+      /* Ignore storage quota or private-mode failures. */
+    }
+  }
+  return next;
+}
+
+export function rememberedCommittedUpgradeStatus(
+  expectedRevision?: string
+): PersistedCommittedUpgradeStatus | undefined {
+  const storage = committedStatusStorage();
+  if (!storage) return undefined;
+  try {
+    const raw = storage.getItem(UPGRADE_COMMITTED_STATUS_KEY);
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      clearCommittedUpgradeStatus();
+      return undefined;
+    }
+    const envelope = parsed as Record<string, unknown>;
+    const sanitized = sanitizeCommittedSnapshot(envelope.snapshot);
+    if (!sanitized || envelope.controlBasePath !== sanitized.controlBasePath) {
+      clearCommittedUpgradeStatus();
+      return undefined;
+    }
+    if (envelope.revision !== undefined && !normalizeCommittedRevision(envelope.revision)) {
+      clearCommittedUpgradeStatus();
+      return undefined;
+    }
+    const revision = normalizeCommittedRevision(envelope.revision);
+    const activationRequested =
+      typeof envelope.activationRequested === 'boolean'
+        ? envelope.activationRequested
+        : undefined;
+    if (expectedRevision) {
+      const expected = normalizeCommittedRevision(expectedRevision);
+      if (!expected || !revision || revision !== expected) {
+        clearCommittedUpgradeStatus();
+        return undefined;
+      }
+    }
+    return {
+      controlBasePath: sanitized.controlBasePath,
+      ...(revision ? { revision } : {}),
+      ...(typeof activationRequested === 'boolean' ? { activationRequested } : {}),
+      snapshot: sanitized.snapshot,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function clearCommittedUpgradeStatus(): void {
+  const storage = committedStatusStorage();
+  if (!storage) return;
+  try {
+    storage.removeItem(UPGRADE_COMMITTED_STATUS_KEY);
+  } catch {
+    /* Ignore storage cleanup failures. */
+  }
 }

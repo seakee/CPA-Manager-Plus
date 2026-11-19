@@ -1658,6 +1658,7 @@ export function FreshSetupWizard({
                 auth={{ kind: 'session', value: transport.sessionToken() }}
                 onUnauthorized={() => setAccessSessionExpired(true)}
                 defaultProtocolsCollapsed
+                completionRecovery
                 subtitleNote={j('bookmark')}
               />
               {strategy === 'connect_external' && (

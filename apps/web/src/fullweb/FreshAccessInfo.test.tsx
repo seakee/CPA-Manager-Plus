@@ -316,4 +316,102 @@ describe('FreshAccessInfo', () => {
     expect(JSON.stringify(renderer.toJSON())).toContain('Bookmark the console URL.');
   });
 
+  it('copies completion recovery details without keys and exposes textarea fallback on clipboard failure', async () => {
+    let rejectNext = true;
+    const writeText = vi.fn(async () => {
+      if (rejectNext) throw new Error('clipboard denied');
+    });
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const fetchMock = vi.fn<typeof fetch>();
+
+    await mount(fetchMock, { kind: 'admin', value: 'secret-admin-key' }, {
+      info: managedInfo,
+      completionRecovery: true,
+    });
+
+    expect(JSON.stringify(renderer.toJSON())).toContain(
+      'docker exec -u 10002:10002 <container> cpa-manager-plus access show'
+    );
+    await act(async () => {
+      await byID('access-info-copy-access').props.onClick();
+    });
+    const fallback = byID('access-info-copy-access-fallback');
+    const expectedValue = String(fallback.props.value);
+    expect(fallback.type).toBe('textarea');
+    expect(fallback.props.className).toBe('form-input form-input-mono');
+    expect(expectedValue).toContain('https://manager.example/admin-cpamp');
+    expect(fallback.props.value).toContain('https://manager.example/admin-cpamp/api/v2');
+    expect(fallback.props.value).toContain('https://manager.example/my-api');
+    expect(fallback.props.value).not.toContain('secret-admin-key');
+    expect(fallback.props.value).not.toContain('key');
+    expect(byID('access-info-copy-feedback').props.children).toBe(
+      accessInfoText('copyFailed', 'en')
+    );
+
+    rejectNext = false;
+    await act(async () => {
+      await byID('access-info-copy-access').props.onClick();
+    });
+    expect(hasID('access-info-copy-access-fallback')).toBe(false);
+    expect(writeText).toHaveBeenLastCalledWith(expectedValue);
+    expect(byID('access-info-copy-feedback').props.children).toBe(
+      accessInfoText('copied', 'en')
+    );
+
+    // External completion recovery keeps external base and omits inference prefix and keys.
+    await act(async () => renderer.unmount());
+    rejectNext = true;
+    await mount(fetchMock, { kind: 'admin', value: 'secret-admin-key' }, {
+      info: {
+        mode: 'connect_external',
+        managementBasePath: '/ext-ctl',
+        inferenceBasePath: '',
+        externalBaseUrl: 'https://cpa.remote.example/gateway',
+        protocols: [],
+        ready: true,
+      },
+      completionRecovery: true,
+    });
+    await act(async () => {
+      await byID('access-info-copy-access').props.onClick();
+    });
+    const externalFallback = byID('access-info-copy-access-fallback');
+    expect(externalFallback.props.value).toContain('https://manager.example/ext-ctl');
+    expect(externalFallback.props.value).toContain('https://cpa.remote.example/gateway');
+    expect(externalFallback.props.value).not.toContain('/my-api');
+    expect(externalFallback.props.value).not.toContain('secret-admin-key');
+  });
+
+  it('renders dedicated localized titles for upgrade_authority_unavailable and upgrade_operation_invalid', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    await mount(fetchMock, { kind: 'admin', value: '' }, {
+      info: {
+        mode: 'migrate_legacy',
+        managementBasePath: '/ctl',
+        inferenceBasePath: '/inf',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_authority_unavailable',
+      },
+    });
+    expect(
+      byID('access-info-not-ready').findByProps({ className: 'alert-title' }).children.join('')
+    ).toBe(accessInfoText('notReadyUpgradeAuthorityTitle', 'en'));
+
+    await act(async () => renderer.unmount());
+    await mount(fetchMock, { kind: 'admin', value: '' }, {
+      info: {
+        mode: 'migrate_legacy',
+        managementBasePath: '/ctl',
+        inferenceBasePath: '/inf',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_operation_invalid',
+      },
+    });
+    expect(
+      byID('access-info-not-ready').findByProps({ className: 'alert-title' }).children.join('')
+    ).toBe(accessInfoText('notReadyUpgradeOperationInvalidTitle', 'en'));
+  });
+
 });

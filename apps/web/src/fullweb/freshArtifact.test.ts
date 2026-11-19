@@ -6,11 +6,14 @@ import {
   ARTIFACT_MAX_UPLOAD_BYTES,
   acquireArtifact,
   createPublicArtifactTransport,
+  extractArtifactErrorCode,
   formatArtifactError,
   formatArtifactPinnedMismatch,
+  isArtifactErrorCode,
   isArtifactPinnedMismatch,
   isArtifactReady,
   isArtifactRecoveryRequired,
+  isNonTransientArtifactReadError,
   mapArtifactErrorCode,
   parseArtifactOperation,
   parseArtifactProbe,
@@ -164,7 +167,7 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
 
   it('maps every artifact error code to its message key and remedy across all four locales', () => {
     const codes = Object.keys(ARTIFACT_ERROR_CODES) as ArtifactErrorCode[];
-    expect(codes).toHaveLength(29);
+    expect(codes).toHaveLength(39);
 
     // Table-driven check of every server code reachable on the Fresh and Upgrade artifact routes.
     const serverArtifactCodes: Array<[ArtifactErrorCode, string]> = [
@@ -186,6 +189,8 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
       ['origin_rejected', 'remedy_origin_rejected'],
       ['method_not_allowed', 'remedy_invalid_request'],
       ['upgrade_artifact_unavailable', 'remedy_upgrade_artifact_unavailable'],
+      ['upgrade_execution_busy', 'remedy_upgrade_execution_busy'],
+      ['upgrade_bootstrap_retired', 'remedy_upgrade_bootstrap_retired'],
       ['upgrade_credential_timeout', 'remedy_upgrade_source_timeout'],
       ['upgrade_mount_timeout', 'remedy_upgrade_source_timeout'],
       ['upgrade_preflight_timeout', 'remedy_upgrade_source_timeout'],
@@ -197,6 +202,14 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
       ['upgrade_operation_invalid', 'remedy_upgrade_operation_invalid'],
       ['upgrade_source_symlinked', 'remedy_upgrade_source_symlinked'],
       ['upgrade_source_unstamped', 'remedy_upgrade_source_unstamped'],
+      ['upgrade_worker_unavailable', 'remedy_upgrade_worker_unavailable'],
+      ['upgrade_worker_peer_refused', 'remedy_upgrade_worker_peer_refused'],
+      ['source_ownership_unavailable', 'remedy_source_ownership_unavailable'],
+      ['upgrade_source_lock_unavailable', 'remedy_source_ownership_unavailable'],
+      ['upgrade_store_locked', 'remedy_upgrade_store_locked'],
+      ['upgrade_store_unavailable', 'remedy_upgrade_store_unavailable'],
+      ['upgrade_store_schema_outdated', 'remedy_upgrade_store_schema_outdated'],
+      ['upgrade_request_invalid', 'remedy_invalid_request'],
     ];
     for (const [serverCode, expectedRemedyKey] of serverArtifactCodes) {
       expect(ARTIFACT_ERROR_MAP[serverCode].remedyKey).toBe(expectedRemedyKey);
@@ -227,6 +240,216 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
 
     expect(formatArtifactError({ kind: 'authentication', status: 401 }).code).toBe('unauthorized');
     expect(formatArtifactError({ status: 413 }).code).toBe('archive_too_large');
+
+    const upgradeArtifactEnvelopes: Array<{
+      envelope: { kind: string; status: number; code: ArtifactErrorCode };
+      expectedCode: ArtifactErrorCode;
+      messageKey:
+        | 'error_upgrade_artifact_unavailable'
+        | 'error_upgrade_execution_busy'
+        | 'error_upgrade_bootstrap_retired'
+        | 'error_invalid_request'
+        | 'error_upgrade_legacy_root_unusable'
+        | 'error_upgrade_store_schema_outdated'
+        | 'error_source_ownership_unavailable'
+        | 'error_upgrade_store_unavailable'
+        | 'error_upgrade_worker_peer_refused';
+      remedyKey:
+        | 'remedy_upgrade_artifact_unavailable'
+        | 'remedy_upgrade_execution_busy'
+        | 'remedy_upgrade_bootstrap_retired'
+        | 'remedy_invalid_request'
+        | 'remedy_upgrade_legacy_root_unusable'
+        | 'remedy_upgrade_store_schema_outdated'
+        | 'remedy_source_ownership_unavailable'
+        | 'remedy_upgrade_store_unavailable'
+        | 'remedy_upgrade_worker_peer_refused';
+      nonTransient: boolean;
+    }> = [
+      {
+        envelope: {
+          kind: 'unavailable',
+          status: 409,
+          code: 'upgrade_artifact_unavailable',
+        },
+        expectedCode: 'upgrade_artifact_unavailable',
+        messageKey: 'error_upgrade_artifact_unavailable',
+        remedyKey: 'remedy_upgrade_artifact_unavailable',
+        nonTransient: true,
+      },
+      {
+        envelope: {
+          kind: 'unavailable',
+          status: 409,
+          code: 'upgrade_execution_busy',
+        },
+        expectedCode: 'upgrade_execution_busy',
+        messageKey: 'error_upgrade_execution_busy',
+        remedyKey: 'remedy_upgrade_execution_busy',
+        nonTransient: false,
+      },
+      {
+        envelope: {
+          kind: 'unavailable',
+          status: 404,
+          code: 'upgrade_bootstrap_retired',
+        },
+        expectedCode: 'upgrade_bootstrap_retired',
+        messageKey: 'error_upgrade_bootstrap_retired',
+        remedyKey: 'remedy_upgrade_bootstrap_retired',
+        nonTransient: true,
+      },
+      {
+        envelope: {
+          kind: 'http',
+          status: 400,
+          code: 'upgrade_request_invalid',
+        },
+        expectedCode: 'upgrade_request_invalid',
+        messageKey: 'error_invalid_request',
+        remedyKey: 'remedy_invalid_request',
+        nonTransient: true,
+      },
+      {
+        envelope: {
+          kind: 'http',
+          status: 503,
+          code: 'upgrade_legacy_root_unusable',
+        },
+        expectedCode: 'upgrade_legacy_root_unusable',
+        messageKey: 'error_upgrade_legacy_root_unusable',
+        remedyKey: 'remedy_upgrade_legacy_root_unusable',
+        nonTransient: true,
+      },
+      {
+        envelope: {
+          kind: 'http',
+          status: 503,
+          code: 'upgrade_store_schema_outdated',
+        },
+        expectedCode: 'upgrade_store_schema_outdated',
+        messageKey: 'error_upgrade_store_schema_outdated',
+        remedyKey: 'remedy_upgrade_store_schema_outdated',
+        nonTransient: true,
+      },
+      {
+        envelope: {
+          kind: 'http',
+          status: 503,
+          code: 'upgrade_source_lock_unavailable',
+        },
+        expectedCode: 'upgrade_source_lock_unavailable',
+        messageKey: 'error_source_ownership_unavailable',
+        remedyKey: 'remedy_source_ownership_unavailable',
+        nonTransient: false,
+      },
+      {
+        envelope: {
+          kind: 'http',
+          status: 503,
+          code: 'upgrade_store_unavailable',
+        },
+        expectedCode: 'upgrade_store_unavailable',
+        messageKey: 'error_upgrade_store_unavailable',
+        remedyKey: 'remedy_upgrade_store_unavailable',
+        nonTransient: false,
+      },
+      {
+        envelope: {
+          kind: 'authentication',
+          status: 403,
+          code: 'upgrade_worker_peer_refused',
+        },
+        expectedCode: 'upgrade_worker_peer_refused',
+        messageKey: 'error_upgrade_worker_peer_refused',
+        remedyKey: 'remedy_upgrade_worker_peer_refused',
+        nonTransient: true,
+      },
+    ];
+    for (const item of upgradeArtifactEnvelopes) {
+      expect(extractArtifactErrorCode(item.envelope)).toBe(item.expectedCode);
+      expect(isNonTransientArtifactReadError(item.envelope)).toBe(item.nonTransient);
+      for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru']) {
+        const formatted = formatArtifactError(item.envelope, '8.0.55', locale);
+        expect(formatted.code).toBe(item.expectedCode);
+        expect(formatted.messageKey).toBe(item.messageKey);
+        expect(formatted.remedyKey).toBe(item.remedyKey);
+        expect(formatted.message).toBe(artifactText(item.messageKey, { version: '8.0.55' }, locale));
+        expect(formatted.remedy).toBe(artifactText(item.remedyKey, { version: '8.0.55' }, locale));
+      }
+    }
+
+    // Direct nested { error: { code } } (handler.go:writeError) and dual-shape
+    // { code, error: { code } } (artifact.go:writeArtifactServiceError) envelopes.
+    const nestedCases: Array<{
+      input: unknown;
+      expectedCode: ArtifactErrorCode;
+      nonTransient: boolean;
+    }> = [
+      {
+        input: { error: { code: 'upgrade_store_unavailable' } },
+        expectedCode: 'upgrade_store_unavailable',
+        nonTransient: false,
+      },
+      {
+        input: { status: 503, error: { code: 'upgrade_operation_invalid' } },
+        expectedCode: 'upgrade_operation_invalid',
+        nonTransient: true,
+      },
+      {
+        input: { status: 401, error: { code: 'admin_unauthorized' } },
+        expectedCode: 'admin_unauthorized',
+        nonTransient: true,
+      },
+      {
+        input: { status: 403, error: { code: 'origin_rejected' } },
+        expectedCode: 'origin_rejected',
+        nonTransient: true,
+      },
+      {
+        input: { status: 403, error: { code: 'upgrade_worker_peer_refused' } },
+        expectedCode: 'upgrade_worker_peer_refused',
+        nonTransient: true,
+      },
+      {
+        input: {
+          code: 'upgrade_legacy_root_unusable',
+          error: { code: 'upgrade_legacy_root_unusable' },
+        },
+        expectedCode: 'upgrade_legacy_root_unusable',
+        nonTransient: true,
+      },
+    ];
+    for (const tc of nestedCases) {
+      expect(extractArtifactErrorCode(tc.input)).toBe(tc.expectedCode);
+      expect(isNonTransientArtifactReadError(tc.input)).toBe(tc.nonTransient);
+      const formatted = formatArtifactError(tc.input, '8.0.55', 'en');
+      expect(formatted.code).toBe(tc.expectedCode);
+      expect(formatted.code).not.toBe('unknown');
+    }
+  });
+
+  it('recognizes upgrade_source_lock_unavailable consistently with source_ownership_unavailable without fallback', () => {
+    expect(isArtifactErrorCode('upgrade_source_lock_unavailable')).toBe(true);
+    const lockEnvelope = { kind: 'http', status: 503, code: 'upgrade_source_lock_unavailable' };
+    const ownershipEnvelope = { kind: 'http', status: 503, code: 'source_ownership_unavailable' };
+    expect(extractArtifactErrorCode(lockEnvelope)).toBe('upgrade_source_lock_unavailable');
+    expect(isNonTransientArtifactReadError(lockEnvelope)).toBe(
+      isNonTransientArtifactReadError(ownershipEnvelope)
+    );
+    expect(isNonTransientArtifactReadError(lockEnvelope)).toBe(false);
+
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru']) {
+      const formatted = formatArtifactError(lockEnvelope, '8.0.55', locale);
+      const ownership = formatArtifactError(ownershipEnvelope, '8.0.55', locale);
+      expect(formatted.code).toBe('upgrade_source_lock_unavailable');
+      expect(formatted.code).not.toBe('upgrade_artifact_unavailable');
+      expect(formatted.code).not.toBe('unknown');
+      expect(formatted.messageKey).toBe('error_source_ownership_unavailable');
+      expect(formatted.remedyKey).toBe('remedy_source_ownership_unavailable');
+      expect(formatted.message).toBe(ownership.message);
+      expect(formatted.remedy).toBe(ownership.remedy);
+    }
   });
 
   it('executes status, probe, acquire and raw upload helpers with client-side guards', async () => {

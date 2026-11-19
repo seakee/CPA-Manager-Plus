@@ -223,7 +223,7 @@ export function buildPrefixPreviewUrls(
     : '';
   const cleanExternal = externalBaseUrl ? externalBaseUrl.trim().replace(/\/+$/, '') : '';
   return {
-    consoleUrl: cleanControl ? `${cleanOrigin}${cleanControl}/ui` : '—',
+    consoleUrl: cleanControl ? `${cleanOrigin}${cleanControl}` : '—',
     managementApiUrl: cleanControl ? `${cleanOrigin}${cleanControl}/api/v2` : '—',
     inferenceUrl: cleanInference ? `${cleanOrigin}${cleanInference}` : '—',
     externalUrl: cleanExternal || '—',

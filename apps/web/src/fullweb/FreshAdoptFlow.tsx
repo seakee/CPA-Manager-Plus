@@ -1240,6 +1240,7 @@ export function FreshAdoptFlow({
                 client={accessInfoClient}
                 auth={accessInfoAuth}
                 onUnauthorized={onUnauthorized}
+                completionRecovery
               />
             )}
           </div>
