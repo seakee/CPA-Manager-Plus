@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/fullweb"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/requestbody"
@@ -49,6 +49,7 @@ type upgradeCanonicalServer struct {
 	inner            http.Handler
 	driver           freshrouting.Driver
 	gatewayAuthority func(context.Context) bool
+	publicOrigin     string
 
 	hostCtx            context.Context
 	protector          *security.Protector
@@ -182,6 +183,7 @@ func attachCompletedUpgradeRouting(
 		inner:             serverApp.Handler(),
 		driver:            driver,
 		gatewayAuthority:  gatewayAuthority,
+		publicOrigin:      publicOrigin,
 	}
 	var dep upgradeCanonicalDependencies
 	if len(deps) > 0 {
@@ -203,9 +205,15 @@ func attachCompletedUpgradeRouting(
 		u.inner = base
 		return requestbody.Middleware(requestbody.DefaultReadIdleTimeout, httpapi.ProtectBrandResources(withSupportPluginHeader(u, u.supportPluginCapable)))
 	})
+	if dep.Startup != nil {
+		// Ingress verifies every publication against the private Manager authority.
+		// Expose the installed handler before the first synchronous publication.
+		dep.Startup.SetCompleted()
+		dep.Startup.SetReady(serverApp.Handler())
+	}
 	if u.driver != nil {
-		u.publishToIngress(ctx)
-		go u.reconcileIngressLoop(ctx)
+		converged := u.tryPublishToIngress(ctx, false)
+		go u.reconcileIngressLoop(ctx, converged)
 	}
 	return nil
 }
@@ -352,23 +360,61 @@ func (u *upgradeCanonicalServer) fullWebHandler(snap routing.RoutingSnapshot, ap
 	return httpapi.FullWebHandler(snap, api)
 }
 
+var fastIngressConvergenceDelays = []time.Duration{
+	25 * time.Millisecond,
+	35 * time.Millisecond,
+	50 * time.Millisecond,
+	70 * time.Millisecond,
+	120 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	800 * time.Millisecond,
+}
+
 func (u *upgradeCanonicalServer) publishToIngress(ctx context.Context) {
+	u.tryPublishToIngress(ctx, true)
+}
+
+func (u *upgradeCanonicalServer) tryPublishToIngress(ctx context.Context, logBlocked bool) bool {
 	if u.driver == nil {
-		return
+		return true
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	op, err := u.loadCurrentOp(pubCtx)
 	if err != nil {
 		log.Printf("skip publishing upgraded routing state to ingress while store is unavailable: %v", err)
-		return
+		return false
 	}
 	if err := u.driver.Apply(pubCtx, u.stateFor(op)); err != nil {
-		log.Printf("publish upgraded routing state to ingress: %v", err)
+		if logBlocked || errors.Is(err, freshrouting.ErrConflict) {
+			log.Printf("publish upgraded routing state to ingress: %v", err)
+		}
+		return false
 	}
+	return true
 }
 
-func (u *upgradeCanonicalServer) reconcileIngressLoop(ctx context.Context) {
+func (u *upgradeCanonicalServer) reconcileIngressLoop(ctx context.Context, initialConverged bool) {
+	if !initialConverged {
+		for i, delay := range fastIngressConvergenceDelays {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if u.driver == nil {
+				return
+			}
+			isLastFastAttempt := i == len(fastIngressConvergenceDelays)-1
+			if u.tryPublishToIngress(ctx, isLastFastAttempt) {
+				break
+			}
+		}
+	}
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -483,6 +529,10 @@ func (u *upgradeCanonicalServer) serveCanonicalAPI(w http.ResponseWriter, r *htt
 		return
 	}
 	resource := strings.TrimPrefix(r.URL.Path, apiPrefix)
+	if upgradeWizardResource(resource) {
+		http.NotFound(w, r)
+		return
+	}
 	if resource == "bootstrap/identity" {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -557,11 +607,10 @@ func (u *upgradeCanonicalServer) operationDocument(ctx context.Context, op model
 		strategy = bootstrap.ConnectExternal
 		gatewayPending = false
 	}
-	_, sugInf := upgradeservice.DeterministicSuggestedPrefixes(op)
 	missingInf := u.missingInferenceCompletionRequired(op)
 	sugOut := ""
 	if missingInf {
-		sugOut = sugInf
+		sugOut = strings.TrimSpace(op.SuggestedInferenceBasePath)
 	}
 	return freshrouting.OperationDocument{
 		Version:          bootstrap.FreshContractVersion,
@@ -615,6 +664,7 @@ func (u *upgradeCanonicalServer) serveDefaultAccessInfo(w http.ResponseWriter, r
 	info := makeKeyAccessInfo(mode, op.ControlBasePath, infPath, ready, externalURL)
 	writeKeyAccessInfo(w, info)
 }
+
 func (u *upgradeCanonicalServer) completionMode() string {
 	if u.targetMode == model.UpgradeTargetExternal {
 		return "connect_external"
@@ -623,7 +673,6 @@ func (u *upgradeCanonicalServer) completionMode() string {
 }
 
 func (u *upgradeCanonicalServer) completionStatusFor(op model.UpgradeOperation) freshrouting.AccessCompletionStatus {
-	_, sugInf := upgradeservice.DeterministicSuggestedPrefixes(op)
 	required := u.missingInferenceCompletionRequired(op)
 	infPath := ""
 	shared := false
@@ -642,30 +691,20 @@ func (u *upgradeCanonicalServer) completionStatusFor(op model.UpgradeOperation) 
 		InferenceCommitted: infCommitted,
 	}
 	if required {
-		resp.SuggestedInferenceBasePath = sugInf
+		resp.SuggestedInferenceBasePath = strings.TrimSpace(op.SuggestedInferenceBasePath)
 	}
 	return resp
 }
 
-func rejectUpgradeCrossSiteMutation(r *http.Request) bool {
+func (u *upgradeCanonicalServer) rejectUpgradeCrossSiteMutation(r *http.Request) bool {
 	if r == nil {
 		return true
 	}
-	if sfs := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); sfs == "cross-site" || sfs == "same-site" {
-		return true
+	publicOrigin := ""
+	if u != nil {
+		publicOrigin = u.publicOrigin
 	}
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
-		return false
-	}
-	if origin == "null" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-		return true
-	}
-	return !strings.EqualFold(u.Host, strings.TrimSpace(r.Host))
+	return upgradesurface.CrossSite(r, publicOrigin)
 }
 
 func (u *upgradeCanonicalServer) writeDriverCompletionError(w http.ResponseWriter, err error) {
@@ -715,7 +754,7 @@ func (u *upgradeCanonicalServer) serveMissingInferenceCompletion(w http.Response
 		}
 		writeFreshJSON(w, u.completionStatusFor(op))
 	case http.MethodPost:
-		if rejectUpgradeCrossSiteMutation(r) {
+		if u.rejectUpgradeCrossSiteMutation(r) {
 			writeUpgradeCompletionError(w, http.StatusForbidden, "origin_rejected", "cross-site access completion request rejected")
 			return
 		}

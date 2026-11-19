@@ -61,6 +61,7 @@ type upgradeCanonicalDependencies struct {
 	Protector       *security.Protector
 	Runtime         runtimeservice.RuntimeClient
 	DesiredStateOut *runtimeservice.DesiredStateStore
+	Startup         *startupHTTPHandler
 }
 
 func resolveUpgradeProtector(cfg config.Config, explicit *security.Protector) (*security.Protector, error) {

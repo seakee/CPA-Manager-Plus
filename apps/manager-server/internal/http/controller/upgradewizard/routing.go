@@ -59,7 +59,7 @@ type routingActionDocument struct {
 }
 
 func buildUpgradeRoutingAndAccessInfo(op model.UpgradeOperation, targetMode string, externalBaseURL string) (upgradeRoutingDocument, upgradeAccessInfoDocument) {
-	sugCtrl, sugInf := upgradeservice.DeterministicSuggestedPrefixes(op)
+	sugCtrl, sugInf := strings.TrimSpace(op.SuggestedControlBasePath), strings.TrimSpace(op.SuggestedInferenceBasePath)
 	infPath := op.InferenceBasePath
 	sharedEntry := op.SharedEntry
 	extURL := ""

@@ -23,6 +23,10 @@ func runExternalConnect(ctx context.Context, args []string, stdout, stderr io.Wr
 	flags := flag.NewFlagSet("upgrade external-connect", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
+	legacy := flags.String("legacy", "", "optional 1.x source data directory to exclude from scratch staging")
+	bundle := flags.String("bundle", "", "optional external backup directory to exclude from scratch staging")
+	backup := flags.String("backup", "", "alias for --bundle")
 	baseURL := flags.String("cpa-base-url", "", "address of the CPA the upgraded install points at")
 	managementKeyFile := flags.String("management-key-file", "", "file containing the External CPA management key")
 	cpaVersion := flags.String("cpa-version", "", "version the CPA serves, used only on initial connection when the CPA answers without a version header")
@@ -34,6 +38,10 @@ func runExternalConnect(ctx context.Context, args []string, stdout, stderr io.Wr
 	if flags.NArg() != 0 || strings.TrimSpace(*baseURL) == "" || strings.TrimSpace(*managementKeyFile) == "" {
 		return fmt.Errorf("%w: --cpa-base-url <url> and --management-key-file <path> are required, and no positional arguments are accepted", ErrUsage)
 	}
+	bundleDir, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
@@ -44,6 +52,9 @@ func runExternalConnect(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 	result, err := upgradeservice.ExternalConnect(ctx, upgradeservice.ExternalConnectOptions{
 		TargetRoot:    targetRoot,
+		ScratchDir:    *scratchDir,
+		LegacyRoot:    strings.TrimSpace(*legacy),
+		BundleDir:     bundleDir,
 		BaseURL:       strings.TrimSpace(*baseURL),
 		ManagementKey: managementKey,
 		CPAVersion:    strings.TrimSpace(*cpaVersion),

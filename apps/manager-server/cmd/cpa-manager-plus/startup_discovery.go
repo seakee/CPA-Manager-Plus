@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +26,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgradeworker"
 )
 
 // startupHTTPHandler owns the fixed discovery path while the normal Manager
@@ -39,6 +45,7 @@ type startupHTTPHandler struct {
 	upgradeAuth       http.Handler
 	upgradeWizard     *upgradewizard.Handler
 	upgradeArtifact   upgradewizard.ArtifactRuntime
+	workerAdmission   *workerLazyAdmission
 	// discoveryObserver coalesces the concurrent unauthenticated observations of
 	// the one source this process is looking at, and remembers the projection it
 	// already proved for it while the source is unchanged.
@@ -101,6 +108,20 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 			h.readOnlyDiscovery == nil || h.upgradeAuth == nil {
 			http.NotFound(w, r)
 			return
+		}
+		if h.workerAdmission != nil {
+			switch h.workerAdmission.resolve(r.Context()) {
+			case workerUpgradeStateNotUpgrade:
+				http.NotFound(w, r)
+				return
+			case workerUpgradeStateIndeterminate:
+				if r.URL.Path == upgradeauth.Path {
+					writeIndeterminateUpgradeEntryError(w, r)
+				} else {
+					writeIndeterminateUpgradeWizardError(w, r)
+				}
+				return
+			}
 		}
 		switch {
 		case r.URL.Path == upgradeauth.Path:
@@ -202,6 +223,48 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// Entropy failure leaves this leaf closed without weakening discovery.
 	h.upgradeAuth = nil
 	h.upgradeWizard = nil
+	h.workerAdmission = nil
+	if client := upgradeworker.FromEnvironment(strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN"))); client != nil {
+		// Distinguish confirmed prepared upgrade stores, confirmed non-upgrade
+		// targets, and transient snapshot probe errors on an existing database.
+		verifier := upgradeworker.NewPreparedCredentialVerifier(paths.Database)
+		preloadCtx, cancelPreload := context.WithTimeout(context.Background(), 2*time.Second)
+		probeOutcome := probeWorkerUpgradeStore(preloadCtx, paths.Database, verifier, admitted)
+		cancelPreload()
+		if probeOutcome == workerUpgradeStateNotUpgrade {
+			h.readOnlyDiscovery = bootstrapdiscovery.Handler{Discovery: bootstrapdiscovery.Unavailable()}
+			return
+		}
+		client.FallbackAuthenticateIdentity = verifier.AuthenticateIdentity
+		client.FallbackAuthenticateAndRevision = verifier.AuthenticateAndRevision
+		h.upgradeAuth = client
+		h.upgradeWizard = &upgradewizard.Handler{
+			Worker:               client,
+			PublicOrigin:         client.PublicOrigin,
+			Database:             func() string { return paths.Database },
+			DataKey:              func() string { return paths.DataKey },
+			Authenticate:         verifier.Authenticate,
+			Artifact:             h.upgradeArtifact,
+			PreserveManagerStore: true,
+		}
+		if probeOutcome == workerUpgradeStateAdmitted {
+			h.readOnlyDiscovery = bootstrapdiscovery.Handler{Discovery: bootstrapdiscovery.UnsupportedUpgrade()}
+			return
+		}
+		gate := &workerLazyAdmission{
+			databasePath: paths.Database,
+			verifier:     verifier,
+		}
+		h.workerAdmission = gate
+		h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r != nil && r.Method == http.MethodGet && gate.resolve(r.Context()) == workerUpgradeStateAdmitted {
+				bootstrapdiscovery.Handler{Discovery: bootstrapdiscovery.UnsupportedUpgrade()}.ServeHTTP(w, r)
+				return
+			}
+			bootstrapdiscovery.Handler{Discovery: bootstrapdiscovery.Unavailable()}.ServeHTTP(w, r)
+		})
+		return
+	}
 	// wizard reads verify the key against the same file, so a key the entry page
 	// accepts is a key the reads accept, and the key kept in the other file is
 	// refused by all three. The resolution also says which file it landed on,
@@ -282,6 +345,161 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 			func(result bootstrap.PublicDiscovery) {
 				bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
 			})
+	})
+}
+
+type workerUpgradeAdmissionState uint32
+
+const (
+	workerUpgradeStateIndeterminate workerUpgradeAdmissionState = iota
+	workerUpgradeStateAdmitted
+	workerUpgradeStateNotUpgrade
+)
+
+type workerLazyAdmission struct {
+	state        atomic.Uint32 // workerUpgradeAdmissionState
+	probeMu      sync.Mutex
+	databasePath string
+	verifier     *upgradeworker.PreparedCredentialVerifier
+}
+
+func (g *workerLazyAdmission) resolve(ctx context.Context) workerUpgradeAdmissionState {
+	if g == nil {
+		return workerUpgradeStateAdmitted
+	}
+	if cur := workerUpgradeAdmissionState(g.state.Load()); cur != workerUpgradeStateIndeterminate {
+		return cur
+	}
+	if ctx.Err() != nil {
+		return workerUpgradeStateIndeterminate
+	}
+	g.probeMu.Lock()
+	defer g.probeMu.Unlock()
+	if cur := workerUpgradeAdmissionState(g.state.Load()); cur != workerUpgradeStateIndeterminate {
+		return cur
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	next := probeWorkerUpgradeStore(probeCtx, g.databasePath, g.verifier, nil)
+	cancel()
+	if next != workerUpgradeStateIndeterminate {
+		g.state.Store(uint32(next))
+	}
+	return next
+}
+
+var workerProbeOpenSnapshot = upgradeservice.OpenSnapshot
+
+func probeWorkerUpgradeStore(
+	ctx context.Context,
+	databasePath string,
+	verifier *upgradeworker.PreparedCredentialVerifier,
+	admitted *legacypreflight.Report,
+) workerUpgradeAdmissionState {
+	cleaned := strings.TrimSpace(databasePath)
+	if cleaned == "" {
+		return workerUpgradeStateNotUpgrade
+	}
+	lockPath := cleaned + ".manager.lock"
+	if lockInfo, lockErr := os.Lstat(lockPath); lockErr == nil {
+		if !lockInfo.Mode().IsRegular() || lockInfo.Size() > 0 {
+			return workerUpgradeStateNotUpgrade
+		}
+		if _, linkErr := processlock.InspectRegularSingleLink(lockPath); linkErr != nil && !os.IsNotExist(linkErr) {
+			if errors.Is(linkErr, os.ErrPermission) {
+				return workerUpgradeStateIndeterminate
+			}
+			return workerUpgradeStateNotUpgrade
+		}
+	} else if !os.IsNotExist(lockErr) {
+		return workerUpgradeStateIndeterminate
+	}
+
+	if marker, markerPresent, markerErr := copyinmarker.Read(filepath.Dir(cleaned)); markerErr != nil {
+		if errors.Is(markerErr, os.ErrPermission) {
+			return workerUpgradeStateIndeterminate
+		}
+		return workerUpgradeStateNotUpgrade
+	} else if markerPresent && (!copyinmarker.SameTarget(marker.TargetDatabase, cleaned) || marker.AwaitingCommit(cleaned)) {
+		return workerUpgradeStateNotUpgrade
+	}
+
+	dbInfo, statErr := os.Lstat(cleaned)
+	if os.IsNotExist(statErr) {
+		if copyinmarker.DatabaseSidecarsAbsent(cleaned) == nil {
+			return workerUpgradeStateNotUpgrade
+		}
+		return workerUpgradeStateIndeterminate
+	}
+	if statErr != nil {
+		return workerUpgradeStateIndeterminate
+	}
+	if !dbInfo.Mode().IsRegular() {
+		return workerUpgradeStateNotUpgrade
+	}
+	if _, linkErr := processlock.InspectRegularSingleLink(cleaned); linkErr != nil {
+		if errors.Is(linkErr, os.ErrPermission) {
+			return workerUpgradeStateIndeterminate
+		}
+		return workerUpgradeStateNotUpgrade
+	}
+	if dbInfo.Size() == 0 && copyinmarker.DatabaseSidecarsAbsent(cleaned) == nil {
+		return workerUpgradeStateNotUpgrade
+	}
+
+	snapshot, snapErr := upgradeservice.OpenSnapshotWithRetry(ctx, workerProbeOpenSnapshot, cleaned, "")
+	if snapErr == nil {
+		op, found, readErr := upgradeservice.ReadRecordFrom(ctx, snapshot.DB())
+		_ = snapshot.Close()
+		if readErr == nil {
+			if found && upgradeworker.ValidPreparedOperation(op) {
+				return workerUpgradeStateAdmitted
+			}
+			return workerUpgradeStateNotUpgrade
+		}
+	}
+	if verifier != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return workerUpgradeStateIndeterminate
+		}
+		baseCtx, baseCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer baseCancel()
+		if verifier.HasPreparedIdentity(baseCtx) {
+			return workerUpgradeStateAdmitted
+		}
+	}
+	if admitted != nil && (admitted.SourceKind == legacypreflight.SourceKindNativeV2 ||
+		admitted.SourceKind == legacypreflight.SourceKindUpgradedLegacy) {
+		return workerUpgradeStateAdmitted
+	}
+	return workerUpgradeStateIndeterminate
+}
+
+func writeIndeterminateUpgradeJSON(w http.ResponseWriter, r *http.Request, body any) {
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(body)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.WriteHeader(http.StatusServiceUnavailable)
+	if r == nil || r.Method != http.MethodHead {
+		_, _ = w.Write(buf.Bytes())
+	}
+}
+
+func writeIndeterminateUpgradeEntryError(w http.ResponseWriter, r *http.Request) {
+	writeIndeterminateUpgradeJSON(w, r, map[string]any{
+		"contract_version": upgradeauth.Contract,
+		"error":            map[string]string{"code": "source_unavailable"},
+	})
+}
+
+func writeIndeterminateUpgradeWizardError(w http.ResponseWriter, r *http.Request) {
+	writeIndeterminateUpgradeJSON(w, r, map[string]any{
+		"contractVersion": upgradewizard.Contract,
+		"code":            "upgrade_store_unavailable",
+		"error":           map[string]string{"code": "upgrade_store_unavailable"},
 	})
 }
 
@@ -606,6 +824,7 @@ func (h *startupHTTPHandler) BeginWritableStartup() {
 	h.readOnlyDiscovery = nil
 	h.upgradeAuth = nil
 	h.upgradeWizard = nil
+	h.workerAdmission = nil
 	h.upgradeArtifact = nil
 }
 

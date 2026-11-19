@@ -84,7 +84,7 @@ func TestCPAImportCommandRefusesWhileTheStoreIsLocked(t *testing.T) {
 	stderr := &bytes.Buffer{}
 	err = Run(context.Background(), []string{
 		"cpa-import",
-		"--legacy", filepath.Join(targetRoot, "legacy"),
+		"--legacy", filepath.Join(t.TempDir(), "legacy"),
 		"--plugins", "true",
 		"--target", targetRoot,
 		"--destination-url", "http://127.0.0.1:8317",

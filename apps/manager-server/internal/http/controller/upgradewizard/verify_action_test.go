@@ -82,13 +82,22 @@ func recordCompletedOperation(t *testing.T, database string, domains ...string) 
 	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
 		t.Fatalf("record the fixture position: %v", err)
 	}
-	for _, domain := range []string{model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig} {
+	for _, domain := range []string{model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig, model.UpgradeDomainRetainedProjection} {
 		if _, err := repository.Advance(ctx, domain, model.UpgradeStageVerify); err != nil {
 			t.Fatalf("record the fixture domain %q: %v", domain, err)
 		}
 	}
 	verification := actionVerification(domains...)
-	// A completed verdict rests on a credential: the fixture seals the one the
+	hasRetained := false
+	for _, d := range verification.Domains {
+		if d == model.UpgradeDomainRetainedProjection {
+			hasRetained = true
+			break
+		}
+	}
+	if !hasRetained {
+		verification.Domains = append(verification.Domains, model.UpgradeDomainRetainedProjection)
+	}
 	// connect step proves and stores the same one in the Manager's own connection,
 	// which is the record a real completed operation leaves. Both writes happen
 	// before the completion transaction, which holds the write lock.
@@ -118,6 +127,30 @@ func recordCompletedOperation(t *testing.T, database string, domains ...string) 
 		ObservedAtMS:  verification.BindingObservedAtMS,
 	}); err != nil {
 		t.Fatalf("record the fixture binding: %v", err)
+	}
+	reconcileEvidence, err := json.Marshal(upgradeservice.ReconcileEvidence{
+		SourceFingerprint: verification.SourceFingerprint,
+		Domains: []upgradeservice.ReconcileDomainReport{
+			{
+				Domain:       upgradeservice.ReconcileDomainRetained,
+				Table:        "usage_events",
+				Applicable:   true,
+				SourceDays:   1,
+				ComparedDays: 1,
+				Mismatches:   []upgradeservice.ReconcileMismatch{},
+			},
+		},
+		ParityGapDays:      []string{},
+		MismatchDays:       []string{},
+		AcknowledgedDays:   []string{},
+		UnacknowledgedDays: []string{},
+		IncompleteDays:     []upgradeservice.ReconcileMarkedDay{},
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture reconciliation: %v", err)
+	}
+	if err := upgradeoperation.RecordReconciliationTx(ctx, tx, reconcileEvidence); err != nil {
+		t.Fatalf("record the fixture reconciliation: %v", err)
 	}
 	if _, err := upgradeoperation.RecordRoutingTx(ctx, tx, "/test-control", "", false, "", ""); err != nil {
 		t.Fatalf("record the fixture routing: %v", err)
@@ -334,9 +367,18 @@ func TestVerifyActionReportsTheRecordedVerdict(t *testing.T) {
 // wire and free of the record: the page reads a code, never a path or a digest.
 func TestVerifyActionReportsATypedRefusal(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	cleanReconcile := json.RawMessage(`{"sourceFingerprint":"fingerprint-after-secret-value","domains":[{"domain":"retained","table":"usage_events","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"pricing","table":"usage_pricing_hourly_rollups_v1","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"coverage","table":"usage_archive_deleted_coverage_daily","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"history","table":"usage_monitoring_account_daily_rollups_v1","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]}],"parityGapDays":[],"mismatchDays":[],"acknowledgedDays":[],"unacknowledgedDays":[],"incompleteDays":[],"newlyMarkedDays":0}`)
 	recordOperation(t, database, model.UpgradeOperation{
-		Stage:       model.UpgradeStageCPAImport,
-		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing},
+		Stage: model.UpgradeStageCPAImport,
+		DomainsDone: []string{
+			model.UpgradeDomainSourceCopy,
+			model.UpgradeDomainRetainedProjection,
+			model.UpgradeDomainPricing,
+			model.UpgradeDomainCoverage,
+			model.UpgradeDomainCPAConfig,
+			model.UpgradeDomainIdentity,
+		},
+		Reconciliation: cleanReconcile,
 	})
 	before := readRecordedOperation(t, database)
 
@@ -371,9 +413,18 @@ func TestVerifyActionReportsATypedRefusal(t *testing.T) {
 // row is untouched.
 func TestVerifyActionHoldsTheStoreFence(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	cleanReconcile := json.RawMessage(`{"sourceFingerprint":"fingerprint-after-secret-value","domains":[{"domain":"retained","table":"usage_events","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"pricing","table":"usage_pricing_hourly_rollups_v1","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"coverage","table":"usage_archive_deleted_coverage_daily","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]},{"domain":"history","table":"usage_monitoring_account_daily_rollups_v1","applicable":true,"sourceDays":0,"comparedDays":0,"mismatches":[]}],"parityGapDays":[],"mismatchDays":[],"acknowledgedDays":[],"unacknowledgedDays":[],"incompleteDays":[],"newlyMarkedDays":0}`)
 	recordOperation(t, database, model.UpgradeOperation{
-		Stage:       model.UpgradeStageCPAImport,
-		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		Stage: model.UpgradeStageCPAImport,
+		DomainsDone: []string{
+			model.UpgradeDomainSourceCopy,
+			model.UpgradeDomainRetainedProjection,
+			model.UpgradeDomainPricing,
+			model.UpgradeDomainCoverage,
+			model.UpgradeDomainCPAConfig,
+			model.UpgradeDomainIdentity,
+		},
+		Reconciliation: cleanReconcile,
 	})
 	before := readRecordedOperation(t, database)
 	held, err := processlock.Acquire(database)
