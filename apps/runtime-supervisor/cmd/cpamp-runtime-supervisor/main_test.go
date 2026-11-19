@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -202,6 +204,10 @@ func TestPrepareUpdateTransportBudgetIsDedicatedAndOrdered(t *testing.T) {
 		t.Fatalf("prepare response budget = %s, execution=%s persistence=%s release=%s", prepareUpdateResponseTimeout,
 			lifecycle.PrepareUpdateExecutionTimeout, lifecycle.PrepareUpdateTerminalPersistenceTimeout, runtimeupdate.ReleaseClientTimeout)
 	}
+	if prepareUpdateUploadReadTimeout <= server.ReadTimeout || prepareUpdateUploadReadTimeout >= prepareUpdateResponseTimeout {
+		t.Fatalf("upload read budget=%s ordinary read=%s prepare response=%s",
+			prepareUpdateUploadReadTimeout, server.ReadTimeout, prepareUpdateResponseTimeout)
+	}
 	if activateUpdateResponseTimeout <= lifecycle.ActivationExecutionTimeout+
 		lifecycle.ActivationTerminalPersistenceTimeout ||
 		lifecycle.ActivationCandidateReadinessTimeout+lifecycle.ActivationRollbackReadinessTimeout >=
@@ -211,45 +217,642 @@ func TestPrepareUpdateTransportBudgetIsDedicatedAndOrdered(t *testing.T) {
 			lifecycle.ActivationTerminalPersistenceTimeout, lifecycle.ActivationCandidateReadinessTimeout,
 			lifecycle.ActivationRollbackReadinessTimeout)
 	}
+	const managerArtifactUploadTimeout = 15 * time.Minute
+	if uploadArtifactBudgetTimeout <= server.ReadTimeout ||
+		uploadArtifactBudgetTimeout != lifecycle.AcquireArtifactExecutionTimeout ||
+		uploadArtifactWriteBudgetTimeout <= uploadArtifactBudgetTimeout ||
+		uploadArtifactWriteBudgetTimeout <= lifecycle.AcquireArtifactExecutionTimeout ||
+		uploadArtifactWriteBudgetTimeout >= managerArtifactUploadTimeout {
+		t.Fatalf("artifact upload budgets read=%s exec=%s write=%s manager=%s",
+			uploadArtifactBudgetTimeout, lifecycle.AcquireArtifactExecutionTimeout,
+			uploadArtifactWriteBudgetTimeout, managerArtifactUploadTimeout)
+	}
 }
 
-func TestPrepareUpdateResponseDeadlineIsRouteSpecific(t *testing.T) {
+const testActiveArtifactID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func testPrepareUploadQuery(operationID string) string {
+	return "operationId=" + operationID +
+		"&expectedRuntimeIdentity=runtime-01" +
+		"&expectedRuntimeGeneration=7" +
+		"&expectedActiveArtifactId=" + testActiveArtifactID +
+		"&targetVersion=7.3.3"
+}
+
+type startExecutorFunc func(context.Context, lifecycle.StartRequest) (journal.Operation, error)
+
+func (fn startExecutorFunc) Start(ctx context.Context, req lifecycle.StartRequest) (journal.Operation, error) {
+	return fn(ctx, req)
+}
+
+type prepareExecutorFunc func(context.Context, lifecycle.PrepareUpdateRequest) (journal.Operation, error)
+
+func (fn prepareExecutorFunc) PrepareUpdate(ctx context.Context, req lifecycle.PrepareUpdateRequest) (journal.Operation, error) {
+	return fn(ctx, req)
+}
+
+type activateExecutorFunc func(context.Context, lifecycle.ActivateUpdateRequest) (journal.Operation, error)
+
+func (fn activateExecutorFunc) ActivateUpdate(ctx context.Context, req lifecycle.ActivateUpdateRequest) (journal.Operation, error) {
+	return fn(ctx, req)
+}
+
+type uploadExecutorFunc func(context.Context, lifecycle.PrepareUpdateUploadRequest) (journal.Operation, error)
+
+func (fn uploadExecutorFunc) PrepareUpdateUpload(ctx context.Context, req lifecycle.PrepareUpdateUploadRequest) (journal.Operation, error) {
+	return fn(ctx, req)
+}
+
+func TestUpdateTransportDeadlinesAreRouteSpecific(t *testing.T) {
+	const (
+		preparePath      = "/v1/runtime/operations/prepare-update"
+		activatePath     = "/v1/runtime/operations/activate-update"
+		validStartBody   = `{"operationId":"op-start","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7}`
+		validPrepareBody = `{"operationId":"op-prep","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7,"expectedActiveArtifactId":"` + testActiveArtifactID + `","targetVersion":"7.3.3"}`
+		validActBody     = `{"operationId":"op-act","expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":7,"expectedActiveArtifactId":"` + testActiveArtifactID + `","targetVersion":"7.3.3"}`
+	)
+
+	protocolHandler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   "runtime-01",
+		RuntimeGeneration: 7,
+		Token:             "runtime-token",
+		Start: startExecutorFunc(func(_ context.Context, req lifecycle.StartRequest) (journal.Operation, error) {
+			return journal.Operation{
+				OperationID:       req.OperationID,
+				OperationType:     "start",
+				RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+				RuntimeGeneration: req.ExpectedRuntimeGeneration,
+				State:             journal.StateSucceeded,
+			}, nil
+		}),
+		PrepareUpdate: prepareExecutorFunc(func(_ context.Context, req lifecycle.PrepareUpdateRequest) (journal.Operation, error) {
+			return journal.Operation{
+				OperationID:       req.OperationID,
+				OperationType:     "prepare_update",
+				RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+				RuntimeGeneration: req.ExpectedRuntimeGeneration,
+				State:             journal.StateSucceeded,
+			}, nil
+		}),
+		ActivateUpdate: activateExecutorFunc(func(_ context.Context, req lifecycle.ActivateUpdateRequest) (journal.Operation, error) {
+			return journal.Operation{
+				OperationID:       req.OperationID,
+				OperationType:     "activate_update",
+				RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+				RuntimeGeneration: req.ExpectedRuntimeGeneration,
+				State:             journal.StateSucceeded,
+			}, nil
+		}),
+		PrepareUpdateUpload: uploadExecutorFunc(func(_ context.Context, req lifecycle.PrepareUpdateUploadRequest) (journal.Operation, error) {
+			if req.OperationID == "op-replay" {
+				return journal.Operation{
+					OperationID:       req.OperationID,
+					RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+					RuntimeGeneration: req.ExpectedRuntimeGeneration,
+					State:             journal.StateSucceeded,
+				}, nil
+			}
+			if _, err := io.ReadAll(req.Archive); err != nil {
+				return journal.Operation{}, err
+			}
+			return journal.Operation{
+				OperationID:       req.OperationID,
+				RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+				RuntimeGeneration: req.ExpectedRuntimeGeneration,
+				State:             journal.StateSucceeded,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, test := range []struct {
-		name      string
-		path      string
-		deadlines int
+		name, method, path, auth, body string
+		wantStatus                     int
+		write                          time.Duration
 	}{
-		{name: "ordinary lifecycle", path: "/v1/runtime/operations/start"},
-		{name: "prepare update", path: prepareUpdateResponsePath, deadlines: 2},
-		{name: "activate update", path: activateUpdateResponsePath, deadlines: 2},
+		{name: "ordinary lifecycle", method: http.MethodPost, path: "/v1/runtime/operations/start", auth: "Bearer runtime-token", body: validStartBody, wantStatus: http.StatusOK},
+		{name: "prepare update missing auth", method: http.MethodPost, path: preparePath, body: validPrepareBody, wantStatus: http.StatusUnauthorized},
+		{name: "prepare update wrong bearer token", method: http.MethodPost, path: preparePath, auth: "Bearer wrong-token", body: validPrepareBody, wantStatus: http.StatusUnauthorized},
+		{name: "prepare update invalid body", method: http.MethodPost, path: preparePath, auth: "Bearer runtime-token", body: `{}`, wantStatus: http.StatusBadRequest},
+		{name: "prepare update authenticated", method: http.MethodPost, path: preparePath, auth: "Bearer runtime-token", body: validPrepareBody, wantStatus: http.StatusOK, write: prepareUpdateResponseTimeout},
+		{name: "activate update missing auth", method: http.MethodPost, path: activatePath, body: validActBody, wantStatus: http.StatusUnauthorized},
+		{name: "activate update wrong bearer token", method: http.MethodPost, path: activatePath, auth: "Bearer wrong-token", body: validActBody, wantStatus: http.StatusUnauthorized},
+		{name: "activate update invalid body", method: http.MethodPost, path: activatePath, auth: "Bearer runtime-token", body: `{}`, wantStatus: http.StatusBadRequest},
+		{name: "activate update authenticated", method: http.MethodPost, path: activatePath, auth: "Bearer runtime-token", body: validActBody, wantStatus: http.StatusOK, write: activateUpdateResponseTimeout},
+		{name: "upload wrong method", method: http.MethodGet, path: protocol.PrepareUpdateUploadPath, auth: "Bearer runtime-token", wantStatus: http.StatusMethodNotAllowed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
-			handler := withPrepareUpdateResponseBudget(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusNoContent)
-			}))
-			request := httptest.NewRequest(http.MethodPost, test.path, nil)
-			handler.ServeHTTP(writer, request)
-			if len(writer.deadlines) != test.deadlines {
-				t.Fatalf("write deadlines = %d, want %d", len(writer.deadlines), test.deadlines)
+			var bodyReader io.Reader
+			if test.body != "" {
+				bodyReader = strings.NewReader(test.body)
 			}
-			if test.path == prepareUpdateResponsePath && !writer.deadlines[0].After(time.Now().Add(11*time.Minute)) {
-				t.Fatalf("prepare deadline = %s, want route budget near %s", writer.deadlines[0], prepareUpdateResponseTimeout)
+			request := httptest.NewRequest(test.method, test.path, bodyReader)
+			if test.auth != "" {
+				request.Header.Set("Authorization", test.auth)
 			}
-			if test.path == activateUpdateResponsePath && !writer.deadlines[0].After(time.Now().Add(2*time.Minute)) {
-				t.Fatalf("activate deadline = %s, want route budget near %s", writer.deadlines[0], activateUpdateResponseTimeout)
+			before := time.Now()
+			protocolHandler.ServeHTTP(writer, request)
+			after := time.Now()
+			if writer.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%s)", writer.Code, test.wantStatus, writer.Body.String())
+			}
+			if test.wantStatus == http.StatusUnauthorized && test.body != "" {
+				if len(writer.reads) != 1 || writer.reads[0].IsZero() || writer.reads[0].After(after.Add(time.Second)) {
+					t.Fatalf("expected immediate read deadline expiration on unconsumed body, got %v", writer.reads)
+				}
+			} else if len(writer.reads) != 0 {
+				t.Fatalf("unexpected read deadline changes: %v", writer.reads)
+			}
+			if test.write == 0 {
+				if len(writer.writes) != 0 {
+					t.Fatalf("unexpected write deadline changes: %v", writer.writes)
+				}
+			} else {
+				if len(writer.writes) != 1 || writer.writes[0].Before(before.Add(test.write)) || writer.writes[0].After(after.Add(test.write)) {
+					t.Fatalf("write deadlines = %v, want single active budget %s", writer.writes, test.write)
+				}
 			}
 		})
 	}
+
+	validUploadPath := protocol.PrepareUpdateUploadPath + "?" + testPrepareUploadQuery("op-upload-1")
+
+	for _, rejected := range []struct {
+		name        string
+		path        string
+		token       string
+		contentType string
+		length      int64
+		noBody      bool
+		wantStatus  int
+	}{
+		{name: "missing bearer token", path: validUploadPath, length: 4, wantStatus: http.StatusUnauthorized},
+		{name: "wrong bearer token", path: validUploadPath, token: "wrong-token", length: 4, wantStatus: http.StatusUnauthorized},
+		{name: "invalid query", path: protocol.PrepareUpdateUploadPath + "?operationId=only", token: "runtime-token", length: 4, wantStatus: http.StatusBadRequest},
+		{name: "invalid content type", path: validUploadPath, token: "runtime-token", contentType: "application/json", length: 4, wantStatus: http.StatusBadRequest},
+		{name: "zero content length", path: validUploadPath, token: "runtime-token", contentType: "application/octet-stream", length: 0, wantStatus: http.StatusBadRequest},
+		{name: "negative content length below -1", path: validUploadPath, token: "runtime-token", contentType: "application/octet-stream", length: -2, wantStatus: http.StatusBadRequest},
+		{name: "http.NoBody with unknown length", path: validUploadPath, token: "runtime-token", contentType: "application/octet-stream", length: -1, noBody: true, wantStatus: http.StatusBadRequest},
+		{name: "oversize content length", path: validUploadPath, token: "runtime-token", contentType: "application/octet-stream", length: runtimeupdate.MaxAcquisitionArchiveBytes + 1, wantStatus: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run("rejected before budget/"+rejected.name, func(t *testing.T) {
+			writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+			var req *http.Request
+			if rejected.noBody {
+				req = httptest.NewRequest(http.MethodPost, rejected.path, nil)
+			} else {
+				req = httptest.NewRequest(http.MethodPost, rejected.path, strings.NewReader("data"))
+			}
+			req.ContentLength = rejected.length
+			if rejected.token != "" {
+				req.Header.Set("Authorization", "Bearer "+rejected.token)
+			}
+			if rejected.contentType != "" {
+				req.Header.Set("Content-Type", rejected.contentType)
+			}
+			protocolHandler.ServeHTTP(writer, req)
+			after := time.Now()
+			if writer.Code != rejected.wantStatus {
+				t.Fatalf("status = %d, want %d", writer.Code, rejected.wantStatus)
+			}
+			if len(writer.writes) != 0 {
+				t.Fatalf("unexpected write deadline changes on rejected upload: writes=%v", writer.writes)
+			}
+			if !rejected.noBody {
+				if got := writer.Header().Get("Connection"); got != "close" {
+					t.Fatalf("Connection header = %q, want close for unconsumed body", got)
+				}
+				if len(writer.reads) != 1 || writer.reads[0].IsZero() || writer.reads[0].After(after.Add(time.Second)) {
+					t.Fatalf("expected immediate read deadline expiration on rejected upload, got %v", writer.reads)
+				}
+			} else if len(writer.reads) != 0 {
+				t.Fatalf("unexpected read deadline changes on NoBody upload: reads=%v", writer.reads)
+			}
+		})
+	}
+
+	t.Run("authenticated valid upload keeps write deadline active and restores read deadline on EOF", func(t *testing.T) {
+		writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+		req := httptest.NewRequest(http.MethodPost, validUploadPath, strings.NewReader("ab"))
+		req.Header.Set("Authorization", "Bearer runtime-token")
+		req.Header.Set("Content-Type", "application/octet-stream")
+		before := time.Now()
+		protocolHandler.ServeHTTP(writer, req)
+		after := time.Now()
+		if writer.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", writer.Code, writer.Body.String())
+		}
+		if len(writer.reads) != 2 || len(writer.writes) != 1 {
+			t.Fatalf("deadline transitions reads=%v writes=%v, want [budget, zero] for read and [budget] for write", writer.reads, writer.writes)
+		}
+		if writer.reads[0].Before(before.Add(prepareUpdateUploadReadTimeout)) || writer.reads[0].After(after.Add(prepareUpdateUploadReadTimeout)) {
+			t.Fatalf("upload read deadline = %s, want budget %s", writer.reads[0], prepareUpdateUploadReadTimeout)
+		}
+		if writer.writes[0].Before(before.Add(prepareUpdateResponseTimeout)) || writer.writes[0].After(after.Add(prepareUpdateResponseTimeout)) {
+			t.Fatalf("upload write deadline = %s, want budget %s", writer.writes[0], prepareUpdateResponseTimeout)
+		}
+		if !writer.reads[1].IsZero() {
+			t.Fatalf("restored read deadline = %v, want zero time after EOF", writer.reads[1])
+		}
+		if got := writer.Header().Get("Connection"); got != "" {
+			t.Fatalf("Connection header = %q, want empty after full body consumption", got)
+		}
+	})
+
+	t.Run("authenticated unconsumed upload expires read deadline immediately", func(t *testing.T) {
+		writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+		replayPath := protocol.PrepareUpdateUploadPath + "?" + testPrepareUploadQuery("op-replay")
+		req := httptest.NewRequest(http.MethodPost, replayPath, strings.NewReader("unconsumed"))
+		req.Header.Set("Authorization", "Bearer runtime-token")
+		req.Header.Set("Content-Type", "application/octet-stream")
+		before := time.Now()
+		protocolHandler.ServeHTTP(writer, req)
+		after := time.Now()
+		if writer.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", writer.Code, writer.Body.String())
+		}
+		if len(writer.reads) != 2 || len(writer.writes) != 1 {
+			t.Fatalf("deadline transitions reads=%v writes=%v, want 2 reads and 1 active write", writer.reads, writer.writes)
+		}
+		if writer.reads[1].IsZero() || writer.reads[1].Before(before) || writer.reads[1].After(after) {
+			t.Fatalf("unconsumed final read deadline = %v, want immediate expiration in [%v, %v]", writer.reads[1], before, after)
+		}
+		if got := writer.Header().Get("Connection"); got != "close" {
+			t.Fatalf("Connection header = %q, want close for unconsumed body", got)
+		}
+	})
+}
+
+func TestPrepareUpdateUploadSurvivesOrdinaryServerTimeouts(t *testing.T) {
+	const ordinaryTimeout = 50 * time.Millisecond
+	firstByteRead := make(chan struct{})
+	protocolHandler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   "runtime-01",
+		RuntimeGeneration: 7,
+		Token:             "runtime-token",
+		PrepareUpdateUpload: uploadExecutorFunc(func(_ context.Context, req lifecycle.PrepareUpdateUploadRequest) (journal.Operation, error) {
+			var first [1]byte
+			if _, err := io.ReadFull(req.Archive, first[:]); err != nil {
+				return journal.Operation{}, err
+			}
+			close(firstByteRead)
+			rest, err := io.ReadAll(req.Archive)
+			if err != nil {
+				return journal.Operation{}, err
+			}
+			if string(first[:])+string(rest) != "ab" {
+				return journal.Operation{}, lifecycle.ErrInvalidRequest
+			}
+			return journal.Operation{
+				OperationID:       req.OperationID,
+				RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+				RuntimeGeneration: req.ExpectedRuntimeGeneration,
+				State:             journal.StateSucceeded,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(nil)
+	server.Config = newHTTPServer(protocolHandler)
+	server.Config.ReadTimeout = ordinaryTimeout
+	server.Config.WriteTimeout = ordinaryTimeout
+	server.Start()
+	defer server.Close()
+
+	conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	target := protocol.PrepareUpdateUploadPath + "?" + testPrepareUploadQuery("op-slow-upload")
+	if _, err := fmt.Fprintf(
+		conn,
+		"POST %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Type: application/octet-stream\r\nContent-Length: 2\r\nConnection: close\r\n\r\na",
+		target,
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstByteRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("authenticated upload did not reach executor")
+	}
+	// Both ordinary server deadlines expire before the client finishes streaming its archive.
+	time.Sleep(3 * ordinaryTimeout)
+	if _, err := io.WriteString(conn, "b"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read delayed upload response: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"state":"succeeded"`) {
+		t.Fatalf("delayed upload = %d, %q, %v", response.StatusCode, body, err)
+	}
+}
+
+func TestPrepareUpdateStalledUnconsumedBodiesClosePromptly(t *testing.T) {
+	protocolHandler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   "runtime-01",
+		RuntimeGeneration: 7,
+		Token:             "runtime-token",
+		PrepareUpdateUpload: uploadExecutorFunc(func(_ context.Context, req lifecycle.PrepareUpdateUploadRequest) (journal.Operation, error) {
+			switch req.OperationID {
+			case "op-conflict", "op-conflict-chunked":
+				return journal.Operation{}, journal.ErrOperationIDConflict
+			case "op-replay", "op-replay-chunked":
+				return journal.Operation{
+					OperationID:       req.OperationID,
+					RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+					RuntimeGeneration: req.ExpectedRuntimeGeneration,
+					State:             journal.StateSucceeded,
+				}, nil
+			case "op-stream-err", "op-stream-err-chunked":
+				var one [1]byte
+				_, _ = req.Archive.Read(one[:])
+				return journal.Operation{
+					OperationID:       req.OperationID,
+					RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+					RuntimeGeneration: req.ExpectedRuntimeGeneration,
+					State:             journal.StateFailed,
+					FailureCode:       "download_failed",
+				}, nil
+			default:
+				return journal.Operation{}, lifecycle.ErrInvalidRequest
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newHTTPServer(protocolHandler)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+	var serverStopped bool
+	t.Cleanup(func() {
+		if !serverStopped {
+			_ = server.Close()
+			<-serveDone
+		}
+	})
+
+	for _, tc := range []struct {
+		name           string
+		rawRequest     string
+		wantStatus     int
+		keepSocketOpen bool
+	}{
+		{
+			name: "unauthenticated stalled upload",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n\r\na",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-unauth"),
+			),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "sync invalid content-type stalled upload",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Type: text/plain\r\nContent-Length: 4096\r\n\r\na",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-bad-ct"),
+			),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "sync oversize content-length stalled upload",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Length: %d\r\n\r\na",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-oversize"),
+				runtimeupdate.MaxAcquisitionArchiveBytes+1,
+			),
+			wantStatus:     http.StatusRequestEntityTooLarge,
+			keepSocketOpen: true,
+		},
+		{
+			name: "precondition 409 conflict stalled Content-Length<=256KiB open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Length: 4096\r\n\r\na",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-conflict"),
+			),
+			wantStatus:     http.StatusConflict,
+			keepSocketOpen: true,
+		},
+		{
+			name: "precondition 409 conflict stalled chunked open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-conflict-chunked"),
+			),
+			wantStatus:     http.StatusConflict,
+			keepSocketOpen: true,
+		},
+		{
+			name: "idempotent 200 replay stalled Content-Length<=256KiB open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Length: 4096\r\n\r\na",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-replay"),
+			),
+			wantStatus:     http.StatusOK,
+			keepSocketOpen: true,
+		},
+		{
+			name: "idempotent 200 replay stalled chunked open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-replay-chunked"),
+			),
+			wantStatus:     http.StatusOK,
+			keepSocketOpen: true,
+		},
+		{
+			name: "partial read stream error stalled Content-Length<=256KiB open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Length: 4096\r\n\r\nabcd",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-stream-err"),
+			),
+			wantStatus:     http.StatusOK,
+			keepSocketOpen: true,
+		},
+		{
+			name: "partial read stream error stalled chunked open socket",
+			rawRequest: fmt.Sprintf(
+				"POST %s?%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n",
+				protocol.PrepareUpdateUploadPath,
+				testPrepareUploadQuery("op-stream-err-chunked"),
+			),
+			wantStatus:     http.StatusOK,
+			keepSocketOpen: true,
+		},
+		{
+			name:       "unauthenticated non-upload prepare stalled body",
+			rawRequest: "POST /v1/runtime/operations/prepare-update HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{",
+			wantStatus: http.StatusUnauthorized,
+		},
+	} {
+		parentT := t
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.keepSocketOpen {
+				// Keep client socket open past server.Shutdown to prove net/http aborted its 256 KiB post-handler drain.
+				parentT.Cleanup(func() { _ = conn.Close() })
+			} else {
+				defer conn.Close()
+			}
+			if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(conn, tc.rawRequest); err != nil {
+				t.Fatal(err)
+			}
+			br := bufio.NewReader(conn)
+			resp, err := http.ReadResponse(br, nil)
+			if err != nil {
+				t.Fatalf("ReadResponse() error = %v", err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			elapsed := time.Since(start)
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if !resp.Close && !strings.EqualFold(resp.Header.Get("Connection"), "close") {
+				t.Fatalf("response did not close unconsumed connection: Close=%v Connection=%q", resp.Close, resp.Header.Get("Connection"))
+			}
+			if elapsed >= time.Second {
+				t.Fatalf("stalled body delayed response for %s; want < 1s", elapsed)
+			}
+			if tc.keepSocketOpen {
+				var extra [1]byte
+				if _, eofErr := br.Read(extra[:]); !errors.Is(eofErr, io.EOF) {
+					t.Fatalf("server kept unconsumed connection open instead of aborting 256 KiB drain: err = %v", eofErr)
+				}
+			}
+		})
+	}
+
+	shutdownStart := time.Now()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("server.Shutdown() with client sockets still open error = %v", err)
+	}
+	serverStopped = true
+	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("server.Serve() error = %v", err)
+	}
+	if shutdownElapsed := time.Since(shutdownStart); shutdownElapsed >= time.Second {
+		t.Fatalf("server.Shutdown() took %s; want < 1s", shutdownElapsed)
+	}
+}
+
+func TestArtifactStatusRouteDoesNotBlockOnSlowCDNLookup(t *testing.T) {
+	lookupEntered := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() {
+		select {
+		case <-releaseLookup:
+		default:
+			close(releaseLookup)
+		}
+	})
+
+	h := newRouteTestHarness(
+		t,
+		lifecycle.WithAcquisitionCDNAddrPolicy(nil),
+		lifecycle.WithAcquisitionCDNLookupIP(func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				once.Do(func() { close(lookupEntered) })
+				select {
+				case <-releaseLookup:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+		}),
+	)
+
+	acquireReq := httptest.NewRequest(http.MethodPost, artifactAcquirePath, strings.NewReader(`{"source":"cdn","cdnPrefix":"https://cdn.example.com/mirror"}`))
+	acquireReq.Header.Set("Authorization", "Bearer runtime-token")
+	acquireReq.Header.Set("Content-Type", "application/json")
+	acquireRec := httptest.NewRecorder()
+	h.handler.ServeHTTP(acquireRec, acquireReq)
+	if acquireRec.Code != http.StatusAccepted {
+		t.Fatalf("POST %s = %d (%s), want 202", artifactAcquirePath, acquireRec.Code, acquireRec.Body.String())
+	}
+
+	select {
+	case <-lookupEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CDN acquire did not reach api.github.com lookup")
+	}
+
+	statusDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		statusReq := httptest.NewRequest(http.MethodGet, artifactStatusPath, nil)
+		statusReq.Header.Set("Authorization", "Bearer runtime-token")
+		rec := httptest.NewRecorder()
+		h.handler.ServeHTTP(rec, statusReq)
+		statusDone <- rec
+	}()
+
+	select {
+	case rec := <-statusDone:
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d (%s), want 200", artifactStatusPath, rec.Code, rec.Body.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("GET /v1/runtime/artifact blocked on slow cdnLookupIP")
+	}
+	close(releaseLookup)
 }
 
 type deadlineResponseWriter struct {
 	*httptest.ResponseRecorder
-	deadlines []time.Time
+	read, write   time.Time
+	reads, writes []time.Time
 }
 
 func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
-	w.deadlines = append(w.deadlines, deadline)
+	w.write = deadline
+	w.writes = append(w.writes, deadline)
+	return nil
+}
+
+func (w *deadlineResponseWriter) SetReadDeadline(deadline time.Time) error {
+	w.read = deadline
+	w.reads = append(w.reads, deadline)
 	return nil
 }
 

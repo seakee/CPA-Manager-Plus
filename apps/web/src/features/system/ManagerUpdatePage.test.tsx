@@ -75,6 +75,8 @@ beforeEach(() => {
     intent: null,
     recoveryRecord: null,
     stage: 'idle',
+    recoveredSession: false,
+    prepareProgress: null,
     initialized: true,
     busy: false,
     storageError: null,
@@ -88,6 +90,7 @@ beforeEach(() => {
     refresh: vi.fn(),
     check: vi.fn(),
     prepare: vi.fn(),
+    prepareUpload: vi.fn(),
     activate: vi.fn(),
     retry: vi.fn(),
     forget: vi.fn(),
@@ -352,6 +355,37 @@ describe('ManagerUpdatePage', () => {
     expect(content).toContain('v1.12.10');
   });
 
+  it('avoids claiming stale cache when a check fails before any cached release exists', async () => {
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      state: 'never_checked',
+      target: undefined,
+      last_success_at: '0001-01-01T00:00:00Z',
+      last_error: 'update source returned HTTP 404',
+    };
+    await renderPage();
+    const content = text(renderer!.root);
+    expect(content).toContain('manager_updates.check_failed_no_cache');
+    expect(content).toContain('manager_updates.check_failed_hint');
+    expect(content).toContain('update source returned HTTP 404');
+    expect(content).not.toContain('manager_updates.failed');
+  });
+  it('explains unknown running version cleanly without blaming network when backend reports unknown running version', async () => {
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      current_version: 'dev',
+      state: 'unknown_version',
+      target: undefined,
+      last_success_at: '0001-01-01T00:00:00Z',
+      last_error: 'unknown running version',
+    };
+    await renderPage();
+    const content = text(renderer!.root);
+    expect(content).toContain('manager_updates.unknown_version');
+    expect(content).toContain('manager_updates.unknown_version_hint');
+    expect(content).not.toContain('manager_updates.check_failed_no_cache');
+    expect(content).not.toContain('manager_updates.check_failed_hint');
+  });
   it('shows loading and then an unavailable state without actionable update controls', async () => {
     mocks.updates.status = null;
     await renderPage();
@@ -362,5 +396,87 @@ describe('ManagerUpdatePage', () => {
     expect(button('manager_updates.check_now').props.disabled).toBe(true);
     expect(renderer!.root.findAllByType('details')).toHaveLength(0);
     expect(renderer!.root.findAllByType('code')).toHaveLength(0);
+  });
+
+  it('generates editable Docker Compose and Docker CLI commands and resets copy status timer', async () => {
+    vi.useFakeTimers();
+    try {
+      await renderPage();
+      await act(async () => {
+        button('manager_updates.show_steps').props.onClick();
+      });
+      expect(text(renderer!.root)).toContain(
+        'docker compose pull cpa-manager-plus && docker compose up -d cpa-manager-plus'
+      );
+      const targetInput = renderer!.root.findByProps({ id: 'manager-docker-target' });
+      await act(async () => {
+        targetInput.props.onChange({ target: { value: 'cpamp-prod' } });
+      });
+      expect(text(renderer!.root)).toContain(
+        'docker compose pull cpamp-prod && docker compose up -d cpamp-prod'
+      );
+      await act(async () => {
+        button('manager_updates.copy_command').props.onClick();
+      });
+      expect(mocks.copy).toHaveBeenCalledWith(
+        'docker compose pull cpamp-prod && docker compose up -d cpamp-prod'
+      );
+      expect(text(renderer!.root.findByProps({ role: 'status' }))).toBe('manager_updates.copied');
+      await act(async () => {
+        vi.advanceTimersByTime(1800);
+      });
+      expect(renderer!.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+      await act(async () => {
+        renderer!.root.findByProps({ id: 'manager-docker-mode-run' }).props.onClick({});
+      });
+      expect(text(renderer!.root)).toContain('docker pull seakee/cpa-manager-plus:v1.12.11');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders native asset selector, direct download URL, terminal command, and release notes', async () => {
+    const target = release('v1.12.11');
+    target.content.notes = { en: 'Fixes gateway routing.' };
+    target.distribution.native.assets = [
+      'cpa-manager-plus_v1.12.11_linux_amd64.tar.gz',
+      'cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz',
+    ];
+    mocks.updates.status = { ...mocks.updates.status!, target };
+    await renderPage();
+    expect(text(renderer!.root)).toContain('manager_updates.notes_toggle');
+    expect(text(renderer!.root)).toContain('Fixes gateway routing.');
+    await act(async () => {
+      button('manager_updates.show_steps').props.onClick();
+    });
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'manager-deployment-native' }).props.onClick({});
+    });
+    const assetSelect = renderer!.root.findByProps({ id: 'manager-native-asset' });
+    await act(async () => {
+      assetSelect.props.onChange('cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz');
+    });
+    const directLink = renderer!.root.find(
+      (node) =>
+        node.type === 'a' &&
+        typeof node.props.href === 'string' &&
+        node.props.href.includes('releases/download/v1.12.11/cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz')
+    );
+    expect(directLink).toBeDefined();
+    expect(text(renderer!.root)).toContain(
+      'curl -fLO https://github.com/seakee/CPA-Manager-Plus/releases/download/v1.12.11/cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz && tar -xzf cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz'
+    );
+  });
+
+  it('shows badge_ahead pill instead of badge_pending when ahead_of_channel', async () => {
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      state: 'ahead_of_channel',
+      target: undefined,
+    };
+    await renderPage();
+    const content = text(renderer!.root);
+    expect(content).toContain('manager_updates.badge_ahead');
+    expect(content).not.toContain('manager_updates.badge_pending');
   });
 });

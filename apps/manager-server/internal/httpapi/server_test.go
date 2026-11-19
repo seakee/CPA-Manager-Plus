@@ -1121,6 +1121,41 @@ func TestManagerConfigSwitchWritePreservesUntouchedFields(t *testing.T) {
 		t.Fatalf("narrow write accepted a whole document: %d %s", rr.Code, rr.Body.String())
 	}
 
+	// Nested collector.enabled and mixed collector+retention bodies are also
+	// refused; a partial collector patch leaves omitted booleans and unknown
+	// keys untouched.
+	for _, bad := range []string{
+		`{"collector":{"enabled":false}}`,
+		`{"collector":{"queue":"other"},"retention":{"retentionDays":45}}`,
+		`{"collector":{}}`,
+		`{"retention":{}}`,
+	} {
+		rr = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(bad))
+		req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("patch %s = %d %s, want 400", bad, rr.Code, rr.Body.String())
+		}
+	}
+	beforeCollectorPatch := rawManagerConfig(t, raw)
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{"collector":{"queue":"events_v2"}}`))
+	req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("partial collector patch = %d %s", rr.Code, rr.Body.String())
+	}
+	afterCollectorPatch := rawManagerConfig(t, raw)
+	if !bytes.Equal(beforeCollectorPatch["futureKnob"], afterCollectorPatch["futureKnob"]) {
+		t.Fatal("partial collector patch dropped unknown top-level field")
+	}
+	patchedCollector := decodeRawObject(t, afterCollectorPatch["collector"])
+	if !bytes.Equal(patchedCollector["queue"], json.RawMessage(`"events_v2"`)) ||
+		!bytes.Equal(patchedCollector["tlsSkipVerify"], json.RawMessage(`true`)) ||
+		!bytes.Equal(patchedCollector["enabled"], json.RawMessage(`true`)) {
+		t.Fatalf("partial collector patch rewrote untouched fields: %s", afterCollectorPatch["collector"])
+	}
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPatch, "/usage-service/config", bytes.NewBufferString(`{"enabled":false}`))
 	handler.ServeHTTP(rr, req)
@@ -1213,4 +1248,105 @@ func TestHTTPAPINewWrapsBrandResourcesBeforeLargeFaviconFlush(t *testing.T) {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("server.Shutdown timed out on httpapi.New /favicon.ico unread body: %v", err)
 	}
+}
+
+type unreadSpyBody struct {
+	reads atomic.Int32
+}
+
+func (b *unreadSpyBody) Read([]byte) (int, error) {
+	b.reads.Add(1)
+	return 0, fmt.Errorf("unexpected body read before authentication")
+}
+
+func (b *unreadSpyBody) Close() error { return nil }
+
+func TestManagerConfigAndCPAUpdateHandlerHardening(t *testing.T) {
+	t.Run("PUT /usage-service/config authenticates before reading body and rejects oversized or trailing-junk JSON", func(t *testing.T) {
+		h := newTestHandler(t, "http://example.test", false)
+
+		// Unauthenticated oversized PUT must return 401 without reading a single byte of r.Body.
+		spy := &unreadSpyBody{}
+		unauthReq := httptest.NewRequest(http.MethodPut, "/usage-service/config", spy)
+		unauthReq.ContentLength = 1 << 20
+		unauthRR := httptest.NewRecorder()
+		h.ServeHTTP(unauthRR, unauthReq)
+		if unauthRR.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated oversized PUT status = %d, want 401", unauthRR.Code)
+		}
+		if got := spy.reads.Load(); got != 0 {
+			t.Fatalf("unauthenticated oversized PUT read body %d times before 401, want 0", got)
+		}
+		if got := unauthRR.Header().Get("Connection"); got != "close" {
+			t.Fatalf("unauthenticated oversized PUT Connection = %q, want close", got)
+		}
+
+		// Authenticated oversized body (>64 KiB) hits MaxBytesReader -> 400 too large + Connection: close.
+		oversized := `{"config":{"collector":{"enabled":false,"queue":"` + strings.Repeat("a", 70<<10) + `"}}}`
+		authBigReq := httptest.NewRequest(http.MethodPut, "/usage-service/config", strings.NewReader(oversized))
+		authBigReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		authBigRR := httptest.NewRecorder()
+		h.ServeHTTP(authBigRR, authBigReq)
+		if authBigRR.Code != http.StatusBadRequest || !strings.Contains(authBigRR.Body.String(), "request body too large") {
+			t.Fatalf("authenticated oversized PUT status = %d body=%s, want 400 request body too large", authBigRR.Code, authBigRR.Body.String())
+		}
+		if got := authBigRR.Header().Get("Connection"); got != "close" {
+			t.Fatalf("authenticated oversized PUT Connection = %q, want close", got)
+		}
+
+		// Trailing JSON token after closing brace is rejected with 400.
+		trailingReq := httptest.NewRequest(http.MethodPut, "/usage-service/config", strings.NewReader(`{"config":{"collector":{"enabled":false}}}{"extra":1}`))
+		trailingReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		trailingRR := httptest.NewRecorder()
+		h.ServeHTTP(trailingRR, trailingReq)
+		if trailingRR.Code != http.StatusBadRequest {
+			t.Fatalf("trailing token PUT status = %d body=%s, want 400", trailingRR.Code, trailingRR.Body.String())
+		}
+	})
+
+	t.Run("Unauthenticated oversized PUT and oversized PATCH close real HTTP/1.1 TCP sockets immediately", func(t *testing.T) {
+		h := newTestHandler(t, "http://example.test", false)
+		ts := httptest.NewServer(h)
+		t.Cleanup(ts.Close)
+		addr := ts.Listener.Addr().String()
+
+		// 1. Unauthenticated oversized PUT over raw HTTP/1.1 TCP with held-open socket + pipelined-looking body prefix.
+		putConn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial TCP for unauth PUT: %v", err)
+		}
+		t.Cleanup(func() { _ = putConn.Close() })
+		putPrefix := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+		rawPut := fmt.Sprintf(
+			"PUT /usage-service/config HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+			addr,
+			512<<10,
+			putPrefix,
+		)
+		putStarted := time.Now()
+		if _, err := putConn.Write([]byte(rawPut)); err != nil {
+			t.Fatalf("write raw unauth PUT: %v", err)
+		}
+		assertPromptTCPCloseWithoutSecondResponse(t, putConn, putStarted, http.StatusUnauthorized, "invalid admin key")
+
+		// 2. Authenticated oversized PATCH (> 4096 bytes) over raw HTTP/1.1 TCP with unread tail held open.
+		patchConn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial TCP for oversized PATCH: %v", err)
+		}
+		t.Cleanup(func() { _ = patchConn.Close() })
+		oversizedPatchHead := `{"collector":{"queue":"` + strings.Repeat("q", 5000) + fmt.Sprintf("\r\nGET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+		rawPatch := fmt.Sprintf(
+			"PATCH /usage-service/config HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+			addr,
+			testutil.AdminKey,
+			64<<10,
+			oversizedPatchHead,
+		)
+		patchStarted := time.Now()
+		if _, err := patchConn.Write([]byte(rawPatch)); err != nil {
+			t.Fatalf("write raw oversized PATCH: %v", err)
+		}
+		assertPromptTCPCloseWithoutSecondResponse(t, patchConn, patchStarted, http.StatusBadRequest, "exactly one of enabled, collector, or retention is required")
+	})
 }

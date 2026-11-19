@@ -17,14 +17,19 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
 
 func TestWriteVersion(t *testing.T) {
@@ -356,7 +361,7 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 		t.Fatalf("HTTP listener ordering not found: listen=%d log=%d serve=%d", listenAt, listeningLogAt, serveAt)
 	}
 	for _, startCall := range []string{
-		"go runtimeReconciler.Run(ctx)",
+		"runtimeReconciler.Run(ctx)",
 		"db.RunDerivedStartupMaintenance(ctx)",
 		"automationRuntime.Start(ctx)",
 		"codexInspectionWorker.Start(ctx)",
@@ -365,7 +370,7 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 		"usageHourlyAggregateWorker.Start(ctx)",
 		"db.StartDerivedMaintenance(ctx)",
 		"collectorWorker.Start(ctx)",
-		"NewLegacyQuotaSnapshotMigrationWorker(db).Start(ctx)",
+		"legacyQuotaSnapshotMigrationWorker.Start(ctx)",
 		"usageCacheAccountingMigrationWorker.Start(ctx)",
 		"waitForUsageResponseMetadataBackfill(ctx, db)",
 		"usageArchiveRetentionWorker.Start(ctx)",
@@ -395,8 +400,11 @@ func TestDerivedMigrationsStartAfterHTTPListenerIsBound(t *testing.T) {
 			retentionAt,
 		)
 	}
-	if !strings.Contains(source, "cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 && cfg.DashboardHourlyRollupEnabled") {
-		t.Fatal("retention worker construction is not gated by explicit enablement, positive days, and hourly rollups")
+	if !strings.Contains(source, "newUsageArchiveRetentionWorker(cfg, serverApp)") ||
+		!strings.Contains(source, "!cfg.DashboardHourlyRollupEnabled") ||
+		!strings.Contains(source, "SetSettingsResolver(") ||
+		!strings.Contains(source, "SetRetentionChangedNotifier(") {
+		t.Fatal("retention worker construction is not gated by hourly rollups and wired to dynamic retention settings")
 	}
 	if !strings.Contains(source, "continuing without blocking background workers") {
 		t.Fatal("post-listen index failure does not explicitly preserve background worker startup")
@@ -968,4 +976,660 @@ func TestLegacyShutdownAbortsNonFreshBodyBeforeCodexWorkerDrain(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdownLegacyRuntime did not complete after Codex gate released")
 	}
+}
+
+type blockingArchiveJobs struct {
+	started chan struct{}
+	release chan struct{}
+	waited  bool
+}
+
+func (b *blockingArchiveJobs) WaitArchiveJobs(context.Context) error {
+	close(b.started)
+	<-b.release
+	b.waited = true
+	return nil
+}
+
+type trackingImportSessions struct {
+	waited bool
+}
+
+func (t *trackingImportSessions) StopAndWaitImportSessions(context.Context) error {
+	t.waited = true
+	return nil
+}
+
+func TestLegacyShutdownCancelsAndDrainsBackgroundAndSQLiteWorkersBeforeReturn(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	var retentionMu sync.Mutex
+	retentionStopped := false
+	var bgWG sync.WaitGroup
+
+	backfillStarted := make(chan struct{})
+	backfillExited := false
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		close(backfillStarted)
+		<-ctx.Done()
+		retentionMu.Lock()
+		canStart := !retentionStopped && ctx.Err() == nil
+		retentionMu.Unlock()
+		if canStart {
+			t.Error("backfill goroutine observed retention starter open after shutdown")
+		}
+		backfillExited = true
+	}()
+	<-backfillStarted
+
+	migrationExited := false
+	workerExited := false
+	importSessions := &trackingImportSessions{}
+	archiveJobs := &blockingArchiveJobs{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	releaseCodex := make(chan struct{})
+	codexGate := &gatingCodexStopper{
+		entered: make(chan struct{}),
+		release: releaseCodex,
+	}
+	releaseRetention := make(chan struct{})
+	retentionStopper := &gatingCodexStopper{
+		entered: make(chan struct{}),
+		release: releaseRetention,
+	}
+
+	serverResult := make(chan error, 1)
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		shutdownLegacyRuntime(
+			ctx,
+			stop,
+			serverResult,
+			nil,
+			codexGate,
+			nil,
+			nil,
+			nil,
+			retentionStopper,
+			archiveJobs,
+			legacyRuntimeShutdownHooks{
+				importSessions: importSessions,
+				stopRetentionStart: func() {
+					retentionMu.Lock()
+					retentionStopped = true
+					retentionMu.Unlock()
+				},
+				waitMigration: func() {
+					migrationExited = true
+				},
+				waitBackground: bgWG.Wait,
+				workerWaits: []func(){
+					func() {
+						workerExited = true
+					},
+				},
+			},
+		)
+	}()
+
+	// Server termination triggers stop() -> cancels ctx -> unblocks backfill goroutine.
+	serverResult <- nil
+
+	<-codexGate.entered
+	close(releaseCodex)
+	<-retentionStopper.entered
+	close(releaseRetention)
+	<-archiveJobs.started
+	close(archiveJobs.release)
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdownLegacyRuntime did not complete")
+	}
+	if !backfillExited || !migrationExited || !workerExited || !importSessions.waited || !archiveJobs.waited {
+		t.Fatalf("expected all background/SQLite drains completed before return: backfill=%v migration=%v worker=%v imports=%v archive=%v",
+			backfillExited, migrationExited, workerExited, importSessions.waited, archiveJobs.waited)
+	}
+}
+
+type recordingShutdownCollectorManager struct {
+	onStop func(context.Context)
+}
+
+func (m *recordingShutdownCollectorManager) StopAndWait(ctx context.Context) error {
+	if m.onStop != nil {
+		m.onStop(ctx)
+	}
+	return nil
+}
+
+type recordingShutdownCollectorWorker struct {
+	onStop func(context.Context)
+}
+
+func (w *recordingShutdownCollectorWorker) Stop(ctx context.Context) {
+	if w.onStop != nil {
+		w.onStop(ctx)
+	}
+}
+
+type recordingShutdownDrainComponent struct {
+	mu      sync.Mutex
+	ctxErr  error
+	hasDL   bool
+	remain  time.Duration
+	called  bool
+	onEnter func(context.Context)
+}
+
+func (r *recordingShutdownDrainComponent) record(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.called = true
+	r.ctxErr = ctx.Err()
+	if dl, ok := ctx.Deadline(); ok {
+		r.hasDL = true
+		r.remain = time.Until(dl)
+	}
+	if r.onEnter != nil {
+		r.onEnter(ctx)
+	}
+}
+
+func (r *recordingShutdownDrainComponent) StopAndWait(ctx context.Context) error {
+	r.record(ctx)
+	return nil
+}
+
+func (r *recordingShutdownDrainComponent) StopAndWaitImportSessions(ctx context.Context) error {
+	r.record(ctx)
+	return nil
+}
+
+func (r *recordingShutdownDrainComponent) WaitArchiveJobs(ctx context.Context) error {
+	r.record(ctx)
+	return nil
+}
+
+func TestLegacyShutdownDrainsHTTPAndPprofBeforeWorkersAndUsesFreshDrainContext(t *testing.T) {
+	t.Run("drains HTTP server and pprof before stopping workers", func(t *testing.T) {
+		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
+
+		httpEntered := make(chan struct{})
+		releaseHTTP := make(chan struct{})
+		httpFinished := atomic.Bool{}
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(httpEntered)
+				<-releaseHTTP
+				httpFinished.Store(true)
+				w.WriteHeader(http.StatusOK)
+			}),
+		}
+		serverResult := make(chan error, 1)
+		go serveHTTPServer(srv, ln, stop, serverResult)
+
+		pprofLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pprofSrv := &http.Server{Handler: http.NewServeMux()}
+		var bgWG sync.WaitGroup
+		bgWG.Add(1)
+		go func() {
+			defer bgWG.Done()
+			_ = pprofSrv.Serve(pprofLn)
+		}()
+
+		httpRespErr := make(chan error, 1)
+		httpStatus := make(chan int, 1)
+		go func() {
+			resp, reqErr := http.Get("http://" + ln.Addr().String() + "/work")
+			if reqErr != nil {
+				httpRespErr <- reqErr
+				return
+			}
+			_ = resp.Body.Close()
+			httpStatus <- resp.StatusCode
+		}()
+		<-httpEntered
+
+		var orderMu sync.Mutex
+		var order []string
+		appendOrder := func(step string) {
+			orderMu.Lock()
+			order = append(order, step)
+			orderMu.Unlock()
+		}
+
+		codexEntered := make(chan struct{})
+		codexStopper := &recordingShutdownDrainComponent{
+			onEnter: func(context.Context) {
+				if !httpFinished.Load() {
+					t.Error("codexInspectionWorker stopped before inflight HTTP handler finished")
+				}
+				appendOrder("codex")
+				close(codexEntered)
+			},
+		}
+		collectorWorker := &recordingShutdownCollectorWorker{
+			onStop: func(context.Context) {
+				if !httpFinished.Load() {
+					t.Error("collectorWorker stopped before inflight HTTP handler finished")
+				}
+				appendOrder("collectorWorker")
+			},
+		}
+		collectorManager := &recordingShutdownCollectorManager{
+			onStop: func(context.Context) {
+				if !httpFinished.Load() {
+					t.Error("collectorManager stopped before inflight HTTP handler finished")
+				}
+				appendOrder("collectorManager")
+			},
+		}
+		retention := &recordingShutdownDrainComponent{onEnter: func(context.Context) { appendOrder("retention") }}
+		imports := &recordingShutdownDrainComponent{onEnter: func(context.Context) { appendOrder("imports") }}
+		archive := &recordingShutdownDrainComponent{onEnter: func(context.Context) { appendOrder("archive") }}
+
+		shutdownDone := make(chan struct{})
+		go func() {
+			defer close(shutdownDone)
+			shutdownLegacyRuntime(
+				ctx,
+				stop,
+				serverResult,
+				nil,
+				codexStopper,
+				collectorWorker,
+				pprofSrv,
+				srv,
+				retention,
+				archive,
+				legacyRuntimeShutdownHooks{
+					collectorManager: collectorManager,
+					importSessions:   imports,
+					waitBackground:   func() { bgWG.Wait(); appendOrder("bgWG") },
+					waitUpgradeCanonical: func() {
+						appendOrder("upgradeCanonical")
+					},
+					workerWaits: []func(){
+						func() { appendOrder("derivedMaintenance") },
+					},
+				},
+			)
+		}()
+
+		stop()
+
+		// While HTTP handler is still inflight, workers must wait for HTTP drain.
+		select {
+		case <-codexEntered:
+			close(releaseHTTP)
+			t.Fatal("workers began stopping before HTTP server finished draining inflight request")
+		case <-time.After(80 * time.Millisecond):
+		}
+
+		close(releaseHTTP)
+		select {
+		case code := <-httpStatus:
+			if code != http.StatusOK {
+				t.Fatalf("inflight HTTP status = %d, want 200", code)
+			}
+		case reqErr := <-httpRespErr:
+			t.Fatalf("inflight HTTP request failed: %v", reqErr)
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for inflight HTTP request")
+		}
+
+		select {
+		case <-shutdownDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("shutdownLegacyRuntime did not complete")
+		}
+
+		wantOrder := []string{"codex", "collectorWorker", "collectorManager", "bgWG", "upgradeCanonical", "retention", "imports", "archive", "derivedMaintenance"}
+		orderMu.Lock()
+		gotOrder := strings.Join(order, ",")
+		orderMu.Unlock()
+		if gotOrder != strings.Join(wantOrder, ",") {
+			t.Fatalf("shutdown order = %q, want %q", gotOrder, strings.Join(wantOrder, ","))
+		}
+	})
+
+	t.Run("allocates fresh bounded drain context after HTTP shutdown timeout", func(t *testing.T) {
+		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
+
+		httpEntered := make(chan struct{})
+		releaseStuck := make(chan struct{})
+		defer close(releaseStuck)
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(httpEntered)
+				<-releaseStuck
+			}),
+		}
+		serverResult := make(chan error, 1)
+		go serveHTTPServer(srv, ln, stop, serverResult)
+
+		go func() {
+			resp, reqErr := http.Get("http://" + ln.Addr().String() + "/stuck")
+			if reqErr == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+		<-httpEntered
+
+		retention := &recordingShutdownDrainComponent{}
+		imports := &recordingShutdownDrainComponent{}
+		archive := &recordingShutdownDrainComponent{}
+
+		stop()
+		shutdownLegacyRuntime(
+			ctx,
+			stop,
+			serverResult,
+			nil,
+			nil,
+			nil,
+			nil,
+			srv,
+			retention,
+			archive,
+			legacyRuntimeShutdownHooks{
+				importSessions:      imports,
+				httpShutdownTimeout: 30 * time.Millisecond,
+				drainTimeout:        2 * time.Second,
+			},
+		)
+
+		for name, rec := range map[string]*recordingShutdownDrainComponent{
+			"retention": retention,
+			"imports":   imports,
+			"archive":   archive,
+		} {
+			if !rec.called || rec.ctxErr != nil || !rec.hasDL || rec.remain < 500*time.Millisecond {
+				t.Fatalf("%s did not receive fresh bounded drain context: called=%t err=%v hasDL=%t remain=%v",
+					name, rec.called, rec.ctxErr, rec.hasDL, rec.remain)
+			}
+		}
+	})
+}
+
+func TestUpgradeCanonicalWaitTracksIngressLoopAndPluginCapabilityClose(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	ingressSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPut {
+			raw, _ := io.ReadAll(r.Body)
+			_, _ = w.Write(raw)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ingressSrv.Close()
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", ingressSrv.URL)
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "https://manager.test")
+
+	st, cfg, _ := seedCompletedManagedUpgradeStore(t, "/console", "/inference")
+	serverApp := httpapi.New(cfg, st, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var canonical *upgradeCanonicalServer
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp, nil, upgradeCanonicalDependencies{
+		CanonicalOut: &canonical,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+	}
+	if canonical == nil || canonical.driver == nil || canonical.pluginCapability == nil {
+		t.Fatalf("expected non-nil canonical server, driver, and pluginCapability: %+v", canonical)
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		canonical.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		t.Fatal("canonical.Wait() returned while ctx was active and reconcileIngressLoop/pluginCapability goroutines were running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("canonical.Wait() did not return after ctx cancellation")
+	}
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed.Store(true)
+	return nil
+}
+
+func TestFreshApplicationServeHTTPRestoresOriginalBodyBeforeReturn(t *testing.T) {
+	paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "manager.sqlite"))
+	paths.Config = filepath.Join(filepath.Dir(paths.Database), "config.json")
+	opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{
+		Initialize: true,
+		AdminKey:   strategyTestAdmin,
+	})
+	if err != nil {
+		t.Fatalf("fresh.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	app := newFreshApplication(opened, config.Config{DBPath: paths.Database}, nil)
+	t.Cleanup(app.Close)
+
+	origBody := &trackingReadCloser{Reader: strings.NewReader("unread-payload")}
+	req := httptest.NewRequest(http.MethodPost, "/unrelated", origBody)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if req.Body != origBody {
+		t.Fatalf("ServeHTTP did not restore original r.Body before returning: got %T, want *trackingReadCloser", req.Body)
+	}
+	if !origBody.closed.Load() {
+		t.Fatal("ServeHTTP did not close wrapped body before returning")
+	}
+}
+
+func TestAwaitFreshStoreShutdownStopsPollingDrainsHandlerBeforeOpenedClose(t *testing.T) {
+	type shutdownMode int
+	const (
+		modeContextCancel shutdownMode = iota
+		modeServerExitWithoutParentCancel
+		modeDirectStopAwait
+	)
+	runCase := func(t *testing.T, mode shutdownMode) {
+		t.Helper()
+		dbDir := t.TempDir()
+		paths := legacypreflight.DefaultPaths(filepath.Join(dbDir, "manager.sqlite"))
+		paths.Config = filepath.Join(dbDir, "config.json")
+
+		startupHandler := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
+		server := &http.Server{Handler: startupHandler}
+		defer func() { _ = server.Close() }()
+		serverResult := make(chan error, 1)
+		if mode == modeServerExitWithoutParentCancel {
+			go func() { _ = server.Serve(ln) }()
+		} else {
+			go serveHTTPServer(server, ln, stop, serverResult)
+		}
+
+		cfg := config.Config{DBPath: paths.Database}
+		await := startFreshStoreAwaiterWithInterval(ctx, cfg, paths, startupHandler, 10*time.Millisecond)
+		defer await.Close()
+
+		initOpened, err := fresh.Open(ctx, paths, fresh.OpenOptions{
+			Initialize: true,
+			AdminKey:   strategyTestAdmin,
+		})
+		if err != nil {
+			t.Fatalf("fresh.Open initialize: %v", err)
+		}
+		if err := initOpened.Close(); err != nil {
+			t.Fatalf("initOpened.Close: %v", err)
+		}
+
+		var (
+			app    *freshApplication
+			opened *fresh.Opened
+		)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if target := startupHandler.fresh.Load(); target != nil {
+				if candidate, ok := target.handler.(*freshApplication); ok {
+					await.mu.Lock()
+					admitted := await.opened
+					await.mu.Unlock()
+					if admitted != nil {
+						app = candidate
+						opened = admitted
+						break
+					}
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if app == nil || opened == nil {
+			t.Fatal("startFreshStoreAwaiter did not admit initialized Fresh store")
+		}
+
+		workerStarted := make(chan struct{})
+		releaseWorker := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseWorker) }) }
+		defer release()
+		var workerFinished atomic.Bool
+		if !app.launchBackground(func() {
+			close(workerStarted)
+			<-releaseWorker
+			workerFinished.Store(true)
+		}) {
+			t.Fatal("failed to launch fresh background worker")
+		}
+		<-workerStarted
+
+		var (
+			orderMu        sync.Mutex
+			order          []string
+			handlerEntered = make(chan struct{})
+			openedCloseHit = make(chan struct{})
+		)
+		record := func(step string) {
+			orderMu.Lock()
+			order = append(order, step)
+			orderMu.Unlock()
+		}
+		app.afterCloseMarked = func() {
+			select {
+			case <-await.done:
+			default:
+				t.Error("polling goroutine was still active when handler.Close started")
+			}
+			record("handler_close_entered")
+			close(handlerEntered)
+		}
+		opened.BeforeClose(func() {
+			if !workerFinished.Load() {
+				t.Error("opened.Close started before freshApplication drained background worker")
+			}
+			record("opened_close_entered")
+			close(openedCloseHit)
+		})
+
+		shutdownDone := make(chan struct{})
+		go func() {
+			defer close(shutdownDone)
+			if mode == modeDirectStopAwait {
+				await.Close()
+			} else {
+				waitForFreshShutdown(ctx, server, serverResult, startupHandler, await, nil)
+			}
+		}()
+		switch mode {
+		case modeContextCancel:
+			stop()
+		case modeServerExitWithoutParentCancel:
+			serverResult <- http.ErrServerClosed
+		}
+
+		select {
+		case <-handlerEntered:
+		case <-time.After(3 * time.Second):
+			release()
+			t.Fatal("handler.Close did not enter during shutdown")
+		}
+
+		select {
+		case <-openedCloseHit:
+			release()
+			t.Fatal("opened.Close ran before handler.Close completed")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		release()
+		select {
+		case <-shutdownDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("shutdown did not complete after releasing worker")
+		}
+
+		orderMu.Lock()
+		gotOrder := strings.Join(order, ",")
+		orderMu.Unlock()
+		if gotOrder != "handler_close_entered,opened_close_entered" {
+			t.Fatalf("shutdown order = %q, want %q", gotOrder, "handler_close_entered,opened_close_entered")
+		}
+		if !workerFinished.Load() {
+			t.Fatal("background worker did not finish before shutdown completed")
+		}
+	}
+
+	t.Run("waitForFreshShutdown_context_cancel", func(t *testing.T) {
+		runCase(t, modeContextCancel)
+	})
+	t.Run("waitForFreshShutdown_server_exit_without_parent_cancel", func(t *testing.T) {
+		runCase(t, modeServerExitWithoutParentCancel)
+	})
+	t.Run("await.Close", func(t *testing.T) {
+		runCase(t, modeDirectStopAwait)
+	})
 }

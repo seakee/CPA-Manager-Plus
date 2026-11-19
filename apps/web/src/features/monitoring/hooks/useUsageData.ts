@@ -107,7 +107,11 @@ export function useUsageData({
   );
   const modelPricesScopeRef = useRef(modelPricesScopeKey);
   const modelPricesRequestIdRef = useRef(0);
+  const lastConfirmedPriceRequestIdRef = useRef(0);
   const modelPricesLoadedRef = useRef(false);
+  const modelPricesRef = useRef<Record<string, ModelPrice>>({});
+  const confirmedModelPricesRef = useRef<Record<string, ModelPrice>>({});
+  const priceSaveQueueRef = useRef<{ scope: string; tail: Promise<void> } | null>(null);
   // The mount effect always starts a price read, so the first render is loading.
   const [modelPricesLoading, setModelPricesLoading] = useState(true);
 
@@ -116,8 +120,12 @@ export function useUsageData({
   useLayoutEffect(() => {
     modelPricesScopeRef.current = modelPricesScopeKey;
     modelPricesRequestIdRef.current += 1;
+    lastConfirmedPriceRequestIdRef.current = 0;
     modelPricesLoadedRef.current = false;
     setModelPricesLoaded(false);
+    confirmedModelPricesRef.current = {};
+    modelPricesRef.current = {};
+    priceSaveQueueRef.current = null;
     setModelPricesState({});
     // The new scope is about to read its prices; keep the first-load state up
     // instead of blanking the page between the switch and the request.
@@ -213,16 +221,38 @@ export function useUsageData({
     const requestId = modelPricesRequestIdRef.current + 1;
     modelPricesRequestIdRef.current = requestId;
     const requestScope = modelPricesScopeKey;
+    const hasServiceBase = Boolean(modelPriceServiceBase);
     const isCurrentRequest = () =>
       modelPricesRequestIdRef.current === requestId && modelPricesScopeRef.current === requestScope;
     const publish = (prices: Record<string, ModelPrice>) => {
       modelPricesLoadedRef.current = true;
       setModelPricesLoaded(true);
+      lastConfirmedPriceRequestIdRef.current = requestId;
+      confirmedModelPricesRef.current = prices;
+      modelPricesRef.current = prices;
       setModelPricesState(prices);
     };
     const legacyPrices = loadModelPrices();
     setModelPricesLoading(true);
     try {
+      if (!hasServiceBase) {
+        // Standalone mode persists per-scope model prices strictly in localStorage;
+        // never drop them as an "authoritative empty" remote response.
+        const scopedFallback = loadModelPriceFallback(requestScope);
+        if (Object.keys(scopedFallback).length > 0) {
+          publish(scopedFallback);
+          clearModelPrices();
+          return;
+        }
+        if (Object.keys(legacyPrices).length > 0) {
+          saveModelPriceFallback(requestScope, legacyPrices);
+          clearModelPrices();
+          publish(legacyPrices);
+          return;
+        }
+        publish({});
+        return;
+      }
       const response = await getModelPricesFromApi();
       if (!isCurrentRequest()) return;
       const apiPrices = response.prices ?? {};
@@ -251,12 +281,15 @@ export function useUsageData({
       // that never loaded fall back to local prices.
       if (!modelPricesLoadedRef.current) {
         const scopedFallback = loadModelPriceFallback(requestScope);
-        setModelPricesState(Object.keys(scopedFallback).length > 0 ? scopedFallback : legacyPrices);
+        const fallbackPrices = Object.keys(scopedFallback).length > 0 ? scopedFallback : legacyPrices;
+        confirmedModelPricesRef.current = fallbackPrices;
+        modelPricesRef.current = fallbackPrices;
+        setModelPricesState(fallbackPrices);
       }
     } finally {
       if (isCurrentRequest()) setModelPricesLoading(false);
     }
-  }, [getModelPricesFromApi, modelPricesScopeKey, saveModelPricesToApi]);
+  }, [getModelPricesFromApi, modelPriceServiceBase, modelPricesScopeKey, saveModelPricesToApi]);
 
   const reloadModelPrices = useCallback(async () => {
     await loadModelPricesFromStorage();
@@ -325,31 +358,74 @@ export function useUsageData({
       // The callback may be captured by a previous connection. Never bump the
       // current generation or write to the gateway for a scope that is gone.
       if (modelPricesScopeRef.current !== modelPricesScopeKey) return;
-      const requestId = modelPricesRequestIdRef.current + 1;
-      modelPricesRequestIdRef.current = requestId;
       const requestScope = modelPricesScopeKey;
-      const isCurrentRequest = () =>
-        modelPricesRequestIdRef.current === requestId &&
-        modelPricesScopeRef.current === requestScope;
-      if (isCurrentRequest()) setModelPricesState(prices);
+      const previousTail =
+        priceSaveQueueRef.current?.scope === requestScope ? priceSaveQueueRef.current.tail : null;
+      let release!: () => void;
+      const currentTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      priceSaveQueueRef.current = { scope: requestScope, tail: currentTail };
       try {
-        const response = await saveModelPricesToApi(prices);
-        if (!isCurrentRequest()) return;
-        modelPricesLoadedRef.current = true;
-        setModelPricesLoaded(true);
-        setModelPricesState(response.prices ?? prices);
-        clearModelPrices();
-        clearModelPriceFallback(requestScope);
-      } catch {
-        if (!isCurrentRequest()) return;
-        // Keep the failed save for this scope only. Writing the unscoped legacy
-        // entry would let another connection migrate it to its own gateway.
-        saveModelPriceFallback(requestScope, prices);
+        if (previousTail) {
+          await previousTail;
+        }
+        if (modelPricesScopeRef.current !== requestScope) return;
+        const requestId = modelPricesRequestIdRef.current + 1;
+        modelPricesRequestIdRef.current = requestId;
+        const hasServiceBase = Boolean(modelPriceServiceBase);
+        const isCurrentRequest = () =>
+          modelPricesRequestIdRef.current === requestId &&
+          modelPricesScopeRef.current === requestScope;
+        if (!hasServiceBase) {
+          modelPricesLoadedRef.current = true;
+          setModelPricesLoaded(true);
+          lastConfirmedPriceRequestIdRef.current = requestId;
+          confirmedModelPricesRef.current = prices;
+          modelPricesRef.current = prices;
+          setModelPricesState(prices);
+          clearModelPrices();
+          saveModelPriceFallback(requestScope, prices);
+          setModelPricesLoading(false);
+          return;
+        }
+        if (isCurrentRequest()) {
+          modelPricesRef.current = prices;
+          setModelPricesState(prices);
+        }
+        try {
+          const response = await saveModelPricesToApi(prices);
+          if (modelPricesScopeRef.current !== requestScope) return;
+          const savedPrices = response.prices ?? prices;
+          if (requestId > lastConfirmedPriceRequestIdRef.current) {
+            lastConfirmedPriceRequestIdRef.current = requestId;
+            confirmedModelPricesRef.current = savedPrices;
+          }
+          if (!isCurrentRequest()) return;
+          modelPricesLoadedRef.current = true;
+          setModelPricesLoaded(true);
+          modelPricesRef.current = savedPrices;
+          setModelPricesState(savedPrices);
+          clearModelPrices();
+          clearModelPriceFallback(requestScope);
+        } catch (err) {
+          if (isCurrentRequest()) {
+            const baseline = confirmedModelPricesRef.current;
+            modelPricesRef.current = baseline;
+            setModelPricesState(baseline);
+          }
+          throw err;
+        } finally {
+          if (isCurrentRequest()) setModelPricesLoading(false);
+        }
       } finally {
-        if (isCurrentRequest()) setModelPricesLoading(false);
+        release();
+        if (priceSaveQueueRef.current?.tail === currentTail) {
+          priceSaveQueueRef.current = null;
+        }
       }
     },
-    [modelPricesScopeKey, saveModelPricesToApi]
+    [modelPriceServiceBase, modelPricesScopeKey, saveModelPricesToApi]
   );
 
   const syncModelPrices = useCallback(
@@ -366,9 +442,13 @@ export function useUsageData({
         // A superseded sync must not hand its candidates to the caller: they
         // belong to the previous scope and would be saved to the current one.
         if (!isCurrentRequest()) return null;
+        const syncedPrices = response.prices ?? {};
         modelPricesLoadedRef.current = true;
         setModelPricesLoaded(true);
-        setModelPricesState(response.prices ?? {});
+        lastConfirmedPriceRequestIdRef.current = requestId;
+        confirmedModelPricesRef.current = syncedPrices;
+        modelPricesRef.current = syncedPrices;
+        setModelPricesState(syncedPrices);
         clearModelPrices();
         clearModelPriceFallback(requestScope);
         return response;

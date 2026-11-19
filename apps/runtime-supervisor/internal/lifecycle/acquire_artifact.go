@@ -375,32 +375,76 @@ func (s *artifactAcquisitionState) resolveOfficialSourceLocked() (OfficialAcquis
 	return source, nil
 }
 
-func (s *artifactAcquisitionState) resolveCDNSourceLocked(prefix string) (CDNAcquisitionSource, error) {
-	if _, err := runtimeupdate.ValidateCDNPrefixWithPolicy(prefix, s.cdnAddrPolicy); err != nil {
+type cdnSourceSnapshot struct {
+	goos          string
+	goarch        string
+	httpClient    *http.Client
+	rootCAs       *x509.CertPool
+	cdnFactory    func(prefix string) (CDNAcquisitionSource, error)
+	cdnAddrPolicy runtimeupdate.CDNAddrPolicy
+	cdnLookupIP   runtimeupdate.CDNLookupIPAddrFunc
+}
+
+func (s *artifactAcquisitionState) snapshotCDNConfig() cdnSourceSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cdnSourceSnapshot{
+		goos:          s.goos,
+		goarch:        s.goarch,
+		httpClient:    s.httpClient,
+		rootCAs:       s.rootCAs,
+		cdnFactory:    s.cdnFactory,
+		cdnAddrPolicy: s.cdnAddrPolicy,
+		cdnLookupIP:   s.cdnLookupIP,
+	}
+}
+
+func (s *artifactAcquisitionState) resolveCDNSource(ctx context.Context, prefix string) (CDNAcquisitionSource, error) {
+	cfg := s.snapshotCDNConfig()
+	if _, err := runtimeupdate.ValidateCDNPrefixWithPolicy(prefix, cfg.cdnAddrPolicy); err != nil {
 		return nil, &ArtifactError{Code: ArtifactCodeInvalidRequest, Err: err}
 	}
-	if !runtimeupdate.SupportedPlatform(s.goos, s.goarch) {
+	if !runtimeupdate.SupportedPlatform(cfg.goos, cfg.goarch) {
 		return nil, &ArtifactError{Code: ArtifactCodeUnsupportedPlatform, Err: runtimeupdate.ErrUnsupportedPlatform}
 	}
-	if s.cdnFactory != nil {
-		source, err := s.cdnFactory(prefix)
+	if cfg.cdnFactory != nil {
+		source, err := cfg.cdnFactory(prefix)
 		if err != nil {
 			return nil, &ArtifactError{Code: ArtifactErrorCode(err), Err: err}
 		}
 		return source, nil
 	}
-	client := s.httpClient
-	if client == nil {
-		client = runtimeupdate.NewCDNHTTPClient(s.rootCAs)
+	dialPolicy := cfg.cdnAddrPolicy
+	redirectPolicy := cfg.cdnAddrPolicy
+	if dialPolicy == nil {
+		dialPolicy = runtimeupdate.CDNAddrPolicyForContext(ctx, cfg.cdnLookupIP)
+		redirectPolicy = runtimeupdate.IsPublicCDNAddr
 	}
-	source, err := runtimeupdate.NewCDNSourceForPlatform(
-		s.goos,
-		s.goarch,
-		prefix,
-		client,
-		runtimeupdate.WithCDNAddrPolicy(s.cdnAddrPolicy),
-		runtimeupdate.WithCDNLookupIP(s.cdnLookupIP),
+	var (
+		source *runtimeupdate.CDNSource
+		err    error
 	)
+	if cfg.httpClient != nil {
+		source, err = runtimeupdate.NewCDNSourceForPlatform(
+			cfg.goos,
+			cfg.goarch,
+			prefix,
+			cfg.httpClient,
+			runtimeupdate.WithCDNAddrPolicy(dialPolicy),
+			runtimeupdate.WithCDNRedirectAddrPolicy(redirectPolicy),
+			runtimeupdate.WithCDNLookupIP(cfg.cdnLookupIP),
+		)
+	} else {
+		source, err = runtimeupdate.NewCDNSourceForPlatformWithRoots(
+			cfg.goos,
+			cfg.goarch,
+			prefix,
+			cfg.rootCAs,
+			runtimeupdate.WithCDNAddrPolicy(dialPolicy),
+			runtimeupdate.WithCDNRedirectAddrPolicy(redirectPolicy),
+			runtimeupdate.WithCDNLookupIP(cfg.cdnLookupIP),
+		)
+	}
 	if err != nil {
 		return nil, &ArtifactError{Code: ArtifactErrorCode(err), Err: err}
 	}
@@ -503,10 +547,16 @@ func (e *Executor) ProbeArtifactSource(ctx context.Context) (ArtifactProbeRespon
 		state.mu.Unlock()
 		return ArtifactProbeResponse{}, err
 	}
+	perCallOfficial := state.officialSource == nil
 	source, err := state.resolveOfficialSourceLocked()
 	state.mu.Unlock()
 	if err != nil {
 		return ArtifactProbeResponse{}, err
+	}
+	if perCallOfficial {
+		if closer, ok := source.(interface{ CloseIdleConnections() }); ok {
+			defer closer.CloseIdleConnections()
+		}
 	}
 	if err := source.Probe(ctx, pinned.Version); err != nil {
 		return ArtifactProbeResponse{
@@ -551,6 +601,11 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 	if e == nil || e.closed.Load() {
 		return ArtifactOperationStatus{}, false, &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
 	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return ArtifactOperationStatus{}, false, err
+		}
+	}
 	state, err := e.acquisitionState()
 	if err != nil {
 		return ArtifactOperationStatus{}, false, err
@@ -572,27 +627,6 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 	if err != nil {
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, false, err
-	}
-	var downloadFn runtimeupdate.AcquireDownloadFunc
-	switch req.Source {
-	case ArtifactSourceGitHub:
-		source, sourceErr := state.resolveOfficialSourceLocked()
-		if sourceErr != nil {
-			state.mu.Unlock()
-			return ArtifactOperationStatus{}, false, sourceErr
-		}
-		downloadFn = func(dlCtx context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
-			return source.DownloadArchive(dlCtx, pinned.Version, dst, progress)
-		}
-	case ArtifactSourceCDN:
-		source, sourceErr := state.resolveCDNSourceLocked(req.CDNPrefix)
-		if sourceErr != nil {
-			state.mu.Unlock()
-			return ArtifactOperationStatus{}, false, sourceErr
-		}
-		downloadFn = func(dlCtx context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
-			return source.DownloadArchive(dlCtx, pinned.Version, dst, progress)
-		}
 	}
 	if state.inFlight {
 		state.mu.Unlock()
@@ -642,6 +676,36 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 			Err:  resolveErr,
 		}
 	}
+	var downloadFn runtimeupdate.AcquireDownloadFunc
+	switch req.Source {
+	case ArtifactSourceGitHub:
+		perCallOfficial := state.officialSource == nil
+		source, sourceErr := state.resolveOfficialSourceLocked()
+		if sourceErr != nil {
+			state.mu.Unlock()
+			return ArtifactOperationStatus{}, false, sourceErr
+		}
+		downloadFn = func(dlCtx context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
+			if perCallOfficial {
+				if closer, ok := source.(interface{ CloseIdleConnections() }); ok {
+					defer closer.CloseIdleConnections()
+				}
+			}
+			return source.DownloadArchive(dlCtx, pinned.Version, dst, progress)
+		}
+	case ArtifactSourceCDN:
+		cdnPrefix := req.CDNPrefix
+		downloadFn = func(dlCtx context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
+			source, sourceErr := state.resolveCDNSource(dlCtx, cdnPrefix)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			if closer, ok := source.(interface{ CloseIdleConnections() }); ok {
+				defer closer.CloseIdleConnections()
+			}
+			return source.DownloadArchive(dlCtx, pinned.Version, dst, progress)
+		}
+	}
 
 	if !e.admitPrepareWorker() {
 		state.mu.Unlock()
@@ -677,6 +741,9 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 // UploadArtifact synchronously stages and commits the pinned artifact from an
 // uploaded .tar.gz stream.
 func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLength int64) (ArtifactOperationStatus, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if e == nil || e.closed.Load() {
 		return ArtifactOperationStatus{}, &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
 	}
@@ -744,6 +811,13 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 			Err:  runtimeupdate.ErrArchiveTooLarge,
 		}
 	}
+	if body == nil || body == http.NoBody || contentLength == 0 || contentLength < -1 {
+		state.mu.Unlock()
+		return ArtifactOperationStatus{}, &ArtifactError{
+			Code: ArtifactCodeInvalidRequest,
+			Err:  ErrInvalidRequest,
+		}
+	}
 
 	if !e.admitPrepareWorker() {
 		state.mu.Unlock()
@@ -771,8 +845,16 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 	}
 	state.mu.Unlock()
 
-	execCtx, cancel := context.WithTimeout(ctx, AcquireArtifactExecutionTimeout)
-	defer cancel()
+	baseCtx := e.recoveryContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	execCtx, cancelExec := context.WithTimeout(baseCtx, AcquireArtifactExecutionTimeout)
+	defer cancelExec()
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, AcquireArtifactExecutionTimeout)
+	defer cancelUpload()
+	stopForward := context.AfterFunc(execCtx, cancelUpload)
+	defer stopForward()
 	return e.executeArtifactAcquisition(
 		execCtx,
 		state,
@@ -781,7 +863,9 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 		selections,
 		stageStore,
 		observer,
-		runtimeupdate.CopyUploadArchive(body, contentLength),
+		func(_ context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
+			return runtimeupdate.CopyUploadArchive(body, contentLength)(uploadCtx, dst, progress)
+		},
 	)
 }
 

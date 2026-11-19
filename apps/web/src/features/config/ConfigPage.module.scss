@@ -788,8 +788,8 @@
   width: 7px;
   height: 7px;
   border-radius: var(--app-radius-pill);
-  background: var(--warning-color);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-color) 25%, transparent);
+  background: var(--data-amber-base);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--data-amber-base) 25%, transparent);
 }
 
 @media (max-width: 1200px) {

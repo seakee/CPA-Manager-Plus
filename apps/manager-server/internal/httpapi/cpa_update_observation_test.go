@@ -125,6 +125,9 @@ func TestCPAUpdateObservationStrictQueryAndEmptyBody(t *testing.T) {
 				runtimeClient.prepareCalls.Load() != 0 || runtimeClient.activateCalls.Load() != 0 {
 				t.Fatalf("invalid observation = %d %s", response.Code, response.Body.String())
 			}
+			if wantStatus == http.StatusBadRequest && !strings.Contains(response.Body.String(), `"code":"invalid_request"`) {
+				t.Fatalf("missing observation error code: %s", response.Body.String())
+			}
 		})
 	}
 }

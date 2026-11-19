@@ -40,7 +40,7 @@ describe('MonitoringStatusHeader unavailable callout', () => {
 
     const links = renderer!.root.findAllByType(Link);
     expect(links).toHaveLength(1);
-    expect(links[0].props.to).toBe('/config');
+    expect(links[0].props.to).toBe('/system');
     expect(links[0].props.children).toBe('monitoring.open_manager_config');
   });
 

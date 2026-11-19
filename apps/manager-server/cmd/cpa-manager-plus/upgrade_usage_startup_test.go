@@ -654,6 +654,9 @@ func assertCreatedUpgradeKeyCollectsUsageViaHTTP(
 		if code := upgradeHTTPRequestJSON(t, http.MethodGet, summaryURL, adminKey, "", &summary); code == http.StatusOK {
 			for _, item := range summary.Items {
 				if item.KeyID == created.Key.ID && item.Calls == 1 {
+					if summary.Coverage.Reason == "projection_catching_up" || item.Coverage.Reason == "projection_catching_up" {
+						break
+					}
 					if summary.Coverage.State == "unknown" || item.Coverage.State == "unknown" || item.LastUsedAtMS == nil {
 						t.Fatalf("usage summary remained unknown after collection start: summary=%+v item=%+v", summary.Coverage, item)
 					}
@@ -1978,4 +1981,141 @@ func TestUpgradeExternalCollectorRefusalPersistenceStopRestartAndRebind(t *testi
 			t.Fatalf("rebound credential marked refused by old-credential refusal: refused=%v err=%v", refused, err)
 		}
 	})
+}
+
+func TestUpgradeStartupWindowSerializesCollectorWorkerWithDisableAndReconcile(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	const mgmtSecret = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cpaServer := newMockUpgradeUsageCPA(t, mgmtSecret, "sk-ext-1")
+
+	for iter := range 6 {
+		enabled := true
+		_, dbPath, dataKeyPath, _, _ := seedUpgradeUsageStartupStore(
+			t, model.UpgradeTargetExternal, cpaServer.server.URL, mgmtSecret, &enabled, "", 0, "/ext-console",
+		)
+		keyBytes, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protector, err := security.NewProtector(keyBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(dbPath, protector)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Config{
+			DBPath:        dbPath,
+			DataKeyPath:   dataKeyPath,
+			CollectorMode: "http",
+			PollInterval:  25 * time.Millisecond,
+		}
+		manager := collector.NewManager(cfg, st)
+		collectorSvc := collectorservice.New(manager)
+		collectorWorker := worker.NewCollectorWorker(cfg, st, collectorSvc)
+		serverApp := httpapi.New(cfg, st, manager)
+		usageSvc := usageapp.New(usageadapter.New(st.SQLDB()), func() usageapp.CollectionPhase {
+			return collectionPhaseFor(manager.Status().Collector)
+		})
+		ws, closeWS, err := newUpgradeAPIKeysHandler(upgradeAPIKeysConfig{
+			DB:        st.SQLDB(),
+			Protector: protector,
+			Usage:     usageSvc,
+		})
+		if err != nil {
+			_ = st.Close()
+			t.Fatal(err)
+		}
+
+		attachUpgradeUsageStartupObserver(manager, upgradeUsageStartupConfig{
+			DB:                   st.SQLDB(),
+			Store:                st,
+			Protector:            protector,
+			ManagerConfigService: serverApp.AppContext().ManagerConfigService,
+			Usage:                usageSvc,
+			Rejection:            ws.rejection,
+			CollectorWorker:      collectorWorker,
+		})
+		var canonical *upgradeCanonicalServer
+		if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, ws.gatewayAdmitted, upgradeCanonicalDependencies{
+			Protector:       protector,
+			Workspace:       ws,
+			CollectorWorker: collectorWorker,
+			CanonicalOut:    &canonical,
+		}); err != nil {
+			closeWS()
+			_ = st.Close()
+			t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+		}
+
+		// Simulate HTTP PATCH {"enabled": false} arriving in the startup window right before collectorWorker.Start acquires reconcileMu.
+		canonical.reconcileMu.Lock()
+		workerDone := make(chan struct{})
+		go func() {
+			defer close(workerDone)
+			collectorWorker.Start(context.Background())
+		}()
+		time.Sleep(5 * time.Millisecond)
+		if _, err := st.PatchManagerCollectorEnabled(context.Background(), false); err != nil {
+			canonical.reconcileMu.Unlock()
+			closeWS()
+			_ = st.Close()
+			t.Fatal(err)
+		}
+		manager.Stop()
+		canonical.reconcileMu.Unlock()
+		<-workerDone
+
+		if status := manager.Status().Collector; status != "stopped" {
+			_ = manager.StopAndWait(context.Background())
+			closeWS()
+			_ = st.Close()
+			t.Fatalf("iter %d: collector revived after disable in startup window: status=%q", iter, status)
+		}
+
+		// Re-enable and run concurrent CollectorWorker.Start + reconcileCollector, then verify rejection stops the bound run cleanly.
+		if _, err := st.PatchManagerCollectorEnabled(context.Background(), true); err != nil {
+			closeWS()
+			_ = st.Close()
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			collectorWorker.Start(context.Background())
+		}()
+		go func() {
+			defer wg.Done()
+			_ = canonical.reconcileCollector(context.Background())
+		}()
+		wg.Wait()
+
+		binding, found, err := upgradeoperation.New(st.SQLDB()).ExternalBinding(context.Background())
+		if err != nil || !found {
+			_ = manager.StopAndWait(context.Background())
+			closeWS()
+			_ = st.Close()
+			t.Fatalf("ExternalBinding: found=%v err=%v", found, err)
+		}
+		credDigest := envelopeDigest(strings.TrimSpace(binding.ManagementKey))
+		if err := ws.rejection.record(context.Background(), binding.Identity, credDigest); err != nil {
+			_ = manager.StopAndWait(context.Background())
+			closeWS()
+			_ = st.Close()
+			t.Fatalf("rejection.record: %v", err)
+		}
+		if status := manager.Status().Collector; status != "stopped" {
+			_ = manager.StopAndWait(context.Background())
+			closeWS()
+			_ = st.Close()
+			t.Fatalf("iter %d: collector remained %q after rejection.record following concurrent Start+reconcile", iter, status)
+		}
+		_ = manager.StopAndWait(context.Background())
+		closeWS()
+		_ = st.Close()
+	}
 }

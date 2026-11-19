@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -34,15 +34,21 @@ const toneClassByStatus: Record<AccountPolicyViewItem['statusTone'], string> = {
   locked: styles.statusLocked,
 };
 
-export function AccountProcessingPolicySection() {
+export function AccountProcessingPolicySection({ headerExtra }: { headerExtra?: ReactNode } = {}) {
   const connectionScope = useAuthStore((state) =>
     JSON.stringify([state.apiBase, state.managementKey])
   );
   const { managerServiceBase } = usePanelFeatureAvailability();
-  return <AccountProcessingPolicyContent key={`${connectionScope}:${managerServiceBase}`} />;
+
+  return (
+    <AccountProcessingPolicyContent
+      key={`${connectionScope}:${managerServiceBase}`}
+      headerExtra={headerExtra}
+    />
+  );
 }
 
-function AccountProcessingPolicyContent() {
+function AccountProcessingPolicyContent({ headerExtra }: { headerExtra?: ReactNode }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const managementKey = useAuthStore((state) => state.managementKey);
@@ -201,6 +207,7 @@ function AccountProcessingPolicyContent() {
               : t('accountPolicy.authIssueAutoDisable_dependency_note')}
           </p>
         ) : null}
+        <p className={styles.cardDescription}>{t(item.descriptionKey)}</p>
 
         <details className={styles.advancedInfo}>
           <summary className={styles.advancedSummary}>
@@ -209,7 +216,6 @@ function AccountProcessingPolicyContent() {
             })}
           </summary>
           <div className={styles.advancedBody}>
-            <p className={styles.cardDescription}>{t(item.descriptionKey)}</p>
             <ul className={styles.behaviorList}>
               {behavior.map((line: string, idx: number) => (
                 <li key={`${item.key}-behavior-${idx}`}>{line}</li>
@@ -275,17 +281,19 @@ function AccountProcessingPolicyContent() {
             })}
           </p>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => void load()}
-          disabled={loading || savingKey !== null}
-        >
-          <IconRefreshCw size={14} />
-          {t('accountPolicy.refresh', { defaultValue: 'Refresh' })}
-        </Button>
+        <div className={styles.sectionHeaderActions}>
+          {headerExtra}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void load()}
+            disabled={loading || savingKey !== null}
+          >
+            <IconRefreshCw size={14} />
+            {t('accountPolicy.refresh', { defaultValue: 'Refresh' })}
+          </Button>
+        </div>
       </div>
-
       {loadError && !status ? (
         <div className={styles.errorState}>
           <strong>{t('accountPolicy.load_failed_title', { defaultValue: 'Load failed' })}</strong>
@@ -310,9 +318,11 @@ function AccountProcessingPolicyContent() {
           <div className={styles.groups}>
             {groups.map((group) => (
               <section className={styles.group} key={group.key}>
-                <header className={styles.groupHeader}>
-                  <h4>{t(group.titleKey)}</h4>
-                </header>
+                {group.items.length > 1 ? (
+                  <header className={styles.groupHeader}>
+                    <h4>{t(group.titleKey)}</h4>
+                  </header>
+                ) : null}
                 <div className={styles.cards}>{group.items.map(renderCapabilityCard)}</div>
               </section>
             ))}

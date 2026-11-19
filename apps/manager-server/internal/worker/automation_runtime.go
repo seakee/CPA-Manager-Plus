@@ -55,6 +55,18 @@ func (r *AutomationRuntime) Start(ctx context.Context) {
 	r.logState(ctx, "loaded")
 }
 
+func (r *AutomationRuntime) Wait() {
+	if r == nil {
+		return
+	}
+	if waiter, ok := r.quotaWorker.(interface{ Wait() }); ok {
+		waiter.Wait()
+	}
+	if waiter, ok := r.accountWorker.(interface{ Wait() }); ok {
+		waiter.Wait()
+	}
+}
+
 func (r *AutomationRuntime) UsageEventHandler() collectorpkg.UsageEventHandler {
 	if r == nil {
 		return nil

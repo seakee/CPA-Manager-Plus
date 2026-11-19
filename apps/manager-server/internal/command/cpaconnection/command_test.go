@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	_ "modernc.org/sqlite"
 )
@@ -1228,6 +1231,85 @@ func TestRunRepairConflictRejectsMissingKeyFileWithoutTouchingState(t *testing.T
 	if got := rawSettingValue(t, dbPath, "setup"); got != beforeSetup {
 		t.Fatal("setup changed despite rejected repair")
 	}
+}
+
+func TestRunPreservesImplicitTLSSkipVerifyOnSetupOnlyAndSparseRows(t *testing.T) {
+	t.Run("setup-only 1.x row with USAGE_RESP_TLS_SKIP_VERIFY=true stays sparse", func(t *testing.T) {
+		clearConnectionEnvironment(t)
+		t.Setenv("USAGE_RESP_TLS_SKIP_VERIFY", "true")
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		dataKeyPath := filepath.Join(dir, "data.key")
+
+		legacy, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("open legacy store: %v", err)
+		}
+		if err := legacy.SaveSetup(context.Background(), store.Setup{
+			CPAUpstreamURL: testCPABaseURL,
+			ManagementKey:  testCPAManagementKey,
+			Queue:          "legacy-q",
+			PopSide:        "left",
+		}); err != nil {
+			_ = legacy.Close()
+			t.Fatalf("seed legacy setup: %v", err)
+		}
+		if err := legacy.Close(); err != nil {
+			t.Fatalf("close legacy store: %v", err)
+		}
+
+		runStoreCommand(t, dbPath, dataKeyPath, testCPABaseURL, testCPAManagementKey)
+		raw := rawSettingValue(t, dbPath, "manager_config_v1")
+		if strings.Contains(raw, `"tlsSkipVerify"`) {
+			t.Fatalf("store-cpa-connection materialized tlsSkipVerify on setup-only DB: %s", raw)
+		}
+		stored, _ := loadProtectedConnections(t, dbPath, dataKeyPath)
+		if stored.Collector.TLSSkipVerifyExplicit {
+			t.Fatalf("stored Collector.TLSSkipVerifyExplicit = true, want false: %#v", stored.Collector)
+		}
+		rtCfg := collectorservice.RuntimeConfigFromManagerConfigWithFallback(stored, config.Config{TLSSkipVerify: true})
+		if !rtCfg.TLSSkipVerify || rtCfg.Queue != "legacy-q" {
+			t.Fatalf("RuntimeConfigFromManagerConfigWithFallback = %#v, want TLSSkipVerify=true Queue=legacy-q", rtCfg)
+		}
+	})
+
+	t.Run("sparse manager_config_v1 without tlsSkipVerify stays sparse across handoff", func(t *testing.T) {
+		clearConnectionEnvironment(t)
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		dataKeyPath := filepath.Join(dir, "data.key")
+
+		st, err := openProtectedStoreForTest(t, dbPath, dataKeyPath)
+		if err != nil {
+			t.Fatalf("open protected store: %v", err)
+		}
+		queue := "sparse-queue"
+		if _, err := st.PatchManagerCollectorConfig(context.Background(), store.ManagerCollectorPatch{Queue: &queue}); err != nil {
+			_ = st.Close()
+			t.Fatalf("seed sparse manager_config_v1: %v", err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatalf("close protected store: %v", err)
+		}
+
+		runStoreCommand(t, dbPath, dataKeyPath, testCPABaseURL, testCPAManagementKey)
+		raw := rawSettingValue(t, dbPath, "manager_config_v1")
+		if strings.Contains(raw, `"tlsSkipVerify"`) {
+			t.Fatalf("store-cpa-connection materialized tlsSkipVerify on sparse row: %s", raw)
+		}
+		reopened, err := openProtectedStoreForTest(t, dbPath, dataKeyPath)
+		if err != nil {
+			t.Fatalf("reopen protected store: %v", err)
+		}
+		defer func() { _ = reopened.Close() }()
+		resolved, _, _, err := managerconfig.New(config.Config{TLSSkipVerify: true}, reopened, nil).ResolveManagerConfigWithSource(context.Background())
+		if err != nil {
+			t.Fatalf("ResolveManagerConfigWithSource: %v", err)
+		}
+		if !resolved.Collector.TLSSkipVerify || resolved.Collector.Queue != "sparse-queue" {
+			t.Fatalf("resolved Collector after sparse handoff = %#v, want TLSSkipVerify=true Queue=sparse-queue", resolved.Collector)
+		}
+	})
 }
 
 func openProtectedStoreForTest(t *testing.T, dbPath string, dataKeyPath string) (*store.Store, error) {

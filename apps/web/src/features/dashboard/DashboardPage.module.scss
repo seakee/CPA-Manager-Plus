@@ -41,9 +41,19 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
-      &.connected { background: var(--data-emerald-base); }
-      &.connecting { background: var(--color-warning); animation: pulse 1.5s infinite; }
-      &.disconnected { background: var(--color-danger); }
+      &.connected {
+        background: var(--status-graphic-success);
+        box-shadow: 0 0 8px color-mix(in srgb, var(--status-graphic-success) 65%, transparent);
+      }
+      &.connecting {
+        background: var(--color-warning);
+        box-shadow: 0 0 8px color-mix(in srgb, var(--data-amber-base) 60%, transparent);
+        animation: pulse 1.5s infinite;
+      }
+      &.disconnected {
+        background: var(--color-danger);
+        box-shadow: 0 0 8px color-mix(in srgb, var(--data-red-base) 60%, transparent);
+      }
     }
 
     .statusInfo {
@@ -53,7 +63,7 @@
       .statusValue {
         font-size: 13px;
         font-weight: 600;
-        color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+        color: var(--data-badge-success-text);
       }
     }
   }
@@ -266,7 +276,7 @@
           font-size: 13px;
           font-weight: 600;
           font-variant-numeric: tabular-nums;
-          &.on { color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary)); }
+          &.on { color: var(--data-badge-success-text); }
           &.off { color: var(--text-muted); }
         }
         .configValueMono {
@@ -289,10 +299,10 @@
           text-transform: uppercase;
           white-space: nowrap;
           background: var(--data-badge-info-bg);
-          color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+          color: var(--data-badge-info-text);
 
           &.configBadgeRoundRobin {
-            color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+            color: var(--data-badge-info-text);
             background: var(--data-badge-info-bg);
           }
 
@@ -302,12 +312,12 @@
           }
 
           &.configBadgeFillFirst {
-            color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+            color: var(--data-badge-success-text);
             background: var(--data-badge-success-bg);
           }
 
           &.configBadgeUnknown {
-            color: color-mix(in srgb, var(--data-badge-neutral-text) 70%, var(--text-primary));
+            color: var(--data-badge-neutral-text);
             background: var(--data-badge-neutral-bg);
           }
         }

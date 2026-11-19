@@ -11,6 +11,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
 
 // maxGatewayConfigBody bounds one page write. A whole payload rule family is the
@@ -186,6 +187,8 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 // gatewayConfiguration serves the gateway configuration page:
 //
 //	GET  gateway/config
+//	GET  gateway/config/source
+//	POST gateway/config/source
 //	POST gateway/config/groups/{groupId}
 //	POST gateway/config/rules/{family}
 //	GET  gateway/config/operations/{requestId}
@@ -243,6 +246,52 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 		gatewayConfigReply(w, struct {
 			Capability freshconfig.Capability `json:"capability"`
 		}{Capability: capability}, nil)
+	case resource == "source":
+		switch r.Method {
+		case http.MethodGet:
+			service := a.gatewayService(w)
+			if service == nil {
+				return
+			}
+			if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
+				gatewayConfigReply(w, freshconfig.SourceView{}, cpa.ErrManagementRejected)
+			}) {
+				return
+			}
+			view, err := service.ReadSource(a.withExternalSavedCredentialGate(r.Context()))
+			gatewayConfigReply(w, view, err)
+		case http.MethodPost:
+			body, ok := gatewayConfigBody(w, r)
+			if !ok {
+				return
+			}
+			if !exactObject(body, "requestId", "expected", "yaml") || !exactExpected(body) || !exactStringField(body, "yaml") {
+				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+				return
+			}
+			var q freshconfig.SourceRequest
+			if json.Unmarshal(body, &q) != nil {
+				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+				return
+			}
+			if err := freshconfig.ValidateSourceRequest(q); err != nil {
+				gatewayConfigReply(w, nil, err)
+				return
+			}
+			service := a.gatewayService(w)
+			if service == nil {
+				return
+			}
+			if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
+				gatewayConfigReply(w, nil, cpa.ErrManagementRejected)
+			}) {
+				return
+			}
+			operation, err := service.SaveSource(a.withExternalSavedCredentialGate(r.Context()), q)
+			gatewayConfigReply(w, operation, err)
+		default:
+			methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+		}
 	case parts[0] == "groups" && len(parts) == 2:
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -296,8 +345,12 @@ func (a *freshApplication) gatewayConfiguration(w http.ResponseWriter, r *http.R
 			return
 		}
 		var q freshconfig.FamilyRequest
-		if json.Unmarshal(body, &q) != nil || freshconfig.ValidateFamilyRequest(parts[1], q) != nil {
+		if json.Unmarshal(body, &q) != nil {
 			gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+			return
+		}
+		if err := freshconfig.ValidateFamilyRequest(parts[1], q); err != nil {
+			gatewayConfigReply(w, nil, err)
 			return
 		}
 		service := a.gatewayService(w)
@@ -336,6 +389,10 @@ func (a *freshApplication) gatewayConfigOperation(w http.ResponseWriter, r *http
 			return
 		}
 		if !exactObject(b) {
+			gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+			return
+		}
+		if !freshkeys.ValidRequestID(parts[1]) {
 			gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
 			return
 		}
@@ -386,4 +443,17 @@ func exactExpected(body []byte) bool {
 		return false
 	}
 	return exactObject(raw["expected"], "generation", "baseline")
+}
+
+func exactStringField(body []byte, key string) bool {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return false
+	}
+	val := bytes.TrimSpace(raw[key])
+	if len(val) == 0 || val[0] != '"' {
+		return false
+	}
+	var s string
+	return json.Unmarshal(val, &s) == nil
 }

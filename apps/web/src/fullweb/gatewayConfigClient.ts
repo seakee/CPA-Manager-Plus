@@ -4,8 +4,24 @@ import type { PublicApiClient } from './publicApi';
 // The Manager's gateway configuration contract. Every response is re-validated
 // here: a malformed projection is a read failure, never a silently rendered page.
 
-export type GatewayFieldType = 'int' | 'bool' | 'string' | 'image-mode';
-export type GatewayFieldKind = 'number' | 'bool' | 'text' | 'duration' | 'url' | 'select';
+export type GatewayFieldType =
+  | 'int'
+  | 'bool'
+  | 'string'
+  | 'image-mode'
+  | 'string-list'
+  | 'kv-map'
+  | 'pattern-list';
+export type GatewayFieldKind =
+  | 'number'
+  | 'bool'
+  | 'text'
+  | 'duration'
+  | 'url'
+  | 'select'
+  | 'string-list'
+  | 'kv-map'
+  | 'pattern-list';
 export type GatewayPresence = 'present' | 'missing' | 'null' | 'unknown';
 export type GatewayMode = 'managed' | 'external' | 'private' | 'unavailable';
 export type GatewayOperationState = 'unknown' | 'persisted' | 'failed';
@@ -46,6 +62,7 @@ export interface GatewayOperation {
   requestId: string;
   group: string;
   target: 'group' | 'family';
+  prefix?: string;
   state: GatewayOperationState;
   code?: string;
   http200?: boolean;
@@ -86,6 +103,17 @@ export interface GatewayView {
   profileLimits?: GatewayProfileLimits;
 }
 
+export interface GatewaySourceView {
+  capability: GatewayCapability;
+  sourceWritable: boolean;
+  reason?: string;
+  generation: string;
+  baseline: string;
+  yaml: string;
+  groupsInvalid?: boolean;
+  operation?: GatewayOperation;
+}
+
 export type GatewayEditAction = 'set' | 'default';
 
 export interface GatewayEdit {
@@ -104,7 +132,15 @@ export interface GatewayExpected {
   baseline: string;
 }
 
-const FIELD_TYPES: Record<string, true> = { int: true, bool: true, string: true, 'image-mode': true };
+const FIELD_TYPES: Record<string, true> = {
+  int: true,
+  bool: true,
+  string: true,
+  'image-mode': true,
+  'string-list': true,
+  'kv-map': true,
+  'pattern-list': true,
+};
 const FIELD_KINDS: Record<string, true> = {
   number: true,
   bool: true,
@@ -112,6 +148,9 @@ const FIELD_KINDS: Record<string, true> = {
   duration: true,
   url: true,
   select: true,
+  'string-list': true,
+  'kv-map': true,
+  'pattern-list': true,
 };
 const PRESENCES: Record<string, true> = { present: true, missing: true, null: true, unknown: true };
 const MODES: Record<string, true> = {
@@ -134,6 +173,7 @@ function parseOperation(value: unknown): GatewayOperation | undefined {
     requestId: value.requestId,
     group: text(value.group),
     target: value.target === 'family' ? 'family' : 'group',
+    ...(typeof value.prefix === 'string' && value.prefix ? { prefix: value.prefix } : {}),
     state: state as GatewayOperationState,
     ...(typeof value.code === 'string' && value.code ? { code: value.code } : {}),
     ...(value.http200 === true ? { http200: true } : {}),
@@ -235,6 +275,38 @@ export function parseGatewayView(value: unknown): GatewayView {
   return view;
 }
 
+export function parseGatewaySourceView(value: unknown): GatewaySourceView {
+  if (!isRecord(value) || !isRecord(value.capability)) throw new Error('invalid gateway source view');
+  const capability = value.capability;
+  const mode = text(capability.mode);
+  if (
+    !MODES[mode] ||
+    typeof capability.readable !== 'boolean' ||
+    typeof capability.writable !== 'boolean' ||
+    typeof capability.rulesWritable !== 'boolean' ||
+    typeof value.sourceWritable !== 'boolean'
+  ) {
+    throw new Error('invalid gateway source view');
+  }
+  const operation = parseOperation(value.operation);
+  return {
+    capability: {
+      mode: mode as GatewayMode,
+      readable: capability.readable,
+      writable: capability.writable,
+      rulesWritable: capability.rulesWritable,
+      ...(typeof capability.reason === 'string' && capability.reason ? { reason: capability.reason } : {}),
+    },
+    sourceWritable: value.sourceWritable,
+    ...(typeof value.reason === 'string' && value.reason ? { reason: value.reason } : {}),
+    generation: text(value.generation),
+    baseline: text(value.baseline),
+    yaml: text(value.yaml),
+    ...(value.groupsInvalid === true ? { groupsInvalid: true } : {}),
+    ...(operation ? { operation } : {}),
+  };
+}
+
 export interface GatewayOperationResponse {
   operation: GatewayOperation;
   effective: 'unknown';
@@ -290,6 +362,22 @@ export function saveGatewayFamily(
     .then((value) => parseGatewayOperationResponse(value));
 }
 
+export function readGatewaySource(client: PublicApiClient, credential?: { kind: 'admin'; value: string }) {
+  return client
+    .get<unknown>('gateway/config/source', credential)
+    .then((value) => parseGatewaySourceView(value));
+}
+
+export function saveGatewaySource(
+  client: PublicApiClient,
+  credential: { kind: 'admin'; value: string },
+  body: { requestId: string; expected: GatewayExpected; yaml: string }
+) {
+  return client
+    .post<unknown>('gateway/config/source', body, credential)
+    .then((value) => parseGatewayOperationResponse(value));
+}
+
 export function readGatewayOperation(
   client: PublicApiClient,
   credential: { kind: 'admin'; value: string },
@@ -305,13 +393,21 @@ export function readGatewayOperation(
 
 /** The value a control shows for a server observation or a draft. */
 export function draftFor(view: GatewayFieldView): GatewayDraft {
-  if (view.presence === 'present') return { action: 'set', value: view.value };
-  // A `*bool` leaf that is unset inherits CPA's own default; showing "off"
-  // would invent a value the installation never chose.
+  if (view.presence === 'present') {
+    return {
+      action: 'set',
+      value:
+        view.type === 'string-list' || view.type === 'kv-map' || view.type === 'pattern-list'
+          ? structuredClone(view.value)
+          : view.value,
+    };
+  }
   if (isInheritable(view)) return { action: 'default', value: '' };
-  return { action: 'set', value: view.type === 'bool' ? false : '' };
+  if (view.type === 'bool') return { action: 'set', value: false };
+  if (view.type === 'string-list' || view.type === 'pattern-list') return { action: 'set', value: [] };
+  if (view.type === 'kv-map') return { action: 'set', value: {} };
+  return { action: 'set', value: '' };
 }
-
 /** A `*bool` leaf: an absent key and an explicit false are different states. */
 export function isInheritable(view: GatewayFieldView): boolean {
   return view.type === 'bool' && typeof view.inherit === 'boolean';
@@ -338,11 +434,49 @@ export function boolDraft(state: GatewayBoolState): GatewayDraft {
   return { action: 'set', value: state === 'on' };
 }
 
+function stableCompoundString(type: GatewayFieldType, value: unknown): string {
+  if (type === 'string-list') {
+    return JSON.stringify(Array.isArray(value) ? value.map(String) : []);
+  }
+  if (type === 'kv-map') {
+    const record = isRecord(value) ? value : {};
+    const sorted = Object.keys(record)
+      .sort()
+      .reduce<Record<string, string>>((acc, key) => {
+        acc[key] = typeof record[key] === 'string' ? record[key] : String(record[key] ?? '');
+        return acc;
+      }, {});
+    return JSON.stringify(sorted);
+  }
+  if (type === 'pattern-list') {
+    const list = Array.isArray(value)
+      ? value.map((item) => {
+          const row = isRecord(item) ? item : {};
+          return {
+            pattern: typeof row.pattern === 'string' ? row.pattern : '',
+            replacement: typeof row.replacement === 'string' ? row.replacement : '',
+          };
+        })
+      : [];
+    return JSON.stringify(list);
+  }
+  return JSON.stringify(value);
+}
+
 export function draftEquals(view: GatewayFieldView, draft: GatewayDraft): boolean {
   if (draft.action === 'default') return isUnset(view);
-  // An unset inheritable leaf has no value of its own, so any explicit value —
-  // including false — is the change the user asked for.
   if (isInheritable(view) && isUnset(view)) return false;
+  if (view.type === 'string-list' || view.type === 'kv-map' || view.type === 'pattern-list') {
+    const normalizedDraft = normalizeDraft(view, draft.value);
+    if (view.presence !== 'present') {
+      const empty = view.type === 'kv-map' ? '{}' : '[]';
+      return stableCompoundString(view.type, normalizedDraft) === empty;
+    }
+    return (
+      stableCompoundString(view.type, normalizedDraft) ===
+      stableCompoundString(view.type, view.value)
+    );
+  }
   if (view.presence !== 'present') {
     return view.type === 'bool' ? draft.value === false : draft.value === '';
   }
@@ -350,7 +484,6 @@ export function draftEquals(view: GatewayFieldView, draft: GatewayDraft): boolea
   if (view.type === 'bool') return draft.value === view.value;
   return draft.value === view.value;
 }
-
 /**
  * Whether this profile accepts the draft as one save. The private H1 profile
  * writes one field per operation and cannot delete a leaf, so "use default" and
@@ -379,11 +512,39 @@ export function normalizeDraft(view: GatewayFieldView, value: unknown): unknown 
     return Number.isFinite(number) ? number : value;
   }
   if (view.type === 'bool') return value === true;
+  if (view.type === 'string-list') {
+    return Array.isArray(value)
+      ? value.map((item) => String(item).trim()).filter((item) => item.length > 0)
+      : [];
+  }
+  if (view.type === 'kv-map') {
+    const record = isRecord(value) ? value : {};
+    const out: Record<string, string> = {};
+    for (const [key, val] of Object.entries(record)) {
+      const trimmed = key.trim();
+      if (!trimmed) continue;
+      out[trimmed] = typeof val === 'string' ? val : String(val ?? '');
+    }
+    return out;
+  }
+  if (view.type === 'pattern-list') {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        const row = isRecord(item) ? item : {};
+        return {
+          pattern: typeof row.pattern === 'string' ? row.pattern.trim() : '',
+          replacement: typeof row.replacement === 'string' ? row.replacement : '',
+        };
+      })
+      .filter((item) => item.pattern.length > 0);
+  }
   return value;
 }
-
 /** Only the shape CPAMP owns is checked here; CPA owns every bound. */
-export function draftIssue(view: GatewayFieldView, draft: GatewayDraft): 'required' | 'integer' | null {
+export type GatewayDraftIssue = 'required' | 'integer' | 'duplicate' | 'keyRequired';
+
+export function draftIssue(view: GatewayFieldView, draft: GatewayDraft): GatewayDraftIssue | null {
   if (draft.action === 'default') return null;
   const value = draft.value;
   if (view.type === 'int') {
@@ -394,6 +555,19 @@ export function draftIssue(view: GatewayFieldView, draft: GatewayDraft): 'requir
   }
   if (view.type === 'string' && (view.kind === 'url' || view.kind === 'duration')) {
     if (String(value ?? '').trim() === '') return 'required';
+  }
+  if (view.type === 'kv-map' && isRecord(value)) {
+    const seen = new Set<string>();
+    for (const [rawKey, rawVal] of Object.entries(value)) {
+      const key = rawKey.trim();
+      const text = typeof rawVal === 'string' ? rawVal : String(rawVal ?? '');
+      if (!key) {
+        if (text !== '') return 'keyRequired';
+        continue;
+      }
+      if (seen.has(key)) return 'duplicate';
+      seen.add(key);
+    }
   }
   return null;
 }

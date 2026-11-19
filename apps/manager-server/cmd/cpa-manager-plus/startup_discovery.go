@@ -893,14 +893,21 @@ func (h *startupHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reqCtx = requestbody.WithEarlyCloseDrainTimeout(reqCtx, h.earlyCloseDrainTimeout)
 		}
 		if r.Body != nil && r.Body != http.NoBody {
-			body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, requestbody.DefaultReadIdleTimeout)
+			origReq := r
+			origBody := origReq.Body
+			body, stopBody := requestbody.Wrap(reqCtx, origBody, w, requestbody.DefaultReadIdleTimeout)
 			if body != nil {
-				defer stopBody()
-				defer func() { _ = body.Close() }()
-				r.Body = body
+				defer func() {
+					_ = body.Close()
+					origReq.Body = origBody
+					stopBody()
+				}()
+				origReq.Body = body
 			}
+			r = origReq.WithContext(reqCtx)
+		} else {
+			r = r.WithContext(reqCtx)
 		}
-		r = r.WithContext(reqCtx)
 	}
 	h.protected.ServeHTTP(w, r)
 }

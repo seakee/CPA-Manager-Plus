@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -264,16 +265,16 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if freshMarkerPresent(paths.Database) {
 		opened, openErr := serveExistingFresh(ctx, cfg, paths, startupHandler)
 		if openErr == nil {
-			defer opened.Close()
-			waitForReadOnlyStartup(ctx, server, serverResult)
+			defer func() { _ = opened.Close() }()
+			waitForFreshShutdown(ctx, server, serverResult, startupHandler, nil, opened)
 			return
 		}
 		// A competing host initializer may still hold this exact admission.
 		// Keep discovery unavailable and retry ownership validation after it
 		// releases the fence; never project this Fresh store as a legacy source.
-		stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
-		defer stopAwait()
-		waitForReadOnlyStartup(ctx, server, serverResult)
+		await := startFreshStoreAwaiter(ctx, cfg, paths, startupHandler)
+		defer await.Close()
+		waitForFreshShutdown(ctx, server, serverResult, startupHandler, await, nil)
 		return
 	}
 	if cfg.EmbeddedRuntimeConfigured() {
@@ -284,10 +285,10 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if !options.Initialize {
 		if _, statErr := os.Lstat(paths.Database); os.IsNotExist(statErr) {
 			startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
-			stopAwait := startAwaitFreshStore(ctx, cfg, paths, startupHandler)
-			defer stopAwait()
+			await := startFreshStoreAwaiter(ctx, cfg, paths, startupHandler)
+			defer await.Close()
 			log.Printf("Manager source has no database; serving read-only Bootstrap discovery pending a later authorized initializer")
-			waitForReadOnlyStartup(ctx, server, serverResult)
+			waitForFreshShutdown(ctx, server, serverResult, startupHandler, await, nil)
 			return
 		}
 	}
@@ -466,13 +467,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 		usageHourlyAggregateWorker = worker.NewUsageHourlyAggregateWorker(db)
 	}
 	identityProjectionWorker := identityprojectionapp.NewWorker(db.IdentityProjections)
-	var usageArchiveRetentionWorker *worker.UsageArchiveRetentionWorker
-	if cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 && cfg.DashboardHourlyRollupEnabled {
-		usageArchiveRetentionWorker = worker.NewUsageArchiveRetentionWorker(
-			serverApp.AppContext().UsageService,
-			cfg.UsageArchiveRetentionDays,
-		)
-	}
+	usageArchiveRetentionWorker := newUsageArchiveRetentionWorker(cfg, serverApp)
 
 	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
 		accountHistoryRollupWorker.Wake()
@@ -502,8 +497,11 @@ func runServerWithOptions(options legacypreflight.Options) {
 	if err != nil {
 		log.Fatalf("configure pprof: %v", err)
 	}
+	var bgWG sync.WaitGroup
 	if pprofServer != nil {
+		bgWG.Add(1)
 		go func() {
+			defer bgWG.Done()
 			log.Printf("cpa-manager-plus pprof listening on %s", pprofServer.Addr)
 			if err := pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("pprof server: %v", err)
@@ -583,16 +581,29 @@ func runServerWithOptions(options legacypreflight.Options) {
 		CollectorWorker:      collectorWorker,
 	})
 	serverApp.SetUpgradeAPIKeys(upgradeKeysHandler.serveHTTP)
+	var upgradeCanonical *upgradeCanonicalServer
 	var reconcilerDesiredStore runtimeservice.DesiredStateStore = db
 	if err := attachCompletedUpgradeRouting(ctx, cfg, db, serverApp, upgradeKeysHandler.gatewayAdmitted, upgradeCanonicalDependencies{
 		Protector:       protector,
 		Workspace:       upgradeKeysHandler,
 		Runtime:         runtimeClient,
+		CollectorWorker: collectorWorker,
 		DesiredStateOut: &reconcilerDesiredStore,
 		Startup:         startupHandler,
+		CanonicalOut:    &upgradeCanonical,
 	}); err != nil {
 		if ctx.Err() != nil {
 			shutdownHTTPServer(server, freshHTTPShutdownTimeout)
+			if pprofServer != nil {
+				pprofCtx, cancelPprof := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := pprofServer.Shutdown(pprofCtx); err != nil {
+					log.Printf("shutdown pprof: %v", err)
+					_ = pprofServer.Close()
+				}
+				cancelPprof()
+			}
+			bgWG.Wait()
+			upgradeCanonical.Wait()
 			return
 		}
 		failStartup("attach completed upgrade routing: %v", err)
@@ -605,7 +616,11 @@ func runServerWithOptions(options legacypreflight.Options) {
 			runtimeservice.DefaultReconcileInterval,
 			log.Printf,
 		)
-		go runtimeReconciler.Run(ctx)
+		bgWG.Add(1)
+		go func() {
+			defer bgWG.Done()
+			runtimeReconciler.Run(ctx)
+		}()
 
 		managerConfigSvc := serverApp.AppContext().ManagerConfigService
 		identityReconcileSvc, err := identityreconcile.NewService(identityreconcile.Config{
@@ -653,9 +668,17 @@ func runServerWithOptions(options legacypreflight.Options) {
 			log.Fatalf("initialize identity reconcile service: %v", err)
 		}
 		identityWorker := identityreconcile.NewWorker(identityReconcileSvc, log.Printf)
-		go identityWorker.Run(ctx)
+		bgWG.Add(1)
+		go func() {
+			defer bgWG.Done()
+			identityWorker.Run(ctx)
+		}()
 	}
-	go serverApp.AppContext().UpdateCheckService.Run(ctx)
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		serverApp.AppContext().UpdateCheckService.Run(ctx)
+	}()
 	if err := serverApp.AppContext().UsageService.StartImportSessionCleanup(ctx); err != nil {
 		log.Printf("[startup] start usage import session cleanup: %v", err)
 	}
@@ -678,31 +701,76 @@ func runServerWithOptions(options legacypreflight.Options) {
 		identityProjectionWorker.Start(ctx)
 		db.StartDerivedMaintenance(ctx)
 		collectorWorker.Start(ctx)
-		worker.NewLegacyQuotaSnapshotMigrationWorker(db).Start(ctx)
-	}
+		legacyQuotaSnapshotMigrationWorker := worker.NewLegacyQuotaSnapshotMigrationWorker(db)
+		legacyQuotaSnapshotMigrationWorker.Start(ctx)
 
-	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
-		accountHistoryRollupWorker.Wake()
-		usageDerivedRollupWorker.Wake()
-		if usageHourlyAggregateWorker != nil {
-			usageHourlyAggregateWorker.Wake()
-		}
-		identityProjectionWorker.Wake()
-		go func() {
-			if err := waitForUsageResponseMetadataBackfill(ctx, db); err != nil {
-				if ctx.Err() == nil {
-					log.Printf("usage response metadata backfill: %v", err)
-				}
-				return
+		var retentionStartMu sync.Mutex
+		retentionStopped := false
+		usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
+			accountHistoryRollupWorker.Wake()
+			usageDerivedRollupWorker.Wake()
+			if usageHourlyAggregateWorker != nil {
+				usageHourlyAggregateWorker.Wake()
 			}
-			if usageArchiveRetentionWorker != nil {
-				usageArchiveRetentionWorker.Start(ctx)
+			identityProjectionWorker.Wake()
+			retentionStartMu.Lock()
+			stopped := retentionStopped || ctx.Err() != nil
+			if !stopped {
+				bgWG.Add(1)
+				go func() {
+					defer bgWG.Done()
+					if err := waitForUsageResponseMetadataBackfill(ctx, db); err != nil {
+						if ctx.Err() == nil {
+							log.Printf("usage response metadata backfill: %v", err)
+						}
+						return
+					}
+					retentionStartMu.Lock()
+					canStart := !retentionStopped && ctx.Err() == nil
+					if canStart && usageArchiveRetentionWorker != nil {
+						usageArchiveRetentionWorker.Start(ctx)
+					}
+					retentionStartMu.Unlock()
+				}()
 			}
-		}()
-
-	})
-	if ctx.Err() == nil {
+			retentionStartMu.Unlock()
+		})
 		usageCacheAccountingMigrationWorker.Start(ctx)
+
+		shutdownLegacyRuntime(
+			ctx,
+			stop,
+			serverResult,
+			startupHandler,
+			codexInspectionWorker,
+			collectorWorker,
+			pprofServer,
+			server,
+			usageArchiveRetentionWorker,
+			serverApp.AppContext().UsageService,
+			legacyRuntimeShutdownHooks{
+				collectorManager: manager,
+				importSessions:   serverApp.AppContext().UsageService,
+				stopRetentionStart: func() {
+					retentionStartMu.Lock()
+					retentionStopped = true
+					retentionStartMu.Unlock()
+				},
+				waitMigration:        usageCacheAccountingMigrationWorker.Wait,
+				waitBackground:       bgWG.Wait,
+				waitUpgradeCanonical: upgradeCanonical.Wait,
+				workerWaits: []func(){
+					automationRuntime.Wait,
+					accountHistoryRollupWorker.Wait,
+					usageDerivedRollupWorker.Wait,
+					usageHourlyAggregateWorker.Wait,
+					legacyQuotaSnapshotMigrationWorker.Wait,
+					identityProjectionWorker.Wait,
+					db.WaitDerivedMaintenance,
+				},
+			},
+		)
+		return
 	}
 
 	shutdownLegacyRuntime(
@@ -716,7 +784,48 @@ func runServerWithOptions(options legacypreflight.Options) {
 		server,
 		usageArchiveRetentionWorker,
 		serverApp.AppContext().UsageService,
+		legacyRuntimeShutdownHooks{
+			collectorManager:     manager,
+			importSessions:       serverApp.AppContext().UsageService,
+			waitBackground:       bgWG.Wait,
+			waitUpgradeCanonical: upgradeCanonical.Wait,
+			workerWaits: []func(){
+				identityProjectionWorker.Wait,
+				db.WaitDerivedMaintenance,
+			},
+		},
 	)
+}
+
+func newUsageArchiveRetentionWorker(cfg config.Config, serverApp *httpapi.Server) *worker.UsageArchiveRetentionWorker {
+	if !cfg.DashboardHourlyRollupEnabled || serverApp == nil || serverApp.AppContext() == nil || serverApp.AppContext().UsageService == nil {
+		return nil
+	}
+	initialDays := 0
+	if cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 {
+		initialDays = cfg.UsageArchiveRetentionDays
+	}
+	retentionWorker := worker.NewUsageArchiveRetentionWorker(
+		serverApp.AppContext().UsageService,
+		initialDays,
+	)
+	if serverApp.AppContext().ManagerConfigService != nil {
+		retentionWorker.SetSettingsResolver(serverApp.AppContext().ManagerConfigService.ResolveRetention)
+		serverApp.AppContext().ManagerConfigService.SetRetentionChangedNotifier(retentionWorker.Wake)
+	}
+	return retentionWorker
+}
+
+type legacyRuntimeShutdownHooks struct {
+	collectorManager     interface{ StopAndWait(context.Context) error }
+	importSessions       interface{ StopAndWaitImportSessions(context.Context) error }
+	stopRetentionStart   func()
+	waitMigration        func()
+	waitBackground       func()
+	waitUpgradeCanonical func()
+	workerWaits          []func()
+	httpShutdownTimeout  time.Duration
+	drainTimeout         time.Duration
 }
 
 func shutdownLegacyRuntime(
@@ -730,7 +839,12 @@ func shutdownLegacyRuntime(
 	server *http.Server,
 	usageArchiveRetentionWorker codexInspectionStopper,
 	usageArchiveJobs interface{ WaitArchiveJobs(context.Context) error },
+	extra ...legacyRuntimeShutdownHooks,
 ) {
+	var hooks legacyRuntimeShutdownHooks
+	if len(extra) > 0 {
+		hooks = extra[0]
+	}
 	select {
 	case <-ctx.Done():
 		select {
@@ -750,34 +864,76 @@ func shutdownLegacyRuntime(
 			stop()
 		}
 	}
+	if hooks.stopRetentionStart != nil {
+		hooks.stopRetentionStart()
+	}
 	if startupHandler != nil {
 		startupHandler.BeginShutdown()
 	}
-	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelShutdown()
-	if collectorWorker != nil {
-		collectorWorker.Stop(context.Background())
-	}
-	if pprofServer != nil {
-		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown pprof: %v", err)
-		}
+	httpShutdownTimeout := hooks.httpShutdownTimeout
+	if httpShutdownTimeout <= 0 {
+		httpShutdownTimeout = 10 * time.Second
 	}
 	if server != nil {
-		if err := server.Shutdown(shutdownCtx); err != nil {
+		httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		if err := server.Shutdown(httpCtx); err != nil {
 			log.Printf("shutdown: %v", err)
 			_ = server.Close()
 		}
+		cancelHTTP()
 	}
+	if pprofServer != nil {
+		pprofCtx, cancelPprof := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		if err := pprofServer.Shutdown(pprofCtx); err != nil {
+			log.Printf("shutdown pprof: %v", err)
+			_ = pprofServer.Close()
+		}
+		cancelPprof()
+	}
+	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
+	collectorCtx, cancelCollector := context.WithTimeout(context.Background(), 10*time.Second)
+	if collectorWorker != nil {
+		collectorWorker.Stop(collectorCtx)
+	}
+	if hooks.collectorManager != nil {
+		if err := hooks.collectorManager.StopAndWait(collectorCtx); err != nil {
+			log.Printf("shutdown collector manager: %v", err)
+		}
+	}
+	cancelCollector()
+	if hooks.waitMigration != nil {
+		hooks.waitMigration()
+	}
+	if hooks.waitBackground != nil {
+		hooks.waitBackground()
+	}
+	if hooks.waitUpgradeCanonical != nil {
+		hooks.waitUpgradeCanonical()
+	}
+	drainTimeout := hooks.drainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = 10 * time.Second
+	}
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancelDrain()
 	if usageArchiveRetentionWorker != nil {
-		if err := usageArchiveRetentionWorker.StopAndWait(shutdownCtx); err != nil {
+		if err := usageArchiveRetentionWorker.StopAndWait(drainCtx); err != nil {
 			log.Printf("shutdown usage archive retention: %v", err)
 		}
 	}
+	if hooks.importSessions != nil {
+		if err := hooks.importSessions.StopAndWaitImportSessions(drainCtx); err != nil {
+			log.Printf("shutdown usage import sessions: %v", err)
+		}
+	}
 	if usageArchiveJobs != nil {
-		if err := usageArchiveJobs.WaitArchiveJobs(shutdownCtx); err != nil {
+		if err := usageArchiveJobs.WaitArchiveJobs(drainCtx); err != nil {
 			log.Printf("shutdown usage archive jobs: %v", err)
+		}
+	}
+	for _, waitFn := range hooks.workerWaits {
+		if waitFn != nil {
+			waitFn()
 		}
 	}
 }
@@ -813,19 +969,27 @@ func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
 	}
 }
 
-// waitForReadOnlyStartup serves a Fresh or read-only discovery listener until
-// ctx cancels or server.Serve exits, then drains active HTTP handlers within
-// freshHTTPShutdownTimeout before callers close the admitted store.
-func waitForReadOnlyStartup(ctx context.Context, server *http.Server, result <-chan error) {
+// awaitReadOnlyShutdownSignal waits until ctx cancels or server.Serve reports exit.
+func awaitReadOnlyShutdownSignal(ctx context.Context, result <-chan error) {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
 	select {
-	case <-ctx.Done():
-		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
+	case <-done:
 	case err := <-result:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("read-only discovery server stopped: %v", err)
 		}
-		shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 	}
+}
+
+// waitForReadOnlyStartup serves a Fresh or read-only discovery listener until
+// ctx cancels or server.Serve exits, then drains active HTTP handlers within
+// freshHTTPShutdownTimeout before callers close the admitted store.
+func waitForReadOnlyStartup(ctx context.Context, server *http.Server, result <-chan error) {
+	awaitReadOnlyShutdownSignal(ctx, result)
+	shutdownHTTPServer(server, freshHTTPShutdownTimeout)
 }
 
 type codexInspectionStopper interface {

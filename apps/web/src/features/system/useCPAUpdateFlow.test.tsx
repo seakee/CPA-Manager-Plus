@@ -2,6 +2,7 @@ import axios, { AxiosError, type AxiosRequestConfig, type AxiosResponse } from '
 import { useLayoutEffect } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CPA_UPDATE_MAX_UPLOAD_BYTES } from './cpaUpdateApi';
 import { useCPAUpdateFlow, type CPAUpdateFlow, type CPAUpdateFlowStage } from './useCPAUpdateFlow';
 import { cpaUpdateStorageKey, readCPAUpdateIntent } from './cpaUpdateIntentStorage';
 import type {
@@ -51,6 +52,11 @@ let mutate: (
   config: AxiosRequestConfig
 ) => Promise<CPAUpdateMutationResult>;
 let observe: (phase: CPAUpdatePhase, body: CPAUpdateIdentity) => Promise<CPAUpdateObservation>;
+let uploadMutate: (
+  params: CPAUpdateRequest,
+  file: Blob,
+  config: AxiosRequestConfig
+) => Promise<CPAUpdateMutationResult>;
 let uuid: ReturnType<typeof vi.fn>;
 const storageKey = () => cpaUpdateStorageKey(mocks.base, mocks.auth.managementKey);
 const calls = (suffix: string) =>
@@ -125,6 +131,7 @@ beforeEach(() => {
   readStatus = async () => status;
   mutate = async (phase, body) => mutationResult(phase, body);
   observe = async (phase, body) => observationResult(updateIntent({ ...body, phase }), 'running');
+  uploadMutate = async (params) => mutationResult('prepare', params);
   request.mockReset();
   request.mockImplementation(async (config: AxiosRequestConfig) => {
     const suffix = config.url!.split('/usage-service/runtime/updates')[1];
@@ -138,6 +145,8 @@ beforeEach(() => {
         config.data as CPAUpdateRequest,
         config
       );
+    } else if (suffix === '/prepare-upload') {
+      data = await uploadMutate(config.params as CPAUpdateRequest, config.data as Blob, config);
     } else throw new Error('Unexpected CPA request: ' + suffix);
     return { data } as AxiosResponse;
   });
@@ -404,25 +413,35 @@ describe('CPA page lifecycle and explicit commands', () => {
 });
 
 describe('CPA response loss and durable observation', () => {
-  it('treats the 30 second timeout as unknown and immediately starts GET observation', async () => {
+  it('treats the 30 second timeout as unknown on activate without premature GET observation', async () => {
+    const prepared = updateIntent({ phase: 'prepare', client_stage: 'prepared' });
+    storeIntent(prepared);
+    const prepObserved = deferred<CPAUpdateObservation>();
+    observe = () => prepObserved.promise;
     await mount();
+    await act(async () => {
+      prepObserved.resolve(observationResult(prepared, 'succeeded'));
+    });
+    expect(flow.stage).toBe('prepared');
+
     const observed = deferred<CPAUpdateObservation>();
     observe = () => observed.promise;
-    mutate = (_phase, _body, config) =>
-      new Promise((_resolve, reject) => {
-        setTimeout(() => reject(new AxiosError('timeout', 'ECONNABORTED')), config.timeout);
-      });
+    mutate = (_phase, _body, config) => {
+      const d = deferred<CPAUpdateMutationResult>();
+      setTimeout(() => d.reject(new AxiosError('timeout', 'ECONNABORTED')), config.timeout);
+      return d.promise;
+    };
     await act(async () => {
-      void flow.prepare();
+      void flow.activate(flow.intent!);
     });
     await tick(29_999);
     expect(flow.stage).toBe('submitting');
-    expect(queries()).toHaveLength(0);
+    expect(queries()).toHaveLength(1); // Only the initial mount prepare recovery GET
     await tick(1);
     expect(flow.stage).toBe('outcome_unknown');
     expect(stages).not.toContain('confirmed_failed');
-    expect(queries()).toHaveLength(1);
-    expect(queries()[0][0].method).toBe('GET');
+    expect(queries()).toHaveLength(2);
+    expect(queries()[1][0].method).toBe('GET');
     const intent = flow.intent!;
     await act(async () => {
       observed.resolve(observationResult(intent, 'running'));
@@ -431,6 +450,52 @@ describe('CPA response loss and durable observation', () => {
     expect(posts()).toHaveLength(1);
   });
 
+  it('streams live prepare progress via GET while POST is in flight and treats 30s timeout as unknown', async () => {
+    await mount();
+    const observed = deferred<CPAUpdateObservation>();
+    let probeCount = 0;
+    observe = async (phase, body) => {
+      probeCount += 1;
+      if (probeCount === 1) {
+        return {
+          ...observationResult(updateIntent(body), 'running'),
+          phase,
+          stage_phase: 'downloading',
+          received_bytes: 512,
+          total_bytes: 1024,
+        };
+      }
+      return observed.promise;
+    };
+    mutate = (_phase, _body, config) => {
+      const d = deferred<CPAUpdateMutationResult>();
+      setTimeout(() => d.reject(new AxiosError('timeout', 'ECONNABORTED')), config.timeout);
+      return d.promise;
+    };
+    await act(async () => {
+      void flow.prepare();
+    });
+    await tick(700);
+    expect(flow.stage).toBe('submitting');
+    expect(flow.prepareProgress).toEqual({
+      phase: 'downloading',
+      receivedBytes: 512,
+      totalBytes: 1024,
+    });
+    await tick(29_300);
+    expect(flow.stage).toBe('outcome_unknown');
+    expect(stages).not.toContain('confirmed_failed');
+    const intent = flow.intent!;
+    await act(async () => {
+      observed.resolve(observationResult(intent, 'running'));
+    });
+    expect(flow.stage).toBe('running');
+    expect(flow.recoveredSession).toBe(false);
+    await tick(3_000);
+    expect(flow.stage).toBe('running');
+    expect(flow.recoveredSession).toBe(false);
+    expect(posts()).toHaveLength(1);
+  });
   it.each(['prepare', 'activate'] as const)(
     'recovers refresh during %s before enabling commands',
     async (phase) => {
@@ -513,7 +578,7 @@ describe('CPA response loss and durable observation', () => {
   it.each(['prepare', 'activate'] as const)(
     'never automatically retries not_found for %s; explicit retry preserves the original request',
     async (phase) => {
-      const intent = updateIntent({ phase });
+      const intent = updateIntent({ phase, source_mode: 'github' });
       storeIntent(intent);
       observe = async () => observationResult(intent, 'not_found');
       await mount();
@@ -535,6 +600,19 @@ describe('CPA response loss and durable observation', () => {
       expect(uuid).not.toHaveBeenCalled();
     }
   );
+
+  it('does not replay a legacy prepare with an unknown original source', async () => {
+    const intent = updateIntent();
+    storeIntent(intent);
+    observe = async () => observationResult(intent, 'not_found');
+    await mount();
+    expect(flow.stage).toBe('not_found');
+    expect(flow.canRetry).toBe(false);
+    await act(async () => {
+      await flow.retry(flow.intent!);
+    });
+    expect(posts()).toHaveLength(0);
+  });
 
   it('distinguishes already_applied replay and retains the original guard after the active artifact changed', async () => {
     const intent = updateIntent({ phase: 'activate' });
@@ -700,6 +778,55 @@ describe('CPA recovery context boundaries', () => {
     expect(posts()).toHaveLength(1);
     expect(uuid).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['prepare', 'activate'] as const)(
+    'skips observe and only refreshes status on refresh() after 409 context_changed on %s so stage never flips to not_found',
+    async (phase) => {
+      if (phase === 'activate') {
+        const prepared = updateIntent({ phase: 'prepare', client_stage: 'prepared' });
+        storeIntent(prepared);
+        observe = async () => observationResult(prepared, 'succeeded');
+        await mount();
+        expect(flow.stage).toBe('prepared');
+      } else {
+        await mount();
+      }
+
+      const queriesBefore = queries().length;
+
+      mutate = async () => {
+        throw httpError('active_artifact_mismatch', 409);
+      };
+      observe = vi.fn(async (_obsPhase, body) =>
+        observationResult(updateIntent({ ...body, phase }), 'not_found')
+      );
+
+      await act(async () => {
+        if (phase === 'activate') {
+          await flow.activate(flow.intent!);
+        } else {
+          await flow.prepare();
+        }
+      });
+      expect(flow.stage).toBe('context_changed');
+      expect(queries()).toHaveLength(queriesBefore);
+      const statusCallsBeforeRefresh = calls('').length;
+
+      status = updateStatus({
+        active_artifact_id: replacementArtifact,
+        target_version: '7.3.0',
+      });
+      await act(async () => {
+        await flow.refresh();
+      });
+
+      expect(queries()).toHaveLength(queriesBefore);
+      expect(calls('')).toHaveLength(statusCallsBeforeRefresh + 1);
+      expect(flow.stage).toBe('context_changed');
+      expect(flow.canRetry).toBe(false);
+      expect(flow.status?.target_version).toBe('7.3.0');
+    }
+  );
 
   it.each([
     { target_version: '7.3.0' },
@@ -878,5 +1005,399 @@ describe('CPA recovery context boundaries', () => {
     });
     expect(flow.available).toBe(false);
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('persists CDN source_mode/cdn_prefix and preserves them on explicit retry after reload', async () => {
+    await mount();
+    mutate = async () => {
+      throw new AxiosError('timeout', 'ECONNABORTED');
+    };
+    observe = async (_phase, body) => observationResult(updateIntent({ ...body, phase: 'prepare' }), 'not_found');
+    await act(async () => {
+      await flow.prepare({ sourceMode: 'cdn', cdnPrefix: ' https://cdn.example.com/mirror/ ' });
+    });
+    const saved = readCPAUpdateIntent(storageKey())!;
+    expect(saved.source_mode).toBe('cdn');
+    expect(saved.cdn_prefix).toBe('https://cdn.example.com/mirror/');
+    expect(flow.stage).toBe('not_found');
+    expect(flow.canRetry).toBe(true);
+
+    await unmount();
+    await mount();
+    expect(flow.stage).toBe('not_found');
+    expect(flow.canRetry).toBe(true);
+    expect(flow.intent).toEqual(saved);
+
+    mutate = async (phase, body) => mutationResult(phase, body);
+    await act(async () => {
+      await flow.retry(flow.intent!);
+    });
+    expect(calls('/prepare')).toHaveLength(2);
+    expect(calls('/prepare')[1][0].data).toEqual({
+      request_id: saved.request_id,
+      target_version: saved.target_version,
+      expected_active_artifact_id: saved.expected_active_artifact_id,
+      source_mode: 'cdn',
+      cdn_prefix: 'https://cdn.example.com/mirror/',
+    });
+    expect(flow.stage).toBe('prepared');
+  });
+
+  it('disables retry and blocks replay for lost upload prepares across reload without falling back to GitHub', async () => {
+    await mount();
+    const pendingUpload = deferred<CPAUpdateMutationResult>();
+    uploadMutate = () => pendingUpload.promise;
+    const archive = new Blob(['gz']);
+    await act(async () => {
+      void flow.prepareUpload(archive);
+    });
+    const saved = readCPAUpdateIntent(storageKey())!;
+    expect(saved.source_mode).toBe('upload');
+    const signal = calls('/prepare-upload')[0][0].signal;
+    await unmount();
+    expect(signal?.aborted).toBe(true);
+
+    observe = async () => observationResult(saved, 'not_found');
+    await mount();
+    expect(flow.stage).toBe('not_found');
+    expect(flow.canRetry).toBe(false);
+    await act(async () => {
+      await flow.retry(flow.intent!);
+    });
+    expect(calls('/prepare')).toHaveLength(0);
+    expect(calls('/prepare-upload')).toHaveLength(1);
+  });
+
+  it('allows explicit activate retry after a successful upload prepare', async () => {
+    const preparedUpload = updateIntent({
+      phase: 'activate',
+      source_mode: 'upload',
+    });
+    storeIntent(preparedUpload);
+    observe = async () => observationResult(preparedUpload, 'not_found');
+    await mount();
+    expect(flow.stage).toBe('not_found');
+    expect(flow.canRetry).toBe(true);
+    await act(async () => {
+      await flow.retry(flow.intent!);
+    });
+    expect(calls('/activate')[0][0].data).toEqual({
+      request_id: preparedUpload.request_id,
+      target_version: preparedUpload.target_version,
+      expected_active_artifact_id: preparedUpload.expected_active_artifact_id,
+    });
+    expect(flow.stage).toBe('succeeded');
+  });
+
+  it('blocks empty/oversize uploads and disallowed CDN prefixes before claiming or sending POST', async () => {
+    await mount();
+    await act(async () => {
+      await flow.prepareUpload(new Blob([]));
+      await flow.prepareUpload({ size: CPA_UPDATE_MAX_UPLOAD_BYTES + 1 } as Blob);
+      await flow.prepare({ sourceMode: 'cdn', cdnPrefix: 'https://198.18.0.1/' });
+      await flow.prepare({ sourceMode: 'cdn', cdnPrefix: 'https://cdn.example.com/../x' });
+    });
+    expect(flow.stage).toBe('idle');
+    expect(readCPAUpdateIntent(storageKey())).toBeNull();
+    expect(posts()).toHaveLength(0);
+    expect(uuid).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { statusCode: 413, code: 'archive_too_large', expectedCode: 'archive_too_large', upload: true },
+    { statusCode: 413, code: '', expectedCode: 'archive_too_large', upload: true },
+    { statusCode: 400, code: 'invalid_request', expectedCode: 'invalid_request', upload: true },
+    { statusCode: 400, code: 'invalid_request', expectedCode: 'invalid_request', upload: false },
+  ])(
+    'maps HTTP $statusCode ($code) to deterministic confirmed_failed and clears local intent',
+    async ({ statusCode, code, expectedCode, upload }) => {
+      await mount();
+      const err = new AxiosError('rejected', 'ERR_BAD_RESPONSE', undefined, undefined, {
+        status: statusCode,
+        data: code ? { code, error: 'raw detail' } : '<html>rejected</html>',
+      } as AxiosResponse);
+      if (upload) {
+        uploadMutate = async () => {
+          throw err;
+        };
+        await act(async () => {
+          await flow.prepareUpload(new Blob(['gz']));
+        });
+      } else {
+        mutate = async () => {
+          throw err;
+        };
+        await act(async () => {
+          await flow.prepare({ sourceMode: 'cdn', cdnPrefix: 'https://cdn.example.com/' });
+        });
+      }
+      expect(flow.stage).toBe('confirmed_failed');
+      expect(flow.failureCode).toBe(expectedCode);
+      expect(readCPAUpdateIntent(storageKey())).toBeNull();
+      expect(queries()).toHaveLength(0);
+    }
+  );
+
+  it('maps chunked 502 terminal journal archive_too_large to confirmed_failed', async () => {
+    await mount();
+    uploadMutate = async (params) => {
+      throw new AxiosError('archive too large', 'ERR_BAD_RESPONSE', undefined, undefined, {
+        status: 502,
+        data: mutationResult('prepare', params, {
+          state: 'failed',
+          failure_code: 'archive_too_large',
+        }),
+      } as AxiosResponse);
+    };
+    await act(async () => {
+      await flow.prepareUpload(new Blob(['gz']));
+    });
+    expect(flow.stage).toBe('confirmed_failed');
+    expect(flow.failureCode).toBe('archive_too_large');
+    expect(readCPAUpdateIntent(storageKey())).toBeNull();
+  });
+
+  it('resets stage, failureCode, and prepareProgress when adopting a new request_id after initialization', async () => {
+    const failedIntent = updateIntent({
+      request_id: 'req-failed-prev',
+      target_version: '7.2.0',
+    });
+    storeIntent(failedIntent);
+    observe = async () => observationResult(failedIntent, 'failed', { failure_code: 'download_failed' });
+    await mount();
+    expect(flow.stage).toBe('confirmed_failed');
+    expect(flow.failureCode).toBe('download_failed');
+
+    const nextIntent = updateIntent({
+      request_id: 'req-next-active',
+      target_version: '7.2.1',
+    });
+    const pendingObserve = deferred<CPAUpdateObservation>();
+    observe = () => pendingObserve.promise;
+    storeIntent(nextIntent);
+
+    await act(async () => {
+      window.dispatchEvent(Object.assign(new Event('storage'), { key: storageKey() }));
+      await Promise.resolve();
+    });
+    expect(flow.stage).toBe('recovering');
+    expect(flow.failureCode).toBeUndefined();
+    expect(flow.prepareProgress).toBeNull();
+    expect(flow.intent).toEqual(nextIntent);
+
+    await act(async () => {
+      pendingObserve.resolve(observationResult(nextIntent, 'running'));
+    });
+    expect(flow.stage).toBe('running');
+  });
+
+  it('preserves upload progress bytes when verifying observation omits byte fields or reports zero', async () => {
+    await mount();
+    const uploadDeferred = deferred<CPAUpdateMutationResult>();
+    let capturedProgress: ((loaded: number, total: number) => void) | undefined;
+    uploadMutate = async (_params, _file, config) => {
+      capturedProgress = (loaded: number, total: number) => {
+        config.onUploadProgress?.({ loaded, total } as never);
+      };
+      return uploadDeferred.promise;
+    };
+    observe = async (phase, body) => ({
+      ...observationResult(updateIntent({ ...body, phase }), 'running'),
+      phase,
+      stage_phase: 'verifying',
+      received_bytes: 0,
+      total_bytes: 0,
+    });
+
+    await act(async () => {
+      void flow.prepareUpload(new Blob([new Uint8Array(1024)]));
+    });
+    await act(async () => {
+      capturedProgress?.(1024, 1024);
+    });
+    expect(flow.prepareProgress).toEqual({
+      phase: 'verifying',
+      receivedBytes: 1024,
+      totalBytes: 1024,
+    });
+
+    await tick(700);
+    expect(flow.prepareProgress).toEqual({
+      phase: 'verifying',
+      receivedBytes: 1024,
+      totalBytes: 1024,
+    });
+
+    await act(async () => {
+      uploadDeferred.resolve(mutationResult('prepare', flow.intent!, { state: 'succeeded' }));
+    });
+    expect(flow.stage).toBe('prepared');
+  });
+
+  it('clears terminal intent when prepare() sees changed target_version and transitions to context_changed so refresh() does not throw changed', async () => {
+    await mount();
+    mutate = async (phase, body) =>
+      mutationResult(phase, updateIntent({ ...body, phase }), {
+        state: 'failed',
+        failure_code: 'checksum_mismatch',
+      });
+
+    await act(async () => {
+      await flow.prepare();
+    });
+    expect(flow.stage).toBe('confirmed_failed');
+    expect(flow.intent).not.toBeNull();
+    expect(readCPAUpdateIntent(storageKey())).toBeNull();
+
+    status = updateStatus({
+      state: 'update_available',
+      target_version: '7.3.0',
+      active_artifact_id: originalArtifact,
+    });
+
+    await act(async () => {
+      await flow.prepare();
+    });
+    expect(flow.stage).toBe('context_changed');
+    expect(flow.intent).toBeNull();
+
+    await act(async () => {
+      await flow.refresh();
+    });
+    expect(flow.storageError).toBeNull();
+  });
+
+  it('clears stale terminal intent in applyStatus when status changes to up_to_date or new target', async () => {
+    await mount();
+    mutate = async (phase, body) =>
+      mutationResult(phase, updateIntent({ ...body, phase }), {
+        state: 'failed',
+        failure_code: 'invalid_archive',
+      });
+
+    await act(async () => {
+      await flow.prepare();
+    });
+    expect(flow.stage).toBe('confirmed_failed');
+    expect(flow.intent).not.toBeNull();
+
+    status = updateStatus({ state: 'up_to_date', current_version: '7.2.0' });
+    await act(async () => {
+      await flow.check();
+    });
+    expect(flow.intent).toBeNull();
+    expect(flow.storageError).toBeNull();
+  });
+
+  it.each(['prepare', 'activate'] as const)(
+    'persists context_changed across unmount/remount on 409 from %s and skips observe() even when status remains compatible',
+    async (phase) => {
+      if (phase === 'activate') {
+        const prepared = updateIntent({ phase: 'prepare', client_stage: 'prepared' });
+        storeIntent(prepared);
+        observe = async () => observationResult(prepared, 'succeeded');
+        await mount();
+        expect(flow.stage).toBe('prepared');
+      } else {
+        await mount();
+      }
+
+      const queriesBeforeMutate = queries().length;
+      mutate = async () => {
+        throw httpError('stale_runtime_generation', 409);
+      };
+      observe = vi.fn(async (_obsPhase, body) =>
+        observationResult(updateIntent({ ...body, phase }), 'not_found')
+      );
+
+      await act(async () => {
+        if (phase === 'activate') {
+          await flow.activate(flow.intent!);
+        } else {
+          await flow.prepare();
+        }
+      });
+
+      expect(flow.stage).toBe('context_changed');
+      expect(flow.canRetry).toBe(false);
+      expect(queries()).toHaveLength(queriesBeforeMutate);
+      const saved = readCPAUpdateIntent(storageKey());
+      expect(saved?.unrecorded_context_changed).toBe(true);
+      expect(flow.intent?.unrecorded_context_changed).toBe(true);
+
+      // Keep status compatible across remount and simulate refresh/re-entry.
+      status = updateStatus({
+        target_version: saved!.target_version,
+        active_artifact_id: saved!.expected_active_artifact_id,
+      });
+      await unmount();
+      await mount();
+
+      expect(queries()).toHaveLength(queriesBeforeMutate);
+      expect(flow.stage).toBe('context_changed');
+      expect(flow.canRetry).toBe(false);
+      expect(flow.canActivate).toBe(false);
+      expect(flow.canPrepare).toBe(false);
+      expect(flow.canCheck).toBe(false);
+      expect(flow.recoveredSession).toBe(true);
+
+      await act(async () => {
+        await flow.forget(flow.recoveryRecord!);
+      });
+      expect(readCPAUpdateIntent(storageKey())).toBeNull();
+      expect(flow.stage).toBe('idle');
+    }
+  );
+
+  it('keeps storageError unavailable and stage context_changed without calling observe() when refresh() runs after 409 persistence fails with QuotaExceededError', async () => {
+    await mount();
+    const origSetItem = storage.setItem.bind(storage);
+    let failQuotaOnSet = false;
+    const setItemSpy = vi.spyOn(storage, 'setItem').mockImplementation((key, value) => {
+      if (failQuotaOnSet) {
+        throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      }
+      origSetItem(key, value);
+    });
+
+    const queriesBeforeMutate = queries().length;
+    mutate = async () => {
+      failQuotaOnSet = true;
+      throw httpError('stale_runtime_generation', 409);
+    };
+    observe = vi.fn(async (_obsPhase, body) =>
+      observationResult(updateIntent({ ...body, phase: 'prepare' }), 'not_found')
+    );
+
+    await act(async () => {
+      await flow.prepare();
+    });
+
+    expect(flow.stage).toBe('context_changed');
+    expect(flow.storageError).toBe('unavailable');
+    expect(readCPAUpdateIntent(storageKey())?.unrecorded_context_changed).toBeUndefined();
+    expect(queries()).toHaveLength(queriesBeforeMutate);
+
+    // Same-page refresh while localStorage.setItem still throws QuotaExceededError (reads still work)
+    await act(async () => {
+      await flow.refresh();
+    });
+
+    expect(flow.storageError).toBe('unavailable');
+    expect(flow.stage).toBe('context_changed');
+    expect(queries()).toHaveLength(queriesBeforeMutate);
+
+    // Once storage quota recovers, refresh() backfills unrecorded_context_changed and clears storageError without observe()
+    failQuotaOnSet = false;
+    await act(async () => {
+      await flow.refresh();
+    });
+
+    expect(flow.storageError).toBeNull();
+    expect(flow.stage).toBe('context_changed');
+    expect(readCPAUpdateIntent(storageKey())?.unrecorded_context_changed).toBe(true);
+    expect(flow.intent?.unrecorded_context_changed).toBe(true);
+    expect(queries()).toHaveLength(queriesBeforeMutate);
+    setItemSpy.mockRestore();
   });
 });

@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// TestGatewayPathTableCoversAcceptedInventory pins the accepted r3 scope: 39
-// writable leaves across 11 page groups plus 5 whole-family rule lists.
+// TestGatewayPathTableCoversAcceptedInventory pins both the adoption-pinned
+// table (39 leaves, 11 groups, 5 families) and the expanded runtime gateway page
+// table (88 leaves, 21 groups, 6 families including payload.replace).
 func TestGatewayPathTableCoversAcceptedInventory(t *testing.T) {
 	if len(gatewayLeaves) != 39 {
 		t.Fatalf("leaf count %d", len(gatewayLeaves))
@@ -16,10 +17,16 @@ func TestGatewayPathTableCoversAcceptedInventory(t *testing.T) {
 	if len(ConfigLeafPaths()) != len(gatewayLeaves) {
 		t.Fatal("leaf paths drifted")
 	}
+	if len(ConfigGroupIDs()) != 11 || len(ConfigRuleFamilyPaths()) != 5 {
+		t.Fatalf("adoption pinned counts drifted: %d groups, %d families", len(ConfigGroupIDs()), len(ConfigRuleFamilyPaths()))
+	}
+	if len(gatewayPageLeaves) != 88 || len(GatewayPageLeafPaths()) != 88 {
+		t.Fatalf("page leaf count %d", len(gatewayPageLeaves))
+	}
 	seen := map[string]string{}
-	for _, group := range gatewayGroups {
+	for _, group := range gatewayPageGroups {
 		for _, path := range group.Leaves {
-			leaf, ok := LookupConfigLeaf(path)
+			leaf, ok := LookupGatewayPageLeaf(path)
 			if !ok {
 				t.Fatalf("%s: group %s names an unknown leaf", path, group.ID)
 			}
@@ -35,25 +42,27 @@ func TestGatewayPathTableCoversAcceptedInventory(t *testing.T) {
 			seen[path] = group.ID
 		}
 	}
-	if len(seen) != len(gatewayLeaves) {
-		t.Fatalf("groups cover %d of %d leaves", len(seen), len(gatewayLeaves))
+	if len(seen) != len(gatewayPageLeaves) {
+		t.Fatalf("groups cover %d of %d leaves", len(seen), len(gatewayPageLeaves))
 	}
-	if got := len(ConfigGroupIDs()); got != 11 {
+	if got := len(GatewayPageGroupIDs()); got != 21 {
 		t.Fatalf("group count %d", got)
 	}
-	if got := len(ConfigRuleFamilyPaths()); got != 5 {
+	if got := len(GatewayPageRuleFamilyIDs()); got != 6 {
 		t.Fatalf("rule family count %d", got)
 	}
 	for _, family := range []struct {
-		name   string
-		raw    bool
-		filter bool
+		name    string
+		raw     bool
+		filter  bool
+		replace bool
 	}{
-		{"default", false, false}, {"default-raw", true, false}, {"override", false, false},
-		{"override-raw", true, false}, {"filter", false, true},
+		{"default", false, false, false}, {"default-raw", true, false, false},
+		{"override", false, false, false}, {"override-raw", true, false, false},
+		{"replace", false, false, true}, {"filter", false, true, false},
 	} {
-		entry, ok := LookupConfigRuleFamily(family.name)
-		if !ok || entry.Raw != family.raw || entry.Filter != family.filter ||
+		entry, ok := LookupGatewayPageRuleFamily(family.name)
+		if !ok || entry.Raw != family.raw || entry.Filter != family.filter || entry.Replace != family.replace ||
 			entry.Path != "requests.payload."+family.name {
 			t.Fatalf("family %s: %+v", family.name, entry)
 		}
@@ -128,6 +137,12 @@ func TestLeafValuesAreShapesOnly(t *testing.T) {
 		{"multimedia.disable-image-generation", "passthrough", true},
 		{"multimedia.disable-image-generation", "disabled", false},
 		{"multimedia.gpt-image-2-base-model", "gpt-5.4-mini", true},
+		{"oauth.providers.antigravity.sensitive-words", []string{"API", "proxy"}, true},
+		{"oauth.providers.antigravity.sensitive-words", []any{1}, false},
+		{"oauth.providers.antigravity.sensitive-words-replace", map[string]string{"old": "new"}, true},
+		{"oauth.providers.antigravity.sensitive-words-replace", map[string]string{"": "new"}, false},
+		{"oauth.providers.antigravity.sensitive-patterns-replace", []map[string]string{{"pattern": "^foo", "replacement": ""}}, true},
+		{"oauth.providers.antigravity.sensitive-patterns-replace", []map[string]string{{"pattern": " ", "replacement": ""}}, false},
 	} {
 		err := ValidateConfigLeafValue(tc.path, tc.value)
 		if (err == nil) != tc.ok {
@@ -137,6 +152,9 @@ func TestLeafValuesAreShapesOnly(t *testing.T) {
 	raw, err := ParseConfigLeafValue("multimedia.disable-image-generation", json.RawMessage(`"chat"`))
 	if err != nil || raw != "chat" {
 		t.Fatal(raw, err)
+	}
+	if listVal, err := ParseConfigLeafValue("oauth.providers.antigravity.sensitive-words", json.RawMessage(`["a","b"]`)); err != nil || len(listVal.([]string)) != 2 {
+		t.Fatalf("string list parse failed: %v %v", listVal, err)
 	}
 	if _, err = ParseConfigLeafValue("multimedia.disable-image-generation", json.RawMessage(`null`)); err == nil {
 		t.Fatal("null accepted as a leaf value")
@@ -190,6 +208,7 @@ func TestRuleFamiliesRejectDuplicatePathsAndBadShapes(t *testing.T) {
 		"default-raw":  `[{"models":[{"name":"gpt-*"}],"params":{"response_format":"{\"type\":\"json_object\"}"}}]`,
 		"override":     `[{"models":[{"name":"*-5","from-protocol":"responses","match":[{"metadata.client":"x"}],"not-exist":["tools"]}],"params":{"top_p":1}}]`,
 		"override-raw": `[{"models":[{"name":"*"}],"params":{}}]`,
+		"replace":      `[{"models":[{"name":"*","protocol":"claude"}],"target":{"role":"user","positions":[1,2]},"replacements":[{"old":"new"}]}]`,
 		"filter":       `[{"models":[{"name":"gpt-*"}],"params":["metadata.client","metadata.tags"]}]`,
 	}
 	for family, body := range valid {
@@ -201,18 +220,21 @@ func TestRuleFamiliesRejectDuplicatePathsAndBadShapes(t *testing.T) {
 		family string
 		body   string
 	}{
-		"duplicate filter path":   {"filter", `[{"models":[{"name":"*"}],"params":["a","a"]}]`},
-		"duplicate exist path":    {"default", `[{"models":[{"name":"*","exist":["a","a"]}],"params":{}}]`},
-		"duplicate match path":    {"default", `[{"models":[{"name":"*","match":[{"a":1},{"a":2}]}],"params":{}}]`},
-		"folded duplicate header": {"default", `[{"models":[{"name":"*","headers":{"X-A":"1","x-a":"2"}}],"params":{}}]`},
-		"raw value not json":      {"default-raw", `[{"models":[{"name":"*"}],"params":{"a":"{"}}]`},
-		"raw value not string":    {"default-raw", `[{"models":[{"name":"*"}],"params":{"a":{}}}]`},
-		"filter params not array": {"filter", `[{"models":[{"name":"*"}],"params":{"a":"b"}}]`},
-		"params not object":       {"default", `[{"models":[{"name":"*"}],"params":"[]"}]`},
-		"unknown condition":       {"default", `[{"models":[{"name":"*","when":[]}],"params":{}}]`},
-		"blank model name":        {"default", `[{"models":[{"name":" "}],"params":{}}]`},
-		"unknown rule key":        {"default", `[{"models":[{"name":"*"}],"params":{},"note":"x"}]`},
-		"empty body":              {"default", ``},
+		"duplicate filter path":          {"filter", `[{"models":[{"name":"*"}],"params":["a","a"]}]`},
+		"duplicate exist path":           {"default", `[{"models":[{"name":"*","exist":["a","a"]}],"params":{}}]`},
+		"duplicate match path":           {"default", `[{"models":[{"name":"*","match":[{"a":1},{"a":2}]}],"params":{}}]`},
+		"folded duplicate header":        {"default", `[{"models":[{"name":"*","headers":{"X-A":"1","x-a":"2"}}],"params":{}}]`},
+		"raw value not json":             {"default-raw", `[{"models":[{"name":"*"}],"params":{"a":"{"}}]`},
+		"raw value not string":           {"default-raw", `[{"models":[{"name":"*"}],"params":{"a":{}}}]`},
+		"filter params not array":        {"filter", `[{"models":[{"name":"*"}],"params":{"a":"b"}}]`},
+		"params not object":              {"default", `[{"models":[{"name":"*"}],"params":"[]"}]`},
+		"unknown condition":              {"default", `[{"models":[{"name":"*","when":[]}],"params":{}}]`},
+		"blank model name":               {"default", `[{"models":[{"name":" "}],"params":{}}]`},
+		"unknown rule key":               {"default", `[{"models":[{"name":"*"}],"params":{},"note":"x"}]`},
+		"replace missing target":         {"replace", `[{"models":[{"name":"*"}],"replacements":[{"a":"b"}]}]`},
+		"replace all and positions both": {"replace", `[{"models":[{"name":"*"}],"target":{"role":"user","all":true,"positions":[1]},"replacements":[{"a":"b"}]}]`},
+		"replace empty replacements":     {"replace", `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[]}]`},
+		"empty body":                     {"default", ``},
 	}
 	for name, tc := range invalid {
 		if _, err := ParseConfigRules(tc.family, json.RawMessage(tc.body)); err == nil {
@@ -278,5 +300,52 @@ func TestPluginScopeIsSeparateFromTheGatewayPage(t *testing.T) {
 	}
 	if _, err := ParseConfigLeafValue("plugins.enabled", json.RawMessage(`true`)); err == nil {
 		t.Fatal("the gateway parser accepted the plugin leaf")
+	}
+}
+
+func TestIsConfigKVMapLeafAndReplaceRuleEdgeCases(t *testing.T) {
+	for _, path := range []string{
+		"oauth.providers.antigravity.sensitive-words-replace",
+		"oauth.providers.devin.sensitive-words-replace",
+		"OAuth.Providers.Antigravity.Sensitive-Words-Replace",
+	} {
+		if !IsConfigKVMapLeaf(path) {
+			t.Fatalf("expected %q to be recognized as ConfigLeafKVMap", path)
+		}
+	}
+	for _, path := range []string{
+		"oauth.providers.antigravity.sensitive-patterns-replace",
+		"routing.strategy",
+		"requests.payload.replace",
+		"unknown.leaf",
+	} {
+		if IsConfigKVMapLeaf(path) {
+			t.Fatalf("expected %q not to be ConfigLeafKVMap", path)
+		}
+	}
+
+	validReplace := map[string]string{
+		"all false with positions":      `[{"models":[{"name":"*"}],"target":{"role":"user","all":false,"positions":[1,2]},"replacements":[{"old.phrase":"new"}]}]`,
+		"all true with empty positions": `[{"models":[{"name":"*"}],"target":{"role":"user","all":true,"positions":[]},"replacements":[{"a":"b"}]}]`,
+		"whitespace-only source key":    `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[{" ":""},{"\t\n":" "}]}]`,
+	}
+	for name, body := range validReplace {
+		if _, err := ParseConfigRules("replace", json.RawMessage(body)); err != nil {
+			t.Fatalf("%s rejected: %v", name, err)
+		}
+	}
+
+	invalidReplace := map[string]string{
+		"empty string source key":        `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[{"":"b"}]}]`,
+		"all false without positions":    `[{"models":[{"name":"*"}],"target":{"role":"user","all":false},"replacements":[{"a":"b"}]}]`,
+		"all false with empty positions": `[{"models":[{"name":"*"}],"target":{"role":"user","all":false,"positions":[]},"replacements":[{"a":"b"}]}]`,
+		"all non-bool":                   `[{"models":[{"name":"*"}],"target":{"role":"user","all":"false","positions":[1]},"replacements":[{"a":"b"}]}]`,
+		"fractional position":            `[{"models":[{"name":"*"}],"target":{"role":"user","positions":[1.5]},"replacements":[{"a":"b"}]}]`,
+		"zero position":                  `[{"models":[{"name":"*"}],"target":{"role":"user","positions":[0]},"replacements":[{"a":"b"}]}]`,
+	}
+	for name, body := range invalidReplace {
+		if _, err := ParseConfigRules("replace", json.RawMessage(body)); err == nil {
+			t.Fatalf("%s accepted unexpectedly", name)
+		}
 	}
 }

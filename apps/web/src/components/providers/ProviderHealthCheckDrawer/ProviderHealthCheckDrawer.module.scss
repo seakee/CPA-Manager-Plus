@@ -52,7 +52,7 @@
   }
 
   div:last-child strong {
-    color: color-mix(in srgb, var(--data-badge-info-text) 72%, var(--text-primary));
+    color: var(--data-badge-info-text);
     font-weight: 700;
   }
 }
@@ -141,7 +141,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -149,7 +149,7 @@
 }
 
 .groupSummary .groupFailureCount {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .groupRows {
@@ -236,7 +236,7 @@
 }
 
 .resultReason {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
@@ -244,7 +244,7 @@
 }
 
 .resultMessageError {
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .statusBadge {
@@ -261,17 +261,17 @@
 
 .statusSuccess {
   background: var(--success-badge-bg);
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  color: var(--data-badge-success-text);
 }
 
 .statusError {
   background: var(--failure-badge-bg);
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
 }
 
 .statusRunning {
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: color-mix(in srgb, var(--data-badge-info-text) 72%, var(--text-primary));
+  color: var(--data-badge-info-text);
 }
 
 .statusPending {

@@ -12,7 +12,7 @@
   border-radius: var(--app-radius-sm);
   border: 1px solid var(--data-badge-danger-border);
   background-color: var(--data-badge-danger-bg);
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   font-size: 12px;
 }
 

@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { useTranslation } from 'react-i18next';
 import type { OAuthModelAliasEntry } from '@/types';
 import { useThemeStore } from '@/stores';
+import { getDataPalette } from '@/utils/dataPalette';
 import { AliasColumn, ProviderColumn, SourceColumn } from './ModelMappingDiagramColumns';
 import { DiagramContextMenu } from './ModelMappingDiagramContextMenu';
 import { hasCaseInsensitiveAliasConflict } from './aliasValidation';
@@ -33,15 +34,6 @@ export interface ModelMappingDiagramProps {
   className?: string;
 }
 
-const PROVIDER_COLORS = [
-  '#409eff', '#67c23a', '#e6a23c', '#f56c6c',
-  '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'
-];
-
-function getProviderColor(provider: string): string {
-  const hash = provider.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  return PROVIDER_COLORS[hash % PROVIDER_COLORS.length];
-}
 
 export interface ModelMappingDiagramRef {
   collapseAll: () => void;
@@ -63,6 +55,24 @@ export const ModelMappingDiagram = forwardRef<ModelMappingDiagramRef, ModelMappi
   const { t } = useTranslation();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const isDark = resolvedTheme === 'dark';
+  const getProviderColor = useCallback(
+    (provider: string): string => {
+      const dataPalette = getDataPalette(resolvedTheme);
+      const providerColors = [
+        dataPalette.blue,
+        dataPalette.green,
+        dataPalette.amber,
+        dataPalette.red,
+        dataPalette.violet,
+        dataPalette.pink,
+        dataPalette.cyan,
+        dataPalette.healthWarn,
+      ];
+      const hash = provider.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      return providerColors[hash % providerColors.length];
+    },
+    [resolvedTheme]
+  );
   const enableTapLinking = useMemo(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia === 'undefined') return false;
     return (
@@ -273,7 +283,7 @@ export const ModelMappingDiagram = forwardRef<ModelMappingDiagramRef, ModelMappi
       }
       return prev;
     });
-  }, [providerNodes, collapsedProviders]);
+  }, [providerNodes, collapsedProviders, getProviderColor]);
 
   useImperativeHandle(
     ref,

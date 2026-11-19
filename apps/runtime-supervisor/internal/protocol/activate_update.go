@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"time"
 	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
@@ -16,6 +18,9 @@ import (
 const (
 	CapabilityActivateUpdate = "activate_update"
 	activateUpdatePath       = "/v1/runtime/operations/activate-update"
+	// ActivateUpdateResponseTimeout bounds the HTTP write budget for authenticated
+	// activate-update requests beyond candidate readiness, rollback, and terminal persistence.
+	ActivateUpdateResponseTimeout = 150 * time.Second
 )
 
 type ActivateUpdateExecutor interface {
@@ -40,6 +45,11 @@ func (h *handler) submitActivateUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_operation", "activate-update is not configured")
 		return
 	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(ActivateUpdateResponseTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeError(w, http.StatusInternalServerError, "internal_error", "activate-update response deadline unavailable")
+		return
+	}
 	operation, err := h.activateUpdate.ActivateUpdate(r.Context(), lifecycle.ActivateUpdateRequest{
 		OperationID:               request.OperationID,
 		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
@@ -56,7 +66,7 @@ func (h *handler) submitActivateUpdate(w http.ResponseWriter, r *http.Request) {
 
 func decodeActivateUpdateRequest(w http.ResponseWriter, r *http.Request) (activateUpdateRequest, error) {
 	var request activateUpdateRequest
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMutationBody))
+	body, err := io.ReadAll(http.MaxBytesReader(unwrapResponseWriter(w), r.Body, maxMutationBody))
 	if err != nil || !utf8.Valid(body) {
 		return request, lifecycle.ErrInvalidRequest
 	}

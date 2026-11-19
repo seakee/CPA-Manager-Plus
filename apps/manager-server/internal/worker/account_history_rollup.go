@@ -27,6 +27,7 @@ type AccountHistoryRollupWorker struct {
 	continuationDelay time.Duration
 	reportedStarted   bool
 	lastReported      int64
+	lifecycle         workerLifecycle
 }
 
 func NewAccountHistoryRollupWorker(store *store.Store) *AccountHistoryRollupWorker {
@@ -44,8 +45,16 @@ func (w *AccountHistoryRollupWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	go w.loop(ctx)
-	w.Wake()
+	if w.lifecycle.goRun(ctx, func() { w.loop(ctx) }) {
+		w.Wake()
+	}
+}
+
+func (w *AccountHistoryRollupWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *AccountHistoryRollupWorker) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {

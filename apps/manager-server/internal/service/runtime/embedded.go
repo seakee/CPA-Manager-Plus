@@ -11,23 +11,25 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 const (
-	embeddedRuntimeProtocolVersion    = "v1"
-	embeddedRuntimeFeaturesHeader     = "X-CPAMP-Runtime-Features"
-	embeddedArtifactFeature           = "active-gateway-artifact-v1"
-	embeddedRuntimeStatusPath         = "/v1/runtime/status"
-	embeddedRuntimeStartPath          = "/v1/runtime/operations/start"
-	embeddedRuntimeStopPath           = "/v1/runtime/operations/stop"
-	embeddedRuntimeRestartPath        = "/v1/runtime/operations/restart"
-	embeddedRuntimePrepareUpdatePath  = "/v1/runtime/operations/prepare-update"
-	embeddedRuntimeActivateUpdatePath = "/v1/runtime/operations/activate-update"
-	embeddedRuntimeObserveUpdatePath  = "/v1/runtime/operations/update"
-	embeddedRuntimeRequestTimeout     = 30 * time.Second
+	embeddedRuntimeProtocolVersion         = "v1"
+	embeddedRuntimeFeaturesHeader          = "X-CPAMP-Runtime-Features"
+	embeddedArtifactFeature                = "active-gateway-artifact-v1"
+	embeddedRuntimeStatusPath              = "/v1/runtime/status"
+	embeddedRuntimeStartPath               = "/v1/runtime/operations/start"
+	embeddedRuntimeStopPath                = "/v1/runtime/operations/stop"
+	embeddedRuntimeRestartPath             = "/v1/runtime/operations/restart"
+	embeddedRuntimePrepareUpdatePath       = "/v1/runtime/operations/prepare-update"
+	embeddedRuntimePrepareUpdateUploadPath = "/v1/runtime/operations/prepare-update/upload"
+	embeddedRuntimeActivateUpdatePath      = "/v1/runtime/operations/activate-update"
+	embeddedRuntimeObserveUpdatePath       = "/v1/runtime/operations/update"
+	embeddedRuntimeRequestTimeout          = 30 * time.Second
 	// Update mutations have dedicated request budgets so status and ordinary
 	// lifecycle calls retain their short timeout semantics. Each remains above
 	// its Supervisor route-specific response budget.
@@ -35,6 +37,9 @@ const (
 	embeddedRuntimeActivateUpdateTimeout = 3 * time.Minute
 	embeddedRuntimeMaxResponseBody       = 64 << 10
 )
+
+// ErrInvalidRequest indicates local validation failed before invoking embedded Runtime transport.
+var ErrInvalidRequest = errors.New("invalid embedded Runtime request")
 
 type RuntimeTokenSource interface {
 	Token(context.Context) (string, error)
@@ -207,6 +212,8 @@ type embeddedPrepareUpdateRequest struct {
 	ExpectedRuntimeGeneration uint64 `json:"expectedRuntimeGeneration"`
 	ExpectedActiveArtifactID  string `json:"expectedActiveArtifactId"`
 	TargetVersion             string `json:"targetVersion"`
+	SourceMode                string `json:"sourceMode,omitempty"`
+	CDNPrefix                 string `json:"cdnPrefix,omitempty"`
 }
 
 type embeddedActivateUpdateRequest struct {
@@ -232,6 +239,9 @@ type embeddedObservedOperationResponse struct {
 	RuntimeIdentity   string                 `json:"runtimeIdentity"`
 	RuntimeGeneration uint64                 `json:"runtimeGeneration"`
 	State             string                 `json:"state"`
+	Phase             string                 `json:"phase,omitempty"`
+	ReceivedBytes     int64                  `json:"receivedBytes,omitempty"`
+	TotalBytes        int64                  `json:"totalBytes,omitempty"`
 	Error             *embeddedProtocolError `json:"error,omitempty"`
 	CreatedAt         time.Time              `json:"createdAt"`
 	UpdatedAt         time.Time              `json:"updatedAt"`
@@ -269,6 +279,8 @@ func (c *EmbeddedClient) PrepareUpdate(ctx context.Context, request model.Runtim
 		ExpectedRuntimeGeneration: uint64(request.ExpectedRuntimeGeneration),
 		ExpectedActiveArtifactID:  string(request.ExpectedActiveArtifactID),
 		TargetVersion:             request.TargetVersion,
+		SourceMode:                request.SourceMode,
+		CDNPrefix:                 request.CDNPrefix,
 	})
 	if err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("encode embedded Runtime %s request: %w", model.RuntimeOperationPrepareUpdate, err)
@@ -282,6 +294,115 @@ func (c *EmbeddedClient) PrepareUpdate(ctx context.Context, request model.Runtim
 		request.ExpectedRuntimeIdentity,
 		payload,
 	)
+}
+
+func (c *EmbeddedClient) PrepareUpdateUpload(
+	ctx context.Context,
+	request model.RuntimePrepareUpdateRequest,
+	archive io.Reader,
+	contentLength int64,
+) (model.RuntimeOperationResult, error) {
+	if archive == nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf(
+			"%w: uploaded archive stream is required: %w",
+			ErrInvalidRequest,
+			&ProtocolError{Code: ProtocolErrorInvalidRequest, HTTPStatus: http.StatusBadRequest},
+		)
+	}
+	if contentLength == 0 || contentLength < -1 {
+		return model.RuntimeOperationResult{}, fmt.Errorf(
+			"%w: invalid upload content length %d: %w",
+			ErrInvalidRequest,
+			contentLength,
+			&ProtocolError{Code: ProtocolErrorInvalidRequest, HTTPStatus: http.StatusBadRequest},
+		)
+	}
+	if err := request.Validate(); err != nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf("validate embedded Runtime %s upload request: %w", model.RuntimeOperationPrepareUpdate, err)
+	}
+	if c.prepareHTTPClient == nil {
+		return model.RuntimeOperationResult{}, errors.New("embedded Runtime HTTP client is unavailable")
+	}
+	token, err := c.runtimeToken(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	endpoint, err := url.Parse(c.baseURL + embeddedRuntimePrepareUpdateUploadPath)
+	if err != nil {
+		return model.RuntimeOperationResult{}, errors.New("embedded Runtime prepare-update upload URL is invalid")
+	}
+	query := endpoint.Query()
+	query.Set("operationId", request.OperationID)
+	query.Set("expectedRuntimeIdentity", string(request.ExpectedRuntimeIdentity))
+	query.Set("expectedRuntimeGeneration", fmt.Sprintf("%d", request.ExpectedRuntimeGeneration))
+	query.Set("expectedActiveArtifactId", string(request.ExpectedActiveArtifactID))
+	query.Set("targetVersion", request.TargetVersion)
+	endpoint.RawQuery = query.Encode()
+
+	uploadCtx, cancel := context.WithCancel(ctx)
+	pipeReader, pipeWriter := io.Pipe()
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		buf := make([]byte, 32*1024)
+		for {
+			if err := uploadCtx.Err(); err != nil {
+				_ = pipeWriter.CloseWithError(err)
+				return
+			}
+			n, readErr := archive.Read(buf)
+			if n > 0 {
+				if _, writeErr := pipeWriter.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					_ = pipeWriter.Close()
+				} else {
+					_ = pipeWriter.CloseWithError(readErr)
+				}
+				return
+			}
+		}
+	}()
+	var cleanupOnce sync.Once
+	cleanupUpload := func() {
+		cleanupOnce.Do(func() {
+			cancel()
+			_ = pipeReader.CloseWithError(context.Canceled)
+			if closer, ok := archive.(io.Closer); ok {
+				_ = closer.Close()
+			}
+			if interruptible, ok := archive.(interface{ Interruptible() bool }); ok && interruptible.Interruptible() {
+				<-pumpDone
+				return
+			}
+			select {
+			case <-pumpDone:
+			default:
+			}
+		})
+	}
+	defer cleanupUpload()
+
+	httpRequest, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, endpoint.String(), pipeReader)
+	if err != nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf("create embedded Runtime %s upload request: %w", model.RuntimeOperationPrepareUpdate, err)
+	}
+	httpRequest.ContentLength = contentLength
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Content-Type", "application/octet-stream")
+	httpRequest.Header.Set("Authorization", "Bearer "+token)
+
+	response, err := c.prepareHTTPClient.Do(httpRequest)
+	if err != nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf("submit embedded Runtime %s upload: %w", model.RuntimeOperationPrepareUpdate, err)
+	}
+	result, decodeErr := decodeMutationResponse(response, model.RuntimeOperationPrepareUpdate, request.OperationID, request.ExpectedRuntimeIdentity)
+	_ = response.Body.Close()
+	cleanupUpload()
+	return result, decodeErr
 }
 
 func (c *EmbeddedClient) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
@@ -371,6 +492,9 @@ func (c *EmbeddedClient) ObserveUpdateOperation(ctx context.Context, request mod
 		RuntimeIdentity:   model.RuntimeIdentity(wire.RuntimeIdentity),
 		RuntimeGeneration: model.RuntimeGeneration(wire.RuntimeGeneration),
 		State:             model.RuntimeOperationState(wire.State),
+		Phase:             wire.Phase,
+		ReceivedBytes:     wire.ReceivedBytes,
+		TotalBytes:        wire.TotalBytes,
 		CreatedAt:         wire.CreatedAt,
 		UpdatedAt:         wire.UpdatedAt,
 		CompletedAt:       wire.CompletedAt,
@@ -455,6 +579,15 @@ func (c *EmbeddedClient) submitMutationWithClient(
 		return model.RuntimeOperationResult{}, fmt.Errorf("submit embedded Runtime %s: %w", operationType, err)
 	}
 	defer response.Body.Close()
+	return decodeMutationResponse(response, operationType, operationID, expectedRuntimeIdentity)
+}
+
+func decodeMutationResponse(
+	response *http.Response,
+	operationType model.RuntimeOperationType,
+	operationID string,
+	expectedRuntimeIdentity model.RuntimeIdentity,
+) (model.RuntimeOperationResult, error) {
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		if protocolErr := decodeProtocolError(response); protocolErr != nil {
 			return model.RuntimeOperationResult{}, protocolErr

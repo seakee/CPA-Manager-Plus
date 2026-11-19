@@ -96,7 +96,7 @@
   border: 1px solid var(--warning-border);
   border-radius: var(--app-radius-md);
   background: var(--warning-bg);
-  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
+  color: var(--warning-text);
   font-size: 14px;
   font-weight: 700;
   line-height: 1.45;
@@ -127,7 +127,7 @@
 
 .untrustedText {
   margin: 0;
-  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  color: var(--data-badge-danger-text);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.5;

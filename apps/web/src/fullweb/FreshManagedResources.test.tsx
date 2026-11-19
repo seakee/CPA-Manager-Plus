@@ -273,7 +273,7 @@ describe('Fresh resources within the original Console', () => {
     await mount(transport);
     await navigate('/console/config');
     const node = (id: string) => renderer.root.findByProps({ 'data-testid': id });
-    await act(async () => node('gateway-tab-retry').props.onClick());
+    await act(async () => node('gateway-tab-routing').props.onClick());
     const field = () => node('gateway-field-routing.retry.request-retry');
     await act(async () => field().findByType('input').props.onChange({ target: { value: '3' } }));
     await act(async () =>
@@ -313,7 +313,7 @@ describe('Fresh resources within the original Console', () => {
     await mount(transport);
     await navigate('/console/config');
     const node = (id: string) => renderer.root.findByProps({ 'data-testid': id });
-    await act(async () => node('gateway-tab-retry').props.onClick());
+    await act(async () => node('gateway-tab-routing').props.onClick());
     const field = () => node('gateway-field-routing.retry.request-retry');
     await act(async () => field().findByType('input').props.onChange({ target: { value: '3' } }));
     await act(async () =>

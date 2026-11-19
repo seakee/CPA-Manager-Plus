@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"sync"
 	"time"
 
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
@@ -24,7 +23,7 @@ type LegacyQuotaSnapshotMigrationWorker struct {
 	groupLimit int
 	delay      time.Duration
 	retryDelay time.Duration
-	start      sync.Once
+	lifecycle  workerLifecycle
 }
 
 func NewLegacyQuotaSnapshotMigrationWorker(st *store.Store) *LegacyQuotaSnapshotMigrationWorker {
@@ -40,9 +39,14 @@ func (w *LegacyQuotaSnapshotMigrationWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	w.start.Do(func() {
-		go w.run(ctx)
-	})
+	w.lifecycle.goRun(ctx, func() { w.run(ctx) })
+}
+
+func (w *LegacyQuotaSnapshotMigrationWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *LegacyQuotaSnapshotMigrationWorker) run(ctx context.Context) {

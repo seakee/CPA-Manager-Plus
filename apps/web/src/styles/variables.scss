@@ -2,24 +2,12 @@
  * SCSS 变量定义
  */
 
-// 颜色
-$primary-color: #3b82f6;
-$success-color: #22c55e;
-$warning-color: #f59e0b;
-$error-color: #ef4444;
-$info-color: #64748b;
-
-// 灰阶
-$gray-50: #f9fafb;
-$gray-100: #f3f4f6;
-$gray-200: #e5e7eb;
-$gray-300: #d1d5db;
-$gray-400: #9ca3af;
-$gray-500: #6b7280;
-$gray-600: #4b5563;
-$gray-700: #374151;
-$gray-800: #1f2937;
-$gray-900: #111827;
+// 颜色（统一引用 themes.scss CSS 变量）
+$primary-color: var(--primary-color);
+$success-color: var(--success-color);
+$warning-color: var(--warning-color);
+$error-color: var(--error-color);
+$info-color: var(--info-color);
 
 // 间距
 $spacing-xs: 4px;
@@ -35,9 +23,9 @@ $radius-md: 8px;
 $radius-lg: 12px;
 $radius-full: 9999px;
 
-// 阴影
-$shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-$shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+// 阴影（统一引用 themes.scss CSS 变量）
+$shadow-sm: var(--app-shadow-soft);
+$shadow-lg: var(--floating-shadow-lg);
 
 // 过渡
 $transition-fast: 150ms ease;

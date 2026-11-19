@@ -29,6 +29,10 @@ const (
 	SyncSourceOpenRouter = "openrouter"
 	SyncSourceMulti      = "multi"
 
+	DefaultModelsDevSyncURL  = "https://models.dev/catalog.json"
+	DefaultLiteLLMSyncURL    = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+	DefaultOpenRouterSyncURL = "https://openrouter.ai/api/v1/models"
+
 	// SyncSource is kept for existing tests and callers that still refer to the
 	// original single-source LiteLLM sync constant.
 	SyncSource = SyncSourceLiteLLM

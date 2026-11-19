@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/Input';
 import { IconPencil, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
+  getUsageServiceErrorCode,
   usageServiceApi,
   type ModelPriceSyncCandidate,
   type ModelPriceSyncResponse,
@@ -37,13 +38,6 @@ import styles from './ModelPricesPage.module.scss';
 
 const FILTERS: ModelPriceFilter[] = ['all', 'missing', 'candidates', 'saved'];
 
-const resolveErrorMessage = (error: unknown, fallback: string) => {
-  const rawMessage = error instanceof Error ? error.message : String(error || fallback);
-  return rawMessage === 'model_price_sync_requires_usage_service'
-    ? 'model_price_sync_requires_usage_service'
-    : rawMessage;
-};
-
 export function ModelPricesPage() {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
@@ -54,18 +48,20 @@ export function ModelPricesPage() {
     modelPricesLoaded,
     modelPricesLoading,
     modelPricesScopeKey,
+    reloadModelPrices,
     setModelPrices,
     syncModelPrices,
     usageServiceAvailable,
   } = useUsageData({ loadUsageEvents: false });
   const [usageSummary, setUsageSummary] = useState<ModelPriceUsageSummaryResponse | null>(null);
-  const [usageSummaryLoading, setUsageSummaryLoading] = useState(false);
-  const [usageSummaryLoaded, setUsageSummaryLoaded] = useState(false);
   const usageSummaryLoadedRef = useRef(false);
   const initialUiState = useRef(readModelPricesPageUiState());
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
   const [syncing, setSyncing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const saveInFlightRef = useRef(false);
+  const syncInFlightRef = useRef(false);
   const syncTokenRef = useRef(0);
   // Bumped whenever the price scope changes: a price action that was started for
   // the previous connection must not touch this page's draft/candidates/notices.
@@ -77,12 +73,9 @@ export function ModelPricesPage() {
   const modelPriceServiceBase = featureAvailability.modelPricesAvailable
     ? featureAvailability.managerServiceBase
     : '';
+  const priceBaselineReady = modelPricesLoaded && !modelPricesLoading;
   const summaryScopeKey = `${managementKey}\u0000${modelPriceServiceBase}`;
   const summaryScopeRef = useRef(summaryScopeKey);
-  const markUsageSummaryUnloaded = () => {
-    usageSummaryLoadedRef.current = false;
-    setUsageSummaryLoaded(false);
-  };
 
   const syncModels = useMemo(
     () => buildSyncPriceModelsFromSummary(usageSummary, modelPrices),
@@ -121,23 +114,20 @@ export function ModelPricesPage() {
     if (scopeChanged) {
       // Another connection must not show this scope's usage summary.
       setUsageSummary(null);
-      markUsageSummaryUnloaded();
+      usageSummaryLoadedRef.current = false;
     }
     if (!modelPriceServiceBase) {
       setUsageSummary(null);
-      markUsageSummaryUnloaded();
-      setUsageSummaryLoading(false);
+      usageSummaryLoadedRef.current = false;
       return () => controller.abort();
     }
 
-    setUsageSummaryLoading(true);
     void usageServiceApi
       .getModelPriceUsageSummary(modelPriceServiceBase, managementKey, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
           setUsageSummary(response);
           usageSummaryLoadedRef.current = true;
-          setUsageSummaryLoaded(true);
         }
       })
       .catch(() => {
@@ -145,11 +135,6 @@ export function ModelPricesPage() {
           // Older Manager Server versions do not expose this lightweight endpoint.
           // Keep saved prices visible without falling back to the large /usage payload.
           if (!usageSummaryLoadedRef.current) setUsageSummary(null);
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setUsageSummaryLoading(false);
         }
       });
 
@@ -161,6 +146,9 @@ export function ModelPricesPage() {
   useEffect(() => {
     syncTokenRef.current += 1;
     pageActionTokenRef.current += 1;
+    saveInFlightRef.current = false;
+    syncInFlightRef.current = false;
+    setSaving(false);
     setSyncing(false);
     setDraft(createEmptyPriceDraft());
     setManualEditorOpen(false);
@@ -168,13 +156,28 @@ export function ModelPricesPage() {
     setSyncResult(null);
   }, [modelPricesScopeKey]);
 
+  const resolveActionErrorMessage = (error: unknown, fallbackMessage: string): string => {
+    const code = getUsageServiceErrorCode(error);
+    if (code) {
+      return t(`usage_service_errors.${code}`, { defaultValue: fallbackMessage });
+    }
+    if (error instanceof Error && error.message) {
+      return error.message === 'model_price_sync_requires_usage_service'
+        ? t('usage_stats.model_price_sync_requires_usage_service')
+        : error.message;
+    }
+    return fallbackMessage;
+  };
+
   const handleSync = async () => {
+    if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
     if (syncModels.length === 0) {
       showNotification(t('usage_stats.model_price_sync_no_models'), 'warning');
       return;
     }
     const token = syncTokenRef.current + 1;
     syncTokenRef.current = token;
+    syncInFlightRef.current = true;
     setSyncing(true);
     try {
       const result = await syncModelPrices(syncModels);
@@ -193,37 +196,50 @@ export function ModelPricesPage() {
       );
     } catch (error: unknown) {
       if (syncTokenRef.current !== token) return;
-      const message = resolveErrorMessage(error, t('common.unknown_error'));
-      showNotification(
-        `${t('usage_stats.model_price_sync_failed')}: ${
-          message === 'model_price_sync_requires_usage_service'
-            ? t('usage_stats.model_price_sync_requires_usage_service')
-            : message
-        }`,
-        'error'
-      );
+      const message = resolveActionErrorMessage(error, t('common.unknown_error'));
+      showNotification(`${t('usage_stats.model_price_sync_failed')}: ${message}`, 'error');
     } finally {
-      if (syncTokenRef.current === token) setSyncing(false);
+      if (syncTokenRef.current === token) {
+        syncInFlightRef.current = false;
+        setSyncing(false);
+      }
     }
   };
 
   const handleConfirmCandidate = async (model: string, candidate: ModelPriceSyncCandidate) => {
+    if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
     const actionToken = pageActionTokenRef.current;
-    await setModelPrices(applyCandidatePrice(modelPrices, model, candidate));
-    if (pageActionTokenRef.current !== actionToken) return;
-    setSyncResult((previous) =>
-      previous
-        ? {
-            ...previous,
-            candidates: previous.candidates?.filter((set) => set.model !== model),
-            unmatched: previous.unmatched?.filter((item) => item !== model),
-          }
-        : previous
-    );
-    showNotification(t('model_prices.candidate_confirmed'), 'success');
+    saveInFlightRef.current = true;
+    setSaving(true);
+    try {
+      await setModelPrices(applyCandidatePrice(modelPrices, model, candidate));
+      if (pageActionTokenRef.current !== actionToken) return;
+      setSyncResult((previous) =>
+        previous
+          ? {
+              ...previous,
+              candidates: previous.candidates?.filter((set) => set.model !== model),
+              unmatched: previous.unmatched?.filter((item) => item !== model),
+            }
+          : previous
+      );
+      showNotification(t('model_prices.candidate_confirmed'), 'success');
+    } catch (error: unknown) {
+      if (pageActionTokenRef.current !== actionToken) return;
+      showNotification(
+        resolveActionErrorMessage(error, t('usage_service_errors.request_failed')),
+        'error'
+      );
+    } finally {
+      if (pageActionTokenRef.current === actionToken) {
+        saveInFlightRef.current = false;
+        setSaving(false);
+      }
+    }
   };
 
   const handleSaveDraft = async () => {
+    if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
     const model = draft.model.trim();
     const price = buildPriceFromDraft(draft, modelPrices[model]);
     if (!model || !price) {
@@ -231,27 +247,58 @@ export function ModelPricesPage() {
       return;
     }
     const actionToken = pageActionTokenRef.current;
-    await setModelPrices({
-      ...modelPrices,
-      [model]: {
-        ...price,
-      },
-    });
-    if (pageActionTokenRef.current !== actionToken) return;
-    setDraft(createEmptyPriceDraft());
-    setManualEditorOpen(false);
-    showNotification(t('usage_stats.model_price_saved'), 'success');
+    saveInFlightRef.current = true;
+    setSaving(true);
+    try {
+      await setModelPrices({
+        ...modelPrices,
+        [model]: {
+          ...price,
+        },
+      });
+      if (pageActionTokenRef.current !== actionToken) return;
+      setDraft(createEmptyPriceDraft());
+      setManualEditorOpen(false);
+      showNotification(t('usage_stats.model_price_saved'), 'success');
+    } catch (error: unknown) {
+      if (pageActionTokenRef.current !== actionToken) return;
+      showNotification(
+        resolveActionErrorMessage(error, t('usage_service_errors.request_failed')),
+        'error'
+      );
+    } finally {
+      if (pageActionTokenRef.current === actionToken) {
+        saveInFlightRef.current = false;
+        setSaving(false);
+      }
+    }
   };
 
   const handleDelete = async (model: string) => {
+    if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
     const next = { ...modelPrices };
     delete next[model];
     const actionToken = pageActionTokenRef.current;
-    await setModelPrices(next);
-    if (pageActionTokenRef.current !== actionToken) return;
-    if (draft.model === model) {
-      setDraft(createEmptyPriceDraft());
-      setManualEditorOpen(false);
+    saveInFlightRef.current = true;
+    setSaving(true);
+    try {
+      await setModelPrices(next);
+      if (pageActionTokenRef.current !== actionToken) return;
+      if (draft.model === model) {
+        setDraft(createEmptyPriceDraft());
+        setManualEditorOpen(false);
+      }
+    } catch (error: unknown) {
+      if (pageActionTokenRef.current !== actionToken) return;
+      showNotification(
+        resolveActionErrorMessage(error, t('usage_service_errors.request_failed')),
+        'error'
+      );
+    } finally {
+      if (pageActionTokenRef.current === actionToken) {
+        saveInFlightRef.current = false;
+        setSaving(false);
+      }
     }
   };
 
@@ -260,6 +307,7 @@ export function ModelPricesPage() {
   };
 
   const openManualEditor = (model = '', price = modelPrices[model]) => {
+    if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
     setDraft(createPriceDraft(model, price));
     setManualEditorOpen(true);
   };
@@ -291,12 +339,18 @@ export function ModelPricesPage() {
           <Button
             size="sm"
             variant="secondary"
+            disabled={!priceBaselineReady || saving || syncing}
             onClick={() => openManualEditor()}
             className={styles.toolbarButton}
           >
             {t('model_prices.add_manual')}
           </Button>
-          <Button size="sm" onClick={() => void handleSync()} loading={syncing}>
+          <Button
+            size="sm"
+            onClick={() => void handleSync()}
+            loading={syncing}
+            disabled={!priceBaselineReady || saving}
+          >
             {t('usage_stats.model_price_sync')}
           </Button>
         </div>
@@ -416,7 +470,12 @@ export function ModelPricesPage() {
               >
                 <IconX size={14} />
               </Button>
-              <Button size="sm" onClick={() => void handleSaveDraft()}>
+              <Button
+                size="sm"
+                onClick={() => void handleSaveDraft()}
+                loading={saving}
+                disabled={!priceBaselineReady || syncing}
+              >
                 {t('common.save')}
               </Button>
             </div>
@@ -434,11 +493,27 @@ export function ModelPricesPage() {
           </div>
         ) : null}
 
-        {!modelPricesLoaded && !usageSummaryLoaded && (modelPricesLoading || usageSummaryLoading) ? (
+        {!modelPricesLoaded && modelPricesLoading ? (
           <div className={styles.emptyState}>{t('common.loading')}</div>
-        ) : visibleRows.length === 0 ? (
-          <div className={styles.emptyState}>{t('model_prices.empty')}</div>
         ) : (
+          <>
+            {!modelPricesLoaded && Boolean(modelPriceServiceBase) ? (
+              <div className={styles.sourceResults} role="alert" data-testid="model-prices-load-failed">
+                <span className={styles.sourceResultError}>
+                  {t('usage_service_errors.request_failed')}
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void reloadModelPrices?.()}
+                >
+                  {t('common.refresh')}
+                </Button>
+              </div>
+            ) : null}
+            {visibleRows.length === 0 ? (
+              <div className={styles.emptyState}>{t('model_prices.empty')}</div>
+            ) : (
           <div className={styles.tableWrap}>
             <table className={styles.priceTable}>
               <thead>
@@ -572,6 +647,7 @@ export function ModelPricesPage() {
                                 className={styles.iconAction}
                                 title={t('common.edit')}
                                 aria-label={t('common.edit')}
+                                disabled={!priceBaselineReady || saving || syncing}
                                 onClick={() => openManualEditor(row.model, row.price)}
                               >
                                 <IconPencil size={14} />
@@ -581,6 +657,7 @@ export function ModelPricesPage() {
                                 className={styles.iconAction}
                                 title={t('common.delete')}
                                 aria-label={t('common.delete')}
+                                disabled={!priceBaselineReady || saving || syncing}
                                 onClick={() => void handleDelete(row.model)}
                               >
                                 <IconTrash2 size={14} />
@@ -614,6 +691,7 @@ export function ModelPricesPage() {
                               <button
                                 type="button"
                                 className={styles.confirmButton}
+                                disabled={!priceBaselineReady || saving || syncing}
                                 onClick={() =>
                                   void handleConfirmCandidate(row.model, selectedCandidate)
                                 }
@@ -625,6 +703,7 @@ export function ModelPricesPage() {
                             <button
                               type="button"
                               className={styles.confirmButton}
+                              disabled={!priceBaselineReady || saving || syncing}
                               onClick={() => openManualEditor(row.model)}
                             >
                               <span>{t('model_prices.add_manual')}</span>
@@ -638,6 +717,8 @@ export function ModelPricesPage() {
               </tbody>
             </table>
           </div>
+            )}
+          </>
         )}
 
         {syncResult?.unmatched?.length ? (

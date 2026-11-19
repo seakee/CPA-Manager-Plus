@@ -131,6 +131,14 @@ func handDestinationConnection(
 	next := managerCfg
 	next.CPAConnection.CPABaseURL = destinationURL
 	next.CPAConnection.ManagementKey = secret
+	if setupOK {
+		if strings.TrimSpace(next.Collector.Queue) == "" {
+			next.Collector.Queue = strings.TrimSpace(setup.Queue)
+		}
+		if strings.TrimSpace(next.Collector.PopSide) == "" && strings.TrimSpace(setup.PopSide) != "" {
+			next.Collector.PopSide = managerconfig.NormalizePopSide(setup.PopSide, "")
+		}
+	}
 	nextSetup := managerconfig.CanonicalSetupFromManagerConfig(next, setup, setupOK)
 	if err := st.SaveManagerConfigAndSetup(ctx, next, nextSetup); err != nil {
 		return fmt.Errorf("store the destination connection: %w", err)

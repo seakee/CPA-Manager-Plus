@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import en from '@/i18n/locales/en.json';
+import { CPA_UPDATE_MAX_UPLOAD_BYTES } from './cpaUpdateApi';
 import zhCN from '@/i18n/locales/zh-CN.json';
 import zhTW from '@/i18n/locales/zh-TW.json';
 import ru from '@/i18n/locales/ru.json';
@@ -63,6 +64,8 @@ const flowState = (patch: Partial<CPAUpdateFlow> = {}): CPAUpdateFlow => ({
   intent: null,
   recoveryRecord: { raw: JSON.stringify(updateIntent()) },
   stage: 'idle',
+  recoveredSession: false,
+  prepareProgress: null,
   initialized: true,
   busy: false,
   storageError: null,
@@ -76,6 +79,7 @@ const flowState = (patch: Partial<CPAUpdateFlow> = {}): CPAUpdateFlow => ({
   refresh: vi.fn(),
   check: vi.fn(),
   prepare: vi.fn(),
+  prepareUpload: vi.fn(),
   activate: vi.fn(),
   retry: vi.fn(),
   forget: vi.fn(),
@@ -212,7 +216,7 @@ describe('CPA update product controls', () => {
   it.each(['prepare', 'activate'] as const)(
     'offers explicit same-request replay for missing %s with activation confirmation when needed',
     async (phase) => {
-      const intent = updateIntent({ phase });
+      const intent = updateIntent({ phase, source_mode: 'github' });
       const flow = flowState({
         intent,
         stage: 'not_found',
@@ -305,12 +309,223 @@ describe('CPA update product controls', () => {
         )
       );
     const reference = flatten(en.cpa_updates);
+    const managerRef = flatten(en.manager_updates);
     for (const locale of [zhCN, zhTW, en, ru]) {
       const entries = flatten(locale.cpa_updates);
       expect(Object.keys(entries).sort()).toEqual(Object.keys(reference).sort());
       expect(Object.values(entries).every((value) => value.trim().length > 0)).toBe(true);
       expect(locale.manager_updates.product).toBe('CPAMP');
       expect(locale.manager_updates.title).toBeTruthy();
+      const managerEntries = flatten(locale.manager_updates);
+      expect(Object.keys(managerEntries).sort()).toEqual(Object.keys(managerRef).sort());
+      expect(Object.values(managerEntries).every((value) => value.trim().length > 0)).toBe(true);
     }
+  });
+
+  it('shows stage-specific recovery guidance and prioritizes requery during outcome_unknown', async () => {
+    await render(
+      flowState({
+        intent: updateIntent({ phase: 'activate' }),
+        stage: 'outcome_unknown',
+        recoveredSession: true,
+        unresolved: true,
+        canPrepare: false,
+        canCheck: false,
+      })
+    );
+    const content = text(renderer!.root);
+    expect(content).toContain(en.cpa_updates.recovery_title_outcome_unknown);
+    expect(content).toContain(en.cpa_updates.recovery_guide_outcome_unknown);
+    expect(content).toContain(en.cpa_updates.recovery_advanced_toggle);
+    expect(button(en.cpa_updates.requery).props.className).toContain('btn-primary');
+  });
+
+  it('explains activation restart interruption while activate is running', async () => {
+    await render(
+      flowState({
+        intent: updateIntent({ phase: 'activate' }),
+        stage: 'running',
+        unresolved: true,
+        canPrepare: false,
+        canCheck: false,
+      })
+    );
+    const content = text(renderer!.root);
+    expect(content).toContain(en.cpa_updates.recovery_title_running);
+    expect(content).toContain(en.cpa_updates.recovery_guide_running_activate);
+  });
+
+  it('renders live prepare progress bar without alarming recovery UI during clean in-page download', async () => {
+    await render(
+      flowState({
+        intent: updateIntent({ phase: 'prepare' }),
+        stage: 'running',
+        recoveredSession: false,
+        prepareProgress: {
+          phase: 'downloading',
+          receivedBytes: 10 * 1024 * 1024,
+          totalBytes: 20 * 1024 * 1024,
+        },
+        unresolved: true,
+        canPrepare: false,
+        canCheck: false,
+      })
+    );
+    const content = text(renderer!.root);
+    const progressBar = renderer!.root.findByProps({ role: 'progressbar' });
+    expect(progressBar.props['aria-valuenow']).toBe(50);
+    expect(content).toContain(`${en.cpa_updates.progress_downloading} (50%)`);
+    expect(content).toContain('10.0 MB / 20.0 MB');
+    expect(content).not.toContain(en.cpa_updates.flow.running);
+    expect(content).not.toContain(en.cpa_updates.check_locked);
+    expect(content).not.toContain(en.cpa_updates.recovery_advanced_toggle);
+    expect(renderer!.root.findAllByType('button').map(text)).not.toContain(en.cpa_updates.requery);
+  });
+
+  it('supports custom CDN prefix validation/submission and manual archive upload', async () => {
+    const flow = flowState();
+    await render(flow);
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'cpa-prepare-source-cdn' }).props.onClick({});
+    });
+    const cdnInput = renderer!.root.findByProps({ id: 'cpa-cdn-prefix' });
+    await act(async () => {
+      cdnInput.props.onChange({ target: { value: 'http://bad.example.com/' } });
+    });
+    expect(text(renderer!.root)).toContain(en.cpa_updates.cdn_prefix_invalid);
+    expect(button(en.cpa_updates.prepare_action).props.disabled).toBe(true);
+    await act(async () => {
+      cdnInput.props.onChange({ target: { value: 'https://cdn.example.com/' } });
+    });
+    await click(en.cpa_updates.prepare_action);
+    expect(flow.prepare).toHaveBeenCalledWith({
+      sourceMode: 'cdn',
+      cdnPrefix: 'https://cdn.example.com/',
+    });
+
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'cpa-prepare-source-upload' }).props.onClick({});
+    });
+    const file = new File(['archive'], 'CLIProxyAPI_8.0.77_linux_amd64.tar.gz', {
+      type: 'application/gzip',
+    });
+    await act(async () => {
+      renderer!.root
+        .findByProps({ id: 'cpa-upload-archive' })
+        .props.onChange({ target: { files: [file] } });
+    });
+    await click(en.cpa_updates.upload_action);
+    expect(flow.prepareUpload).toHaveBeenCalledWith(file);
+  });
+
+  it('blocks empty/oversize upload files, requires new selection after upload, and rejects disallowed CDN prefixes', async () => {
+    const flow = flowState();
+    await render(flow);
+
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'cpa-prepare-source-cdn' }).props.onClick({});
+    });
+    const cdnInput = renderer!.root.findByProps({ id: 'cpa-cdn-prefix' });
+    for (const badPrefix of [
+      'https://127.0.0.1/',
+      'https://198.18.0.1/',
+      'https://[::ffff:127.0.0.1]/',
+      'https://cdn.example.com/../x',
+      'https://cdn.example.com/%2e/x',
+    ]) {
+      await act(async () => {
+        cdnInput.props.onChange({ target: { value: badPrefix } });
+      });
+      expect(text(renderer!.root)).toContain(en.cpa_updates.cdn_prefix_invalid);
+      expect(button(en.cpa_updates.prepare_action).props.disabled).toBe(true);
+    }
+
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'cpa-prepare-source-upload' }).props.onClick({});
+    });
+    const fileInput = () => renderer!.root.findByProps({ id: 'cpa-upload-archive' });
+
+    const emptyFile = new File([], 'empty.tar.gz', { type: 'application/gzip' });
+    await act(async () => {
+      fileInput().props.onChange({ target: { files: [emptyFile] } });
+    });
+    expect(text(renderer!.root)).toContain(en.cpa_updates.upload_file_empty);
+    expect(button(en.cpa_updates.upload_action).props.disabled).toBe(true);
+
+    const oversizeFile = { name: 'huge.tar.gz', size: CPA_UPDATE_MAX_UPLOAD_BYTES + 1 } as File;
+    await act(async () => {
+      fileInput().props.onChange({ target: { files: [oversizeFile] } });
+    });
+    expect(text(renderer!.root)).toContain(en.cpa_updates.upload_file_too_large);
+    expect(button(en.cpa_updates.upload_action).props.disabled).toBe(true);
+
+    const validFile = new File(['archive'], 'valid.tar.gz', { type: 'application/gzip' });
+    await act(async () => {
+      fileInput().props.onChange({ target: { files: [validFile] } });
+    });
+    expect(button(en.cpa_updates.upload_action).props.disabled).toBe(false);
+    await click(en.cpa_updates.upload_action);
+    expect(flow.prepareUpload).toHaveBeenCalledExactlyOnceWith(validFile);
+
+    // After submission / confirmed failure, a new file selection is required.
+    await render(
+      flowState({
+        intent: updateIntent({ phase: 'prepare', source_mode: 'upload' }),
+        stage: 'confirmed_failed',
+        failureCode: 'archive_too_large',
+      })
+    );
+    expect(text(renderer!.root)).toContain(en.cpa_updates.failures.archive_too_large);
+    expect(button(en.cpa_updates.upload_action).props.disabled).toBe(true);
+  });
+
+  it('shows upload navigation hint during active upload and hides retry_same for lost upload prepare', async () => {
+    const uploadIntent = updateIntent({ phase: 'prepare', source_mode: 'upload' });
+    await render(
+      flowState({
+        intent: uploadIntent,
+        stage: 'submitting',
+        recoveredSession: false,
+        unresolved: true,
+        canPrepare: false,
+        canCheck: false,
+        prepareProgress: { phase: 'uploading', receivedBytes: 512, totalBytes: 1024 },
+      })
+    );
+    expect(text(renderer!.root)).toContain(en.cpa_updates.upload_leave_hint);
+    expect(text(renderer!.root)).not.toContain(en.cpa_updates.leave_hint);
+
+    await render(
+      flowState({
+        intent: uploadIntent,
+        stage: 'not_found',
+        recoveredSession: true,
+        unresolved: true,
+        canPrepare: false,
+        canCheck: false,
+        canRetry: false,
+      })
+    );
+    expect(text(renderer!.root)).toContain(en.cpa_updates.recovery_guide_not_found_upload);
+    expect(renderer!.root.findAllByType('button').map(text)).not.toContain(
+      en.cpa_updates.retry_same
+    );
+  });
+
+  it.each([
+    'release_metadata_unavailable',
+    'upload_read_failed',
+    'invalid_archive',
+    'binary_missing',
+    'checksum_mismatch',
+  ] as const)('renders localized failure text for %s', async (failureCode) => {
+    await render(
+      flowState({
+        intent: updateIntent({ phase: 'prepare' }),
+        stage: 'confirmed_failed',
+        failureCode,
+      })
+    );
+    expect(text(renderer!.root)).toContain(en.cpa_updates.failures[failureCode]);
   });
 });

@@ -14,15 +14,15 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [CPA v8-only scoped acceptance](evidence/a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1.md)
+The current [CPA v8-only scoped acceptance](evidence/41ab4005c260ef24064cd8fa6a7a9cee88b9a2644e77bd4c2e1f10290ba8f265.md)
 binds the actual source and destination executions to official CPA `v8.0.55`.
 Both real-process producers passed from immutable implementation
-`a9c58d4cc756a9317fd8673e7067f300d5c6c23e`
-(tree `048822a09db7eac901859d60d69d8f377daa21cf`). The build read a clean
-`git archive` of that commit rather than concurrent UI worktree edits. Race-enabled
+`f63ebce353e31734613b162c066fb6e84740e20d`
+(tree `949bffba1393eb937704965239eb38c44ede89e6`). The build read a clean
+`git archive` of that commit rather than host scratch directories. Race-enabled
 Linux/amd64 test tools and the Runtime Supervisor were newly compiled under an
-unprivileged identity, then executed in task-owned network isolation. The base
-image supplied compatible loaders, not the tested Manager or Supervisor.
+unprivileged identity in `golang:1.26.11-bookworm`, then executed in a throwaway
+`debian:bookworm-slim` (`linux/amd64`) container with `--network none`.
 
 Each private source profile carried 133 Client Keys. Both source and destination
 were actual pinned CPA `v8.0.55` processes; no v7 executable was mounted or run.
@@ -32,30 +32,36 @@ The private `legacy_managed` class now denotes a constrained legacy-layout v0
 safe read on CPA v8, not a supported pre-v8 runtime or public Fresh admission.
 
 The current consumer implementation SHA-256 is
-`817e3d8b620bd4c4e6837e02ea71b31ad4a5d7b2857f94842502e7b32a88876f`.
-The unchanged 11-file Runtime execution-chain pin is
-`340686a6ad37b2a6843c943f6beb2a1339edc5abcf441f1ae2483ddaa63941d6`.
+`41678273bdd124a524730056788bccdd6b0a4371123ad418b983f6dccaa43d4b`.
+The independently audited 11-file Runtime execution-chain pin is
+`598260a2127acff39b9e202f508325363aabc26a4392cb1952dd25ca05f41431` (updated from
+`340686a6ad37b2a6843c943f6beb2a1339edc5abcf441f1ae2483ddaa63941d6` after
+independent read-only Carbon audit of `1272db0214b33ae86bbef1908f66c9fe8c055d21`
+with GO and 0 findings).
 
 | Current chain | Report SHA-256 | Executed source |
 | --- | --- | --- |
-| network resources | `333a8ec55fc68fc48de6910e47704d4ca337381120a7595d8ca1ef2f0ca27076` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
-| legacy-layout v8 resources | `82e815d47903651052fa8b405c0630b3c3a0694a3a01758d0db96632c00f17bb` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
-| legacy-managed v8 transition | `9e5f8a5b25809c230a670f4c081b921575f43a4c4e49847b67833cd471eb24e3` | `a9c58d4cc756a9317fd8673e7067f300d5c6c23e` |
+| network resources | `2d2d9391f2f5bf6579886bdd8128d837c51a190898ef6387fe673f8177d69ace` | `f63ebce353e31734613b162c066fb6e84740e20d` |
+| legacy-layout v8 resources | `b675dad1bd3bcb853fefa3e02e76bf4df745c51e8d2234860157efe9507b4949` | `f63ebce353e31734613b162c066fb6e84740e20d` |
+| legacy-managed v8 transition | `d801e2fa840adfcbe916e678196a8eec1e368c13f44a725b85b6d90b13755486` | `f63ebce353e31734613b162c066fb6e84740e20d` |
 
-Thirteen raw producer outputs were byte-verified; the network manifest was
-already identical and twelve content-addressed files are new. All 89 existing
-evidence files remain unchanged. The previous [acceptance](evidence/1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c.md)
-and its [final audit](evidence/f71b3d471ed1a1cd49901a4cfff5596162d6823e3434a0bac63efb2b80bd5773.md)
-are superseded historical records, not current v8-only support evidence.
-Historical v7 evidence is neither relabeled nor executed as a current positive.
+Thirteen raw producer outputs were byte-verified; all three manifests were
+already identical and ten report/trace/observation files are new. All 103
+existing evidence files remain unchanged. The previous
+[acceptance](evidence/a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1.md)
+and its [final audit](evidence/17363ecbbe981be8798f5376aa6a74a3f629f2eb2394366e4d38fb443b31500b.md)
+(along with earlier records) are superseded historical records, not current
+v8-only support evidence. Historical v7 evidence is neither relabeled nor
+executed as a current positive.
 
 The three original fixed-CPA8 AQ reports retain their selected traces, original
 runner `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc` and tree
 `b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`. The six AQ tools were byte-compared
 with that revision and are unchanged. Their original limited, unknown, failed
 and aborted boundaries are not promoted. The separate [independent byte/provenance
-audit](evidence/17363ecbbe981be8798f5376aa6a74a3f629f2eb2394366e4d38fb443b31500b.md) completed with GO and no findings;
-session provenance confirms Argon without fallback.
+audit](evidence/757f21faca53c7f04b11bb881b8740c8029e9ca55d22f3a93856b1367fdb4c43.md)
+completed with GO and no findings (audited by read-only `QualByteAuditArgon`,
+actual runtime model `oracle-cpa/gemini-4-neon-xhigh`).
 
 This private renewal does not certify public Gateway activation, five-mode UI,
 SSE/WebSocket, live provider/OAuth accounts, Native installation, arm64, other

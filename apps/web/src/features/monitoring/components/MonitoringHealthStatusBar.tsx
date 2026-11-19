@@ -6,30 +6,15 @@ import {
 } from '@/features/monitoring/healthStatusAccessibility';
 import { formatStatusWindowLabel } from '@/features/monitoring/model/statusWindow';
 import type { StatusBarData, StatusBlockDetail } from '@/utils/recentRequests';
+import { interpolateStatusBarColor } from '@/utils/statusBarColor';
 import styles from '../MonitoringCenterPage.module.scss';
 
-const STATUS_BAR_COLOR_STOPS = [
-  { r: 239, g: 68, b: 68 },
-  { r: 250, g: 204, b: 21 },
-  { r: 34, g: 197, b: 94 },
-] as const;
 
 const formatStatusRate = (rate: number) => {
   const rounded = rate.toFixed(1);
   return `${rounded.endsWith('.0') ? rounded.slice(0, -2) : rounded}%`;
 };
 
-const rateToStatusColor = (rate: number) => {
-  const t = Math.max(0, Math.min(1, rate));
-  const segment = t < 0.5 ? 0 : 1;
-  const localT = segment === 0 ? t * 2 : (t - 0.5) * 2;
-  const from = STATUS_BAR_COLOR_STOPS[segment];
-  const to = STATUS_BAR_COLOR_STOPS[segment + 1];
-  const r = Math.round(from.r + (to.r - from.r) * localT);
-  const g = Math.round(from.g + (to.g - from.g) * localT);
-  const b = Math.round(from.b + (to.b - from.b) * localT);
-  return `rgb(${r}, ${g}, ${b})`;
-};
 
 export function MonitoringHealthStatusBar({
   statusData,
@@ -236,7 +221,7 @@ export function MonitoringHealthStatusBar({
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                  style={isIdle ? undefined : { backgroundColor: rateToStatusColor(detail.rate) }}
+                  style={isIdle ? undefined : { backgroundColor: interpolateStatusBarColor(detail.rate) }}
                 />
               </button>
               {isActive ? renderTooltip(detail, index, tooltipId) : null}

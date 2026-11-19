@@ -259,6 +259,39 @@ func TestUsageArchiveRetentionWorkerStartIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestUsageArchiveRetentionWorkerNilAndCanceledStartAllowSubsequentValidStart(t *testing.T) {
+	activated := make(chan struct{})
+	service := &wakeObservingRetentionService{activated: activated}
+	worker := NewUsageArchiveRetentionWorker(service, 30)
+	worker.interval = time.Hour
+
+	var nilCtx context.Context
+	worker.Start(nilCtx)
+
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	worker.Start(canceledCtx)
+	if got := service.calls.Load(); got != 0 {
+		t.Fatalf("ActiveArchiveRun calls after nil/canceled Start = %d, want 0", got)
+	}
+
+	liveCtx, cancelLive := context.WithCancel(context.Background())
+	defer cancelLive()
+	worker.Start(liveCtx)
+
+	select {
+	case <-activated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retention worker did not start on valid context after nil and canceled Start calls")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := worker.StopAndWait(stopCtx); err != nil {
+		t.Fatalf("StopAndWait: %v", err)
+	}
+}
+
 func TestUsageArchiveRetentionWorkerLoopUsesShortRetryAfterFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -897,5 +930,229 @@ func TestUsageArchiveRetentionWorkerDoesNotDeadlockOnNoncanonicalHash(t *testing
 	}
 	if eventCount != 1 {
 		t.Fatalf("legacy event count = %d, want 1", eventCount)
+	}
+}
+
+func TestUsageArchiveRetentionWorkerSettingsResolverErrorRetriesAndDynamicDisable(t *testing.T) {
+	t.Run("resolver error requests short retry without calling service unless context cancelled", func(t *testing.T) {
+		service := &fakeUsageArchiveRetentionService{}
+		worker := NewUsageArchiveRetentionWorker(service, 0)
+		worker.SetSettingsResolver(func(context.Context) (bool, int, error) {
+			return false, 0, errors.New("settings temporarily unavailable")
+		})
+
+		if retry := worker.runOnce(context.Background()); !retry {
+			t.Fatal("runOnce() = false on transient settings resolver error, want true")
+		}
+		if len(service.calls) != 0 {
+			t.Fatalf("service.calls = %#v, want empty on resolver error", service.calls)
+		}
+
+		cancelledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if retry := worker.runOnce(cancelledCtx); retry {
+			t.Fatal("runOnce(cancelledCtx) = true, want false")
+		}
+	})
+
+	t.Run("resolver dynamically enables and disables retention", func(t *testing.T) {
+		var enabled atomic.Bool
+		var days atomic.Int32
+		enabled.Store(true)
+		days.Store(14)
+
+		service := &fakeUsageArchiveRetentionService{}
+		worker := NewUsageArchiveRetentionWorker(service, 0)
+		fixedNow := time.UnixMilli(30 * 24 * time.Hour.Milliseconds())
+		worker.now = func() time.Time { return fixedNow }
+		worker.SetSettingsResolver(func(context.Context) (bool, int, error) {
+			return enabled.Load(), int(days.Load()), nil
+		})
+
+		if retry := worker.runOnce(context.Background()); retry {
+			t.Fatal("runOnce() requested retry when enabled")
+		}
+		wantCutoff := fixedNow.Add(-14 * 24 * time.Hour).UnixMilli()
+		wantCalls := []string{
+			"active",
+			"create:" + strconv.FormatInt(wantCutoff, 10),
+			"resume:previewed",
+			"verify:archived",
+			"resume:verified",
+			"delete:verified",
+			"resume:completed",
+		}
+		if !reflect.DeepEqual(service.calls, wantCalls) {
+			t.Fatalf("service.calls = %#v, want %#v", service.calls, wantCalls)
+		}
+
+		service.calls = nil
+		enabled.Store(false)
+		if retry := worker.runOnce(context.Background()); retry {
+			t.Fatal("runOnce() requested retry when dynamically disabled")
+		}
+		if len(service.calls) != 0 {
+			t.Fatalf("service.calls after dynamic disable = %#v, want empty", service.calls)
+		}
+
+		enabled.Store(true)
+		days.Store(0)
+		if retry := worker.runOnce(context.Background()); retry {
+			t.Fatal("runOnce() requested retry when dynamic retentionDays <= 0")
+		}
+		if len(service.calls) != 0 {
+			t.Fatalf("service.calls with non-positive dynamic days = %#v, want empty", service.calls)
+		}
+	})
+}
+
+func TestUsageArchiveRetentionWorkerWakeAndResolverRetryLoop(t *testing.T) {
+	t.Run("Wake triggers immediate retention pass when initially disabled", func(t *testing.T) {
+		var enabled atomic.Bool
+		firstResolverCheck := make(chan struct{})
+		var resolverCalls atomic.Int32
+
+		activated := make(chan struct{})
+		service := &wakeObservingRetentionService{activated: activated}
+		worker := NewUsageArchiveRetentionWorker(service, 0)
+		worker.interval = time.Hour
+		worker.retryInterval = time.Hour
+		worker.SetSettingsResolver(func(context.Context) (bool, int, error) {
+			if resolverCalls.Add(1) == 1 {
+				close(firstResolverCheck)
+			}
+			return enabled.Load(), 30, nil
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		worker.Start(ctx)
+
+		select {
+		case <-firstResolverCheck:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for initial settings resolver check")
+		}
+
+		enabled.Store(true)
+		worker.Wake()
+
+		select {
+		case <-activated:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Wake() to trigger retention run")
+		}
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if err := worker.StopAndWait(stopCtx); err != nil {
+			t.Fatalf("StopAndWait: %v", err)
+		}
+	})
+
+	t.Run("loop retries after transient settings resolver error", func(t *testing.T) {
+		var attempts atomic.Int32
+		activated := make(chan struct{})
+		service := &wakeObservingRetentionService{activated: activated}
+		worker := NewUsageArchiveRetentionWorker(service, 0)
+		worker.interval = time.Hour
+		worker.retryInterval = 10 * time.Millisecond
+		worker.SetSettingsResolver(func(context.Context) (bool, int, error) {
+			if attempts.Add(1) == 1 {
+				return false, 0, errors.New("transient sqlite busy")
+			}
+			return true, 30, nil
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		worker.Start(ctx)
+
+		select {
+		case <-activated:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for retry after settings resolver error")
+		}
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if err := worker.StopAndWait(stopCtx); err != nil {
+			t.Fatalf("StopAndWait: %v", err)
+		}
+	})
+}
+
+type wakeObservingRetentionService struct {
+	calls     atomic.Int32
+	activated chan struct{}
+}
+
+func (s *wakeObservingRetentionService) ActiveArchiveRun(context.Context) (store.UsageArchiveRun, bool, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.activated)
+	}
+	return store.UsageArchiveRun{}, false, nil
+}
+
+func (s *wakeObservingRetentionService) CreateRetentionArchive(context.Context, int64) (usageservice.ArchiveStatus, error) {
+	return usageservice.ArchiveStatus{}, nil
+}
+
+func (s *wakeObservingRetentionService) ResumeArchive(context.Context, string) (usageservice.ArchiveStatus, error) {
+	return usageservice.ArchiveStatus{}, nil
+}
+
+func (s *wakeObservingRetentionService) VerifyArchive(context.Context, string) (usageservice.ArchiveStatus, error) {
+	return usageservice.ArchiveStatus{}, nil
+}
+
+func (s *wakeObservingRetentionService) DeleteArchive(context.Context, string) (usageservice.ArchiveStatus, error) {
+	return usageservice.ArchiveStatus{}, nil
+}
+
+type cancellableRetentionService struct {
+	fakeUsageArchiveRetentionService
+	cancelledIDs []string
+}
+
+func (s *cancellableRetentionService) CancelArchive(_ context.Context, id string) (usageservice.ArchiveStatus, error) {
+	s.cancelledIDs = append(s.cancelledIDs, id)
+	s.found = false
+	s.run.Status = usagearchive.StatusCancelled
+	return usageservice.ArchiveStatus{Run: s.run}, nil
+}
+
+func TestUsageArchiveRetentionWorkerCancelsActiveRetentionRunWhenDisabled(t *testing.T) {
+	service := &cancellableRetentionService{
+		fakeUsageArchiveRetentionService: fakeUsageArchiveRetentionService{
+			found: true,
+			run: store.UsageArchiveRun{
+				ID:     "retention-run-1",
+				Mode:   usagearchive.RunModeRetention,
+				Status: usagearchive.StatusVerified,
+			},
+		},
+	}
+	worker := NewUsageArchiveRetentionWorker(service, 0)
+	worker.runOnce(context.Background())
+
+	if len(service.cancelledIDs) != 1 || service.cancelledIDs[0] != "retention-run-1" {
+		t.Fatalf("cancelledIDs = %#v, want [retention-run-1]", service.cancelledIDs)
+	}
+
+	// Non-retention (manual) active run must NOT be cancelled when retention is disabled.
+	manualSvc := &cancellableRetentionService{
+		fakeUsageArchiveRetentionService: fakeUsageArchiveRetentionService{
+			found: true,
+			run: store.UsageArchiveRun{
+				ID:     "manual-run-1",
+				Mode:   usagearchive.RunModeManual,
+				Status: usagearchive.StatusPreviewed,
+			},
+		},
+	}
+	NewUsageArchiveRetentionWorker(manualSvc, 0).runOnce(context.Background())
+	if len(manualSvc.cancelledIDs) != 0 {
+		t.Fatalf("manual run unexpectedly cancelled: %#v", manualSvc.cancelledIDs)
 	}
 }

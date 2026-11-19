@@ -33,6 +33,12 @@
   align-items: center;
 }
 
+.modelActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .infoGrid {
   display: grid;
   gap: $spacing-sm;
@@ -180,17 +186,18 @@
   width: 44px;
   height: 44px;
   border-radius: var(--app-radius-sm);
-  background-color: var(--primary-color);
-  color: white;
+  background-color: var(--primary-solid);
+  color: var(--primary-contrast);
   flex-shrink: 0;
 
   &.github {
     // Accepted colour literal: GitHub brand tile stays dark in both themes.
     background-color: #24292f;
+    color: white;
   }
 
   &.docs {
-    background-color: var(--success-color);
+    background-color: var(--data-emerald-dark-2);
   }
 }
 

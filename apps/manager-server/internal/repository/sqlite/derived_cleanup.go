@@ -276,6 +276,20 @@ func StartDerivedMaintenance(ctx context.Context, db *sql.DB) {
 	go runDerivedMaintenance(ctx, db)
 }
 
+// StartDerivedMaintenanceTracked launches the periodic derived cleanup loop and
+// returns a wait function that blocks until that goroutine exits.
+func StartDerivedMaintenanceTracked(ctx context.Context, db *sql.DB) func() {
+	if db == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runDerivedMaintenance(ctx, db)
+	}()
+	return func() { <-done }
+}
+
 func runDerivedMaintenance(ctx context.Context, db *sql.DB) {
 	ticker := time.NewTicker(derivedCheckInterval)
 	defer ticker.Stop()

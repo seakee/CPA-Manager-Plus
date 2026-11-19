@@ -1529,6 +1529,65 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 	}
 }
 
+func TestServerCompatV8ModelsRefreshProxy(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	rr := testutil.Request(t, handler, http.MethodPost, "/v8/management/models/refresh", "", testutil.AdminKey)
+	testutil.RequireStatus(t, rr, http.StatusOK)
+	got, ok := cpa.LastRequest("/v8/management/models/refresh")
+	if !ok {
+		t.Fatal("CPA mock did not receive /v8/management/models/refresh")
+	}
+	if got.Method != http.MethodPost || got.Authorization != "Bearer management-key" {
+		t.Fatalf("/v8/management/models/refresh proxy request = %#v", got)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		method     string
+		target     string
+		key        string
+		want       int
+		noRedirect bool
+	}{
+		{name: "missing admin key", method: http.MethodPost, target: "/v8/management/models/refresh", want: http.StatusUnauthorized},
+		{name: "wrong admin key", method: http.MethodPost, target: "/v8/management/models/refresh", key: "wrong-key", want: http.StatusUnauthorized},
+		{name: "CPA management key rejected", method: http.MethodPost, target: "/v8/management/models/refresh", key: "management-key", want: http.StatusUnauthorized},
+		{name: "get not allowed", method: http.MethodGet, target: "/v8/management/models/refresh", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options not allowed", method: http.MethodOptions, target: "/v8/management/models/refresh", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "nested path denied", method: http.MethodPost, target: "/v8/management/models/refresh/all", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "duplicate slash denied", method: http.MethodPost, target: "/v8//management/models/refresh", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "leading double slash denied", method: http.MethodPost, target: "//v8/management/models/refresh", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(cpa.Requests())
+			res := testutil.Request(t, handler, tc.method, tc.target, "", tc.key)
+			testutil.RequireStatus(t, res, tc.want)
+			if tc.noRedirect && res.Header().Get("Location") != "" {
+				t.Fatalf("%s %s redirected to %q", tc.method, tc.target, res.Header().Get("Location"))
+			}
+			if len(cpa.Requests()) != before {
+				t.Fatalf("%s %s unexpectedly reached CPA", tc.method, tc.target)
+			}
+		})
+	}
+
+	// Cross-site request must be refused before reaching the proxy.
+	before := len(cpa.Requests())
+	crossSite := httptest.NewRequest(http.MethodPost, "/v8/management/models/refresh", nil)
+	crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossSite.Header.Set("Sec-Fetch-Dest", "empty")
+	crossSiteRR := httptest.NewRecorder()
+	handler.ServeHTTP(crossSiteRR, crossSite)
+	testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
+	if len(cpa.Requests()) != before {
+		t.Fatal("cross-site POST /v8/management/models/refresh reached CPA")
+	}
+}
+
 func TestServerCompatPluginProxyRoutes(t *testing.T) {
 	type observedRequest struct {
 		method            string

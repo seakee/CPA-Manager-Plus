@@ -1074,7 +1074,7 @@
     width: 5px;
     height: 5px;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--status-graphic-success);
   }
 }
 
@@ -1099,6 +1099,7 @@
     color: var(--error-color);
 
     .metricDot {
+      background: var(--status-graphic-danger);
       opacity: 1;
     }
   }
@@ -1689,12 +1690,12 @@
 
 .accountHistoryMetricCost .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--warning-color);
+  color: var(--status-display-warning);
 }
 
 .accountHistoryMetricSuccess .accountHistoryIcon {
   background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
-  color: var(--success-color);
+  color: var(--status-display-success);
 }
 
 .accountHistoryFootnote {
@@ -1977,7 +1978,7 @@
 
 .accountIconButtonSettings:global(.btn) {
   background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
-  color: color-mix(in srgb, var(--primary-color) 78%, var(--text-primary));
+  color: var(--primary-text);
 
   &:hover {
     border-color: color-mix(in srgb, var(--primary-color) 22%, transparent);
@@ -2768,7 +2769,7 @@
   }
 
   &:focus-visible {
-    outline: 2px solid var(--color-primary, #{$primary-color});
+    outline: 2px solid var(--primary-color);
     outline-offset: 1px;
   }
 }
@@ -3531,7 +3532,7 @@
 
     .overviewAttentionIcon {
       background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
-      color: var(--error-color);
+      color: var(--status-display-danger);
     }
   }
 
@@ -3542,7 +3543,7 @@
 
 .overviewAttentionIcon {
   background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
-  color: var(--warning-color);
+  color: var(--status-display-warning);
 }
 
 .overviewAttentionBody {
@@ -4450,6 +4451,7 @@
   max-width: min(240px, calc(100vw - 32px));
   padding: $spacing-sm $spacing-md;
   border: 1px solid color-mix(in srgb, var(--quota-summary-accent) 42%, var(--border-color));
+  border-top: 3px solid var(--quota-summary-accent);
   border-radius: var(--app-radius-md);
   background: var(--app-surface-strong);
   color: var(--text-primary);
@@ -4715,7 +4717,7 @@
 
 .metricIconGreen {
   background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
-  color: var(--success-color);
+  color: var(--status-display-success);
 }
 
 .metricIconTeal {
@@ -4725,7 +4727,7 @@
 
 .metricIconAmber {
   background: color-mix(in srgb, var(--data-amber-base) 12%, transparent);
-  color: var(--warning-color);
+  color: var(--status-display-warning);
 }
 
 .detailInlineNote {
@@ -7490,7 +7492,7 @@
 
 .diagnosticKpiIconGreen {
   background: color-mix(in srgb, var(--data-green-base) 10%, transparent);
-  color: var(--success-color);
+  color: var(--status-display-success);
 }
 
 .diagnosticRecentFailure {

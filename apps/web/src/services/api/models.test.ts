@@ -1,5 +1,5 @@
+import axios from 'axios';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     request: vi.fn(),
@@ -331,5 +331,30 @@ describe('Claude model discovery authentication', () => {
       })
     );
     expect(mocks.request.mock.calls[0]?.[0]?.header).not.toHaveProperty('x-api-key');
+  });
+});
+
+describe('modelsApi.refreshUpstreamModels', () => {
+  it('posts to /v8/management/models/refresh with Bearer management key for both Full Web and standalone CPA bases', async () => {
+    const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ data: { status: 'ok' } });
+    try {
+      await modelsApi.refreshUpstreamModels('/console/api/v2/cpamp', '  admin-key  ');
+      expect(postSpy).toHaveBeenNthCalledWith(
+        1,
+        '/console/api/v2/cpamp/v8/management/models/refresh',
+        undefined,
+        { headers: { Authorization: 'Bearer admin-key' } }
+      );
+
+      await modelsApi.refreshUpstreamModels('http://127.0.0.1:8317/v0/management', 'mgmt-secret');
+      expect(postSpy).toHaveBeenNthCalledWith(
+        2,
+        'http://127.0.0.1:8317/v8/management/models/refresh',
+        undefined,
+        { headers: { Authorization: 'Bearer mgmt-secret' } }
+      );
+    } finally {
+      postSpy.mockRestore();
+    }
   });
 });

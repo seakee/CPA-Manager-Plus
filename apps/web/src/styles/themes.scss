@@ -27,12 +27,8 @@
   --app-shadow: none;
   --app-shadow-soft: none;
   --app-text-primary: #2c3e50;
-  /* Body-size copy must clear 4.5:1 not only on white but on the canvas
-     (#eff2f7), on the white-alpha card surfaces and on 8-12% primary tints
-     that sit under hovered rows and chips. Measured worst case for the whole
-     light surface set: regular 5.91:1, muted 5.02:1. */
-  --app-text-regular: #475569;
-  --app-text-muted: #52606f;
+  --app-text-regular: #5f6c7b;
+  --app-text-muted: #8b95a6;
   --app-accent: var(--data-blue-base);
   --app-accent-soft: rgba(59, 130, 246, 0.12);
   --surface-subtle: #f6faff;
@@ -104,11 +100,7 @@
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
   --text-tertiary: var(--app-text-muted);
-  /* Recessive graphic tier: decorative glyphs, separators and other non-text
-     marks. >= 3:1 on every light surface (4.45:1 on white, 3.96:1 on the
-     canvas), so it must never carry placeholder, helper or any other copy a
-     user has to read. */
-  --text-quaternary: #6f7889;
+  --text-quaternary: #b5bdca;
   --text-muted: var(--app-text-muted);
 
   --border-color: var(--app-border);
@@ -161,7 +153,7 @@
   --color-info-dark-2: var(--data-slate-dark-2);
 
   --data-blue-base: #3b82f6;
-  --data-blue-dark-2: #1d4ed8;
+  --data-blue-dark-2: #2563eb;
   --data-blue-light-3: #60a5fa;
   --data-blue-light-5: #93c5fd;
   --data-blue-light-7: #bfdbfe;
@@ -177,12 +169,7 @@
   --data-emerald-light-9: #ecfdf5;
 
   --data-green-base: #22c55e;
-  /* The `-dark-2` steps of the three status ramps are the text tier: they must
-     clear 4.5:1 both on the canvas and on the 8-12% self-tint that their own
-     badges and inline feedback paint (`--success-color` / `--warning-color`
-     consumers). Measured worst case incl. self tints: green 5.32:1,
-     amber 5.29:1, red 4.72:1. */
-  --data-green-dark-2: #166534;
+  --data-green-dark-2: #16a34a;
   --data-green-light-3: #4ade80;
   --data-green-light-5: #86efac;
   --data-green-light-7: #bbf7d0;
@@ -190,7 +177,7 @@
   --data-green-light-9: #f0fdf4;
 
   --data-amber-base: #f59e0b;
-  --data-amber-dark-2: #92400e;
+  --data-amber-dark-2: #d97706;
   --data-amber-light-3: #fbbf24;
   --data-amber-light-5: #fcd34d;
   --data-amber-light-7: #fde68a;
@@ -198,7 +185,7 @@
   --data-amber-light-9: #fffbeb;
 
   --data-red-base: #ef4444;
-  --data-red-dark-2: #b91c1c;
+  --data-red-dark-2: #dc2626;
   --data-red-light-3: #f87171;
   --data-red-light-5: #fca5a5;
   --data-red-light-7: #fecaca;
@@ -256,12 +243,67 @@
   --data-badge-neutral-bg: var(--data-slate-light-9);
   --data-badge-neutral-border: var(--data-slate-light-5);
 
+
+  --status-graphic-success: var(--data-green-base);
+  --status-graphic-warning: var(--data-amber-base);
+  --status-graphic-danger: var(--data-red-base);
+  --status-graphic-info: var(--data-blue-base);
+  --status-graphic-emerald: var(--data-emerald-base);
+
+  /* 3:1+ vivid tier for graphic icons on tinted icon tiles and large (>= 18px bold) accents. */
+  --status-display-success: #16a34a;
+  --status-display-warning: #d97706;
+  --status-display-danger: #ef4444;
+  --status-display-info: #2563eb;
+  --status-display-emerald: #059669;
+
+  --kpi-value-color: var(--text-primary);
+
+  --data-badge-success-dot: var(--status-graphic-success);
+  --data-badge-warning-dot: var(--status-graphic-warning);
+  --data-badge-danger-dot: var(--status-graphic-danger);
+  --data-badge-info-dot: var(--status-graphic-info);
+  --data-badge-neutral-dot: var(--data-slate-base);
+  --data-rank-1-bg: #f59e0b;
+  --data-rank-1-text: #0b1324;
+  --data-rank-2-bg: #64748b;
+  --data-rank-2-text: #ffffff;
+  --data-rank-3-bg: #fffbeb;
+  --data-rank-3-text: #d97706;
+
+  --data-pink-base: #ec4899;
+  --status-bar-low: var(--data-red-base);
+  --status-bar-mid: #facc15;
+  --status-bar-high: var(--data-green-base);
+
+  --chart-axis-label: var(--app-text-muted);
+  --chart-axis-line: #e2e8f0;
+  --chart-axis-line-usage: #d8e5f2;
+  --chart-axis-pointer: #767f8f;
+  --chart-split-line: #e8edf5;
+  --chart-split-line-usage: #d3e1ef;
+  --chart-bar-bg: rgba(139, 149, 166, 0.14);
+  --chart-tooltip-bg: rgba(255, 255, 255, 0.96);
+  --chart-tooltip-border: #dbe3ef;
+  --chart-tooltip-border-usage: #d8e5f2;
+  --chart-tooltip-text: #0f172a;
+  --chart-tooltip-text-usage: var(--app-text-primary);
+  --chart-tooltip-muted: var(--app-text-muted);
+  --chart-tooltip-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);
+  --chart-cell-border: var(--app-surface-strong);
+  --chart-emphasis-border: var(--app-text-primary);
+  --chart-pie-shadow: rgba(15, 23, 42, 0.18);
+  --chart-heatmap-1: var(--data-blue-light-9);
+  --chart-heatmap-2: var(--data-blue-light-5);
+  --chart-heatmap-3: var(--data-blue-base);
+  --chart-heatmap-4: #0f766e;
+
   --primary-color: var(--color-primary);
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary-dark-2);
-  /* Text-safe primary for links, labels and active indicators, including when
-     they sit on tinted primary fills (`--primary-soft` and darker). */
-  --primary-text: #1d4ed8;
+  /* Text-safe primary for links, labels and active indicators (5.17:1 on white,
+     4.75:1 on subtle blue, 4.61:1 on canvas). */
+  --primary-text: #2563eb;
   --primary-contrast: #ffffff;
   --primary-solid: #2563eb;
   --primary-solid-hover: #1d4ed8;
@@ -277,10 +319,10 @@
   --focus-inset: color-mix(in srgb, var(--primary-color) 22%, transparent);
   --focus-text: var(--primary-text);
 
-  --success-color: var(--color-success-dark-2);
+  --success-color: var(--color-success);
   --quota-medium-color: var(--color-warning);
-  --warning-color: var(--color-warning-dark-2);
-  --error-color: var(--color-danger-dark-2);
+  --warning-color: var(--color-warning);
+  --error-color: var(--color-danger);
   --danger-color: var(--error-color);
   --info-color: var(--color-info);
 
@@ -337,10 +379,10 @@
   --app-shadow-soft: none;
   --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --app-text-primary: #e5e5e5;
-  /* Worst case over the dark surface set (canvas, glass, sidebar scrim, 5-8%
-     white lifts and 12-18% blue/semantic tints): regular 6.33:1, muted 5.06:1. */
+  /* Cool slate muted step (#94a3b8, >= 4.96:1 worst case) restores dark-mode
+     hierarchy without sacrificing readability on lifted panels. */
   --app-text-regular: #bcbcbc;
-  --app-text-muted: #a8a8a8;
+  --app-text-muted: #94a3b8;
   --app-accent-soft: rgba(96, 165, 250, 0.18);
   --surface-subtle: rgba(255, 255, 255, 0.06);
   --surface-subtle-hover: rgba(96, 165, 250, 0.12);
@@ -384,7 +426,7 @@
     0 18px 36px rgba(0, 0, 0, 0.42),
     0 0 0 1px color-mix(in srgb, var(--app-input-border-focus) 16%, transparent);
   --floating-shadow-dialog: 0 10px 15px -3px rgb(0 0 0 / 0.1);
-  --floating-shadow-drawer: -24px 0 48px rgba(15, 23, 42, 0.18);
+  --floating-shadow-drawer: -24px 0 48px rgba(0, 0, 0, 0.45);
   --overlay-scrim: rgba(0, 0, 0, 0.35);
   --overlay-scrim-backdrop: rgb(8 8 8 / 0.46);
   --overlay-scrim-drawer: rgba(15, 23, 42, 0.52);
@@ -530,10 +572,74 @@
   --data-badge-neutral-bg: rgba(148, 163, 184, 0.12);
   --data-badge-neutral-border: rgba(148, 163, 184, 0.2);
 
+  --status-graphic-success: var(--data-green-base);
+  --status-graphic-warning: var(--data-amber-base);
+  --status-graphic-danger: var(--data-red-base);
+  --status-graphic-info: var(--data-blue-base);
+  --status-graphic-emerald: var(--data-emerald-base);
+
+  --status-display-success: var(--data-green-base);
+  --status-display-warning: var(--data-amber-base);
+  --status-display-danger: var(--data-red-base);
+  --status-display-info: var(--data-blue-base);
+  --status-display-emerald: var(--data-emerald-base);
+
+  --kpi-value-color: var(--text-primary);
+
+  --data-badge-success-dot: var(--status-graphic-success);
+  --data-badge-warning-dot: var(--status-graphic-warning);
+  --data-badge-danger-dot: var(--status-graphic-danger);
+  --data-badge-info-dot: var(--status-graphic-info);
+  --data-badge-neutral-dot: var(--data-slate-base);
+
+  --data-rank-1-bg: #fbbf24;
+  --data-rank-1-text: #0b1324;
+  --data-rank-2-bg: #94a3b8;
+  --data-rank-2-text: #0b1324;
+  --data-rank-3-bg: rgba(251, 191, 36, 0.16);
+  --data-rank-3-text: #fbbf24;
+
+  --data-pink-base: #f472b6;
+  --status-bar-low: var(--data-red-base);
+  --status-bar-mid: #facc15;
+  --status-bar-high: var(--data-green-base);
+
+  --chart-axis-label: var(--app-text-regular);
+  --chart-axis-line: rgba(255, 255, 255, 0.12);
+  --chart-axis-line-usage: rgba(255, 255, 255, 0.12);
+  --chart-axis-pointer: #7a7a7a;
+  --chart-split-line: rgba(255, 255, 255, 0.1);
+  --chart-split-line-usage: rgba(255, 255, 255, 0.1);
+  --chart-bar-bg: rgba(255, 255, 255, 0.08);
+  --chart-tooltip-bg: rgba(24, 28, 40, 0.96);
+  --chart-tooltip-border: rgba(255, 255, 255, 0.12);
+  --chart-tooltip-border-usage: rgba(255, 255, 255, 0.12);
+  --chart-tooltip-text: var(--app-text-primary);
+  --chart-tooltip-text-usage: var(--app-text-primary);
+  --chart-tooltip-muted: var(--app-text-regular);
+  --chart-tooltip-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+  --chart-cell-border: var(--app-surface-strong);
+  --chart-emphasis-border: var(--app-text-primary);
+  --chart-pie-shadow: rgba(0, 0, 0, 0.36);
+  --chart-heatmap-1: #102f4f;
+  --chart-heatmap-2: #1d5f98;
+  --chart-heatmap-3: #3b82f6;
+  --chart-heatmap-4: var(--data-blue-base);
+
   --primary-color: var(--color-primary);
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary);
-  --primary-text: var(--data-blue-dark-2);
+  --primary-text: var(--data-blue-base);
+  --primary-contrast: #0b1324;
+  --primary-solid: var(--data-blue-base);
+  --primary-solid-hover: var(--data-blue-dark-2);
+  --primary-solid-active: #3b82f6;
+  --danger-solid: var(--data-red-base);
+  --danger-solid-hover: var(--data-red-dark-2);
+  --danger-solid-active: #ef4444;
+  --success-color: var(--data-green-base);
+  --warning-color: var(--data-amber-base);
+  --error-color: var(--data-red-base);
   --primary-ring: rgba(96, 165, 250, 0.28);
   --count-badge-text: var(--data-badge-info-text);
   --shadow: none;

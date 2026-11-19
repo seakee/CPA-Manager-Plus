@@ -51,6 +51,17 @@
   background: currentColor;
   flex-shrink: 0;
 }
+.statusBadge.tonegood .statusDot {
+  background: var(--status-graphic-success);
+}
+
+.statusBadge.tonewarn .statusDot {
+  background: var(--status-graphic-warning);
+}
+
+.statusBadge.tonebad .statusDot {
+  background: var(--status-graphic-danger);
+}
 
 .statusMeta {
   display: flex;
@@ -402,7 +413,7 @@
 
 .tabButtonActive,
 .tabButtonActive:hover {
-  background: var(--data-blue-base);
+  background: var(--primary-solid);
   color: var(--primary-contrast);
   box-shadow: 0 8px 18px color-mix(in srgb, var(--data-blue-base) 18%, transparent);
 }
@@ -1037,7 +1048,7 @@
   min-height: 20px;
   padding: 0 6px;
   border-radius: var(--app-radius-pill);
-  background: var(--data-blue-base);
+  background: var(--primary-solid);
   color: var(--primary-contrast);
   font-size: 11px;
   font-weight: 700;
@@ -1259,18 +1270,22 @@
   height: var(--control-height-sm);
   min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--data-red-base) 30%, var(--border-color));
+  border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--data-red-base) 8%, var(--bg-primary));
-  color: var(--error-color);
+  background: var(--monitor-surface-elevated);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 }
 
+.filterToggleChip svg {
+  color: var(--status-display-danger);
+}
+
 .filterToggleChipActive {
-  border-color: color-mix(in srgb, var(--data-red-base) 44%, var(--border-color));
-  background: color-mix(in srgb, var(--data-red-base) 14%, var(--bg-primary));
-  color: var(--error-color);
+  border-color: var(--data-badge-danger-border);
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
 }
 
 .errorBox,

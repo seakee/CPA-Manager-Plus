@@ -7,6 +7,8 @@ import type { ModelPrice } from '@/utils/usage';
 const USAGE_SERVICE_ERROR_CODES = new Set([
   'request_failed',
   'connection_env_managed',
+  'retention_env_managed',
+  'cpa_connection_already_bound',
   'cpa_connection_required',
   'cpa_connection_required_for_monitoring',
   'management_api_validation_failed',
@@ -24,15 +26,35 @@ const USAGE_SERVICE_ERROR_CODES = new Set([
   'api_key_aliases_required',
   'api_key_alias_duplicate',
   'model_price_sync_failed',
+  'model_price_structure_locked_by_usage_archive',
+  'management_rejected',
+  'target_moved',
+  'external_management_key_rejected',
+  'external_target_moved',
+  'external_cpa_authority_unavailable',
   'method_not_allowed',
   'account_processing_policy_env_locked',
   'usage_import_session_invalid_request',
   'usage_import_session_not_found',
   'usage_import_session_conflict',
+  'usage_import_session_file_mismatch',
   'usage_import_session_too_large',
   'usage_import_session_quota_exceeded',
   'usage_import_session_limit_exceeded',
   'usage_import_session_unavailable',
+  'usage_archive_invalid_id',
+  'usage_archive_invalid_request',
+  'usage_archive_request_too_large',
+  'usage_archive_no_events',
+  'usage_archive_maintenance_locked',
+  'usage_archive_invalid_state',
+  'usage_archive_cancel_unsafe',
+  'usage_archive_cancel_published',
+  'usage_archive_cancel_cleanup_failed',
+  'usage_archive_coverage_incomplete',
+  'usage_archive_delete_unavailable',
+  'usage_archive_not_found',
+  'usage_archive_unavailable',
 ]);
 
 export interface UsageServiceApiError extends Error {
@@ -105,6 +127,19 @@ export interface UsageServiceDatabaseMaintenanceStatus {
   command?: string;
 }
 
+export interface UsageServiceDataMigrationStatus {
+  name: string;
+  status: string;
+  lastEventId: number;
+  targetEventId: number;
+  processedRows: number;
+  changedRows: number;
+  appliedRows: number;
+  startedAtMs?: number;
+  updatedAtMs?: number;
+  finishedAtMs?: number;
+}
+
 export interface UsageServiceStatus {
   service?: string;
   dbPath?: string;
@@ -113,6 +148,7 @@ export interface UsageServiceStatus {
   collector?: UsageServiceCollectorStatus;
   database?: UsageServiceDatabaseStatus;
   databaseMaintenance?: UsageServiceDatabaseMaintenanceStatus;
+  dataMigration?: UsageServiceDataMigrationStatus;
 }
 
 export type UsageServiceStatusScope = 'database-maintenance';
@@ -210,6 +246,14 @@ export interface ManagerExternalUsageServiceConfig {
   enabled: boolean;
   serviceBase: string;
 }
+export interface ManagerRetentionConfig {
+  enabled?: boolean;
+  retentionDays: number;
+  envLocked?: boolean;
+  enabledEnvLocked?: boolean;
+  retentionDaysEnvLocked?: boolean;
+}
+
 
 export type ManagerCodexInspectionScheduleMode = 'interval' | 'time_points';
 export type ManagerCodexInspectionAutoActionMode = 'none' | 'enable' | 'disable' | 'delete';
@@ -246,6 +290,7 @@ export interface ManagerConfig {
   collector: ManagerCollectorConfig;
   codexInspection?: ManagerCodexInspectionConfig;
   externalUsageService: ManagerExternalUsageServiceConfig;
+  retention?: ManagerRetentionConfig;
   updatedAtMs?: number;
 }
 
@@ -260,6 +305,98 @@ export interface ManagerConfigResponse {
   source?: 'env' | 'db' | '';
   cpaUsage?: CPAUsageConfig;
 }
+export interface UsageArchivePreview {
+  cutoff_timestamp_ms: number;
+  target_event_id: number;
+  event_count: number;
+  estimated_bytes: number;
+  min_timestamp_ms?: number;
+  max_timestamp_ms?: number;
+}
+
+export interface UsageArchiveProgressSummary {
+  phase: string;
+  current: number;
+  total: number;
+  unit?: string;
+  updated_at_ms?: number;
+}
+
+export interface UsageArchiveRunSummary {
+  id: string;
+  mode: string;
+  status: string;
+  resume_status?: string;
+  requested_stage?: string;
+  progress?: UsageArchiveProgressSummary;
+  cutoff_timestamp_ms: number;
+  target_event_id: number;
+  event_count: number;
+  estimated_bytes: number;
+  last_archived_event_id: number;
+  archived_event_count: number;
+  archived_uncompressed_bytes: number;
+  archived_compressed_bytes: number;
+  last_deleted_event_id: number;
+  deleted_event_count: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  started_at_ms?: number;
+  archived_at_ms?: number;
+  verified_at_ms?: number;
+  delete_started_at_ms?: number;
+  completed_at_ms?: number;
+  has_error: boolean;
+}
+
+export interface UsageArchiveSegmentSummary {
+  run_id: string;
+  sequence: number;
+  status: string;
+  first_event_id: number;
+  last_event_id: number;
+  min_timestamp_ms: number;
+  max_timestamp_ms: number;
+  event_count: number;
+  uncompressed_bytes: number;
+  compressed_bytes: number;
+  created_at_ms: number;
+  verified_at_ms?: number;
+}
+
+export interface UsageArchiveStatusSummary {
+  run: UsageArchiveRunSummary;
+  segments: UsageArchiveSegmentSummary[];
+}
+
+export interface UsageArchiveList {
+  runs: UsageArchiveRunSummary[];
+  total: number;
+  status_counts?: Record<string, number>;
+  next_cursor?: string;
+}
+
+export interface UsageMaintenanceStatus {
+  raw_event_count: number;
+  raw_min_timestamp_ms: number;
+  raw_max_timestamp_ms: number;
+  raw_archived_event_count: number;
+  raw_deleted_event_count: number;
+  active_run?: UsageArchiveRunSummary;
+  active_lock?: {
+    run_id: string;
+    operation: string;
+    acquired_at_ms: number;
+    updated_at_ms: number;
+  };
+  readiness: {
+    migration_ready: boolean;
+    hourly_aggregate_ready: boolean;
+    archive_delete_enabled: boolean;
+  };
+  compact_requires_stopped_server: boolean;
+}
+
 
 export interface CodexInspectionRun {
   id: number;
@@ -1843,10 +1980,10 @@ export const usageServiceApi = {
   },
 
   /**
-   * `PATCH /usage-service/config` writes the request-monitoring switch and
-   * nothing else. The switch owns one field, so it never reads the whole
-   * document back just to submit it again: a body that carries more than the
-   * switch is refused by the Manager instead of being interpreted.
+   * `PATCH /usage-service/config` accepts one narrow action per request:
+   * the request-monitoring switch (`{ enabled }`), collector tuning
+   * (`{ collector }`), or archive retention (`{ retention }`). Combining
+   * actions or passing nested `collector.enabled` is rejected with 400.
    */
   setRequestMonitoring: async (
     base: string,
@@ -1857,6 +1994,191 @@ export const usageServiceApi = {
       const response = await axios.patch<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
         { enabled },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  patchSettings: async (
+    base: string,
+    patch:
+      | { collector: Partial<Omit<ManagerCollectorConfig, 'enabled'>> }
+      | { retention: Partial<Omit<ManagerRetentionConfig, 'envLocked' | 'enabledEnvLocked' | 'retentionDaysEnvLocked'>> },
+    managementKey?: string
+  ): Promise<ManagerConfigResponse> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.patch<ManagerConfigResponse>(
+        buildUrl(base, '/usage-service/config'),
+        patch,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getMaintenanceStatus: async (
+    base: string,
+    managementKey?: string
+  ): Promise<UsageMaintenanceStatus> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageMaintenanceStatus>(
+        buildUrl(base, '/v0/management/usage/maintenance'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  listArchives: async (
+    base: string,
+    managementKey?: string,
+    params: { limit?: number; status?: string } = {}
+  ): Promise<UsageArchiveList> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageArchiveList>(
+        buildUrl(base, '/v0/management/usage/archives'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  previewArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    cutoffTimestampMs: number
+  ): Promise<UsageArchivePreview> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchivePreview>(
+        buildUrl(base, '/v0/management/usage/archives/preview'),
+        { cutoff_timestamp_ms: cutoffTimestampMs },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  createArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    cutoffTimestampMs: number
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchiveStatusSummary>(
+        buildUrl(base, '/v0/management/usage/archives'),
+        { cutoff_timestamp_ms: cutoffTimestampMs },
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getArchiveStatus: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageArchiveStatusSummary>(
+        buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}`),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  verifyArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string,
+    wait = true
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchiveStatusSummary>(
+        buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}/verify`),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params: { wait },
+        }
+      );
+      return response.data;
+    });
+  },
+
+  deleteArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string,
+    wait = true
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchiveStatusSummary>(
+        buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}/delete`),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params: { wait },
+        }
+      );
+      return response.data;
+    });
+  },
+
+  resumeArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string,
+    wait = true
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchiveStatusSummary>(
+        buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}/resume`),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params: { wait },
+        }
+      );
+      return response.data;
+    });
+  },
+
+  cancelArchive: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string
+  ): Promise<UsageArchiveStatusSummary> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<UsageArchiveStatusSummary>(
+        buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}/cancel`),
+        undefined,
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),

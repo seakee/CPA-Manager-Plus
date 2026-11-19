@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -12,14 +13,21 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 
 	usageadapter "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
@@ -33,6 +41,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
@@ -40,6 +49,8 @@ import (
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
 )
 
 const (
@@ -60,8 +71,10 @@ type upgradeCanonicalDependencies struct {
 	Workspace       *upgradeKeyWorkspace
 	Protector       *security.Protector
 	Runtime         runtimeservice.RuntimeClient
+	CollectorWorker *worker.CollectorWorker
 	DesiredStateOut *runtimeservice.DesiredStateStore
 	Startup         *startupHTTPHandler
+	CanonicalOut    **upgradeCanonicalServer
 }
 
 func resolveUpgradeProtector(cfg config.Config, explicit *security.Protector) (*security.Protector, error) {
@@ -97,14 +110,17 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 	if err != nil {
 		return fmt.Errorf("load upgrade canonical protector: %w", err)
 	}
-	runtimeClient := deps.Runtime
+	var runtimeClient runtimeservice.RuntimeClient
 	var artifactClient *runtimeservice.ArtifactClient
-	if cfg.EmbeddedRuntimeConfigured() && u.targetMode == model.UpgradeTargetManaged {
-		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
-		if runtimeClient == nil {
-			runtimeClient = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, tokenSource)
+	if u.targetMode == model.UpgradeTargetManaged {
+		runtimeClient = deps.Runtime
+		if cfg.EmbeddedRuntimeConfigured() {
+			tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
+			if runtimeClient == nil {
+				runtimeClient = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, tokenSource)
+			}
+			artifactClient = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
 		}
-		artifactClient = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
 	}
 	workspace := deps.Workspace
 	if workspace == nil && u.db != nil && u.db.SQLDB() != nil {
@@ -137,21 +153,36 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 		u.updates = updatecheck.New(u.db, buildinfo.Version, buildinfo.SourceCommit, true)
 	}
 	if u.appCtx != nil && u.appCtx.ManagerConfigService != nil {
+		u.appCtx.ManagerConfigService.UseExternalCollectorLifecycle()
 		u.appCtx.ManagerConfigService.SetCPAUsageProbeAllowed(func(context.Context) bool {
 			return u.targetMode != model.UpgradeTargetExternal
 		})
 	}
 	u.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(func(callCtx context.Context) (string, string, error) {
+		if install, ok := upgradeExternalHoldInstall(callCtx); ok {
+			return install.BaseURL, install.ManagementKey, nil
+		}
 		install, _, loadErr := u.loadFencedExternalInstall(callCtx)
 		if loadErr != nil {
 			return "", "", loadErr
 		}
 		return install.BaseURL, install.ManagementKey, nil
 	})
+	if u.appCtx != nil && u.db != nil {
+		u.appCtx.CPAUpdateService = cpaupdateservice.New(
+			upgradeCPAUpdateStore{owner: u},
+			upgradeRuntimeClientAdapter{owner: u},
+			u.runtimeModeFor(u.targetMode),
+		).WithModeResolver(func() model.RuntimeMode {
+			return u.effectiveRuntimeMode(context.Background())
+		})
+	}
 	u.configService = &upgradeConfigService{owner: u}
 	u.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, u.probePluginCapable)
 	if ctx != nil && ctx.Done() != nil {
+		u.bgWG.Add(1)
 		go func() {
+			defer u.bgWG.Done()
 			<-ctx.Done()
 			u.pluginCapability.close()
 		}()
@@ -166,6 +197,7 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 			}
 		}
 	}
+	u.bindCollectorLifecycleLocker(deps.CollectorWorker)
 	return nil
 }
 
@@ -233,19 +265,62 @@ func (u *upgradeCanonicalServer) precheckExternalCredential(ctx context.Context)
 
 type upgradeExternalHoldContextKey struct{}
 
-func withUpgradeExternalHold(ctx context.Context) context.Context {
+type upgradeExternalHoldState struct {
+	install freshkeyapply.ExternalInstall
+	hasSnap bool
+}
+
+func withUpgradeExternalHoldInstall(ctx context.Context, install freshkeyapply.ExternalInstall) context.Context {
 	if ctx == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, upgradeExternalHoldContextKey{}, true)
+	return context.WithValue(ctx, upgradeExternalHoldContextKey{}, upgradeExternalHoldState{
+		install: install,
+		hasSnap: true,
+	})
 }
 
 func hasUpgradeExternalHold(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
-	held, _ := ctx.Value(upgradeExternalHoldContextKey{}).(bool)
+	_, held := ctx.Value(upgradeExternalHoldContextKey{}).(upgradeExternalHoldState)
 	return held
+}
+
+func upgradeExternalHoldInstall(ctx context.Context) (freshkeyapply.ExternalInstall, bool) {
+	if ctx == nil {
+		return freshkeyapply.ExternalInstall{}, false
+	}
+	state, ok := ctx.Value(upgradeExternalHoldContextKey{}).(upgradeExternalHoldState)
+	if !ok || !state.hasSnap {
+		return freshkeyapply.ExternalInstall{}, false
+	}
+	return state.install, true
+}
+
+type upgradeExternalPrecheckErrKey struct{}
+
+type upgradeExternalPrecheckErrState struct {
+	err error
+}
+
+func withUpgradeExternalPrecheckErr(ctx context.Context, err error) context.Context {
+	if ctx == nil || err == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, upgradeExternalPrecheckErrKey{}, upgradeExternalPrecheckErrState{err: err})
+}
+
+func upgradeExternalPrecheckErr(ctx context.Context) (error, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	state, ok := ctx.Value(upgradeExternalPrecheckErrKey{}).(upgradeExternalPrecheckErrState)
+	if !ok || state.err == nil {
+		return nil, false
+	}
+	return state.err, true
 }
 
 func (u *upgradeCanonicalServer) enterExternalCredentialHold(
@@ -274,7 +349,7 @@ func (u *upgradeCanonicalServer) enterExternalCredentialHold(
 		rc := http.NewResponseController(w)
 		_ = rc.SetWriteDeadline(time.Now().Add(budget + 5*time.Second))
 	}
-	holdCtx := withUpgradeExternalHold(ctx)
+	holdCtx := withUpgradeExternalHoldInstall(ctx, install)
 	var cancel context.CancelFunc = func() {}
 	if budget > 0 {
 		holdCtx, cancel = context.WithTimeout(holdCtx, budget)
@@ -285,6 +360,29 @@ func (u *upgradeCanonicalServer) enterExternalCredentialHold(
 			u.workspace.credentialGate.release()
 		}
 	}, nil
+}
+
+func (u *upgradeCanonicalServer) enterExternalBridgeCredentialHold(
+	ctx context.Context,
+	path string,
+) (freshkeyapply.ExternalInstall, string, *externalCredentialHold, context.Context, error) {
+	if u == nil || u.workspace == nil {
+		return freshkeyapply.ExternalInstall{}, "", nil, nil, freshkeyapply.ErrExternalUnavailable
+	}
+	if !u.workspace.credentialGate.acquire(ctx) {
+		return freshkeyapply.ExternalInstall{}, "", nil, nil, errExternalCredentialWaitCancelled
+	}
+	install, credDigest, err := u.precheckExternalCredential(ctx)
+	if err != nil {
+		u.workspace.credentialGate.release()
+		return freshkeyapply.ExternalInstall{}, "", nil, nil, err
+	}
+	budget := upgradeExternalHoldBudget
+	if externalLegacyWaitsOnProvider(path) {
+		budget = 0
+	}
+	hold, holdCtx := beginExternalCredentialHold(withUpgradeExternalHoldInstall(ctx, install), &u.workspace.credentialGate, budget)
+	return install, credDigest, hold, holdCtx, nil
 }
 
 func (u *upgradeCanonicalServer) recordExternalAuthFailureIfMatching(
@@ -342,12 +440,22 @@ func (u *upgradeCanonicalServer) probePluginCapable(ctx context.Context) bool {
 	return u.configService.SupportsPlugins(ctx)
 }
 
-func (u *upgradeCanonicalServer) notePluginDocumentObserved(hasPluginDir bool) {
+func (u *upgradeCanonicalServer) currentPluginCapabilityEpoch() uint64 {
+	if u == nil || u.pluginCapability == nil {
+		return 0
+	}
+	u.pluginCapability.mu.Lock()
+	epoch := u.pluginCapability.epoch
+	u.pluginCapability.mu.Unlock()
+	return epoch
+}
+
+func (u *upgradeCanonicalServer) notePluginDocumentObserved(epoch uint64, hasPluginDir bool) {
 	if u == nil || u.pluginCapability == nil {
 		return
 	}
 	u.pluginCapability.mu.Lock()
-	if !u.pluginCapability.closed {
+	if !u.pluginCapability.closed && u.pluginCapability.epoch == epoch {
 		u.pluginCapability.proven = hasPluginDir
 		u.pluginCapability.at = u.pluginCapability.now()
 	}
@@ -368,7 +476,7 @@ type upgradeConfigScope struct {
 }
 
 func (sc upgradeConfigScope) ownsGroup(id string) bool {
-	if sc.ruleFamilies && id == cpa.ConfigRulesGroupID {
+	if sc.ruleFamilies && (id == cpa.ConfigRulesGroupID || id == freshconfig.ConfigSourceGroupID) {
 		return true
 	}
 	_, ok := sc.lookupGroup(id)
@@ -379,10 +487,10 @@ var (
 	upgradeGatewayScope = upgradeConfigScope{
 		name:         "gateway",
 		ruleFamilies: true,
-		groupIDs:     cpa.ConfigGroupIDs,
-		lookupGroup:  cpa.LookupConfigGroup,
-		leafPaths:    cpa.ConfigLeafPaths,
-		lookupLeaf:   cpa.LookupConfigLeaf,
+		groupIDs:     cpa.GatewayPageGroupIDs,
+		lookupGroup:  cpa.LookupGatewayPageGroup,
+		leafPaths:    cpa.GatewayPageLeafPaths,
+		lookupLeaf:   cpa.LookupGatewayPageLeaf,
 		parseValue:   cpa.ParseConfigLeafValue,
 	}
 	upgradePluginScope = upgradeConfigScope{
@@ -404,16 +512,17 @@ type upgradeConfigWire interface {
 }
 
 type upgradeConfigAuthority struct {
-	capable    freshconfig.Capability
-	mode       string
-	sourceID   string
-	generation string
-	endpoint   string
-	secret     string
-	readOnly   string
-	external   freshkeyapply.ExternalInstall
-	credDigest string
-	transport  upgradeConfigWire
+	capable     freshconfig.Capability
+	mode        string
+	sourceID    string
+	generation  string
+	endpoint    string
+	secret      string
+	readOnly    string
+	external    freshkeyapply.ExternalInstall
+	credDigest  string
+	transport   upgradeConfigWire
+	liveAuthErr error
 }
 
 type upgradeConfigService struct {
@@ -541,12 +650,25 @@ func (s *upgradeConfigService) resolveAuthority(ctx context.Context, sc upgradeC
 				readOnly: freshconfig.ReasonPluginManagedOnly,
 			}, nil
 		}
+		if preErr, ok := upgradeExternalPrecheckErr(ctx); ok {
+			if errors.Is(preErr, cpa.ErrExternalTargetMoved) {
+				return upgradeConfigAuthority{
+					capable: freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonTargetMoved},
+					mode:    freshconfig.ModeUnavailable,
+				}, cpa.ErrExternalTargetMoved
+			}
+			return upgradeConfigAuthority{
+				capable: freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonUnavailable},
+				mode:    freshconfig.ModeUnavailable,
+			}, nil
+		}
 		install, credDigest, err := u.precheckExternalCredential(ctx)
 		switch {
 		case errors.Is(err, cpa.ErrManagementRejected):
 			return upgradeConfigAuthority{
-				capable: freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonManagementRejected},
-				mode:    freshconfig.ModeUnavailable,
+				capable:     freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonManagementRejected},
+				mode:        freshconfig.ModeUnavailable,
+				liveAuthErr: cpa.ErrManagementRejected,
 			}, cpa.ErrManagementRejected
 		case errors.Is(err, cpa.ErrExternalRejectionUnavailable):
 			return upgradeConfigAuthority{}, cpa.ErrExternalRejectionUnavailable
@@ -566,8 +688,9 @@ func (s *upgradeConfigService) resolveAuthority(ctx context.Context, sc upgradeC
 			u.recordExternalAuthFailureIfMatching(ctx, install, credDigest, verErr)
 			if errors.Is(verErr, cpa.ErrManagementRejected) || errors.Is(verErr, cpa.ErrManagementClientForbidden) {
 				return upgradeConfigAuthority{
-					capable: freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonManagementRejected},
-					mode:    freshconfig.ModeUnavailable,
+					capable:     freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonManagementRejected},
+					mode:        freshconfig.ModeUnavailable,
+					liveAuthErr: verErr,
 				}, verErr
 			}
 			if forWrite {
@@ -673,7 +796,6 @@ func (s *upgradeConfigService) SupportsPlugins(ctx context.Context) bool {
 	_, hasDir := plugins["dir"]
 	return hasDir
 }
-
 func (s *upgradeConfigService) LogsCapability(ctx context.Context) (freshconfig.Capability, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -692,6 +814,26 @@ func (s *upgradeConfigService) LogsCapability(ctx context.Context) (freshconfig.
 			RulesWritable: false,
 			Reason:        auth.capable.Reason,
 		}, nil
+	}
+	if auth.mode == freshconfig.ModeManaged {
+		if auth.transport == nil {
+			return freshconfig.Capability{
+				Mode:          freshconfig.ModeManaged,
+				Readable:      false,
+				Writable:      false,
+				RulesWritable: false,
+				Reason:        freshconfig.ReasonUnavailable,
+			}, nil
+		}
+		if _, readErr := auth.transport.ReadConfigDocument(ctx, auth.secret); readErr != nil {
+			return freshconfig.Capability{
+				Mode:          freshconfig.ModeManaged,
+				Readable:      false,
+				Writable:      false,
+				RulesWritable: false,
+				Reason:        freshconfig.ReasonReadUnavailable,
+			}, nil
+		}
 	}
 	if auth.mode == freshconfig.ModeExternal && !auth.capable.Writable && auth.readOnly == "" {
 		return freshconfig.Capability{
@@ -714,45 +856,46 @@ func (s *upgradeConfigService) ReadPlugin(ctx context.Context) (freshconfig.View
 }
 
 func (s *upgradeConfigService) readScope(ctx context.Context, sc upgradeConfigScope) (freshconfig.View, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	journal, journalInvalid, err := s.loadJournal(ctx)
 	if err != nil {
 		return freshconfig.View{}, err
 	}
+	if journalInvalid {
+		journal = nil
+	}
 	auth, resolveErr := s.resolveAuthority(ctx, sc, false)
-	if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+	if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) || errors.Is(resolveErr, cpa.ErrManagementRejected) || auth.liveAuthErr != nil {
 		return freshconfig.View{}, resolveErr
 	}
 	view := freshconfig.View{
 		Capability:    auth.capable,
 		Generation:    auth.generation,
 		GroupsInvalid: journalInvalid,
+		Groups:        []freshconfig.GroupView{},
+		Fields:        []freshconfig.FieldView{},
+		Families:      []freshconfig.FamilyView{},
 	}
 	var document map[string]any
 	if auth.capable.Readable && auth.transport != nil {
+		observedEpoch := s.owner.currentPluginCapabilityEpoch()
 		doc, docErr := auth.transport.ReadConfigDocument(ctx, auth.secret)
 		if docErr != nil {
 			if auth.mode == freshconfig.ModeExternal {
 				s.owner.recordExternalAuthFailureIfMatching(ctx, auth.external, auth.credDigest, docErr)
-				if errors.Is(docErr, cpa.ErrManagementRejected) || errors.Is(docErr, cpa.ErrManagementClientForbidden) {
-					view.Capability = freshconfig.Capability{
-						Mode:   freshconfig.ModeUnavailable,
-						Reason: freshconfig.ReasonManagementRejected,
-					}
-					auth.capable = view.Capability
-				} else {
-					view.Capability = freshconfig.Capability{
-						Mode:   auth.mode,
-						Reason: freshconfig.ReasonReadUnavailable,
-					}
-					auth.capable = view.Capability
+				if errors.Is(docErr, cpa.ErrManagementRejected) ||
+					errors.Is(docErr, cpa.ErrManagementClientForbidden) ||
+					errors.Is(docErr, cpa.ErrExternalTargetMoved) ||
+					errors.Is(docErr, cpa.ErrExternalRejectionUnavailable) {
+					return freshconfig.View{}, docErr
 				}
-			} else {
-				view.Capability = freshconfig.Capability{
-					Mode:   auth.mode,
-					Reason: freshconfig.ReasonReadUnavailable,
-				}
-				auth.capable = view.Capability
 			}
+			view.Capability = freshconfig.Capability{
+				Mode:   auth.mode,
+				Reason: freshconfig.ReasonReadUnavailable,
+			}
+			auth.capable = view.Capability
 		} else {
 			document = doc
 			plugins, hasPlugins := document["plugins"].(map[string]any)
@@ -760,7 +903,7 @@ func (s *upgradeConfigService) readScope(ctx context.Context, sc upgradeConfigSc
 			if hasPlugins {
 				_, hasDir = plugins["dir"]
 			}
-			s.owner.notePluginDocumentObserved(hasDir)
+			s.owner.notePluginDocumentObserved(observedEpoch, hasDir)
 			if sc.managedOnly && !hasDir {
 				auth.capable.Writable = false
 				auth.capable.Reason = freshconfig.ReasonUnavailable
@@ -777,6 +920,20 @@ func (s *upgradeConfigService) readScope(ctx context.Context, sc upgradeConfigSc
 		}
 		if op, ok := entry.Operations[entry.Latest]; ok && op.State == "unknown" {
 			blocked[id] = freshconfig.ReasonUnknownOriginal
+		}
+	}
+	var sourceUnknownOp *freshstore.ConfigGroupOperation
+	if sc.ownsGroup(freshconfig.ConfigSourceGroupID) && !journalInvalid {
+		if op, ok := upgradeUnknownGroupOperation(journal, freshconfig.ConfigSourceGroupID); ok {
+			sourceUnknownOp = &op
+			for _, id := range sc.groupIDs() {
+				if blocked[id] == "" {
+					blocked[id] = freshconfig.ReasonUnknownOriginal
+				}
+			}
+			if sc.ruleFamilies && blocked[cpa.ConfigRulesGroupID] == "" {
+				blocked[cpa.ConfigRulesGroupID] = freshconfig.ReasonUnknownOriginal
+			}
 		}
 	}
 
@@ -798,6 +955,11 @@ func (s *upgradeConfigService) readScope(ctx context.Context, sc upgradeConfigSc
 				entry.Operation = &copied
 				entry.Persisted = op.State
 			}
+		}
+		if sourceUnknownOp != nil && (entry.Operation == nil || entry.Operation.State != "unknown") {
+			copied := sourceUnknownOp.Clone()
+			entry.Operation = &copied
+			entry.Persisted = copied.State
 		}
 		if document != nil {
 			entry.Baseline = upgradeGroupBaseline(document, group)
@@ -864,8 +1026,12 @@ func (s *upgradeConfigService) readScope(ctx context.Context, sc upgradeConfigSc
 				rulesOp = &copied
 			}
 		}
-		for _, id := range cpa.ConfigRuleFamilyIDs() {
-			family, _ := cpa.LookupConfigRuleFamily(id)
+		if sourceUnknownOp != nil && (rulesOp == nil || rulesOp.State != "unknown") {
+			copied := sourceUnknownOp.Clone()
+			rulesOp = &copied
+		}
+		for _, id := range cpa.GatewayPageRuleFamilyIDs() {
+			family, _ := cpa.LookupGatewayPageRuleFamily(id)
 			item := freshconfig.FamilyView{
 				Family:    family.Family,
 				Path:      family.Path,
@@ -916,6 +1082,16 @@ func (s *upgradeConfigService) saveGroupScope(
 ) (freshstore.ConfigGroupOperation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if sc.managedOnly {
+		if err := freshconfig.ValidatePluginGroupRequest(groupID, req); err != nil {
+			return freshstore.ConfigGroupOperation{}, err
+		}
+	} else {
+		if err := freshconfig.ValidateGroupRequest(groupID, req); err != nil {
+			return freshstore.ConfigGroupOperation{}, err
+		}
+	}
 
 	group, ok := sc.lookupGroup(groupID)
 	if !ok || !freshkeys.ValidRequestID(req.RequestID) {
@@ -984,7 +1160,30 @@ func (s *upgradeConfigService) saveGroupScope(
 			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
 		}
 	}
-
+	if sc.ownsGroup(freshconfig.ConfigSourceGroupID) {
+		if _, ok := upgradeUnknownGroupOperation(journal, freshconfig.ConfigSourceGroupID); ok {
+			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
+		}
+	}
+	type kvLeafPut struct {
+		path    string
+		payload []byte
+	}
+	var kvPuts []kvLeafPut
+	for _, edit := range edits {
+		if edit.Action != "set" {
+			continue
+		}
+		leaf, ok := sc.lookupLeaf(edit.Path)
+		if !ok || leaf.Type != cpa.ConfigLeafKVMap {
+			continue
+		}
+		encoded, encErr := cpa.EncodeConfigLeafValue(edit.Path, edit.Value)
+		if encErr != nil {
+			return freshstore.ConfigGroupOperation{}, freshconfig.ErrInvalid
+		}
+		kvPuts = append(kvPuts, kvLeafPut{path: edit.Path, payload: encoded})
+	}
 	doc, err := auth.transport.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
 		if auth.mode == freshconfig.ModeExternal {
@@ -1024,13 +1223,18 @@ func (s *upgradeConfigService) saveGroupScope(
 		return op, err
 	}
 
-	payload, patched := upgradeGroupPatch(group.Prefix, edits)
+	payload, patched := upgradeGroupPatch(group.Prefix, edits, sc.lookupLeaf)
 	applied := false
 	if patched {
 		if group.Prefix == "" {
 			for _, edit := range edits {
 				if edit.Action != "set" {
 					continue
+				}
+				if sc.lookupLeaf != nil {
+					if leaf, ok := sc.lookupLeaf(edit.Path); ok && leaf.Type == cpa.ConfigLeafKVMap {
+						continue
+					}
 				}
 				leafPayload, mErr := json.Marshal(edit.Value)
 				if mErr != nil {
@@ -1047,6 +1251,12 @@ func (s *upgradeConfigService) saveGroupScope(
 			}
 			applied = true
 		}
+	}
+	for _, put := range kvPuts {
+		if err := auth.transport.PutConfigValue(ctx, auth.secret, put.path, put.payload); err != nil {
+			return s.failOperation(ctx, group.ID, op, err, auth, applied)
+		}
+		applied = true
 	}
 	for _, edit := range edits {
 		if edit.Action != "default" {
@@ -1070,8 +1280,11 @@ func (s *upgradeConfigService) SaveFamily(ctx context.Context, familyID string, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	family, ok := cpa.LookupConfigRuleFamily(familyID)
-	if !ok || !freshkeys.ValidRequestID(req.RequestID) {
+	if err := freshconfig.ValidateFamilyRequest(familyID, req); err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	family, ok := cpa.LookupGatewayPageRuleFamily(familyID)
+	if !ok {
 		return freshstore.ConfigGroupOperation{}, freshconfig.ErrInvalid
 	}
 	parsedRules, err := cpa.ParseConfigRules(family.Family, req.Rules)
@@ -1128,7 +1341,9 @@ func (s *upgradeConfigService) SaveFamily(ctx context.Context, familyID string, 
 			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
 		}
 	}
-
+	if _, ok := upgradeUnknownGroupOperation(journal, freshconfig.ConfigSourceGroupID); ok {
+		return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
+	}
 	doc, err := auth.transport.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
 		return freshstore.ConfigGroupOperation{}, cpa.ErrProofUnavailable
@@ -1389,12 +1604,18 @@ func upgradeCanonicalDigest(value any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func upgradeGroupPatch(prefix string, edits []freshstore.ConfigGroupEdit) ([]byte, bool) {
+func upgradeGroupPatch(prefix string, edits []freshstore.ConfigGroupEdit, lookupLeaf func(string) (cpa.ConfigLeaf, bool)) ([]byte, bool) {
 	if prefix == "" {
 		for _, edit := range edits {
-			if edit.Action == "set" {
-				return []byte("{}"), true
+			if edit.Action != "set" {
+				continue
 			}
+			if lookupLeaf != nil {
+				if leaf, ok := lookupLeaf(edit.Path); ok && leaf.Type == cpa.ConfigLeafKVMap {
+					continue
+				}
+			}
+			return []byte("{}"), true
 		}
 		return nil, false
 	}
@@ -1404,6 +1625,11 @@ func upgradeGroupPatch(prefix string, edits []freshstore.ConfigGroupEdit) ([]byt
 	for _, edit := range edits {
 		if edit.Action != "set" {
 			continue
+		}
+		if lookupLeaf != nil {
+			if leaf, ok := lookupLeaf(edit.Path); ok && leaf.Type == cpa.ConfigLeafKVMap {
+				continue
+			}
 		}
 		parts := strings.Split(edit.Path, ".")
 		if len(parts) <= len(prefixParts) {
@@ -1504,6 +1730,1139 @@ func sameUpgradeFamilyRequest(operation freshstore.ConfigGroupOperation, path st
 		upgradeCanonicalDigest(operation.Rules) == upgradeCanonicalDigest(rules)
 }
 
+func sameUpgradeSourceRequest(operation freshstore.ConfigGroupOperation, targetPrefix, baseline string) bool {
+	return operation.Target == "group" &&
+		operation.Prefix == targetPrefix &&
+		operation.Baseline == baseline
+}
+
+func upgradeUnknownGroupOperation(journal map[string]*freshstore.ConfigGroupJournal, groupID string) (freshstore.ConfigGroupOperation, bool) {
+	entry := journal[groupID]
+	if entry == nil {
+		return freshstore.ConfigGroupOperation{}, false
+	}
+	op, ok := entry.Operations[entry.Latest]
+	if !ok || op.State != "unknown" {
+		return freshstore.ConfigGroupOperation{}, false
+	}
+	return op.Clone(), true
+}
+
+func upgradeBlockingSourceOperation(journal map[string]*freshstore.ConfigGroupJournal) (*freshstore.ConfigGroupOperation, string, error) {
+	if op, ok := upgradeUnknownGroupOperation(journal, freshconfig.ConfigSourceGroupID); ok {
+		return &op, freshconfig.ReasonUnknownOriginal, cpa.ErrApplyUnknown
+	}
+	for _, groupID := range cpa.GatewayPageGroupIDs() {
+		if op, ok := upgradeUnknownGroupOperation(journal, groupID); ok {
+			return &op, freshconfig.ReasonUnknownOriginal, cpa.ErrApplyUnknown
+		}
+	}
+	if op, ok := upgradeUnknownGroupOperation(journal, cpa.ConfigRulesGroupID); ok {
+		return &op, freshconfig.ReasonUnknownOriginal, cpa.ErrApplyUnknown
+	}
+	for _, groupID := range upgradeSortedMapKeys(journal) {
+		if !upgradeGatewayScope.ownsGroup(groupID) {
+			continue
+		}
+		if op, ok := upgradeUnknownGroupOperation(journal, groupID); ok {
+			return &op, freshconfig.ReasonUnknownOriginal, cpa.ErrApplyUnknown
+		}
+	}
+	return nil, "", nil
+}
+
+var upgradeProtectedSourceRoots = map[string]bool{
+	"config-version":           true,
+	"management":               true,
+	"remote-management":        true,
+	"access":                   true,
+	"api-keys":                 true,
+	"plugins":                  true,
+	"observability":            true,
+	"models":                   true,
+	"credentials":              true,
+	"credential-concurrency":   true,
+	"credential-in-flight":     true,
+	"pprof":                    true,
+	"usage-statistics-enabled": true,
+	"logging":                  true,
+	"auth-dir":                 true,
+	"kv-store":                 true,
+	"gemini-api-key":           true,
+	"interactions-api-key":     true,
+	"vertex-api-key":           true,
+	"codex-api-key":            true,
+	"claude-api-key":           true,
+	"xai-api-key":              true,
+	"meta-api-key":             true,
+	"openai-compatibility":     true,
+}
+
+var upgradeProtectedSourceSubtrees = map[string]map[string]bool{
+	"server": {
+		"host":         true,
+		"port":         true,
+		"discovery":    true,
+		"tls":          true,
+		"unix-socket":  true,
+		"github-token": true,
+		"kv-store":     true,
+	},
+	"oauth": {
+		"auth-dir": true,
+	},
+}
+
+var upgradeSensitiveSourceKeyNames = map[string]bool{
+	"secret-key":     true,
+	"secret":         true,
+	"api-key":        true,
+	"api-keys":       true,
+	"management-key": true,
+	"github-token":   true,
+	"password":       true,
+	"private-key":    true,
+	"access-token":   true,
+	"refresh-token":  true,
+	"client-secret":  true,
+}
+
+func (s *upgradeConfigService) ReadSource(ctx context.Context) (freshconfig.SourceView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	journal, journalInvalid, err := s.loadJournal(ctx)
+	if err != nil {
+		return freshconfig.SourceView{}, err
+	}
+	auth, resolveErr := s.resolveAuthority(ctx, upgradeGatewayScope, false)
+	if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) || errors.Is(resolveErr, cpa.ErrManagementRejected) || auth.liveAuthErr != nil {
+		return freshconfig.SourceView{}, resolveErr
+	}
+	view := freshconfig.SourceView{
+		Capability:    auth.capable,
+		Generation:    auth.generation,
+		GroupsInvalid: journalInvalid,
+	}
+	var document map[string]any
+	if auth.capable.Readable && auth.transport != nil {
+		observedEpoch := s.owner.currentPluginCapabilityEpoch()
+		doc, docErr := auth.transport.ReadConfigDocument(ctx, auth.secret)
+		if docErr != nil {
+			if auth.mode == freshconfig.ModeExternal {
+				s.owner.recordExternalAuthFailureIfMatching(ctx, auth.external, auth.credDigest, docErr)
+				if errors.Is(docErr, cpa.ErrManagementRejected) ||
+					errors.Is(docErr, cpa.ErrManagementClientForbidden) ||
+					errors.Is(docErr, cpa.ErrExternalTargetMoved) ||
+					errors.Is(docErr, cpa.ErrExternalRejectionUnavailable) {
+					return freshconfig.SourceView{}, docErr
+				}
+			}
+			view.Capability.Readable = false
+			view.Capability.Writable = false
+			view.Capability.RulesWritable = false
+			view.Capability.Reason = freshconfig.ReasonReadUnavailable
+			document = nil
+		} else {
+			document = doc
+			plugins, hasPlugins := document["plugins"].(map[string]any)
+			hasDir := false
+			if hasPlugins {
+				_, hasDir = plugins["dir"]
+			}
+			s.owner.notePluginDocumentObserved(observedEpoch, hasDir)
+		}
+	}
+
+	var blockedReason string
+	if !view.GroupsInvalid {
+		if entry := journal[freshconfig.ConfigSourceGroupID]; entry != nil {
+			if op, ok := entry.Operations[entry.Latest]; ok {
+				copied := op.Clone()
+				view.Operation = &copied
+			}
+		}
+		if blockingOp, reason, _ := upgradeBlockingSourceOperation(journal); reason != "" {
+			blockedReason = reason
+			if view.Operation == nil || view.Operation.State != "unknown" {
+				view.Operation = blockingOp
+			}
+		}
+	}
+
+	if document != nil {
+		sanitized := upgradeSanitizeSourceDocument(document)
+		view.Baseline = upgradeCanonicalDigest(sanitized)
+		encoded, encErr := upgradeEncodeSourceYAML(sanitized)
+		if encErr != nil {
+			return freshconfig.SourceView{}, encErr
+		}
+		view.YAML = encoded
+	}
+
+	switch {
+	case !view.Capability.Readable:
+		view.SourceWritable = false
+		if view.Capability.Reason != "" {
+			view.Reason = view.Capability.Reason
+		} else {
+			view.Reason = freshconfig.ReasonUnavailable
+		}
+	case view.GroupsInvalid:
+		view.SourceWritable = false
+		view.Reason = freshconfig.ReasonJournalInvalid
+	case blockedReason != "":
+		view.SourceWritable = false
+		view.Reason = blockedReason
+	case !view.Capability.Writable:
+		view.SourceWritable = false
+		if view.Capability.Reason != "" {
+			view.Reason = view.Capability.Reason
+		} else {
+			view.Reason = freshconfig.ReasonUnavailable
+		}
+	default:
+		view.SourceWritable = true
+	}
+	return view, nil
+}
+
+func (s *upgradeConfigService) SaveSource(ctx context.Context, req freshconfig.SourceRequest) (freshstore.ConfigGroupOperation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := freshconfig.ValidateSourceRequest(req); err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	targetDoc, err := upgradeParseStrictSourceYAML(req.YAML)
+	if err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+
+	auth, err := s.resolveAuthority(ctx, upgradeGatewayScope, true)
+	if err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	if auth.transport == nil {
+		return freshstore.ConfigGroupOperation{}, cpa.ErrProofUnavailable
+	}
+	if !auth.capable.Writable {
+		return freshstore.ConfigGroupOperation{}, freshconfig.ErrReadOnly
+	}
+	if req.Expected.Generation != auth.generation {
+		return freshstore.ConfigGroupOperation{}, freshconfig.ErrGenerationMismatch
+	}
+
+	journal, journalInvalid, err := s.loadJournal(ctx)
+	if err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	if journalInvalid {
+		return freshstore.ConfigGroupOperation{}, cpa.ErrSourceConflict
+	}
+
+	targetPrefix := freshconfig.ConfigSourceGroupID + ":" + upgradeCanonicalDigest(targetDoc)
+	for id, entry := range journal {
+		if entry == nil {
+			continue
+		}
+		if existing, found := entry.Operations[req.RequestID]; found {
+			cloned := existing.Clone()
+			if id != freshconfig.ConfigSourceGroupID || !sameUpgradeSourceRequest(cloned, targetPrefix, req.Expected.Baseline) {
+				return cloned, cpa.ErrSourceConflict
+			}
+			if cloned.State == "unknown" {
+				return cloned, cpa.ErrApplyUnknown
+			}
+			return cloned, nil
+		}
+	}
+	if _, _, blockErr := upgradeBlockingSourceOperation(journal); blockErr != nil {
+		return freshstore.ConfigGroupOperation{}, blockErr
+	}
+
+	doc, err := auth.transport.ReadConfigDocument(ctx, auth.secret)
+	if err != nil {
+		if auth.mode == freshconfig.ModeExternal {
+			s.owner.recordExternalAuthFailureIfMatching(ctx, auth.external, auth.credDigest, err)
+			if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrManagementClientForbidden) {
+				return freshstore.ConfigGroupOperation{}, err
+			}
+		}
+		return freshstore.ConfigGroupOperation{}, cpa.ErrProofUnavailable
+	}
+	baselineDoc := upgradeSanitizeSourceDocument(doc)
+	if upgradeCanonicalDigest(baselineDoc) != req.Expected.Baseline {
+		return freshstore.ConfigGroupOperation{}, cpa.ErrSourceConflict
+	}
+	if err := upgradeValidateSourceKeyCaseAgainstRaw(doc, targetDoc); err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	if !auth.capable.RulesWritable && upgradeTargetDeletesOrNullsRequestsWithPayload(doc, baselineDoc, targetDoc) {
+		return freshstore.ConfigGroupOperation{}, freshconfig.ErrRulesReadOnly
+	}
+
+	edits, ops, err := upgradePlanSourceChanges(doc, baselineDoc, targetDoc)
+	if err != nil {
+		return freshstore.ConfigGroupOperation{}, err
+	}
+	if len(edits) == 0 {
+		return freshstore.ConfigGroupOperation{}, freshconfig.Rejection{Code: freshconfig.CodeSourceNoChanges}
+	}
+	if !auth.capable.RulesWritable && upgradeTouchesPayloadRules(doc, baselineDoc, targetDoc, edits) {
+		return freshstore.ConfigGroupOperation{}, freshconfig.ErrRulesReadOnly
+	}
+	op := freshstore.ConfigGroupOperation{
+		SourceID:   auth.sourceID,
+		Generation: auth.generation,
+		RequestID:  req.RequestID,
+		Group:      freshconfig.ConfigSourceGroupID,
+		Target:     "group",
+		Prefix:     targetPrefix,
+		Baseline:   req.Expected.Baseline,
+		Edits:      edits,
+		State:      "unknown",
+	}
+	if err := s.appendOperation(ctx, freshconfig.ConfigSourceGroupID, op); err != nil {
+		return op, err
+	}
+
+	applied := false
+	for _, writeOp := range ops {
+		var writeErr error
+		switch writeOp.kind {
+		case upgradeSourceOpPatch:
+			writeErr = auth.transport.PatchConfigPath(ctx, auth.secret, writeOp.path, writeOp.payload)
+		case upgradeSourceOpPut:
+			writeErr = auth.transport.PutConfigValue(ctx, auth.secret, writeOp.path, writeOp.payload)
+		case upgradeSourceOpDelete:
+			writeErr = auth.transport.DeleteConfigPath(ctx, auth.secret, writeOp.path)
+		}
+		if writeErr != nil {
+			return s.failOperation(ctx, freshconfig.ConfigSourceGroupID, op, writeErr, auth, applied)
+		}
+		applied = true
+	}
+
+	acknowledged := op
+	acknowledged.HTTP200 = true
+	if err := s.updateOperation(ctx, freshconfig.ConfigSourceGroupID, op, acknowledged); err != nil {
+		return op, err
+	}
+	return s.resolveOperationWithMode(ctx, freshconfig.ConfigSourceGroupID, auth, acknowledged, false)
+}
+
+func upgradeSanitizeSourceDocument(document map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, val := range document {
+		lower := strings.ToLower(key)
+		if upgradeProtectedSourceRoots[lower] || upgradeSensitiveSourceKeyNames[lower] {
+			continue
+		}
+		if cpa.IsConfigKVMapLeaf(key) {
+			out[key] = upgradeCloneJSONValue(val)
+			continue
+		}
+		if subMap, ok := val.(map[string]any); ok {
+			cleaned := upgradeSanitizeSourceSubtree(key, subMap)
+			if len(subMap) == 0 || len(cleaned) > 0 {
+				out[key] = cleaned
+			}
+			continue
+		}
+		if subSlice, ok := val.([]any); ok {
+			out[key] = upgradeSanitizeSourceSlice(key, subSlice)
+			continue
+		}
+		out[key] = upgradeCloneJSONValue(val)
+	}
+	return out
+}
+
+func upgradeSanitizeSourceSubtree(prefix string, mapping map[string]any) map[string]any {
+	out := map[string]any{}
+	subBlocked := upgradeProtectedSourceSubtrees[strings.ToLower(prefix)]
+	for key, val := range mapping {
+		lower := strings.ToLower(key)
+		if subBlocked != nil && subBlocked[lower] {
+			continue
+		}
+		if upgradeSensitiveSourceKeyNames[lower] {
+			continue
+		}
+		if strings.EqualFold(prefix, "requests") && lower == "proxy-url" {
+			if errors.Is(cpa.ValidateProxyURL(val), cpa.ErrProxyURLCredentials) {
+				continue
+			}
+		}
+		path := prefix + "." + key
+		if cpa.IsConfigKVMapLeaf(path) {
+			out[key] = upgradeCloneJSONValue(val)
+			continue
+		}
+		if child, ok := val.(map[string]any); ok {
+			cleaned := upgradeSanitizeSourceSubtree(path, child)
+			if len(child) == 0 || len(cleaned) > 0 {
+				out[key] = cleaned
+			}
+			continue
+		}
+		if sliceVal, ok := val.([]any); ok {
+			out[key] = upgradeSanitizeSourceSlice(path, sliceVal)
+			continue
+		}
+		out[key] = upgradeCloneJSONValue(val)
+	}
+	return out
+}
+
+func upgradeSanitizeSourceSlice(prefix string, items []any) []any {
+	out := make([]any, len(items))
+	itemPrefix := prefix + "[]"
+	for i, item := range items {
+		switch typed := item.(type) {
+		case map[string]any:
+			out[i] = upgradeSanitizeSourceSubtree(itemPrefix, typed)
+		case []any:
+			out[i] = upgradeSanitizeSourceSlice(itemPrefix, typed)
+		default:
+			out[i] = upgradeCloneJSONValue(item)
+		}
+	}
+	return out
+}
+
+func upgradeCloneJSONValue(val any) any {
+	switch typed := val.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, v := range typed {
+			out[k] = upgradeCloneJSONValue(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, v := range typed {
+			out[i] = upgradeCloneJSONValue(v)
+		}
+		return out
+	default:
+		return val
+	}
+}
+
+func upgradeHasProtectedSubtree(path string) bool {
+	lower := strings.ToLower(path)
+	if upgradeProtectedSourceSubtrees[lower] != nil {
+		return true
+	}
+	prefix := lower + "."
+	for blockedPrefix := range upgradeProtectedSourceSubtrees {
+		if strings.HasPrefix(blockedPrefix, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func upgradeEncodeSourceYAML(doc map[string]any) (string, error) {
+	if len(doc) == 0 {
+		return "{}\n", nil
+	}
+	node, err := upgradeToYAMLNode(doc)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(node); err != nil {
+		return "", err
+	}
+	if err := enc.Close(); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func upgradeToYAMLNode(value any) (*yaml.Node, error) {
+	switch typed := value.(type) {
+	case map[string]any:
+		node := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		for _, key := range upgradeSortedMapKeys(typed) {
+			kNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+			vNode, err := upgradeToYAMLNode(typed[key])
+			if err != nil {
+				return nil, err
+			}
+			node.Content = append(node.Content, kNode, vNode)
+		}
+		return node, nil
+	case []any:
+		node := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		for _, item := range typed {
+			itemNode, err := upgradeToYAMLNode(item)
+			if err != nil {
+				return nil, err
+			}
+			node.Content = append(node.Content, itemNode)
+		}
+		return node, nil
+	case json.Number:
+		raw := typed.String()
+		if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: raw}, nil
+		}
+		if _, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: raw}, nil
+		}
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: raw}, nil
+	case bool:
+		if typed {
+			return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"}, nil
+		}
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"}, nil
+	case string:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: typed}, nil
+	case nil:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}, nil
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return nil, err
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var normalized any
+		if err := dec.Decode(&normalized); err != nil {
+			return nil, err
+		}
+		return upgradeToYAMLNode(normalized)
+	}
+}
+
+func upgradeParseStrictSourceYAML(raw string) (map[string]any, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return map[string]any{}, nil
+	}
+	dec := yaml.NewDecoder(strings.NewReader(raw))
+	var root yaml.Node
+	if err := dec.Decode(&root); err != nil {
+		if errors.Is(err, io.EOF) {
+			return map[string]any{}, nil
+		}
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid YAML syntax"}
+	}
+	var second yaml.Node
+	if err := dec.Decode(&second); err != io.EOF {
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "multiple YAML documents are not allowed"}
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) != 1 {
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid YAML document"}
+	}
+	top := root.Content[0]
+	if top.Kind == yaml.ScalarNode && top.Tag == "!!null" {
+		return map[string]any{}, nil
+	}
+	if top.Kind != yaml.MappingNode {
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML root must be a mapping"}
+	}
+	val, err := upgradeDecodeYAMLNode(top, "", false, 0)
+	if err != nil {
+		return nil, err
+	}
+	doc, ok := val.(map[string]any)
+	if !ok {
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML root must be a mapping"}
+	}
+	return doc, nil
+}
+
+const upgradeMaxYAMLDepth = 32
+
+func upgradeSourceMappingKeyPolicy(path string, inDataValue bool) (allowDataKeys bool, valuesAreData bool) {
+	if inDataValue {
+		return true, true
+	}
+	lower := strings.ToLower(path)
+	if cpa.IsConfigKVMapLeaf(lower) {
+		return true, false
+	}
+	if strings.HasPrefix(lower, "requests.payload.") {
+		rest := strings.TrimPrefix(lower, "requests.payload.")
+		if family, tail, ok := strings.Cut(rest, "[]"); ok {
+			if _, known := cpa.LookupGatewayPageRuleFamily(family); known {
+				switch tail {
+				case ".params", ".models[].match[]", ".models[].not-match[]":
+					return true, true
+				case ".models[].headers", ".replacements[]":
+					return true, false
+				}
+			}
+		}
+	}
+	return false, false
+}
+
+func upgradeDecodeYAMLNode(node *yaml.Node, path string, inDataValue bool, depth int) (any, error) {
+	if depth > upgradeMaxYAMLDepth {
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML nesting depth exceeded"}
+	}
+	switch node.Kind {
+	case yaml.AliasNode:
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML aliases are not allowed"}
+	case yaml.MappingNode:
+		if len(node.Content)%2 != 0 {
+			return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid YAML mapping"}
+		}
+		allowDataKeys, valuesAreData := upgradeSourceMappingKeyPolicy(path, inDataValue)
+		out := make(map[string]any, len(node.Content)/2)
+		var seenLower map[string]struct{}
+		if !allowDataKeys {
+			seenLower = make(map[string]struct{}, len(node.Content)/2)
+		}
+		for i := 0; i < len(node.Content); i += 2 {
+			kNode := node.Content[i]
+			vNode := node.Content[i+1]
+			if kNode.Kind != yaml.ScalarNode || kNode.Tag != "!!str" {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML mapping keys must be strings"}
+			}
+			key := kNode.Value
+			if allowDataKeys {
+				if key == "" {
+					return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML keys cannot be empty"}
+				}
+			} else if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "./?#%\\") {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "YAML keys cannot be empty or contain dots"}
+			}
+			if _, dup := out[key]; dup {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: fmt.Sprintf("duplicate YAML key: %s", key)}
+			}
+			if seenLower != nil {
+				lowerKey := strings.ToLower(key)
+				if _, dup := seenLower[lowerKey]; dup {
+					return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: fmt.Sprintf("duplicate YAML key: %s", key)}
+				}
+				seenLower[lowerKey] = struct{}{}
+			}
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			val, err := upgradeDecodeYAMLNode(vNode, childPath, valuesAreData, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = val
+		}
+		return out, nil
+	case yaml.SequenceNode:
+		itemPath := path + "[]"
+		out := make([]any, 0, len(node.Content))
+		for _, item := range node.Content {
+			val, err := upgradeDecodeYAMLNode(item, itemPath, inDataValue, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, val)
+		}
+		return out, nil
+	case yaml.ScalarNode:
+		switch node.Tag {
+		case "!!null":
+			return nil, nil
+		case "!!bool":
+			var b bool
+			if err := node.Decode(&b); err != nil {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid boolean value"}
+			}
+			return b, nil
+		case "!!int":
+			if i, err := strconv.ParseInt(node.Value, 10, 64); err == nil {
+				return json.Number(strconv.FormatInt(i, 10)), nil
+			}
+			if u, err := strconv.ParseUint(node.Value, 10, 64); err == nil {
+				if u > math.MaxInt64 {
+					return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid integer value"}
+				}
+				return json.Number(strconv.FormatUint(u, 10)), nil
+			}
+			var i int64
+			if err := node.Decode(&i); err != nil {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid integer value"}
+			}
+			return json.Number(strconv.FormatInt(i, 10)), nil
+		case "!!float":
+			var f float64
+			if err := node.Decode(&f); err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+				return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "invalid float value"}
+			}
+			raw := strconv.FormatFloat(f, 'g', -1, 64)
+			if !strings.ContainsAny(raw, ".eE") {
+				raw += ".0"
+			}
+			return json.Number(raw), nil
+		case "!!str":
+			return node.Value, nil
+		default:
+			return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: fmt.Sprintf("unsupported YAML tag: %s", node.Tag)}
+		}
+	default:
+		return nil, freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Message: "unsupported YAML node"}
+	}
+}
+
+type upgradeSourceOpKind int
+
+const (
+	upgradeSourceOpPatch upgradeSourceOpKind = iota + 1
+	upgradeSourceOpPut
+	upgradeSourceOpDelete
+)
+
+type upgradeSourceWriteOp struct {
+	kind    upgradeSourceOpKind
+	path    string
+	payload []byte
+}
+
+func upgradeValidateSourceKeyCaseAgainstRaw(rawDoc, targetDoc map[string]any) error {
+	if len(rawDoc) == 0 || len(targetDoc) == 0 {
+		return nil
+	}
+	return upgradeValidateSourceNodeCaseAgainstRaw("", "", false, rawDoc, targetDoc)
+}
+
+func upgradeValidateSourceNodeCaseAgainstRaw(
+	reportPath string,
+	schemaPath string,
+	inDataValue bool,
+	rawNode any,
+	targetNode any,
+) error {
+	switch targetTyped := targetNode.(type) {
+	case map[string]any:
+		rawMap, ok := rawNode.(map[string]any)
+		if !ok || len(rawMap) == 0 || len(targetTyped) == 0 {
+			return nil
+		}
+		allowDataKeys, valuesAreData := upgradeSourceMappingKeyPolicy(schemaPath, inDataValue)
+		rawKeys := upgradeSortedMapKeys(rawMap)
+		for _, targetKey := range upgradeSortedMapKeys(targetTyped) {
+			childReportPath := targetKey
+			if reportPath != "" {
+				childReportPath = reportPath + "." + targetKey
+			}
+			childSchemaPath := targetKey
+			if schemaPath != "" {
+				childSchemaPath = schemaPath + "." + targetKey
+			}
+			if !allowDataKeys {
+				for _, rawKey := range rawKeys {
+					if strings.EqualFold(targetKey, rawKey) && targetKey != rawKey {
+						if upgradeIsProtectedOrHiddenRawNode(schemaPath, rawKey, rawMap[rawKey]) {
+							return freshconfig.Rejection{
+								Code:    freshconfig.CodeSourceProtectedPath,
+								Field:   childReportPath,
+								Message: "source YAML contains protected or hidden key with conflicting case",
+							}
+						}
+						return freshconfig.Rejection{
+							Code:    freshconfig.CodeSourceInvalidYAML,
+							Field:   childReportPath,
+							Message: "source YAML contains key whose case conflicts with active configuration",
+						}
+					}
+				}
+			}
+			if rawChild, exists := rawMap[targetKey]; exists {
+				if err := upgradeValidateSourceNodeCaseAgainstRaw(childReportPath, childSchemaPath, valuesAreData, rawChild, targetTyped[targetKey]); err != nil {
+					return err
+				}
+			}
+		}
+	case []any:
+		if inDataValue {
+			return nil
+		}
+		rawSlice, ok := rawNode.([]any)
+		if !ok {
+			return nil
+		}
+		itemSchemaPath := schemaPath + "[]"
+		for i := range min(len(targetTyped), len(rawSlice)) {
+			itemReportPath := fmt.Sprintf("%s[%d]", reportPath, i)
+			if err := upgradeValidateSourceNodeCaseAgainstRaw(itemReportPath, itemSchemaPath, false, rawSlice[i], targetTyped[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func upgradeIsProtectedOrHiddenRawNode(schemaPrefix, rawKey string, rawVal any) bool {
+	lowerPrefix := strings.ToLower(schemaPrefix)
+	lowerKey := strings.ToLower(rawKey)
+	if schemaPrefix == "" && upgradeProtectedSourceRoots[lowerKey] {
+		return true
+	}
+	if sub := upgradeProtectedSourceSubtrees[lowerPrefix]; sub != nil && sub[lowerKey] {
+		return true
+	}
+	if upgradeSensitiveSourceKeyNames[lowerKey] {
+		return true
+	}
+	rawPath := rawKey
+	if schemaPrefix != "" {
+		rawPath = schemaPrefix + "." + rawKey
+	}
+	if upgradeHasProtectedSubtree(rawPath) {
+		return true
+	}
+	return upgradeRawNodeHasProtectedOrStripped(rawPath, rawVal)
+}
+
+func upgradePlanSourceChanges(rawDoc, baselineDoc, targetDoc map[string]any) ([]freshstore.ConfigGroupEdit, []upgradeSourceWriteOp, error) {
+	if err := upgradeValidateSourceKeyCaseAgainstRaw(rawDoc, targetDoc); err != nil {
+		return nil, nil, err
+	}
+	var edits []freshstore.ConfigGroupEdit
+	patchGroups := map[string]map[string]any{}
+	var puts []upgradeSourceWriteOp
+	var deletes []string
+
+	recordSet := func(path string, val any) error {
+		if val == nil {
+			if upgradeRawPathHasProtectedOrStripped(rawDoc, path) || upgradeHasProtectedSubtree(path) {
+				return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot remove mapping containing protected keys"}
+			}
+			if _, presence := cpa.LookupConfigValue(baselineDoc, path); presence == cpa.ConfigPresent {
+				edits = append(edits, freshstore.ConfigGroupEdit{Path: path, Action: "default"})
+				deletes = append(deletes, path)
+				return nil
+			}
+			return freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Field: path, Message: "null values cannot be added as new keys"}
+		}
+		parts := strings.Split(path, ".")
+		if len(parts) == 1 && upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+			return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite mapping containing protected keys"}
+		}
+		if upgradeIsPayloadRulePath(path) && upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+			return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite value containing protected keys"}
+		}
+		edits = append(edits, freshstore.ConfigGroupEdit{Path: path, Action: "set", Value: val})
+		if len(parts) == 1 || upgradeIsPayloadRulePath(path) || cpa.IsConfigKVMapLeaf(path) {
+			encoded, err := json.Marshal(val)
+			if err != nil {
+				return err
+			}
+			puts = append(puts, upgradeSourceWriteOp{kind: upgradeSourceOpPut, path: path, payload: encoded})
+			return nil
+		}
+		parent := strings.Join(parts[:len(parts)-1], ".")
+		leafKey := parts[len(parts)-1]
+		bucket, ok := patchGroups[parent]
+		if !ok {
+			bucket = map[string]any{}
+			patchGroups[parent] = bucket
+		}
+		bucket[leafKey] = val
+		return nil
+	}
+
+	var walk func(prefix string, baseMap, nextMap map[string]any) error
+	walk = func(prefix string, baseMap, nextMap map[string]any) error {
+		for _, key := range upgradeSortedMapKeys(baseMap) {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			baseVal := baseMap[key]
+			nextVal, exists := nextMap[key]
+			if !exists {
+				if baseChild, ok := baseVal.(map[string]any); ok {
+					if upgradeHasProtectedSubtree(path) || upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+						if err := walk(path, baseChild, map[string]any{}); err != nil {
+							return err
+						}
+						continue
+					}
+				} else if upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+					return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot remove value containing protected keys"}
+				}
+				edits = append(edits, freshstore.ConfigGroupEdit{Path: path, Action: "default"})
+				deletes = append(deletes, path)
+				continue
+			}
+			if cpa.IsConfigKVMapLeaf(path) {
+				if upgradeCanonicalDigest(baseVal) != upgradeCanonicalDigest(nextVal) {
+					if err := recordSet(path, nextVal); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			baseChild, baseIsMap := baseVal.(map[string]any)
+			nextChild, nextIsMap := nextVal.(map[string]any)
+			if baseIsMap && nextIsMap {
+				if err := walk(path, baseChild, nextChild); err != nil {
+					return err
+				}
+				continue
+			}
+			if baseIsMap && !nextIsMap {
+				if upgradeRawPathHasProtectedOrStripped(rawDoc, path) || upgradeHasProtectedSubtree(path) {
+					return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite or remove mapping containing protected keys"}
+				}
+			}
+			if upgradeCanonicalDigest(baseVal) != upgradeCanonicalDigest(nextVal) {
+				if !baseIsMap && upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+					return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite value containing protected keys"}
+				}
+				if nextIsMap {
+					if err := upgradeValidateNoNilSourceMapLeaves(path, nextChild); err != nil {
+						return err
+					}
+					if err := recordSet(path, nextChild); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := recordSet(path, nextVal); err != nil {
+					return err
+				}
+			}
+		}
+
+		for _, key := range upgradeSortedMapKeys(nextMap) {
+			if _, exists := baseMap[key]; exists {
+				continue
+			}
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			nextVal := nextMap[key]
+			if cpa.IsConfigKVMapLeaf(path) {
+				if err := recordSet(path, nextVal); err != nil {
+					return err
+				}
+				continue
+			}
+			if nextChild, ok := nextVal.(map[string]any); ok {
+				if len(nextChild) == 0 {
+					if upgradeRawPathHasProtectedOrStripped(rawDoc, path) {
+						return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite mapping containing protected keys"}
+					}
+					if err := recordSet(path, nextChild); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := walk(path, map[string]any{}, nextChild); err != nil {
+					return err
+				}
+				continue
+			}
+			if upgradeRawPathHasProtectedOrStripped(rawDoc, path) || (nextVal == nil && upgradeHasProtectedSubtree(path)) {
+				return freshconfig.Rejection{Code: freshconfig.CodeSourceProtectedPath, Field: path, Message: "cannot overwrite mapping containing protected keys"}
+			}
+			if err := recordSet(path, nextVal); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := walk("", baselineDoc, targetDoc); err != nil {
+		return nil, nil, err
+	}
+
+	sort.Slice(edits, func(i, j int) bool { return edits[i].Path < edits[j].Path })
+
+	var ops []upgradeSourceWriteOp
+	patchPrefixes := upgradeSortedMapKeys(patchGroups)
+	for _, prefix := range patchPrefixes {
+		encoded, err := json.Marshal(patchGroups[prefix])
+		if err != nil {
+			return nil, nil, err
+		}
+		ops = append(ops, upgradeSourceWriteOp{kind: upgradeSourceOpPatch, path: prefix, payload: encoded})
+	}
+	sort.Slice(puts, func(i, j int) bool { return puts[i].path < puts[j].path })
+	ops = append(ops, puts...)
+	sort.Strings(deletes)
+	for _, path := range deletes {
+		ops = append(ops, upgradeSourceWriteOp{kind: upgradeSourceOpDelete, path: path})
+	}
+	return edits, ops, nil
+}
+
+func upgradeRawPathHasProtectedOrStripped(rawDoc map[string]any, dotPath string) bool {
+	if len(rawDoc) == 0 || dotPath == "" {
+		return false
+	}
+	parts := strings.Split(dotPath, ".")
+	found := false
+	upgradeForEachRawPathFold(rawDoc, "", parts, func(matchedPath string, val any) {
+		if found {
+			return
+		}
+		if upgradeRawNodeHasProtectedOrStripped(matchedPath, val) {
+			found = true
+		}
+	})
+	return found
+}
+
+func upgradeForEachRawPathFold(current any, prefix string, parts []string, visit func(string, any)) {
+	if len(parts) == 0 {
+		visit(prefix, current)
+		return
+	}
+	mapping, ok := current.(map[string]any)
+	if !ok {
+		return
+	}
+	for key, val := range mapping {
+		if strings.EqualFold(key, parts[0]) {
+			nextPrefix := key
+			if prefix != "" {
+				nextPrefix = prefix + "." + key
+			}
+			upgradeForEachRawPathFold(val, nextPrefix, parts[1:], visit)
+		}
+	}
+}
+
+func upgradeRawNodeHasProtectedOrStripped(prefix string, val any) bool {
+	if cpa.IsConfigKVMapLeaf(prefix) {
+		return false
+	}
+	if strings.EqualFold(prefix, "requests.proxy-url") && errors.Is(cpa.ValidateProxyURL(val), cpa.ErrProxyURLCredentials) {
+		return true
+	}
+	switch typed := val.(type) {
+	case map[string]any:
+		subBlocked := upgradeProtectedSourceSubtrees[strings.ToLower(prefix)]
+		for key, child := range typed {
+			lower := strings.ToLower(key)
+			if prefix == "" && upgradeProtectedSourceRoots[lower] {
+				return true
+			}
+			if subBlocked != nil && subBlocked[lower] {
+				return true
+			}
+			if upgradeSensitiveSourceKeyNames[lower] {
+				return true
+			}
+			if strings.EqualFold(prefix, "requests") && lower == "proxy-url" {
+				if errors.Is(cpa.ValidateProxyURL(child), cpa.ErrProxyURLCredentials) {
+					return true
+				}
+			}
+			childPath := key
+			if prefix != "" {
+				childPath = prefix + "." + key
+			}
+			if upgradeRawNodeHasProtectedOrStripped(childPath, child) {
+				return true
+			}
+		}
+		return false
+	case []any:
+		itemPrefix := prefix + "[]"
+		for _, item := range typed {
+			if upgradeRawNodeHasProtectedOrStripped(itemPrefix, item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func upgradeIsPayloadRulePath(path string) bool {
+	lower := strings.ToLower(path)
+	if _, ok := cpa.LookupGatewayPageRuleFamily(strings.TrimPrefix(lower, "requests.payload.")); ok {
+		return strings.HasPrefix(lower, "requests.payload.")
+	}
+	return lower == "requests.payload"
+}
+
+func upgradeDocHasPayloadSubtree(doc map[string]any) bool {
+	for key, val := range doc {
+		if !strings.EqualFold(key, "requests") {
+			continue
+		}
+		reqMap, ok := val.(map[string]any)
+		if !ok {
+			continue
+		}
+		for childKey := range reqMap {
+			if strings.EqualFold(childKey, "payload") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func upgradeTouchesPayloadRules(rawDoc, baselineDoc, targetDoc map[string]any, edits []freshstore.ConfigGroupEdit) bool {
+	hasPayload := upgradeDocHasPayloadSubtree(rawDoc) || upgradeDocHasPayloadSubtree(baselineDoc) || upgradeDocHasPayloadSubtree(targetDoc)
+	for _, edit := range edits {
+		lower := strings.ToLower(edit.Path)
+		if strings.HasPrefix(lower, "requests.payload.") || lower == "requests.payload" {
+			return true
+		}
+		if lower == "requests" && hasPayload {
+			return true
+		}
+	}
+	return false
+}
+
+func upgradeTargetDeletesOrNullsRequestsWithPayload(rawDoc, baselineDoc, targetDoc map[string]any) bool {
+	if !upgradeDocHasPayloadSubtree(rawDoc) && !upgradeDocHasPayloadSubtree(baselineDoc) {
+		return false
+	}
+	for key, val := range targetDoc {
+		if strings.EqualFold(key, "requests") {
+			return val == nil
+		}
+	}
+	return true
+}
+
+func upgradeValidateNoNilSourceMapLeaves(prefix string, m map[string]any) error {
+	if cpa.IsConfigKVMapLeaf(prefix) || upgradeIsPayloadRulePath(prefix) {
+		return nil
+	}
+	for _, key := range upgradeSortedMapKeys(m) {
+		path := prefix + "." + key
+		val := m[key]
+		if val == nil {
+			return freshconfig.Rejection{Code: freshconfig.CodeSourceInvalidYAML, Field: path, Message: "null values cannot be added as new keys"}
+		}
+		if child, ok := val.(map[string]any); ok {
+			if err := upgradeValidateNoNilSourceMapLeaves(path, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func upgradeSortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (u *upgradeCanonicalServer) serveGatewayConfig(w http.ResponseWriter, r *http.Request, resource string) {
 	if r.URL.RawQuery != "" || r.URL.EscapedPath() != r.URL.Path {
 		gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
@@ -1538,13 +2897,8 @@ func (u *upgradeCanonicalServer) serveGatewayConfig(w http.ResponseWriter, r *ht
 					gatewayConfigReply(w, nil, cpa.ErrExternalRejectionUnavailable)
 					return
 				}
-				view := freshconfig.View{
-					Capability: freshconfig.Capability{Mode: freshconfig.ModeUnavailable, Reason: freshconfig.ReasonUnavailable},
-				}
-				if errors.Is(err, cpa.ErrExternalTargetMoved) {
-					view.Capability.Reason = freshconfig.ReasonTargetMoved
-				}
-				gatewayConfigReply(w, view, nil)
+				view, readErr := u.configService.Read(withUpgradeExternalPrecheckErr(r.Context(), err))
+				gatewayConfigReply(w, view, readErr)
 				return
 			}
 			defer release()
@@ -1599,6 +2953,73 @@ func (u *upgradeCanonicalServer) serveGatewayConfig(w http.ResponseWriter, r *ht
 		gatewayConfigReply(w, struct {
 			Capability freshconfig.Capability `json:"capability"`
 		}{Capability: capView}, nil)
+	case parts[0] == "source" && len(parts) == 1:
+		switch r.Method {
+		case http.MethodGet:
+			if u.targetMode == model.UpgradeTargetExternal {
+				_, _, holdCtx, release, err := u.enterExternalCredentialHold(w, r.Context(), upgradeExternalHoldBudget)
+				if err != nil {
+					if errors.Is(err, errExternalCredentialWaitCancelled) {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
+					if errors.Is(err, cpa.ErrManagementRejected) {
+						gatewayConfigReply(w, freshconfig.SourceView{}, cpa.ErrManagementRejected)
+						return
+					}
+					if errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+						gatewayConfigReply(w, nil, cpa.ErrExternalRejectionUnavailable)
+						return
+					}
+					view, readErr := u.configService.ReadSource(withUpgradeExternalPrecheckErr(r.Context(), err))
+					gatewayConfigReply(w, view, readErr)
+					return
+				}
+				defer release()
+				view, readErr := u.configService.ReadSource(holdCtx)
+				gatewayConfigReply(w, view, readErr)
+				return
+			}
+			view, err := u.configService.ReadSource(r.Context())
+			gatewayConfigReply(w, view, err)
+		case http.MethodPost:
+			body, ok := gatewayConfigBody(w, r)
+			if !ok {
+				return
+			}
+			if !exactObject(body, "requestId", "expected", "yaml") || !exactExpected(body) || !exactStringField(body, "yaml") {
+				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+				return
+			}
+			var req freshconfig.SourceRequest
+			if json.Unmarshal(body, &req) != nil {
+				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+				return
+			}
+			if err := freshconfig.ValidateSourceRequest(req); err != nil {
+				gatewayConfigReply(w, nil, err)
+				return
+			}
+			if u.targetMode == model.UpgradeTargetExternal {
+				_, _, holdCtx, release, err := u.enterExternalCredentialHold(w, r.Context(), upgradeExternalHoldBudget)
+				if err != nil {
+					if errors.Is(err, errExternalCredentialWaitCancelled) {
+						writeExternalCredentialWaitCancelled(w)
+						return
+					}
+					gatewayConfigReply(w, nil, err)
+					return
+				}
+				defer release()
+				op, saveErr := u.configService.SaveSource(holdCtx, req)
+				gatewayConfigReply(w, op, saveErr)
+				return
+			}
+			op, err := u.configService.SaveSource(r.Context(), req)
+			gatewayConfigReply(w, op, err)
+		default:
+			methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+		}
 	case parts[0] == "groups" && len(parts) == 2:
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -1698,6 +3119,10 @@ func (u *upgradeCanonicalServer) serveGatewayConfig(w http.ResponseWriter, r *ht
 				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
 				return
 			}
+			if !freshkeys.ValidRequestID(parts[1]) {
+				gatewayConfigReply(w, nil, freshconfig.ErrInvalid)
+				return
+			}
 			if u.targetMode == model.UpgradeTargetExternal {
 				_, _, holdCtx, release, err := u.enterExternalCredentialHold(w, r.Context(), upgradeExternalHoldBudget)
 				if err != nil {
@@ -1705,7 +3130,12 @@ func (u *upgradeCanonicalServer) serveGatewayConfig(w http.ResponseWriter, r *ht
 						writeExternalCredentialWaitCancelled(w)
 						return
 					}
-					gatewayConfigReply(w, nil, err)
+					if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
+						gatewayConfigReply(w, nil, err)
+						return
+					}
+					op, opErr := u.configService.Operation(withUpgradeExternalPrecheckErr(r.Context(), err), parts[1], true)
+					gatewayConfigReply(w, op, opErr)
 					return
 				}
 				defer release()
@@ -1914,6 +3344,272 @@ func (u *upgradeCanonicalServer) observeVerifiedManagedRuntime(ctx context.Conte
 		return rec, model.RuntimeObservedStatus{}, errUpgradeManagedRuntimeUnavailable
 	}
 	return rec, observed, nil
+}
+
+func (u *upgradeCanonicalServer) runtimeModeFor(targetMode string) model.RuntimeMode {
+	if u == nil {
+		return ""
+	}
+	switch targetMode {
+	case model.UpgradeTargetManaged:
+		return model.RuntimeModeEmbedded
+	case model.UpgradeTargetExternal:
+		return model.RuntimeModeExternal
+	default:
+		return ""
+	}
+}
+
+func (u *upgradeCanonicalServer) effectiveRuntimeMode(ctx context.Context) model.RuntimeMode {
+	if u == nil {
+		return ""
+	}
+	if _, err := u.loadCurrentOp(ctx); err != nil {
+		return ""
+	}
+	return u.runtimeModeFor(u.targetMode)
+}
+
+func (u *upgradeCanonicalServer) observeExternalRuntimeStatus(ctx context.Context) (model.RuntimeObservedStatus, error) {
+	if u == nil || u.runtimeExternal == nil {
+		return model.RuntimeObservedStatus{}, errEmbeddedRuntimeDisabled
+	}
+	install, credDigest, holdCtx, release, err := u.enterExternalCredentialHold(nil, ctx, upgradeExternalHoldBudget)
+	if err != nil {
+		return model.RuntimeObservedStatus{}, err
+	}
+	defer release()
+	observed, obsErr := u.runtimeExternal.Status(holdCtx)
+	if obsErr != nil {
+		u.recordExternalAuthFailureIfMatching(ctx, install, credDigest, obsErr)
+		return model.RuntimeObservedStatus{}, obsErr
+	}
+	return observed, nil
+}
+
+func (u *upgradeCanonicalServer) observeManagedUpdateRuntime(ctx context.Context) (upgradeDestinationRecord, model.RuntimeObservedStatus, error) {
+	rec, _, err := u.loadVerifiedManagedDestination(ctx)
+	if err != nil {
+		return upgradeDestinationRecord{}, model.RuntimeObservedStatus{}, err
+	}
+	observed, err := u.runtime.Status(ctx)
+	if err != nil {
+		return rec, model.RuntimeObservedStatus{}, errUpgradeManagedRuntimeUnreachable
+	}
+	if observed.Validate() != nil ||
+		observed.ProtocolVersion != "v1" ||
+		observed.Identity == "" ||
+		observed.Identity != rec.Intent.ExpectedRuntimeIdentity ||
+		observed.Generation == 0 {
+		return rec, model.RuntimeObservedStatus{}, errUpgradeManagedRuntimeUnavailable
+	}
+	return rec, observed, nil
+}
+
+type upgradeCPAUpdateStore struct {
+	owner *upgradeCanonicalServer
+}
+
+var _ cpaupdateservice.Store = upgradeCPAUpdateStore{}
+
+func (s upgradeCPAUpdateStore) LoadCPAUpdateCheck(ctx context.Context) ([]byte, error) {
+	if s.owner == nil || s.owner.db == nil || !s.owner.effectiveRuntimeMode(ctx).IsValid() {
+		return nil, errUpgradeManagedRuntimeUnavailable
+	}
+	return s.owner.db.LoadCPAUpdateCheck(ctx)
+}
+
+func (s upgradeCPAUpdateStore) SaveCPAUpdateCheck(ctx context.Context, data []byte) error {
+	if s.owner == nil || s.owner.db == nil || !s.owner.effectiveRuntimeMode(ctx).IsValid() {
+		return errUpgradeManagedRuntimeUnavailable
+	}
+	return s.owner.db.SaveCPAUpdateCheck(ctx, data)
+}
+
+type upgradeRuntimeClientAdapter struct {
+	owner *upgradeCanonicalServer
+}
+
+var (
+	_ runtimeservice.RuntimeClient         = upgradeRuntimeClientAdapter{}
+	_ runtimeservice.PrepareUpdateUploader = upgradeRuntimeClientAdapter{}
+)
+
+func (c upgradeRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
+	if c.owner == nil {
+		return model.RuntimeObservedStatus{}, errEmbeddedRuntimeDisabled
+	}
+	switch c.owner.effectiveRuntimeMode(ctx) {
+	case model.RuntimeModeExternal:
+		return c.owner.observeExternalRuntimeStatus(ctx)
+	case model.RuntimeModeEmbedded:
+		_, observed, err := c.owner.observeManagedUpdateRuntime(ctx)
+		return observed, err
+	default:
+		return model.RuntimeObservedStatus{}, errEmbeddedRuntimeDisabled
+	}
+}
+
+func (c upgradeRuntimeClientAdapter) verifyManagedTarget(
+	ctx context.Context,
+	expectedIdentity model.RuntimeIdentity,
+	mutation bool,
+) (runtimeservice.RuntimeClient, error) {
+	if c.owner == nil {
+		return nil, errEmbeddedRuntimeDisabled
+	}
+	switch c.owner.effectiveRuntimeMode(ctx) {
+	case model.RuntimeModeExternal:
+		if mutation {
+			return nil, runtimeservice.ErrRuntimeMutationUnsupported
+		}
+		return nil, runtimeservice.ErrRuntimeObservationUnsupported
+	case model.RuntimeModeEmbedded:
+	default:
+		return nil, errUpgradeManagedRuntimeUnavailable
+	}
+	rec, _, err := c.owner.observeManagedUpdateRuntime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if expectedIdentity == "" || expectedIdentity != rec.Intent.ExpectedRuntimeIdentity {
+		return nil, errUpgradeManagedRuntimeUnavailable
+	}
+	if c.owner.runtime == nil {
+		return nil, errUpgradeManagedRuntimeUnavailable
+	}
+	return c.owner.runtime, nil
+}
+
+func (c upgradeRuntimeClientAdapter) enterManagedLifecycleMutation(
+	ctx context.Context,
+	expectedIdentity model.RuntimeIdentity,
+	requireRunningDesired bool,
+) (runtimeservice.RuntimeClient, func(), error) {
+	if c.owner == nil {
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	switch c.owner.effectiveRuntimeMode(ctx) {
+	case model.RuntimeModeExternal:
+		return nil, nil, runtimeservice.ErrRuntimeMutationUnsupported
+	case model.RuntimeModeEmbedded:
+	default:
+		return nil, nil, errUpgradeManagedRuntimeUnavailable
+	}
+	if _, _, err := c.owner.loadVerifiedManagedDestination(ctx); err != nil {
+		return nil, nil, err
+	}
+	unlock, err := c.owner.runtimeLifecycleMu.Lock(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if c.owner.db != nil {
+		desired, found, desiredErr := c.owner.db.LoadEmbeddedRuntimeDesiredState(ctx)
+		if desiredErr != nil {
+			unlock()
+			return nil, nil, errUpgradeManagedRuntimeUnavailable
+		}
+		if requireRunningDesired && found && desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+			unlock()
+			return nil, nil, &runtimeservice.ProtocolError{
+				Code:       runtimeservice.ProtocolErrorOperationStateConflict,
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+	}
+	client, err := c.verifyManagedTarget(ctx, expectedIdentity, true)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return client, unlock, nil
+}
+
+func (c upgradeRuntimeClientAdapter) Start(
+	ctx context.Context,
+	request model.RuntimeMutationRequest,
+) (model.RuntimeOperationResult, error) {
+	client, unlock, err := c.enterManagedLifecycleMutation(ctx, request.ExpectedRuntimeIdentity, false)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer unlock()
+	return client.Start(ctx, request)
+}
+
+func (c upgradeRuntimeClientAdapter) Stop(
+	ctx context.Context,
+	request model.RuntimeMutationRequest,
+) (model.RuntimeOperationResult, error) {
+	client, unlock, err := c.enterManagedLifecycleMutation(ctx, request.ExpectedRuntimeIdentity, false)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer unlock()
+	return client.Stop(ctx, request)
+}
+
+func (c upgradeRuntimeClientAdapter) Restart(
+	ctx context.Context,
+	request model.RuntimeMutationRequest,
+) (model.RuntimeOperationResult, error) {
+	client, unlock, err := c.enterManagedLifecycleMutation(ctx, request.ExpectedRuntimeIdentity, false)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer unlock()
+	return client.Restart(ctx, request)
+}
+
+func (c upgradeRuntimeClientAdapter) PrepareUpdate(
+	ctx context.Context,
+	request model.RuntimePrepareUpdateRequest,
+) (model.RuntimeOperationResult, error) {
+	client, err := c.verifyManagedTarget(ctx, request.ExpectedRuntimeIdentity, true)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.PrepareUpdate(ctx, request)
+}
+
+func (c upgradeRuntimeClientAdapter) PrepareUpdateUpload(
+	ctx context.Context,
+	request model.RuntimePrepareUpdateRequest,
+	archive io.Reader,
+	contentLength int64,
+) (model.RuntimeOperationResult, error) {
+	client, err := c.verifyManagedTarget(ctx, request.ExpectedRuntimeIdentity, true)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	uploader, ok := client.(runtimeservice.PrepareUpdateUploader)
+	if !ok {
+		return model.RuntimeOperationResult{}, runtimeservice.ErrRuntimeMutationUnsupported
+	}
+	return uploader.PrepareUpdateUpload(ctx, request, archive, contentLength)
+}
+
+func (c upgradeRuntimeClientAdapter) ActivateUpdate(
+	ctx context.Context,
+	request model.RuntimeActivateUpdateRequest,
+) (model.RuntimeOperationResult, error) {
+	client, unlock, err := c.enterManagedLifecycleMutation(ctx, request.ExpectedRuntimeIdentity, true)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer unlock()
+	return client.ActivateUpdate(ctx, request)
+}
+
+func (c upgradeRuntimeClientAdapter) ObserveUpdateOperation(
+	ctx context.Context,
+	request model.RuntimeObserveUpdateOperationRequest,
+) (model.RuntimeUpdateOperationObservation, error) {
+	client, err := c.verifyManagedTarget(ctx, request.ExpectedRuntimeIdentity, false)
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, err
+	}
+	return client.ObserveUpdateOperation(ctx, request)
 }
 
 type fencedUpgradeArtifactRuntime struct {
@@ -2488,13 +4184,13 @@ func (u *upgradeCanonicalServer) serveExternalUsage(w http.ResponseWriter, r *ht
 			return
 		}
 	}
-	if err := u.enableAndReconcileExternalCollector(holdCtx, install); err != nil {
-		writeUpgradeUsageErrorJSON(w, http.StatusServiceUnavailable, "external_usage_unavailable")
+	if err := u.enableAndReconcileExternalCollector(holdCtx, install, &externalUsageProbe{report: report, enabled: true}); err != nil {
+		u.writeUpgradeExternalUsageError(w, err)
 		return
 	}
-	state, stateErr := u.currentExternalUsageState(holdCtx, true, report)
-	if stateErr != nil {
-		writeUpgradeUsageErrorJSON(w, http.StatusServiceUnavailable, "external_usage_unavailable")
+	state, err := u.currentExternalUsageState(holdCtx, true, report)
+	if err != nil {
+		u.writeUpgradeExternalUsageError(w, err)
 		return
 	}
 	writeFreshJSON(w, state)
@@ -2513,7 +4209,9 @@ func (u *upgradeCanonicalServer) readUpgradeExternalUsageState(
 		return externalUsageState{}, err
 	}
 	if enabled {
-		u.reconcileCollectorBestEffort(ctx)
+		if err := u.reconcileCollectorWithProbe(ctx, &externalUsageProbe{report: report, enabled: enabled}); err != nil {
+			return externalUsageState{}, err
+		}
 	}
 	return u.currentExternalUsageState(ctx, enabled, report)
 }
@@ -2719,7 +4417,11 @@ func (u *upgradeCanonicalServer) serveExternalRebind(w http.ResponseWriter, r *h
 			return
 		}
 		clearErr := u.workspace.rejection.clear(rebindCtx)
-		u.reconcileCollectorBestEffort(rebindCtx)
+		u.reconcileCollectorBestEffort(withUpgradeExternalHoldInstall(rebindCtx, freshkeyapply.ExternalInstall{
+			Identity:      binding.Identity,
+			BaseURL:       canonicalURL,
+			ManagementKey: candidateKey,
+		}))
 		if clearErr != nil {
 			u.writeUpgradeRebindFailure(w, clearErr)
 			return
@@ -2784,7 +4486,11 @@ func (u *upgradeCanonicalServer) serveExternalRebind(w http.ResponseWriter, r *h
 	u.syncOp(updatedOp)
 	u.pluginCapability.forget()
 	clearErr := u.workspace.rejection.clear(rebindCtx)
-	u.reconcileCollectorBestEffort(rebindCtx)
+	u.reconcileCollectorBestEffort(withUpgradeExternalHoldInstall(rebindCtx, freshkeyapply.ExternalInstall{
+		Identity:      updatedBinding.Identity,
+		BaseURL:       canonicalURL,
+		ManagementKey: candidateKey,
+	}))
 	if clearErr != nil {
 		u.writeUpgradeRebindFailure(w, clearErr)
 		return
@@ -3051,6 +4757,20 @@ func (u *upgradeCanonicalServer) servePluginResource(w http.ResponseWriter, r *h
 		http.NotFound(w, r)
 		return
 	}
+	if len(r.Header.Values("Authorization")) > 1 {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	authorized, authErr := u.verifyAdminBearer(r.Context(), r)
+	if authErr != nil {
+		writeUpgradeAuthorityUnavailable(w)
+		return
+	}
+	if !authorized {
+		u.inner.ServeHTTP(w, r)
+		return
+	}
 	if _, err := u.loadCurrentOp(r.Context()); err != nil {
 		writeUpgradeAuthorityUnavailable(w)
 		return
@@ -3060,17 +4780,17 @@ func (u *upgradeCanonicalServer) servePluginResource(w http.ResponseWriter, r *h
 		return
 	}
 	if u.targetMode == model.UpgradeTargetExternal {
-		install, credDigest, holdCtx, release, err := u.enterExternalCredentialHold(w, r.Context(), upgradeExternalHoldBudget)
+		install, credDigest, hold, holdCtx, err := u.enterExternalBridgeCredentialHold(r.Context(), r.URL.Path)
 		if err != nil {
 			u.writeExternalBridgePrecheckFailure(w, err)
 			return
 		}
-		defer release()
+		defer hold.finish()
 		overrideCtx := proxysvc.WithSavedSetupOverride(holdCtx, install.BaseURL, install.ManagementKey)
 		markedCtx, mark := proxysvc.WithSavedKeyMark(overrideCtx)
-		rec := newUpgradeExternalLegacyRecorder(w, mark)
+		rec := newUpgradeExternalLegacyRecorder(w, context.WithoutCancel(holdCtx), u, hold, install, credDigest, mark)
 		u.inner.ServeHTTP(rec, r.WithContext(markedCtx))
-		rec.finish(r.Context(), u, install, credDigest)
+		rec.finish()
 		return
 	}
 	if u.workspace == nil || u.runtime == nil {
@@ -3182,29 +4902,139 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 		}
 	}
 
-	reconcileCollectorAfter := clone.URL.Path == "/usage-service/config" &&
-		(r.Method == http.MethodPut || r.Method == http.MethodPatch)
+	if u.targetMode == model.UpgradeTargetManaged && clone.URL.Path == "/usage-service/config" && r.Method == http.MethodPut {
+		if u.workspace == nil || u.runtime == nil {
+			writeUpgradeAuthorityUnavailable(w)
+			return
+		}
+		rec, secret, err := u.workspace.loadManagedDestination(clone.Context())
+		if err != nil {
+			writeUpgradeAuthorityUnavailable(w)
+			return
+		}
+		if _, _, _, err := verifyUpgradeManagedLiveRuntime(clone.Context(), u.runtime, rec); err != nil {
+			writeUpgradeAuthorityUnavailable(w)
+			return
+		}
+		if clone.Body != nil && clone.Body != http.NoBody {
+			const maxManagedConfigPutBytes = 64 << 10
+			rawBody, readErr := io.ReadAll(io.LimitReader(clone.Body, maxManagedConfigPutBytes+1))
+			if readErr != nil || len(rawBody) > maxManagedConfigPutBytes {
+				w.Header().Set("Connection", "close")
+				_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+				_ = clone.Body.Close()
+			} else {
+				_ = clone.Body.Close()
+			}
+			if readErr == nil {
+				clone.Body = io.NopCloser(bytes.NewReader(rawBody))
+				if len(rawBody) <= maxManagedConfigPutBytes && utf8.Valid(rawBody) {
+					var req struct {
+						Config model.ManagerConfig `json:"config"`
+					}
+					decoder := json.NewDecoder(bytes.NewReader(rawBody))
+					if err := decoder.Decode(&req); err == nil {
+						if _, err := decoder.Token(); err == io.EOF {
+							conn := req.Config.CPAConnection
+							if rawURL := strings.TrimSpace(conn.CPABaseURL); rawURL != "" {
+								submittedCanonical, normErr := canonicalUpgradeUsageURL(rawURL)
+								if normErr != nil || submittedCanonical != rec.CanonicalURL {
+									w.Header().Set("Content-Type", "application/json")
+									w.WriteHeader(http.StatusConflict)
+									writeFreshJSON(w, struct {
+										Code    string `json:"code"`
+										Message string `json:"message"`
+									}{
+										Code:    "managed_connection_immutable",
+										Message: "Managed Upgrade CPA connection cannot be replaced via usage-service config",
+									})
+									return
+								}
+							}
+							if rawKey := strings.TrimSpace(conn.ManagementKey); rawKey != "" && !security.EqualHMAC(rawKey, secret) {
+								w.Header().Set("Content-Type", "application/json")
+								w.WriteHeader(http.StatusConflict)
+								writeFreshJSON(w, struct {
+									Code    string `json:"code"`
+									Message string `json:"message"`
+								}{
+									Code:    "managed_connection_immutable",
+									Message: "Managed Upgrade CPA connection cannot be replaced via usage-service config",
+								})
+								return
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
+	hasCollectorPatch := false
+	hasEnabledPatch := false
+	if clone.URL.Path == "/usage-service/config" && r.Method == http.MethodPatch && clone.Body != nil {
+		rawBody, readErr := io.ReadAll(io.LimitReader(clone.Body, 4096+1))
+		if readErr != nil || len(rawBody) > 4096 {
+			w.Header().Set("Connection", "close")
+			_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+			_ = clone.Body.Close()
+		} else {
+			_ = clone.Body.Close()
+		}
+		if readErr == nil {
+			clone.Body = io.NopCloser(bytes.NewReader(rawBody))
+			if len(rawBody) <= 4096 {
+				var bodyMap map[string]json.RawMessage
+				if json.Unmarshal(rawBody, &bodyMap) == nil {
+					for key := range bodyMap {
+						if strings.EqualFold(key, "collector") {
+							hasCollectorPatch = true
+						} else if strings.EqualFold(key, "enabled") {
+							hasEnabledPatch = true
+						}
+					}
+				}
+			}
+		}
+	}
+	reconcileCollectorAfter := clone.URL.Path == "/usage-service/config" &&
+		(r.Method == http.MethodPut || hasCollectorPatch || hasEnabledPatch)
 	if u.targetMode == model.UpgradeTargetExternal {
 		if legacyBridgePresentsSavedKey(clone) {
-			install, credDigest, holdCtx, release, err := u.enterExternalCredentialHold(w, clone.Context(), upgradeExternalHoldBudget)
+			if u.appCtx != nil && u.appCtx.ProxyService != nil {
+				nextReq, releaseAuthFile, status, authErr := u.appCtx.ProxyService.AcquireRequestAuthFileMutation(clone)
+				if authErr != nil {
+					response.Error(w, status, authErr)
+					return
+				}
+				defer releaseAuthFile()
+				clone = nextReq
+			}
+			install, credDigest, hold, holdCtx, err := u.enterExternalBridgeCredentialHold(clone.Context(), clone.URL.Path)
 			if err != nil {
 				u.writeExternalBridgePrecheckFailure(w, err)
 				return
 			}
-			defer release()
+			defer hold.finish()
 			overrideCtx := proxysvc.WithSavedSetupOverride(holdCtx, install.BaseURL, install.ManagementKey)
 			markedCtx, mark := proxysvc.WithSavedKeyMark(overrideCtx)
-			rec := newUpgradeExternalLegacyRecorder(w, mark)
+			rec := newUpgradeExternalLegacyRecorder(w, context.WithoutCancel(holdCtx), u, hold, install, credDigest, mark)
 			u.inner.ServeHTTP(rec, clone.WithContext(markedCtx))
-			rec.finish(r.Context(), u, install, credDigest)
+			rec.finish()
 			if reconcileCollectorAfter && rec.statusCode() >= 200 && rec.statusCode() < 300 {
-				u.reconcileCollectorBestEffort(r.Context())
+				reconcileCtx, cancelReconcile := u.detachedReconcileContext(r.Context())
+				u.reconcileCollectorBestEffort(reconcileCtx)
+				cancelReconcile()
 			}
 			return
 		}
 		if legacyBridgeServicePresentsSavedKey(clone) {
+			if u.workspace == nil || !u.workspace.credentialGate.acquire(clone.Context()) {
+				writeExternalCredentialWaitCancelled(w)
+				return
+			}
 			install, _, err := u.precheckExternalCredential(clone.Context())
+			u.workspace.credentialGate.release()
 			if err != nil {
 				u.writeExternalBridgePrecheckFailure(w, err)
 				return
@@ -3233,7 +5063,9 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 		rec := &statusCaptureResponseWriter{ResponseWriter: w, code: http.StatusOK}
 		u.inner.ServeHTTP(rec, clone)
 		if rec.code >= 200 && rec.code < 300 {
-			u.reconcileCollectorBestEffort(r.Context())
+			reconcileCtx, cancelReconcile := u.detachedReconcileContext(r.Context())
+			u.reconcileCollectorBestEffort(reconcileCtx)
+			cancelReconcile()
 		}
 		return
 	}
@@ -3281,23 +5113,50 @@ func (w *statusCaptureResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
+func (w *statusCaptureResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 type upgradeExternalLegacyRecorder struct {
 	dst          http.ResponseWriter
 	header       http.Header
-	body         bytes.Buffer
 	status       int
-	wroteHeader  bool
+	decided      bool
 	intercepting bool
 	streaming    bool
+	recordCtx    context.Context
+	owner        *upgradeCanonicalServer
+	hold         *externalCredentialHold
+	install      freshkeyapply.ExternalInstall
+	credDigest   string
 	mark         *proxysvc.SavedKeyMark
 }
 
-func newUpgradeExternalLegacyRecorder(dst http.ResponseWriter, mark *proxysvc.SavedKeyMark) *upgradeExternalLegacyRecorder {
+func newUpgradeExternalLegacyRecorder(
+	dst http.ResponseWriter,
+	recordCtx context.Context,
+	owner *upgradeCanonicalServer,
+	hold *externalCredentialHold,
+	install freshkeyapply.ExternalInstall,
+	credDigest string,
+	mark *proxysvc.SavedKeyMark,
+) *upgradeExternalLegacyRecorder {
 	return &upgradeExternalLegacyRecorder{
-		dst:    dst,
-		header: make(http.Header),
-		status: http.StatusOK,
-		mark:   mark,
+		dst:        dst,
+		header:     make(http.Header),
+		status:     http.StatusOK,
+		recordCtx:  recordCtx,
+		owner:      owner,
+		hold:       hold,
+		install:    install,
+		credDigest: credDigest,
+		mark:       mark,
+	}
+}
+
+func (r *upgradeExternalLegacyRecorder) release() {
+	if r.hold != nil {
+		r.hold.release()
 	}
 }
 
@@ -3309,58 +5168,86 @@ func (r *upgradeExternalLegacyRecorder) Header() http.Header {
 }
 
 func (r *upgradeExternalLegacyRecorder) WriteHeader(code int) {
-	if r.wroteHeader {
+	if r.decided {
 		return
 	}
-	r.wroteHeader = true
+	if code < http.StatusOK {
+		copyUpgradeHeaders(r.dst.Header(), r.header)
+		r.header = make(http.Header)
+		r.dst.WriteHeader(code)
+		return
+	}
+	r.decided = true
 	r.status = code
+	if r.hold != nil {
+		r.hold.claimHeader()
+	}
 	if r.mark != nil && r.mark.Attached() && (code == http.StatusUnauthorized || code == http.StatusForbidden) {
 		r.intercepting = true
+		if code == http.StatusUnauthorized {
+			r.owner.recordExternalAuthFailureIfMatching(r.recordCtx, r.install, r.credDigest, cpa.ErrManagementRejected)
+			writeExternalManagementRejected(r.dst)
+		} else {
+			r.owner.recordExternalAuthFailureIfMatching(r.recordCtx, r.install, r.credDigest, cpa.ErrManagementClientForbidden)
+			writeExternalManagementForbidden(r.dst)
+		}
+		r.release()
 		return
 	}
 	r.streaming = true
 	copyUpgradeHeaders(r.dst.Header(), r.header)
 	r.dst.WriteHeader(code)
+	r.release()
 }
 
 func (r *upgradeExternalLegacyRecorder) Write(p []byte) (int, error) {
-	if !r.wroteHeader {
-		r.WriteHeader(http.StatusOK)
-	}
 	if r.intercepting {
-		if r.body.Len() < 8<<10 {
-			_, _ = r.body.Write(p)
-		}
 		return len(p), nil
 	}
+	if !r.decided {
+		r.WriteHeader(http.StatusOK)
+	}
 	return r.dst.Write(p)
+}
+
+func (r *upgradeExternalLegacyRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.dst.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	r.release()
+	r.decided = true
+	return hijacker.Hijack()
+}
+
+func (r *upgradeExternalLegacyRecorder) Unwrap() http.ResponseWriter {
+	return r.dst
+}
+
+func (r *upgradeExternalLegacyRecorder) Flush() {
+	if r.intercepting {
+		return
+	}
+	if flusher, ok := r.dst.(http.Flusher); ok {
+		if !r.decided {
+			r.WriteHeader(http.StatusOK)
+		}
+		flusher.Flush()
+	}
 }
 
 func (r *upgradeExternalLegacyRecorder) statusCode() int {
 	return r.status
 }
 
-func (r *upgradeExternalLegacyRecorder) finish(
-	ctx context.Context,
-	owner *upgradeCanonicalServer,
-	install freshkeyapply.ExternalInstall,
-	credDigest string,
-) {
-	if !r.wroteHeader {
+func (r *upgradeExternalLegacyRecorder) finish() {
+	if !r.decided {
+		r.decided = true
+		r.streaming = true
 		copyUpgradeHeaders(r.dst.Header(), r.header)
 		r.dst.WriteHeader(http.StatusOK)
-		return
+		r.release()
 	}
-	if !r.intercepting {
-		return
-	}
-	if r.status == http.StatusUnauthorized {
-		owner.recordExternalAuthFailureIfMatching(ctx, install, credDigest, cpa.ErrManagementRejected)
-		writeExternalManagementRejected(r.dst)
-		return
-	}
-	owner.recordExternalAuthFailureIfMatching(ctx, install, credDigest, cpa.ErrManagementClientForbidden)
-	writeExternalManagementForbidden(r.dst)
 }
 
 func copyUpgradeHeaders(dst, src http.Header) {
@@ -3377,6 +5264,7 @@ func copyUpgradeHeaders(dst, src http.Header) {
 func (u *upgradeCanonicalServer) enableAndReconcileExternalCollector(
 	ctx context.Context,
 	install freshkeyapply.ExternalInstall,
+	probe *externalUsageProbe,
 ) error {
 	if u == nil || u.db == nil {
 		return errors.New("upgrade store unavailable")
@@ -3388,6 +5276,9 @@ func (u *upgradeCanonicalServer) enableAndReconcileExternalCollector(
 	if !ok {
 		mgrCfg = model.ManagerConfig{}
 	}
+	if err := upgradeInheritSetupCollectorSettings(ctx, u.db, &mgrCfg, ok); err != nil {
+		return err
+	}
 	enabled := true
 	mgrCfg.CPAConnection.CPABaseURL = install.BaseURL
 	mgrCfg.CPAConnection.ManagementKey = install.ManagementKey
@@ -3398,7 +5289,92 @@ func (u *upgradeCanonicalServer) enableAndReconcileExternalCollector(
 	if err := u.alignStoredExternalConnection(ctx, install.BaseURL, install.ManagementKey); err != nil {
 		return err
 	}
-	return u.reconcileCollector(ctx)
+	return u.reconcileCollectorWithProbe(ctx, probe)
+}
+
+func upgradeValidCollectorPopSide(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "left":
+		return "left"
+	case "right":
+		return "right"
+	default:
+		return ""
+	}
+}
+
+func upgradeInheritSetupCollectorSettings(
+	ctx context.Context,
+	db *store.Store,
+	mgrCfg *model.ManagerConfig,
+	mgrOK bool,
+) error {
+	if mgrCfg == nil || db == nil {
+		return nil
+	}
+	rawPopSide := strings.TrimSpace(mgrCfg.Collector.PopSide)
+	mgrCfg.Collector.Queue = strings.TrimSpace(mgrCfg.Collector.Queue)
+	mgrCfg.Collector.PopSide = upgradeValidCollectorPopSide(rawPopSide)
+	if !mgrOK || mgrCfg.Collector.Queue == "" || mgrCfg.Collector.PopSide == "" {
+		setupCfg, setupOK, err := db.LoadSetup(ctx)
+		if err != nil {
+			return err
+		}
+		if setupOK {
+			if mgrCfg.Collector.Queue == "" {
+				if queue := strings.TrimSpace(setupCfg.Queue); queue != "" {
+					mgrCfg.Collector.Queue = queue
+				}
+			}
+			if (!mgrOK || rawPopSide == "") && mgrCfg.Collector.PopSide == "" {
+				if side := upgradeValidCollectorPopSide(setupCfg.PopSide); side != "" {
+					mgrCfg.Collector.PopSide = side
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (u *upgradeCanonicalServer) healManagedStoredConnectionLocked(
+	ctx context.Context,
+	mgrCfg *model.ManagerConfig,
+	mgrOK bool,
+	rec upgradeDestinationRecord,
+	secret string,
+) error {
+	if u == nil || u.db == nil || mgrCfg == nil {
+		return nil
+	}
+	if err := upgradeInheritSetupCollectorSettings(ctx, u.db, mgrCfg, mgrOK); err != nil {
+		return err
+	}
+	setupCfg, setupOK, err := u.db.LoadSetup(ctx)
+	if err != nil {
+		return err
+	}
+	mgrNeedsHeal := mgrOK && (cpa.NormalizeBaseURL(mgrCfg.CPAConnection.CPABaseURL) != cpa.NormalizeBaseURL(rec.BaseURL) ||
+		!security.EqualHMAC(strings.TrimSpace(mgrCfg.CPAConnection.ManagementKey), secret))
+	setupNeedsHeal := setupOK && (cpa.NormalizeBaseURL(setupCfg.CPAUpstreamURL) != cpa.NormalizeBaseURL(rec.BaseURL) ||
+		!security.EqualHMAC(strings.TrimSpace(setupCfg.ManagementKey), secret))
+	mgrCfg.CPAConnection.CPABaseURL = rec.BaseURL
+	mgrCfg.CPAConnection.ManagementKey = secret
+	if !mgrNeedsHeal && !setupNeedsHeal {
+		return nil
+	}
+	nextSetup := setupCfg
+	nextSetup.CPAUpstreamURL = rec.BaseURL
+	nextSetup.ManagementKey = secret
+	if strings.TrimSpace(nextSetup.Queue) == "" {
+		nextSetup.Queue = mgrCfg.Collector.Queue
+	}
+	if upgradeValidCollectorPopSide(nextSetup.PopSide) == "" {
+		nextSetup.PopSide = mgrCfg.Collector.PopSide
+	}
+	if mgrOK {
+		return u.db.SaveManagerConfigAndSetup(ctx, *mgrCfg, nextSetup)
+	}
+	return u.db.SaveSetup(ctx, nextSetup)
 }
 
 func (u *upgradeCanonicalServer) reconcileCollectorBestEffort(ctx context.Context) {
@@ -3407,26 +5383,90 @@ func (u *upgradeCanonicalServer) reconcileCollectorBestEffort(ctx context.Contex
 	}
 }
 
+type externalUsageProbe struct {
+	report  cpa.ExternalVersionReport
+	enabled bool
+}
+
+func (u *upgradeCanonicalServer) detachedReconcileContext(reqCtx context.Context) (context.Context, context.CancelFunc) {
+	if reqCtx == nil {
+		reqCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), upgradeExternalHoldBudget)
+	if u != nil && u.hostCtx != nil {
+		stopHost := context.AfterFunc(u.hostCtx, cancel)
+		return ctx, func() {
+			stopHost()
+			cancel()
+		}
+	}
+	return ctx, cancel
+}
+
 func (u *upgradeCanonicalServer) reconcileCollector(ctx context.Context) error {
+	return u.reconcileCollectorWithProbe(ctx, nil)
+}
+
+func (u *upgradeCanonicalServer) reconcileCollectorWithProbe(ctx context.Context, probe *externalUsageProbe) error {
 	if u == nil || u.appCtx == nil || u.appCtx.Collector == nil || u.db == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	mgrCfg, mgrOK, err := u.db.LoadManagerConfig(ctx)
 	if err != nil {
 		return err
 	}
 	if mgrOK && !collectorsvc.ManagerCollectorEnabled(mgrCfg) {
+		u.reconcileMu.Lock()
+		latestCfg, latestOK, latestErr := u.db.LoadManagerConfig(ctx)
+		if latestErr != nil {
+			u.reconcileMu.Unlock()
+			return latestErr
+		}
+		if latestOK && !collectorsvc.ManagerCollectorEnabled(latestCfg) {
+			if u.targetMode == model.UpgradeTargetManaged && u.workspace != nil {
+				if rec, secret, destErr := u.workspace.loadManagedDestination(ctx); destErr == nil {
+					_ = u.healManagedStoredConnectionLocked(ctx, &latestCfg, latestOK, rec, secret)
+				}
+			}
+			u.appCtx.Collector.Stop()
+			u.reconcileMu.Unlock()
+			return nil
+		}
+		u.reconcileMu.Unlock()
+	}
+	if u.targetMode == model.UpgradeTargetExternal && u.workspace != nil && !hasUpgradeExternalHold(ctx) {
+		if !u.workspace.credentialGate.acquire(ctx) {
+			return errExternalCredentialWaitCancelled
+		}
+		defer u.workspace.credentialGate.release()
+	}
+	u.reconcileMu.Lock()
+	defer u.reconcileMu.Unlock()
+
+	mgrCfg, mgrOK, err = u.db.LoadManagerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if mgrOK && !collectorsvc.ManagerCollectorEnabled(mgrCfg) {
+		if u.targetMode == model.UpgradeTargetManaged && u.workspace != nil {
+			if rec, secret, destErr := u.workspace.loadManagedDestination(ctx); destErr == nil {
+				_ = u.healManagedStoredConnectionLocked(ctx, &mgrCfg, mgrOK, rec, secret)
+			}
+		}
 		u.appCtx.Collector.Stop()
 		return nil
 	}
 	if !mgrOK {
 		mgrCfg = model.ManagerConfig{}
 	}
-
-	var (
-		externalInstall    freshkeyapply.ExternalInstall
-		externalCredDigest string
-	)
+	if err := upgradeInheritSetupCollectorSettings(ctx, u.db, &mgrCfg, mgrOK); err != nil {
+		return err
+	}
+	var externalInstall freshkeyapply.ExternalInstall
+	var externalCredDigest string
 	switch u.targetMode {
 	case model.UpgradeTargetExternal:
 		install, credDigest, err := u.precheckExternalCredential(ctx)
@@ -3436,6 +5476,73 @@ func (u *upgradeCanonicalServer) reconcileCollector(ctx context.Context) error {
 		}
 		if err := u.alignStoredExternalConnection(ctx, install.BaseURL, install.ManagementKey); err != nil {
 			return err
+		}
+		targetCfg := mgrCfg
+		targetCfg.CPAConnection.CPABaseURL = install.BaseURL
+		targetCfg.CPAConnection.ManagementKey = install.ManagementKey
+		targetRTCfg := collectorsvc.RuntimeConfigFromManagerConfigWithFallback(targetCfg, u.appCtx.Config)
+		activeWithMatchingTarget := func() bool {
+			activeCfg, active := u.appCtx.Collector.ActiveRuntimeConfig()
+			return active && activeCfg == targetRTCfg
+		}
+
+		var report cpa.ExternalVersionReport
+		var statsEnabled bool
+		if probe != nil {
+			report = probe.report
+			statsEnabled = probe.enabled
+		} else {
+			probeCtx := ctx
+			var recordedRejection atomic.Bool
+			if u.workspace != nil && u.workspace.rejection != nil && install.Identity != "" && credDigest != "" {
+				probeCtx = cpa.WithExternalHeaderObserver(ctx, func(statusCode int, _ bool) {
+					if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+						if recordedRejection.CompareAndSwap(false, true) {
+							errForStatus := cpa.ErrManagementRejected
+							if statusCode == http.StatusForbidden {
+								errForStatus = cpa.ErrManagementClientForbidden
+							}
+							u.recordExternalAuthFailureIfMatching(ctx, install, credDigest, errForStatus)
+						}
+					}
+				})
+			}
+			var verErr error
+			report, verErr = cpa.ObserveExternalVersion(probeCtx, install.BaseURL, install.ManagementKey)
+			if verErr != nil {
+				rejected := recordedRejection.Load() || errors.Is(verErr, cpa.ErrManagementRejected) || errors.Is(verErr, cpa.ErrManagementClientForbidden)
+				if !recordedRejection.Load() {
+					u.recordExternalAuthFailureIfMatching(ctx, install, credDigest, verErr)
+				}
+				if rejected || !activeWithMatchingTarget() {
+					u.appCtx.Collector.Stop()
+				}
+				return verErr
+			}
+			if report.WriteBlocked {
+				u.appCtx.Collector.Stop()
+				return cpa.ErrExternalVersionUnsupported
+			}
+			var statsErr error
+			statsEnabled, statsErr = cpa.FetchExternalUsageStatistics(probeCtx, install.BaseURL, install.ManagementKey)
+			if statsErr != nil {
+				rejected := recordedRejection.Load() || errors.Is(statsErr, cpa.ErrManagementRejected) || errors.Is(statsErr, cpa.ErrManagementClientForbidden)
+				if !recordedRejection.Load() {
+					u.recordExternalAuthFailureIfMatching(ctx, install, credDigest, statsErr)
+				}
+				if rejected || !activeWithMatchingTarget() {
+					u.appCtx.Collector.Stop()
+				}
+				return statsErr
+			}
+		}
+		if report.WriteBlocked {
+			u.appCtx.Collector.Stop()
+			return cpa.ErrExternalVersionUnsupported
+		}
+		if !statsEnabled {
+			u.appCtx.Collector.Stop()
+			return nil
 		}
 		mgrCfg.CPAConnection.CPABaseURL = install.BaseURL
 		mgrCfg.CPAConnection.ManagementKey = install.ManagementKey
@@ -3455,28 +5562,38 @@ func (u *upgradeCanonicalServer) reconcileCollector(ctx context.Context) error {
 			u.appCtx.Collector.Stop()
 			return nil
 		}
-		if mgrOK && (mgrCfg.CPAConnection.CPABaseURL != rec.BaseURL || !security.EqualHMAC(mgrCfg.CPAConnection.ManagementKey, secret)) {
-			mgrCfg.CPAConnection.CPABaseURL = rec.BaseURL
-			mgrCfg.CPAConnection.ManagementKey = secret
-			if err := u.db.SaveManagerConfig(ctx, mgrCfg); err != nil {
-				return err
-			}
-		} else {
-			mgrCfg.CPAConnection.CPABaseURL = rec.BaseURL
-			mgrCfg.CPAConnection.ManagementKey = secret
+		if err := u.healManagedStoredConnectionLocked(ctx, &mgrCfg, mgrOK, rec, secret); err != nil {
+			return err
 		}
 	default:
 		u.appCtx.Collector.Stop()
 		return nil
 	}
 
+	rtCfg := collectorsvc.RuntimeConfigFromManagerConfigWithFallback(mgrCfg, u.appCtx.Config)
+	if activeCfg, active := u.appCtx.Collector.ActiveRuntimeConfig(); active && activeCfg == rtCfg {
+		return nil
+	}
 	collectorCtx := u.hostCtx
 	if collectorCtx == nil {
 		collectorCtx = context.Background()
 	}
-	rtCfg := collectorsvc.RuntimeConfigFromManagerConfigWithFallback(mgrCfg, u.appCtx.Config)
-	if u.targetMode == model.UpgradeTargetExternal && u.workspace != nil && u.workspace.rejection != nil {
-		u.workspace.rejection.noteCollectorStart(externalInstall.Identity, externalCredDigest, externalInstall.BaseURL, externalInstall.ManagementKey)
+	if u.targetMode == model.UpgradeTargetExternal {
+		var rejection *upgradeExternalRejection
+		if u.workspace != nil {
+			rejection = u.workspace.rejection
+		}
+		startUpgradeExternalCollector(
+			collectorCtx,
+			u.appCtx.Collector,
+			rejection,
+			externalInstall.Identity,
+			externalCredDigest,
+			externalInstall.BaseURL,
+			externalInstall.ManagementKey,
+			rtCfg,
+		)
+		return nil
 	}
 	u.appCtx.Collector.Start(collectorCtx, rtCfg)
 	return nil

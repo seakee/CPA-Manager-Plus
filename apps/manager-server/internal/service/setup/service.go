@@ -176,6 +176,7 @@ func (s *Service) Setup(ctx context.Context, req Request, _ string) (Result, err
 	managerCfg.Collector.PollIntervalMS = req.PollIntervalMS
 	managerCfg.Collector.QueryLimit = req.QueryLimit
 	managerCfg.Collector.TLSSkipVerify = req.TLSSkipVerify
+	managerCfg.Collector.TLSSkipVerifyExplicit = true
 	if requestMonitoringEnabled {
 		if err := cpa.ValidateCollectorConfig(
 			ctx,

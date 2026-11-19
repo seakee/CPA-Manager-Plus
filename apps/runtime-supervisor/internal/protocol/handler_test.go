@@ -2,11 +2,13 @@ package protocol
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testRuntimeToken = "runtime-token"
@@ -215,4 +217,67 @@ func assertErrorCode(t *testing.T, response *httptest.ResponseRecorder, want str
 	if got.Error.Code != want || got.Error.Message == "" {
 		t.Fatalf("error = %#v, want code %q", got.Error, want)
 	}
+}
+
+func TestCloseUnconsumedResponseWriterImplicitWriteCommitsHeaderAndClosesWhenUnconsumed(t *testing.T) {
+	t.Run("unconsumed_body_sets_connection_close_and_expires_read_deadline_once", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, startPath, strings.NewReader(`{"operationId":"op-1"}`))
+		recorder := &uploadDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		wrapped := &closeUnconsumedResponseWriter{
+			ResponseWriter: recorder,
+			body:           trackRequestBody(req),
+		}
+		before := time.Now()
+		n, err := wrapped.Write([]byte("first-"))
+		after := time.Now()
+		if err != nil || n != len("first-") {
+			t.Fatalf("first Write = (%d, %v), want (%d, nil)", n, err, len("first-"))
+		}
+		if !wrapped.wroteHeader {
+			t.Fatal("expected wroteHeader=true after implicit 200 Write")
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", recorder.Code)
+		}
+		if got := recorder.Header().Get("Connection"); got != "close" {
+			t.Fatalf("Connection = %q, want close", got)
+		}
+		if len(recorder.readDeadlines) != 1 || recorder.readDeadlines[0].IsZero() ||
+			recorder.readDeadlines[0].Before(before) || recorder.readDeadlines[0].After(after) {
+			t.Fatalf("readDeadlines = %v, want 1 immediate deadline in [%v, %v]", recorder.readDeadlines, before, after)
+		}
+		if _, err := wrapped.Write([]byte("second")); err != nil {
+			t.Fatalf("second Write error = %v", err)
+		}
+		if len(recorder.readDeadlines) != 1 {
+			t.Fatalf("readDeadlines after second Write = %v, want 1", recorder.readDeadlines)
+		}
+		if got := recorder.Body.String(); got != "first-second" {
+			t.Fatalf("body = %q, want first-second", got)
+		}
+	})
+
+	t.Run("consumed_body_commits_200_without_connection_close_or_expired_deadline", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, startPath, strings.NewReader(`{}`))
+		recorder := &uploadDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		wrapped := &closeUnconsumedResponseWriter{
+			ResponseWriter: recorder,
+			body:           trackRequestBody(req),
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatalf("ReadAll(req.Body): %v", err)
+		}
+		if _, err := wrapped.Write([]byte("ok")); err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+		if !wrapped.wroteHeader || recorder.Code != http.StatusOK {
+			t.Fatalf("wroteHeader=%t status=%d, want true and 200", wrapped.wroteHeader, recorder.Code)
+		}
+		if got := recorder.Header().Get("Connection"); got != "" {
+			t.Fatalf("Connection = %q, want empty", got)
+		}
+		if len(recorder.readDeadlines) != 0 {
+			t.Fatalf("readDeadlines = %v, want none", recorder.readDeadlines)
+		}
+	})
 }

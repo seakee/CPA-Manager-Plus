@@ -7,13 +7,28 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: nowrap;
+  gap: 16px;
+}
+
+.sectionHeaderActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
 }
 
 .sectionHeaderText {
   display: grid;
+  flex: 1 1 280px;
   gap: 4px;
   min-width: 0;
+}
+
+@media (max-width: 768px) {
+  .sectionHeader {
+    flex-wrap: wrap;
+  }
 }
 
 .sectionTitle {
@@ -53,14 +68,15 @@
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 10px;
-  align-items: start;
+  gap: 12px;
+  align-items: stretch;
 }
 
 .card {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: 14px;
   border-radius: var(--app-radius-sm);
   border: 1px solid var(--border-color);
   background: color-mix(in srgb, var(--surface-subtle) 42%, var(--bg-primary));
@@ -74,18 +90,11 @@
   border-color: color-mix(in srgb, var(--success-color) 34%, var(--border-color));
 }
 
-.statusBlocked {
-  border-color: color-mix(in srgb, var(--warning-color) 46%, var(--border-color));
-}
-
-.statusLocked {
-  border-color: color-mix(in srgb, var(--text-secondary) 28%, var(--border-color));
-}
-
+.statusBlocked,
+.statusLocked,
 .statusOff {
   border-color: var(--border-color);
 }
-
 .cardHeader {
   display: flex;
   align-items: flex-start;
@@ -127,19 +136,32 @@
 }
 
 .advancedInfo {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: var(--app-radius-sm);
-  border: 1px solid var(--border-color);
-  background: color-mix(in srgb, var(--surface-subtle) 44%, transparent);
+  margin: auto 0 0;
+  padding: 2px 0 0;
+}
+.advancedInfo:not([open]) .advancedBody {
+  display: none;
 }
 
 .advancedSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   cursor: pointer;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
   list-style: none;
+}
+
+.advancedSummary::before {
+  content: '▸';
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.advancedInfo[open] .advancedSummary::before {
+  transform: rotate(90deg);
 }
 
 .advancedSummary::-webkit-details-marker {
@@ -150,8 +172,9 @@
   display: grid;
   gap: 8px;
   margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-color);
 }
-
 .behaviorList {
   display: grid;
   gap: 4px;

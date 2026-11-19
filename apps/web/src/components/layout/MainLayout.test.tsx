@@ -192,8 +192,8 @@ describe('original MainLayout console navigation', () => {
       '/system',
       '/system/runtime',
       '/config',
-      '/logs',
       '/system/updates',
+      '/logs',
     ]);
   });
 

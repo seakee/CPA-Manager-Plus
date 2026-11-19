@@ -189,6 +189,29 @@ func TestSetupKeepsCompleteConnectionRotationRules(t *testing.T) {
 	}
 }
 
+func TestSetupPersistsExplicitWholeCollectorTLSSkipVerify(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	service, st, _ := newSetupService(t, nil, nil)
+	service.cfg.TLSSkipVerify = true
+
+	if _, err := service.Setup(context.Background(), Request{
+		CPAUpstreamURL:               cpa.URL(),
+		ManagementKey:                cpa.ManagementKey,
+		TLSSkipVerify:                false,
+		RequestMonitoringEnabled:     boolPtr(false),
+		EnsureUsageStatisticsEnabled: boolPtr(false),
+	}, ""); err != nil {
+		t.Fatalf("Setup(TLSSkipVerify=false): %v", err)
+	}
+	loaded, ok, err := st.LoadManagerConfig(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("LoadManagerConfig = (%v, %v)", ok, err)
+	}
+	if !loaded.Collector.TLSSkipVerifyExplicit || loaded.Collector.TLSSkipVerify {
+		t.Fatalf("Setup persisted Collector = %#v, want TLSSkipVerifyExplicit=true TLSSkipVerify=false", loaded.Collector)
+	}
+}
+
 func newSetupService(t *testing.T, managerCfg *store.ManagerConfig, setup *store.Setup) (*Service, *store.Store, config.Config) {
 	t.Helper()
 	cfg := testutil.NewConfig(t)

@@ -52,11 +52,11 @@
 
   &[data-quota-window-icon='payg'],
   &[data-quota-window-icon='billing'] {
-    color: var(--warning-color);
+    color: var(--status-display-warning);
   }
 
   &[data-quota-window-icon='product'] {
-    color: var(--success-color);
+    color: var(--status-display-success);
   }
 
   &[data-quota-window-icon='model'] {
@@ -272,7 +272,7 @@
 .rowIconGreen {
   border-color: color-mix(in srgb, var(--data-green-base) 34%, transparent);
   background: var(--data-green-light-9);
-  color: var(--success-color);
+  color: var(--status-display-success);
 }
 
 .rowIconTeal {
@@ -284,7 +284,7 @@
 .rowIconAmber {
   border-color: color-mix(in srgb, var(--data-amber-base) 34%, transparent);
   background: var(--data-amber-light-9);
-  color: var(--warning-color);
+  color: var(--status-display-warning);
 }
 
 .metricLabel,
@@ -370,7 +370,7 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--color-warning);
+  background: var(--warning-color);
   color: var(--primary-contrast);
 }
 

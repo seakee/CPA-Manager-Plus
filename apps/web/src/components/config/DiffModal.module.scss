@@ -11,8 +11,8 @@ $diff-prefix-width: 20px;
 $diff-add-color: var(--color-success);
 $diff-del-color: var(--color-danger);
 $diff-hunk-color: var(--color-primary);
-$diff-add-text-color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
-$diff-del-text-color: color-mix(in srgb, var(--data-badge-danger-text) 92%, var(--text-primary));
+$diff-add-text-color: var(--success-color);
+$diff-del-text-color: var(--error-color);
 
 .diffModal {
   :global(.modal-body) {
@@ -135,7 +135,7 @@ $diff-del-text-color: color-mix(in srgb, var(--data-badge-danger-text) 92%, var(
   align-items: center;
   background: color-mix(in srgb, $diff-hunk-color 8%, var(--bg-primary));
   border-bottom: 1px solid color-mix(in srgb, $diff-hunk-color 12%, var(--border-color));
-  color: color-mix(in srgb, $diff-hunk-color 75%, var(--text-secondary));
+  color: var(--primary-text);
   min-height: $diff-line-height;
 }
 

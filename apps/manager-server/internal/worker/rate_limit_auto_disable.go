@@ -63,6 +63,7 @@ type RateLimitAutoDisableWorker struct {
 	baseURL             string
 	managementKey       string
 	enableCheckInterval time.Duration
+	lifecycle           workerLifecycle
 }
 
 type quotaAutoDisableCandidate struct {
@@ -120,7 +121,17 @@ func NewRateLimitAutoDisableWorkerWithMutationCoordinator(
 }
 
 func (w *RateLimitAutoDisableWorker) Start(ctx context.Context) {
-	go w.run(ctx)
+	if w == nil {
+		return
+	}
+	w.lifecycle.goRun(ctx, func() { w.run(ctx) })
+}
+
+func (w *RateLimitAutoDisableWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *RateLimitAutoDisableWorker) UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig) {

@@ -556,7 +556,7 @@
 .requestIdBadge {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: color-mix(in srgb, var(--data-cyan-dark-2) 68%, var(--text-primary));
+  color: var(--data-cyan-dark-2);
   background: var(--data-cyan-light-9);
   border-color: var(--data-cyan-light-7);
 }
@@ -566,7 +566,7 @@
 }
 
 .statusSuccess {
-  color: color-mix(in srgb, var(--success-badge-text) 65%, var(--text-primary));
+  color: var(--success-badge-text);
   background: var(--success-badge-bg);
   border-color: var(--success-badge-border);
 }
@@ -578,13 +578,13 @@
 }
 
 .statusWarn {
-  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
+  color: var(--warning-text);
   background: var(--warning-bg);
   border-color: var(--warning-border);
 }
 
 .statusError {
-  color: color-mix(in srgb, var(--failure-badge-text) 75%, var(--text-primary));
+  color: var(--failure-badge-text);
   background: var(--failure-badge-bg);
   border-color: var(--failure-badge-border);
 }
@@ -596,13 +596,13 @@
 }
 
 .levelWarn {
-  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
+  color: var(--warning-text);
   background: var(--warning-bg);
   border-color: var(--warning-border);
 }
 
 .levelError {
-  color: color-mix(in srgb, var(--failure-badge-text) 75%, var(--text-primary));
+  color: var(--failure-badge-text);
   background: var(--failure-badge-bg);
   border-color: var(--failure-badge-border);
 }

@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -511,5 +513,235 @@ func TestEmbeddedClientRejectsUnknownMutationResultFields(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("mutation error = %v", err)
+	}
+}
+
+func TestEmbeddedClientPrepareUpdateUploadCancelsOutboundStreamOnEarlyResponse(t *testing.T) {
+	request := model.RuntimePrepareUpdateRequest{
+		RuntimeMutationRequest: model.RuntimeMutationRequest{
+			OperationID:               "prepare-upload-early",
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: testArtifactID,
+		TargetVersion:            "7.3.4",
+	}
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "409 conflict without draining upload body",
+			status: http.StatusConflict,
+			body:   `{"error":{"code":"operation_state_conflict","message":"busy"}}`,
+		},
+		{
+			name:   "200 replay without draining upload body",
+			status: http.StatusOK,
+			body:   `{"operationId":"prepare-upload-early","operationType":"prepare_update","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"succeeded"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			firstRead := make(chan struct{})
+			stopStream := make(chan struct{})
+			defer close(stopStream)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				<-firstRead
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			reader := &slowTrickleReader{firstRead: firstRead, stop: stopStream}
+			result, err := NewEmbeddedClient(server.URL, testRuntimeToken).PrepareUpdateUpload(
+				t.Context(),
+				request,
+				reader,
+				1<<20,
+			)
+			if tc.status == http.StatusConflict {
+				code, ok := ErrorCode(err)
+				if !ok || code != ProtocolErrorOperationStateConflict {
+					t.Fatalf("PrepareUpdateUpload() error = %v code=%q ok=%v, want %q", err, code, ok, ProtocolErrorOperationStateConflict)
+				}
+				return
+			}
+			if err != nil || result.State != model.RuntimeOperationSucceeded {
+				t.Fatalf("PrepareUpdateUpload() = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
+type slowTrickleReader struct {
+	firstRead chan struct{}
+	stop      <-chan struct{}
+	notified  bool
+}
+
+func (r *slowTrickleReader) Read(p []byte) (int, error) {
+	if !r.notified {
+		r.notified = true
+		close(r.firstRead)
+	}
+	select {
+	case <-r.stop:
+		return 0, io.EOF
+	case <-time.After(time.Millisecond):
+		if len(p) == 0 {
+			return 0, nil
+		}
+		p[0] = 'x'
+		return 1, nil
+	}
+}
+
+func TestEmbeddedClientPrepareUpdateUploadRejectsInvalidContentLengthLocally(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	request := model.RuntimePrepareUpdateRequest{
+		RuntimeMutationRequest: model.RuntimeMutationRequest{
+			OperationID:               "prepare-upload-invalid-len",
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: testArtifactID,
+		TargetVersion:            "7.3.4",
+	}
+	client := NewEmbeddedClient(server.URL, testRuntimeToken)
+	for _, tc := range []struct {
+		name   string
+		reader io.Reader
+		length int64
+	}{
+		{name: "nil archive", reader: nil, length: 64},
+		{name: "zero content length", reader: strings.NewReader("archive-bytes"), length: 0},
+		{name: "negative content length below -1", reader: strings.NewReader("archive-bytes"), length: -2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.PrepareUpdateUpload(t.Context(), request, tc.reader, tc.length)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("PrepareUpdateUpload() error = %v, want ErrInvalidRequest", err)
+			}
+			code, ok := ErrorCode(err)
+			if !ok || code != ProtocolErrorInvalidRequest {
+				t.Fatalf("ErrorCode(%v) = (%q, %v), want (%q, true)", err, code, ok, ProtocolErrorInvalidRequest)
+			}
+		})
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("Supervisor requests = %d, want 0", got)
+	}
+}
+
+func TestEmbeddedClientPrepareUpdateUploadReturnsPromptlyWhenReaderBlocksAfterFirstChunk(t *testing.T) {
+	request := model.RuntimePrepareUpdateRequest{
+		RuntimeMutationRequest: model.RuntimeMutationRequest{
+			OperationID:               "prepare-upload-blocking",
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: testArtifactID,
+		TargetVersion:            "7.3.4",
+	}
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "409 conflict while inbound reader blocks after first chunk",
+			status: http.StatusConflict,
+			body:   `{"error":{"code":"operation_state_conflict","message":"busy"}}`,
+		},
+		{
+			name:   "200 replay while inbound reader blocks after first chunk",
+			status: http.StatusOK,
+			body:   `{"operationId":"prepare-upload-blocking","operationType":"prepare_update","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"succeeded"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			secondReadEntered := make(chan struct{})
+			stopStream := make(chan struct{})
+			var streamReleased atomic.Bool
+			defer func() {
+				streamReleased.Store(true)
+				close(stopStream)
+			}()
+
+			const firstChunk = "first-chunk-bytes"
+			reader := &blockingAfterFirstChunkReader{
+				firstChunk:        []byte(firstChunk),
+				secondReadEntered: secondReadEntered,
+				stop:              stopStream,
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				buf := make([]byte, len(firstChunk))
+				if _, err := io.ReadFull(r.Body, buf); err != nil {
+					t.Errorf("read first chunk: %v", err)
+				}
+				<-secondReadEntered
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			started := time.Now()
+			result, err := NewEmbeddedClient(server.URL, testRuntimeToken).PrepareUpdateUpload(
+				t.Context(),
+				request,
+				reader,
+				1<<20,
+			)
+			elapsed := time.Since(started)
+			if elapsed > 500*time.Millisecond {
+				t.Fatalf("PrepareUpdateUpload() took %v, want prompt return without waiting on blocked reader", elapsed)
+			}
+			if streamReleased.Load() {
+				t.Fatal("stream was released before PrepareUpdateUpload returned")
+			}
+			if tc.status == http.StatusConflict {
+				code, ok := ErrorCode(err)
+				if !ok || code != ProtocolErrorOperationStateConflict {
+					t.Fatalf("PrepareUpdateUpload() error = %v code=%q ok=%v, want %q", err, code, ok, ProtocolErrorOperationStateConflict)
+				}
+				return
+			}
+			if err != nil || result.State != model.RuntimeOperationSucceeded {
+				t.Fatalf("PrepareUpdateUpload() = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
+type blockingAfterFirstChunkReader struct {
+	firstChunk        []byte
+	secondReadEntered chan struct{}
+	stop              <-chan struct{}
+	reads             atomic.Int32
+}
+
+func (r *blockingAfterFirstChunkReader) Read(p []byte) (int, error) {
+	switch r.reads.Add(1) {
+	case 1:
+		n := copy(p, r.firstChunk)
+		return n, nil
+	case 2:
+		close(r.secondReadEntered)
+		<-r.stop
+		return 0, io.EOF
+	default:
+		<-r.stop
+		return 0, io.EOF
 	}
 }

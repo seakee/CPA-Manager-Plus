@@ -27,7 +27,7 @@ import {
   usageServiceApi,
   type UsageServiceStatus,
 } from '@/services/api/usageService';
-import { isGatewayPendingError } from '@/services/api/models';
+import { isGatewayPendingError, modelsApi } from '@/services/api/models';
 import { classifyModels } from '@/utils/models';
 import { STORAGE_KEY_AUTH, STORAGE_KEY_QUOTA_CACHE } from '@/utils/constants';
 import iconGemini from '@/assets/icons/gemini.svg';
@@ -103,7 +103,7 @@ function SystemPageContent({
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
   const [modelStatus, setModelStatus] = useState<ModelStatus>();
-
+  const [modelsSyncing, setModelsSyncing] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState<UsageServiceStatus | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState('');
@@ -247,6 +247,43 @@ function SystemPageContent({
     }
   };
 
+  const syncUpstreamModels = async () => {
+    if (auth.connectionStatus !== 'connected' || !auth.apiBase || !auth.managementKey || modelsSyncing) {
+      showNotification(t('notification.connection_required'), 'warning');
+      return;
+    }
+    setModelsSyncing(true);
+    try {
+      await modelsApi.refreshUpstreamModels(auth.apiBase, auth.managementKey);
+      await fetchModels({ forceRefresh: true });
+      showNotification(
+        t('system_info.models_sync_upstream_success', {
+          count: useModelsStore.getState().models.length,
+        }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const status =
+        err && typeof err === 'object'
+          ? ((err as { status?: number; response?: { status?: number } }).response?.status ??
+            (err as { status?: number }).status)
+          : undefined;
+      if (status === 404 || status === 405) {
+        showNotification(t('system_info.models_sync_upstream_unsupported'), 'warning');
+      } else if (isGatewayPendingError(err) || status === 503) {
+        showNotification(t('system_info.models_gateway_pending'), 'warning');
+      } else {
+        const detail = err instanceof Error ? err.message : String(err);
+        showNotification(
+          t('system_info.models_sync_upstream_failed', { error: detail }),
+          'error'
+        );
+      }
+    } finally {
+      setModelsSyncing(false);
+    }
+  };
+
   const refreshDatabaseStatus = useCallback(async () => {
     const requestId = databaseRequestId.current + 1;
     databaseRequestId.current = requestId;
@@ -319,31 +356,32 @@ function SystemPageContent({
   }, [fetchConfig]);
 
   useEffect(() => {
+    if (workspace) return;
     fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.connectionStatus, auth.apiBase]);
+  }, [auth.connectionStatus, auth.apiBase, workspace]);
 
   useEffect(() => {
-    if (featureAvailability.checking) return;
+    if (workspace || featureAvailability.checking) return;
     void refreshDatabaseStatus();
-  }, [featureAvailability.checking, refreshDatabaseStatus]);
+  }, [featureAvailability.checking, refreshDatabaseStatus, workspace]);
 
   useEffect(() => {
-    if (!featureAvailability.managerServiceAvailable) return;
+    if (workspace || !featureAvailability.managerServiceAvailable) return;
     const timer = window.setInterval(() => {
       void refreshDatabaseStatus();
     }, DATABASE_STATUS_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [featureAvailability.managerServiceAvailable, refreshDatabaseStatus]);
+  }, [featureAvailability.managerServiceAvailable, refreshDatabaseStatus, workspace]);
 
-  useHeaderRefresh(refreshDatabaseStatus, featureAvailability.managerServiceAvailable);
-  const InformationContainer = workspace ? 'details' : 'div';
+  useHeaderRefresh(refreshDatabaseStatus, !workspace && featureAvailability.managerServiceAvailable);
+  if (workspace) {
+    return <div className={styles.container}>{workspace}</div>;
+  }
 
   return (
     <div className={styles.container}>
-      {workspace && <div style={{ marginBottom: '24px' }}>{workspace}</div>}
-      <InformationContainer className={workspace ? 'system-additional-info' : undefined}>
-        {workspace && <summary>{configurationText('additionalInfo')}</summary>}
+      <div>
         <div className={styles.content}>
           <Card
             title={t('system_info.quick_links_title')}
@@ -414,7 +452,7 @@ function SystemPageContent({
             </div>
           </Card>
 
-          {featureAvailability.managerServiceAvailable && (
+          {!workspace && featureAvailability.managerServiceAvailable && (
             <DatabaseStatusCard
               status={databaseStatus}
               loading={databaseLoading}
@@ -422,65 +460,80 @@ function SystemPageContent({
             />
           )}
 
-          <Card
-            title={t('system_info.models_title')}
-            extra={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => fetchModels({ forceRefresh: true })}
-                loading={modelsLoading}
-              >
-                {t('common.refresh')}
-              </Button>
-            }
-          >
-            <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
-            {modelStatus && (
-              <div className={`status-badge ${modelStatus.type}`}>{modelStatusText}</div>
-            )}
-            {modelsCache && modelsError && modelStatus?.type !== 'error' && (
-              <div className="error-box">{modelsError}</div>
-            )}
-            {modelsLoading && !modelsCache ? (
-              <div className="hint">{t('common.loading')}</div>
-            ) : !modelsCache ? null : models.length === 0 ? (
-              <div className="hint">{t('system_info.models_empty')}</div>
-            ) : (
-              <div className="item-list">
-                {groupedModels.map((group) => {
-                  const iconSrc = getIconForCategory(group.id);
-                  return (
-                    <div key={group.id} className="item-row">
-                      <div className="item-meta">
-                        <div className={styles.groupTitle}>
-                          {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
-                          <span className="item-title">{group.label}</span>
+          {!workspace && (
+            <Card
+              title={t('system_info.models_title')}
+              extra={
+                <div className={styles.modelActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void syncUpstreamModels()}
+                    loading={modelsSyncing}
+                    disabled={modelsLoading || modelsSyncing || !auth.managementKey}
+                    title={t('system_info.models_sync_upstream_hint')}
+                  >
+                    {t('system_info.models_sync_upstream')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => fetchModels({ forceRefresh: true })}
+                    loading={modelsLoading}
+                    disabled={modelsSyncing}
+                  >
+                    {t('common.refresh')}
+                  </Button>
+                </div>
+              }
+            >
+              <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
+              {modelStatus && (
+                <div className={`status-badge ${modelStatus.type}`}>{modelStatusText}</div>
+              )}
+              {modelsCache && modelsError && modelStatus?.type !== 'error' && (
+                <div className="error-box">{modelsError}</div>
+              )}
+              {modelsLoading && !modelsCache ? (
+                <div className="hint">{t('common.loading')}</div>
+              ) : !modelsCache ? null : models.length === 0 ? (
+                <div className="hint">{t('system_info.models_empty')}</div>
+              ) : (
+                <div className="item-list">
+                  {groupedModels.map((group) => {
+                    const iconSrc = getIconForCategory(group.id);
+                    return (
+                      <div key={group.id} className="item-row">
+                        <div className="item-meta">
+                          <div className={styles.groupTitle}>
+                            {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
+                            <span className="item-title">{group.label}</span>
+                          </div>
+                          <div className="item-subtitle">
+                            {t('system_info.models_count', { count: group.items.length })}
+                          </div>
                         </div>
-                        <div className="item-subtitle">
-                          {t('system_info.models_count', { count: group.items.length })}
+                        <div className={styles.modelTags}>
+                          {group.items.map((model) => (
+                            <span
+                              key={`${model.name}-${model.alias ?? 'default'}`}
+                              className={styles.modelTag}
+                              title={model.description || ''}
+                            >
+                              <span className={styles.modelName}>{model.name}</span>
+                              {model.alias && (
+                                <span className={styles.modelAlias}>{model.alias}</span>
+                              )}
+                            </span>
+                          ))}
                         </div>
                       </div>
-                      <div className={styles.modelTags}>
-                        {group.items.map((model) => (
-                          <span
-                            key={`${model.name}-${model.alias ?? 'default'}`}
-                            className={styles.modelTag}
-                            title={model.description || ''}
-                          >
-                            <span className={styles.modelName}>{model.name}</span>
-                            {model.alias && (
-                              <span className={styles.modelAlias}>{model.alias}</span>
-                            )}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          )}
 
           <Card title={t('system_info.clear_login_title')}>
             <p className={styles.sectionDescription}>{t('system_info.clear_login_desc')}</p>
@@ -491,7 +544,7 @@ function SystemPageContent({
             </div>
           </Card>
         </div>
-      </InformationContainer>
+      </div>
     </div>
   );
 }

@@ -695,14 +695,14 @@ function MainLayoutContent({
           icon: sidebarIcons.config,
         },
         {
-          path: '/logs',
-          label: t('nav.logs'),
-          icon: sidebarIcons.logs,
-        },
-        {
           path: '/system/updates',
           label: t('manager_updates.title'),
           icon: sidebarIcons.system,
+        },
+        {
+          path: '/logs',
+          label: t('nav.logs'),
+          icon: sidebarIcons.logs,
         },
       ],
     },

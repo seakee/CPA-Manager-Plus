@@ -50,13 +50,13 @@
       background: var(--data-slate-light-5);
 
       &.good {
-        background: var(--data-emerald-base);
+        background: var(--status-graphic-success);
       }
       &.warn {
-        background: var(--color-warning);
+        background: var(--status-graphic-warning);
       }
       &.bad {
-        background: var(--color-danger);
+        background: var(--status-graphic-danger);
       }
     }
 
@@ -77,7 +77,7 @@
     .count {
       font-weight: 600;
       font-variant-numeric: tabular-nums;
-      color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+      color: var(--data-badge-danger-text);
     }
     .percent {
       font-size: 11px;

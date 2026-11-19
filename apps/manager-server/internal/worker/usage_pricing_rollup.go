@@ -30,6 +30,7 @@ type UsagePricingRollupWorker struct {
 	nextTask          int
 	reportedStarted   [usageDerivedTaskCount]bool
 	lastReported      [usageDerivedTaskCount]int64
+	lifecycle         workerLifecycle
 }
 
 const (
@@ -56,8 +57,16 @@ func (w *UsagePricingRollupWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	go w.loop(ctx)
-	w.Wake()
+	if w.lifecycle.goRun(ctx, func() { w.loop(ctx) }) {
+		w.Wake()
+	}
+}
+
+func (w *UsagePricingRollupWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *UsagePricingRollupWorker) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {

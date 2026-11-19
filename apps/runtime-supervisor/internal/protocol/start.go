@@ -85,7 +85,7 @@ func writeOperationResponse(w http.ResponseWriter, operation journal.Operation, 
 // their original empty payload and reject the field even when its value is empty.
 func decodeMutationRequest(w http.ResponseWriter, r *http.Request, startArtifact ...*artifact.ID) (mutationRequest, error) {
 	var request mutationRequest
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMutationBody))
+	body, err := io.ReadAll(http.MaxBytesReader(unwrapResponseWriter(w), r.Body, maxMutationBody))
 	if err != nil || !utf8.Valid(body) {
 		return request, lifecycle.ErrInvalidRequest
 	}

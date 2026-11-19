@@ -40,37 +40,40 @@ type Config struct {
 	AdminKey       string
 	// AdminAuthorityConfigured distinguishes absent host authority from an
 	// explicitly configured but unreadable/empty secret for Fresh admission.
-	AdminAuthorityConfigured     bool
-	DataKey                      string
-	DataKeyPath                  string
-	RuntimeURL                   string
-	RuntimeTokenFile             string
-	RuntimeDataDir               string
-	RuntimeJournalPath           string
-	CollectorMode                string
-	Queue                        string
-	PopSide                      string
-	BatchSize                    int
-	PollInterval                 time.Duration
-	QueryLimit                   int
-	PprofAddr                    string
-	PanelPath                    string
-	CORSOrigins                  []string
-	TLSSkipVerify                bool
-	QuotaCooldownEnabled         bool
-	AccountActionsEnabled        bool
-	AccountActionsAutoDisable    bool
-	DashboardHourlyRollupEnabled bool
-	UsageImportChunkBytes        int64
-	UsageImportDiskQuotaBytes    int64
-	UsageImportMaxSessions       int
-	UsageImportSessionTTL        time.Duration
-	UsageArchiveDir              string
-	UsageArchiveRetentionEnabled bool
-	UsageArchiveRetentionDays    int
-	QuotaCooldownEnvSet          bool
-	AccountActionsEnvSet         bool
-	AccountActionsAutoEnvSet     bool
+	AdminAuthorityConfigured           bool
+	DataKey                            string
+	DataKeyPath                        string
+	RuntimeURL                         string
+	RuntimeTokenFile                   string
+	RuntimeDataDir                     string
+	RuntimeJournalPath                 string
+	CollectorMode                      string
+	Queue                              string
+	PopSide                            string
+	BatchSize                          int
+	PollInterval                       time.Duration
+	QueryLimit                         int
+	PprofAddr                          string
+	PanelPath                          string
+	CORSOrigins                        []string
+	TLSSkipVerify                      bool
+	QuotaCooldownEnabled               bool
+	AccountActionsEnabled              bool
+	AccountActionsAutoDisable          bool
+	DashboardHourlyRollupEnabled       bool
+	UsageImportChunkBytes              int64
+	UsageImportDiskQuotaBytes          int64
+	UsageImportMaxSessions             int
+	UsageImportSessionTTL              time.Duration
+	UsageArchiveDir                    string
+	UsageArchiveRetentionEnabled       bool
+	UsageArchiveRetentionDays          int
+	UsageArchiveRetentionEnvSet        bool
+	UsageArchiveRetentionEnabledEnvSet bool
+	UsageArchiveRetentionDaysEnvSet    bool
+	QuotaCooldownEnvSet                bool
+	AccountActionsEnvSet               bool
+	AccountActionsAutoEnvSet           bool
 }
 
 type LoadOptions struct {
@@ -232,10 +235,13 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			"USAGE_ARCHIVE_RETENTION_ENABLED",
 			cfgFile.UsageArchiveRetentionEnabled,
 		),
-		UsageArchiveRetentionDays: usageArchiveRetentionDays,
-		QuotaCooldownEnvSet:       hasEnv("USAGE_QUOTA_COOLDOWN_ENABLED"),
-		AccountActionsEnvSet:      hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
-		AccountActionsAutoEnvSet:  hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
+		UsageArchiveRetentionDays:          usageArchiveRetentionDays,
+		UsageArchiveRetentionEnvSet:        hasEnv("USAGE_ARCHIVE_RETENTION_ENABLED") && hasEnv("USAGE_ARCHIVE_RETENTION_DAYS"),
+		UsageArchiveRetentionEnabledEnvSet: hasEnv("USAGE_ARCHIVE_RETENTION_ENABLED"),
+		UsageArchiveRetentionDaysEnvSet:    hasEnv("USAGE_ARCHIVE_RETENTION_DAYS"),
+		QuotaCooldownEnvSet:                hasEnv("USAGE_QUOTA_COOLDOWN_ENABLED"),
+		AccountActionsEnvSet:               hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
+		AccountActionsAutoEnvSet:           hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
 	}, nil
 }
 

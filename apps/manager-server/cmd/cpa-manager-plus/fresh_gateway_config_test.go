@@ -386,3 +386,94 @@ func TestExternalGatewaySaveFilesTheFirstRefusal(t *testing.T) {
 		t.Fatal("the recorded refusal did not stop the next read from presenting the key")
 	}
 }
+
+func TestGatewayConfigSourceSurfaceAndReadSave(t *testing.T) {
+	app, cpaServer := externalAuthorityApp(t, "")
+	app.gatewayConfig = gatewayFor(app)
+
+	readRes := gatewayRequest(t, app, http.MethodGet, "gateway/config/source", "", "")
+	if readRes.Code != http.StatusOK {
+		t.Fatalf("GET gateway/config/source status=%d body=%s", readRes.Code, readRes.Body.String())
+	}
+	var view freshconfig.SourceView
+	if err := json.Unmarshal(readRes.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if !view.SourceWritable || view.Baseline == "" || !strings.Contains(view.YAML, "strategy:") {
+		t.Fatalf("unexpected SourceView: %+v", view)
+	}
+
+	// Reject non-string yaml field.
+	badBody := `{"requestId":"` + strings.Repeat("ac", 16) + `","expected":{"generation":"` + view.Generation + `","baseline":"` + view.Baseline + `"},"yaml":null}`
+	badRes := gatewayRequest(t, app, http.MethodPost, "gateway/config/source", badBody, "application/json")
+	if badRes.Code != http.StatusBadRequest || errorCode(t, badRes) != "invalid_config_request" {
+		t.Fatalf("expected invalid_config_request on null yaml, got %d %s", badRes.Code, badRes.Body.String())
+	}
+
+	// Reject protected path insertion with 422 protected_source_path.
+	protPayload, _ := json.Marshal(map[string]any{
+		"requestId": strings.Repeat("ad", 16),
+		"expected":  map[string]string{"generation": view.Generation, "baseline": view.Baseline},
+		"yaml":      "management:\n  secret-key: leaked\nrouting:\n  strategy: round-robin\n",
+	})
+	protRes := gatewayRequest(t, app, http.MethodPost, "gateway/config/source", string(protPayload), "application/json")
+	if protRes.Code != http.StatusUnprocessableEntity || errorCode(t, protRes) != freshconfig.CodeSourceProtectedPath {
+		t.Fatalf("expected 422 protected_source_path, got %d %s", protRes.Code, protRes.Body.String())
+	}
+
+	// Wrong method rejected with 405.
+	delRes := gatewayRequest(t, app, http.MethodDelete, "gateway/config/source", "", "")
+	if delRes.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on DELETE gateway/config/source, got %d", delRes.Code)
+	}
+	_ = cpaServer
+}
+
+func TestGatewayConfigFamilyValidationAndOperationNotFound(t *testing.T) {
+	fixture := newGatewayConfigFixture(t, gatewayTestDocument, nil)
+	requestID := strings.Repeat("ab", 16)
+	expected := `{"generation":"7","baseline":"` + strings.Repeat("a", 64) + `"}`
+
+	unknownFamilyBody := `{"requestId":"` + requestID + `","expected":` + expected + `,"rules":[]}`
+	unknownFamilyResp := gatewayRequest(t, fixture.app, http.MethodPost, "gateway/config/rules/unknown-family", unknownFamilyBody, "application/json")
+	if unknownFamilyResp.Code != http.StatusBadRequest || errorCode(t, unknownFamilyResp) != "invalid_config_request" {
+		t.Fatalf("unknown rule family = %d %s, want 400 invalid_config_request", unknownFamilyResp.Code, unknownFamilyResp.Body.String())
+	}
+
+	missingOpResp := gatewayRequest(t, fixture.app, http.MethodGet, "gateway/config/operations/"+requestID, "", "")
+	if missingOpResp.Code != http.StatusNotFound || errorCode(t, missingOpResp) != "operation_not_found" {
+		t.Fatalf("missing operation = %d %s, want 404 operation_not_found", missingOpResp.Code, missingOpResp.Body.String())
+	}
+}
+
+// TestGatewayConfigReconcileValidatesRequestIDBeforeCredentialPrecheck ensures
+// reconcile rejects malformed request IDs with 400 invalid_config_request before
+// consulting the External saved-credential refusal gate.
+func TestGatewayConfigReconcileValidatesRequestIDBeforeCredentialPrecheck(t *testing.T) {
+	app, cpaServer := externalAuthorityApp(t, "")
+	app.gatewayConfig = gatewayFor(app)
+	generation, baseline := externalPageTarget(t, app, "routing")
+	cpaServer.reject.Store(true)
+	saveBody := `{"requestId":"` + strings.Repeat("ab", 16) + `","expected":{"generation":"` + generation + `","baseline":"` + baseline + `"},` +
+		`"edits":[{"path":"routing.strategy","action":"set","value":"fill-first"}]}`
+	saveResp := gatewayRequest(t, app, http.MethodPost, "gateway/config/groups/routing", saveBody, "application/json")
+	if saveResp.Code != http.StatusConflict || errorCode(t, saveResp) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("seed refusal status=%d body=%s", saveResp.Code, saveResp.Body.String())
+	}
+	if !app.externalReadGrant(t.Context()).Refused {
+		t.Fatal("expected recorded external credential refusal")
+	}
+
+	reads, probes := cpaServer.reads.Load(), cpaServer.probes.Load()
+	invalidResp := gatewayRequest(t, app, http.MethodPost, "gateway/config/operations/invalid-id/reconcile", "{}", "application/json")
+	if invalidResp.Code != http.StatusBadRequest || errorCode(t, invalidResp) != "invalid_config_request" {
+		t.Fatalf("invalid reconcile status=%d body=%s, want 400 invalid_config_request", invalidResp.Code, invalidResp.Body.String())
+	}
+	validResp := gatewayRequest(t, app, http.MethodPost, "gateway/config/operations/"+strings.Repeat("cd", 16)+"/reconcile", "{}", "application/json")
+	if validResp.Code != http.StatusConflict || errorCode(t, validResp) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("valid-id refused reconcile status=%d body=%s, want 409 %s", validResp.Code, validResp.Body.String(), freshconfig.ReasonManagementRejected)
+	}
+	if cpaServer.reads.Load() != reads || cpaServer.probes.Load() != probes {
+		t.Fatalf("reconcile unexpectedly contacted CPA: reads %d->%d probes %d->%d", reads, cpaServer.reads.Load(), probes, cpaServer.probes.Load())
+	}
+}
