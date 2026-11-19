@@ -273,11 +273,12 @@ describe('useUsageData model price scope', () => {
 
     mocks.saveModelPrices.mockRejectedValueOnce(new Error('save offline'));
     await act(async () => {
-      await latest.setModelPrices({ 'a-model': price(9) });
+      await expect(latest.setModelPrices({ 'a-model': price(9) })).rejects.toThrow('save offline');
     });
     expect(mocks.saveLocalPrices).not.toHaveBeenCalled();
     expect(legacyStore).toEqual({});
-    expect([...scopedStore.values()][0]).toEqual({ 'a-model': price(9) });
+    expect(scopedStore.size).toBe(0);
+    expect(latest.modelPrices).toEqual({});
 
     const apiSavesBefore = mocks.saveModelPrices.mock.calls.length;
     mocks.auth = { apiBase: 'https://gateway-b.test', managementKey: 'key-b' };
@@ -288,7 +289,7 @@ describe('useUsageData model price scope', () => {
       await Promise.resolve();
     });
 
-    // Connection B must neither migrate A's leftovers nor show them.
+    // Connection B must neither migrate A's failed edits nor show them.
     expect(mocks.saveModelPrices.mock.calls.length).toBe(apiSavesBefore);
     expect(latest.modelPrices).toEqual({});
     expect(latest.modelPricesLoaded).toBe(true);
@@ -452,7 +453,9 @@ describe('useUsageData model price scope', () => {
 
     mocks.saveModelPrices.mockRejectedValueOnce(new Error('save offline'));
     await act(async () => {
-      await latest.setModelPrices({ 'saved-model': price(4) });
+      await expect(latest.setModelPrices({ 'saved-model': price(4) })).rejects.toThrow(
+        'save offline'
+      );
     });
     expect(latest.modelPricesLoading).toBe(false);
 

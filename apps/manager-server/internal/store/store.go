@@ -46,6 +46,9 @@ type ManagerCollectorConfig = model.ManagerCollectorConfig
 type ManagerCodexInspectionConfig = model.ManagerCodexInspectionConfig
 type ManagerCodexInspectionScheduleConfig = model.ManagerCodexInspectionScheduleConfig
 type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
+type ManagerRetentionConfig = model.ManagerRetentionConfig
+type ManagerCollectorPatch = model.ManagerCollectorPatch
+type ManagerRetentionPatch = model.ManagerRetentionPatch
 type EmbeddedRuntimeDesiredLifecycle = model.EmbeddedRuntimeDesiredLifecycle
 type EmbeddedRuntimeDesiredState = model.EmbeddedRuntimeDesiredState
 type CodexInspectionRun = model.CodexInspectionRun
@@ -150,8 +153,11 @@ type UsagePricingAccountSnapshot struct {
 }
 
 type Store struct {
-	db            *sql.DB
-	modelPricesMu sync.RWMutex
+	db                        *sql.DB
+	modelPricesMu             sync.RWMutex
+	derivedMaintenanceMu      sync.Mutex
+	derivedMaintenanceStopped bool
+	derivedMaintenanceWGs     []func()
 
 	Settings            setting.Repository
 	UsageEvents         usageevent.Repository
@@ -217,10 +223,34 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) StartDerivedMaintenance(ctx context.Context) {
+	if s == nil || s.db == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	s.derivedMaintenanceMu.Lock()
+	if s.derivedMaintenanceStopped || ctx.Err() != nil {
+		s.derivedMaintenanceMu.Unlock()
+		return
+	}
+	wait := sqliterepo.StartDerivedMaintenanceTracked(ctx, s.db)
+	s.derivedMaintenanceWGs = append(s.derivedMaintenanceWGs, wait)
+	s.derivedMaintenanceMu.Unlock()
+}
+
+// WaitDerivedMaintenance waits until every StartDerivedMaintenance goroutine has exited.
+func (s *Store) WaitDerivedMaintenance() {
 	if s == nil {
 		return
 	}
-	sqliterepo.StartDerivedMaintenance(ctx, s.db)
+	s.derivedMaintenanceMu.Lock()
+	s.derivedMaintenanceStopped = true
+	waits := s.derivedMaintenanceWGs
+	s.derivedMaintenanceWGs = nil
+	s.derivedMaintenanceMu.Unlock()
+	for _, wait := range waits {
+		if wait != nil {
+			wait()
+		}
+	}
 }
 
 func (s *Store) RunDerivedStartupMaintenance(ctx context.Context) error {
@@ -277,6 +307,14 @@ func (s *Store) LoadManagerConfig(ctx context.Context) (ManagerConfig, bool, err
 
 func (s *Store) PatchManagerCollectorEnabled(ctx context.Context, enabled bool) (bool, error) {
 	return s.Settings.PatchManagerCollectorEnabled(ctx, enabled)
+}
+
+func (s *Store) PatchManagerCollectorConfig(ctx context.Context, patch ManagerCollectorPatch) (bool, error) {
+	return s.Settings.PatchManagerCollectorConfig(ctx, patch)
+}
+
+func (s *Store) PatchManagerRetentionConfig(ctx context.Context, patch ManagerRetentionPatch) (bool, error) {
+	return s.Settings.PatchManagerRetentionConfig(ctx, patch)
 }
 
 func (s *Store) SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired EmbeddedRuntimeDesiredLifecycle) (EmbeddedRuntimeDesiredState, error) {

@@ -103,6 +103,8 @@ type Executor struct {
 	prepareMu          sync.Mutex
 	prepareAdmissionMu sync.Mutex
 	prepareWorkers     sync.WaitGroup
+	prepareProgressMu  sync.Mutex
+	prepareProgress    map[string]PrepareProgress
 
 	recoveryMu             sync.Mutex
 	recoveryContext        context.Context

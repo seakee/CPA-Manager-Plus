@@ -304,7 +304,7 @@ func TestReadProjectsOnlyThePageScope(t *testing.T) {
 	if view.Capability.Mode != ModeManaged || !view.Capability.Writable || !view.Capability.RulesWritable {
 		t.Fatalf("capability %+v", view.Capability)
 	}
-	if len(view.Fields) != 39 || len(view.Families) != 5 || len(view.Groups) != 11 {
+	if len(view.Fields) != 88 || len(view.Families) != 6 || len(view.Groups) != 21 {
 		t.Fatalf("projection sizes %d %d %d", len(view.Fields), len(view.Families), len(view.Groups))
 	}
 	encoded, err := json.Marshal(view)
@@ -1117,4 +1117,494 @@ func baselineOf(t *testing.T, view View, groupID string) string {
 	}
 	t.Fatalf("group %q is not projected", groupID)
 	return ""
+}
+
+func TestSaveGroupKVMapLeafUsesReplacementPutAndRemovesDeletedKeys(t *testing.T) {
+	ctx := context.Background()
+	wire := &fakeWire{
+		document: map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"antigravity": map[string]any{
+						"antigravity-credits": true,
+						"sensitive-words-replace": map[string]any{
+							"keep":      "1",
+							"remove-me": "2",
+						},
+					},
+					"devin": map[string]any{
+						"sensitive-words-replace": map[string]any{
+							"legacy-word": "masked",
+						},
+					},
+				},
+			},
+		},
+	}
+	service, _ := managedService(t, wire)
+
+	view, err := service.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	op, err := service.SaveGroup(ctx, "antigravity", GroupRequest{
+		RequestID: strings.Repeat("71", 16),
+		Expected:  Expected{Generation: view.Generation, Baseline: baselineOf(t, view, "antigravity")},
+		Edits: []Edit{
+			{Path: "oauth.providers.antigravity.antigravity-credits", Action: "set", Value: json.RawMessage(`false`)},
+			{Path: "oauth.providers.antigravity.sensitive-words-replace", Action: "set", Value: json.RawMessage(`{"keep":"1","added.phrase":"3"}`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveGroup antigravity: %v", err)
+	}
+	if op.State != "persisted" {
+		t.Fatalf("expected persisted operation, got %+v", op)
+	}
+	if len(wire.patches) != 1 || wire.patches[0].path != "oauth.providers.antigravity" || strings.Contains(wire.patches[0].body, "sensitive-words-replace") {
+		t.Fatalf("expected non-KVMap sibling PATCH without sensitive-words-replace, got %+v", wire.patches)
+	}
+	if len(wire.puts) != 1 || wire.puts[0].path != "oauth.providers.antigravity.sensitive-words-replace" {
+		t.Fatalf("expected atomic PUT on sensitive-words-replace, got %+v", wire.puts)
+	}
+	gotMap, _ := cpa.LookupConfigValue(wire.document, "oauth.providers.antigravity.sensitive-words-replace")
+	asMap, ok := gotMap.(map[string]any)
+	if !ok || len(asMap) != 2 || asMap["keep"] != "1" || asMap["added.phrase"] != "3" {
+		t.Fatalf("expected omitted key removed after PUT replacement, got %#v", gotMap)
+	}
+
+	// Setting a KVMap leaf to an empty map uses PUT (no PATCH) and removes prior keys.
+	view, err = service.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read before devin empty set: %v", err)
+	}
+	wire.patches, wire.puts, wire.deletes = nil, nil, nil
+	op, err = service.SaveGroup(ctx, "devin", GroupRequest{
+		RequestID: strings.Repeat("72", 16),
+		Expected:  Expected{Generation: view.Generation, Baseline: baselineOf(t, view, "devin")},
+		Edits: []Edit{
+			{Path: "oauth.providers.devin.sensitive-words-replace", Action: "set", Value: json.RawMessage(`{}`)},
+		},
+	})
+	if err != nil || op.State != "persisted" {
+		t.Fatalf("SaveGroup devin empty map = (%+v, %v)", op, err)
+	}
+	if len(wire.patches) != 0 || len(wire.puts) != 1 || wire.puts[0].body != "{}" {
+		t.Fatalf("expected sole PUT {} for empty KVMap, got patches=%+v puts=%+v", wire.patches, wire.puts)
+	}
+
+	// Restoring default deletes the KVMap leaf path.
+	view, err = service.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read before devin default: %v", err)
+	}
+	wire.patches, wire.puts, wire.deletes = nil, nil, nil
+	op, err = service.SaveGroup(ctx, "devin", GroupRequest{
+		RequestID: strings.Repeat("73", 16),
+		Expected:  Expected{Generation: view.Generation, Baseline: baselineOf(t, view, "devin")},
+		Edits: []Edit{
+			{Path: "oauth.providers.devin.sensitive-words-replace", Action: "default"},
+		},
+	})
+	if err != nil || op.State != "persisted" {
+		t.Fatalf("SaveGroup devin default = (%+v, %v)", op, err)
+	}
+	if len(wire.deletes) != 1 || wire.deletes[0] != "oauth.providers.devin.sensitive-words-replace" {
+		t.Fatalf("expected DELETE on KVMap leaf, got %+v", wire.deletes)
+	}
+}
+
+func TestSourceAndGroupFamilyLegacyMutualCrossFencing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("unknown source operation fences all gateway groups and families while keeping plugins isolated", func(t *testing.T) {
+		wire := &fakeWire{
+			document: map[string]any{
+				"plugins": map[string]any{"enabled": false},
+				"routing": map[string]any{"strategy": "round-robin"},
+				"requests": map[string]any{
+					"payload": map[string]any{"default": []any{}},
+				},
+			},
+		}
+		service, store := managedService(t, wire)
+
+		beforeView, err := service.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read before: %v", err)
+		}
+		var defaultBaseline string
+		for _, fam := range beforeView.Families {
+			if fam.Family == "default" {
+				defaultBaseline = fam.Baseline
+			}
+		}
+		srcBefore, err := service.ReadSource(ctx)
+		if err != nil {
+			t.Fatalf("ReadSource: %v", err)
+		}
+
+		wire.patchErr = cpa.ErrProofUnavailable
+		srcReqID := strings.Repeat("81", 16)
+		_, err = service.SaveSource(ctx, SourceRequest{
+			RequestID: srcReqID,
+			Expected:  Expected{Generation: srcBefore.Generation, Baseline: srcBefore.Baseline},
+			YAML:      "requests:\n  payload:\n    default: []\nrouting:\n  strategy: fill-first\n",
+		})
+		if err == nil {
+			t.Fatal("expected SaveSource transport failure")
+		}
+		wire.patchErr = nil
+
+		fencedView, err := service.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read while source unknown: %v", err)
+		}
+		for _, g := range fencedView.Groups {
+			if g.Writable || g.Reason != ReasonUnknownOriginal || g.Operation == nil || g.Operation.RequestID != srcReqID {
+				t.Fatalf("expected group %q fenced by unknown source op, got %+v", g.ID, g)
+			}
+		}
+		for _, f := range fencedView.Fields {
+			if f.Editable || f.Reason != ReasonUnknownOriginal {
+				t.Fatalf("expected field %q non-editable with %q, got %+v", f.Path, ReasonUnknownOriginal, f)
+			}
+		}
+		for _, fam := range fencedView.Families {
+			if fam.Writable || !fam.ReadOnly || fam.Reason != ReasonUnknownOriginal || fam.Operation == nil || fam.Operation.RequestID != srcReqID {
+				t.Fatalf("expected family %q fenced by unknown source op, got %+v", fam.Family, fam)
+			}
+		}
+
+		if _, err = service.SaveGroup(ctx, "routing", GroupRequest{
+			RequestID: strings.Repeat("82", 16),
+			Expected:  Expected{Generation: beforeView.Generation, Baseline: baselineOf(t, beforeView, "routing")},
+			Edits:     []Edit{{Path: "routing.strategy", Action: "set", Value: json.RawMessage(`"fill-first"`)}},
+		}); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("expected SaveGroup fenced with ErrApplyUnknown, got %v", err)
+		}
+		if _, err = service.SaveFamily(ctx, "default", FamilyRequest{
+			RequestID: strings.Repeat("83", 16),
+			Expected:  Expected{Generation: beforeView.Generation, Baseline: defaultBaseline},
+			Rules:     json.RawMessage(`[]`),
+		}); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("expected SaveFamily fenced with ErrApplyUnknown, got %v", err)
+		}
+
+		// Plugin scope stays independent of gateway source journal.
+		pluginView, err := service.ReadPlugins(ctx)
+		if err != nil || len(pluginView.Groups) != 1 || !pluginView.Groups[0].Writable {
+			t.Fatalf("expected plugin scope unaffected, got (%+v, %v)", pluginView, err)
+		}
+
+		// Reconciling the unknown source operation unlocks groups and families.
+		reconciled, err := service.Operation(ctx, srcReqID, true)
+		if err != nil || reconciled.State == "unknown" {
+			t.Fatalf("Operation reconcile = (%+v, %v), record=%+v", reconciled, err, store.record.ConfigGroups[ConfigSourceGroupID])
+		}
+		unlockedView, err := service.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read after reconcile: %v", err)
+		}
+		for _, g := range unlockedView.Groups {
+			if !g.Writable {
+				t.Fatalf("expected group %q writable after reconcile, got %+v", g.ID, g)
+			}
+		}
+	})
+
+	t.Run("unknown group operation fences ReadSource and SaveSource", func(t *testing.T) {
+		wire := &fakeWire{document: map[string]any{"routing": map[string]any{"strategy": "round-robin"}}}
+		service, _ := managedService(t, wire)
+
+		view, _ := service.Read(ctx)
+		srcBefore, _ := service.ReadSource(ctx)
+		wire.patchErr = cpa.ErrProofUnavailable
+		grpReqID := strings.Repeat("84", 16)
+		_, _ = service.SaveGroup(ctx, "routing", GroupRequest{
+			RequestID: grpReqID,
+			Expected:  Expected{Generation: view.Generation, Baseline: baselineOf(t, view, "routing")},
+			Edits:     []Edit{{Path: "routing.strategy", Action: "set", Value: json.RawMessage(`"fill-first"`)}},
+		})
+		wire.patchErr = nil
+
+		srcView, err := service.ReadSource(ctx)
+		if err != nil {
+			t.Fatalf("ReadSource: %v", err)
+		}
+		if srcView.SourceWritable || srcView.Reason != ReasonUnknownOriginal || srcView.Operation == nil || srcView.Operation.RequestID != grpReqID {
+			t.Fatalf("expected ReadSource fenced by unknown group op, got %+v", srcView)
+		}
+		if _, err = service.SaveSource(ctx, SourceRequest{
+			RequestID: strings.Repeat("85", 16),
+			Expected:  Expected{Generation: srcBefore.Generation, Baseline: srcBefore.Baseline},
+			YAML:      "routing:\n  strategy: fill-first\n",
+		}); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("expected SaveSource fenced with ErrApplyUnknown, got %v", err)
+		}
+	})
+
+	t.Run("unknown family operation fences ReadSource and SaveSource", func(t *testing.T) {
+		wire := &fakeWire{
+			document: map[string]any{
+				"routing":  map[string]any{"strategy": "round-robin"},
+				"requests": map[string]any{"payload": map[string]any{"filter": []any{}}},
+			},
+		}
+		service, _ := managedService(t, wire)
+
+		view, _ := service.Read(ctx)
+		var filterBaseline string
+		for _, fam := range view.Families {
+			if fam.Family == "filter" {
+				filterBaseline = fam.Baseline
+			}
+		}
+		srcBefore, _ := service.ReadSource(ctx)
+		wire.putErr = cpa.ErrProofUnavailable
+		famReqID := strings.Repeat("86", 16)
+		_, _ = service.SaveFamily(ctx, "filter", FamilyRequest{
+			RequestID: famReqID,
+			Expected:  Expected{Generation: view.Generation, Baseline: filterBaseline},
+			Rules:     json.RawMessage(`[{"models":[{"name":"*"}],"params":["a"]}]`),
+		})
+		wire.putErr = nil
+
+		srcView, err := service.ReadSource(ctx)
+		if err != nil {
+			t.Fatalf("ReadSource: %v", err)
+		}
+		if srcView.SourceWritable || srcView.Reason != ReasonUnknownOriginal || srcView.Operation == nil || srcView.Operation.RequestID != famReqID {
+			t.Fatalf("expected ReadSource fenced by unknown family op, got %+v", srcView)
+		}
+		if _, err = service.SaveSource(ctx, SourceRequest{
+			RequestID: strings.Repeat("87", 16),
+			Expected:  Expected{Generation: srcBefore.Generation, Baseline: srcBefore.Baseline},
+			YAML:      "routing:\n  strategy: fill-first\n",
+		}); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("expected SaveSource fenced with ErrApplyUnknown, got %v", err)
+		}
+	})
+
+	t.Run("unknown legacy field operation fences ReadSource and SaveSource", func(t *testing.T) {
+		wire := &fakeWire{
+			document:      map[string]any{"routing": map[string]any{"strategy": "round-robin"}},
+			fieldPresence: "present",
+			fieldValue:    json.Number("3"),
+		}
+		rec := managedRecord()
+		legacyReqID := strings.Repeat("88", 16)
+		rec.Config = map[string]*freshstore.FieldJournal{
+			"routing.retry.request-retry": {
+				Latest: legacyReqID,
+				Operations: map[string]freshstore.ConfigOperation{
+					legacyReqID: {
+						SourceID:   rec.Operation.Identity.InstallationID,
+						Generation: "7",
+						RequestID:  legacyReqID,
+						Field:      "routing.retry.request-retry",
+						Value:      json.Number("3"),
+						State:      "unknown",
+						Revision:   1,
+					},
+				},
+			},
+		}
+		store := &memoryStore{record: rec}
+		service := New(store, func(context.Context, uint64) (string, error) { return "management-test-only", nil }, managedTargets)
+		service.wire = wire
+		service.managed = true
+		service.endpoint = "http://127.0.0.1:8317"
+		srcView, err := service.ReadSource(ctx)
+		if err != nil {
+			t.Fatalf("ReadSource: %v", err)
+		}
+		if srcView.SourceWritable || srcView.Reason != ReasonLegacyUnresolved || srcView.Operation == nil || srcView.Operation.RequestID != legacyReqID {
+			t.Fatalf("expected ReadSource fenced by unresolved legacy field, got %+v", srcView)
+		}
+		if _, err = service.SaveSource(ctx, SourceRequest{
+			RequestID: strings.Repeat("89", 16),
+			Expected:  Expected{Generation: srcView.Generation, Baseline: srcView.Baseline},
+			YAML:      "routing:\n  strategy: fill-first\n",
+		}); !errors.Is(err, ErrLegacyUnresolved) {
+			t.Fatalf("expected SaveSource fenced with ErrLegacyUnresolved, got %v", err)
+		}
+
+		reconciled, err := service.Operation(ctx, legacyReqID, true)
+		if err != nil || reconciled.State == "unknown" {
+			t.Fatalf("reconcile legacy field = (%+v, %v)", reconciled, err)
+		}
+		unlockedSrc, err := service.ReadSource(ctx)
+		if err != nil || !unlockedSrc.SourceWritable {
+			t.Fatalf("expected ReadSource writable after legacy reconcile, got (%+v, %v)", unlockedSrc, err)
+		}
+	})
+}
+
+func TestCrossGroupRequestIDReuseAndUnknownReplayContract(t *testing.T) {
+	ctx := context.Background()
+	wire := &fakeWire{
+		document: map[string]any{
+			"routing":  map[string]any{"strategy": "round-robin", "retry": map[string]any{"request-retry": json.Number("1")}},
+			"requests": map[string]any{"payload": map[string]any{"filter": []any{}}},
+		},
+	}
+	svc, _ := managedService(t, wire)
+	view, err := svc.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	baselines := map[string]string{}
+	for _, g := range view.Groups {
+		baselines[g.ID] = g.Baseline
+	}
+	var filterBaseline string
+	for _, f := range view.Families {
+		if f.Family == "filter" {
+			filterBaseline = f.Baseline
+		}
+	}
+
+	// 1. Unknown group save replay returns ErrApplyUnknown, and cross-group reuse returns ErrSourceConflict.
+	wire.patchErr = cpa.ErrProofUnavailable
+	retryReqID := strings.Repeat("c1", 16)
+	retryReq := GroupRequest{
+		RequestID: retryReqID,
+		Expected:  Expected{Generation: view.Generation, Baseline: baselines["retry"]},
+		Edits:     []Edit{{Path: "routing.retry.request-retry", Action: "set", Value: json.RawMessage("4")}},
+	}
+	if _, err := svc.SaveGroup(ctx, "retry", retryReq); !errors.Is(err, cpa.ErrApplyUnknown) {
+		t.Fatalf("SaveGroup lost patch = %v, want ErrApplyUnknown", err)
+	}
+	if _, err := svc.SaveGroup(ctx, "retry", retryReq); !errors.Is(err, cpa.ErrApplyUnknown) {
+		t.Fatalf("SaveGroup unknown replay = %v, want ErrApplyUnknown", err)
+	}
+	if _, err := svc.SaveGroup(ctx, "routing", GroupRequest{
+		RequestID: retryReqID,
+		Expected:  Expected{Generation: view.Generation, Baseline: baselines["routing"]},
+		Edits:     []Edit{{Path: "routing.strategy", Action: "set", Value: json.RawMessage(`"fill-first"`)}},
+	}); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("cross-group reuse retry->routing = %v, want ErrSourceConflict", err)
+	}
+	if _, err := svc.SaveFamily(ctx, "filter", FamilyRequest{
+		RequestID: retryReqID,
+		Expected:  Expected{Generation: view.Generation, Baseline: filterBaseline},
+		Rules:     json.RawMessage(`[{"models":[{"name":"*"}],"params":["a"]}]`),
+	}); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("cross-group reuse retry->rules = %v, want ErrSourceConflict", err)
+	}
+	srcView, _ := svc.ReadSource(ctx)
+	if _, err := svc.SaveSource(ctx, SourceRequest{
+		RequestID: retryReqID,
+		Expected:  Expected{Generation: srcView.Generation, Baseline: srcView.Baseline},
+		YAML:      "routing:\n  strategy: fill-first\n",
+	}); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("cross-group reuse retry->source = %v, want ErrSourceConflict", err)
+	}
+	wire.patchErr = nil
+
+	// 2. Unknown SaveFamily replay returns ErrApplyUnknown, and reusing a persisted family requestId in SaveGroup returns ErrSourceConflict.
+	wire.putErr = cpa.ErrProofUnavailable
+	famReqID := strings.Repeat("c2", 16)
+	famReq := FamilyRequest{
+		RequestID: famReqID,
+		Expected:  Expected{Generation: view.Generation, Baseline: filterBaseline},
+		Rules:     json.RawMessage(`[{"models":[{"name":"*"}],"params":["b"]}]`),
+	}
+	if _, err := svc.SaveFamily(ctx, "filter", famReq); !errors.Is(err, cpa.ErrApplyUnknown) {
+		t.Fatalf("SaveFamily lost put = %v, want ErrApplyUnknown", err)
+	}
+	if _, err := svc.SaveFamily(ctx, "filter", famReq); !errors.Is(err, cpa.ErrApplyUnknown) {
+		t.Fatalf("SaveFamily unknown replay = %v, want ErrApplyUnknown", err)
+	}
+	if _, err := svc.SaveGroup(ctx, "routing", GroupRequest{
+		RequestID: famReqID,
+		Expected:  Expected{Generation: view.Generation, Baseline: baselines["routing"]},
+		Edits:     []Edit{{Path: "routing.strategy", Action: "set", Value: json.RawMessage(`"fill-first"`)}},
+	}); !errors.Is(err, cpa.ErrSourceConflict) {
+		t.Fatalf("cross-group reuse rules->routing = %v, want ErrSourceConflict", err)
+	}
+}
+
+func TestReadDocumentErrorDisablesWritesAndOperationPropagatesExternalErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Read marks all fields and groups non-writable when ReadConfigDocument fails", func(t *testing.T) {
+		wire := &fakeWire{documentErr: errors.New("upstream timeout")}
+		svc, _ := managedService(t, wire)
+
+		view, err := svc.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if view.Capability.Writable || view.Capability.Readable || view.Capability.Reason != ReasonReadUnavailable {
+			t.Fatalf("unexpected capability when ReadConfigDocument fails: %+v", view.Capability)
+		}
+		for _, g := range view.Groups {
+			if g.Writable {
+				t.Fatalf("group %s unexpectedly Writable=true on nil document", g.ID)
+			}
+		}
+		for _, fam := range view.Families {
+			if fam.Writable {
+				t.Fatalf("family %s unexpectedly Writable=true on nil document", fam.Family)
+			}
+		}
+	})
+
+	t.Run("Operation reconcile propagates ErrManagementRejected and ErrExternalTargetMoved", func(t *testing.T) {
+		wire := &fakeWire{document: map[string]any{"routing": map[string]any{"retry": map[string]any{"request-retry": 2}}}}
+		st := &memoryStore{record: managedRecord()}
+		st.record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:         bootstrap.ConnectExternal,
+			Stage:            "committed",
+			TargetIdentity:   "external:sha256:" + strings.Repeat("b", 64),
+			TargetGeneration: 1,
+		}
+		st.record.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL: "https://external.test", ManagementKey: "cpamp_protected_envelope",
+		}
+		svc := New(st, nil, nil)
+		svc.wire = wire
+		svc.transport = nil
+		var credErr error
+		svc.EnableExternal(func(context.Context, uint64) (string, string, error) {
+			if credErr != nil {
+				return "", "", credErr
+			}
+			return st.record.Connection.CPABaseURL, "management-test-only", nil
+		})
+		svc.targets = externalTargets()
+		svc.externalWire = func(string) configWire { return wire }
+		svc.externalProbe = supportedExternalVersion
+
+		view, err := svc.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		var retryBase string
+		for _, g := range view.Groups {
+			if g.ID == "retry" {
+				retryBase = g.Baseline
+			}
+		}
+
+		wire.patchErr = cpa.ErrProofUnavailable
+		reqID := strings.Repeat("e1", 16)
+		if _, err := svc.SaveGroup(ctx, "retry", GroupRequest{
+			RequestID: reqID,
+			Expected:  Expected{Generation: view.Generation, Baseline: retryBase},
+			Edits:     []Edit{{Path: "routing.retry.request-retry", Action: "set", Value: json.RawMessage("3")}},
+		}); !errors.Is(err, cpa.ErrApplyUnknown) {
+			t.Fatalf("SaveGroup = %v, want ErrApplyUnknown", err)
+		}
+		wire.patchErr = nil
+
+		for _, wantErr := range []error{cpa.ErrManagementRejected, cpa.ErrExternalTargetMoved} {
+			credErr = wantErr
+			if _, err := svc.Operation(ctx, reqID, true); !errors.Is(err, wantErr) {
+				t.Fatalf("Operation(reconcile=true) under %v returned %v", wantErr, err)
+			}
+		}
+	})
 }

@@ -649,6 +649,53 @@ func TestStoreAPIKeyAliasesActiveHashesMigration(t *testing.T) {
 	}
 }
 
+func TestStoreDerivedMaintenanceGuardsNilCanceledAndStoppedState(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Nil and already-canceled contexts must not spawn or register maintenance waiters.
+	var nilCtx context.Context
+	st.StartDerivedMaintenance(nilCtx)
+	canceledCtx, cancelImmediately := context.WithCancel(context.Background())
+	cancelImmediately()
+	st.StartDerivedMaintenance(canceledCtx)
+
+	st.derivedMaintenanceMu.Lock()
+	initialWaiters := len(st.derivedMaintenanceWGs)
+	st.derivedMaintenanceMu.Unlock()
+	if initialWaiters != 0 {
+		t.Fatalf("waiters after nil/canceled StartDerivedMaintenance = %d, want 0", initialWaiters)
+	}
+
+	liveCtx, cancelLive := context.WithCancel(context.Background())
+	st.StartDerivedMaintenance(liveCtx)
+	st.derivedMaintenanceMu.Lock()
+	activeWaiters := len(st.derivedMaintenanceWGs)
+	st.derivedMaintenanceMu.Unlock()
+	if activeWaiters != 1 {
+		t.Fatalf("waiters after live StartDerivedMaintenance = %d, want 1", activeWaiters)
+	}
+
+	cancelLive()
+	st.WaitDerivedMaintenance()
+
+	// Post-stop StartDerivedMaintenance with a fresh live context must be a no-op.
+	postStopCtx, cancelPostStop := context.WithCancel(context.Background())
+	defer cancelPostStop()
+	st.StartDerivedMaintenance(postStopCtx)
+	st.derivedMaintenanceMu.Lock()
+	stopped := st.derivedMaintenanceStopped
+	postStopWaiters := len(st.derivedMaintenanceWGs)
+	st.derivedMaintenanceMu.Unlock()
+	if !stopped || postStopWaiters != 0 {
+		t.Fatalf("post-stop state = (stopped=%v, waiters=%d), want (true, 0)", stopped, postStopWaiters)
+	}
+	st.WaitDerivedMaintenance()
+}
+
 func testCanonicalHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])

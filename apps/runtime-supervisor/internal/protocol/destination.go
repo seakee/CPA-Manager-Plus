@@ -19,7 +19,7 @@ type DestinationExecutor interface {
 
 func (h *handler) submitDestination(w http.ResponseWriter, r *http.Request) {
 	var request lifecycle.DestinationRequest
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	d := json.NewDecoder(http.MaxBytesReader(unwrapResponseWriter(w), r.Body, 1<<20))
 	opening, err := d.Token()
 	if err != nil || opening != json.Delim('{') {
 		writeError(w, 400, "invalid_request", "invalid destination request")

@@ -38,10 +38,10 @@ var (
 
 	ipv6GlobalUnicastPrefix  = netip.MustParsePrefix("2000::/3")
 	ipv6WellKnownNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+	ipv4FakeIPPrefix         = netip.MustParsePrefix("198.18.0.0/15")
 	ipv4IANAGlobal192_0_0_9  = netip.MustParseAddr("192.0.0.9")
 	ipv4IANAGlobal192_0_0_10 = netip.MustParseAddr("192.0.0.10")
-
-	nonPublicIPv4Prefixes = []netip.Prefix{
+	nonPublicIPv4Prefixes    = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("10.0.0.0/8"),
 		netip.MustParsePrefix("100.64.0.0/10"),
@@ -84,8 +84,10 @@ type CDNLookupIPAddrFunc func(ctx context.Context, host string) ([]net.IPAddr, e
 type CDNSourceOption func(*cdnSourceConfig)
 
 type cdnSourceConfig struct {
-	addrPolicy CDNAddrPolicy
-	lookupIP   CDNLookupIPAddrFunc
+	addrPolicy         CDNAddrPolicy
+	redirectAddrPolicy CDNAddrPolicy
+	lookupIP           CDNLookupIPAddrFunc
+	httpClient         *http.Client
 }
 
 // WithCDNAddrPolicy overrides the IP address policy for a CDNSource.
@@ -95,10 +97,25 @@ func WithCDNAddrPolicy(policy CDNAddrPolicy) CDNSourceOption {
 	}
 }
 
+// WithCDNRedirectAddrPolicy overrides the literal IP address policy checked on
+// original URLs, HTTP redirects, and final URLs independently of dial-time resolution.
+func WithCDNRedirectAddrPolicy(policy CDNAddrPolicy) CDNSourceOption {
+	return func(cfg *cdnSourceConfig) {
+		cfg.redirectAddrPolicy = policy
+	}
+}
+
 // WithCDNLookupIP overrides the DNS resolver used at dial time by a CDNSource.
 func WithCDNLookupIP(lookup CDNLookupIPAddrFunc) CDNSourceOption {
 	return func(cfg *cdnSourceConfig) {
 		cfg.lookupIP = lookup
+	}
+}
+
+// WithCDNHTTPClient overrides the HTTP client wrapped by a CDNSource.
+func WithCDNHTTPClient(client *http.Client) CDNSourceOption {
+	return func(cfg *cdnSourceConfig) {
+		cfg.httpClient = client
 	}
 }
 
@@ -153,6 +170,63 @@ func AllowLoopbackCDNAddr(addr netip.Addr) bool {
 		return true
 	}
 	return IsPublicCDNAddr(addr)
+}
+
+func isFakeIPv4(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" {
+		return false
+	}
+	unmapped := addr.Unmap()
+	return unmapped.Is4() && ipv4FakeIPPrefix.Contains(unmapped)
+}
+
+// IsPublicOrFakeIPCDNAddr permits globally public addresses plus RFC 2544
+// Fake-IP addresses (198.18.0.0/15) used by transparent TUN proxy DNS.
+func IsPublicOrFakeIPCDNAddr(addr netip.Addr) bool {
+	return isFakeIPv4(addr) || IsPublicCDNAddr(addr)
+}
+
+// CDNAddrPolicyForContext returns IsPublicOrFakeIPCDNAddr when the runtime's
+// resolver indicates transparent TUN Fake-IP mode (api.github.com resolves into
+// 198.18.0.0/15 without private addresses), and strict IsPublicCDNAddr otherwise.
+func CDNAddrPolicyForContext(ctx context.Context, lookup CDNLookupIPAddrFunc) CDNAddrPolicy {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if isTunnelFakeIPMode(ctx, lookup) {
+		return IsPublicOrFakeIPCDNAddr
+	}
+	return IsPublicCDNAddr
+}
+
+func isTunnelFakeIPMode(ctx context.Context, lookup CDNLookupIPAddrFunc) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ipAddrs, err := lookup(probeCtx, githubAPIHost)
+	if err != nil || len(ipAddrs) == 0 {
+		return false
+	}
+	sawFakeIP := false
+	for _, ipAddr := range ipAddrs {
+		addr, ok := netip.AddrFromSlice(ipAddr.IP)
+		if !ok || ipAddr.Zone != "" {
+			return false
+		}
+		if isFakeIPv4(addr) {
+			sawFakeIP = true
+			continue
+		}
+		if !IsPublicCDNAddr(addr) {
+			return false
+		}
+	}
+	return sawFakeIP
 }
 
 // ValidateCDNPrefix enforces that a user-supplied CDN prefix is an https URL
@@ -219,18 +293,19 @@ func validateCDNHostLiteral(host string, policy CDNAddrPolicy) error {
 	if policy == nil {
 		policy = IsPublicCDNAddr
 	}
-	if host == "" || strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+	trimmedHost := strings.TrimSuffix(host, ".")
+	if trimmedHost == "" || strings.EqualFold(trimmedHost, "localhost") || strings.HasSuffix(strings.ToLower(trimmedHost), ".localhost") {
 		return fmt.Errorf("%w: loopback host is not allowed", ErrInvalidCDNPrefix)
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if !policy(addr) {
+		if isFakeIPv4(addr) || !policy(addr) {
 			return fmt.Errorf("%w: non-public CDN host address %s is not allowed", ErrInvalidCDNPrefix, host)
 		}
 		return nil
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		addr, ok := netip.AddrFromSlice(ip)
-		if !ok || !policy(addr) {
+		if !ok || isFakeIPv4(addr) || !policy(addr) {
 			return fmt.Errorf("%w: non-public CDN host address %s is not allowed", ErrInvalidCDNPrefix, host)
 		}
 		return nil
@@ -238,7 +313,7 @@ func validateCDNHostLiteral(host string, policy CDNAddrPolicy) error {
 	if strings.ContainsRune(host, ':') {
 		return fmt.Errorf("%w: invalid IPv6 host literal %s", ErrInvalidCDNPrefix, host)
 	}
-	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	labels := strings.Split(trimmedHost, ".")
 	lastLabel := labels[len(labels)-1]
 	if lastLabel == "" || isAllDigits(lastLabel) || strings.HasPrefix(strings.ToLower(lastLabel), "0x") {
 		return fmt.Errorf("%w: numeric host literal %s is not allowed", ErrInvalidCDNPrefix, host)
@@ -305,15 +380,26 @@ func cdnReleaseAssetURLWithPolicy(goos, goarch, prefix, version string, policy C
 // CDNSource downloads a release archive through a validated HTTPS CDN prefix.
 // Trust comes exclusively from the pinned executable artifactId in the image manifest.
 type CDNSource struct {
-	client     httpDoer
-	goos       string
-	goarch     string
-	prefix     string
-	addrPolicy CDNAddrPolicy
+	client             httpDoer
+	goos               string
+	goarch             string
+	prefix             string
+	addrPolicy         CDNAddrPolicy
+	redirectAddrPolicy CDNAddrPolicy
+}
+
+// CloseIdleConnections closes any idle keep-alive connections held by this CDN source's HTTP client.
+func (s *CDNSource) CloseIdleConnections() {
+	if s == nil || s.client == nil {
+		return
+	}
+	if closer, ok := s.client.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func NewCDNSource(prefix string, opts ...CDNSourceOption) (*CDNSource, error) {
-	return NewCDNSourceForPlatform(runtime.GOOS, runtime.GOARCH, prefix, NewCDNHTTPClient(nil), opts...)
+	return NewCDNSourceForPlatformWithRoots(runtime.GOOS, runtime.GOARCH, prefix, nil, opts...)
 }
 
 func NewCDNSourceWithClient(prefix string, client *http.Client, opts ...CDNSourceOption) (*CDNSource, error) {
@@ -321,10 +407,10 @@ func NewCDNSourceWithClient(prefix string, client *http.Client, opts ...CDNSourc
 }
 
 func NewCDNSourceWithRoots(prefix string, roots *x509.CertPool, opts ...CDNSourceOption) (*CDNSource, error) {
-	return NewCDNSourceForPlatform(runtime.GOOS, runtime.GOARCH, prefix, NewCDNHTTPClient(roots), opts...)
+	return NewCDNSourceForPlatformWithRoots(runtime.GOOS, runtime.GOARCH, prefix, roots, opts...)
 }
 
-func NewCDNSourceForPlatform(goos, goarch, prefix string, client *http.Client, opts ...CDNSourceOption) (*CDNSource, error) {
+func resolveCDNSourceConfig(opts ...CDNSourceOption) cdnSourceConfig {
 	cfg := cdnSourceConfig{
 		addrPolicy: IsPublicCDNAddr,
 		lookupIP:   net.DefaultResolver.LookupIPAddr,
@@ -337,10 +423,45 @@ func NewCDNSourceForPlatform(goos, goarch, prefix string, client *http.Client, o
 	if cfg.addrPolicy == nil {
 		cfg.addrPolicy = IsPublicCDNAddr
 	}
+	if cfg.redirectAddrPolicy == nil {
+		cfg.redirectAddrPolicy = cfg.addrPolicy
+	}
 	if cfg.lookupIP == nil {
 		cfg.lookupIP = net.DefaultResolver.LookupIPAddr
 	}
-	normalizedPrefix, err := ValidateCDNPrefixWithPolicy(prefix, cfg.addrPolicy)
+	return cfg
+}
+
+// NewCDNSourceForPlatformWithRoots builds a platform-specific CDN source using
+// a single-layer hardened HTTP client with roots and opts applied directly.
+func NewCDNSourceForPlatformWithRoots(goos, goarch, prefix string, roots *x509.CertPool, opts ...CDNSourceOption) (*CDNSource, error) {
+	cfg := resolveCDNSourceConfig(opts...)
+	normalizedPrefix, err := ValidateCDNPrefixWithPolicy(prefix, cfg.redirectAddrPolicy)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := platformAssetSuffix(goos, goarch); err != nil {
+		return nil, err
+	}
+	var client *http.Client
+	if cfg.httpClient != nil {
+		client = wrapCDNClient(cfg.httpClient, cfg)
+	} else {
+		client = newCDNHTTPClient(roots, cfg)
+	}
+	return &CDNSource{
+		client:             client,
+		goos:               goos,
+		goarch:             goarch,
+		prefix:             normalizedPrefix,
+		addrPolicy:         cfg.addrPolicy,
+		redirectAddrPolicy: cfg.redirectAddrPolicy,
+	}, nil
+}
+
+func NewCDNSourceForPlatform(goos, goarch, prefix string, client *http.Client, opts ...CDNSourceOption) (*CDNSource, error) {
+	cfg := resolveCDNSourceConfig(opts...)
+	normalizedPrefix, err := ValidateCDNPrefixWithPolicy(prefix, cfg.redirectAddrPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -351,22 +472,23 @@ func NewCDNSourceForPlatform(goos, goarch, prefix string, client *http.Client, o
 		return nil, errors.New("CDN HTTP client is required")
 	}
 	return &CDNSource{
-		client:     wrapCDNClient(client, cfg),
-		goos:       goos,
-		goarch:     goarch,
-		prefix:     normalizedPrefix,
-		addrPolicy: cfg.addrPolicy,
+		client:             wrapCDNClient(client, cfg),
+		goos:               goos,
+		goarch:             goarch,
+		prefix:             normalizedPrefix,
+		addrPolicy:         cfg.addrPolicy,
+		redirectAddrPolicy: cfg.redirectAddrPolicy,
 	}, nil
 }
 
 func NewCDNHTTPClient(roots *x509.CertPool) *http.Client {
-	cfg := cdnSourceConfig{
-		addrPolicy: IsPublicCDNAddr,
-		lookupIP:   net.DefaultResolver.LookupIPAddr,
-	}
+	return newCDNHTTPClient(roots, resolveCDNSourceConfig())
+}
+
+func newCDNHTTPClient(roots *x509.CertPool, cfg cdnSourceConfig) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.DialContext = newCDNDialContext(nil, cfg.lookupIP, cfg.addrPolicy)
+	transport.DialContext = newCDNDialContextWithLiteralPolicy(nil, cfg.lookupIP, cfg.addrPolicy, cfg.redirectAddrPolicy)
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.ExpectContinueTimeout = time.Second
@@ -381,7 +503,7 @@ func NewCDNHTTPClient(roots *x509.CertPool) *http.Client {
 	return &http.Client{
 		Transport:     transport,
 		Timeout:       ReleaseClientTimeout,
-		CheckRedirect: makeCDNRedirectChecker(cfg.addrPolicy),
+		CheckRedirect: makeCDNRedirectChecker(cfg.redirectAddrPolicy),
 	}
 }
 
@@ -390,18 +512,18 @@ func wrapCDNClient(client *http.Client, cfg cdnSourceConfig) *http.Client {
 	if transport, ok := cloned.Transport.(*http.Transport); ok && transport != nil {
 		transportClone := transport.Clone()
 		transportClone.Proxy = nil
-		transportClone.DialContext = newCDNDialContext(transportClone.DialContext, cfg.lookupIP, cfg.addrPolicy)
+		transportClone.DialContext = newCDNDialContextWithLiteralPolicy(transportClone.DialContext, cfg.lookupIP, cfg.addrPolicy, cfg.redirectAddrPolicy)
 		cloned.Transport = transportClone
 	} else if cloned.Transport == nil {
 		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 		defaultTransport.Proxy = nil
-		defaultTransport.DialContext = newCDNDialContext(nil, cfg.lookupIP, cfg.addrPolicy)
+		defaultTransport.DialContext = newCDNDialContextWithLiteralPolicy(nil, cfg.lookupIP, cfg.addrPolicy, cfg.redirectAddrPolicy)
 		cloned.Transport = defaultTransport
 	}
 	if cloned.Timeout <= 0 {
 		cloned.Timeout = ReleaseClientTimeout
 	}
-	cloned.CheckRedirect = makeCDNRedirectChecker(cfg.addrPolicy)
+	cloned.CheckRedirect = makeCDNRedirectChecker(cfg.redirectAddrPolicy)
 	return &cloned
 }
 
@@ -410,8 +532,20 @@ func newCDNDialContext(
 	lookup CDNLookupIPAddrFunc,
 	policy CDNAddrPolicy,
 ) func(ctx context.Context, network, address string) (net.Conn, error) {
+	return newCDNDialContextWithLiteralPolicy(baseDial, lookup, policy, policy)
+}
+
+func newCDNDialContextWithLiteralPolicy(
+	baseDial func(ctx context.Context, network, addr string) (net.Conn, error),
+	lookup CDNLookupIPAddrFunc,
+	policy CDNAddrPolicy,
+	literalPolicy CDNAddrPolicy,
+) func(ctx context.Context, network, address string) (net.Conn, error) {
 	if policy == nil {
 		policy = IsPublicCDNAddr
+	}
+	if literalPolicy == nil {
+		literalPolicy = policy
 	}
 	if lookup == nil {
 		lookup = net.DefaultResolver.LookupIPAddr
@@ -425,6 +559,9 @@ func newCDNDialContext(
 		host, port, err := net.SplitHostPort(address)
 		if err != nil || host == "" || port == "" {
 			return nil, fmt.Errorf("invalid CDN dial address %q", address)
+		}
+		if err := validateCDNHostLiteral(host, literalPolicy); err != nil {
+			return nil, err
 		}
 		verifiedAddrs, err := resolveAndVerifyCDNHost(ctx, host, lookup, policy)
 		if err != nil {
@@ -462,8 +599,11 @@ func resolveAndVerifyCDNHost(
 	lookup CDNLookupIPAddrFunc,
 	policy CDNAddrPolicy,
 ) ([]netip.Addr, error) {
+	if policy == nil {
+		policy = IsPublicCDNAddr
+	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if !policy(addr) {
+		if isFakeIPv4(addr) || !policy(addr) {
 			return nil, fmt.Errorf("refusing CDN connection to non-public address %s", addr)
 		}
 		return []netip.Addr{addr.Unmap()}, nil
@@ -553,10 +693,22 @@ func validCDNRequestURL(req *http.Request, policy CDNAddrPolicy) bool {
 // DownloadArchive fetches the release archive from the CDN prefix into destination,
 // enforcing HTTPS, redirect limits, non-public address refusal, and the 64 MiB size cap.
 func (s *CDNSource) DownloadArchive(ctx context.Context, version string, destination io.Writer, progress ProgressFunc) error {
+	return s.downloadArchiveBounded(ctx, version, 0, destination, progress)
+}
+
+func (s *CDNSource) downloadArchiveBounded(ctx context.Context, version string, expectedSize int64, destination io.Writer, progress ProgressFunc) error {
 	if s == nil || s.client == nil || destination == nil {
 		return fmt.Errorf("%w: CDN source is unavailable", ErrDownloadFailed)
 	}
-	targetURL, err := cdnReleaseAssetURLWithPolicy(s.goos, s.goarch, s.prefix, version, s.addrPolicy)
+	defer s.CloseIdleConnections()
+	urlPolicy := s.redirectAddrPolicy
+	if urlPolicy == nil {
+		urlPolicy = s.addrPolicy
+	}
+	if urlPolicy == nil {
+		urlPolicy = IsPublicCDNAddr
+	}
+	targetURL, err := cdnReleaseAssetURLWithPolicy(s.goos, s.goarch, s.prefix, version, urlPolicy)
 	if err != nil {
 		return err
 	}
@@ -568,18 +720,33 @@ func (s *CDNSource) DownloadArchive(ctx context.Context, version string, destina
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: CDN download request: %v", ErrDownloadFailed, err)
+		return fmt.Errorf("%w: CDN download request: %w", ErrDownloadFailed, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !validCDNRequestURL(resp.Request, s.addrPolicy) {
+	if resp.StatusCode != http.StatusOK || !validCDNRequestURL(resp.Request, urlPolicy) {
 		return fmt.Errorf("%w: CDN download returned HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
-	written, err := copyBoundedArchive(resp.Body, destination, resp.ContentLength, progress)
+	if resp.ContentLength > MaxAcquisitionArchiveBytes {
+		return fmt.Errorf("%w: content length %d exceeds %d", ErrArchiveTooLarge, resp.ContentLength, MaxAcquisitionArchiveBytes)
+	}
+	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
+		return fmt.Errorf("%w: CDN download size differs from release metadata", ErrArchiveInvalid)
+	}
+	maxBytes := int64(MaxAcquisitionArchiveBytes)
+	totalBytes := resp.ContentLength
+	if expectedSize > 0 {
+		maxBytes = min(expectedSize, int64(MaxAcquisitionArchiveBytes))
+		totalBytes = expectedSize
+	}
+	written, err := copyBoundedArchiveWithMax(ctx, resp.Body, destination, totalBytes, maxBytes, progress)
 	if err != nil {
-		if errors.Is(err, ErrArchiveTooLarge) {
+		if errors.Is(err, ErrArchiveTooLarge) || errors.Is(err, ErrArchiveInvalid) || errors.Is(err, ErrStaging) {
 			return err
 		}
-		return fmt.Errorf("%w: read CDN response body: %v", ErrDownloadFailed, err)
+		return fmt.Errorf("%w: read CDN response body: %w", ErrDownloadFailed, err)
+	}
+	if expectedSize > 0 && written != expectedSize {
+		return fmt.Errorf("%w: CDN download size differs from release metadata", ErrArchiveInvalid)
 	}
 	if resp.ContentLength >= 0 && written != resp.ContentLength {
 		return fmt.Errorf("%w: CDN download size differs from Content-Length", ErrDownloadFailed)
@@ -703,12 +870,15 @@ func (s *Source) DownloadArchive(ctx context.Context, version string, destinatio
 		resp.Request.URL.Scheme != "https" || !allowedDownloadHost(resp.Request.URL.Hostname()) {
 		return fmt.Errorf("%w: official download returned HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
-	written, err := copyBoundedArchive(resp.Body, destination, resp.ContentLength, progress)
+	if resp.ContentLength > MaxAcquisitionArchiveBytes {
+		return fmt.Errorf("%w: content length %d exceeds %d", ErrArchiveTooLarge, resp.ContentLength, MaxAcquisitionArchiveBytes)
+	}
+	written, err := copyBoundedArchiveWithMax(ctx, resp.Body, destination, resp.ContentLength, MaxAcquisitionArchiveBytes, progress)
 	if err != nil {
-		if errors.Is(err, ErrArchiveTooLarge) {
+		if errors.Is(err, ErrArchiveTooLarge) || errors.Is(err, ErrStaging) {
 			return err
 		}
-		return fmt.Errorf("%w: read official download body: %v", ErrDownloadFailed, err)
+		return fmt.Errorf("%w: read official download body: %w", ErrDownloadFailed, err)
 	}
 	if resp.ContentLength >= 0 && written != resp.ContentLength {
 		return fmt.Errorf("%w: official download size differs from Content-Length", ErrDownloadFailed)
@@ -720,28 +890,64 @@ func (s *Source) DownloadArchive(ctx context.Context, version string, destinatio
 }
 
 func copyBoundedArchive(src io.Reader, dst io.Writer, contentLength int64, progress ProgressFunc) (int64, error) {
+	return copyBoundedArchiveWithMax(context.Background(), src, dst, contentLength, MaxAcquisitionArchiveBytes, progress)
+}
+
+func copyBoundedArchiveWithMax(
+	ctx context.Context,
+	src io.Reader,
+	dst io.Writer,
+	contentLength int64,
+	maxBytes int64,
+	progress ProgressFunc,
+) (int64, error) {
 	if contentLength > MaxAcquisitionArchiveBytes {
 		return 0, fmt.Errorf("%w: content length %d exceeds %d", ErrArchiveTooLarge, contentLength, MaxAcquisitionArchiveBytes)
+	}
+	if maxBytes <= 0 || maxBytes > MaxAcquisitionArchiveBytes {
+		maxBytes = MaxAcquisitionArchiveBytes
+	}
+	if contentLength > maxBytes {
+		return 0, fmt.Errorf("%w: content length %d exceeds expected %d", ErrArchiveInvalid, contentLength, maxBytes)
 	}
 	var totalBytes int64
 	if contentLength > 0 {
 		totalBytes = contentLength
 	}
+	writeLimit := maxBytes
+	if contentLength >= 0 && contentLength < writeLimit {
+		writeLimit = contentLength
+	}
 	if progress != nil {
 		progress(0, totalBytes)
 	}
-	limited := io.LimitReader(src, MaxAcquisitionArchiveBytes+1)
+	limited := io.LimitReader(src, min(writeLimit+1, int64(MaxAcquisitionArchiveBytes)+1))
 	buf := make([]byte, 32*1024)
 	var received int64
 	for {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return received, err
+			}
+		}
 		n, readErr := limited.Read(buf)
 		if n > 0 {
-			received += int64(n)
-			if received > MaxAcquisitionArchiveBytes {
-				return received, fmt.Errorf("%w: archive exceeds %d bytes", ErrArchiveTooLarge, MaxAcquisitionArchiveBytes)
+			next := received + int64(n)
+			if next > MaxAcquisitionArchiveBytes {
+				return next, fmt.Errorf("%w: archive exceeds %d bytes", ErrArchiveTooLarge, MaxAcquisitionArchiveBytes)
 			}
+			if next > writeLimit {
+				if maxBytes < MaxAcquisitionArchiveBytes && next > maxBytes {
+					return next, fmt.Errorf("%w: archive exceeds expected %d bytes", ErrArchiveInvalid, maxBytes)
+				}
+				return next, nil
+			}
+			received = next
 			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
-				return received, writeErr
+				if errors.Is(writeErr, ErrArchiveTooLarge) {
+					return received, writeErr
+				}
+				return received, fmt.Errorf("%w: write archive: %w", ErrStaging, writeErr)
 			}
 			if progress != nil {
 				progress(received, totalBytes)
@@ -753,7 +959,7 @@ func copyBoundedArchive(src io.Reader, dst io.Writer, contentLength int64, progr
 			}
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(readErr, &maxBytesErr) {
-				return received, fmt.Errorf("%w: %v", ErrArchiveTooLarge, readErr)
+				return received, fmt.Errorf("%w: %w", ErrArchiveTooLarge, readErr)
 			}
 			return received, readErr
 		}

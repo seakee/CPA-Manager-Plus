@@ -196,5 +196,17 @@ describe('gateway configuration client', () => {
     expect(
       draftIssue(field({ type: 'string', kind: 'url', value: '' }), { action: 'set', value: ' ' })
     ).toBe('required');
+    expect(
+      draftIssue(
+        field({ type: 'kv-map', path: 'routing.replace-model', value: {} }),
+        { action: 'set', value: { '': 'replacement' } }
+      )
+    ).toBe('keyRequired');
+    expect(
+      draftIssue(
+        field({ type: 'kv-map', path: 'routing.replace-model', value: {} }),
+        { action: 'set', value: { alpha: 'one', ' alpha ': 'two' } }
+      )
+    ).toBe('duplicate');
   });
 });

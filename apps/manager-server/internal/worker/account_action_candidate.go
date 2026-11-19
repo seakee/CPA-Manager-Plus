@@ -32,6 +32,7 @@ type AccountActionCandidateWorker struct {
 
 	mu          sync.RWMutex
 	autoDisable bool
+	lifecycle   workerLifecycle
 }
 
 type accountActionCandidate struct {
@@ -80,7 +81,17 @@ func NewAccountActionCandidateWorkerWithMutationCoordinator(
 }
 
 func (w *AccountActionCandidateWorker) Start(ctx context.Context) {
-	go w.run(ctx)
+	if w == nil {
+		return
+	}
+	w.lifecycle.goRun(ctx, func() { w.run(ctx) })
+}
+
+func (w *AccountActionCandidateWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *AccountActionCandidateWorker) SetAutoDisable(enabled bool) {

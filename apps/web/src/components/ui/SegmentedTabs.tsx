@@ -15,6 +15,7 @@ export type SegmentedTabItem<Id extends string = string> = {
   disabled?: boolean;
   title?: string;
   to?: string;
+  testId?: string;
 };
 
 export type SegmentedTabsLinkProps = {
@@ -145,6 +146,7 @@ export function SegmentedTabs<Id extends string>({
           className: itemClassName,
           role: 'tab' as const,
           id: itemId,
+          'data-testid': item.testId,
           'aria-selected': isActive,
           tabIndex: isActive && !isDisabled ? 0 : -1,
           title: item.title,
@@ -152,7 +154,6 @@ export function SegmentedTabs<Id extends string>({
           onKeyDown: (event: KeyboardEvent<HTMLElement>) => handleKeyDown(event, item.id),
           children: item.label,
         };
-
         if (item.to && !isDisabled && LinkComponent) {
           return (
             <LinkComponent

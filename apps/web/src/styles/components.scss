@@ -661,7 +661,7 @@ textarea {
 }
 
 .modal {
-  background: var(--bg-primary);
+  background: var(--app-surface-strong, var(--bg-primary));
   border-radius: var(--app-radius-md);
   border: 1px solid var(--border-color);
   /* floating layer: elevation allowed */

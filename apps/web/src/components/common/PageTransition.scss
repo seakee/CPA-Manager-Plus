@@ -8,6 +8,9 @@
   min-height: 0;
   overflow: hidden;
 
+  &--empty {
+    display: none;
+  }
   &__layer {
     display: flex;
     flex-direction: column;

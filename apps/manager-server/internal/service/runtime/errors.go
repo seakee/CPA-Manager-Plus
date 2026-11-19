@@ -14,6 +14,7 @@ type ProtocolErrorCode string
 
 const (
 	ProtocolErrorInvalidRequest                  ProtocolErrorCode = "invalid_request"
+	ProtocolErrorArchiveTooLarge                 ProtocolErrorCode = "archive_too_large"
 	ProtocolErrorUnsupportedOperation            ProtocolErrorCode = "unsupported_operation"
 	ProtocolErrorRuntimeIdentityMismatch         ProtocolErrorCode = "runtime_identity_mismatch"
 	ProtocolErrorStaleRuntimeGeneration          ProtocolErrorCode = "stale_runtime_generation"

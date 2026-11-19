@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -181,4 +182,170 @@ func submitObserveUpdate(t *testing.T, handler http.Handler, target string, body
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+type prepareProgressFunc func(string) (lifecycle.PrepareProgress, bool)
+
+func (f prepareProgressFunc) ObservePrepareProgress(operationID string) (lifecycle.PrepareProgress, bool) {
+	return f(operationID)
+}
+
+func TestObserveUpdateOperationIncludesTransientPrepareProgressWhileRunning(t *testing.T) {
+	h, err := NewHandler(Config{
+		RuntimeIdentity:   "runtime-01",
+		RuntimeGeneration: 7,
+		Token:             testRuntimeToken,
+		ObserveUpdate: observeUpdateFunc(func(context.Context, lifecycle.ObserveUpdateOperationRequest) (journal.Operation, error) {
+			return journal.Operation{
+				OperationID: "manager-op", OperationType: lifecycle.UpdateOperationPrepare,
+				RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, State: journal.StateRunning,
+			}, nil
+		}),
+		ObservePrepareProgress: prepareProgressFunc(func(id string) (lifecycle.PrepareProgress, bool) {
+			if id != "manager-op" {
+				return lifecycle.PrepareProgress{}, false
+			}
+			return lifecycle.PrepareProgress{Phase: "downloading", ReceivedBytes: 512, TotalBytes: 1024}, true
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := submitObserveUpdate(t, h, validObserveUpdateTarget(), nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got observedOperationResponse
+	decodeResponse(t, response, &got)
+	if got.Phase != "downloading" || got.ReceivedBytes != 512 || got.TotalBytes != 1024 {
+		t.Fatalf("progress response = %+v", got)
+	}
+}
+
+func TestObserveUpdateOperationOmitsTransientProgressForTerminalStatesAndActivateUpdate(t *testing.T) {
+	created := time.Date(2026, 9, 18, 2, 3, 4, 0, time.UTC)
+	updated := created.Add(time.Second)
+	completed := updated
+	tests := []struct {
+		name          string
+		operationType string
+		state         journal.State
+		failureCode   string
+		completedAt   *time.Time
+	}{
+		{
+			name:          "prepare_update succeeded",
+			operationType: lifecycle.UpdateOperationPrepare,
+			state:         journal.StateSucceeded,
+			completedAt:   &completed,
+		},
+		{
+			name:          "prepare_update failed",
+			operationType: lifecycle.UpdateOperationPrepare,
+			state:         journal.StateFailed,
+			failureCode:   "staging_failed",
+			completedAt:   &completed,
+		},
+		{
+			name:          "activate_update accepted",
+			operationType: lifecycle.UpdateOperationActivate,
+			state:         journal.StateAccepted,
+		},
+		{
+			name:          "activate_update running",
+			operationType: lifecycle.UpdateOperationActivate,
+			state:         journal.StateRunning,
+		},
+		{
+			name:          "activate_update succeeded",
+			operationType: lifecycle.UpdateOperationActivate,
+			state:         journal.StateSucceeded,
+			completedAt:   &completed,
+		},
+		{
+			name:          "activate_update failed",
+			operationType: lifecycle.UpdateOperationActivate,
+			state:         journal.StateFailed,
+			failureCode:   "activation_failed",
+			completedAt:   &completed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := NewHandler(Config{
+				RuntimeIdentity:   "runtime-01",
+				RuntimeGeneration: 7,
+				Token:             testRuntimeToken,
+				ObserveUpdate: observeUpdateFunc(func(_ context.Context, request lifecycle.ObserveUpdateOperationRequest) (journal.Operation, error) {
+					if request.OperationType != tc.operationType {
+						t.Fatalf("request.OperationType = %q, want %q", request.OperationType, tc.operationType)
+					}
+					return journal.Operation{
+						OperationID:       "manager-op",
+						OperationType:     tc.operationType,
+						RuntimeIdentity:   "runtime-01",
+						RuntimeGeneration: 7,
+						State:             tc.state,
+						FailureCode:       tc.failureCode,
+						CreatedAt:         created,
+						UpdatedAt:         updated,
+						CompletedAt:       tc.completedAt,
+					}, nil
+				}),
+				ObservePrepareProgress: prepareProgressFunc(func(id string) (lifecycle.PrepareProgress, bool) {
+					if id != "manager-op" {
+						return lifecycle.PrepareProgress{}, false
+					}
+					return lifecycle.PrepareProgress{
+						Phase:         "downloading",
+						ReceivedBytes: 512,
+						TotalBytes:    1024,
+					}, true
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			query := url.Values{
+				"operationId":               {"manager-op"},
+				"expectedRuntimeIdentity":   {"runtime-01"},
+				"expectedRuntimeGeneration": {"7"},
+				"operationType":             {tc.operationType},
+				"targetVersion":             {"7.3.4"},
+			}
+			response := submitObserveUpdate(t, h, observeUpdateOperationPath+"?"+query.Encode(), nil)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			assertJSONHeaders(t, response)
+
+			rawBody := response.Body.String()
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(rawBody), &raw); err != nil {
+				t.Fatalf("unmarshal raw response: %v", err)
+			}
+			for _, omittedKey := range []string{"phase", "receivedBytes", "totalBytes"} {
+				if _, exists := raw[omittedKey]; exists {
+					t.Fatalf("response included transient field %q: %s", omittedKey, rawBody)
+				}
+			}
+
+			var got observedOperationResponse
+			decodeResponse(t, response, &got)
+			if got.OperationID != "manager-op" || got.OperationType != tc.operationType || got.State != tc.state {
+				t.Fatalf("response = %+v", got)
+			}
+			if got.Phase != "" || got.ReceivedBytes != 0 || got.TotalBytes != 0 {
+				t.Fatalf("transient progress leaked into decoded response: %+v", got)
+			}
+			if tc.failureCode == "" && got.Error != nil {
+				t.Fatalf("unexpected error in response: %+v", got.Error)
+			}
+			if tc.failureCode != "" && (got.Error == nil || got.Error.Code != tc.failureCode) {
+				t.Fatalf("error = %+v, want code %q", got.Error, tc.failureCode)
+			}
+		})
+	}
 }

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,12 +22,14 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	keyrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	settingrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
@@ -1699,11 +1703,13 @@ func TestCompletedExternalUpgradeMountsUsageRebindAndFencesBridge(t *testing.T) 
 	// 4. Rotate External CPA key -> 401 records rejection, blanks access-info, and POST external/rebind aborts unattempted key journal op & restores authority.
 	activeKey.Store(newKey)
 	gwRejected := authReq(http.MethodGet, "/ext-console/api/v2/gateway/config", "")
-	var rejectedView freshconfig.View
-	_ = json.NewDecoder(gwRejected.Body).Decode(&rejectedView)
+	var rejectedErr struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(gwRejected.Body).Decode(&rejectedErr)
 	_ = gwRejected.Body.Close()
-	if rejectedView.Capability.Reason != freshconfig.ReasonManagementRejected {
-		t.Fatalf("expected management rejection on gateway/config, got %+v", rejectedView.Capability)
+	if gwRejected.StatusCode != http.StatusConflict || rejectedErr.Code != freshconfig.ReasonManagementRejected {
+		t.Fatalf("expected 409 %s on gateway/config, got status=%d body=%+v", freshconfig.ReasonManagementRejected, gwRejected.StatusCode, rejectedErr)
 	}
 
 	fencedInfoRes := authReq(http.MethodGet, "/ext-console/api/v2/api-keys/access-info", "")
@@ -1959,5 +1965,604 @@ func TestCompletedManagedUpgradeSeedsDesiredRunningOnceAndExternalFencesReconcil
 	}
 	if _, extFound, extErr := extDesiredStore.LoadEmbeddedRuntimeDesiredState(ctx); extErr != nil || extFound {
 		t.Fatalf("External desired state = (found=%v, err=%v), want absent", extFound, extErr)
+	}
+}
+
+func TestCompletedManagedUpgradeFencesForeignCPAConnectionPutAndReenablesCollection(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	managedSecret := strings.Repeat("d", 64)
+	var statsEnabled atomic.Bool
+	statsEnabled.Store(true)
+	managedCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+managedSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.64")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/config":
+			_, _ = w.Write([]byte(`{"port":8317}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config":
+			_, _ = w.Write([]byte(`{"config-version":8,"access":{"api-keys":["sk-managed-1"]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-statistics-enabled":
+			_ = json.NewEncoder(w).Encode(map[string]any{"usage-statistics-enabled": statsEnabled.Load()})
+		case r.Method == http.MethodPut && r.URL.Path == "/v0/management/usage-statistics-enabled":
+			statsEnabled.Store(true)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage":
+			_, _ = w.Write([]byte(`{"usage":{}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/usage-queue":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer managedCPA.Close()
+
+	ctx := context.Background()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, cfg, adminKey := seedCompletedManagedUpgradeStore(t, "/upg-console", "/upg-api")
+	cfg.CollectorMode = "http"
+	cfg.PollInterval = 25 * time.Millisecond
+
+	enabled := true
+	managedURL := strings.TrimRight(managedCPA.URL, "/")
+	if err := st.SaveManagerConfigAndSetup(ctx, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{
+			CPABaseURL:    managedURL,
+			ManagementKey: managedSecret,
+		},
+		Collector: model.ManagerCollectorConfig{
+			Enabled:        &enabled,
+			CollectorMode:  "http",
+			Queue:          "managed-q",
+			PopSide:        "left",
+			PollIntervalMS: 25,
+		},
+	}, model.Setup{
+		CPAUpstreamURL: managedURL,
+		ManagementKey:  managedSecret,
+		Queue:          "managed-q",
+		PopSide:        "left",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	keyBytes, _, err := security.LoadOrCreateDataKey("", cfg.DataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector, err := security.NewProtector(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedDestKey, err := protector.ProtectString(managedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceIdentity := "external:sha256:" + strings.Repeat("c", 64)
+	pluginsInit := false
+	destPayload, _ := json.Marshal(upgradeDestinationRecord{
+		BaseURL:           managedURL,
+		URLProved:         true,
+		ManagementKey:     sealedDestKey,
+		ServerFingerprint: "external:sha256:" + strings.Repeat("b", 64),
+		Attempt:           1,
+		OperationID:       upgradeManagedDestinationOperationID(sourceIdentity, 1),
+		Intent: upgradeDestinationIntent{
+			ExpectedRuntimeIdentity:   "embedded-default",
+			ExpectedRuntimeGeneration: 7,
+			ExpectedActiveArtifactID:  qualifiedArtifact,
+			SourceIdentity:            sourceIdentity,
+			SourceClass:               upgradeManagedDestinationClass,
+			APIKeys:                   []string{"sk-managed-1"},
+			PluginsEnabled:            &pluginsInit,
+		},
+	})
+	if _, err := st.SQLDB().Exec(`insert into settings(key, value, updated_at_ms) values(?, ?, ?)`, upgradeImportDestinationSettingKey, string(destPayload), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &upgradeCanonicalTestRuntime{
+		status: model.RuntimeObservedStatus{
+			Identity:           "embedded-default",
+			Generation:         21,
+			ProtocolVersion:    "v1",
+			State:              model.RuntimeStateReady,
+			Capabilities:       model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStop, model.RuntimeCapabilityRestart},
+			CPAObservedVersion: "8.0.64",
+			Recovery:           &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive},
+			ActiveGatewayArtifact: &model.ActiveGatewayArtifact{
+				Engine:     "cpa",
+				ArtifactID: qualifiedArtifact,
+				Version:    "8.0.64",
+			},
+		},
+	}
+
+	manager := collector.NewManager(cfg, st)
+	t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+	serverApp := httpapi.New(cfg, st, manager)
+	ws, closeWS, err := newUpgradeAPIKeysHandler(upgradeAPIKeysConfig{
+		DB:        st.SQLDB(),
+		Protector: protector,
+		Runtime:   rt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeWS)
+
+	var canonical *upgradeCanonicalServer
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp, ws.gatewayAdmitted, upgradeCanonicalDependencies{
+		Protector:    protector,
+		Workspace:    ws,
+		Runtime:      rt,
+		CanonicalOut: &canonical,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+	}
+
+	callManaged := func(method, path, body string) (int, string) {
+		t.Helper()
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, reader)
+		req.Header.Set("Authorization", "Bearer "+adminKey)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		serverApp.Handler().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// 1. PUT /cpamp/config and /cpamp/usage-service/config carrying foreign cpaConnection —
+	//    including extra top-level "cpaConnection":123 and sequential duplicate "cpaConnection":{...},"cpaConnection":null —
+	//    are rejected with 409 managed_connection_immutable and never mutate stored connection or collector state.
+	foreignBodies := []string{
+		`{"config":{"cpaConnection":{"cpaBaseUrl":"http://127.0.0.1:1","managementKey":"` + managedSecret + `"},"collector":{"enabled":false,"batchSize":50}}}`,
+		`{"config":{"cpaConnection":{"cpaBaseUrl":"` + managedURL + `","managementKey":"` + strings.Repeat("f", 64) + `"},"collector":{"enabled":false}}}`,
+		`{"cpaConnection":123,"config":{"cpaConnection":{"cpaBaseUrl":"http://127.0.0.1:1","managementKey":"` + managedSecret + `"},"collector":{"enabled":false,"batchSize":50}}}`,
+		`{"cpaConnection":123,"config":{"cpaConnection":{"cpaBaseUrl":"` + managedURL + `","managementKey":"` + strings.Repeat("f", 64) + `"},"collector":{"enabled":false}}}`,
+		`{"config":{"cpaConnection":{"cpaBaseUrl":"http://127.0.0.1:1","managementKey":"` + managedSecret + `"},"cpaConnection":null,"collector":{"enabled":false,"batchSize":50}}}`,
+		`{"config":{"cpaConnection":{"cpaBaseUrl":"` + managedURL + `","managementKey":"` + strings.Repeat("f", 64) + `"},"cpaConnection":null,"collector":{"enabled":false}}}`,
+	}
+	for _, targetPath := range []string{"/upg-console/api/v2/cpamp/config", "/upg-console/api/v2/cpamp/usage-service/config"} {
+		for i, foreignBody := range foreignBodies {
+			code, raw := callManaged(http.MethodPut, targetPath, foreignBody)
+			var errResp struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal([]byte(raw), &errResp)
+			if code != http.StatusConflict || errResp.Code != "managed_connection_immutable" {
+				t.Fatalf("foreign Managed PUT %s case %d = %d %s, want 409 managed_connection_immutable", targetPath, i, code, raw)
+			}
+		}
+	}
+	savedMgr, ok, err := st.LoadManagerConfig(ctx)
+	if err != nil || !ok || savedMgr.CPAConnection.CPABaseURL != managedURL || savedMgr.CPAConnection.ManagementKey != managedSecret || savedMgr.Collector.Enabled == nil || !*savedMgr.Collector.Enabled {
+		t.Fatalf("LoadManagerConfig after rejected foreign PUT = (%+v, collector.enabled=%v, ok=%v, err=%v), want %q enabled=true", savedMgr.CPAConnection, savedMgr.Collector.Enabled, ok, err, managedURL)
+	}
+	savedSetup, ok, err := st.LoadSetup(ctx)
+	if err != nil || !ok || savedSetup.CPAUpstreamURL != managedURL || savedSetup.ManagementKey != managedSecret {
+		t.Fatalf("LoadSetup after rejected foreign PUT = (%+v, ok=%v, err=%v), want %q", savedSetup, ok, err, managedURL)
+	}
+
+	// 2. Legitimate Managed PUT omitting cpaConnection succeeds with 200; even if setup drifted beforehand, reconciliation heals both rows.
+	if err := st.SaveSetup(ctx, model.Setup{
+		CPAUpstreamURL: "http://127.0.0.1:1",
+		ManagementKey:  "stale-secret",
+		Queue:          "managed-q",
+		PopSide:        "left",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, targetPath := range []string{"/upg-console/api/v2/cpamp/config", "/upg-console/api/v2/cpamp/usage-service/config"} {
+		if code, raw := callManaged(http.MethodPut, targetPath, `{"config":{"collector":{"enabled":false,"batchSize":64,"pollIntervalMs":25,"collectorMode":"http"}}}`); code != http.StatusOK {
+			t.Fatalf("legitimate Managed PUT %s(enabled=false) = %d %s, want 200", targetPath, code, raw)
+		}
+	}
+	healedSetup, ok, err := st.LoadSetup(ctx)
+	if err != nil || !ok || healedSetup.CPAUpstreamURL != managedURL || healedSetup.ManagementKey != managedSecret {
+		t.Fatalf("LoadSetup after Managed reconciliation = (%+v, ok=%v, err=%v), want %q", healedSetup, ok, err, managedURL)
+	}
+
+	// 3. Subsequent PATCH /cpamp/config {"enabled": true} cleanly re-enables collection against Managed CPA.
+	if code, raw := callManaged(http.MethodPatch, "/upg-console/api/v2/cpamp/config", `{"enabled":true}`); code != http.StatusOK {
+		t.Fatalf("PATCH /cpamp/config {\"enabled\":true} = %d %s, want 200", code, raw)
+	}
+	activeCfg, active := manager.ActiveRuntimeConfig()
+	if !active || activeCfg.CPAUpstreamURL != managedURL || activeCfg.Queue != "managed-q" || activeCfg.PopSide != "left" {
+		t.Fatalf("ActiveRuntimeConfig after Managed re-enable = (active=%v, %+v), want active on %q (managed-q/left)", active, activeCfg, managedURL)
+	}
+}
+
+func TestCompletedExternalUpgradeGatewayConfigTargetMovedProjectionAndConcurrentRejection(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	extKey := strings.Repeat("a", 64)
+	extCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+extKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.64")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v8/management/config" {
+			_, _ = w.Write([]byte(`{"config-version":8,"routing":{"strategy":"round-robin"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer extCPA.Close()
+
+	ctx := context.Background()
+	st, cfg, adminKey := seedCompletedExternalUpgradeStore(t, "/ext-console", extCPA.URL)
+	keyBytes, _, err := security.LoadOrCreateDataKey("", cfg.DataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector, err := security.NewProtector(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, closeWS, err := newUpgradeAPIKeysHandler(upgradeAPIKeysConfig{
+		DB:        st.SQLDB(),
+		Protector: protector,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeWS)
+
+	var canonical *upgradeCanonicalServer
+	serverApp := httpapi.New(cfg, st, nil)
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp, ws.gatewayAdmitted, upgradeCanonicalDependencies{
+		Protector:    protector,
+		Workspace:    ws,
+		CanonicalOut: &canonical,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+	}
+
+	// Seed one persisted operation and one unknown operation in upgrade_config_groups_v1.
+	reqPersisted := strings.Repeat("1", 32)
+	reqUnknown := strings.Repeat("2", 32)
+	reqMissing := strings.Repeat("3", 32)
+	journalGroups := map[string]*freshstore.ConfigGroupJournal{
+		"routing": {
+			Latest: reqPersisted,
+			Operations: map[string]freshstore.ConfigGroupOperation{
+				reqPersisted: {
+					RequestID:  reqPersisted,
+					Group:      "routing",
+					Target:     "group",
+					Prefix:     "routing",
+					Baseline:   strings.Repeat("0", 64),
+					Edits:      []freshstore.ConfigGroupEdit{{Path: "routing.strategy", Action: "set", Value: "round-robin"}},
+					State:      "persisted",
+					Generation: "2000",
+				},
+			},
+		},
+		freshconfig.ConfigSourceGroupID: {
+			Latest: reqUnknown,
+			Operations: map[string]freshstore.ConfigGroupOperation{
+				reqUnknown: {
+					RequestID:  reqUnknown,
+					Group:      freshconfig.ConfigSourceGroupID,
+					Target:     "group",
+					Prefix:     "requests",
+					Baseline:   strings.Repeat("0", 64),
+					Edits:      []freshstore.ConfigGroupEdit{{Path: "requests.retry", Action: "set", Value: 3}},
+					State:      "unknown",
+					Generation: "2000",
+				},
+			},
+		},
+	}
+	rawGroups := map[string]json.RawMessage{}
+	for k, v := range journalGroups {
+		b, _ := json.Marshal(v)
+		rawGroups[k] = b
+	}
+	journalBytes, _ := json.Marshal(upgradeConfigJournalEnvelope{Groups: rawGroups})
+	if _, err := st.SQLDB().Exec(`insert into settings(key, value, updated_at_ms) values(?, ?, ?)`, upgradeConfigGroupsSettingsKey, string(journalBytes), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	callExt := func(method, path, body string) (int, []byte) {
+		t.Helper()
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, reader)
+		req.Header.Set("Authorization", "Bearer "+adminKey)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		serverApp.Handler().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.Bytes()
+	}
+
+	// Induce ErrExternalTargetMoved by writing a conflicting legacy setup URL.
+	if err := st.SaveSetup(ctx, model.Setup{
+		CPAUpstreamURL: "http://127.0.0.1:19999",
+		ManagementKey:  extKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. GET /gateway/config under ErrExternalTargetMoved returns full non-empty groups/fields/families projection.
+	code, raw := callExt(http.MethodGet, "/ext-console/api/v2/gateway/config", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /gateway/config (target moved) = %d %s, want 200", code, raw)
+	}
+	var cfgView freshconfig.View
+	if err := json.Unmarshal(raw, &cfgView); err != nil {
+		t.Fatal(err)
+	}
+	if cfgView.Capability.Mode != freshconfig.ModeUnavailable || cfgView.Capability.Reason != freshconfig.ReasonTargetMoved {
+		t.Fatalf("GET /gateway/config capability = %+v, want unavailable/%s", cfgView.Capability, freshconfig.ReasonTargetMoved)
+	}
+	if len(cfgView.Groups) == 0 || len(cfgView.Fields) == 0 || len(cfgView.Families) == 0 {
+		t.Fatalf("GET /gateway/config returned empty projection under ErrExternalTargetMoved: groups=%d fields=%d families=%d", len(cfgView.Groups), len(cfgView.Fields), len(cfgView.Families))
+	}
+	code, raw = callExt(http.MethodGet, "/ext-console/api/v2/gateway/config/source", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /gateway/config/source (target moved) = %d %s, want 200", code, raw)
+	}
+	var srcView freshconfig.SourceView
+	if err := json.Unmarshal(raw, &srcView); err != nil {
+		t.Fatal(err)
+	}
+	if srcView.Capability.Mode != freshconfig.ModeUnavailable || srcView.Capability.Reason != freshconfig.ReasonTargetMoved || srcView.SourceWritable || srcView.Reason != freshconfig.ReasonTargetMoved {
+		t.Fatalf("GET /gateway/config/source under ErrExternalTargetMoved = %+v, want unavailable/%s sourceWritable=false", srcView, freshconfig.ReasonTargetMoved)
+	}
+
+	// 2. POST /gateway/config/operations/{id}/reconcile under ErrExternalTargetMoved:
+	//    - missing -> 404
+	//    - persisted -> 200
+	//    - unknown -> 409 external_target_moved with result.operation populated
+	if code, raw = callExt(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqMissing+"/reconcile", `{}`); code != http.StatusNotFound {
+		t.Fatalf("reconcile(missing) under ErrExternalTargetMoved = %d %s, want 404", code, raw)
+	}
+	code, raw = callExt(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqPersisted+"/reconcile", `{}`)
+	if code != http.StatusOK || !strings.Contains(string(raw), reqPersisted) {
+		t.Fatalf("reconcile(persisted) under ErrExternalTargetMoved = %d %s, want 200 with operation", code, raw)
+	}
+	code, raw = callExt(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqUnknown+"/reconcile", `{}`)
+	var unknownReply struct {
+		Code   string `json:"code"`
+		Result *struct {
+			Operation freshstore.ConfigGroupOperation `json:"operation"`
+			Effective string                          `json:"effective"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(raw, &unknownReply)
+	if code != http.StatusConflict || unknownReply.Code != freshconfig.ReasonTargetMoved || unknownReply.Result == nil || unknownReply.Result.Operation.RequestID != reqUnknown {
+		t.Fatalf("reconcile(unknown) under ErrExternalTargetMoved = %d %s, want 409 %s with result.operation %s", code, raw, freshconfig.ReasonTargetMoved, reqUnknown)
+	}
+
+	// 2b. Degraded branches (GET /gateway/config, GET /gateway/config/source, POST /gateway/config/operations/{id}/reconcile)
+	//     must never wait on credentialGate or invert lock order (configService.mu -> credentialGate) when another goroutine holds credentialGate.
+	runDegradedHTTPWithOccupiedGate := func(method, path, body, waitStackSymbol string) (int, []byte) {
+		t.Helper()
+		if err := st.SaveSetup(ctx, model.Setup{
+			CPAUpstreamURL: "http://127.0.0.1:19999",
+			ManagementKey:  extKey,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		canonical.configService.mu.Lock()
+		reqCtx, cancelReq := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cancelReq()
+
+		type httpResult struct {
+			code int
+			body []byte
+		}
+		doneCh := make(chan httpResult, 1)
+		go func() {
+			var reader io.Reader
+			if body != "" {
+				reader = strings.NewReader(body)
+			}
+			req := httptest.NewRequest(method, path, reader).WithContext(reqCtx)
+			req.Header.Set("Authorization", "Bearer "+adminKey)
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			serverApp.Handler().ServeHTTP(rec, req)
+			doneCh <- httpResult{code: rec.Code, body: rec.Body.Bytes()}
+		}()
+
+		// Wait until the HTTP goroutine has exited enterExternalCredentialHold and parked on configService.mu.Lock().
+		stackBuf := make([]byte, 1<<18)
+		parkDeadline := time.Now().Add(2 * time.Second)
+		for {
+			n := runtime.Stack(stackBuf, true)
+			stacks := string(stackBuf[:n])
+			parked := false
+			for _, block := range strings.Split(stacks, "\n\n") {
+				if strings.Contains(block, waitStackSymbol) && strings.Contains(block, "(*Mutex).Lock") {
+					parked = true
+					break
+				}
+			}
+			if parked {
+				break
+			}
+			if time.Now().After(parkDeadline) {
+				canonical.configService.mu.Unlock()
+				t.Fatalf("HTTP %s %s did not park on configService.mu after enterExternalCredentialHold", method, path)
+			}
+			time.Sleep(time.Millisecond)
+		}
+
+		// Simulate another goroutine holding credentialGate (and heal setup so a stale re-probe would hit credentialGate).
+		gateAcquired := make(chan struct{})
+		releaseHolder := make(chan struct{})
+		holderDone := make(chan struct{})
+		go func() {
+			defer close(holderDone)
+			if !ws.credentialGate.acquire(ctx) {
+				return
+			}
+			close(gateAcquired)
+			<-releaseHolder
+			ws.credentialGate.release()
+		}()
+		<-gateAcquired
+		defer func() {
+			close(releaseHolder)
+			<-holderDone
+		}()
+
+		if err := st.SaveSetup(ctx, model.Setup{
+			CPAUpstreamURL: strings.TrimRight(extCPA.URL, "/"),
+			ManagementKey:  extKey,
+		}); err != nil {
+			canonical.configService.mu.Unlock()
+			t.Fatal(err)
+		}
+		canonical.configService.mu.Unlock()
+
+		select {
+		case res := <-doneCh:
+			return res.code, res.body
+		case <-time.After(250 * time.Millisecond):
+			t.Fatalf("degraded %s %s blocked on held credentialGate (AB-BA lock order inversion)", method, path)
+			return 0, nil
+		}
+	}
+
+	code, raw = runDegradedHTTPWithOccupiedGate(http.MethodGet, "/ext-console/api/v2/gateway/config", "", "(*upgradeConfigService).readScope")
+	if code != http.StatusOK {
+		t.Fatalf("degraded GET /gateway/config with held credentialGate = %d %s, want 200", code, raw)
+	}
+	cfgView = freshconfig.View{}
+	if err := json.Unmarshal(raw, &cfgView); err != nil {
+		t.Fatal(err)
+	}
+	if cfgView.Capability.Mode != freshconfig.ModeUnavailable || cfgView.Capability.Reason != freshconfig.ReasonTargetMoved || len(cfgView.Groups) == 0 || len(cfgView.Fields) == 0 || len(cfgView.Families) == 0 {
+		t.Fatalf("degraded GET /gateway/config with held credentialGate = %+v (groups=%d fields=%d families=%d)", cfgView.Capability, len(cfgView.Groups), len(cfgView.Fields), len(cfgView.Families))
+	}
+
+	code, raw = runDegradedHTTPWithOccupiedGate(http.MethodGet, "/ext-console/api/v2/gateway/config/source", "", "(*upgradeConfigService).ReadSource")
+	if code != http.StatusOK {
+		t.Fatalf("degraded GET /gateway/config/source with held credentialGate = %d %s, want 200", code, raw)
+	}
+	srcView = freshconfig.SourceView{}
+	if err := json.Unmarshal(raw, &srcView); err != nil {
+		t.Fatal(err)
+	}
+	if srcView.Capability.Mode != freshconfig.ModeUnavailable || srcView.Capability.Reason != freshconfig.ReasonTargetMoved || srcView.SourceWritable || srcView.Reason != freshconfig.ReasonTargetMoved {
+		t.Fatalf("degraded GET /gateway/config/source with held credentialGate = %+v", srcView)
+	}
+
+	if code, raw = runDegradedHTTPWithOccupiedGate(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqMissing+"/reconcile", `{}`, "(*upgradeConfigService).operationScope"); code != http.StatusNotFound {
+		t.Fatalf("degraded reconcile(missing) with held credentialGate = %d %s, want 404", code, raw)
+	}
+	code, raw = runDegradedHTTPWithOccupiedGate(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqPersisted+"/reconcile", `{}`, "(*upgradeConfigService).operationScope")
+	if code != http.StatusOK || !strings.Contains(string(raw), reqPersisted) {
+		t.Fatalf("degraded reconcile(persisted) with held credentialGate = %d %s, want 200", code, raw)
+	}
+	code, raw = runDegradedHTTPWithOccupiedGate(http.MethodPost, "/ext-console/api/v2/gateway/config/operations/"+reqUnknown+"/reconcile", `{}`, "(*upgradeConfigService).operationScope")
+	unknownReply.Code = ""
+	unknownReply.Result = nil
+	_ = json.Unmarshal(raw, &unknownReply)
+	if code != http.StatusConflict || unknownReply.Code != freshconfig.ReasonTargetMoved || unknownReply.Result == nil || unknownReply.Result.Operation.RequestID != reqUnknown {
+		t.Fatalf("degraded reconcile(unknown) with held credentialGate = %d %s, want 409 %s with result.operation %s", code, raw, freshconfig.ReasonTargetMoved, reqUnknown)
+	}
+
+	// Also verify ReasonUnavailable (non-target-moved precheck error) completes immediately while credentialGate is held by another goroutine.
+	heldGateDone := make(chan struct{})
+	releaseHeldGate := make(chan struct{})
+	heldGateReady := make(chan struct{})
+	go func() {
+		defer close(heldGateDone)
+		if ws.credentialGate.acquire(ctx) {
+			close(heldGateReady)
+			<-releaseHeldGate
+			ws.credentialGate.release()
+		}
+	}()
+	<-heldGateReady
+	shortCtx, cancelShort := context.WithTimeout(ctx, 150*time.Millisecond)
+	unavailView, unavailErr := canonical.configService.Read(withUpgradeExternalPrecheckErr(shortCtx, freshkeyapply.ErrExternalUnavailable))
+	if unavailErr != nil || unavailView.Capability.Mode != freshconfig.ModeUnavailable || unavailView.Capability.Reason != freshconfig.ReasonUnavailable || len(unavailView.Groups) == 0 || len(unavailView.Fields) == 0 || len(unavailView.Families) == 0 {
+		cancelShort()
+		close(releaseHeldGate)
+		<-heldGateDone
+		t.Fatalf("Read(ErrExternalUnavailable) under held credentialGate = (%+v, err=%v), want unavailable/%s with non-empty projection", unavailView.Capability, unavailErr, freshconfig.ReasonUnavailable)
+	}
+	unavailSrc, unavailSrcErr := canonical.configService.ReadSource(withUpgradeExternalPrecheckErr(shortCtx, freshkeyapply.ErrExternalUnavailable))
+	if unavailSrcErr != nil || unavailSrc.Capability.Mode != freshconfig.ModeUnavailable || unavailSrc.Capability.Reason != freshconfig.ReasonUnavailable || unavailSrc.SourceWritable || unavailSrc.Reason != freshconfig.ReasonUnavailable {
+		cancelShort()
+		close(releaseHeldGate)
+		<-heldGateDone
+		t.Fatalf("ReadSource(ErrExternalUnavailable) under held credentialGate = (%+v, err=%v), want unavailable/%s", unavailSrc, unavailSrcErr, freshconfig.ReasonUnavailable)
+	}
+	unavailOp, unavailOpErr := canonical.configService.Operation(withUpgradeExternalPrecheckErr(shortCtx, freshkeyapply.ErrExternalUnavailable), reqUnknown, true)
+	cancelShort()
+	close(releaseHeldGate)
+	<-heldGateDone
+	if !errors.Is(unavailOpErr, cpa.ErrApplyUnknown) || unavailOp.RequestID != reqUnknown {
+		t.Fatalf("Operation(ErrExternalUnavailable, unknown) under held credentialGate = (%+v, err=%v), want (%s, ErrApplyUnknown)", unavailOp, unavailOpErr, reqUnknown)
+	}
+	// 3. Restore aligned setup, then simulate concurrent background collector recording rejection AFTER enterExternalCredentialHold succeeds.
+	if err := st.SaveSetup(ctx, model.Setup{
+		CPAUpstreamURL: strings.TrimRight(extCPA.URL, "/"),
+		ManagementKey:  extKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding, found, err := upgradeoperation.New(st.SQLDB()).ExternalBinding(ctx)
+	if err != nil || !found {
+		t.Fatalf("ExternalBinding: found=%v err=%v", found, err)
+	}
+	credDigest := envelopeDigest(strings.TrimSpace(binding.ManagementKey))
+
+	// Hold configService.mu so GET /gateway/config passes enterExternalCredentialHold and parks before resolveAuthority.
+	canonical.configService.mu.Lock()
+	type respPair struct {
+		code int
+		body []byte
+	}
+	respCh := make(chan respPair, 1)
+	go func() {
+		c, b := callExt(http.MethodGet, "/ext-console/api/v2/gateway/config", "")
+		respCh <- respPair{code: c, body: b}
+	}()
+	// Wait until the in-flight request acquires credentialGate (proving it passed enterExternalCredentialHold).
+	waitCtx, cancelWait := context.WithTimeout(ctx, 20*time.Millisecond)
+	if ws.credentialGate.acquire(waitCtx) {
+		ws.credentialGate.release()
+	}
+	cancelWait()
+
+	if err := ws.rejection.record(ctx, binding.Identity, credDigest); err != nil {
+		canonical.configService.mu.Unlock()
+		t.Fatalf("ws.rejection.record: %v", err)
+	}
+	canonical.configService.mu.Unlock()
+
+	got := <-respCh
+	if got.code != http.StatusConflict || !strings.Contains(string(got.body), freshconfig.ReasonManagementRejected) {
+		t.Fatalf("GET /gateway/config with concurrent rejection after hold = %d %s, want 409 %s", got.code, got.body, freshconfig.ReasonManagementRejected)
 	}
 }

@@ -35,7 +35,7 @@ export const updateIntent = (patch: Partial<CPAUpdateIntent> = {}): CPAUpdateInt
 });
 export const mutationResult = (
   phase: CPAUpdatePhase,
-  request: CPAUpdateRequest,
+  request: Pick<CPAUpdateRequest, 'request_id' | 'target_version' | 'expected_active_artifact_id'>,
   patch: Partial<CPAUpdateMutationResult> = {}
 ): CPAUpdateMutationResult => ({
   phase,

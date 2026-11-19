@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -33,6 +34,7 @@ type PublicManagerConfig struct {
 	Collector            store.ManagerCollectorConfig            `json:"collector"`
 	CodexInspection      store.ManagerCodexInspectionConfig      `json:"codexInspection"`
 	ExternalUsageService store.ManagerExternalUsageServiceConfig `json:"externalUsageService"`
+	Retention            store.ManagerRetentionConfig            `json:"retention,omitempty"`
 	UpdatedAtMS          int64                                   `json:"updatedAtMs,omitempty"`
 }
 
@@ -46,7 +48,9 @@ type Service struct {
 	store                      *store.Store
 	collector                  *collectorservice.Service
 	externalCollectorLifecycle bool
+	collectorMu                sync.Mutex
 	cpaUsageProbeAllowed       func(context.Context) bool
+	retentionChangedNotifier   func()
 }
 
 func New(cfg config.Config, store *store.Store, collector *collectorservice.Service) *Service {
@@ -59,12 +63,9 @@ func New(cfg config.Config, store *store.Store, collector *collectorservice.Serv
 
 // UseExternalCollectorLifecycle delegates Collector start/stop to an enclosing
 // host (Fresh) so neither Update nor SetCollectorEnabled starts or stops a
-// detached background Collector. Under this mode, SetCollectorEnabled (the
-// narrow monitoring-switch PATCH) updates only Manager's persisted
-// configuration row without mutating CPA usage-statistics settings, whereas
-// whole-document Update (PUT, permitted on non-External profiles) still
-// validates the connection and enables CPA usage-statistics when collector
-// monitoring is enabled.
+// detached background Collector or mutates CPA usage-statistics settings, while
+// read-only CPA collector retention validation still runs when monitoring is
+// enabled and CPA usage probing is permitted.
 func (s *Service) UseExternalCollectorLifecycle() {
 	if s != nil {
 		s.externalCollectorLifecycle = true
@@ -79,6 +80,12 @@ func (s *Service) UseExternalCollectorLifecycle() {
 func (s *Service) SetCPAUsageProbeAllowed(allow func(context.Context) bool) {
 	if s != nil {
 		s.cpaUsageProbeAllowed = allow
+	}
+}
+
+func (s *Service) SetRetentionChangedNotifier(fn func()) {
+	if s != nil {
+		s.retentionChangedNotifier = fn
 	}
 }
 
@@ -138,75 +145,145 @@ func (s *Service) ValidateCPAConnection(ctx context.Context) (CPAConnectionValid
 }
 
 func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Response, error) {
+	// Probing/mutating CPA is gated below by s.cpaUsageProbeAllowed and
+	// s.externalCollectorLifecycle rather than rejecting local config updates.
 	current, source, _, err := s.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
+		return Response{}, err
+	}
+	saved, savedOK, err := s.store.LoadManagerConfig(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	if err := validateSubmittedCollectorConfig(&submitted.Collector); err != nil {
 		return Response{}, err
 	}
 	if err := model.ValidateCodexInspectionConfig(submitted.CodexInspection); err != nil {
 		return Response{}, err
 	}
+	envDays := PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30)
+	retentionDaysSubmitted := submitted.Retention.RetentionDaysExplicit || submitted.Retention.RetentionDays != 0
+	if submitted.Retention.Enabled != nil && s.retentionEnabledEnvLocked() &&
+		*submitted.Retention.Enabled != s.cfg.UsageArchiveRetentionEnabled {
+		return Response{}, errors.New("retention settings are managed by environment variables")
+	}
+	if retentionDaysSubmitted && s.retentionDaysEnvLocked() &&
+		submitted.Retention.RetentionDays != envDays {
+		return Response{}, errors.New("retention settings are managed by environment variables")
+	}
+	if retentionDaysSubmitted && !s.retentionDaysEnvLocked() &&
+		(submitted.Retention.RetentionDays < 1 || submitted.Retention.RetentionDays > 3650) {
+		return Response{}, errors.New("retentionDays must be between 1 and 3650")
+	}
+
 	next := s.MergeSubmittedManagerConfig(current, submitted)
 	if source == SourceEnv && ManagerConfigConnectionDiffers(current, next) {
 		return Response{}, errors.New("connection setup is managed by environment variables")
 	}
-	if next.CPAConnection.CPABaseURL != "" || next.CPAConnection.ManagementKey != "" {
-		if next.CPAConnection.CPABaseURL == "" || next.CPAConnection.ManagementKey == "" {
-			return Response{}, errors.New("cpaBaseUrl and managementKey are required")
-		}
-		if err := cpa.ValidateManagementAPI(
-			ctx,
-			next.CPAConnection.CPABaseURL,
-			next.CPAConnection.ManagementKey,
-		); err != nil {
-			return Response{}, err
-		}
-		if ManagerCollectorEnabled(next) {
-			if err := cpa.ValidateCollectorConfig(
-				ctx,
-				next.CPAConnection.CPABaseURL,
-				next.CPAConnection.ManagementKey,
-				next.Collector.PollIntervalMS,
-			); err != nil {
-				return Response{}, err
-			}
-			if err := cpa.SetUsageStatisticsEnabled(
-				ctx,
-				next.CPAConnection.CPABaseURL,
-				next.CPAConnection.ManagementKey,
-				true,
-			); err != nil {
-				return Response{}, err
-			}
-		}
-	} else if ManagerCollectorEnabled(next) {
-		return Response{}, errors.New("cpaBaseUrl and managementKey are required when request monitoring is enabled")
-	}
-	if next.CPAConnection.CPABaseURL == "" || next.CPAConnection.ManagementKey == "" {
-		if err := s.store.SaveManagerConfig(ctx, next); err != nil {
-			return Response{}, err
-		}
-		if !s.externalCollectorLifecycle && s.collector != nil {
-			_ = s.collector.Stop(context.Background())
-		}
-		return Response{
-			Config: PublicConfig(next),
-			Source: string(SourceDB),
-		}, nil
-	}
-	setup := SetupFromManagerConfig(next)
-	if err := s.store.SaveManagerConfigAndSetup(ctx, next, setup); err != nil {
+	if err := validateResolvedCollectorConfig(&next.Collector); err != nil {
 		return Response{}, err
 	}
-	if !s.externalCollectorLifecycle && s.collector != nil {
-		if ManagerCollectorEnabled(next) {
-			_ = s.collector.Start(context.Background(), next)
-		} else {
-			_ = s.collector.Stop(context.Background())
+	if source != SourceEnv {
+		probeAllowed := s.cpaUsageProbeAllowed == nil || s.cpaUsageProbeAllowed(ctx)
+		if cpa.NormalizeBaseURL(next.CPAConnection.CPABaseURL) != "" || strings.TrimSpace(next.CPAConnection.ManagementKey) != "" {
+			if !ConnectionComplete(next) {
+				return Response{}, errors.New("cpaBaseUrl and managementKey are required")
+			}
+			if probeAllowed {
+				if !s.externalCollectorLifecycle {
+					if err := cpa.ValidateManagementAPI(
+						ctx,
+						next.CPAConnection.CPABaseURL,
+						next.CPAConnection.ManagementKey,
+					); err != nil {
+						return Response{}, err
+					}
+				}
+				if ManagerCollectorEnabled(next) {
+					if err := cpa.ValidateCollectorConfig(
+						ctx,
+						next.CPAConnection.CPABaseURL,
+						next.CPAConnection.ManagementKey,
+						next.Collector.PollIntervalMS,
+					); err != nil {
+						return Response{}, err
+					}
+					if !s.externalCollectorLifecycle {
+						if err := cpa.SetUsageStatisticsEnabled(
+							ctx,
+							next.CPAConnection.CPABaseURL,
+							next.CPAConnection.ManagementKey,
+							true,
+						); err != nil {
+							return Response{}, err
+						}
+					}
+				}
+			}
+		} else if ManagerCollectorEnabled(next) {
+			return Response{}, errors.New("cpaBaseUrl and managementKey are required when request monitoring is enabled")
 		}
 	}
+
+	toPersist := next
+	if source == SourceEnv {
+		if savedOK {
+			toPersist.CPAConnection = saved.CPAConnection
+			toPersist.Collector = saved.Collector
+			toPersist.ExternalUsageService = saved.ExternalUsageService
+		} else {
+			toPersist.CPAConnection = store.ManagerCPAConnectionConfig{}
+			toPersist.Collector = store.ManagerCollectorConfig{}
+			toPersist.ExternalUsageService = store.ManagerExternalUsageServiceConfig{}
+		}
+	} else {
+		toPersist.Collector.TLSSkipVerifyExplicit = true
+	}
+	if s.retentionEnabledEnvLocked() {
+		if savedOK {
+			toPersist.Retention.Enabled = saved.Retention.Enabled
+		} else {
+			toPersist.Retention.Enabled = nil
+		}
+	}
+	if s.retentionDaysEnvLocked() {
+		if savedOK {
+			toPersist.Retention.RetentionDays = saved.Retention.RetentionDays
+		} else {
+			toPersist.Retention.RetentionDays = 0
+		}
+	}
+	stripRetentionLockMetadata(&toPersist.Retention)
+
+	if source == SourceEnv || toPersist.CPAConnection.CPABaseURL == "" || toPersist.CPAConnection.ManagementKey == "" {
+		if err := s.store.SaveManagerConfig(ctx, toPersist); err != nil {
+			return Response{}, err
+		}
+	} else {
+		setup := SetupFromManagerConfig(toPersist)
+		if err := s.store.SaveManagerConfigAndSetup(ctx, toPersist, setup); err != nil {
+			return Response{}, err
+		}
+	}
+
+	var (
+		resolved       store.ManagerConfig
+		resolvedSource Source
+	)
+	if source == SourceEnv {
+		resolved, resolvedSource, _, err = s.ResolveManagerConfigWithSource(ctx)
+	} else {
+		resolved, resolvedSource, err = s.reconcileStandaloneCollector(ctx)
+	}
+	if err != nil {
+		return Response{}, err
+	}
+	if s.effectiveRetentionDiffers(current.Retention, resolved.Retention) && s.retentionChangedNotifier != nil {
+		s.retentionChangedNotifier()
+	}
 	return Response{
-		Config: PublicConfig(next),
-		Source: string(SourceDB),
+		Config: PublicConfig(resolved),
+		Source: string(resolvedSource),
 	}, nil
 }
 
@@ -227,63 +304,234 @@ func (s *Service) SetCollectorEnabled(ctx context.Context, enabled bool) (Respon
 	if source == SourceEnv && ManagerCollectorEnabled(current) != enabled {
 		return Response{}, errors.New("connection setup is managed by environment variables")
 	}
-	connection := current.CPAConnection.CPABaseURL != "" && current.CPAConnection.ManagementKey != ""
-	if enabled && !s.externalCollectorLifecycle {
-		if !connection {
-			return Response{}, errors.New("cpaBaseUrl and managementKey are required when request monitoring is enabled")
-		}
-		// Enabling is proven against the CPA before anything is stored: the
-		// Collector would otherwise run against a CPA that records nothing.
-		if err := cpa.ValidateManagementAPI(ctx, current.CPAConnection.CPABaseURL, current.CPAConnection.ManagementKey); err != nil {
+	connection := ConnectionComplete(current)
+	probeAllowed := s.cpaUsageProbeAllowed == nil || s.cpaUsageProbeAllowed(ctx)
+	if enabled {
+		if err := validateEnabledCollectorBounds(current.Collector); err != nil {
 			return Response{}, err
 		}
+		if !s.externalCollectorLifecycle {
+			if !connection {
+				return Response{}, errors.New("cpaBaseUrl and managementKey are required when request monitoring is enabled")
+			}
+			// Enabling is proven against the CPA before anything is stored: the
+			// Collector would otherwise run against a CPA that records nothing.
+			if probeAllowed {
+				if err := cpa.ValidateManagementAPI(ctx, current.CPAConnection.CPABaseURL, current.CPAConnection.ManagementKey); err != nil {
+					return Response{}, err
+				}
+			}
+		}
+		if connection && probeAllowed {
+			if err := cpa.ValidateCollectorConfig(
+				ctx,
+				current.CPAConnection.CPABaseURL,
+				current.CPAConnection.ManagementKey,
+				current.Collector.PollIntervalMS,
+			); err != nil {
+				return Response{}, err
+			}
+		}
+		if !s.externalCollectorLifecycle && probeAllowed {
+			if err := cpa.SetUsageStatisticsEnabled(
+				ctx,
+				current.CPAConnection.CPABaseURL,
+				current.CPAConnection.ManagementKey,
+				true,
+			); err != nil {
+				return Response{}, err
+			}
+		}
+	}
+	if source != SourceEnv {
+		if _, err := s.store.PatchManagerCollectorEnabled(ctx, enabled); err != nil {
+			return Response{}, err
+		}
+	}
+	next, nextSource, err := s.reconcileStandaloneCollector(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{
+		Config: PublicConfig(next),
+		Source: string(nextSource),
+	}, nil
+}
+
+// PatchCollector updates supplied collector parameters without altering
+// request-monitoring state (`collector.enabled`), CPAConnection, or untouched
+// persisted fields.
+func (s *Service) PatchCollector(ctx context.Context, patch store.ManagerCollectorPatch) (Response, error) {
+	if patch.IsEmpty() {
+		return Response{}, errors.New("collector patch requires at least one field")
+	}
+	current, source, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	if source == SourceEnv {
+		return Response{}, errors.New("connection setup is managed by environment variables")
+	}
+
+	normalized := store.ManagerCollectorPatch{}
+	nextCollector := current.Collector
+	if patch.CollectorMode != nil {
+		mode, err := normalizeCollectorModeStrict(*patch.CollectorMode)
+		if err != nil {
+			return Response{}, err
+		}
+		normalized.CollectorMode = &mode
+		nextCollector.CollectorMode = mode
+	}
+	if patch.Queue != nil {
+		queue, err := normalizeCollectorQueueStrict(*patch.Queue)
+		if err != nil {
+			return Response{}, err
+		}
+		normalized.Queue = &queue
+		nextCollector.Queue = queue
+	}
+	if patch.PopSide != nil {
+		side, err := normalizePopSideStrict(*patch.PopSide)
+		if err != nil {
+			return Response{}, err
+		}
+		normalized.PopSide = &side
+		nextCollector.PopSide = side
+	}
+	if patch.BatchSize != nil {
+		if err := validateBatchSize(*patch.BatchSize); err != nil {
+			return Response{}, err
+		}
+		batch := *patch.BatchSize
+		normalized.BatchSize = &batch
+		nextCollector.BatchSize = batch
+	}
+	if patch.PollIntervalMS != nil {
+		if err := validatePollIntervalMS(*patch.PollIntervalMS); err != nil {
+			return Response{}, err
+		}
+		poll := *patch.PollIntervalMS
+		normalized.PollIntervalMS = &poll
+		nextCollector.PollIntervalMS = poll
+	}
+	if patch.QueryLimit != nil {
+		if err := validateQueryLimit(*patch.QueryLimit); err != nil {
+			return Response{}, err
+		}
+		limit := *patch.QueryLimit
+		normalized.QueryLimit = &limit
+		nextCollector.QueryLimit = limit
+	}
+	if patch.TLSSkipVerify != nil {
+		skip := *patch.TLSSkipVerify
+		normalized.TLSSkipVerify = &skip
+		nextCollector.TLSSkipVerify = skip
+	}
+
+	if (s.cpaUsageProbeAllowed == nil || s.cpaUsageProbeAllowed(ctx)) && ConnectionComplete(current) && ManagerCollectorEnabled(current) && patch.PollIntervalMS != nil {
 		if err := cpa.ValidateCollectorConfig(
 			ctx,
 			current.CPAConnection.CPABaseURL,
 			current.CPAConnection.ManagementKey,
-			current.Collector.PollIntervalMS,
-		); err != nil {
-			return Response{}, err
-		}
-		if err := cpa.SetUsageStatisticsEnabled(
-			ctx,
-			current.CPAConnection.CPABaseURL,
-			current.CPAConnection.ManagementKey,
-			true,
+			nextCollector.PollIntervalMS,
 		); err != nil {
 			return Response{}, err
 		}
 	}
-	if source != SourceEnv {
-		patched, err := s.store.PatchManagerCollectorEnabled(ctx, enabled)
-		if err != nil {
+
+	if _, err := s.store.PatchManagerCollectorConfig(ctx, normalized); err != nil {
+		return Response{}, err
+	}
+
+	next, nextSource, err := s.reconcileStandaloneCollector(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{
+		Config: PublicConfig(next),
+		Source: string(nextSource),
+	}, nil
+}
+
+func (s *Service) reconcileStandaloneCollector(ctx context.Context) (store.ManagerConfig, Source, error) {
+	if s.externalCollectorLifecycle || s.collector == nil {
+		resolved, resolvedSource, _, err := s.ResolveManagerConfigWithSource(ctx)
+		return resolved, resolvedSource, err
+	}
+	s.collectorMu.Lock()
+	defer s.collectorMu.Unlock()
+	resolved, resolvedSource, _, err := s.ResolveManagerConfigWithSource(context.WithoutCancel(ctx))
+	if err != nil {
+		return store.ManagerConfig{}, SourceNone, err
+	}
+	if ConnectionComplete(resolved) && ManagerCollectorEnabled(resolved) {
+		_ = s.collector.Start(context.Background(), resolved)
+	} else {
+		_ = s.collector.Stop(context.Background())
+	}
+	return resolved, resolvedSource, nil
+}
+
+// PatchRetention updates supplied archive retention settings without altering
+// CPAConnection, Collector, or untouched persisted fields.
+func (s *Service) PatchRetention(ctx context.Context, patch store.ManagerRetentionPatch) (Response, error) {
+	if patch.IsEmpty() {
+		return Response{}, errors.New("retention patch requires at least one field")
+	}
+	if _, _, _, err := s.ResolveManagerConfigWithSource(ctx); err != nil {
+		return Response{}, err
+	}
+	if patch.Enabled != nil && s.retentionEnabledEnvLocked() && *patch.Enabled != s.cfg.UsageArchiveRetentionEnabled {
+		return Response{}, errors.New("retention settings are managed by environment variables")
+	}
+	envDays := PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30)
+	if patch.RetentionDays != nil && s.retentionDaysEnvLocked() && *patch.RetentionDays != envDays {
+		return Response{}, errors.New("retention settings are managed by environment variables")
+	}
+
+	normalized := store.ManagerRetentionPatch{}
+	if patch.Enabled != nil && !s.retentionEnabledEnvLocked() {
+		enabled := *patch.Enabled
+		normalized.Enabled = &enabled
+	}
+	if patch.RetentionDays != nil && !s.retentionDaysEnvLocked() {
+		if *patch.RetentionDays < 1 || *patch.RetentionDays > 3650 {
+			return Response{}, errors.New("retentionDays must be between 1 and 3650")
+		}
+		days := *patch.RetentionDays
+		normalized.RetentionDays = &days
+	}
+
+	if !normalized.IsEmpty() {
+		if _, err := s.store.PatchManagerRetentionConfig(ctx, normalized); err != nil {
 			return Response{}, err
 		}
-		if !patched {
-			// Nothing is stored yet, so there is no document to patch. The resolved
-			// configuration is what this Manager serves, and only the switch differs.
-			next := current
-			next.Collector.Enabled = BoolPtr(enabled)
-			if err := s.store.SaveManagerConfig(ctx, next); err != nil {
-				return Response{}, err
-			}
+		if s.retentionChangedNotifier != nil {
+			s.retentionChangedNotifier()
 		}
 	}
 	next, nextSource, _, err := s.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
 		return Response{}, err
 	}
-	if !s.externalCollectorLifecycle && s.collector != nil {
-		if ManagerCollectorEnabled(next) {
-			_ = s.collector.Start(context.Background(), next)
-		} else {
-			_ = s.collector.Stop(context.Background())
-		}
-	}
 	return Response{
 		Config: PublicConfig(next),
 		Source: string(nextSource),
 	}, nil
+}
+
+func (s *Service) ResolveRetention(ctx context.Context) (bool, int, error) {
+	cfg, _, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	enabled := cfg.Retention.Enabled != nil && *cfg.Retention.Enabled
+	days := cfg.Retention.RetentionDays
+	if days <= 0 {
+		days = PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30)
+	}
+	return enabled, days, nil
 }
 
 func (s *Service) ResolveSetup(ctx context.Context) (store.Setup, bool, error) {
@@ -360,7 +608,7 @@ func (s *Service) ResolveManagerConfigWithSource(ctx context.Context) (store.Man
 		if err != nil {
 			return cfg, source, false, err
 		}
-		if !managerOK {
+		if !managerOK || (strings.TrimSpace(saved.CPAConnection.CPABaseURL) == "" && strings.TrimSpace(saved.CPAConnection.ManagementKey) == "") {
 			// A lone legacy setup row remains the fallback even when it is
 			// partial; the setup page needs to see that state and report
 			// needs_setup rather than silently replacing it with defaults.
@@ -390,10 +638,20 @@ func (s *Service) ResolveManagerConfigWithSource(ctx context.Context) (store.Man
 		cfg.Collector.PollIntervalMS = PositiveOrDefault(int(s.cfg.PollInterval/time.Millisecond), cfg.Collector.PollIntervalMS, 500)
 		cfg.Collector.QueryLimit = PositiveOrDefault(s.cfg.QueryLimit, cfg.Collector.QueryLimit, 50000)
 		cfg.Collector.TLSSkipVerify = s.cfg.TLSSkipVerify
+		cfg.Collector.TLSSkipVerifyExplicit = true
 		source = SourceEnv
 		found = true
 	}
 
+	if s.retentionEnabledEnvLocked() {
+		cfg.Retention.Enabled = BoolPtr(s.cfg.UsageArchiveRetentionEnabled)
+	}
+	if s.retentionDaysEnvLocked() {
+		cfg.Retention.RetentionDays = PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30)
+	}
+	cfg.Retention.EnvLocked = s.retentionEnvLocked()
+	cfg.Retention.EnabledEnvLocked = s.retentionEnabledEnvLocked()
+	cfg.Retention.RetentionDaysEnvLocked = s.retentionDaysEnvLocked()
 	return cfg, source, found, nil
 }
 
@@ -411,14 +669,56 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			TLSSkipVerify:  s.cfg.TLSSkipVerify,
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
+		Retention: store.ManagerRetentionConfig{
+			Enabled:                BoolPtr(s.cfg.UsageArchiveRetentionEnabled),
+			RetentionDays:          PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30),
+			EnvLocked:              s.retentionEnvLocked(),
+			EnabledEnvLocked:       s.retentionEnabledEnvLocked(),
+			RetentionDaysEnvLocked: s.retentionDaysEnvLocked(),
+		},
 	}
+}
+
+func (s *Service) retentionEnabledEnvLocked() bool {
+	return s.cfg.UsageArchiveRetentionEnvSet || s.cfg.UsageArchiveRetentionEnabledEnvSet
+}
+
+func (s *Service) retentionDaysEnvLocked() bool {
+	return s.cfg.UsageArchiveRetentionEnvSet || s.cfg.UsageArchiveRetentionDaysEnvSet
+}
+
+func (s *Service) retentionEnvLocked() bool {
+	return s.retentionEnabledEnvLocked() && s.retentionDaysEnvLocked()
+}
+
+func (s *Service) effectiveRetentionDiffers(left, right store.ManagerRetentionConfig) bool {
+	leftEnabled := left.Enabled != nil && *left.Enabled
+	rightEnabled := right.Enabled != nil && *right.Enabled
+	defaultDays := PositiveOrDefault(s.cfg.UsageArchiveRetentionDays, 30, 30)
+	leftDays := PositiveOrDefault(left.RetentionDays, defaultDays, 30)
+	rightDays := PositiveOrDefault(right.RetentionDays, defaultDays, 30)
+	return leftEnabled != rightEnabled || leftDays != rightDays
+}
+
+func stripRetentionLockMetadata(r *store.ManagerRetentionConfig) {
+	if r == nil {
+		return
+	}
+	r.EnvLocked = false
+	r.EnabledEnvLocked = false
+	r.RetentionDaysEnvLocked = false
 }
 
 func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitted store.ManagerConfig) store.ManagerConfig {
 	next := base
 
 	if strings.TrimSpace(submitted.CPAConnection.CPABaseURL) != "" {
-		next.CPAConnection.CPABaseURL = cpa.NormalizeBaseURL(submitted.CPAConnection.CPABaseURL)
+		submittedURL := cpa.NormalizeBaseURL(submitted.CPAConnection.CPABaseURL)
+		if submittedURL != cpa.NormalizeBaseURL(base.CPAConnection.CPABaseURL) &&
+			strings.TrimSpace(submitted.CPAConnection.ManagementKey) == "" {
+			next.CPAConnection.ManagementKey = ""
+		}
+		next.CPAConnection.CPABaseURL = submittedURL
 	}
 	if strings.TrimSpace(submitted.CPAConnection.ManagementKey) != "" {
 		next.CPAConnection.ManagementKey = strings.TrimSpace(submitted.CPAConnection.ManagementKey)
@@ -433,9 +733,18 @@ func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitte
 	next.Collector.BatchSize = PositiveOrDefault(submitted.Collector.BatchSize, next.Collector.BatchSize, 100)
 	next.Collector.PollIntervalMS = PositiveOrDefault(submitted.Collector.PollIntervalMS, next.Collector.PollIntervalMS, 500)
 	next.Collector.QueryLimit = PositiveOrDefault(submitted.Collector.QueryLimit, next.Collector.QueryLimit, 50000)
-	next.Collector.TLSSkipVerify = submitted.Collector.TLSSkipVerify
+	if submitted.Collector.TLSSkipVerifyExplicit || submitted.Collector.TLSSkipVerify {
+		next.Collector.TLSSkipVerify = submitted.Collector.TLSSkipVerify
+		next.Collector.TLSSkipVerifyExplicit = true
+	}
 
 	next.CodexInspection = store.NormalizeCodexInspectionConfig(submitted.CodexInspection, next.CodexInspection)
+	if submitted.Retention.Enabled != nil {
+		next.Retention.Enabled = BoolPtr(*submitted.Retention.Enabled)
+	}
+	if submitted.Retention.RetentionDays > 0 {
+		next.Retention.RetentionDays = submitted.Retention.RetentionDays
+	}
 
 	next.ExternalUsageService.Enabled = false
 	next.ExternalUsageService.ServiceBase = ""
@@ -444,15 +753,24 @@ func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitte
 }
 
 func PublicConfig(cfg store.ManagerConfig) PublicManagerConfig {
+	collector := cfg.Collector
+	collector.TLSSkipVerifyExplicit = true
 	return PublicManagerConfig{
 		CPAConnection: PublicManagerCPAConnectionConfig{
 			CPABaseURL:              cfg.CPAConnection.CPABaseURL,
 			ManagementKeyConfigured: strings.TrimSpace(cfg.CPAConnection.ManagementKey) != "",
 		},
-		Collector:            cfg.Collector,
+		Collector:            collector,
 		CodexInspection:      cfg.CodexInspection,
 		ExternalUsageService: cfg.ExternalUsageService,
-		UpdatedAtMS:          cfg.UpdatedAtMS,
+		Retention: store.ManagerRetentionConfig{
+			Enabled:                cfg.Retention.Enabled,
+			RetentionDays:          cfg.Retention.RetentionDays,
+			EnvLocked:              cfg.Retention.EnvLocked,
+			EnabledEnvLocked:       cfg.Retention.EnabledEnvLocked,
+			RetentionDaysEnvLocked: cfg.Retention.RetentionDaysEnvLocked,
+		},
+		UpdatedAtMS: cfg.UpdatedAtMS,
 	}
 }
 
@@ -665,6 +983,138 @@ func MergeLegacyCollectorSettings(managerCfg *store.ManagerConfig, setup store.S
 	}
 }
 
+func normalizeCollectorModeStrict(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case "auto", "http", "resp", "subscribe":
+		return mode, nil
+	default:
+		return "", errors.New("collectorMode must be auto, http, resp, or subscribe")
+	}
+}
+
+func normalizePopSideStrict(raw string) (string, error) {
+	side := strings.ToLower(strings.TrimSpace(raw))
+	switch side {
+	case "left", "right":
+		return side, nil
+	default:
+		return "", errors.New("popSide must be left or right")
+	}
+}
+
+func validateBatchSize(value int) error {
+	if value < 1 || value > 5000 {
+		return errors.New("batchSize must be between 1 and 5000")
+	}
+	return nil
+}
+
+func validatePollIntervalMS(value int) error {
+	if value < 10 || value > 60000 {
+		return errors.New("pollIntervalMs must be between 10 and 60000")
+	}
+	return nil
+}
+
+func validateQueryLimit(value int) error {
+	if value < 1 || value > 100000 {
+		return errors.New("queryLimit must be between 1 and 100000")
+	}
+	return nil
+}
+
+func normalizeCollectorQueueStrict(raw string) (string, error) {
+	queue := strings.TrimSpace(raw)
+	if queue == "" {
+		return "", errors.New("queue must not be empty")
+	}
+	for _, r := range queue {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New("queue must not be empty or contain control characters")
+		}
+	}
+	return queue, nil
+}
+
+func validateSubmittedCollectorConfig(c *store.ManagerCollectorConfig) error {
+	if c == nil {
+		return nil
+	}
+	if c.CollectorMode != "" {
+		mode, err := normalizeCollectorModeStrict(c.CollectorMode)
+		if err != nil {
+			return err
+		}
+		c.CollectorMode = mode
+	}
+	if c.Queue != "" {
+		queue, err := normalizeCollectorQueueStrict(c.Queue)
+		if err != nil {
+			return err
+		}
+		c.Queue = queue
+	}
+	if c.PopSide != "" {
+		side, err := normalizePopSideStrict(c.PopSide)
+		if err != nil {
+			return err
+		}
+		c.PopSide = side
+	}
+	if c.BatchSize != 0 {
+		if err := validateBatchSize(c.BatchSize); err != nil {
+			return err
+		}
+	}
+	if c.PollIntervalMS != 0 {
+		if err := validatePollIntervalMS(c.PollIntervalMS); err != nil {
+			return err
+		}
+	}
+	if c.QueryLimit != 0 {
+		if err := validateQueryLimit(c.QueryLimit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateResolvedCollectorConfig(c *store.ManagerCollectorConfig) error {
+	if c == nil {
+		return nil
+	}
+	mode, err := normalizeCollectorModeStrict(c.CollectorMode)
+	if err != nil {
+		return err
+	}
+	queue, err := normalizeCollectorQueueStrict(c.Queue)
+	if err != nil {
+		return err
+	}
+	side, err := normalizePopSideStrict(c.PopSide)
+	if err != nil {
+		return err
+	}
+	if err := validateBatchSize(c.BatchSize); err != nil {
+		return err
+	}
+	if err := validatePollIntervalMS(c.PollIntervalMS); err != nil {
+		return err
+	}
+	if err := validateQueryLimit(c.QueryLimit); err != nil {
+		return err
+	}
+	c.CollectorMode = mode
+	c.Queue = queue
+	c.PopSide = side
+	return nil
+}
+
+func validateEnabledCollectorBounds(c store.ManagerCollectorConfig) error {
+	return validateResolvedCollectorConfig(&c)
+}
+
 func ManagerConfigConnectionDiffers(left store.ManagerConfig, right store.ManagerConfig) bool {
 	return cpa.NormalizeBaseURL(left.CPAConnection.CPABaseURL) != cpa.NormalizeBaseURL(right.CPAConnection.CPABaseURL) ||
 		left.CPAConnection.ManagementKey != right.CPAConnection.ManagementKey ||
@@ -674,6 +1124,7 @@ func ManagerConfigConnectionDiffers(left store.ManagerConfig, right store.Manage
 		left.Collector.PopSide != right.Collector.PopSide ||
 		left.Collector.BatchSize != right.Collector.BatchSize ||
 		left.Collector.PollIntervalMS != right.Collector.PollIntervalMS ||
+		left.Collector.QueryLimit != right.Collector.QueryLimit ||
 		left.Collector.TLSSkipVerify != right.Collector.TLSSkipVerify
 }
 

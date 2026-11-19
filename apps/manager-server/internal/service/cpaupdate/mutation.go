@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -32,6 +33,8 @@ type MutationRequest struct {
 	RequestID                string                  `json:"request_id"`
 	TargetVersion            string                  `json:"target_version"`
 	ExpectedActiveArtifactID model.RuntimeArtifactID `json:"expected_active_artifact_id"`
+	SourceMode               string                  `json:"source_mode,omitempty"`
+	CDNPrefix                string                  `json:"cdn_prefix,omitempty"`
 }
 
 func (r MutationRequest) Validate() error {
@@ -39,6 +42,18 @@ func (r MutationRequest) Validate() error {
 		return newMutationError(MutationErrorInvalid, "invalid_request")
 	}
 	if !r.ExpectedActiveArtifactID.IsValid() {
+		return newMutationError(MutationErrorInvalid, "invalid_request")
+	}
+	switch r.SourceMode {
+	case "", "github":
+		if strings.TrimSpace(r.CDNPrefix) != "" {
+			return newMutationError(MutationErrorInvalid, "invalid_request")
+		}
+	case "cdn":
+		if !validMutationCDNPrefix(r.CDNPrefix) {
+			return newMutationError(MutationErrorInvalid, "invalid_request")
+		}
+	default:
 		return newMutationError(MutationErrorInvalid, "invalid_request")
 	}
 	return nil
@@ -70,6 +85,7 @@ type MutationErrorKind string
 
 const (
 	MutationErrorInvalid     MutationErrorKind = "invalid"
+	MutationErrorTooLarge    MutationErrorKind = "too_large"
 	MutationErrorConflict    MutationErrorKind = "conflict"
 	MutationErrorExecution   MutationErrorKind = "execution"
 	MutationErrorUnavailable MutationErrorKind = "unavailable"
@@ -84,6 +100,8 @@ func (e *MutationError) Error() string {
 	switch e.Kind {
 	case MutationErrorInvalid:
 		return "invalid CPA update mutation request"
+	case MutationErrorTooLarge:
+		return "uploaded archive exceeds size limit"
 	case MutationErrorConflict:
 		return "CPA update mutation conflicts with current state"
 	case MutationErrorExecution:
@@ -106,14 +124,24 @@ func newMutationError(kind MutationErrorKind, code string) error {
 }
 
 func (s *Service) Prepare(ctx context.Context, request MutationRequest) (MutationResult, error) {
-	return s.mutate(ctx, MutationPhasePrepare, request)
+	return s.mutate(ctx, MutationPhasePrepare, request, nil, 0)
+}
+
+func (s *Service) PrepareUpload(ctx context.Context, request MutationRequest, archive io.Reader, contentLength int64) (MutationResult, error) {
+	if archive == nil || strings.TrimSpace(request.SourceMode) != "" || strings.TrimSpace(request.CDNPrefix) != "" {
+		return MutationResult{}, newMutationError(MutationErrorInvalid, "invalid_request")
+	}
+	return s.mutate(ctx, MutationPhasePrepare, request, archive, contentLength)
 }
 
 func (s *Service) Activate(ctx context.Context, request MutationRequest) (MutationResult, error) {
-	return s.mutate(ctx, MutationPhaseActivate, request)
+	if strings.TrimSpace(request.SourceMode) != "" || strings.TrimSpace(request.CDNPrefix) != "" {
+		return MutationResult{}, newMutationError(MutationErrorInvalid, "invalid_request")
+	}
+	return s.mutate(ctx, MutationPhaseActivate, request, nil, 0)
 }
 
-func (s *Service) mutate(ctx context.Context, phase MutationPhase, request MutationRequest) (MutationResult, error) {
+func (s *Service) mutate(ctx context.Context, phase MutationPhase, request MutationRequest, uploadArchive io.Reader, uploadLength int64) (MutationResult, error) {
 	if err := request.Validate(); err != nil {
 		return MutationResult{}, err
 	}
@@ -197,11 +225,22 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	}
 	var operation model.RuntimeOperationResult
 	if phase == MutationPhasePrepare {
-		operation, err = s.runtime.PrepareUpdate(ctx, model.RuntimePrepareUpdateRequest{
+		prepareReq := model.RuntimePrepareUpdateRequest{
 			RuntimeMutationRequest:   mutationRequest,
 			ExpectedActiveArtifactID: artifact.ArtifactID,
 			TargetVersion:            state.TargetVersion,
-		})
+			SourceMode:               request.SourceMode,
+			CDNPrefix:                strings.TrimSpace(request.CDNPrefix),
+		}
+		if uploadArchive != nil {
+			uploader, ok := s.runtime.(runtimeservice.PrepareUpdateUploader)
+			if !ok {
+				return MutationResult{}, newMutationError(MutationErrorConflict, "runtime_capability_unavailable")
+			}
+			operation, err = uploader.PrepareUpdateUpload(ctx, prepareReq, uploadArchive, uploadLength)
+		} else {
+			operation, err = s.runtime.PrepareUpdate(ctx, prepareReq)
+		}
 	} else {
 		operation, err = s.runtime.ActivateUpdate(ctx, model.RuntimeActivateUpdateRequest{
 			RuntimeMutationRequest:   mutationRequest,
@@ -283,6 +322,10 @@ func mutationRuntimeError(err error) (MutationResult, error) {
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_transport_unavailable")
 	}
 	switch code {
+	case runtimeservice.ProtocolErrorInvalidRequest:
+		return MutationResult{}, newMutationError(MutationErrorInvalid, string(code))
+	case runtimeservice.ProtocolErrorArchiveTooLarge:
+		return MutationResult{}, newMutationError(MutationErrorTooLarge, string(code))
 	case runtimeservice.ProtocolErrorRuntimeIdentityMismatch,
 		runtimeservice.ProtocolErrorStaleRuntimeGeneration,
 		runtimeservice.ProtocolErrorOperationIDConflict,

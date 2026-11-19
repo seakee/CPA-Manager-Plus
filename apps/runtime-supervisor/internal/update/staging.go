@@ -65,8 +65,9 @@ func (m Metadata) validate() error {
 
 // Preparer combines the fixed official source with Supervisor-private storage.
 type Preparer struct {
-	source *Source
-	store  *Store
+	source  *Source
+	store   *Store
+	cdnOpts []CDNSourceOption
 }
 
 func NewPreparer(root string) (*Preparer, error) {
@@ -98,6 +99,23 @@ func NewPreparerWithStore(store *Store) (*Preparer, error) {
 	return &Preparer{source: source, store: store}, nil
 }
 
+// NewPreparerWithSource combines a platform-configured official release source with a stage store.
+func NewPreparerWithSource(source *Source, store *Store) (*Preparer, error) {
+	if source == nil || store == nil {
+		return nil, fmt.Errorf("%w: staging service is unavailable", ErrStaging)
+	}
+	return &Preparer{source: source, store: store}, nil
+}
+
+// SetCDNOptionsForTesting configures CDN transport options (such as a local TLS
+// client and synthetic DNS resolver) on p for isolated tests.
+func (p *Preparer) SetCDNOptionsForTesting(opts ...CDNSourceOption) {
+	if p == nil {
+		return
+	}
+	p.cdnOpts = append([]CDNSourceOption(nil), opts...)
+}
+
 func (p *Preparer) Resolve(ctx context.Context, version string) (Release, error) {
 	if p == nil || p.source == nil {
 		return Release{}, fmt.Errorf("%w: release source is unavailable", ErrReleaseMetadata)
@@ -105,11 +123,73 @@ func (p *Preparer) Resolve(ctx context.Context, version string) (Release, error)
 	return p.source.Resolve(ctx, version)
 }
 
+// StageOptions configures optional progress, CDN prefix, or upload stream staging.
+type StageOptions struct {
+	SourceMode    string
+	CDNPrefix     string
+	UploadContext context.Context
+	UploadReader  io.Reader
+	UploadLength  int64
+	Progress      ProgressFunc
+	OnPhase       func(string)
+}
+
 func (p *Preparer) Stage(ctx context.Context, release Release) (Metadata, error) {
+	return p.StageWithOptions(ctx, release, StageOptions{})
+}
+
+func (p *Preparer) StageWithOptions(ctx context.Context, release Release, opts StageOptions) (Metadata, error) {
 	if p == nil || p.source == nil || p.store == nil {
 		return Metadata{}, fmt.Errorf("%w: staging service is unavailable", ErrStaging)
 	}
-	return p.store.Stage(ctx, release, p.source.Download)
+	if p.source.asset != "" {
+		if err := p.source.validateRelease(release); err != nil {
+			return Metadata{}, err
+		}
+	} else {
+		if ValidateVersion(release.Version) != nil || !canonicalDigest(release.ArchiveDigest) ||
+			release.ArchiveSize <= 0 || release.ArchiveSize > maxReleaseArchiveBytes {
+			return Metadata{}, fmt.Errorf("%w: noncanonical selected asset", ErrArchiveInvalid)
+		}
+		if _, _, err := resolveCDNReleasePlatform(release); err != nil {
+			return Metadata{}, err
+		}
+	}
+	switch opts.SourceMode {
+	case "", "github":
+	case "cdn", "upload":
+		if release.ArchiveSize > MaxAcquisitionArchiveBytes {
+			return Metadata{}, fmt.Errorf("%w: official release archive size %d exceeds %d", ErrArchiveTooLarge, release.ArchiveSize, MaxAcquisitionArchiveBytes)
+		}
+	default:
+		return Metadata{}, fmt.Errorf("%w: unsupported prepare source mode", ErrArchiveInvalid)
+	}
+	download := func(ctx context.Context, rel Release, dst io.Writer) error {
+		switch opts.SourceMode {
+		case "", "github":
+			if opts.OnPhase != nil {
+				opts.OnPhase("downloading")
+			}
+			return p.source.DownloadWithProgress(ctx, rel, dst, opts.Progress)
+		case "cdn":
+			if opts.OnPhase != nil {
+				opts.OnPhase("downloading")
+			}
+			return DownloadFromCDN(ctx, rel, opts.CDNPrefix, dst, opts.Progress, p.cdnOpts...)
+		case "upload":
+			if opts.OnPhase != nil {
+				opts.OnPhase("verifying")
+			}
+			uploadCtx := ctx
+			if opts.UploadContext != nil {
+				uploadCtx = opts.UploadContext
+			}
+			return VerifyUploadStream(uploadCtx, rel, opts.UploadReader, opts.UploadLength, dst, opts.Progress)
+		default:
+			return fmt.Errorf("%w: unsupported prepare source mode", ErrArchiveInvalid)
+		}
+	}
+	return p.store.stage(ctx, release, download, opts.OnPhase, opts.SourceMode == "upload")
 }
 
 // Store owns immutable finalized stages beneath one private persistent root.
@@ -173,6 +253,10 @@ func newStore(root string, executionGID *uint32) (*Store, error) {
 type downloadArchive func(context.Context, Release, io.Writer) error
 
 func (s *Store) Stage(ctx context.Context, release Release, download downloadArchive) (Metadata, error) {
+	return s.stage(ctx, release, download, nil, false)
+}
+
+func (s *Store) stage(ctx context.Context, release Release, download downloadArchive, onPhase func(string), verifyUploadBeforeReuse bool) (Metadata, error) {
 	if err := ctx.Err(); err != nil {
 		return Metadata{}, err
 	}
@@ -180,8 +264,13 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 		return Metadata{}, fmt.Errorf("%w: invalid stage request", ErrStaging)
 	}
 	finalPath := filepath.Join(s.root, release.Version)
-	if metadata, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
-		return metadata, err
+	if !verifyUploadBeforeReuse {
+		if onPhase != nil {
+			onPhase("verifying")
+		}
+		if metadata, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
+			return metadata, err
+		}
 	}
 	temporary, err := os.MkdirTemp(s.root, temporaryPrefix)
 	if err != nil {
@@ -197,13 +286,30 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 	if err != nil {
 		return Metadata{}, fmt.Errorf("%w: create temporary archive: %v", ErrStaging, err)
 	}
-	downloadErr := download(ctx, release, archiveFile)
+	if err := download(ctx, release, archiveFile); err != nil {
+		return Metadata{}, errors.Join(err, archiveFile.Close())
+	}
+	// New uploads must prove exact official bytes even when the same version
+	// is already staged. A verified existing stage needs no replacement.
+	if verifyUploadBeforeReuse {
+		if err := ctx.Err(); err != nil {
+			return Metadata{}, errors.Join(err, archiveFile.Close())
+		}
+		if metadata, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
+			return metadata, errors.Join(err, archiveFile.Close())
+		}
+	}
 	syncErr := archiveFile.Sync()
 	closeErr := archiveFile.Close()
-	if err := errors.Join(downloadErr, syncErr, closeErr); err != nil {
+	if err := errors.Join(syncErr, closeErr); err != nil {
 		return Metadata{}, err
 	}
-
+	if err := ctx.Err(); err != nil {
+		return Metadata{}, err
+	}
+	if onPhase != nil {
+		onPhase("verifying")
+	}
 	publication := filepath.Join(temporary, "final")
 	if err := os.Mkdir(publication, 0o700); err != nil {
 		return Metadata{}, fmt.Errorf("%w: create publication directory: %v", ErrStaging, err)
@@ -225,8 +331,11 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 	if err := syncDirectory(publication); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
 	}
-	if _, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
+	if err := ctx.Err(); err != nil {
 		return Metadata{}, err
+	}
+	if existing, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
+		return existing, err
 	}
 	if err := os.Rename(publication, finalPath); err != nil {
 		if existing, found, verifyErr := s.verifyPreparedFinal(finalPath, release); found || verifyErr != nil {

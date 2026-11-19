@@ -23,18 +23,23 @@ type AcquireDownloadFunc func(ctx context.Context, destination io.Writer, progre
 // bounded by MaxAcquisitionArchiveBytes (64 MiB).
 func CopyUploadArchive(src io.Reader, contentLength int64) AcquireDownloadFunc {
 	return func(ctx context.Context, destination io.Writer, progress ProgressFunc) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if src == nil || destination == nil {
+		if src == nil || destination == nil || contentLength < -1 {
 			return fmt.Errorf("%w: upload archive stream is required", ErrArchiveInvalid)
 		}
-		written, err := copyBoundedArchive(src, destination, contentLength, progress)
+		if contentLength > MaxAcquisitionArchiveBytes {
+			return fmt.Errorf("%w: content length %d exceeds %d", ErrArchiveTooLarge, contentLength, MaxAcquisitionArchiveBytes)
+		}
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("%w: upload stream interrupted: %w", ErrDownloadFailed, err)
+			}
+		}
+		written, err := copyBoundedArchiveWithMax(ctx, src, destination, contentLength, MaxAcquisitionArchiveBytes, progress)
 		if err != nil {
-			if errors.Is(err, ErrArchiveTooLarge) {
+			if errors.Is(err, ErrArchiveTooLarge) || errors.Is(err, ErrStaging) {
 				return err
 			}
-			return fmt.Errorf("%w: read uploaded archive: %v", ErrArchiveInvalid, err)
+			return fmt.Errorf("%w: read uploaded archive: %w", ErrDownloadFailed, err)
 		}
 		if contentLength >= 0 && written != contentLength {
 			return fmt.Errorf("%w: uploaded size differs from Content-Length", ErrArchiveInvalid)

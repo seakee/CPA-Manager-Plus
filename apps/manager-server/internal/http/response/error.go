@@ -38,6 +38,7 @@ func ManagerConfigErrorStatus(err error) int {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "connection setup is managed by environment variables"),
+		strings.Contains(message, "retention settings are managed by environment variables"),
 		strings.Contains(message, "locked by environment variable"):
 		return http.StatusConflict
 	case strings.Contains(message, "CPA connection is already bound"):
@@ -45,6 +46,15 @@ func ManagerConfigErrorStatus(err error) int {
 	case strings.Contains(message, "cpaBaseUrl and managementKey are required"),
 		strings.Contains(message, "CPA redis-usage-queue-retention-seconds"),
 		strings.Contains(message, "pollIntervalMs must be less than or equal"),
+		strings.Contains(message, "retentionDays must be between"),
+		strings.Contains(message, "batchSize must be"),
+		strings.Contains(message, "pollIntervalMs must be"),
+		strings.Contains(message, "queryLimit must be"),
+		strings.Contains(message, "collectorMode must be"),
+		strings.Contains(message, "popSide must be"),
+		strings.Contains(message, "queue must not be empty"),
+		strings.Contains(message, "collector patch requires at least one field"),
+		strings.Contains(message, "retention patch requires at least one field"),
 		strings.Contains(message, "invalid time zone"):
 		return http.StatusBadRequest
 	case strings.Contains(message, "management API validation failed"),
@@ -71,6 +81,8 @@ func UsageServiceErrorCode(err error) string {
 	switch {
 	case strings.Contains(message, "connection setup is managed by environment variables"):
 		return "connection_env_managed"
+	case strings.Contains(message, "retention settings are managed by environment variables"):
+		return "retention_env_managed"
 	case strings.Contains(message, "locked by environment variable"):
 		return "account_processing_policy_env_locked"
 	case strings.Contains(message, "CPA connection is already bound"):

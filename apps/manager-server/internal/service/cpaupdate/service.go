@@ -100,6 +100,9 @@ func (s *Service) currentMode() model.RuntimeMode {
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.currentMode().IsValid() {
+		return Status{}, errors.New("CPA update Runtime mode is invalid")
+	}
 	if err := s.load(ctx); err != nil {
 		return Status{}, err
 	}
@@ -112,6 +115,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 func (s *Service) Check(ctx context.Context) (Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.currentMode().IsValid() {
+		return Status{}, errors.New("CPA update Runtime mode is invalid")
+	}
 	if err := s.load(ctx); err != nil {
 		return Status{}, err
 	}

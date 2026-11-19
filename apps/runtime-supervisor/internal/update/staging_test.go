@@ -9,8 +9,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -155,6 +159,64 @@ func TestStoreReusesOnlyVerifiedImmutableFinalStageAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestPreparerVerifiesEveryNewUploadBeforeReusingFinalStage(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer := newPreparer(&Source{asset: "linux_amd64.tar.gz"}, store)
+	archive := tarGzip(t, archiveEntry{name: stagedExecutableName, data: []byte("exact executable")})
+	release := releaseForArchive("7.3.3", archive)
+	upload := func(reader io.Reader, length int64) (Metadata, error) {
+		return preparer.StageWithOptions(t.Context(), release, StageOptions{
+			SourceMode: "upload", UploadReader: reader, UploadLength: length,
+		})
+	}
+	want, err := upload(bytes.NewReader(archive), release.ArchiveSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.ResolveFinalized(release.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(final.ExecutablePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongDigest := bytes.Clone(archive)
+	wrongDigest[len(wrongDigest)-1] ^= 1
+	for _, tc := range []struct {
+		name   string
+		bytes  []byte
+		length int64
+	}{
+		{name: "known size mismatch", bytes: archive[:len(archive)-1], length: release.ArchiveSize - 1},
+		{name: "unknown size mismatch", bytes: archive[:len(archive)-1], length: -1},
+		{name: "same size wrong digest", bytes: wrongDigest, length: release.ArchiveSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := upload(bytes.NewReader(tc.bytes), tc.length); !errors.Is(err, ErrArchiveInvalid) || got != (Metadata{}) {
+				t.Fatalf("invalid upload = %#v, %v", got, err)
+			}
+			if after, err := store.ResolveFinalized(release.Version); err != nil || after != final {
+				t.Fatalf("invalid upload altered finalized stage: %#v, %v", after, err)
+			}
+		})
+	}
+	valid := bytes.NewReader(archive)
+	if got, err := upload(valid, -1); err != nil || got != want || valid.Len() != 0 {
+		t.Fatalf("valid reuse = %#v, %v; %d unread bytes", got, err, valid.Len())
+	}
+	after, err := os.Stat(final.ExecutablePath)
+	if err != nil || !os.SameFile(original, after) {
+		t.Fatalf("finalized executable was replaced: %v", err)
+	}
+	if entries, err := os.ReadDir(store.root); err != nil || len(entries) != 1 || entries[0].Name() != release.Version {
+		t.Fatalf("unexpected stage root contents: %v, %v", entries, err)
+	}
+}
+
 func TestStoreRejectsChangedOfficialSourceWithoutOverwrite(t *testing.T) {
 	root := t.TempDir()
 	archive := tarGzip(t, archiveEntry{name: stagedExecutableName, typeFlag: tar.TypeReg, data: []byte("binary")})
@@ -258,5 +320,197 @@ func assertMode(t *testing.T, name string, want os.FileMode) {
 	}
 	if info.Mode().Perm() != want {
 		t.Fatalf("%s mode = %o, want %o", name, info.Mode().Perm(), want)
+	}
+}
+
+type eofCancelUploadReader struct {
+	r        *bytes.Reader
+	onEOF    func()
+	canceled bool
+}
+
+func (r *eofCancelUploadReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if errors.Is(err, io.EOF) && !r.canceled {
+		r.canceled = true
+		r.onEOF()
+	}
+	return n, err
+}
+
+func TestStageWithOptionsEnforcesAssetMetadataBoundsPhaseAndUploadContext(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer := newPreparer(&Source{asset: "linux_amd64.tar.gz"}, store)
+	archive := tarGzip(t, archiveEntry{name: stagedExecutableName, data: []byte("stage-options-executable")})
+	release := releaseForArchive("7.3.3", archive)
+
+	uploadCtx, cancelUpload := context.WithCancel(t.Context())
+	defer cancelUpload()
+	var uploadPhases []string
+	meta, err := preparer.StageWithOptions(t.Context(), release, StageOptions{
+		SourceMode:    "upload",
+		UploadContext: uploadCtx,
+		UploadReader: &eofCancelUploadReader{
+			r:     bytes.NewReader(archive),
+			onEOF: cancelUpload,
+		},
+		UploadLength: release.ArchiveSize,
+		OnPhase: func(phase string) {
+			uploadPhases = append(uploadPhases, phase)
+		},
+	})
+	if err != nil || meta.Version != "7.3.3" {
+		t.Fatalf("StageWithOptions(post-EOF canceled upload) = %+v, err=%v", meta, err)
+	}
+	if len(uploadPhases) == 0 || uploadPhases[0] != "verifying" {
+		t.Fatalf("upload phases = %v, want verifying", uploadPhases)
+	}
+
+	var reusePhases []string
+	reused, err := preparer.StageWithOptions(t.Context(), release, StageOptions{
+		SourceMode: "github",
+		OnPhase: func(phase string) {
+			reusePhases = append(reusePhases, phase)
+		},
+	})
+	if err != nil || reused != meta {
+		t.Fatalf("StageWithOptions(reuse pre-staged) = %+v, err=%v; want %+v", reused, err, meta)
+	}
+	if len(reusePhases) == 0 {
+		t.Fatal("expected verifying phase callback when reusing pre-staged directory")
+	}
+	for _, phase := range reusePhases {
+		if phase != "verifying" {
+			t.Fatalf("pre-staged reuse reported phase %q, want only verifying", phase)
+		}
+	}
+
+	for _, bad := range []struct {
+		name   string
+		mutate func(*Release)
+	}{
+		{name: "empty asset name", mutate: func(r *Release) { r.AssetName = "" }},
+		{name: "wrong platform asset name", mutate: func(r *Release) {
+			r.AssetName = "CLIProxyAPI_7.3.3_linux_aarch64.tar.gz"
+			r.AssetURL = "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.3/CLIProxyAPI_7.3.3_linux_aarch64.tar.gz"
+		}},
+		{name: "empty asset URL", mutate: func(r *Release) { r.AssetURL = "" }},
+		{name: "wrong asset URL", mutate: func(r *Release) {
+			r.AssetURL = "https://example.com/CLIProxyAPI_7.3.3_linux_amd64.tar.gz"
+		}},
+	} {
+		candidate := release
+		bad.mutate(&candidate)
+		if _, err := preparer.StageWithOptions(t.Context(), candidate, StageOptions{SourceMode: "github"}); !errors.Is(err, ErrArchiveInvalid) {
+			t.Fatalf("StageWithOptions(%s) = %v, want ErrArchiveInvalid", bad.name, err)
+		}
+	}
+
+	oversize := release
+	oversize.ArchiveSize = MaxAcquisitionArchiveBytes + 1
+	for _, mode := range []string{"cdn", "upload"} {
+		if _, err := preparer.StageWithOptions(t.Context(), oversize, StageOptions{SourceMode: mode}); !errors.Is(err, ErrArchiveTooLarge) {
+			t.Fatalf("StageWithOptions(%s, >64 MiB) = %v, want ErrArchiveTooLarge", mode, err)
+		}
+	}
+}
+
+func TestStageWithOptionsCDNSourceEndToEnd(t *testing.T) {
+	binary := []byte("cdn-staged-executable-7.3.4")
+	binarySum := sha256.Sum256(binary)
+	wantArtifactID := "sha256:" + hex.EncodeToString(binarySum[:])
+	archive := tarGzip(t, archiveEntry{name: stagedExecutableName, data: binary})
+	release := releaseForArchive("7.3.4", archive)
+	officialPath := "/router-for-me/CLIProxyAPI/releases/download/v7.3.4/CLIProxyAPI_7.3.4_linux_amd64.tar.gz"
+
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mirror/https://github.com" + officialPath:
+			w.Header().Set("Content-Length", strconv.Itoa(len(archive)))
+			_, _ = w.Write(archive)
+		case "/corrupt/https://github.com" + officialPath:
+			corrupted := append([]byte(nil), archive...)
+			corrupted[0] ^= 0xff
+			w.Header().Set("Content-Length", strconv.Itoa(len(corrupted)))
+			_, _ = w.Write(corrupted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer tlsServer.Close()
+
+	cdnClient := newTLSServerClientForOfficialHosts(tlsServer)
+	transport := cdnClient.Transport.(*http.Transport)
+	fixtureDial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		peer, err := net.ResolveTCPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		conn, err := fixtureDial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return cdnFixtureConn{Conn: conn, remote: peer}, nil
+	}
+	publicLookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == githubAPIHost {
+			return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+		}
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	}
+
+	stageRoot := t.TempDir()
+	store, err := NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer := newPreparer(&Source{asset: "linux_amd64.tar.gz"}, store)
+	preparer.SetCDNOptionsForTesting(WithCDNHTTPClient(cdnClient), WithCDNLookupIP(publicLookup))
+
+	// Corrupted CDN archive fails closed with ErrArchiveInvalid and leaves no stage files.
+	if _, err := preparer.StageWithOptions(t.Context(), release, StageOptions{
+		SourceMode: "cdn",
+		CDNPrefix:  "https://cdn.example.com/corrupt/",
+	}); !errors.Is(err, ErrArchiveInvalid) {
+		t.Fatalf("StageWithOptions(cdn corrupt) = %v, want ErrArchiveInvalid", err)
+	}
+	if entries, readErr := os.ReadDir(stageRoot); readErr != nil || len(entries) != 0 {
+		t.Fatalf("corrupt CDN stage left files: %v, %v", entries, readErr)
+	}
+
+	var phases []string
+	var lastReceived, lastTotal int64
+	meta, err := preparer.StageWithOptions(t.Context(), release, StageOptions{
+		SourceMode: "cdn",
+		CDNPrefix:  "https://cdn.example.com/mirror/",
+		OnPhase: func(phase string) {
+			phases = append(phases, phase)
+		},
+		Progress: func(received, total int64) {
+			lastReceived = received
+			lastTotal = total
+		},
+	})
+	if err != nil {
+		t.Fatalf("StageWithOptions(cdn valid) error = %v", err)
+	}
+	if meta.Version != "7.3.4" || string(meta.ArtifactID) != wantArtifactID || meta.SourceArchiveDigest != release.ArchiveDigest {
+		t.Fatalf("StageWithOptions(cdn valid) metadata = %+v", meta)
+	}
+	if lastReceived != release.ArchiveSize || lastTotal != release.ArchiveSize {
+		t.Fatalf("StageWithOptions(cdn valid) progress = (%d/%d), want %d", lastReceived, lastTotal, release.ArchiveSize)
+	}
+	sawDownloading := false
+	for _, p := range phases {
+		if p == "downloading" {
+			sawDownloading = true
+		}
+	}
+	if !sawDownloading {
+		t.Fatalf("StageWithOptions(cdn valid) phases = %v, expected downloading", phases)
 	}
 }

@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -21,4 +22,10 @@ type RuntimeClient interface {
 	PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error)
 	ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error)
 	ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error)
+}
+
+// PrepareUpdateUploader is optionally implemented by Runtime clients that
+// support streaming an uploaded CPA release archive for staging.
+type PrepareUpdateUploader interface {
+	PrepareUpdateUpload(ctx context.Context, request model.RuntimePrepareUpdateRequest, archive io.Reader, contentLength int64) (model.RuntimeOperationResult, error)
 }

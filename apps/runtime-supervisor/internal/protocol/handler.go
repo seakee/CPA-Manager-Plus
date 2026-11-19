@@ -7,8 +7,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
@@ -25,19 +28,21 @@ const (
 )
 
 type Config struct {
-	RuntimeIdentity   string
-	RuntimeGeneration uint64
-	Token             string
-	Start             StartExecutor
-	Stop              StopExecutor
-	Restart           RestartExecutor
-	PrepareUpdate     PrepareUpdateExecutor
-	ActivateUpdate    ActivateUpdateExecutor
-	ObserveUpdate     UpdateOperationObserver
-	Status            StatusObserver
-	Recovery          RecoveryStatusObserver
-	Artifact          ArtifactStatusObserver
-	Destination       DestinationExecutor
+	RuntimeIdentity        string
+	RuntimeGeneration      uint64
+	Token                  string
+	Start                  StartExecutor
+	Stop                   StopExecutor
+	Restart                RestartExecutor
+	PrepareUpdate          PrepareUpdateExecutor
+	PrepareUpdateUpload    PrepareUpdateUploadExecutor
+	ActivateUpdate         ActivateUpdateExecutor
+	ObserveUpdate          UpdateOperationObserver
+	ObservePrepareProgress PrepareProgressObserver
+	Status                 StatusObserver
+	Recovery               RecoveryStatusObserver
+	Artifact               ArtifactStatusObserver
+	Destination            DestinationExecutor
 }
 
 // StatusObserver supplies read-only availability facts after authentication.
@@ -64,8 +69,10 @@ type handler struct {
 	stop                    StopExecutor
 	restart                 RestartExecutor
 	prepareUpdate           PrepareUpdateExecutor
+	prepareUpdateUpload     PrepareUpdateUploadExecutor
 	activateUpdate          ActivateUpdateExecutor
 	updateOperationObserver UpdateOperationObserver
+	prepareProgressObserver PrepareProgressObserver
 	status                  StatusObserver
 	recovery                RecoveryStatusObserver
 	artifact                ArtifactStatusObserver
@@ -126,8 +133,10 @@ func NewHandler(config Config) (http.Handler, error) {
 		stop:                    config.Stop,
 		restart:                 config.Restart,
 		prepareUpdate:           config.PrepareUpdate,
+		prepareUpdateUpload:     config.PrepareUpdateUpload,
 		activateUpdate:          config.ActivateUpdate,
 		updateOperationObserver: config.ObserveUpdate,
+		prepareProgressObserver: config.ObservePrepareProgress,
 		status:                  config.Status,
 		recovery:                config.Recovery,
 		artifact:                config.Artifact,
@@ -136,10 +145,14 @@ func NewHandler(config Config) (http.Handler, error) {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w = &closeUnconsumedResponseWriter{
+		ResponseWriter: w,
+		body:           trackRequestBody(r),
+	}
 	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath, observeUpdateOperationPath:
-	case startPath, stopPath, restartPath, prepareUpdatePath, activateUpdatePath, destinationPath:
+	case startPath, stopPath, restartPath, prepareUpdatePath, PrepareUpdateUploadPath, activateUpdatePath, destinationPath:
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
@@ -206,11 +219,107 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.submitRestart(w, r)
 	case prepareUpdatePath:
 		h.submitPrepareUpdate(w, r)
+	case PrepareUpdateUploadPath:
+		h.submitPrepareUpdateUpload(w, r)
 	case activateUpdatePath:
 		h.submitActivateUpdate(w, r)
 	case destinationPath:
 		h.submitDestination(w, r)
 	}
+}
+
+type bodyConsumptionTracker struct {
+	rc       io.ReadCloser
+	consumed atomic.Bool
+}
+
+func trackRequestBody(r *http.Request) *bodyConsumptionTracker {
+	tracker := &bodyConsumptionTracker{}
+	if r == nil || r.Body == nil || r.Body == http.NoBody {
+		tracker.consumed.Store(true)
+		return tracker
+	}
+	tracker.rc = r.Body
+	r.Body = tracker
+	return tracker
+}
+
+func (b *bodyConsumptionTracker) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.consumed.Store(true)
+	}
+	return n, err
+}
+
+func (b *bodyConsumptionTracker) Close() error {
+	return b.rc.Close()
+}
+
+type closeUnconsumedResponseWriter struct {
+	http.ResponseWriter
+	body                *bodyConsumptionTracker
+	wroteHeader         bool
+	expiredReadDeadline bool
+}
+
+func (w *closeUnconsumedResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *closeUnconsumedResponseWriter) SetReadDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && !deadline.After(time.Now().Add(time.Second)) {
+		if w.expiredReadDeadline {
+			return nil
+		}
+		w.expiredReadDeadline = true
+	} else {
+		w.expiredReadDeadline = false
+	}
+	return http.NewResponseController(w.ResponseWriter).SetReadDeadline(deadline)
+}
+
+func (w *closeUnconsumedResponseWriter) WriteHeader(statusCode int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		if w.body != nil && !w.body.consumed.Load() {
+			w.Header().Set("Connection", "close")
+			if !w.expiredReadDeadline {
+				w.expiredReadDeadline = true
+				_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Now())
+			}
+		}
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *closeUnconsumedResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func unwrapResponseWriter(w http.ResponseWriter) http.ResponseWriter {
+	if wrapped, ok := w.(*closeUnconsumedResponseWriter); ok {
+		return wrapped.ResponseWriter
+	}
+	return w
+}
+
+func requestBodyConsumed(w http.ResponseWriter) bool {
+	if wrapped, ok := w.(*closeUnconsumedResponseWriter); ok && wrapped.body != nil {
+		return wrapped.body.consumed.Load()
+	}
+	return false
+}
+
+func restoreUploadReadDeadline(controller *http.ResponseController, consumed bool) {
+	if consumed {
+		_ = controller.SetReadDeadline(time.Time{})
+		return
+	}
+	_ = controller.SetReadDeadline(time.Now())
 }
 
 func requestsFeature(r *http.Request, feature string) bool {

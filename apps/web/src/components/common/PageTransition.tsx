@@ -390,52 +390,61 @@ export function PageTransition({
     };
   }, [isAnimating, resolveScrollContainer]);
 
-  return (
-    <div className={`page-transition${isAnimating ? ' page-transition--animating' : ''}`}>
-      {(() => {
-        const currentIndex = layers.findIndex((layer) => layer.status === 'current');
-        const resolvedCurrentIndex = currentIndex === -1 ? layers.length - 1 : currentIndex;
-        const keepStackedIndex = layers
-          .slice(0, resolvedCurrentIndex)
-          .map((layer, index) => ({ layer, index }))
-          .reverse()
-          .find(({ layer }) => layer.status === 'stacked')?.index;
+  const currentIndex = layers.findIndex((layer) => layer.status === 'current');
+  const resolvedCurrentIndex = currentIndex === -1 ? layers.length - 1 : currentIndex;
+  const keepStackedIndex = layers
+    .slice(0, resolvedCurrentIndex)
+    .map((layer, index) => ({ layer, index }))
+    .reverse()
+    .find(({ layer }) => layer.status === 'stacked')?.index;
 
-        return layers.map((layer, index) => {
-          const shouldKeepStacked = layer.status === 'stacked' && index === keepStackedIndex;
-          return (
-            <div
-              key={layer.key}
-              className={[
-                'page-transition__layer',
-                layer.status === 'exiting' ? 'page-transition__layer--exit' : '',
-                layer.status === 'stacked' ? 'page-transition__layer--stacked' : '',
-                shouldKeepStacked ? 'page-transition__layer--stacked-keep' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              aria-hidden={layer.status !== 'current'}
-              inert={layer.status !== 'current'}
-              ref={
-                layer.status === 'exiting'
-                  ? exitingLayerRef
-                  : layer.status === 'current'
-                    ? currentLayerRef
-                    : undefined
-              }
-            >
-              <PageTransitionLayerContext.Provider
-                value={{
-                  ...PAGE_TRANSITION_LAYER_CONTEXT_VALUES[layer.status],
-                  isAnimating,
-                }}
-              >
-                {render(layer.location)}
-              </PageTransitionLayerContext.Provider>
-            </div>
-          );
-        });
-      })()}
+  const renderedLayers = layers.map((layer, index) => ({
+    layer,
+    index,
+    shouldKeepStacked: layer.status === 'stacked' && index === keepStackedIndex,
+    content: render(layer.location),
+  }));
+  const allLayersEmpty = renderedLayers.every(
+    ({ content }) => content === null || content === undefined || content === false
+  );
+
+  return (
+    <div
+      className={`page-transition${isAnimating ? ' page-transition--animating' : ''}${
+        allLayersEmpty ? ' page-transition--empty' : ''
+      }`}
+    >
+      {renderedLayers.map(({ layer, shouldKeepStacked, content }) => (
+        <div
+          key={layer.key}
+          className={[
+            'page-transition__layer',
+            layer.status === 'exiting' ? 'page-transition__layer--exit' : '',
+            layer.status === 'stacked' ? 'page-transition__layer--stacked' : '',
+            shouldKeepStacked ? 'page-transition__layer--stacked-keep' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          aria-hidden={layer.status !== 'current'}
+          inert={layer.status !== 'current'}
+          ref={
+            layer.status === 'exiting'
+              ? exitingLayerRef
+              : layer.status === 'current'
+                ? currentLayerRef
+                : undefined
+          }
+        >
+          <PageTransitionLayerContext.Provider
+            value={{
+              ...PAGE_TRANSITION_LAYER_CONTEXT_VALUES[layer.status],
+              isAnimating,
+            }}
+          >
+            {content}
+          </PageTransitionLayerContext.Provider>
+        </div>
+      ))}
     </div>
   );
 }

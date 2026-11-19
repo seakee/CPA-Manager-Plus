@@ -43,13 +43,20 @@ const (
 	CodeProxyURLCredentials = "proxy_url_credentials"
 	// CodeInvalidConfig names a value outside the private profile's range.
 	CodeInvalidConfig = "invalid_config"
+	// CodeSourceInvalidYAML reports malformed, ambiguous or non-mapping YAML.
+	CodeSourceInvalidYAML = "invalid_source_yaml"
+	// CodeSourceProtectedPath reports an attempt to edit a secret or owned path.
+	CodeSourceProtectedPath = "protected_source_path"
+	// CodeSourceNoChanges reports a source save whose normalized tree matches baseline.
+	CodeSourceNoChanges = "source_no_changes"
 )
 
 // ManagerCode reports whether code is one of this Manager's own page codes. An
 // unknown code is never passed through: the reply falls back to a bounded one.
 func ManagerCode(code string) bool {
 	switch code {
-	case CodeProxyURLCredentials, CodeInvalidConfig:
+	case CodeProxyURLCredentials, CodeInvalidConfig,
+		CodeSourceInvalidYAML, CodeSourceProtectedPath, CodeSourceNoChanges:
 		return true
 	}
 	return false
@@ -401,10 +408,10 @@ type scope struct {
 }
 
 var gatewayConfigScope = scope{
-	leafPaths:    cpa.ConfigLeafPaths,
-	groupIDs:     cpa.ConfigGroupIDs,
-	lookupGroup:  cpa.LookupConfigGroup,
-	lookupLeaf:   cpa.LookupConfigLeaf,
+	leafPaths:    cpa.GatewayPageLeafPaths,
+	groupIDs:     cpa.GatewayPageGroupIDs,
+	lookupGroup:  cpa.LookupGatewayPageGroup,
+	lookupLeaf:   cpa.LookupGatewayPageLeaf,
 	parseValue:   cpa.ParseConfigLeafValue,
 	ruleFamilies: true,
 }
@@ -413,7 +420,7 @@ var gatewayConfigScope = scope{
 // page also owns the shared payload-rules journal, which is not a page group, so
 // membership is a scope question and never a plain page-group lookup.
 func (sc scope) ownsGroup(id string) bool {
-	if sc.ruleFamilies && id == cpa.ConfigRulesGroupID {
+	if sc.ruleFamilies && (id == cpa.ConfigRulesGroupID || id == ConfigSourceGroupID) {
 		return true
 	}
 	_, ok := sc.lookupGroup(id)
@@ -743,6 +750,7 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 			view.Capability.Writable = false
 			view.Capability.RulesWritable = false
 			view.Capability.Reason = ReasonReadUnavailable
+			auth.capable = view.Capability
 			document = nil
 		}
 	}
@@ -755,6 +763,12 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 		}
 		if operation, ok := entry.Operations[entry.Latest]; ok && operation.State == "unknown" {
 			blocked[id] = ReasonUnknownOriginal
+		}
+	}
+	var sourceUnknownOp *freshstore.ConfigGroupOperation
+	if sc.ownsGroup(ConfigSourceGroupID) {
+		if op, ok := unknownGroupOperation(r, ConfigSourceGroupID); ok {
+			sourceUnknownOp = &op
 		}
 	}
 	// A pre-cutover field operation that was never resolved blocks its group. It
@@ -806,6 +820,16 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 	if sc.ruleFamilies && !private && unresolvedLegacyField(r, cpa.ConfigRulesGroupID) && blocked[cpa.ConfigRulesGroupID] == "" {
 		blocked[cpa.ConfigRulesGroupID] = ReasonLegacyUnresolved
 	}
+	if sourceUnknownOp != nil {
+		for _, id := range sc.groupIDs() {
+			if blocked[id] == "" {
+				blocked[id] = ReasonUnknownOriginal
+			}
+		}
+		if sc.ruleFamilies && blocked[cpa.ConfigRulesGroupID] == "" {
+			blocked[cpa.ConfigRulesGroupID] = ReasonUnknownOriginal
+		}
+	}
 	// A private-profile group is writable only if it holds a private leaf. Every
 	// other group of that profile stays readable and read-only.
 	groupIDs := sc.groupIDs()
@@ -839,6 +863,11 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 			entry.Operation = operation
 			entry.Persisted = operation.State
 		}
+		if sourceUnknownOp != nil && (entry.Operation == nil || entry.Operation.State != "unknown") {
+			copied := sourceUnknownOp.Clone()
+			entry.Operation = &copied
+			entry.Persisted = copied.State
+		}
 		if document != nil {
 			entry.Baseline = groupBaseline(document, group)
 		}
@@ -853,7 +882,7 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 			groupReason = reason
 		}
 		entry.Reason = groupReason
-		entry.Writable = auth.capable.Writable && !view.GroupsInvalid && blocked[id] == ""
+		entry.Writable = auth.capable.Writable && !view.GroupsInvalid && blocked[id] == "" && document != nil
 		view.Groups = append(view.Groups, entry)
 	}
 	for _, path := range sc.leafPaths() {
@@ -893,8 +922,12 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 				rulesOperation = &copied
 			}
 		}
-		for _, id := range cpa.ConfigRuleFamilyIDs() {
-			family, _ := cpa.LookupConfigRuleFamily(id)
+		if sourceUnknownOp != nil && (rulesOperation == nil || rulesOperation.State != "unknown") {
+			copied := sourceUnknownOp.Clone()
+			rulesOperation = &copied
+		}
+		for _, id := range cpa.GatewayPageRuleFamilyIDs() {
+			family, _ := cpa.LookupGatewayPageRuleFamily(id)
 			item := FamilyView{Family: family.Family, Path: family.Path, ReadOnly: true, Operation: rulesOperation}
 			if document != nil {
 				if value, presence := cpa.LookupConfigValue(document, family.Path); presence == cpa.ConfigPresent {
@@ -904,7 +937,7 @@ func (s *Service) read(ctx context.Context, sc scope) (View, error) {
 				}
 				item.Baseline = familyBaseline(document, family.Path)
 			}
-			item.Writable = auth.capable.RulesWritable && !view.GroupsInvalid && blocked[cpa.ConfigRulesGroupID] == ""
+			item.Writable = auth.capable.RulesWritable && !view.GroupsInvalid && blocked[cpa.ConfigRulesGroupID] == "" && document != nil
 			item.ReadOnly = !item.Writable
 			switch reason, isBlocked := blocked[cpa.ConfigRulesGroupID]; {
 			case view.GroupsInvalid:
@@ -937,6 +970,74 @@ func unresolvedLegacyField(r freshstore.Record, group string) bool {
 		}
 	}
 	return false
+}
+
+func unknownGroupOperation(r freshstore.Record, groupID string) (freshstore.ConfigGroupOperation, bool) {
+	if r.ConfigGroupsInvalid {
+		return freshstore.ConfigGroupOperation{}, false
+	}
+	entry := r.ConfigGroups[groupID]
+	if entry == nil {
+		return freshstore.ConfigGroupOperation{}, false
+	}
+	operation, ok := entry.Operations[entry.Latest]
+	if !ok || operation.State != "unknown" {
+		return freshstore.ConfigGroupOperation{}, false
+	}
+	return operation.Clone(), true
+}
+
+// blockingSourceOperation reports any unresolved gateway operation that must be
+// settled before the whole-document source view can be saved. Because source
+// mode spans every gateway group and payload rule family, an unknown operation
+// anywhere in the gateway scope fences source edits, and vice versa.
+func blockingSourceOperation(r freshstore.Record) (*freshstore.ConfigGroupOperation, string, error) {
+	if op, ok := unknownGroupOperation(r, ConfigSourceGroupID); ok {
+		return &op, ReasonUnknownOriginal, cpa.ErrApplyUnknown
+	}
+	for _, groupID := range cpa.GatewayPageGroupIDs() {
+		if op, ok := unknownGroupOperation(r, groupID); ok {
+			return &op, ReasonUnknownOriginal, cpa.ErrApplyUnknown
+		}
+	}
+	if op, ok := unknownGroupOperation(r, cpa.ConfigRulesGroupID); ok {
+		return &op, ReasonUnknownOriginal, cpa.ErrApplyUnknown
+	}
+	for _, groupID := range sortedMapKeys(r.ConfigGroups) {
+		if !gatewayConfigScope.ownsGroup(groupID) {
+			continue
+		}
+		if op, ok := unknownGroupOperation(r, groupID); ok {
+			return &op, ReasonUnknownOriginal, cpa.ErrApplyUnknown
+		}
+	}
+	var newest *freshstore.ConfigGroupOperation
+	var newestRevision uint64
+	for _, path := range sortedMapKeys(r.Config) {
+		if _, isPlugin := cpa.LookupPluginConfigLeaf(path); isPlugin {
+			continue
+		}
+		entry := r.Config[path]
+		if entry == nil || r.ConfigInvalid[path] {
+			continue
+		}
+		operation, ok := entry.Operations[entry.Latest]
+		if !ok || operation.State != "unknown" {
+			continue
+		}
+		view := legacyView(operation)
+		if grp, ok := cpa.LookupGatewayPageGroup(view.Group); ok {
+			view.Prefix = grp.Prefix
+		}
+		if newest == nil || operation.Revision > newestRevision {
+			copied := view.Clone()
+			newest, newestRevision = &copied, operation.Revision
+		}
+	}
+	if newest != nil {
+		return newest, ReasonLegacyUnresolved, ErrLegacyUnresolved
+	}
+	return nil, "", nil
 }
 
 func firstReason(reasons ...string) string {
@@ -1011,10 +1112,10 @@ func (s *Service) operation(ctx context.Context, sc scope, id string, reconcile 
 				return operation, nil
 			}
 			auth, resolveErr := s.resolve(ctx, r, sc)
-			if errors.Is(resolveErr, ErrPluginAuthority) {
-				return operation, resolveErr
-			}
-			if errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) {
+			if errors.Is(resolveErr, ErrPluginAuthority) ||
+				errors.Is(resolveErr, cpa.ErrExternalRejectionUnavailable) ||
+				errors.Is(resolveErr, cpa.ErrManagementRejected) ||
+				errors.Is(resolveErr, cpa.ErrExternalTargetMoved) {
 				return operation, resolveErr
 			}
 			if resolveErr != nil || !auth.capable.Readable {
@@ -1025,7 +1126,7 @@ func (s *Service) operation(ctx context.Context, sc scope, id string, reconcile 
 	}
 	// A field operation journaled before the page became group-based is still
 	// readable and reconcilable; it is never writable again.
-	for _, path := range cpa.ConfigLeafPaths() {
+	for _, path := range sc.leafPaths() {
 		if _, ok := sc.lookupLeaf(path); !ok {
 			continue
 		}
@@ -1080,7 +1181,7 @@ func legacyView(operation freshstore.ConfigOperation) freshstore.ConfigGroupOper
 }
 
 func fieldGroup(path string) string {
-	if leaf, ok := cpa.LookupConfigLeaf(path); ok {
+	if leaf, ok := cpa.LookupGatewayPageLeaf(path); ok {
 		return leaf.Group
 	}
 	return "legacy"

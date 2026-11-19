@@ -1168,3 +1168,273 @@ func buildAcquireTarGzip(t *testing.T, entries ...acquireArchiveEntry) []byte {
 	}
 	return buf.Bytes()
 }
+
+type acquireSyntheticPeerConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c acquireSyntheticPeerConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestArtifactAcquireCDNFakeIPHandling(t *testing.T) {
+	officialPath := "/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_linux_amd64.tar.gz"
+	var archiveBytes []byte
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/mirror/https://github.com"+officialPath {
+			w.Header().Set("Content-Length", strconv.Itoa(len(archiveBytes)))
+			_, _ = w.Write(archiveBytes)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer tlsServer.Close()
+
+	var mu sync.Mutex
+	var dialedTargets []string
+	newIsolatedClient := func() *http.Client {
+		client := newOfficialAndCDNTLSClient(tlsServer)
+		transport := client.Transport.(*http.Transport)
+		loopbackDial := transport.DialContext
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			mu.Lock()
+			dialedTargets = append(dialedTargets, address)
+			mu.Unlock()
+			peer, err := net.ResolveTCPAddr(network, address)
+			if err != nil {
+				return nil, err
+			}
+			conn, err := loopbackDial(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return acquireSyntheticPeerConn{Conn: conn, remote: peer}, nil
+		}
+		return client
+	}
+
+	// 1. Literal 198.18.0.1 prefix must still be rejected even when DNS is in Fake-IP mode.
+	fakeIPEnv := newSlimAcquireTestEnv(
+		t,
+		WithAcquisitionHTTPClient(newIsolatedClient()),
+		WithAcquisitionCDNAddrPolicy(nil),
+		WithAcquisitionCDNLookupIP(func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				return []net.IPAddr{{IP: net.ParseIP("198.18.0.31")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+		}),
+	)
+	archiveBytes = fakeIPEnv.archive
+	if _, _, err := fakeIPEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://198.18.0.1/mirror",
+	}); ArtifactErrorCode(err) != ArtifactCodeInvalidRequest {
+		t.Fatalf("literal Fake-IP CDN prefix err = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeInvalidRequest)
+	}
+
+	// 2. Domain resolving to 198.18.0.113 when api.github.com is normal public IP must fail with download_failed without dialing.
+	nonFakeEnv := newSlimAcquireTestEnv(
+		t,
+		WithAcquisitionHTTPClient(newIsolatedClient()),
+		WithAcquisitionCDNAddrPolicy(nil),
+		WithAcquisitionCDNLookupIP(func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+		}),
+	)
+	op, started, err := nonFakeEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://cdn.example.com/mirror",
+	})
+	if err != nil || !started || op.Source != ArtifactSourceCDN {
+		t.Fatalf("AcquireArtifact non-Fake-IP env = %+v, started=%v, err=%v", op, started, err)
+	}
+	finalNonFake := awaitAcquisitionTerminal(t, nonFakeEnv.executor)
+	if finalNonFake.Operation == nil || finalNonFake.Operation.Phase != ArtifactPhaseFailed ||
+		finalNonFake.Operation.Code != ArtifactCodeDownloadFailed {
+		t.Fatalf("non-Fake-IP final = %+v, want failed/%s", finalNonFake, ArtifactCodeDownloadFailed)
+	}
+	mu.Lock()
+	nonFakeDials := len(dialedTargets)
+	mu.Unlock()
+	if nonFakeDials != 0 {
+		t.Fatalf("non-Fake-IP mode dialed %v; want refusal before dialing", dialedTargets)
+	}
+
+	// 3. Domain resolving to 198.18.0.113 when Fake-IP sentinel mode is active passes dial and remote peer checks
+	// and completes end-to-end against the isolated local TLS fixture with zero real host network calls.
+	opFake, startedFake, err := fakeIPEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://cdn.example.com/mirror",
+	})
+	if err != nil || !startedFake || opFake.Source != ArtifactSourceCDN {
+		t.Fatalf("AcquireArtifact Fake-IP env = %+v, started=%v, err=%v", opFake, startedFake, err)
+	}
+	finalFake := awaitAcquisitionTerminal(t, fakeIPEnv.executor)
+	if finalFake.Operation == nil || finalFake.Operation.Phase != ArtifactPhaseSucceeded ||
+		finalFake.Active == nil || finalFake.Active.ArtifactID != fakeIPEnv.pinnedID {
+		t.Fatalf("Fake-IP final = %+v, want succeeded with %s", finalFake, fakeIPEnv.pinnedID)
+	}
+	mu.Lock()
+	gotTargets := append([]string(nil), dialedTargets...)
+	mu.Unlock()
+	if len(gotTargets) != 1 || gotTargets[0] != "198.18.0.113:443" {
+		t.Fatalf("Fake-IP dialed targets = %v, want [198.18.0.113:443]", gotTargets)
+	}
+}
+
+func TestArtifactStatusDoesNotBlockOnSlowCDNLookup(t *testing.T) {
+	lookupEntered := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() {
+		select {
+		case <-releaseLookup:
+		default:
+			close(releaseLookup)
+		}
+	})
+
+	env := newSlimAcquireTestEnv(
+		t,
+		WithAcquisitionCDNAddrPolicy(nil),
+		WithAcquisitionCDNLookupIP(func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				once.Do(func() { close(lookupEntered) })
+				select {
+				case <-releaseLookup:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+		}),
+	)
+
+	acquireStart := time.Now()
+	op, started, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://cdn.example.com/mirror",
+	})
+	if err != nil || !started || op.Source != ArtifactSourceCDN {
+		t.Fatalf("AcquireArtifact(cdn) = %+v, started=%v, err=%v", op, started, err)
+	}
+	if elapsed := time.Since(acquireStart); elapsed >= 500*time.Millisecond {
+		t.Fatalf("AcquireArtifact blocked %s waiting for DNS lookup", elapsed)
+	}
+
+	select {
+	case <-lookupEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async CDN acquisition did not enter api.github.com DNS lookup")
+	}
+
+	statusDone := make(chan struct{})
+	var status ArtifactStatusResponse
+	var statusErr error
+	go func() {
+		status, statusErr = env.executor.ArtifactStatus()
+		close(statusDone)
+	}()
+	select {
+	case <-statusDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ArtifactStatus() blocked on slow cdnLookupIP")
+	}
+	if statusErr != nil || status.Operation == nil || status.Operation.Phase != ArtifactPhaseDownloading {
+		t.Fatalf("ArtifactStatus() during slow DNS lookup = %+v, err=%v", status, statusErr)
+	}
+
+	close(releaseLookup)
+	settled := awaitAcquisitionTerminal(t, env.executor)
+	if settled.Operation == nil || settled.Operation.Phase != ArtifactPhaseFailed {
+		t.Fatalf("settled status = %+v, want failed", settled)
+	}
+}
+
+func TestUploadArtifactDecouplesPostEOFStagingAndMapsStreamReadErrors(t *testing.T) {
+	env := newSlimAcquireTestEnv(t)
+	callerCtx, cancelCaller := context.WithCancel(t.Context())
+	defer cancelCaller()
+
+	op, err := env.executor.UploadArtifact(
+		callerCtx,
+		&eofCancelingReader{
+			r:     bytes.NewReader(env.archive),
+			onEOF: cancelCaller,
+		},
+		int64(len(env.archive)),
+	)
+	if err != nil || op.Phase != ArtifactPhaseSucceeded {
+		t.Fatalf("UploadArtifact(post-EOF caller cancel) = %+v, err=%v; want succeeded", op, err)
+	}
+	status, err := env.executor.ArtifactStatus()
+	if err != nil || status.Required || status.Active == nil || status.Active.ArtifactID != env.pinnedID {
+		t.Fatalf("ArtifactStatus after post-EOF canceled upload = %+v, err=%v", status, err)
+	}
+
+	failEnv := newSlimAcquireTestEnv(t)
+	_, readErr := failEnv.executor.UploadArtifact(
+		t.Context(),
+		&midStreamErrorReader{prefix: env.archive[:8], err: io.ErrUnexpectedEOF},
+		-1,
+	)
+	if ArtifactErrorCode(readErr) != ArtifactCodeDownloadFailed {
+		t.Fatalf("UploadArtifact(unexpected EOF) code = %q (err=%v), want %q", ArtifactErrorCode(readErr), readErr, ArtifactCodeDownloadFailed)
+	}
+}
+
+func TestUploadArtifactNilContextAndInvalidEmptyInputsPreserveCurrentOp(t *testing.T) {
+	env := newSlimAcquireTestEnv(
+		t,
+		WithAcquisitionCDNAddrPolicy(nil),
+		WithAcquisitionCDNLookupIP(func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		}),
+	)
+	// Seed currentOp via a failed CDN acquire.
+	if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://cdn.example.com/mirror",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seeded := awaitAcquisitionTerminal(t, env.executor)
+	if seeded.Operation == nil || seeded.Operation.Phase != ArtifactPhaseFailed {
+		t.Fatalf("seeded status = %+v, want failed", seeded)
+	}
+	seededID := seeded.Operation.ID
+
+	for _, tc := range []struct {
+		name   string
+		body   io.Reader
+		length int64
+	}{
+		{name: "nil body", body: nil, length: 4},
+		{name: "http.NoBody", body: http.NoBody, length: -1},
+		{name: "zero length", body: bytes.NewReader(nil), length: 0},
+		{name: "negative length below -1", body: bytes.NewReader(env.archive), length: -2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := env.executor.UploadArtifact(t.Context(), tc.body, tc.length); ArtifactErrorCode(err) != ArtifactCodeInvalidRequest {
+				t.Fatalf("UploadArtifact(%s) err = %v (code %q), want %q", tc.name, err, ArtifactErrorCode(err), ArtifactCodeInvalidRequest)
+			}
+			st, err := env.executor.ArtifactStatus()
+			if err != nil || st.Operation == nil || st.Operation.ID != seededID {
+				t.Fatalf("UploadArtifact(%s) overwrote currentOp: %+v, err=%v", tc.name, st, err)
+			}
+		})
+	}
+
+	var nilCtx context.Context
+	op, err := env.executor.UploadArtifact(nilCtx, bytes.NewReader(env.archive), int64(len(env.archive)))
+	if err != nil || op.Phase != ArtifactPhaseSucceeded {
+		t.Fatalf("UploadArtifact(nil ctx) = %+v, err=%v; want succeeded", op, err)
+	}
+}

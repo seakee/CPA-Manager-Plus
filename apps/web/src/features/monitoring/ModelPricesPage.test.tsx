@@ -1,6 +1,7 @@
-import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Input } from '@/components/ui/Input';
+import type { UsageServiceApiError } from '@/services/api/usageService';
 import { calculateCost, type ModelPrice } from '@/utils/usage';
 import { ModelPricesPage } from './ModelPricesPage';
 
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => {
     },
     usageSummary: vi.fn(),
     sync: vi.fn(),
+    reload: vi.fn(),
     usage: {
       loading: false,
       modelPricesLoaded: true,
@@ -67,7 +69,7 @@ vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
     modelPricesLoaded: mocks.usage.modelPricesLoaded,
     modelPricesLoading: mocks.usage.modelPricesLoading,
     modelPricesScopeKey: mocks.usage.modelPricesScopeKey,
-    reloadModelPrices: vi.fn(),
+    reloadModelPrices: mocks.reload,
     setModelPrices: mocks.save,
     syncModelPrices: mocks.sync,
     usageServiceAvailable: true,
@@ -621,5 +623,439 @@ describe('ModelPricesPage price action scope isolation', () => {
     });
 
     expect(hasDraftEditor()).toBe(true);
+  });
+
+  it('shows the localized server rejection error instead of success when saving a draft fails with archive lock', async () => {
+    const lockedError = new Error(
+      'Model price structure cannot change after archived raw usage has been deleted.'
+    ) as UsageServiceApiError;
+    lockedError.name = 'UsageServiceApiError';
+    lockedError.status = 409;
+    lockedError.code = 'model_price_structure_locked_by_usage_archive';
+    mocks.save.mockRejectedValueOnce(lockedError);
+
+    await mountAndSettle();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+    await clickBySpanLabel('common.save');
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocks.notify).toHaveBeenCalledWith(
+      'usage_service_errors.model_price_structure_locked_by_usage_archive',
+      'error'
+    );
+    expect(notifiedWith('usage_stats.model_price_saved')).toBe(false);
+    expect(hasDraftEditor()).toBe(true);
+  });
+
+  it('shows the server rejection error and preserves candidates or drafts on confirm and delete failures', async () => {
+    const lockedError = new Error(
+      'Model price structure cannot change after archived raw usage has been deleted.'
+    ) as UsageServiceApiError;
+    lockedError.name = 'UsageServiceApiError';
+    lockedError.status = 409;
+    lockedError.code = 'model_price_structure_locked_by_usage_archive';
+
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'tiered-model', calls: 1, requested_calls: 1, resolved_calls: 1 }],
+    });
+    mocks.sync.mockResolvedValue(candidateResponse);
+    await mountAndSettle();
+    await clickBySpanLabel('usage_stats.model_price_sync');
+    expect(candidateSelects()).toHaveLength(1);
+
+    mocks.save.mockRejectedValueOnce(lockedError);
+    await clickBySpanLabel('model_prices.confirm_candidate');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.notify).toHaveBeenCalledWith(
+      'usage_service_errors.model_price_structure_locked_by_usage_archive',
+      'error'
+    );
+    expect(notifiedWith('model_prices.candidate_confirmed')).toBe(false);
+    expect(candidateSelects()).toHaveLength(1);
+
+    mocks.notify.mockClear();
+    await act(async () => {
+      renderer.unmount();
+    });
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+    mocks.save.mockRejectedValueOnce(new Error('unexpected failure'));
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.delete' })[0].props.onClick();
+      await Promise.resolve();
+    });
+    expect(mocks.notify).toHaveBeenCalledWith('unexpected failure', 'error');
+    expect(hasDraftEditor()).toBe(true);
+  });
+
+  it('ignores a rejected save from a superseded connection and falls back when error has no message', async () => {
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    let rejectSave!: (reason?: unknown) => void;
+    const savePromise = new Promise<undefined>((_resolve, reject) => {
+      rejectSave = reject;
+    });
+    mocks.save.mockReturnValueOnce(savePromise);
+    await clickBySpanLabel('common.save');
+
+    await switchToScopeB();
+    mocks.notify.mockClear();
+
+    await act(async () => {
+      rejectSave(new Error('late locked error'));
+      await Promise.resolve();
+    });
+    expect(mocks.notify).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    mocks.save.mockRejectedValueOnce({});
+    await clickBySpanLabel('common.save');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.notify).toHaveBeenCalledWith('usage_service_errors.request_failed', 'error');
+  });
+
+  it('guards saves with an in-flight lock so overlapping writes cannot race', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+
+    let resolveSave!: () => void;
+    const pendingSave = new Promise<undefined>((resolve) => {
+      resolveSave = () => resolve(undefined);
+    });
+    mocks.save.mockReturnValueOnce(pendingSave);
+
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    const findSaveButton = () =>
+      renderer.root.findAllByType('button').find((button) =>
+        button.findAllByType('span').some((span) => span.children.includes('common.save'))
+      )!;
+    const findDeleteButton = () =>
+      renderer.root.findAllByProps({ 'aria-label': 'common.delete' })[0];
+
+    await act(async () => {
+      findSaveButton().props.onClick();
+    });
+    expect(mocks.save).toHaveBeenCalledTimes(1);
+    expect(findSaveButton().props.disabled).toBe(true);
+    expect(findDeleteButton().props.disabled).toBe(true);
+
+    // Overlapping clicks on save or delete while save is in flight are ignored.
+    await act(async () => {
+      findSaveButton().props.onClick();
+      findDeleteButton().props.onClick();
+    });
+    expect(mocks.save).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSave();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(hasDraftEditor()).toBe(false);
+    expect(findDeleteButton().props.disabled).toBe(false);
+    mocks.save.mockResolvedValueOnce(undefined);
+    await act(async () => {
+      findDeleteButton().props.onClick();
+      await Promise.resolve();
+    });
+    expect(mocks.save).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps mutations disabled and shows loading while initial price baseline has not settled even if usage summary resolves', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'gpt-5.5', request_count: 1, unpriced_count: 1 }],
+    });
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: true,
+      modelPricesScopeKey: 'scope-a',
+    };
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+      await Promise.resolve();
+    });
+
+    expect(JSON.stringify(renderer.toJSON())).toContain('common.loading');
+    const hasSpanLabel = (btn: ReactTestInstance, label: string) =>
+      btn.findAllByType('span').some((span) => span.children.includes(label));
+    const toolbarButtons = renderer.root.findAllByType('button');
+    const addButton = toolbarButtons.find((btn) => hasSpanLabel(btn, 'model_prices.add_manual'));
+    const syncButton = toolbarButtons.find((btn) =>
+      hasSpanLabel(btn, 'usage_stats.model_price_sync')
+    );
+    expect(addButton?.props.disabled).toBe(true);
+    expect(syncButton?.props.disabled).toBe(true);
+
+    // Failed price load (!modelPricesLoaded && !modelPricesLoading) renders load-failed alert & keeps row mutations disabled.
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-a',
+    };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'model-prices-load-failed' })).toBeDefined();
+    const rowAddBtn = renderer.root
+      .findAllByType('button')
+      .filter((btn) => btn.findAll((node) => node.children?.includes('model_prices.add_manual')).length > 0);
+    expect(rowAddBtn.every((btn) => btn.props.disabled === true)).toBe(true);
+  });
+  it('disables Add Manual and Edit while saving or syncing is in flight', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'unpriced-model', calls: 1, requested_calls: 1, resolved_calls: 1 }],
+    });
+    await mountAndSettle();
+
+    const toolbarAddBtn = () =>
+      renderer.root
+        .findAllByType('button')
+        .find(
+          (btn) =>
+            btn.props.className?.includes('toolbarButton') &&
+            btn.findAllByType('span').some((span) => span.children.includes('model_prices.add_manual'))
+        )!;
+    const rowAddButtons = () =>
+      renderer.root
+        .findAllByType('button')
+        .filter(
+          (btn) =>
+            !btn.props.className?.includes('toolbarButton') &&
+            btn.findAllByType('span').some((span) => span.children.includes('model_prices.add_manual'))
+        );
+    const editButtons = () => renderer.root.findAllByProps({ 'aria-label': 'common.edit' });
+
+    const pendingSave = deferred<undefined>();
+    mocks.save.mockReturnValueOnce(pendingSave.promise);
+    await act(async () => {
+      editButtons()[0].props.onClick();
+    });
+    await clickBySpanLabel('common.save');
+
+    expect(toolbarAddBtn().props.disabled).toBe(true);
+    expect(rowAddButtons().every((btn) => btn.props.disabled === true)).toBe(true);
+    expect(editButtons().every((btn) => btn.props.disabled === true)).toBe(true);
+
+    await act(async () => {
+      pendingSave.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hasDraftEditor()).toBe(false);
+    expect(toolbarAddBtn().props.disabled).toBe(false);
+    expect(editButtons().every((btn) => btn.props.disabled === false)).toBe(true);
+
+    const pendingSync = deferred<typeof candidateResponse>();
+    mocks.sync.mockReturnValueOnce(pendingSync.promise);
+    await clickBySpanLabel('usage_stats.model_price_sync');
+    expect(toolbarAddBtn().props.disabled).toBe(true);
+    expect(rowAddButtons().every((btn) => btn.props.disabled === true)).toBe(true);
+    expect(editButtons().every((btn) => btn.props.disabled === true)).toBe(true);
+
+    // Clicking disabled Add Manual or Edit while syncing must not open the editor.
+    await act(async () => {
+      toolbarAddBtn().props.onClick();
+      editButtons()[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(false);
+
+    await act(async () => {
+      pendingSync.resolve({ ...candidateResponse, candidates: [] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(toolbarAddBtn().props.disabled).toBe(false);
+    expect(editButtons().every((btn) => btn.props.disabled === false)).toBe(true);
+  });
+
+  it('blocks writes when usage summary settles before pending or failed price baseline and recovers after retry', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: true,
+      modelPricesScopeKey: 'scope-a',
+    };
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'gpt-5.5', calls: 3, requested_calls: 3, resolved_calls: 3 }],
+    });
+
+    await mountAndSettle();
+    const toolbarActionButtons = () =>
+      renderer.root
+        .findAllByType('button')
+        .filter((btn) =>
+          btn
+            .findAllByType('span')
+            .some(
+              (span) =>
+                span.children.includes('model_prices.add_manual') ||
+                span.children.includes('usage_stats.model_price_sync')
+            )
+        );
+    for (const btn of toolbarActionButtons()) {
+      expect(btn.props.disabled).toBe(true);
+      await act(async () => {
+        btn.props.onClick();
+      });
+    }
+    expect(hasDraftEditor()).toBe(false);
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.sync).not.toHaveBeenCalled();
+
+    // Price baseline read fails while fallback prices or usageSummary rows exist: all mutations stay blocked.
+    mocks.prices = { 'fallback-model': tieredPrice() };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-a',
+    };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+
+    const alertBox = renderer.root.findByProps({ 'data-testid': 'model-prices-load-failed' });
+    const retryBtn = alertBox.findByType('button');
+    expect(retryBtn).toBeDefined();
+
+    const editBtn = renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0];
+    const deleteBtn = renderer.root.findAllByProps({ 'aria-label': 'common.delete' })[0];
+    expect(editBtn.props.disabled).toBe(true);
+    expect(deleteBtn.props.disabled).toBe(true);
+    for (const btn of [...toolbarActionButtons(), editBtn, deleteBtn]) {
+      expect(btn.props.disabled).toBe(true);
+      await act(async () => {
+        btn.props.onClick();
+      });
+    }
+    expect(hasDraftEditor()).toBe(false);
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.sync).not.toHaveBeenCalled();
+
+    // Retry triggers reloadModelPrices and restores mutations once server prices load.
+    await act(async () => {
+      retryBtn.props.onClick();
+    });
+    expect(mocks.reload).toHaveBeenCalledTimes(1);
+
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-a',
+    };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'model-prices-load-failed' })).toHaveLength(0);
+    const rowAddBtn = renderer.root
+      .findAllByType('button')
+      .find(
+        (btn) =>
+          !btn.props.className?.includes('toolbarButton') &&
+          btn.findAllByType('span').some((span) => span.children.includes('model_prices.add_manual'))
+      )!;
+    expect(rowAddBtn.props.disabled).toBe(false);
+
+    await act(async () => {
+      rowAddBtn.props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+    await changeField('usage_stats.model_price_prompt ($/1M)', '2');
+    await changeField('usage_stats.model_price_completion ($/1M)', '6');
+    mocks.save.mockResolvedValueOnce(undefined);
+    const saved = await save();
+    expect(saved['tiered-model']).toEqual(tieredPrice());
+    expect(saved['gpt-5.5']).toMatchObject({ prompt: 2, completion: 6, source: 'manual' });
+  });
+
+  it.each([
+    'external_management_key_rejected',
+    'management_rejected',
+    'target_moved',
+    'external_cpa_authority_unavailable',
+  ])('maps usage service error code %s on model price sync failures', async (code) => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+
+    const syncErr = new Error('raw key rejected') as UsageServiceApiError;
+    syncErr.name = 'UsageServiceApiError';
+    syncErr.status = code === 'external_cpa_authority_unavailable' ? 503 : 409;
+    syncErr.code = code;
+    mocks.sync.mockRejectedValueOnce(syncErr);
+
+    await clickBySpanLabel('usage_stats.model_price_sync');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.notify).toHaveBeenCalledWith(
+      `usage_stats.model_price_sync_failed: usage_service_errors.${code}`,
+      'error'
+    );
   });
 });

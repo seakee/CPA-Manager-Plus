@@ -136,7 +136,7 @@ func validateGroupRequest(sc scope, groupID string, q GroupRequest) error {
 
 // ValidateFamilyRequest rejects a rule request before any write happens.
 func ValidateFamilyRequest(family string, q FamilyRequest) error {
-	entry, ok := cpa.LookupConfigRuleFamily(family)
+	entry, ok := cpa.LookupGatewayPageRuleFamily(family)
 	if !ok {
 		return ErrInvalid
 	}
@@ -232,6 +232,13 @@ func (s *Service) saveGroup(ctx context.Context, sc scope, groupID string, q Gro
 		return freshstore.ConfigGroupOperation{}, cpa.ErrSourceConflict
 	}
 	if auth.mode == ModePrivate {
+		if sc.ownsGroup(ConfigSourceGroupID) && len(edits) == 1 {
+			if journal := r.Config[edits[0].Path]; journal == nil || journal.Operations[q.RequestID].RequestID == "" {
+				if _, ok := unknownGroupOperation(r, ConfigSourceGroupID); ok {
+					return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
+				}
+			}
+		}
 		// The private H1 profile has its own write unit: one leaf, one operation,
 		// reserved by the Host. It never joins the group PATCH journal.
 		return s.savePrivateGroup(ctx, r, auth, groupID, edits, q)
@@ -239,17 +246,49 @@ func (s *Service) saveGroup(ctx context.Context, sc scope, groupID string, q Gro
 	if unresolvedLegacyField(r, groupID) {
 		return freshstore.ConfigGroupOperation{}, ErrLegacyUnresolved
 	}
-	if entry := r.ConfigGroups[groupID]; entry != nil {
+	for id, entry := range r.ConfigGroups {
+		if entry == nil {
+			continue
+		}
 		if old, exists := entry.Operations[q.RequestID]; exists {
 			// Tombstone forever: an existing request ID is never a new write.
-			if !sameGroupRequest(old, edits, q.Expected.Baseline) {
+			if id != groupID || !sameGroupRequest(old, edits, q.Expected.Baseline) {
 				return old, cpa.ErrSourceConflict
+			}
+			if old.State == "unknown" {
+				return old, cpa.ErrApplyUnknown
 			}
 			return old, nil
 		}
+	}
+	if entry := r.ConfigGroups[groupID]; entry != nil {
 		if latest, exists := entry.Operations[entry.Latest]; exists && latest.State == "unknown" {
 			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
 		}
+	}
+	if sc.ownsGroup(ConfigSourceGroupID) {
+		if _, ok := unknownGroupOperation(r, ConfigSourceGroupID); ok {
+			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
+		}
+	}
+	type kvLeafPut struct {
+		path    string
+		payload []byte
+	}
+	var kvPuts []kvLeafPut
+	for _, edit := range edits {
+		if edit.Action != "set" {
+			continue
+		}
+		leaf, ok := sc.lookupLeaf(edit.Path)
+		if !ok || leaf.Type != cpa.ConfigLeafKVMap {
+			continue
+		}
+		encoded, encErr := cpa.EncodeConfigLeafValue(edit.Path, edit.Value)
+		if encErr != nil {
+			return freshstore.ConfigGroupOperation{}, ErrInvalid
+		}
+		kvPuts = append(kvPuts, kvLeafPut{path: edit.Path, payload: encoded})
 	}
 	document, err := auth.wire.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
@@ -266,18 +305,21 @@ func (s *Service) saveGroup(ctx context.Context, sc scope, groupID string, q Gro
 	if err = s.appendGroupOperation(ctx, r.Operation.Identity, r.Operation.Revision, groupID, operation); err != nil {
 		return operation, err
 	}
-	// One PATCH with only the edited leaves first, then one DELETE per restored
-	// leaf. The PATCH is the only write that can be refused before anything
-	// changed, but a delete-only save has the same shape one step later: each
-	// acknowledged DELETE has already changed the document. So "applied" tracks
-	// every write of this save that landed, not just the PATCH, and any later
-	// failure is unknown and resolved by reading back, never reported as
-	// "nothing was written" and never resent.
-	payload, patched := groupPatch(group.Prefix, edits)
+	// One PATCH with non-KVMap edited leaves first, then one replacement PUT per
+	// KVMap leaf (so omitted keys are deleted rather than merged by CPA), then
+	// one DELETE per restored leaf. "applied" tracks every acknowledged write of
+	// this save so any later failure stays unknown and is resolved by read-back.
+	payload, patched := groupPatch(group.Prefix, edits, sc.lookupLeaf)
 	applied := false
 	if patched {
 		if err = auth.wire.PatchConfigPath(ctx, auth.secret, group.Prefix, payload); err != nil {
 			return s.failGroupOperation(ctx, groupID, operation, err, false)
+		}
+		applied = true
+	}
+	for _, put := range kvPuts {
+		if err = auth.wire.PutConfigValue(ctx, auth.secret, put.path, put.payload); err != nil {
+			return s.failGroupOperation(ctx, groupID, operation, err, applied)
 		}
 		applied = true
 	}
@@ -302,7 +344,7 @@ func (s *Service) saveGroup(ctx context.Context, sc scope, groupID string, q Gro
 func (s *Service) SaveFamily(ctx context.Context, familyID string, q FamilyRequest) (freshstore.ConfigGroupOperation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	family, ok := cpa.LookupConfigRuleFamily(familyID)
+	family, ok := cpa.LookupGatewayPageRuleFamily(familyID)
 	if !ok {
 		return freshstore.ConfigGroupOperation{}, ErrInvalid
 	}
@@ -339,16 +381,27 @@ func (s *Service) SaveFamily(ctx context.Context, familyID string, q FamilyReque
 	if unresolvedLegacyField(r, cpa.ConfigRulesGroupID) {
 		return freshstore.ConfigGroupOperation{}, ErrLegacyUnresolved
 	}
-	if entry := r.ConfigGroups[cpa.ConfigRulesGroupID]; entry != nil {
+	for id, entry := range r.ConfigGroups {
+		if entry == nil {
+			continue
+		}
 		if old, exists := entry.Operations[q.RequestID]; exists {
-			if !sameFamilyRequest(old, family.Path, rules, q.Expected.Baseline) {
+			if id != cpa.ConfigRulesGroupID || !sameFamilyRequest(old, family.Path, rules, q.Expected.Baseline) {
 				return old, cpa.ErrSourceConflict
+			}
+			if old.State == "unknown" {
+				return old, cpa.ErrApplyUnknown
 			}
 			return old, nil
 		}
+	}
+	if entry := r.ConfigGroups[cpa.ConfigRulesGroupID]; entry != nil {
 		if latest, exists := entry.Operations[entry.Latest]; exists && latest.State == "unknown" {
 			return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
 		}
+	}
+	if _, ok := unknownGroupOperation(r, ConfigSourceGroupID); ok {
+		return freshstore.ConfigGroupOperation{}, cpa.ErrApplyUnknown
 	}
 	document, err := auth.wire.ReadConfigDocument(ctx, auth.secret)
 	if err != nil {
@@ -382,13 +435,18 @@ func (s *Service) SaveFamily(ctx context.Context, familyID string, q FamilyReque
 
 // groupPatch nests the edited leaves below their group prefix. Presence of a key
 // is the whole instruction: CPA merges mappings and never invents siblings.
-func groupPatch(prefix string, edits []freshstore.ConfigGroupEdit) ([]byte, bool) {
+func groupPatch(prefix string, edits []freshstore.ConfigGroupEdit, lookupLeaf func(string) (cpa.ConfigLeaf, bool)) ([]byte, bool) {
 	prefixParts := strings.Split(prefix, ".")
 	body := map[string]any{}
 	written := false
 	for _, edit := range edits {
 		if edit.Action != "set" {
 			continue
+		}
+		if lookupLeaf != nil {
+			if leaf, ok := lookupLeaf(edit.Path); ok && leaf.Type == cpa.ConfigLeafKVMap {
+				continue
+			}
 		}
 		parts := strings.Split(edit.Path, ".")
 		if len(parts) <= len(prefixParts) {

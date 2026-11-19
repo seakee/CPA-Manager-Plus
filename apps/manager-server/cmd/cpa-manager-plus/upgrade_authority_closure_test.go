@@ -30,6 +30,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 	freshstrategy "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
 type closureManagedRuntime struct {
@@ -343,8 +344,14 @@ func TestUpgradeExternalStoreFenceAtomicRebindAndRefusalHook(t *testing.T) {
 	var activeKey atomic.Value
 	activeKey.Store(oldKey)
 	var returnForbidden atomic.Bool
+	var configHits atomic.Int32
+	var totalHits atomic.Int32
 
 	extCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		totalHits.Add(1)
+		if r.URL.Path == "/v0/management/config" {
+			configHits.Add(1)
+		}
 		if returnForbidden.Load() {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -408,12 +415,26 @@ func TestUpgradeExternalStoreFenceAtomicRebindAndRefusalHook(t *testing.T) {
 
 	serverApp := httpapi.New(cfg, st, nil)
 	serverApp.SetUpgradeAPIKeys(ws.serveHTTP)
-	if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, ws.gatewayAdmitted, upgradeCanonicalDependencies{
-		Workspace: ws,
-		Protector: protector,
+	var canonical *upgradeCanonicalServer
+	canonicalCtx, cancelCanonical := context.WithCancel(context.Background())
+	if err := attachCompletedUpgradeRouting(canonicalCtx, cfg, st, serverApp, ws.gatewayAdmitted, upgradeCanonicalDependencies{
+		Workspace:    ws,
+		Protector:    protector,
+		CanonicalOut: &canonical,
 	}); err != nil {
+		cancelCanonical()
 		t.Fatal(err)
 	}
+	if canonical != nil && canonical.pluginCapability != nil {
+		canonical.pluginCapability.close()
+		canonical.pluginCapability = nil
+	}
+	t.Cleanup(func() {
+		cancelCanonical()
+		if canonical != nil {
+			canonical.Wait()
+		}
+	})
 	ts := httptest.NewServer(serverApp.Handler())
 	defer ts.Close()
 
@@ -464,13 +485,58 @@ func TestUpgradeExternalStoreFenceAtomicRebindAndRefusalHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2. Legacy bridge HTTP 403 records durable refusal and invokes the shared onRecord hook.
+	assertSingleJSON := func(label string, raw []byte) map[string]any {
+		t.Helper()
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("%s invalid JSON (%v): %s", label, err, string(raw))
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		var single map[string]any
+		if err := dec.Decode(&single); err != nil {
+			t.Fatalf("%s decode failed (%v): %s", label, err, string(raw))
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); err != io.EOF {
+			t.Fatalf("%s returned trailing JSON data (%v): %s", label, err, string(raw))
+		}
+		return out
+	}
+
+	// 2a. Bridged 200 request executes upstream strictly once and writes one valid JSON body.
+	before200Config := configHits.Load()
+	before200Total := totalHits.Load()
+	okBridgeRes := authReq(http.MethodGet, "/ext-console/api/v2/cpamp/v0/management/config", "")
+	okBridgeBytes, _ := io.ReadAll(okBridgeRes.Body)
+	_ = okBridgeRes.Body.Close()
+	if okBridgeRes.StatusCode != http.StatusOK {
+		t.Fatalf("legacy 200 status=%d body=%s, want 200", okBridgeRes.StatusCode, string(okBridgeBytes))
+	}
+	if gotConfig, gotTotal := configHits.Load()-before200Config, totalHits.Load()-before200Total; gotConfig != 1 || gotTotal != 1 {
+		t.Fatalf("legacy 200 upstream hits config=%d total=%d, want 1/1", gotConfig, gotTotal)
+	}
+	okPayload := assertSingleJSON("legacy 200", okBridgeBytes)
+	if okPayload["port"] != float64(8317) {
+		t.Fatalf("legacy 200 body=%+v, want port=8317", okPayload)
+	}
+
+	// 2b. Legacy bridge HTTP 403 executes upstream strictly once, records durable refusal, and writes one valid JSON body.
+	before403Config := configHits.Load()
+	before403Total := totalHits.Load()
 	returnForbidden.Store(true)
 	legacyRes := authReq(http.MethodGet, "/ext-console/api/v2/cpamp/v0/management/config", "")
+	legacyBytes, _ := io.ReadAll(legacyRes.Body)
 	_ = legacyRes.Body.Close()
 	returnForbidden.Store(false)
 	if legacyRes.StatusCode != http.StatusConflict || recordedCalls.Load() == 0 {
-		t.Fatalf("legacy 403 status=%d hookCalls=%d, want 409 and hookCalls>0", legacyRes.StatusCode, recordedCalls.Load())
+		t.Fatalf("legacy 403 status=%d hookCalls=%d body=%s, want 409 and hookCalls>0", legacyRes.StatusCode, recordedCalls.Load(), string(legacyBytes))
+	}
+	if gotConfig, gotTotal := configHits.Load()-before403Config, totalHits.Load()-before403Total; gotConfig != 1 || gotTotal != 1 {
+		t.Fatalf("legacy 403 upstream hits config=%d total=%d, want 1/1", gotConfig, gotTotal)
+	}
+	errPayload := assertSingleJSON("legacy 403", legacyBytes)
+	if errPayload["code"] != freshconfig.ReasonManagementRejected {
+		t.Fatalf("legacy 403 code=%v, want %q (body=%s)", errPayload["code"], freshconfig.ReasonManagementRejected, string(legacyBytes))
 	}
 	extIdentity := freshkeyapply.ExternalIdentity(strings.TrimRight(extCPA.URL, "/"))
 	if gotID, _ := recordedIdentity.Load().(string); gotID != extIdentity {
@@ -1249,6 +1315,172 @@ func TestUpgradeGatewayConfigHoldsPartialWriteReconcileAndRequestIDSemantics(t *
 
 		if cpaHits.Load() != 0 {
 			t.Fatalf("refused logs-capability or reconcile contacted External CPA %d times, want 0", cpaHits.Load())
+		}
+	})
+}
+
+type recording1xxWriter struct {
+	header   http.Header
+	statuses []int
+	body     bytes.Buffer
+}
+
+func (w *recording1xxWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *recording1xxWriter) WriteHeader(code int) {
+	w.statuses = append(w.statuses, code)
+}
+
+func (w *recording1xxWriter) Write(p []byte) (int, error) {
+	return w.body.Write(p)
+}
+
+func TestUpgradeCanonicalSecurityAndStreamingRegressions(t *testing.T) {
+	t.Run("servePluginResource rejects duplicate Authorization and checks admin auth before credentialGate", func(t *testing.T) {
+		st, cfg, adminKey := seedCompletedExternalUpgradeStore(t, "/ext-console", "http://127.0.0.1:18317")
+		keyBytes, _, err := security.LoadOrCreateDataKey("", cfg.DataKeyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		protector, err := security.NewProtector(keyBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws, closeWS, err := newUpgradeAPIKeysHandler(upgradeAPIKeysConfig{
+			DB:        st.SQLDB(),
+			Protector: protector,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(closeWS)
+
+		// Occupy External credentialGate so any unauthorized request reaching the gate would block/fail.
+		if !ws.credentialGate.acquire(context.Background()) {
+			t.Fatal("failed to acquire initial credentialGate")
+		}
+		defer ws.credentialGate.release()
+
+		var innerHits atomic.Int32
+		srv := &upgradeCanonicalServer{
+			db:         st,
+			targetMode: model.UpgradeTargetExternal,
+			workspace:  ws,
+			inner: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				innerHits.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}),
+		}
+
+		// 1) Duplicate Authorization headers -> 401 without calling inner or blocking on credentialGate.
+		dupReq := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/demo/index.html", nil)
+		dupReq.Header.Add("Authorization", "Bearer "+adminKey)
+		dupReq.Header.Add("Authorization", "Bearer other")
+		dupRR := httptest.NewRecorder()
+		srv.servePluginResource(dupRR, dupReq)
+		if dupRR.Code != http.StatusUnauthorized || innerHits.Load() != 0 {
+			t.Fatalf("duplicate auth header = (%d, innerHits=%d), want (401, 0)", dupRR.Code, innerHits.Load())
+		}
+
+		// 2) Wrong/missing admin bearer forwards to inner auth rejection immediately without waiting on credentialGate.
+		unauthReq := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/demo/index.html", nil)
+		unauthReq.Header.Set("Authorization", "Bearer wrong-key")
+		unauthCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		unauthRR := httptest.NewRecorder()
+		srv.servePluginResource(unauthRR, unauthReq.WithContext(unauthCtx))
+		if unauthRR.Code != http.StatusUnauthorized || innerHits.Load() != 1 {
+			t.Fatalf("unauthenticated request = (%d, innerHits=%d), want (401, 1)", unauthRR.Code, innerHits.Load())
+		}
+	})
+
+	t.Run("upgradeExternalLegacyRecorder passes 1xx without latching, intercepts 401/403, and releases gate on SSE WriteHeader", func(t *testing.T) {
+		var wsGate externalCredentialGate
+		if !wsGate.acquire(context.Background()) {
+			t.Fatal("acquire gate failed")
+		}
+		hold := &externalCredentialHold{gate: &wsGate}
+
+		markedCtx, mark := proxysvc.WithSavedKeyMark(context.Background())
+		proxysvc.NoteSavedManagementKey(markedCtx)
+
+		st, _, _ := seedCompletedExternalUpgradeStore(t, "/ext-console", "http://127.0.0.1:18317")
+		srv := &upgradeCanonicalServer{
+			db: st,
+		}
+
+		dst := &recording1xxWriter{}
+		rec := newUpgradeExternalLegacyRecorder(
+			dst,
+			context.Background(),
+			srv,
+			hold,
+			freshkeyapply.ExternalInstall{Identity: "ext-id"},
+			"digest-1",
+			mark,
+		)
+
+		// 103 Early Hints must not latch decided or release credentialGate.
+		rec.WriteHeader(http.StatusEarlyHints)
+		if rec.decided {
+			t.Fatal("1xx WriteHeader unexpectedly latched decided=true")
+		}
+		quickCtx, cancelQuick := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancelQuick()
+		if wsGate.acquire(quickCtx) {
+			t.Fatal("1xx WriteHeader released credentialGate prematurely")
+		}
+
+		// Subsequent 401 with SavedKeyMark intercepts -> 409 external_management_key_rejected and releases gate.
+		rec.WriteHeader(http.StatusUnauthorized)
+		if len(dst.statuses) != 2 || dst.statuses[0] != http.StatusEarlyHints || dst.statuses[1] != http.StatusConflict ||
+			!strings.Contains(dst.body.String(), freshconfig.ReasonManagementRejected) {
+			t.Fatalf("intercepted 401 statuses=%v body=%s, want [103 409] with %s", dst.statuses, dst.body.String(), freshconfig.ReasonManagementRejected)
+		}
+		reacqCtx, cancelReacq := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancelReacq()
+		if !wsGate.acquire(reacqCtx) {
+			t.Fatal("credentialGate was not released after intercepted 401")
+		}
+
+		// On streaming 200 SSE response, WriteHeader releases gate immediately without waiting for handler return.
+		hold2 := &externalCredentialHold{gate: &wsGate}
+		dst2 := httptest.NewRecorder()
+		rec2 := newUpgradeExternalLegacyRecorder(dst2, context.Background(), srv, hold2, freshkeyapply.ExternalInstall{}, "", nil)
+		rec2.Flush()
+		if !dst2.Flushed || rec2.Unwrap() != dst2 {
+			t.Fatalf("Flush=%v Unwrap=%v, want Flushed=true and dst2", dst2.Flushed, rec2.Unwrap() == dst2)
+		}
+		reacqCtx2, cancelReacq2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancelReacq2()
+		if !wsGate.acquire(reacqCtx2) {
+			t.Fatal("credentialGate was not released on Flush/200 WriteHeader")
+		}
+		wsGate.release()
+	})
+
+	t.Run("notePluginDocumentObserved ignores stale epochs after capability cache epoch advances", func(t *testing.T) {
+		probe := newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, func(context.Context) bool { return false })
+		probe.launch = func(func()) {}
+		t.Cleanup(probe.close)
+		srv := &upgradeCanonicalServer{
+			pluginCapability: probe,
+		}
+		staleEpoch := srv.currentPluginCapabilityEpoch()
+		srv.pluginCapability.forget()
+		srv.notePluginDocumentObserved(staleEpoch, true)
+		if srv.pluginCapability.proven {
+			t.Fatal("stale epoch mutated proven=true")
+		}
+		currentEpoch := srv.currentPluginCapabilityEpoch()
+		srv.notePluginDocumentObserved(currentEpoch, true)
+		if !srv.pluginCapability.proven {
+			t.Fatal("current epoch failed to record proven=true")
 		}
 	})
 }

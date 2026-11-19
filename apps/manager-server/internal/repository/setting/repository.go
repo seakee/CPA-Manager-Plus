@@ -1,6 +1,7 @@
 package setting
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,10 +28,12 @@ type Repository interface {
 	NormalizeLegacyConnectionStorage(ctx context.Context, cfg model.ManagerConfig, managerPresent bool, setup model.Setup, setupPresent bool) error
 	LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error)
 	// PatchManagerCollectorEnabled rewrites only the request-monitoring switch of
-	// the stored configuration document. Every other field, including a key this
-	// build does not know, is left exactly as stored; the second result reports
-	// whether a document existed to patch.
+	// the stored configuration document, initializing a minimal document when
+	// absent. Every other field, including keys this build does not know, is left
+	// untouched.
 	PatchManagerCollectorEnabled(ctx context.Context, enabled bool) (bool, error)
+	PatchManagerCollectorConfig(ctx context.Context, patch model.ManagerCollectorPatch) (bool, error)
+	PatchManagerRetentionConfig(ctx context.Context, patch model.ManagerRetentionPatch) (bool, error)
 	// LoadPersistedCPAConnectionRevision reports only the persisted DB-owned
 	// revision; effective env ownership and CPA instance identity remain separate.
 	LoadPersistedCPAConnectionRevision(ctx context.Context) (string, bool, error)
@@ -186,11 +189,11 @@ func (r *repository) SaveManagerConfig(ctx context.Context, cfg model.ManagerCon
 func (r *repository) PatchManagerCollectorEnabled(ctx context.Context, enabled bool) (bool, error) {
 	updatedAtMS := time.Now().UnixMilli()
 	patched := false
-	err := r.saveWithConnectionRevision(ctx, true, func(tx *sql.Tx) error {
+	err := r.saveWithConnectionRevision(ctx, false, func(tx *sql.Tx) error {
 		var raw string
 		switch err := tx.QueryRowContext(ctx, `select value from settings where key = ?`, managerConfigKey).Scan(&raw); {
 		case errors.Is(err, sql.ErrNoRows):
-			return nil
+			raw = "{}"
 		case err != nil:
 			return err
 		}
@@ -219,7 +222,7 @@ func patchCollectorEnabled(raw []byte, enabled bool, updatedAtMS int64) ([]byte,
 		return nil, errors.New("manager_config_v1 must be a JSON object")
 	}
 	var collector map[string]json.RawMessage
-	if existing, ok := document["collector"]; ok && len(existing) > 0 {
+	if existing, ok := document["collector"]; ok && len(existing) > 0 && !bytes.Equal(bytes.TrimSpace(existing), []byte("null")) {
 		if err := json.Unmarshal(existing, &collector); err != nil {
 			return nil, err
 		}
@@ -233,6 +236,148 @@ func patchCollectorEnabled(raw []byte, enabled bool, updatedAtMS int64) ([]byte,
 		return nil, err
 	}
 	document["collector"] = encoded
+	document["updatedAtMs"] = json.RawMessage(strconv.FormatInt(updatedAtMS, 10))
+	return json.Marshal(document)
+}
+
+func (r *repository) PatchManagerCollectorConfig(ctx context.Context, patch model.ManagerCollectorPatch) (bool, error) {
+	updatedAtMS := time.Now().UnixMilli()
+	patched := false
+	err := r.saveWithConnectionRevision(ctx, false, func(tx *sql.Tx) error {
+		var raw string
+		switch err := tx.QueryRowContext(ctx, `select value from settings where key = ?`, managerConfigKey).Scan(&raw); {
+		case errors.Is(err, sql.ErrNoRows):
+			raw = "{}"
+		case err != nil:
+			return err
+		}
+		data, err := patchCollectorDocument([]byte(raw), patch, updatedAtMS)
+		if err != nil {
+			return err
+		}
+		patched = true
+		return upsertSetting(ctx, tx, managerConfigKey, data, updatedAtMS)
+	})
+	if err != nil {
+		return false, err
+	}
+	return patched, nil
+}
+
+func (r *repository) PatchManagerRetentionConfig(ctx context.Context, patch model.ManagerRetentionPatch) (bool, error) {
+	updatedAtMS := time.Now().UnixMilli()
+	patched := false
+	err := r.saveWithConnectionRevision(ctx, false, func(tx *sql.Tx) error {
+		var raw string
+		switch err := tx.QueryRowContext(ctx, `select value from settings where key = ?`, managerConfigKey).Scan(&raw); {
+		case errors.Is(err, sql.ErrNoRows):
+			raw = "{}"
+		case err != nil:
+			return err
+		}
+		data, err := patchRetentionDocument([]byte(raw), patch, updatedAtMS)
+		if err != nil {
+			return err
+		}
+		patched = true
+		return upsertSetting(ctx, tx, managerConfigKey, data, updatedAtMS)
+	})
+	if err != nil {
+		return false, err
+	}
+	return patched, nil
+}
+
+func patchCollectorDocument(raw []byte, patch model.ManagerCollectorPatch, updatedAtMS int64) ([]byte, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if document == nil {
+		return nil, errors.New("manager_config_v1 must be a JSON object")
+	}
+	var collector map[string]json.RawMessage
+	if existing, ok := document["collector"]; ok && len(existing) > 0 && !bytes.Equal(bytes.TrimSpace(existing), []byte("null")) {
+		if err := json.Unmarshal(existing, &collector); err != nil {
+			return nil, err
+		}
+	}
+	if collector == nil {
+		collector = map[string]json.RawMessage{}
+	}
+	if patch.CollectorMode != nil {
+		encoded, err := json.Marshal(*patch.CollectorMode)
+		if err != nil {
+			return nil, err
+		}
+		collector["collectorMode"] = encoded
+	}
+	if patch.Queue != nil {
+		encoded, err := json.Marshal(*patch.Queue)
+		if err != nil {
+			return nil, err
+		}
+		collector["queue"] = encoded
+	}
+	if patch.PopSide != nil {
+		encoded, err := json.Marshal(*patch.PopSide)
+		if err != nil {
+			return nil, err
+		}
+		collector["popSide"] = encoded
+	}
+	if patch.BatchSize != nil {
+		collector["batchSize"] = json.RawMessage(strconv.Itoa(*patch.BatchSize))
+	}
+	if patch.PollIntervalMS != nil {
+		collector["pollIntervalMs"] = json.RawMessage(strconv.Itoa(*patch.PollIntervalMS))
+	}
+	if patch.QueryLimit != nil {
+		collector["queryLimit"] = json.RawMessage(strconv.Itoa(*patch.QueryLimit))
+	}
+	if patch.TLSSkipVerify != nil {
+		collector["tlsSkipVerify"] = json.RawMessage(strconv.FormatBool(*patch.TLSSkipVerify))
+	}
+	encoded, err := json.Marshal(collector)
+	if err != nil {
+		return nil, err
+	}
+	document["collector"] = encoded
+	document["updatedAtMs"] = json.RawMessage(strconv.FormatInt(updatedAtMS, 10))
+	return json.Marshal(document)
+}
+
+func patchRetentionDocument(raw []byte, patch model.ManagerRetentionPatch, updatedAtMS int64) ([]byte, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if document == nil {
+		return nil, errors.New("manager_config_v1 must be a JSON object")
+	}
+	var retention map[string]json.RawMessage
+	if existing, ok := document["retention"]; ok && len(existing) > 0 && !bytes.Equal(bytes.TrimSpace(existing), []byte("null")) {
+		if err := json.Unmarshal(existing, &retention); err != nil {
+			return nil, err
+		}
+	}
+	if retention == nil {
+		retention = map[string]json.RawMessage{}
+	}
+	if patch.Enabled != nil {
+		retention["enabled"] = json.RawMessage(strconv.FormatBool(*patch.Enabled))
+	}
+	if patch.RetentionDays != nil {
+		retention["retentionDays"] = json.RawMessage(strconv.Itoa(*patch.RetentionDays))
+	}
+	delete(retention, "envLocked")
+	delete(retention, "enabledEnvLocked")
+	delete(retention, "retentionDaysEnvLocked")
+	encoded, err := json.Marshal(retention)
+	if err != nil {
+		return nil, err
+	}
+	document["retention"] = encoded
 	document["updatedAtMs"] = json.RawMessage(strconv.FormatInt(updatedAtMS, 10))
 	return json.Marshal(document)
 }
@@ -274,6 +419,9 @@ func (r *repository) marshalLegacySetup(setup model.Setup) ([]byte, error) {
 }
 
 func (r *repository) marshalManagerConfig(cfg model.ManagerConfig) ([]byte, error) {
+	cfg.Retention.EnvLocked = false
+	cfg.Retention.EnabledEnvLocked = false
+	cfg.Retention.RetentionDaysEnvLocked = false
 	protected, err := r.protectManagerConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -298,6 +446,9 @@ func (r *repository) LoadManagerConfig(ctx context.Context) (model.ManagerConfig
 	if err != nil {
 		return model.ManagerConfig{}, false, err
 	}
+	cfg.Retention.EnvLocked = false
+	cfg.Retention.EnabledEnvLocked = false
+	cfg.Retention.RetentionDaysEnvLocked = false
 	return cfg, true, nil
 }
 

@@ -94,10 +94,15 @@ func (m *CPAMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		m.mu.Lock()
+		usageEnabled := m.UsageStatisticsEnabled
+		retentionSeconds := m.RetentionSeconds
+		proxyURL := m.ProxyURL
+		m.mu.Unlock()
 		writeJSON(w, map[string]any{
-			"usage-statistics-enabled":            m.UsageStatisticsEnabled,
-			"redis-usage-queue-retention-seconds": m.RetentionSeconds,
-			"proxy-url":                           m.ProxyURL,
+			"usage-statistics-enabled":            usageEnabled,
+			"redis-usage-queue-retention-seconds": retentionSeconds,
+			"proxy-url":                           proxyURL,
 		})
 	case r.URL.Path == "/v0/management/usage-statistics-enabled" && r.Method == http.MethodPut:
 		if !m.hasManagementAuth(r) {

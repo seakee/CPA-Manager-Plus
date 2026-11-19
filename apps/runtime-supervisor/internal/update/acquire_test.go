@@ -72,7 +72,9 @@ func TestValidateCDNPrefixTable(t *testing.T) {
 		"https://cdn.example.com/with space",
 		"https://cdn.example.com/with\x00nul",
 		"https://localhost/mirror",
+		"https://localhost./mirror",
 		"https://sub.localhost/mirror",
+		"https://sub.localhost./mirror",
 		"https://127.0.0.1",
 		"https://127.0.0.1:8443/mirror",
 		"https://127.255.255.254/mirror",
@@ -890,4 +892,133 @@ func newTLSServerClientForOfficialHosts(server *httptest.Server) *http.Client {
 
 func (s *Store) prepareFinalizedExecutionDirectoryForTest(finalPath string) error {
 	return s.prepareFinalizedExecutionDirectory(finalPath)
+}
+
+func TestIsTunnelFakeIPModeAndPolicy(t *testing.T) {
+	fakeLookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("198.18.0.31")}}, nil
+	}
+	if !isTunnelFakeIPMode(t.Context(), fakeLookup) {
+		t.Fatal("expected Fake-IP mode when githubAPIHost resolves into 198.18.0.0/15")
+	}
+	normalLookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+	}
+	if isTunnelFakeIPMode(t.Context(), normalLookup) {
+		t.Fatal("expected non-Fake-IP mode for normal public GitHub address")
+	}
+	mixedPrivateLookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("198.18.0.31")}, {IP: net.ParseIP("10.0.0.1")}}, nil
+	}
+	if isTunnelFakeIPMode(t.Context(), mixedPrivateLookup) {
+		t.Fatal("mixed private address must not enable Fake-IP mode")
+	}
+	// Literal 198.18.0.1 prefix must still fail strict ValidateCDNPrefix and ValidateCDNPrefixWithPolicy.
+	if _, err := ValidateCDNPrefix("https://198.18.0.1/mirror"); !errors.Is(err, ErrInvalidCDNPrefix) {
+		t.Fatalf("literal 198.18.0.1 prefix err = %v, want ErrInvalidCDNPrefix", err)
+	}
+	if _, err := ValidateCDNPrefixWithPolicy("https://198.18.0.1/mirror", IsPublicOrFakeIPCDNAddr); !errors.Is(err, ErrInvalidCDNPrefix) {
+		t.Fatalf("literal 198.18.0.1 prefix with Fake-IP policy err = %v, want ErrInvalidCDNPrefix", err)
+	}
+	if !IsPublicOrFakeIPCDNAddr(netip.MustParseAddr("198.18.0.113")) {
+		t.Fatal("IsPublicOrFakeIPCDNAddr must permit 198.18.0.113")
+	}
+	for _, blocked := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "172.16.0.1", "192.168.1.1"} {
+		if IsPublicOrFakeIPCDNAddr(netip.MustParseAddr(blocked)) {
+			t.Fatalf("IsPublicOrFakeIPCDNAddr(%s) = true, want false", blocked)
+		}
+	}
+	// Literal Fake-IP or loopback prefix URLs must be rejected by NewCDNSource* even when dial policy permits Fake-IP.
+	for _, badLiteral := range []string{
+		"https://198.18.0.1/mirror",
+		"https://198.18.0.113/mirror",
+		"https://127.0.0.1/mirror",
+		"https://localhost./mirror",
+		"https://a.localhost./mirror",
+	} {
+		if _, err := NewCDNSourceForPlatformWithRoots(
+			"linux",
+			"amd64",
+			badLiteral,
+			nil,
+			WithCDNAddrPolicy(IsPublicOrFakeIPCDNAddr),
+			WithCDNRedirectAddrPolicy(IsPublicCDNAddr),
+		); !errors.Is(err, ErrInvalidCDNPrefix) {
+			t.Fatalf("NewCDNSourceForPlatformWithRoots(%q) err = %v, want ErrInvalidCDNPrefix", badLiteral, err)
+		}
+		if _, err := NewCDNSourceForPlatform(
+			"linux",
+			"amd64",
+			badLiteral,
+			&http.Client{},
+			WithCDNAddrPolicy(IsPublicOrFakeIPCDNAddr),
+			WithCDNRedirectAddrPolicy(IsPublicCDNAddr),
+		); !errors.Is(err, ErrInvalidCDNPrefix) {
+			t.Fatalf("NewCDNSourceForPlatform(%q) err = %v, want ErrInvalidCDNPrefix", badLiteral, err)
+		}
+	}
+	// Literal Fake-IP host in resolveAndVerifyCDNHost (without DNS lookup) must be refused even under IsPublicOrFakeIPCDNAddr.
+	if _, err := resolveAndVerifyCDNHost(t.Context(), "198.18.0.113", func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+	}, IsPublicOrFakeIPCDNAddr); err == nil {
+		t.Fatal("resolveAndVerifyCDNHost must refuse literal 198.18.0.113 host without DNS resolution")
+	}
+	// DNS-resolved Fake-IP for a domain host is permitted under IsPublicOrFakeIPCDNAddr, while private DNS results remain blocked.
+	var seen []string
+	verified, err := resolveAndVerifyCDNHost(
+		t.Context(),
+		"cdn.example.com",
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.113")}}, nil
+		},
+		func(addr netip.Addr) bool {
+			seen = append(seen, addr.String())
+			return IsPublicOrFakeIPCDNAddr(addr)
+		},
+	)
+	if err != nil || len(verified) != 1 || verified[0].String() != "198.18.0.113" || len(seen) != 1 {
+		t.Fatalf("resolveAndVerifyCDNHost(domain -> 198.18.0.113) = %v, %v, seen=%v", verified, err, seen)
+	}
+	for _, privateIP := range []string{"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254"} {
+		if _, err := resolveAndVerifyCDNHost(
+			t.Context(),
+			"cdn.example.com",
+			func(context.Context, string) ([]net.IPAddr, error) {
+				return []net.IPAddr{{IP: net.ParseIP(privateIP)}}, nil
+			},
+			IsPublicOrFakeIPCDNAddr,
+		); err == nil {
+			t.Fatalf("resolveAndVerifyCDNHost(domain -> %s) under Fake-IP policy succeeded, want refusal", privateIP)
+		}
+	}
+	// Final URL check in DownloadArchive must enforce redirectAddrPolicy (IsPublicCDNAddr) even when addrPolicy permits Fake-IP.
+	for _, badFinalURL := range []string{
+		"https://198.18.0.1/asset.tar.gz",
+		"https://127.0.0.1/asset.tar.gz",
+		"https://localhost./asset.tar.gz",
+	} {
+		finalReq, reqErr := http.NewRequest(http.MethodGet, badFinalURL, nil)
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		src := &CDNSource{
+			client: doerFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(strings.NewReader("archive-bytes")),
+					ContentLength: int64(len("archive-bytes")),
+					Header:        make(http.Header),
+					Request:       finalReq,
+				}, nil
+			}),
+			goos:               "linux",
+			goarch:             "amd64",
+			prefix:             "https://cdn.example.com/mirror",
+			addrPolicy:         IsPublicOrFakeIPCDNAddr,
+			redirectAddrPolicy: IsPublicCDNAddr,
+		}
+		if dlErr := src.DownloadArchive(t.Context(), "8.0.55", io.Discard, nil); !errors.Is(dlErr, ErrDownloadFailed) {
+			t.Fatalf("DownloadArchive with final URL %q err = %v, want ErrDownloadFailed", badFinalURL, dlErr)
+		}
+	}
 }

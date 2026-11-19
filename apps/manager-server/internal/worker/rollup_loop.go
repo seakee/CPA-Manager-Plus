@@ -2,8 +2,42 @@ package worker
 
 import (
 	"context"
+	"sync"
 	"time"
 )
+
+type workerLifecycle struct {
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	started bool
+	stopped bool
+}
+
+func (l *workerLifecycle) goRun(ctx context.Context, fn func()) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	l.mu.Lock()
+	if l.stopped || l.started || ctx.Err() != nil {
+		l.mu.Unlock()
+		return false
+	}
+	l.started = true
+	l.wg.Add(1)
+	l.mu.Unlock()
+	go func() {
+		defer l.wg.Done()
+		fn()
+	}()
+	return true
+}
+
+func (l *workerLifecycle) wait() {
+	l.mu.Lock()
+	l.stopped = true
+	l.mu.Unlock()
+	l.wg.Wait()
+}
 
 const defaultRollupContinuationDelay = 250 * time.Millisecond
 

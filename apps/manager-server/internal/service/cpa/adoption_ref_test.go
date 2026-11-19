@@ -212,7 +212,7 @@ func TestAdoptionRootSetsFollowTheItems(t *testing.T) {
 		// `client` is exactly two gateway leaves. It has no provider section in
 		// the copy plan, so it contributes routing configuration and no provider
 		// verdict: `provider-state-client` covers configuration no item carries.
-		"client":    {bootstrap.AdoptionRefConfigRouting},
+		"client": {bootstrap.AdoptionRefConfigRouting},
 		// `oauth` carries the auth directory (and so the credential files), its
 		// copyable provider maps, and the source keys nothing copies — its refresh
 		// worker count and its provider runtime block.

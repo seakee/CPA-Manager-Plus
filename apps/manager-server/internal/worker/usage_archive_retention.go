@@ -20,18 +20,19 @@ const (
 )
 
 type UsageArchiveRetentionWorker struct {
-	service       usageArchiveRetentionService
-	retentionDays int
-	interval      time.Duration
-	retryInterval time.Duration
-	running       atomic.Int32
-	lifecycleMu   sync.Mutex
-	cancel        context.CancelFunc
-	done          chan struct{}
-	stopped       bool
-	now           func() time.Time
+	service          usageArchiveRetentionService
+	retentionDays    int
+	settingsResolver func(context.Context) (bool, int, error)
+	wakeCh           chan struct{}
+	interval         time.Duration
+	retryInterval    time.Duration
+	running          atomic.Int32
+	lifecycleMu      sync.Mutex
+	cancel           context.CancelFunc
+	done             chan struct{}
+	stopped          bool
+	now              func() time.Time
 }
-
 type usageArchiveRetentionService interface {
 	ActiveArchiveRun(context.Context) (store.UsageArchiveRun, bool, error)
 	CreateRetentionArchive(context.Context, int64) (usageservice.ArchiveStatus, error)
@@ -40,18 +41,42 @@ type usageArchiveRetentionService interface {
 	DeleteArchive(context.Context, string) (usageservice.ArchiveStatus, error)
 }
 
+type usageArchiveCanceller interface {
+	CancelArchive(context.Context, string) (usageservice.ArchiveStatus, error)
+}
+
 func NewUsageArchiveRetentionWorker(service usageArchiveRetentionService, retentionDays int) *UsageArchiveRetentionWorker {
 	return &UsageArchiveRetentionWorker{
 		service:       service,
 		retentionDays: retentionDays,
+		wakeCh:        make(chan struct{}, 1),
 		interval:      defaultUsageArchiveRetentionInterval,
 		retryInterval: defaultUsageArchiveRetentionRetryInterval,
 		now:           time.Now,
 	}
 }
 
+func (w *UsageArchiveRetentionWorker) SetSettingsResolver(resolver func(context.Context) (bool, int, error)) {
+	if w != nil {
+		w.settingsResolver = resolver
+	}
+}
+
+func (w *UsageArchiveRetentionWorker) Wake() {
+	if w == nil || w.wakeCh == nil {
+		return
+	}
+	select {
+	case w.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (w *UsageArchiveRetentionWorker) Start(ctx context.Context) {
-	if w == nil || w.service == nil || w.retentionDays <= 0 {
+	if w == nil || w.service == nil || (w.retentionDays <= 0 && w.settingsResolver == nil) {
+		return
+	}
+	if ctx == nil || ctx.Err() != nil {
 		return
 	}
 	w.lifecycleMu.Lock()
@@ -111,6 +136,8 @@ func (w *UsageArchiveRetentionWorker) loop(ctx context.Context) {
 		case <-ctx.Done():
 			timer.Stop()
 			return
+		case <-w.wakeCh:
+			timer.Stop()
 		case <-timer.C:
 		}
 	}
@@ -120,11 +147,29 @@ func (w *UsageArchiveRetentionWorker) loop(ctx context.Context) {
 // the normal daily interval. This keeps a transient derived-coverage failure
 // from holding the maintenance lock for an entire retention period.
 func (w *UsageArchiveRetentionWorker) runOnce(ctx context.Context) bool {
-	if w == nil || w.service == nil || w.retentionDays <= 0 || !w.running.CompareAndSwap(0, 1) {
+	if w == nil || w.service == nil {
+		return false
+	}
+	retentionDays := w.retentionDays
+	if w.settingsResolver != nil {
+		enabled, resolvedDays, resolveErr := w.settingsResolver(ctx)
+		if resolveErr != nil {
+			log.Printf("[usage-retention] resolve retention config: %v", resolveErr)
+			return ctx.Err() == nil
+		}
+		if !enabled || resolvedDays <= 0 {
+			w.cleanupDisabledRetentionRun(ctx)
+			return false
+		}
+		retentionDays = resolvedDays
+	} else if retentionDays <= 0 {
+		w.cleanupDisabledRetentionRun(ctx)
+		return false
+	}
+	if !w.running.CompareAndSwap(0, 1) {
 		return false
 	}
 	defer w.running.Store(0)
-
 	active, found, err := w.service.ActiveArchiveRun(ctx)
 	if err != nil {
 		log.Printf("[usage-retention] inspect active archive run: %v", err)
@@ -149,15 +194,15 @@ func (w *UsageArchiveRetentionWorker) runOnce(ctx context.Context) bool {
 	if w.now != nil {
 		now = w.now
 	}
-	retentionDays := int64(w.retentionDays)
-	if retentionDays > math.MaxInt64/int64(24*time.Hour) {
-		log.Printf("[usage-retention] retention days %d exceeds the supported duration", w.retentionDays)
+	days64 := int64(retentionDays)
+	if days64 > math.MaxInt64/int64(24*time.Hour) {
+		log.Printf("[usage-retention] retention days %d exceeds the supported duration", retentionDays)
 		return false
 	}
-	retentionDuration := time.Duration(retentionDays * int64(24*time.Hour))
+	retentionDuration := time.Duration(days64 * int64(24*time.Hour))
 	cutoffMS := now().Add(-retentionDuration).UnixMilli()
 	if cutoffMS <= 0 {
-		log.Printf("[usage-retention] retention days %d places the cutoff before the supported timestamp range", w.retentionDays)
+		log.Printf("[usage-retention] retention days %d places the cutoff before the supported timestamp range", retentionDays)
 		return false
 	}
 	status, err := w.service.CreateRetentionArchive(ctx, cutoffMS)
@@ -179,6 +224,39 @@ func (w *UsageArchiveRetentionWorker) runOnce(ctx context.Context) bool {
 		return ctx.Err() == nil
 	}
 	return false
+}
+
+func (w *UsageArchiveRetentionWorker) cleanupDisabledRetentionRun(ctx context.Context) {
+	if w == nil || w.service == nil {
+		return
+	}
+	canceller, ok := w.service.(usageArchiveCanceller)
+	if !ok {
+		return
+	}
+	if !w.running.CompareAndSwap(0, 1) {
+		return
+	}
+	defer w.running.Store(0)
+	active, found, err := w.service.ActiveArchiveRun(ctx)
+	if err != nil {
+		log.Printf("[usage-retention] inspect active archive run while disabled: %v", err)
+		return
+	}
+	if !found || active.Mode != usagearchive.RunModeRetention {
+		return
+	}
+	if _, cancelErr := canceller.CancelArchive(ctx, active.ID); cancelErr != nil {
+		if errors.Is(cancelErr, usageservice.ErrArchiveCancelPublished) ||
+			errors.Is(cancelErr, usageservice.ErrArchiveCancelUnsafe) ||
+			errors.Is(cancelErr, usageservice.ErrArchiveInvalidState) {
+			if advErr := w.advance(ctx, active.ID); advErr != nil {
+				log.Printf("[usage-retention] settle active archive run %s while disabled: %v", active.ID, advErr)
+			}
+			return
+		}
+		log.Printf("[usage-retention] cancel active archive run %s while disabled: %v", active.ID, cancelErr)
+	}
 }
 
 func (w *UsageArchiveRetentionWorker) advance(ctx context.Context, runID string) error {

@@ -26,12 +26,14 @@ import (
 	settingrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
 )
 
 // testUpgradeFullWebDist overrides the embedded Full Web bundle in source-only
@@ -61,6 +63,8 @@ type upgradeCanonicalServer struct {
 	configService      *upgradeConfigService
 	runtimeLifecycleMu runtimeLifecycleMutex
 	pluginCapability   *pluginCapabilityProbe
+	reconcileMu        sync.Mutex
+	bgWG               sync.WaitGroup
 }
 
 func failClosedUpgradeHandler(code string) http.Handler {
@@ -125,6 +129,11 @@ func attachCompletedUpgradeRouting(
 		return nil
 	}
 	failClosed := func(code string, err error) error {
+		if appCtx := serverApp.AppContext(); appCtx != nil {
+			appCtx.CPAUpdateService = cpaupdateservice.New(db, nil, "").WithModeResolver(func() model.RuntimeMode {
+				return ""
+			})
+		}
 		serverApp.WrapHandler(func(_ http.Handler) http.Handler {
 			return failClosedUpgradeHandler(code)
 		})
@@ -187,9 +196,13 @@ func attachCompletedUpgradeRouting(
 	if len(deps) > 0 {
 		dep = deps[0]
 	}
+	if dep.CanonicalOut != nil {
+		*dep.CanonicalOut = u
+	}
 	if err := u.initCanonicalResources(ctx, cfg, dep); err != nil {
 		return failClosed("upgrade_authority_unavailable", err)
 	}
+	u.bindCollectorLifecycleLocker(dep.CollectorWorker)
 	if dep.DesiredStateOut != nil {
 		*dep.DesiredStateOut = upgradeDesiredStateStore{owner: u}
 	}
@@ -205,9 +218,32 @@ func attachCompletedUpgradeRouting(
 	})
 	if u.driver != nil {
 		u.publishToIngress(ctx)
-		go u.reconcileIngressLoop(ctx)
+		u.bgWG.Add(1)
+		go func() {
+			defer u.bgWG.Done()
+			u.reconcileIngressLoop(ctx)
+		}()
 	}
 	return nil
+}
+
+func (u *upgradeCanonicalServer) Wait() {
+	if u == nil {
+		return
+	}
+	u.bgWG.Wait()
+}
+
+func (u *upgradeCanonicalServer) bindCollectorLifecycleLocker(explicit *worker.CollectorWorker) {
+	if u == nil {
+		return
+	}
+	if explicit != nil {
+		explicit.SetLifecycleLocker(&u.reconcileMu)
+	}
+	if u.appCtx != nil && u.appCtx.Collector != nil {
+		bindUpgradeCollectorWorkerLocker(u.appCtx.Collector, &u.reconcileMu)
+	}
 }
 
 func (u *upgradeCanonicalServer) syncOp(candidate model.UpgradeOperation) model.UpgradeOperation {

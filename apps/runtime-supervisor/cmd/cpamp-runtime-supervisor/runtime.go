@@ -138,6 +138,7 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 			return nil, errors.Join(err, store.Close())
 		}
 		settings.ObserveUpdate = runtime.executor
+		settings.ObservePrepareProgress = runtime.executor
 		if runtimeupdate.SupportedPlatform(goruntime.GOOS, goruntime.GOARCH) {
 			if err := runtime.executor.EnableActivateUpdate(selected, artifactObserver, selectionStore, observer); err != nil {
 				return nil, errors.Join(fmt.Errorf("enable update activation: %w", err), runtime.executor.Close())
@@ -151,9 +152,9 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 				return nil, errors.Join(fmt.Errorf("enable trusted update staging: %w", prepareErr), runtime.executor.Close())
 			}
 			settings.PrepareUpdate = runtime.executor
+			settings.PrepareUpdateUpload = runtime.executor
 		}
 		settings.Start = runtime.executor
-		// The currently qualified destination artifact is Linux-only. Other
 		// platforms retain existing lifecycle support without advertising Adopt.
 		// The bootstrap Gateway shares the Supervisor's parent Runtime root.
 		if goruntime.GOOS == "linux" {

@@ -7,60 +7,84 @@ import { referenceText as r, type ReferenceTextKey } from '../i18n/configuration
 // editable path.
 
 export type GatewayTabKey =
-  | 'overview'
   | 'common'
   | 'routing'
-  | 'retry'
-  | 'requests'
-  | 'media'
-  | 'compat'
-  | 'owners';
+  | 'network'
+  | 'clients'
+  | 'upstream'
+  | 'payload'
+  | 'media';
 
 export const GATEWAY_TABS: GatewayTabKey[] = [
-  'overview',
   'common',
   'routing',
-  'retry',
-  'requests',
+  'network',
+  'clients',
+  'upstream',
+  'payload',
   'media',
-  'compat',
-  'owners',
 ];
 
-export type GatewayFieldKind = 'number' | 'bool' | 'text' | 'duration' | 'url' | 'select';
+export type UpstreamProviderKey =
+  | 'codex'
+  | 'claude'
+  | 'antigravity'
+  | 'devin'
+  | 'other'
+  | 'oauth';
+
+export const UPSTREAM_PROVIDERS: UpstreamProviderKey[] = [
+  'codex',
+  'claude',
+  'antigravity',
+  'devin',
+  'other',
+  'oauth',
+];
+
+export type GatewayFieldKind =
+  | 'number'
+  | 'bool'
+  | 'text'
+  | 'duration'
+  | 'url'
+  | 'select'
+  | 'string-list'
+  | 'kv-map'
+  | 'pattern-list';
 
 export interface GatewayFieldMeta {
   path: string;
   labelKey: ReferenceTextKey;
   helpKey: ReferenceTextKey;
   risk?: boolean;
+  /** Search synonyms/aliases (e.g. old YAML keys, shorthand terms). */
+  keywords?: string[];
   /** A dependent leaf is edited only while its switch is on. */
   depends?: string;
-  /**
-   * Select options. `readOnly` marks a value CPA may already persist but which
-   * must never be offered as a new draft: `passthrough` postdates the accepted
-   * inventory, so it is shown as the current value and never as a choice.
-   */
   options?: { value: string; labelKey: ReferenceTextKey; readOnly?: boolean }[];
 }
 
 export interface GatewayGroupMeta {
   id: string;
-  tab: 'routing' | 'retry' | 'requests' | 'media' | 'compat';
+  tab: 'routing' | 'network' | 'clients' | 'upstream' | 'media';
+  provider?: UpstreamProviderKey;
   titleKey: Parameters<typeof c>[0];
   helpKey: Parameters<typeof c>[0];
+  collapsedByDefault?: boolean;
   fields: GatewayFieldMeta[];
 }
 
 export interface GatewayFamilyMeta {
   family: string;
+  step: string;
   path: string;
   labelKey: Parameters<typeof c>[0];
   hintKey: Parameters<typeof c>[0];
   raw: boolean;
   filter: boolean;
+  replace: boolean;
 }
-
 export interface GatewayOwnerMeta {
   path: string;
   ownerKey: ReferenceTextKey;
@@ -105,25 +129,51 @@ export function gatewayGroups(): GatewayGroupMeta[] {
       helpKey: 'routingHelp',
       fields: [
         field('routing.strategy', 'strategy', 'strategyHelp', {
+          keywords: ['wrr', 'round-robin', 'fill-first'],
           options: [
             { value: 'round-robin', labelKey: 'strategyRoundRobin' },
             { value: 'weighted-round-robin', labelKey: 'strategyWeighted' },
             { value: 'fill-first', labelKey: 'strategyFillFirst' },
           ],
         }),
-        field('routing.session-affinity', 'affinity', 'affinityHelp'),
+        field('routing.session-affinity', 'affinity', 'affinityHelp', {
+          keywords: ['sticky', '粘性'],
+        }),
         field('routing.session-affinity-ttl', 'ttl', 'ttlHelp', {
           depends: 'routing.session-affinity',
+          keywords: ['ttl', 'sticky'],
         }),
         field('routing.session-affinity-subagents', 'subagents', 'subagentsHelp', {
           depends: 'routing.session-affinity',
+        }),
+        field('routing.session-affinity-rebind-on', 'rebindOn', 'rebindOnHelp', {
+          depends: 'routing.session-affinity',
+          options: [
+            { value: 'any', labelKey: 'rebindAny' },
+            { value: 'quota', labelKey: 'rebindQuota' },
+            { value: 'never', labelKey: 'rebindNever' },
+          ],
         }),
         field('routing.force-model-prefix', 'prefix', 'prefixHelp'),
       ],
     },
     {
+      id: 'quota',
+      tab: 'routing',
+      titleKey: 'quotaTitle',
+      helpKey: 'quotaHelp',
+      fields: [
+        field('quota-exceeded.switch-project', 'switchProject', 'switchProjectHelp', {
+          keywords: ['quota-exceeded', 'failover'],
+        }),
+        field('quota-exceeded.switch-preview-model', 'switchPreviewModel', 'switchPreviewModelHelp', {
+          keywords: ['quota-exceeded', 'preview'],
+        }),
+      ],
+    },
+    {
       id: 'retry',
-      tab: 'retry',
+      tab: 'routing',
       titleKey: 'retryTitle',
       helpKey: 'retryHelp',
       fields: [
@@ -134,7 +184,7 @@ export function gatewayGroups(): GatewayGroupMeta[] {
     },
     {
       id: 'cooldown',
-      tab: 'retry',
+      tab: 'routing',
       titleKey: 'cooldownTitle',
       helpKey: 'cooldownHelp',
       fields: [
@@ -144,24 +194,84 @@ export function gatewayGroups(): GatewayGroupMeta[] {
       ],
     },
     {
+      id: 'oauth',
+      tab: 'upstream',
+      provider: 'oauth',
+      titleKey: 'oauthTitle',
+      helpKey: 'oauthHelp',
+      fields: [
+        field('oauth.auth-auto-refresh-workers', 'authRefreshWorkers', 'authRefreshWorkersHelp', {
+          keywords: ['workers', 'refresh'],
+        }),
+      ],
+    },
+    {
       id: 'request',
-      tab: 'requests',
+      tab: 'network',
       titleKey: 'requestTitle',
       helpKey: 'requestHelp',
       fields: [
         field('requests.proxy-url', 'proxy', 'proxyHelp'),
+        field('requests.tls-handshake-timeout-seconds', 'tlsHandshakeTimeout', 'tlsHandshakeTimeoutHelp', {
+          keywords: ['utls', 'tls'],
+        }),
         field('requests.passthrough-headers', 'headers', 'headersPassHelp'),
         field('requests.nonstream-keepalive-interval', 'keepalive', 'keepaliveHelp'),
       ],
     },
     {
       id: 'streaming',
-      tab: 'requests',
+      tab: 'network',
       titleKey: 'streamingTitle',
       helpKey: 'streamingHelp',
       fields: [
-        field('requests.streaming.keepalive-seconds', 'sse', 'sseHelp'),
+        field('requests.streaming.keepalive-seconds', 'sse', 'sseHelp', { keywords: ['sse'] }),
         field('requests.streaming.bootstrap-retries', 'bootstrap', 'bootstrapHelp'),
+        field(
+          'requests.streaming.send-keepalive-before-ft',
+          'sendKeepaliveBeforeFt',
+          'sendKeepaliveBeforeFtHelp',
+          { keywords: ['first-token', 'sse'] }
+        ),
+      ],
+    },
+    {
+      id: 'server',
+      tab: 'network',
+      titleKey: 'serverTitle',
+      helpKey: 'serverHelp',
+      collapsedByDefault: true,
+      fields: [
+        field('server.max-request-body-bytes', 'maxRequestBodyBytes', 'maxRequestBodyBytesHelp'),
+        field('server.shutdown-timeout', 'shutdownTimeout', 'shutdownTimeoutHelp'),
+        field('server.commercial-mode', 'commercialMode', 'commercialModeHelp', {
+          keywords: ['commercial-mode'],
+        }),
+      ],
+    },
+    {
+      id: 'compression',
+      tab: 'network',
+      titleKey: 'compressionTitle',
+      helpKey: 'compressionHelp',
+      collapsedByDefault: true,
+      fields: [
+        field('server.response-compression.enabled', 'respCompressionEnabled', 'respCompressionEnabledHelp', {
+          keywords: ['gzip', 'zstd', 'compress'],
+        }),
+        field('server.response-compression.min-bytes', 'respCompressionMinBytes', 'respCompressionMinBytesHelp'),
+      ],
+    },
+    {
+      id: 'aistudio',
+      tab: 'upstream',
+      provider: 'other',
+      titleKey: 'aistudioTitle',
+      helpKey: 'aistudioHelp',
+      fields: [
+        field('oauth.providers.aistudio.ws-auth', 'aistudioWsAuth', 'aistudioWsAuthHelp', {
+          keywords: ['ws-auth', 'websocket'],
+        }),
       ],
     },
     {
@@ -183,23 +293,57 @@ export function gatewayGroups(): GatewayGroupMeta[] {
       ],
     },
     {
+      id: 'live_relay',
+      tab: 'media',
+      titleKey: 'liveRelayTitle',
+      helpKey: 'liveRelayHelp',
+      collapsedByDefault: true,
+      fields: [
+        field('oauth.providers.codex.live-media-relay.enabled', 'liveRelayEnabled', 'liveRelayEnabledHelp', {
+          keywords: ['webrtc', 'turn', 'relay'],
+        }),
+        field('oauth.providers.codex.live-media-relay.max-sessions', 'liveRelayMaxSessions', 'liveRelayMaxSessionsHelp'),
+        field(
+          'oauth.providers.codex.live-media-relay.disable-private-remote-ips',
+          'liveRelayDisablePrivateIps',
+          'liveRelayDisablePrivateIpsHelp'
+        ),
+        field('oauth.providers.codex.live-media-relay.public-ip', 'liveRelayPublicIp', 'liveRelayPublicIpHelp'),
+        field('oauth.providers.codex.live-media-relay.udp-port-min', 'liveRelayUdpMin', 'liveRelayUdpMinHelp'),
+        field('oauth.providers.codex.live-media-relay.udp-port-max', 'liveRelayUdpMax', 'liveRelayUdpMaxHelp'),
+      ],
+    },
+    {
       id: 'client',
-      tab: 'compat',
+      tab: 'clients',
       titleKey: 'clientTitle',
       helpKey: 'clientHelp',
       fields: [
         field('client.codex.enable-apply-patch', 'patch', 'patchHelp'),
         field('client.codex.optimize-multi-agent-v2', 'multiAgent', 'multiAgentHelp'),
+        field('client.codex.web-search-result-cache.enabled', 'webSearchCacheEnabled', 'webSearchCacheEnabledHelp'),
+        field('client.codex.web-search-result-cache.ttl', 'webSearchCacheTtl', 'webSearchCacheTtlHelp'),
+        field('client.codex.web-search-result-cache.limit', 'webSearchCacheLimit', 'webSearchCacheLimitHelp'),
+      ],
+    },
+    {
+      id: 'client_claude',
+      tab: 'clients',
+      titleKey: 'clientClaudeTitle',
+      helpKey: 'clientClaudeHelp',
+      fields: [
+        field('client.claude.show-codex-commentary', 'showCodexCommentary', 'showCodexCommentaryHelp'),
       ],
     },
     {
       id: 'codex',
-      tab: 'compat',
+      tab: 'upstream',
+      provider: 'codex',
       titleKey: 'codexTitle',
       helpKey: 'codexHelp',
       fields: [
         field('upstream.codex.response-steering', 'steering', 'steeringHelp', { risk: true }),
-        field('upstream.codex.disable-codex-cloaking', 'codexCloak', 'codexCloakHelp'),
+        field('upstream.codex.disable-codex-cloaking', 'codexCloak', 'codexCloakHelp', { keywords: ['cloak'] }),
         field('upstream.codex.stream-bootstrap-buffering', 'buffering', 'bufferingHelp', {
           risk: true,
         }),
@@ -207,25 +351,55 @@ export function gatewayGroups(): GatewayGroupMeta[] {
           depends: 'upstream.codex.stream-bootstrap-buffering',
         }),
         field('upstream.codex.orphan-delegation-compatibility', 'orphan', 'orphanHelp'),
-        field('upstream.codex.model-level-cooling', 'modelCooling', 'codexModelCoolingHelp'),
+        field('upstream.codex.model-level-cooling', 'codexModelCooling', 'codexModelCoolingHelp'),
+        field('upstream.codex.upstream-request-compression', 'codexReqCompression', 'codexReqCompressionHelp', {
+          keywords: ['zstd', 'compress'],
+        }),
+        field(
+          'upstream.codex.upstream-request-compression-min-bytes',
+          'codexReqCompressionMinBytes',
+          'codexReqCompressionMinBytesHelp'
+        ),
+        field('upstream.codex.websocket-compression', 'codexWsCompression', 'codexWsCompressionHelp'),
+      ],
+    },
+    {
+      id: 'codex_oauth',
+      tab: 'upstream',
+      provider: 'codex',
+      titleKey: 'codexOauthTitle',
+      helpKey: 'codexOauthHelp',
+      collapsedByDefault: true,
+      fields: [
+        field('oauth.providers.codex.signin-with-chatgpt-identifier', 'codexSiwcId', 'codexSiwcIdHelp', {
+          keywords: ['siwc'],
+        }),
+        field('oauth.providers.codex.header-defaults.user-agent', 'codexHeaderUa', 'codexHeaderUaHelp'),
+        field('oauth.providers.codex.header-defaults.beta-features', 'codexHeaderBeta', 'codexHeaderBetaHelp'),
       ],
     },
     {
       id: 'claude',
-      tab: 'compat',
+      tab: 'upstream',
+      provider: 'claude',
       titleKey: 'claudeTitle',
       helpKey: 'claudeHelp',
       fields: [
         field('upstream.claude.model-level-cooling', 'modelCooling', 'claudeModelCoolingHelp'),
-        field('upstream.claude.disable-claude-cloak-mode', 'claudeCloak', 'claudeCloakHelp'),
+        field('upstream.claude.disable-claude-cloak-mode', 'claudeCloak', 'claudeCloakHelp', { keywords: ['cloak'] }),
         field('upstream.claude.disable-cloaking-model-list', 'rawModelIds', 'rawModelIdsHelp'),
+        field('upstream.claude.tool-search', 'claudeToolSearch', 'claudeToolSearchHelp'),
+        field('upstream.claude.server-side-fallback', 'claudeServerFallback', 'claudeServerFallbackHelp'),
+        field('upstream.claude.session-date-pin-days', 'claudeSessionDatePinDays', 'claudeSessionDatePinDaysHelp'),
       ],
     },
     {
       id: 'headers',
-      tab: 'compat',
+      tab: 'upstream',
+      provider: 'claude',
       titleKey: 'headersTitle',
       helpKey: 'headersHelp',
+      collapsedByDefault: true,
       fields: [
         field('upstream.claude.header-defaults.user-agent', 'userAgent', 'userAgentHelp'),
         field('upstream.claude.header-defaults.package-version', 'packageVersion', 'packageVersionHelp'),
@@ -239,11 +413,93 @@ export function gatewayGroups(): GatewayGroupMeta[] {
           'deviceProfile',
           'deviceProfileHelp'
         ),
+        field(
+          'upstream.claude.header-defaults.inject-diagnostics',
+          'claudeInjectDiagnostics',
+          'claudeInjectDiagnosticsHelp'
+        ),
+        field('upstream.claude.header-defaults.client-request-id', 'claudeClientReqId', 'claudeClientReqIdHelp', {
+          options: [
+            { value: '', labelKey: 'clientReqIdDefault' },
+            { value: 'on', labelKey: 'clientReqIdOn' },
+            { value: 'off', labelKey: 'clientReqIdOff' },
+            { value: 'passthrough', labelKey: 'clientReqIdPassthrough' },
+          ],
+        }),
+        field(
+          'upstream.claude.header-defaults.native-entrypoints',
+          'claudeNativeEntrypoints',
+          'claudeNativeEntrypointsHelp'
+        ),
+        field('upstream.claude.header-defaults.anthropic-beta-strip', 'claudeBetaStrip', 'claudeBetaStripHelp'),
+        field('upstream.claude.header-defaults.anthropic-beta-append', 'claudeBetaAppend', 'claudeBetaAppendHelp'),
+      ],
+    },
+    {
+      id: 'antigravity',
+      tab: 'upstream',
+      provider: 'antigravity',
+      titleKey: 'antigravityTitle',
+      helpKey: 'antigravityHelp',
+      fields: [
+        field('oauth.providers.antigravity.antigravity-credits', 'agCredits', 'agCreditsHelp', {
+          keywords: ['credits', 'google one'],
+        }),
+        field('oauth.providers.antigravity.signature-cache-enabled', 'agSigCache', 'agSigCacheHelp'),
+        field('oauth.providers.antigravity.signature-bypass-strict', 'agSigBypassStrict', 'agSigBypassStrictHelp'),
+        field('oauth.providers.antigravity.tos-pause-window', 'agTosPause', 'agTosPauseHelp', {
+          keywords: ['tos', '403'],
+        }),
+        field('oauth.providers.antigravity.connection-pool.enabled', 'agPoolEnabled', 'agPoolEnabledHelp'),
+        field(
+          'oauth.providers.antigravity.connection-pool.idle-conn-timeout',
+          'agPoolIdleTimeout',
+          'agPoolIdleTimeoutHelp'
+        ),
+        field(
+          'oauth.providers.antigravity.connection-pool.max-idle-conns-per-host',
+          'agPoolMaxIdle',
+          'agPoolMaxIdleHelp'
+        ),
+        field('oauth.providers.antigravity.sensitive-words', 'sensitiveWords', 'sensitiveWordsHelp', {
+          keywords: ['2119', 'zwsp', 'sensitive'],
+        }),
+        field(
+          'oauth.providers.antigravity.sensitive-words-replace',
+          'sensitiveWordsReplace',
+          'sensitiveWordsReplaceHelp',
+          { keywords: ['2119', 'replace', 'sensitive'] }
+        ),
+        field(
+          'oauth.providers.antigravity.sensitive-patterns-replace',
+          'sensitivePatternsReplace',
+          'sensitivePatternsReplaceHelp',
+          { keywords: ['re2', 'regex', 'sensitive'] }
+        ),
+      ],
+    },
+    {
+      id: 'devin',
+      tab: 'upstream',
+      provider: 'devin',
+      titleKey: 'devinTitle',
+      helpKey: 'devinHelp',
+      fields: [
+        field('oauth.providers.devin.sensitive-words', 'sensitiveWords', 'sensitiveWordsHelp', {
+          keywords: ['sensitive'],
+        }),
+        field('oauth.providers.devin.sensitive-words-replace', 'sensitiveWordsReplace', 'sensitiveWordsReplaceHelp'),
+        field(
+          'oauth.providers.devin.sensitive-patterns-replace',
+          'sensitivePatternsReplace',
+          'sensitivePatternsReplaceHelp'
+        ),
       ],
     },
     {
       id: 'xai',
-      tab: 'compat',
+      tab: 'upstream',
+      provider: 'other',
       titleKey: 'xaiTitle',
       helpKey: 'xaiHelp',
       fields: [field('upstream.xai.inject-x-search', 'searchTool', 'searchToolHelp')],
@@ -253,11 +509,12 @@ export function gatewayGroups(): GatewayGroupMeta[] {
 
 export function gatewayFamilies(): GatewayFamilyMeta[] {
   return [
-    { family: 'default', path: 'requests.payload.default', labelKey: 'familyDefault', hintKey: 'familyDefaultHelp', raw: false, filter: false },
-    { family: 'default-raw', path: 'requests.payload.default-raw', labelKey: 'familyDefaultRaw', hintKey: 'familyDefaultRawHelp', raw: true, filter: false },
-    { family: 'override', path: 'requests.payload.override', labelKey: 'familyOverride', hintKey: 'familyOverrideHelp', raw: false, filter: false },
-    { family: 'override-raw', path: 'requests.payload.override-raw', labelKey: 'familyOverrideRaw', hintKey: 'familyOverrideRawHelp', raw: true, filter: false },
-    { family: 'filter', path: 'requests.payload.filter', labelKey: 'familyFilter', hintKey: 'familyFilterHelp', raw: false, filter: true },
+    { family: 'default', step: '01', path: 'requests.payload.default', labelKey: 'familyDefault', hintKey: 'familyDefaultHelp', raw: false, filter: false, replace: false },
+    { family: 'default-raw', step: '02', path: 'requests.payload.default-raw', labelKey: 'familyDefaultRaw', hintKey: 'familyDefaultRawHelp', raw: true, filter: false, replace: false },
+    { family: 'override', step: '03', path: 'requests.payload.override', labelKey: 'familyOverride', hintKey: 'familyOverrideHelp', raw: false, filter: false, replace: false },
+    { family: 'override-raw', step: '04', path: 'requests.payload.override-raw', labelKey: 'familyOverrideRaw', hintKey: 'familyOverrideRawHelp', raw: true, filter: false, replace: false },
+    { family: 'replace', step: '05', path: 'requests.payload.replace', labelKey: 'familyReplace', hintKey: 'familyReplaceHelp', raw: false, filter: false, replace: true },
+    { family: 'filter', step: '06', path: 'requests.payload.filter', labelKey: 'familyFilter', hintKey: 'familyFilterHelp', raw: false, filter: true, replace: false },
   ];
 }
 
