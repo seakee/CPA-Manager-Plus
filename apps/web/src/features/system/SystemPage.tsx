@@ -27,7 +27,7 @@ import {
   usageServiceApi,
   type UsageServiceStatus,
 } from '@/services/api/usageService';
-import { isGatewayPendingError } from '@/services/api/models';
+import { isGatewayPendingError, modelsApi } from '@/services/api/models';
 import { classifyModels } from '@/utils/models';
 import { STORAGE_KEY_AUTH, STORAGE_KEY_QUOTA_CACHE } from '@/utils/constants';
 import iconGemini from '@/assets/icons/gemini.svg';
@@ -103,7 +103,7 @@ function SystemPageContent({
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
   const [modelStatus, setModelStatus] = useState<ModelStatus>();
-
+  const [modelsSyncing, setModelsSyncing] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState<UsageServiceStatus | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState('');
@@ -244,6 +244,43 @@ function SystemPageContent({
               ? { text: err }
               : undefined;
       setModelStatus({ type: 'error', message: { key: 'system_info.models_error' }, detail });
+    }
+  };
+
+  const syncUpstreamModels = async () => {
+    if (auth.connectionStatus !== 'connected' || !auth.apiBase || !auth.managementKey || modelsSyncing) {
+      showNotification(t('notification.connection_required'), 'warning');
+      return;
+    }
+    setModelsSyncing(true);
+    try {
+      await modelsApi.refreshUpstreamModels(auth.apiBase, auth.managementKey);
+      await fetchModels({ forceRefresh: true });
+      showNotification(
+        t('system_info.models_sync_upstream_success', {
+          count: useModelsStore.getState().models.length,
+        }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const status =
+        err && typeof err === 'object'
+          ? ((err as { status?: number; response?: { status?: number } }).response?.status ??
+            (err as { status?: number }).status)
+          : undefined;
+      if (status === 404 || status === 405) {
+        showNotification(t('system_info.models_sync_upstream_unsupported'), 'warning');
+      } else if (isGatewayPendingError(err) || status === 503) {
+        showNotification(t('system_info.models_gateway_pending'), 'warning');
+      } else {
+        const detail = err instanceof Error ? err.message : String(err);
+        showNotification(
+          t('system_info.models_sync_upstream_failed', { error: detail }),
+          'error'
+        );
+      }
+    } finally {
+      setModelsSyncing(false);
     }
   };
 
@@ -427,14 +464,27 @@ function SystemPageContent({
             <Card
               title={t('system_info.models_title')}
               extra={
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => fetchModels({ forceRefresh: true })}
-                  loading={modelsLoading}
-                >
-                  {t('common.refresh')}
-                </Button>
+                <div className={styles.modelActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void syncUpstreamModels()}
+                    loading={modelsSyncing}
+                    disabled={modelsLoading || modelsSyncing || !auth.managementKey}
+                    title={t('system_info.models_sync_upstream_hint')}
+                  >
+                    {t('system_info.models_sync_upstream')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => fetchModels({ forceRefresh: true })}
+                    loading={modelsLoading}
+                    disabled={modelsSyncing}
+                  >
+                    {t('common.refresh')}
+                  </Button>
+                </div>
               }
             >
               <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>

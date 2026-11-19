@@ -206,3 +206,89 @@ func TestProxyV8APIKeysConfigRequiresASavedSetup(t *testing.T) {
 		t.Fatalf("status = %d, want %d (body=%q)", recorder.Code, http.StatusPreconditionRequired, recorder.Body.String())
 	}
 }
+
+func TestV8ModelsRefreshPathAndPredicates(t *testing.T) {
+	tests := []struct {
+		target    string
+		canonical bool
+		refused   bool
+	}{
+		{target: "/v8/management/models/refresh", canonical: true},
+		{target: "/v8/management/models/refresh/extra"},
+		{target: "/v8/management/models/refresh-x"},
+		{target: "/v8/management/models"},
+		{target: "/v8//management/models/refresh", refused: true},
+		{target: "//v8/management/models/refresh", refused: true},
+		{target: "/v8/management/models/./refresh", refused: true},
+		{target: "/v8/management/models/refresh/../config"},
+		{target: "/v8/management/models/%2e%2e/models/refresh", refused: true},
+	}
+	for _, test := range tests {
+		req := httptest.NewRequest(http.MethodPost, test.target, nil)
+		if got := IsCanonicalV8ModelsRefreshRequest(req); got != test.canonical {
+			t.Fatalf("IsCanonicalV8ModelsRefreshRequest(%q) = %v, want %v", test.target, got, test.canonical)
+		}
+		if got := IsNonCanonicalV8ModelsRefreshRequest(req); got != test.refused {
+			t.Fatalf("IsNonCanonicalV8ModelsRefreshRequest(%q) = %v, want %v", test.target, got, test.refused)
+		}
+	}
+}
+
+func TestProxyV8ModelsRefreshForwardsOnlyAdminPosts(t *testing.T) {
+	const savedKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	fixture := newPluginProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	methodNotAllowed := func(w http.ResponseWriter) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+
+	recorder := httptest.NewRecorder()
+	fixture.service.ProxyV8ModelsRefresh(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v8/management/models/refresh", nil),
+		writeProxyError,
+		methodNotAllowed,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body=%q)", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if len(*fixture.upstreamPaths) != 1 || (*fixture.upstreamPaths)[0] != "/v8/management/models/refresh" {
+		t.Fatalf("upstream paths = %#v, want [/v8/management/models/refresh]", *fixture.upstreamPaths)
+	}
+	if len(*fixture.upstreamAuthorizations) != 1 || (*fixture.upstreamAuthorizations)[0] != "Bearer "+savedKey {
+		t.Fatalf("upstream auth = %#v, want saved management key", *fixture.upstreamAuthorizations)
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		target string
+		want   int
+	}{
+		{name: "get", method: http.MethodGet, target: "/v8/management/models/refresh", want: http.StatusMethodNotAllowed},
+		{name: "put", method: http.MethodPut, target: "/v8/management/models/refresh", want: http.StatusMethodNotAllowed},
+		{name: "delete", method: http.MethodDelete, target: "/v8/management/models/refresh", want: http.StatusMethodNotAllowed},
+		{name: "trailing slash", method: http.MethodPost, target: "/v8/management/models/refresh/", want: http.StatusNotFound},
+		{name: "nested path", method: http.MethodPost, target: "/v8/management/models/refresh/extra", want: http.StatusNotFound},
+		{name: "duplicate slash", method: http.MethodPost, target: "/v8//management/models/refresh", want: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := len(*fixture.upstreamPaths)
+			rr := httptest.NewRecorder()
+			fixture.service.ProxyV8ModelsRefresh(
+				rr,
+				httptest.NewRequest(test.method, test.target, nil),
+				writeProxyError,
+				methodNotAllowed,
+			)
+			if rr.Code != test.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rr.Code, test.want, rr.Body.String())
+			}
+			if len(*fixture.upstreamPaths) != before {
+				t.Fatalf("%s %s reached upstream unexpectedly", test.method, test.target)
+			}
+		})
+	}
+}

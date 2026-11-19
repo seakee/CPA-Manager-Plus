@@ -114,6 +114,9 @@ func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	if proxysvc.IsCPAV8APIKeysConfigPath(path) {
 		return r.Method == http.MethodGet && proxysvc.IsCanonicalV8APIKeysConfigRequest(r)
 	}
+	if proxysvc.IsCPAV8ModelsRefreshPath(path) {
+		return r.Method == http.MethodPost && proxysvc.IsCanonicalV8ModelsRefreshRequest(r)
+	}
 	cleaned := strings.TrimRight(path, "/")
 	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
 		return true
@@ -1119,6 +1122,8 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodPost)
 	case "v0/management/plugins", "v0/management/plugin-store":
 		return allowed(http.MethodGet)
+	case "v8/management/models/refresh":
+		return allowed(http.MethodPost)
 	case "status", "health", "v1/models", "models":
 		return allowed(http.MethodGet)
 	default:

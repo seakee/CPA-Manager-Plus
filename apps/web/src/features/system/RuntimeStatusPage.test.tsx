@@ -509,7 +509,7 @@ describe('RuntimeStatusPage artifact origin display', () => {
 
       // Trigger manual refreshModels(true) while initial refreshModels(false) is still awaiting apiKeysApi.list()
       const modelsCard = renderer!.root.findByProps({ 'data-testid': 'runtime-models-card' });
-      const refreshBtn = modelsCard.findByType('button');
+      const refreshBtn = modelsCard.findByProps({ 'data-testid': 'runtime-models-refresh-btn' });
       await act(async () => {
         refreshBtn.props.onClick();
         await Promise.resolve();
@@ -613,6 +613,242 @@ describe('RuntimeStatusPage artifact origin display', () => {
         await act(async () => renderer!.unmount());
         renderer = undefined;
       }
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('surfaces gateway version, recovery state, copyable artifact digest, and places anomaly banner before hero cards', async () => {
+    const execCommand = vi.fn(() => true);
+    const textarea = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: vi.fn(),
+      focus: vi.fn(),
+      select: vi.fn(),
+      setSelectionRange: vi.fn(),
+      remove: vi.fn(),
+    };
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      createElement: vi.fn(() => textarea),
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      execCommand,
+    });
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') {
+          return {
+            mode: 'embedded' as const,
+            status: 'degraded',
+            observedAt: '2026-11-19T11:20:14Z',
+            manager: { state: 'ready' },
+            gateway: {
+              identity: 'embedded-default',
+              protocolVersion: 'v1',
+              state: 'starting',
+              ready: false,
+              version: '8.0.78',
+              artifactId: DIGEST,
+              capabilities: ['restart', 'stop'],
+              recovery: { state: 'armed', attemptsRemaining: 3 },
+            },
+          };
+        }
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    await mount(client);
+
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'runtime-status-gateway-version' }).props.children
+    ).toBe('v8.0.78');
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'runtime-status-recovery' }).props.children
+    ).toBe(i18n.t('runtime_status.recovery_armed', { lng: 'zh-CN', count: 3 }));
+
+    // Anomaly banner is promoted above the hero lifecycle cards
+    const pageChildren = renderer!.root.findByProps({ 'data-testid': 'runtime-status-page' }).children;
+    const anomalyIndex = pageChildren.findIndex(
+      (child) =>
+        typeof child !== 'string' &&
+        String(child.props.className ?? '').includes('runtime-status-anomaly')
+    );
+    const heroIndex = pageChildren.findIndex(
+      (child) => typeof child !== 'string' && child.props.className === 'runtime-status-cards'
+    );
+    expect(anomalyIndex).toBeGreaterThan(-1);
+    expect(heroIndex).toBeGreaterThan(anomalyIndex);
+
+    // Clicking abbreviated artifact digest copies full sha256 digest
+    const digestBtn = renderer!.root.findByProps({ 'data-testid': 'runtime-artifact-digest-btn' });
+    await act(async () => {
+      await digestBtn.props.onClick();
+    });
+    expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(textarea.value).toBe(DIGEST);
+  });
+
+  it('filters available models and copies model ID on chip click', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    const execCommand = vi.fn(() => true);
+    const textarea = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: vi.fn(),
+      focus: vi.fn(),
+      select: vi.fn(),
+      setSelectionRange: vi.fn(),
+      remove: vi.fn(),
+    };
+    vi.stubGlobal('localStorage', memoryStorage());
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      createElement: vi.fn(() => textarea),
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      execCommand,
+    });
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: '/console/api/v2/cpamp',
+      sessionMode: 'manager_embedded',
+      managementKey: 'admin-secret',
+    });
+    useConfigStore.setState({ config: { apiKeys: ['sk-test'] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const fetchModelsSpy = vi
+      .spyOn(modelsApi, 'fetchModels')
+      .mockResolvedValue([{ name: 'gpt-6.1-terra' }, { name: 'claude-sonnet-4-5' }]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const toggleBtn = renderer!.root.findByProps({ 'data-testid': 'runtime-models-toggle-btn' });
+      await act(async () => {
+        toggleBtn.props.onClick();
+      });
+
+      const filterInput = renderer!.root.findByProps({
+        'data-testid': 'runtime-models-filter-input',
+      });
+      await act(async () => {
+        filterInput.props.onChange({ target: { value: 'claude' } });
+      });
+
+      const chips = renderer!.root.findAllByProps({ 'data-testid': 'runtime-model-chip' });
+      expect(chips).toHaveLength(1);
+      expect(chips[0].props.title).toBe('claude-sonnet-4-5');
+
+      await act(async () => {
+        await chips[0].props.onClick();
+      });
+      expect(execCommand).toHaveBeenCalledWith('copy');
+      expect(textarea.value).toBe('claude-sonnet-4-5');
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('triggers upstream model refresh and reloads models list on sync button click', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: '/console/api/v2/cpamp',
+      sessionMode: 'manager_embedded',
+      managementKey: 'admin-secret',
+    });
+    useConfigStore.setState({ config: { apiKeys: ['sk-test'] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const refreshUpstreamSpy = vi
+      .spyOn(modelsApi, 'refreshUpstreamModels')
+      .mockResolvedValue({ status: 'ok' });
+    const fetchModelsSpy = vi
+      .spyOn(modelsApi, 'fetchModels')
+      .mockResolvedValueOnce([{ name: 'gpt-old' }])
+      .mockResolvedValueOnce([{ name: 'gpt-old' }, { name: 'gpt-new-upstream' }]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const syncBtn = renderer!.root.findByProps({ 'data-testid': 'runtime-models-sync-btn' });
+      await act(async () => {
+        await syncBtn.props.onClick();
+      });
+
+      expect(refreshUpstreamSpy).toHaveBeenCalledWith('/console/api/v2/cpamp', 'admin-secret');
+      expect(fetchModelsSpy).toHaveBeenCalledTimes(2);
+      expect(useModelsStore.getState().models.map((m) => m.name)).toContain('gpt-new-upstream');
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      refreshUpstreamSpy.mockRestore();
       fetchModelsSpy.mockRestore();
       useModelsStore.getState().clearCache();
       useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
