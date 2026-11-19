@@ -33,6 +33,12 @@
   align-items: center;
 }
 
+.modelActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .infoGrid {
   display: grid;
   gap: $spacing-sm;

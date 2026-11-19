@@ -537,24 +537,40 @@ textarea {
     border-color: var(--data-badge-success-border);
     background: var(--data-badge-success-bg);
     color: var(--data-badge-success-text);
+
+    .status-dot {
+      background: var(--data-badge-success-dot);
+    }
   }
 
   &.is-warning {
     border-color: var(--data-badge-warning-border);
     background: var(--data-badge-warning-bg);
     color: var(--data-badge-warning-text);
+
+    .status-dot {
+      background: var(--data-badge-warning-dot);
+    }
   }
 
   &.is-danger {
     border-color: var(--data-badge-danger-border);
     background: var(--data-badge-danger-bg);
     color: var(--data-badge-danger-text);
+
+    .status-dot {
+      background: var(--data-badge-danger-dot);
+    }
   }
 
   &.is-info {
     border-color: var(--data-badge-info-border);
     background: var(--data-badge-info-bg);
     color: var(--data-badge-info-text);
+
+    .status-dot {
+      background: var(--data-badge-info-dot);
+    }
   }
 }
 

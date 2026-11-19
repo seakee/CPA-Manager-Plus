@@ -76,6 +76,18 @@ const buildV1ModelsEndpoint = (baseUrl: string): string => {
   return `${trimmed}/v1/models`;
 };
 
+const buildV8ModelsRefreshEndpoint = (baseUrl: string): string => {
+  const raw = (baseUrl || '').trim();
+  if (!raw) return '';
+  const normalized = raw.startsWith('/') ? raw : normalizeApiBase(raw);
+  if (!normalized) return '';
+  let trimmed = normalized.replace(/\/+$/g, '');
+  trimmed = trimmed.replace(/\/v0\/management$/i, '');
+  trimmed = trimmed.replace(/\/v1\/models$/i, '');
+  trimmed = trimmed.replace(/\/v1$/i, '');
+  if (!trimmed) return '';
+  return `${trimmed}/v8/management/models/refresh`;
+};
 const buildClaudeModelsEndpoint = (baseUrl: string): string => {
   const normalized = normalizeApiBase(baseUrl);
   const fallback = normalized || DEFAULT_CLAUDE_BASE_URL;
@@ -127,6 +139,30 @@ export const modelsApi = {
     return normalizeModelList(payload, { dedupe: true });
   },
 
+  /**
+   * Trigger CPA v8 upstream model list refresh (`POST /v8/management/models/refresh`).
+   */
+  async refreshUpstreamModels(
+    baseUrl: string,
+    managementKey?: string,
+    headers: Record<string, string> = {}
+  ): Promise<unknown> {
+    const endpoint = buildV8ModelsRefreshEndpoint(baseUrl);
+    if (!endpoint) {
+      throw new Error('Invalid base url');
+    }
+
+    const resolvedHeaders = { ...headers };
+    const trimmedKey = managementKey?.trim();
+    if (trimmedKey && !hasHeader(resolvedHeaders, 'authorization')) {
+      resolvedHeaders.Authorization = `Bearer ${trimmedKey}`;
+    }
+
+    const response = await axios.post(endpoint, undefined, {
+      headers: Object.keys(resolvedHeaders).length ? resolvedHeaders : undefined,
+    });
+    return response.data;
+  },
   /**
    * Fetch models from /v1/models endpoint via api-call.
    * Useful when the configured baseUrl is the upstream host root (e.g. https://api.example.com).
