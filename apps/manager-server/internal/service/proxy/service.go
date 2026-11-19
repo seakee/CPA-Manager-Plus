@@ -103,6 +103,7 @@ const cpaManagementPrefix = "/v0/management"
 // this package only recognize their v0 paths, and the config root also carries
 // the management secret field.
 const cpaV8APIKeysConfigPath = "/v8/management/config/api-keys"
+const cpaV8ModelsRefreshPath = "/v8/management/models/refresh"
 const codexInviteOriginHeader = "X-Codex-Invite-Origin"
 const managementOriginJSONField = "management_origin"
 const authFilePhysicalNameHeader = "X-CPAMP-Auth-File-Physical-Name"
@@ -321,6 +322,21 @@ func (s *Service) ProxyV8APIKeysConfig(w http.ResponseWriter, r *http.Request, w
 	s.proxyToSavedSetup(w, r, writeError, true, false)
 }
 
+// ProxyV8ModelsRefresh forwards an explicit CPA v8 upstream model-list refresh
+// trigger (`POST /v8/management/models/refresh`) for verified admins only.
+// Only canonical POST requests on that exact path are forwarded, substituting
+// the saved CPA management key upstream.
+func (s *Service) ProxyV8ModelsRefresh(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), methodNotAllowed func(http.ResponseWriter)) {
+	if !IsCPAV8ModelsRefreshPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be "+cpaV8ModelsRefreshPath))
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, true, false)
+}
 func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), useSavedManagementKey bool, rewritePluginOrigin bool) {
 	s.proxyWithResponseHook(w, r, writeError, useSavedManagementKey, rewritePluginOrigin, nil)
 }
@@ -1762,6 +1778,11 @@ func IsCPAV8APIKeysConfigPath(path string) bool {
 	return path == cpaV8APIKeysConfigPath || strings.HasPrefix(path, cpaV8APIKeysConfigPath+"/")
 }
 
+// IsCPAV8ModelsRefreshPath matches only the exact CPA v8 upstream model refresh
+// endpoint so no sibling or nested path under /v8/management/models is exposed.
+func IsCPAV8ModelsRefreshPath(path string) bool {
+	return path == cpaV8ModelsRefreshPath
+}
 // isCanonicalRequestPath rejects percent-encoded, dot-segment and duplicate-slash
 // paths. ServeMux does not clean escaped dot segments and redirects the rest, so
 // a prefix check alone would let /api-keys/%2e%2e/... resolve to another upstream
@@ -1815,6 +1836,25 @@ func IsNonCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
 	return IsCPAV8APIKeysConfigPath(cleaned) || IsCPAV8APIKeysConfigPath(strings.TrimSuffix(cleaned, "/"))
 }
 
+// IsCanonicalV8ModelsRefreshRequest reports whether r is the canonical POST
+// target for the CPA v8 upstream model refresh route.
+func IsCanonicalV8ModelsRefreshRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && IsCPAV8ModelsRefreshPath(r.URL.Path) && isCanonicalRequestPath(r.URL)
+}
+
+// IsNonCanonicalV8ModelsRefreshRequest reports whether r is a dirty path that
+// ServeMux would clean onto /v8/management/models/refresh and must be refused
+// with 404 before any redirect can happen.
+func IsNonCanonicalV8ModelsRefreshRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if IsCPAV8ModelsRefreshPath(r.URL.Path) {
+		return true
+	}
+	cleaned := cleanRequestPath(r.URL.Path)
+	return IsCPAV8ModelsRefreshPath(cleaned) || IsCPAV8ModelsRefreshPath(strings.TrimSuffix(cleaned, "/"))
+}
 // cleanRequestPath mirrors the cleaning http.ServeMux performs before dispatch:
 // duplicate slashes collapse, dot segments resolve, and a trailing slash survives.
 func cleanRequestPath(requestPath string) string {

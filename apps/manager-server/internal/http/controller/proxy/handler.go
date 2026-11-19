@@ -53,6 +53,20 @@ func (h *Handler) V8APIKeysConfig(w http.ResponseWriter, r *http.Request) {
 	h.App.ProxyService.ProxyV8APIKeysConfig(w, r, response.Error, response.MethodNotAllowed)
 }
 
+// V8ModelsRefresh triggers CPA v8 upstream model synchronization for verified
+// admins only, substituting the saved CPA management key upstream.
+func (h *Handler) V8ModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, errors.New("invalid admin key"))
+		return
+	}
+	h.App.ProxyService.ProxyV8ModelsRefresh(w, r, response.Error, response.MethodNotAllowed)
+}
 func (h *Handler) CPAResource(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet,

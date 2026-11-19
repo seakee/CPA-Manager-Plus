@@ -105,7 +105,7 @@ func New(appCtx *app.Context) http.Handler {
 // with an exact 404 before ServeMux can redirect them onto a canonical one.
 func refuseNonCanonicalV8APIKeysPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if proxysvc.IsNonCanonicalV8APIKeysConfigRequest(r) {
+		if proxysvc.IsNonCanonicalV8APIKeysConfigRequest(r) || proxysvc.IsNonCanonicalV8ModelsRefreshRequest(r) {
 			http.NotFound(w, r)
 			return
 		}
@@ -131,7 +131,7 @@ func rootHandler(
 		// rather than by the generic preflight branch below, which would advertise
 		// a 204 for a method the route does not have. This still runs inside
 		// RejectCrossSiteAdmin, so a sandboxed document cannot even ask.
-		if proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) && r.Method == http.MethodOptions {
+		if (proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) || proxysvc.IsCPAV8ModelsRefreshPath(r.URL.Path)) && r.Method == http.MethodOptions {
 			middleware.WriteCORS(appCtx.Config, w, r)
 			response.MethodNotAllowed(w)
 			return
@@ -205,6 +205,10 @@ func rootHandler(
 		// document is a cross-site fetch client and must not reach it.
 		if proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) {
 			middleware.WithCORS(appCtx.Config, proxyHandler.V8APIKeysConfig)(w, r)
+			return
+		}
+		if proxysvc.IsCPAV8ModelsRefreshPath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.V8ModelsRefresh)(w, r)
 			return
 		}
 		if r.URL.Path == "/" {
