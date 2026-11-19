@@ -6,14 +6,19 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -486,6 +491,98 @@ func TestPrepareUpdatePersistsStableTerminalFailureAndDoesNotRetry(t *testing.T)
 	}
 }
 
+type prepareUploadFake struct {
+	*prepareUpdateFake
+	stageUpload func(context.Context, runtimeupdate.Release, runtimeupdate.StageOptions) error
+}
+
+func (p prepareUploadFake) StageWithOptions(ctx context.Context, release runtimeupdate.Release, opts runtimeupdate.StageOptions) (runtimeupdate.Metadata, error) {
+	return runtimeupdate.Metadata{}, p.stageUpload(ctx, release, opts)
+}
+
+func TestPrepareUpdateUploadProgressAndFailureSurviveCallerCancellation(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	request := prepareUploadRequest()
+	caller, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stages := 0
+	checkProgress := func(received int64) {
+		t.Helper()
+		progress, ok := f.starter.ObservePrepareProgress(request.OperationID)
+		if !ok || progress != (PrepareProgress{Phase: "verifying", ReceivedBytes: received, TotalBytes: 1}) {
+			t.Fatalf("upload progress = %+v, found=%v", progress, ok)
+		}
+	}
+	preparer := prepareUploadFake{prepareUpdateFake: f.preparer,
+		stageUpload: func(ctx context.Context, _ runtimeupdate.Release, opts runtimeupdate.StageOptions) error {
+			stages++
+			if opts.SourceMode != "upload" || opts.UploadReader != request.Archive || opts.UploadLength != request.ContentLength {
+				t.Fatalf("stage upload options = %+v", opts)
+			}
+			checkProgress(0)
+			opts.OnPhase("verifying")
+			opts.Progress(1, 0)
+			checkProgress(1)
+			cancel()
+			if ctx.Err() != nil {
+				t.Fatalf("post-EOF stage context followed upload caller cancellation: %v", ctx.Err())
+			}
+			if opts.UploadContext == nil || !errors.Is(opts.UploadContext.Err(), context.Canceled) {
+				t.Fatalf("upload stream context = %v, want context.Canceled", opts.UploadContext)
+			}
+			return fmt.Errorf("stream interrupted: %w", runtimeupdate.ErrArchiveInvalid)
+		},
+	}
+	if err := f.starter.EnablePrepareUpdate(f.observer, preparer); err != nil {
+		t.Fatal(err)
+	}
+	op, err := f.starter.PrepareUpdateUpload(caller, request)
+	if err != nil || op.State != journal.StateFailed || op.FailureCode != "release_asset_invalid" {
+		t.Fatalf("failed upload = %+v, %v", op, err)
+	}
+	if progress, ok := f.starter.ObservePrepareProgress(request.OperationID); ok {
+		t.Fatalf("terminal upload still has transient progress: %+v", progress)
+	}
+	request.Archive = strings.NewReader("another upload")
+	replayed, err := f.starter.PrepareUpdateUpload(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(replayed, op) || stages != 1 || f.preparer.resolveCalls != 1 {
+		t.Fatalf("upload replay = %+v, %v; stage=%d resolve=%d", replayed, err, stages, f.preparer.resolveCalls)
+	}
+}
+
+func TestPrepareUpdateUploadRejectsInvalidLengthOrMissingVerifierBeforeAdmission(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	for _, test := range []struct {
+		length int64
+		want   error
+	}{
+		{length: 0, want: ErrInvalidRequest},
+		{length: runtimeupdate.MaxAcquisitionArchiveBytes + 1, want: runtimeupdate.ErrArchiveTooLarge},
+		{length: 1, want: ErrUnsupportedStaging},
+	} {
+		request := prepareUploadRequest()
+		request.ContentLength = test.length
+		if op, err := f.starter.PrepareUpdateUpload(t.Context(), request); !errors.Is(err, test.want) || op != (journal.Operation{}) {
+			t.Errorf("length %d: upload = %+v, %v; want %v", test.length, op, err, test.want)
+		}
+	}
+	if f.preparer.resolveCalls != 0 || f.preparer.stageCalls != 0 || containsEvent(f.events, "begin") {
+		t.Fatalf("rejected upload reached release lookup or execution: %v", f.events)
+	}
+}
+
+func prepareUploadRequest() PrepareUpdateUploadRequest {
+	return PrepareUpdateUploadRequest{
+		OperationID:               "prepare-upload",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  activeArtifactA,
+		TargetVersion:             "7.3.3",
+		Archive:                   strings.NewReader("x"),
+		ContentLength:             1,
+	}
+}
+
 func TestPrepareUpdateQueueWaitConsumesExecutionBudget(t *testing.T) {
 	origTimeout := prepareUpdateExecutionTimeout
 	prepareUpdateExecutionTimeout = 40 * time.Millisecond
@@ -678,4 +775,385 @@ func prepareUpdateArchive(t *testing.T, executable []byte) []byte {
 		t.Fatal(err)
 	}
 	return archive.Bytes()
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
+}
+
+type eofCancelingReader struct {
+	r        *bytes.Reader
+	onEOF    func()
+	canceled bool
+}
+
+func (r *eofCancelingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if errors.Is(err, io.EOF) && !r.canceled {
+		r.canceled = true
+		r.onEOF()
+	}
+	return n, err
+}
+
+type midStreamErrorReader struct {
+	prefix []byte
+	sent   bool
+	err    error
+}
+
+func (r *midStreamErrorReader) Read(p []byte) (int, error) {
+	if !r.sent && len(r.prefix) > 0 {
+		r.sent = true
+		n := copy(p, r.prefix)
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func newMetadataOnlyReleaseSource(t *testing.T, version string, archive []byte, onResolve func()) *runtimeupdate.Source {
+	t.Helper()
+	sum := sha256.Sum256(archive)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	assetName := "CLIProxyAPI_" + version + "_linux_amd64.tar.gz"
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if onResolve != nil {
+				onResolve()
+			}
+			if req.URL.Hostname() != "api.github.com" {
+				return nil, fmt.Errorf("unexpected outbound host %s", req.URL.Host)
+			}
+			body, err := json.Marshal(map[string]any{
+				"tag_name": "v" + version,
+				"draft":    false,
+				"assets": []map[string]any{
+					{
+						"name":                 assetName,
+						"digest":               digest,
+						"size":                 len(archive),
+						"browser_download_url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v" + version + "/" + assetName,
+					},
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader(body)),
+				Request:    req,
+			}, nil
+		}),
+	}
+	source, err := runtimeupdate.NewSourceForPlatform("linux", "amd64", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+func TestPrepareUpdateUploadDecouplesPostEOFExtractionAndMapsStreamReadErrors(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	archive := prepareUpdateArchive(t, []byte("verified-uploaded-binary-7.3.3"))
+	source := newMetadataOnlyReleaseSource(t, "7.3.3", archive, nil)
+	stageStore, err := runtimeupdate.NewStore(filepath.Join(t.TempDir(), "stages"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer, err := runtimeupdate.NewPreparerWithSource(source, stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.starter.EnablePrepareUpdate(f.observer, preparer); err != nil {
+		t.Fatal(err)
+	}
+
+	uploadCtx, cancelUpload := context.WithCancel(t.Context())
+	defer cancelUpload()
+	postEOFReq := PrepareUpdateUploadRequest{
+		OperationID:               "upload-post-eof-cancel",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  activeArtifactA,
+		TargetVersion:             "7.3.3",
+		Archive: &eofCancelingReader{
+			r:     bytes.NewReader(archive),
+			onEOF: cancelUpload,
+		},
+		ContentLength: int64(len(archive)),
+	}
+	op, err := f.starter.PrepareUpdateUpload(uploadCtx, postEOFReq)
+	if err != nil || op.State != journal.StateSucceeded || op.FailureCode != "" {
+		t.Fatalf("post-EOF canceled upload = %+v, err = %v; want succeeded", op, err)
+	}
+	finalized, err := stageStore.ResolveFinalized("7.3.3")
+	if err != nil || finalized.Metadata.Version != "7.3.3" {
+		t.Fatalf("ResolveFinalized(7.3.3) = %+v, err = %v", finalized, err)
+	}
+
+	for idx, tc := range []struct {
+		name       string
+		cancelMid  bool
+		streamErr  error
+		wantReason string
+	}{
+		{name: "unexpected EOF mid-stream", streamErr: io.ErrUnexpectedEOF, wantReason: "download_failed"},
+		{name: "read deadline mid-stream", streamErr: os.ErrDeadlineExceeded, wantReason: "download_failed"},
+		{name: "caller cancel mid-stream", cancelMid: true, streamErr: context.Canceled, wantReason: "download_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			version := fmt.Sprintf("7.3.%d", 10+idx)
+			verSource := newMetadataOnlyReleaseSource(t, version, archive, nil)
+			verStore, storeErr := runtimeupdate.NewStore(filepath.Join(t.TempDir(), "stages"))
+			if storeErr != nil {
+				t.Fatal(storeErr)
+			}
+			verPreparer, prepErr := runtimeupdate.NewPreparerWithSource(verSource, verStore)
+			if prepErr != nil {
+				t.Fatal(prepErr)
+			}
+			verFixture := newPrepareFixture(t, activeArtifactA)
+			if err := verFixture.starter.EnablePrepareUpdate(verFixture.observer, verPreparer); err != nil {
+				t.Fatal(err)
+			}
+			reqCtx, reqCancel := context.WithCancel(t.Context())
+			defer reqCancel()
+			var reader io.Reader = &midStreamErrorReader{prefix: archive[:8], err: tc.streamErr}
+			if tc.cancelMid {
+				reader = &eofCancelingReader{
+					r:     bytes.NewReader(archive[:8]),
+					onEOF: reqCancel,
+				}
+			}
+			failedOp, uploadErr := verFixture.starter.PrepareUpdateUpload(reqCtx, PrepareUpdateUploadRequest{
+				OperationID:               fmt.Sprintf("upload-err-%d", idx),
+				ExpectedRuntimeIdentity:   "runtime-01",
+				ExpectedRuntimeGeneration: 41,
+				ExpectedActiveArtifactID:  activeArtifactA,
+				TargetVersion:             version,
+				Archive:                   reader,
+				ContentLength:             -1,
+			})
+			if uploadErr != nil || failedOp.State != journal.StateFailed || failedOp.FailureCode != tc.wantReason {
+				t.Fatalf("PrepareUpdateUpload(%s) = %+v, err=%v; want failed/%s", tc.name, failedOp, uploadErr, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestPrepareUpdateProgressReportsResolvingAndKeepsVerifyingOnPreStagedReuse(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	archive := prepareUpdateArchive(t, []byte("pre-staged-binary-7.3.3"))
+
+	resolveEntered := make(chan struct{})
+	releaseResolve := make(chan struct{})
+	var resolveOnce sync.Once
+	source := newMetadataOnlyReleaseSource(t, "7.3.3", archive, func() {
+		resolveOnce.Do(func() {
+			close(resolveEntered)
+			<-releaseResolve
+		})
+	})
+	stageStore, err := runtimeupdate.NewStore(filepath.Join(t.TempDir(), "stages"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer, err := runtimeupdate.NewPreparerWithSource(source, stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-stage 7.3.3 using upload so the finalized directory already exists on disk.
+	preStageSource := newMetadataOnlyReleaseSource(t, "7.3.3", archive, nil)
+	preStagePreparer, err := runtimeupdate.NewPreparerWithSource(preStageSource, stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := preStagePreparer.Resolve(t.Context(), "7.3.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preStagePreparer.StageWithOptions(t.Context(), rel, runtimeupdate.StageOptions{
+		SourceMode:   "upload",
+		UploadReader: bytes.NewReader(archive),
+		UploadLength: int64(len(archive)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var observedPhases []PrepareProgress
+	wrappedPreparer := &phaseObservingPreparer{
+		Preparer: preparer,
+		observe: func() {
+			if p, ok := f.starter.ObservePrepareProgress("op-reuse-stage"); ok {
+				observedPhases = append(observedPhases, p)
+			}
+		},
+	}
+	if err := f.starter.EnablePrepareUpdate(f.observer, wrappedPreparer); err != nil {
+		t.Fatal(err)
+	}
+
+	type prepareOutcome struct {
+		op  journal.Operation
+		err error
+	}
+	done := make(chan prepareOutcome, 1)
+	go func() {
+		op, prepErr := f.starter.PrepareUpdate(t.Context(), prepareUpdateRequest("op-reuse-stage", "7.3.3", activeArtifactA))
+		done <- prepareOutcome{op: op, err: prepErr}
+	}()
+
+	<-resolveEntered
+	resolvingProgress, ok := f.starter.ObservePrepareProgress("op-reuse-stage")
+	if !ok || resolvingProgress.Phase != "resolving" {
+		t.Fatalf("progress during Resolve = %+v, found=%v; want resolving", resolvingProgress, ok)
+	}
+	close(releaseResolve)
+
+	outcome := <-done
+	if outcome.err != nil || outcome.op.State != journal.StateSucceeded {
+		t.Fatalf("PrepareUpdate(reuse) = %+v, err = %v", outcome.op, outcome.err)
+	}
+	if len(observedPhases) == 0 {
+		t.Fatal("expected at least one observed phase during StageWithOptions")
+	}
+	for _, p := range observedPhases {
+		if p.Phase != "verifying" {
+			t.Fatalf("observed phase during pre-staged reuse = %+v; want verifying (never downloading)", p)
+		}
+	}
+}
+
+type phaseObservingPreparer struct {
+	*runtimeupdate.Preparer
+	observe func()
+}
+
+func (p *phaseObservingPreparer) StageWithOptions(ctx context.Context, release runtimeupdate.Release, opts runtimeupdate.StageOptions) (runtimeupdate.Metadata, error) {
+	if p.observe != nil {
+		p.observe()
+	}
+	origOnPhase := opts.OnPhase
+	opts.OnPhase = func(phase string) {
+		if origOnPhase != nil {
+			origOnPhase(phase)
+		}
+		if p.observe != nil {
+			p.observe()
+		}
+	}
+	return p.Preparer.StageWithOptions(ctx, release, opts)
+}
+
+type prepareCDNSyntheticConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c prepareCDNSyntheticConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestPrepareUpdateStagesFromCDNSourceEndToEnd(t *testing.T) {
+	binary := []byte("cdn-prepared-binary-7.3.4")
+	binarySum := sha256.Sum256(binary)
+	wantArtifactID := artifact.ID("sha256:" + hex.EncodeToString(binarySum[:]))
+	archive := prepareUpdateArchive(t, binary)
+	officialPath := "/router-for-me/CLIProxyAPI/releases/download/v7.3.4/CLIProxyAPI_7.3.4_linux_amd64.tar.gz"
+
+	var cdnHits int
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mirror/https://github.com" + officialPath:
+			cdnHits++
+			w.Header().Set("Content-Length", strconv.Itoa(len(archive)))
+			_, _ = w.Write(archive)
+		case "/corrupt/https://github.com" + officialPath:
+			cdnHits++
+			corrupted := append([]byte(nil), archive...)
+			corrupted[0] ^= 0xff
+			w.Header().Set("Content-Length", strconv.Itoa(len(corrupted)))
+			_, _ = w.Write(corrupted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer tlsServer.Close()
+
+	baseTransport := tlsServer.Client().Transport.(*http.Transport).Clone()
+	targetAddr := tlsServer.Listener.Addr().String()
+	baseTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		peer, err := net.ResolveTCPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, targetAddr)
+		if err != nil {
+			return nil, err
+		}
+		return prepareCDNSyntheticConn{Conn: conn, remote: peer}, nil
+	}
+	if baseTransport.TLSClientConfig == nil {
+		baseTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		baseTransport.TLSClientConfig = baseTransport.TLSClientConfig.Clone()
+	}
+	baseTransport.TLSClientConfig.ServerName = "example.com"
+	cdnClient := &http.Client{Transport: baseTransport}
+	publicLookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == "api.github.com" {
+			return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+		}
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	}
+
+	// Metadata-only official source rejects any non-api.github.com host so asset download MUST traverse CDN.
+	source := newMetadataOnlyReleaseSource(t, "7.3.4", archive, nil)
+	stageStore, err := runtimeupdate.NewStore(filepath.Join(t.TempDir(), "stages"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer, err := runtimeupdate.NewPreparerWithSource(source, stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparer.SetCDNOptionsForTesting(
+		runtimeupdate.WithCDNHTTPClient(cdnClient),
+		runtimeupdate.WithCDNLookupIP(publicLookup),
+	)
+	f := newPrepareFixture(t, activeArtifactA)
+	if err := f.starter.EnablePrepareUpdate(f.observer, preparer); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Corrupt CDN archive records durable failed operation with release_asset_invalid.
+	badReq := prepareUpdateRequest("op-cdn-corrupt", "7.3.4", activeArtifactA)
+	badReq.SourceMode = "cdn"
+	badReq.CDNPrefix = "https://cdn.example.com/corrupt/"
+	failedOp, err := f.starter.PrepareUpdate(t.Context(), badReq)
+	if err != nil || failedOp.State != journal.StateFailed || failedOp.FailureCode != "release_asset_invalid" {
+		t.Fatalf("PrepareUpdate(cdn corrupt) = %+v, err=%v; want failed/release_asset_invalid", failedOp, err)
+	}
+	if _, resolveErr := stageStore.ResolveFinalized("7.3.4"); resolveErr == nil {
+		t.Fatal("corrupt CDN prepare published finalized stage")
+	}
+
+	// 2. Valid CDN archive stages finalized artifact and completes succeeded.
+	okReq := prepareUpdateRequest("op-cdn-valid", "7.3.4", activeArtifactA)
+	okReq.SourceMode = "cdn"
+	okReq.CDNPrefix = "https://cdn.example.com/mirror/"
+	okOp, err := f.starter.PrepareUpdate(t.Context(), okReq)
+	if err != nil || okOp.State != journal.StateSucceeded || okOp.FailureCode != "" {
+		t.Fatalf("PrepareUpdate(cdn valid) = %+v, err=%v; want succeeded", okOp, err)
+	}
+	if cdnHits != 2 {
+		t.Fatalf("CDN server hits = %d, want 2 (corrupt + valid)", cdnHits)
+	}
+	finalized, err := stageStore.ResolveFinalized("7.3.4")
+	if err != nil || finalized.Metadata.ArtifactID != wantArtifactID {
+		t.Fatalf("ResolveFinalized(7.3.4) = %+v, err=%v; want artifact %s", finalized, err, wantArtifactID)
+	}
 }

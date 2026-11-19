@@ -2,11 +2,13 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
@@ -151,4 +153,93 @@ func activateAuthenticatedRequest(t *testing.T, h http.Handler, method, path, bo
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
 	return response
+}
+
+func TestActivateUpdateWriteDeadlineRequiresValidAuthAndReturnsJSONOnDeadlineError(t *testing.T) {
+	called := 0
+	h := activateUpdateHandler(t, activateUpdateFunc(func(_ context.Context, req lifecycle.ActivateUpdateRequest) (journal.Operation, error) {
+		called++
+		return journal.Operation{
+			OperationID:       req.OperationID,
+			OperationType:     "activate_update",
+			RuntimeIdentity:   req.ExpectedRuntimeIdentity,
+			RuntimeGeneration: req.ExpectedRuntimeGeneration,
+			State:             journal.StateSucceeded,
+		}, nil
+	}))
+
+	for _, tc := range []struct {
+		name       string
+		auth       string
+		body       string
+		wantStatus int
+	}{
+		{name: "missing auth", body: validActivateUpdateBody, wantStatus: http.StatusUnauthorized},
+		{name: "wrong bearer token", auth: "Bearer wrong-token", body: validActivateUpdateBody, wantStatus: http.StatusUnauthorized},
+		{name: "invalid JSON body", auth: "Bearer " + testRuntimeToken, body: `{"operationId":"op"}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, activateUpdatePath, strings.NewReader(tc.body))
+			if tc.auth != "" {
+				req.Header.Set("Authorization", tc.auth)
+			}
+			rec := &uploadDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			h.ServeHTTP(rec, req)
+			after := time.Now()
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if len(rec.writeDeadlines) != 0 {
+				t.Fatalf("unexpected write deadline extension on %s: writes=%v", tc.name, rec.writeDeadlines)
+			}
+			if tc.wantStatus == http.StatusUnauthorized {
+				if len(rec.readDeadlines) != 1 || rec.readDeadlines[0].IsZero() || rec.readDeadlines[0].After(after.Add(time.Second)) {
+					t.Fatalf("expected immediate read deadline expiration on unconsumed %s: reads=%v", tc.name, rec.readDeadlines)
+				}
+			} else if len(rec.readDeadlines) != 0 {
+				t.Fatalf("unexpected read deadline change on consumed %s: reads=%v", tc.name, rec.readDeadlines)
+			}
+		})
+	}
+
+	// Unconfigured activate-update does not extend write deadline either.
+	readOnly := newTestHandler(t)
+	unconfiguredReq := httptest.NewRequest(http.MethodPost, activateUpdatePath, strings.NewReader(validActivateUpdateBody))
+	unconfiguredReq.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	unconfiguredRec := &uploadDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	readOnly.ServeHTTP(unconfiguredRec, unconfiguredReq)
+	if unconfiguredRec.Code != http.StatusBadRequest || len(unconfiguredRec.writeDeadlines) != 0 {
+		t.Fatalf("unconfigured activate status=%d writes=%v", unconfiguredRec.Code, unconfiguredRec.writeDeadlines)
+	}
+
+	// Deadline failure returns protocol JSON internal_error rather than text/plain.
+	failReq := httptest.NewRequest(http.MethodPost, activateUpdatePath, strings.NewReader(validActivateUpdateBody))
+	failReq.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	failRec := &uploadDeadlineRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		writeErr:         errors.New("deadline unavailable"),
+	}
+	h.ServeHTTP(failRec, failReq)
+	if failRec.Code != http.StatusInternalServerError || called != 0 {
+		t.Fatalf("deadline error status = %d, called = %d; want 500, 0", failRec.Code, called)
+	}
+	assertJSONHeaders(t, failRec.ResponseRecorder)
+	assertErrorCode(t, failRec.ResponseRecorder, "internal_error")
+
+	// Valid authenticated activate-update extends write deadline and keeps it active through response flush.
+	okReq := httptest.NewRequest(http.MethodPost, activateUpdatePath, strings.NewReader(validActivateUpdateBody))
+	okReq.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	okRec := &uploadDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	before := time.Now()
+	h.ServeHTTP(okRec, okReq)
+	after := time.Now()
+	if okRec.Code != http.StatusOK || called != 1 {
+		t.Fatalf("valid activate status = %d, called = %d", okRec.Code, called)
+	}
+	if len(okRec.readDeadlines) != 0 || len(okRec.writeDeadlines) != 1 {
+		t.Fatalf("valid activate deadlines read=%v write=%v, want 0 read and 1 active write", okRec.readDeadlines, okRec.writeDeadlines)
+	}
+	if okRec.writeDeadlines[0].Before(before.Add(ActivateUpdateResponseTimeout)) || okRec.writeDeadlines[0].After(after.Add(ActivateUpdateResponseTimeout)) {
+		t.Fatalf("valid activate write deadline = %v, want ~%s", okRec.writeDeadlines[0], ActivateUpdateResponseTimeout)
+	}
 }

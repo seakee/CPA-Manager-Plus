@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
@@ -17,12 +18,13 @@ import (
 )
 
 const (
-	artifactStatusPath          = "/v1/runtime/artifact"
-	artifactProbePath           = "/v1/runtime/artifact/probe"
-	artifactAcquirePath         = "/v1/runtime/artifact/acquire"
-	artifactUploadPath          = "/v1/runtime/artifact/upload"
-	uploadArtifactBudgetTimeout = 10 * time.Minute
-	maxArtifactJSONRequestBytes = 4 << 10
+	artifactStatusPath               = "/v1/runtime/artifact"
+	artifactProbePath                = "/v1/runtime/artifact/probe"
+	artifactAcquirePath              = "/v1/runtime/artifact/acquire"
+	artifactUploadPath               = "/v1/runtime/artifact/upload"
+	uploadArtifactBudgetTimeout      = lifecycle.AcquireArtifactExecutionTimeout
+	uploadArtifactWriteBudgetTimeout = 12 * time.Minute
+	maxArtifactJSONRequestBytes      = 4 << 10
 )
 
 type artifactErrorResponse struct {
@@ -79,7 +81,10 @@ func (h *artifactRoutesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		http.NotFound(w, r)
 		return
 	}
-
+	w = &artifactResponseWriter{
+		ResponseWriter: w,
+		body:           trackArtifactRequestBody(r),
+	}
 	if !h.authorized(r.Header.Get("Authorization")) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeArtifactError(w, http.StatusUnauthorized, lifecycle.ArtifactCodeUnauthorized)
@@ -158,33 +163,34 @@ func (h *artifactRoutesHandler) serveAcquire(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *artifactRoutesHandler) serveUpload(w http.ResponseWriter, r *http.Request) {
-	if !validUploadContentType(r.Header.Get("Content-Type")) {
+	if len(r.Header.Values("Content-Type")) > 1 || !validUploadContentType(r.Header.Get("Content-Type")) {
 		writeArtifactError(w, http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
 		return
 	}
-	controller := http.NewResponseController(w)
-	deadline := time.Now().Add(uploadArtifactBudgetTimeout)
-	if err := controller.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		writeArtifactError(w, http.StatusInternalServerError, lifecycle.ArtifactCodeInstallFailed)
-		return
-	}
-	if err := controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		_ = controller.SetReadDeadline(time.Time{})
-		writeArtifactError(w, http.StatusInternalServerError, lifecycle.ArtifactCodeInstallFailed)
-		return
-	}
-	defer func() {
-		_ = controller.SetReadDeadline(time.Time{})
-		_ = controller.SetWriteDeadline(time.Time{})
-	}()
-
 	if r.ContentLength > runtimeupdate.MaxAcquisitionArchiveBytes {
 		writeArtifactError(w, http.StatusRequestEntityTooLarge, lifecycle.ArtifactCodeArchiveTooLarge)
 		return
 	}
-	body := http.MaxBytesReader(w, r.Body, runtimeupdate.MaxAcquisitionArchiveBytes)
-	defer body.Close()
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.ContentLength < -1 {
+		writeArtifactError(w, http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+		return
+	}
+	controller := http.NewResponseController(w)
+	now := time.Now()
+	if err := controller.SetReadDeadline(now.Add(uploadArtifactBudgetTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeArtifactError(w, http.StatusInternalServerError, lifecycle.ArtifactCodeInstallFailed)
+		return
+	}
+	if err := controller.SetWriteDeadline(now.Add(uploadArtifactWriteBudgetTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		restoreArtifactUploadReadDeadline(controller, artifactRequestBodyConsumed(w))
+		writeArtifactError(w, http.StatusInternalServerError, lifecycle.ArtifactCodeInstallFailed)
+		return
+	}
+	defer func() {
+		restoreArtifactUploadReadDeadline(controller, artifactRequestBodyConsumed(w))
+	}()
 
+	body := http.MaxBytesReader(unwrapArtifactResponseWriter(w), r.Body, runtimeupdate.MaxAcquisitionArchiveBytes)
 	op, err := h.executor.UploadArtifact(r.Context(), body, r.ContentLength)
 	if err != nil {
 		writeMappedArtifactError(w, err)
@@ -271,4 +277,98 @@ func writeArtifactJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type artifactBodyTracker struct {
+	rc       io.ReadCloser
+	consumed atomic.Bool
+}
+
+func trackArtifactRequestBody(r *http.Request) *artifactBodyTracker {
+	tracker := &artifactBodyTracker{}
+	if r == nil || r.Body == nil || r.Body == http.NoBody {
+		tracker.consumed.Store(true)
+		return tracker
+	}
+	tracker.rc = r.Body
+	r.Body = tracker
+	return tracker
+}
+
+func (b *artifactBodyTracker) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.consumed.Store(true)
+	}
+	return n, err
+}
+
+func (b *artifactBodyTracker) Close() error {
+	return b.rc.Close()
+}
+
+type artifactResponseWriter struct {
+	http.ResponseWriter
+	body                *artifactBodyTracker
+	wroteHeader         bool
+	expiredReadDeadline bool
+}
+
+func (w *artifactResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *artifactResponseWriter) SetReadDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && !deadline.After(time.Now().Add(time.Second)) {
+		if w.expiredReadDeadline {
+			return nil
+		}
+		w.expiredReadDeadline = true
+	} else {
+		w.expiredReadDeadline = false
+	}
+	return http.NewResponseController(w.ResponseWriter).SetReadDeadline(deadline)
+}
+
+func (w *artifactResponseWriter) WriteHeader(statusCode int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		if w.body != nil && !w.body.consumed.Load() {
+			w.Header().Set("Connection", "close")
+			if !w.expiredReadDeadline {
+				w.expiredReadDeadline = true
+				_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Now())
+			}
+		}
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *artifactResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func unwrapArtifactResponseWriter(w http.ResponseWriter) http.ResponseWriter {
+	if wrapped, ok := w.(*artifactResponseWriter); ok {
+		return wrapped.ResponseWriter
+	}
+	return w
+}
+
+func artifactRequestBodyConsumed(w http.ResponseWriter) bool {
+	if wrapped, ok := w.(*artifactResponseWriter); ok && wrapped.body != nil {
+		return wrapped.body.consumed.Load()
+	}
+	return false
+}
+
+func restoreArtifactUploadReadDeadline(controller *http.ResponseController, consumed bool) {
+	if consumed {
+		_ = controller.SetReadDeadline(time.Time{})
+		return
+	}
+	_ = controller.SetReadDeadline(time.Now())
 }

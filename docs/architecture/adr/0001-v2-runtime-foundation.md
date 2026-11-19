@@ -210,9 +210,13 @@ returns `503 operation_persistence_unavailable`.
 
 A successful query returns only `operationId`, `operationType`,
 `runtimeIdentity`, `runtimeGeneration`, `state`, `createdAt`, `updatedAt`,
+optional transient in-memory `prepare_update` progress fields (`phase`,
+`receivedBytes`, `totalBytes`) while `state` is `accepted` or `running`,
 optional terminal `completedAt`, and failed-only `error.code` with a fixed
 non-sensitive message. The four durable states remain `accepted`, `running`,
-`succeeded`, and `failed`. Returned `runtimeGeneration` is the operation's
+`succeeded`, and `failed`; transient progress fields are never persisted to the
+journal or returned for terminal rows. Returned `runtimeGeneration` is the
+operation's
 creation epoch. It may differ from the current query epoch in either numeric
 direction: generations are opaque random values, not ordered counters.
 Retained terminal tombstones remain observable, including an `updatedAt`
@@ -242,8 +246,10 @@ Ready, fresh recommendations, discovery success, a newer target, the original
 active artifact, or prepare/activate capabilities.
 
 Manager returns `phase`, `request_id`, `target_version`,
-`runtime_operation_id`, and `state`, with durable `created_at`/`updated_at`,
-terminal `completed_at`, and failed-only stable `failure_code` when present.
+`runtime_operation_id`, and `state`, with optional transient prepare progress
+(`stage_phase`, `received_bytes`, `total_bytes`) while `accepted` or `running`,
+durable `created_at`/`updated_at`, terminal `completed_at`, and failed-only
+stable `failure_code` when present.
 Only `404 operation_not_found` normalizes to `state=not_found`, without
 timestamps or invented terminal evidence. ID/type/identity mismatches and
 malformed Runtime results fail closed. Runtime version equaling the target
@@ -487,16 +493,24 @@ Logical ownership, security/authority, state ownership, process role, and proces
 - A build-time checksum-pinned embedded CPA artifact establishes image contents; it does not grant Runtime, Ingress, or container bootstrap updater authority.
 
 The first updater mutation is the private Runtime Protocol v1
-`prepare_update` operation. Manager supplies only an exact target version and
-the existing Runtime identity, generation, and active-artifact freshness
+`prepare_update` operation. Manager supplies an exact target version and the
+existing Runtime identity, generation, and active-artifact freshness
 fences. Supervisor fixes release authority to the exact
 `router-for-me/CLIProxyAPI` GitHub tag and supported official platform asset;
-Manager cannot supply a repository, URL, mirror, asset name, checksum,
-executable path, or extraction path. The selected GitHub Release asset MUST
-provide a canonical SHA-256 digest, which Supervisor verifies against the
-downloaded archive bytes. Supervisor separately computes the exact extracted
-`cli-proxy-api` executable SHA-256; archive identity and executable artifact
-identity are distinct authorities.
+Manager cannot change the repository, asset name, checksum, executable path,
+or extraction path. The default transport is the official GitHub download;
+an explicit HTTPS CDN prefix only rewrites the transport URL of that exact
+asset. Literal hosts and redirects are validated separately from DNS dial
+targets. Fake-IP addresses are permitted only as resolved dial targets when
+the GitHub API DNS check confirms Fake-IP mode; non-public literal addresses
+remain blocked. Alternatively, authenticated
+`POST /v1/runtime/operations/prepare-update/upload` accepts a streamed archive
+for the exact target version.
+Both alternative transports (HTTPS CDN downloads and streamed uploads) enforce
+a 64 MiB archive size limit and must match the official archive size and
+canonical SHA-256 digest. Supervisor separately computes
+the extracted `cli-proxy-api` executable SHA-256; archive identity and
+executable artifact identity are distinct authorities.
 
 Before release lookup, download, or durable intent for a previously unseen
 prepare operation, Supervisor freshly re-observes the configured active
@@ -508,6 +522,10 @@ and CPAMP-owned metadata. Replayed retained operations perform no second
 download or extraction, and an existing version is reused only after its
 metadata and exact executable bytes still match the current official source
 digest.
+A new upload request must verify its own bytes before reusing such a stage.
+Browser recovery observes existing requests without resubmitting them; an
+explicit CDN retry retains the original prefix, and an upload must be
+selected again if the original request was lost.
 
 Prepare does not change the active executable, child process, desired
 lifecycle, recovery lease, or Runtime generation. Persistent active selection,
@@ -522,8 +540,14 @@ second fresh active-artifact fence is required after the released lifecycle
 gate and before Begin. Accepted prepares are tracked through shutdown so
 CloseAdmission rejects new work and the private journal closes only after
 terminal evidence is persisted. Ordinary Runtime requests keep their short
-transport deadlines; `prepare-update` uses a bounded budget ordered as
+transport deadlines; `POST /v1/runtime/operations/prepare-update` and
+`POST /v1/runtime/operations/prepare-update/upload` grant their extended budgets
+only after authentication and synchronous request validation pass, ordered as
 operation execution, Supervisor response/write, then Manager request.
+`POST /v1/runtime/operations/prepare-update/upload` also applies a bounded
+Supervisor request-body read deadline, and `PUT /v1/runtime/artifact/upload`
+likewise applies an authentication-and-validation-gated bounded request-body
+read deadline (`10m`); other requests retain the default read deadline.
 
 The active CPA selection is Supervisor-private persistent Runtime state,
 logically `/runtime/supervisor/active/cpa/selection.json`. Selection absence
@@ -563,8 +587,12 @@ When a slim Runtime image omits the bundled CPA executable, the image-pinned
 artifact manifest `artifactId` remains the sole trust root for first-time
 runtime acquisition. The official GitHub Release source, a user-selected HTTPS
 CDN prefix, and a local archive upload are untrusted transports only; the CDN
-transport refuses connections to non-public destination addresses (self-hosted
-LAN mirrors are out of scope for the first release), the official source never
+transport shares the `prepare_update` address policy, validating literal hosts
+and redirect targets for public addresses separately from DNS dial targets and
+permitting Fake-IP addresses only as resolved dial targets when the GitHub API
+DNS check confirms Fake-IP mode, while non-public literal or redirect addresses
+and self-hosted LAN mirrors remain blocked (out of scope for the first
+release); the official source never
 falls back to a CDN automatically, and Manager still cannot supply a target
 version, filesystem path, checksum, command, or rollback
 target. Verified acquisition stages the pinned version and exact `artifactId`

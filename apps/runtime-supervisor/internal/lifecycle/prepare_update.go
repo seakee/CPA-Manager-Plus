@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
+	"io"
+	"net/http"
+	"strings"
+	"time"
 )
 
 var (
@@ -47,6 +49,17 @@ type updatePreparer interface {
 	Stage(context.Context, runtimeupdate.Release) (runtimeupdate.Metadata, error)
 }
 
+type updateOptionsPreparer interface {
+	StageWithOptions(context.Context, runtimeupdate.Release, runtimeupdate.StageOptions) (runtimeupdate.Metadata, error)
+}
+
+// PrepareProgress captures transient staging progress for an in-flight prepare_update.
+type PrepareProgress struct {
+	Phase         string
+	ReceivedBytes int64
+	TotalBytes    int64
+}
+
 // PrepareUpdateRequest contains only exact target policy and freshness fences.
 // Release authority and all filesystem paths remain Supervisor-owned.
 type PrepareUpdateRequest struct {
@@ -55,6 +68,8 @@ type PrepareUpdateRequest struct {
 	ExpectedRuntimeGeneration uint64
 	ExpectedActiveArtifactID  artifact.ID
 	TargetVersion             string
+	SourceMode                string
+	CDNPrefix                 string
 }
 
 func (r PrepareUpdateRequest) Validate() error {
@@ -62,7 +77,47 @@ func (r PrepareUpdateRequest) Validate() error {
 		!r.ExpectedActiveArtifactID.IsValid() || runtimeupdate.ValidateVersion(r.TargetVersion) != nil {
 		return ErrInvalidRequest
 	}
+	switch r.SourceMode {
+	case "", "github":
+		if strings.TrimSpace(r.CDNPrefix) != "" {
+			return ErrInvalidRequest
+		}
+	case "cdn":
+		if _, err := runtimeupdate.ValidateCDNPrefix(r.CDNPrefix); err != nil {
+			return ErrInvalidRequest
+		}
+	default:
+		return ErrInvalidRequest
+	}
 	return nil
+}
+
+// PrepareUpdateUploadRequest submits an uploaded .tar.gz release stream for an
+// official TargetVersion while enforcing exact release metadata verification.
+type PrepareUpdateUploadRequest struct {
+	OperationID               string
+	ExpectedRuntimeIdentity   string
+	ExpectedRuntimeGeneration uint64
+	ExpectedActiveArtifactID  artifact.ID
+	TargetVersion             string
+	Archive                   io.Reader
+	ContentLength             int64 // Negative denotes an upload of unknown size.
+}
+
+func (r PrepareUpdateUploadRequest) Validate() error {
+	if r.ContentLength > runtimeupdate.MaxAcquisitionArchiveBytes {
+		return runtimeupdate.ErrArchiveTooLarge
+	}
+	if r.Archive == nil || r.Archive == http.NoBody || r.ContentLength == 0 || r.ContentLength < -1 {
+		return ErrInvalidRequest
+	}
+	return PrepareUpdateRequest{
+		OperationID:               r.OperationID,
+		ExpectedRuntimeIdentity:   r.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: r.ExpectedRuntimeGeneration,
+		ExpectedActiveArtifactID:  r.ExpectedActiveArtifactID,
+		TargetVersion:             r.TargetVersion,
+	}.Validate()
 }
 
 // EnablePrepareUpdate installs the Runtime16 dependencies before the executor
@@ -81,10 +136,68 @@ func (e *Executor) EnablePrepareUpdate(observer activeArtifactRefresher, prepare
 	return nil
 }
 
+// ObservePrepareProgress returns transient phase/byte progress for an active prepare_update.
+func (e *Executor) ObservePrepareProgress(operationID string) (PrepareProgress, bool) {
+	if e == nil || operationID == "" {
+		return PrepareProgress{}, false
+	}
+	e.prepareProgressMu.Lock()
+	defer e.prepareProgressMu.Unlock()
+	if e.prepareProgress == nil {
+		return PrepareProgress{}, false
+	}
+	progress, ok := e.prepareProgress[operationID]
+	return progress, ok
+}
+
+func (e *Executor) setPrepareProgress(operationID string, progress PrepareProgress) {
+	e.prepareProgressMu.Lock()
+	defer e.prepareProgressMu.Unlock()
+	if e.prepareProgress == nil {
+		e.prepareProgress = make(map[string]PrepareProgress)
+	}
+	e.prepareProgress[operationID] = progress
+}
+
+func (e *Executor) clearPrepareProgress(operationID string) {
+	e.prepareProgressMu.Lock()
+	defer e.prepareProgressMu.Unlock()
+	delete(e.prepareProgress, operationID)
+}
+
 func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateRequest) (journal.Operation, error) {
 	if err := request.Validate(); err != nil {
 		return journal.Operation{}, err
 	}
+	return e.executePrepare(ctx, request, runtimeupdate.StageOptions{
+		SourceMode: request.SourceMode,
+		CDNPrefix:  request.CDNPrefix,
+	})
+}
+
+func (e *Executor) PrepareUpdateUpload(ctx context.Context, request PrepareUpdateUploadRequest) (journal.Operation, error) {
+	if err := request.Validate(); err != nil {
+		return journal.Operation{}, err
+	}
+	return e.executePrepare(ctx, PrepareUpdateRequest{
+		OperationID:               request.OperationID,
+		ExpectedRuntimeIdentity:   request.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: request.ExpectedRuntimeGeneration,
+		ExpectedActiveArtifactID:  request.ExpectedActiveArtifactID,
+		TargetVersion:             request.TargetVersion,
+	}, runtimeupdate.StageOptions{
+		SourceMode:   "upload",
+		UploadReader: request.Archive,
+		UploadLength: request.ContentLength,
+	})
+}
+
+func (e *Executor) executePrepare(
+	ctx context.Context,
+	request PrepareUpdateRequest,
+	stageOpts runtimeupdate.StageOptions,
+) (journal.Operation, error) {
+	upload := stageOpts.SourceMode == "upload"
 	if !e.admitPrepareWorker() {
 		return journal.Operation{}, ErrPersistenceUnavailable
 	}
@@ -142,6 +255,11 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 		e.mu.Unlock()
 		return operation, nil
 	}
+	optsPreparer, _ := preparer.(updateOptionsPreparer)
+	if upload && optsPreparer == nil {
+		e.mu.Unlock()
+		return journal.Operation{}, ErrUnsupportedStaging
+	}
 	if e.activeSelectionAmbiguous {
 		e.mu.Unlock()
 		return journal.Operation{}, journal.ErrOperationStateConflict
@@ -157,6 +275,9 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 
 	// Release metadata lookup is privileged Supervisor I/O, but it must not
 	// hold the shared lifecycle/recovery gate.
+	e.setPrepareProgress(request.OperationID, PrepareProgress{Phase: "resolving"})
+	defer e.clearPrepareProgress(request.OperationID)
+
 	release, err := preparer.Resolve(preconditionCtx, request.TargetVersion)
 	if err != nil {
 		return journal.Operation{}, mapPrepareResolveError(err)
@@ -170,17 +291,60 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 		return operation, err
 	}
 
-	// Durable running evidence transfers execution to the Supervisor. The
-	// caller's request context no longer controls staging or terminal evidence.
+	phase := "verifying"
+	if !upload && optsPreparer == nil {
+		phase = "downloading"
+	}
+	e.setPrepareProgress(request.OperationID, PrepareProgress{
+		Phase:      phase,
+		TotalBytes: release.ArchiveSize,
+	})
+	stageOpts.Progress = func(receivedBytes, totalBytes int64) {
+		e.prepareProgressMu.Lock()
+		defer e.prepareProgressMu.Unlock()
+		progress, ok := e.prepareProgress[request.OperationID]
+		if !ok {
+			return
+		}
+		progress.ReceivedBytes = receivedBytes
+		if totalBytes > 0 {
+			progress.TotalBytes = totalBytes
+		}
+		e.prepareProgress[request.OperationID] = progress
+	}
+	stageOpts.OnPhase = func(phase string) {
+		e.prepareProgressMu.Lock()
+		defer e.prepareProgressMu.Unlock()
+		progress, ok := e.prepareProgress[request.OperationID]
+		if !ok {
+			return
+		}
+		progress.Phase = phase
+		e.prepareProgress[request.OperationID] = progress
+	}
+
+	// Durable running evidence transfers execution to the Supervisor. Only
+	// reading the uploaded HTTP stream follows the caller's request context;
+	// post-EOF extraction, verification, fsync, and terminal persistence use
+	// the bounded Supervisor execution context.
 	stageCtx, cancelStage := context.WithDeadline(context.Background(), operationDeadline)
-	_, stageErr := preparer.Stage(stageCtx, release)
+	var cancelUpload context.CancelFunc
+	if upload {
+		stageOpts.UploadContext, cancelUpload = context.WithDeadline(ctx, operationDeadline)
+	}
+	var stageErr error
+	if optsPreparer != nil {
+		_, stageErr = optsPreparer.StageWithOptions(stageCtx, release, stageOpts)
+	} else {
+		_, stageErr = preparer.Stage(stageCtx, release)
+	}
+	if cancelUpload != nil {
+		cancelUpload()
+	}
 	cancelStage()
 	state, failureCode := journal.StateSucceeded, ""
 	if stageErr != nil {
-		state, failureCode = journal.StateFailed, "staging_failed"
-		if errors.Is(stageErr, runtimeupdate.ErrArchiveInvalid) {
-			failureCode = "release_asset_invalid"
-		}
+		state, failureCode = journal.StateFailed, mapPrepareStageFailureCode(stageErr)
 	}
 	completeCtx, cancelComplete := context.WithTimeout(context.Background(), PrepareUpdateTerminalPersistenceTimeout)
 	result, err := e.journal.Complete(completeCtx, e.authority.RuntimeIdentity, intent.OperationID, state, failureCode)
@@ -189,6 +353,19 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 		return operation, fmt.Errorf("%w: record prepare-update result: %w", ErrExecutionFailed, err)
 	}
 	return result, nil
+}
+
+func mapPrepareStageFailureCode(err error) string {
+	switch {
+	case errors.Is(err, runtimeupdate.ErrArchiveTooLarge):
+		return "archive_too_large"
+	case errors.Is(err, runtimeupdate.ErrArchiveInvalid), errors.Is(err, runtimeupdate.ErrArtifactMismatch):
+		return "release_asset_invalid"
+	case errors.Is(err, runtimeupdate.ErrDownloadFailed), errors.Is(err, runtimeupdate.ErrSourceUnreachable):
+		return "download_failed"
+	default:
+		return "staging_failed"
+	}
 }
 
 func (e *Executor) admitPrepareWorker() bool {

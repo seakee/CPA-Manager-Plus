@@ -22,12 +22,19 @@ type UpdateOperationObserver interface {
 	ObserveUpdateOperation(context.Context, lifecycle.ObserveUpdateOperationRequest) (journal.Operation, error)
 }
 
+type PrepareProgressObserver interface {
+	ObservePrepareProgress(operationID string) (lifecycle.PrepareProgress, bool)
+}
+
 type observedOperationResponse struct {
 	OperationID       string         `json:"operationId"`
 	OperationType     string         `json:"operationType"`
 	RuntimeIdentity   string         `json:"runtimeIdentity"`
 	RuntimeGeneration uint64         `json:"runtimeGeneration"`
 	State             journal.State  `json:"state"`
+	Phase             string         `json:"phase,omitempty"`
+	ReceivedBytes     int64          `json:"receivedBytes,omitempty"`
+	TotalBytes        int64          `json:"totalBytes,omitempty"`
 	Error             *protocolError `json:"error,omitempty"`
 	CreatedAt         time.Time      `json:"createdAt"`
 	UpdatedAt         time.Time      `json:"updatedAt"`
@@ -59,6 +66,15 @@ func (h *handler) serveObserveUpdateOperation(w http.ResponseWriter, r *http.Req
 		UpdatedAt:         operation.UpdatedAt,
 		CompletedAt:       operation.CompletedAt,
 	}
+	if operation.OperationType == lifecycle.UpdateOperationPrepare &&
+		(operation.State == journal.StateAccepted || operation.State == journal.StateRunning) &&
+		h.prepareProgressObserver != nil {
+		if progress, ok := h.prepareProgressObserver.ObservePrepareProgress(operation.OperationID); ok {
+			response.Phase = progress.Phase
+			response.ReceivedBytes = progress.ReceivedBytes
+			response.TotalBytes = progress.TotalBytes
+		}
+	}
 	if operation.FailureCode != "" {
 		response.Error = &protocolError{Code: operation.FailureCode, Message: "update operation failed"}
 	}
@@ -67,7 +83,7 @@ func (h *handler) serveObserveUpdateOperation(w http.ResponseWriter, r *http.Req
 
 func decodeObserveUpdateOperationRequest(w http.ResponseWriter, r *http.Request) (lifecycle.ObserveUpdateOperationRequest, error) {
 	var request lifecycle.ObserveUpdateOperationRequest
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 0))
+	body, err := io.ReadAll(http.MaxBytesReader(unwrapResponseWriter(w), r.Body, 0))
 	if err != nil || len(body) != 0 {
 		return request, lifecycle.ErrInvalidRequest
 	}

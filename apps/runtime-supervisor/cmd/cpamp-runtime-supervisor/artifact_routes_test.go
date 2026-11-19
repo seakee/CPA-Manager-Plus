@@ -2,14 +2,17 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -244,17 +247,30 @@ func TestArtifactUploadOver64MiBReturns413AndSetsDeadlines(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer runtime-token")
 	req.Header.Set("Content-Type", "application/gzip")
 	writer := &readWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	before := time.Now()
 	h.handler.ServeHTTP(writer, req)
+	after := time.Now()
 	if writer.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("PUT oversize upload status = %d, want 413 (body=%s)", writer.Code, writer.Body.String())
 	}
 	assertArtifactErrorCode(t, writer.ResponseRecorder, lifecycle.ArtifactCodeArchiveTooLarge)
-	if len(writer.readDeadlines) != 2 || len(writer.writeDeadlines) != 2 {
-		t.Fatalf("upload deadlines read=%d write=%d, want 2 each", len(writer.readDeadlines), len(writer.writeDeadlines))
+	if len(writer.readDeadlines) != 2 || len(writer.writeDeadlines) != 1 {
+		t.Fatalf("upload deadlines read=%d write=%d, want 2 read and 1 active write", len(writer.readDeadlines), len(writer.writeDeadlines))
 	}
-	if !writer.readDeadlines[0].After(time.Now().Add(9*time.Minute)) ||
-		!writer.writeDeadlines[0].After(time.Now().Add(9*time.Minute)) {
-		t.Fatalf("upload deadlines = read %v, write %v; want ~10m budget", writer.readDeadlines[0], writer.writeDeadlines[0])
+	if writer.readDeadlines[0].Before(before.Add(uploadArtifactBudgetTimeout)) ||
+		writer.readDeadlines[0].After(after.Add(uploadArtifactBudgetTimeout)) {
+		t.Fatalf("upload read deadline = %v, want ~%s", writer.readDeadlines[0], uploadArtifactBudgetTimeout)
+	}
+	if writer.writeDeadlines[0].Before(before.Add(uploadArtifactWriteBudgetTimeout)) ||
+		writer.writeDeadlines[0].After(after.Add(uploadArtifactWriteBudgetTimeout)) ||
+		!writer.writeDeadlines[0].After(writer.readDeadlines[0]) {
+		t.Fatalf("upload write deadline = %v (read=%v), want ~%s (> read budget)", writer.writeDeadlines[0], writer.readDeadlines[0], uploadArtifactWriteBudgetTimeout)
+	}
+	if writer.readDeadlines[1].IsZero() || writer.readDeadlines[1].Before(before) || writer.readDeadlines[1].After(after) {
+		t.Fatalf("unconsumed oversize upload final read deadline = %v, want immediate expiration in [%v, %v]", writer.readDeadlines[1], before, after)
+	}
+	if got := writer.Header().Get("Connection"); got != "close" {
+		t.Fatalf("oversize upload Connection = %q, want close", got)
 	}
 
 	entries, err := os.ReadDir(h.stageRoot)
@@ -264,6 +280,258 @@ func TestArtifactUploadOver64MiBReturns413AndSetsDeadlines(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.selectionRoot, "selection.json")); !os.IsNotExist(err) {
 		t.Fatalf("oversize upload created selection.json: %v", err)
 	}
+}
+
+func TestArtifactUploadEmptyOrInvalidLengthsRejectedBeforeDeadlinesOrOperationMutation(t *testing.T) {
+	h := newRouteTestHarness(
+		t,
+		lifecycle.WithAcquisitionCDNAddrPolicy(nil),
+		lifecycle.WithAcquisitionCDNLookupIP(func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host == "api.github.com" {
+				return []net.IPAddr{{IP: net.ParseIP("140.82.121.6")}}, nil
+			}
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		}),
+	)
+
+	// Seed a retained operation on state.currentOp and wait for it to settle.
+	acqReq := httptest.NewRequest(http.MethodPost, artifactAcquirePath, strings.NewReader(`{"source":"cdn","cdnPrefix":"https://cdn.example.com/mirror"}`))
+	acqReq.Header.Set("Authorization", "Bearer runtime-token")
+	acqRec := httptest.NewRecorder()
+	h.handler.ServeHTTP(acqRec, acqReq)
+	if acqRec.Code != http.StatusAccepted {
+		t.Fatalf("seed POST acquire = %d (%s), want 202", acqRec.Code, acqRec.Body.String())
+	}
+	var seededOpID string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stRec := httptest.NewRecorder()
+		stReq := httptest.NewRequest(http.MethodGet, artifactStatusPath, nil)
+		stReq.Header.Set("Authorization", "Bearer runtime-token")
+		h.handler.ServeHTTP(stRec, stReq)
+		var st lifecycle.ArtifactStatusResponse
+		if err := json.NewDecoder(stRec.Body).Decode(&st); err == nil && st.Operation != nil && st.Operation.Phase == lifecycle.ArtifactPhaseFailed {
+			seededOpID = st.Operation.ID
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if seededOpID == "" {
+		t.Fatal("seeded acquire operation did not settle to failed")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		body   io.Reader
+		length int64
+	}{
+		{name: "ContentLength 0 with empty reader", body: strings.NewReader(""), length: 0},
+		{name: "ContentLength 0 with nil body", body: nil, length: 0},
+		{name: "ContentLength -2", body: strings.NewReader("ab"), length: -2},
+		{name: "http.NoBody with ContentLength -1", body: nil, length: -1},
+		{name: "http.NoBody with positive ContentLength", body: nil, length: 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, artifactUploadPath, tc.body)
+			req.ContentLength = tc.length
+			req.Header.Set("Authorization", "Bearer runtime-token")
+			req.Header.Set("Content-Type", "application/gzip")
+			writer := &readWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			h.handler.ServeHTTP(writer, req)
+			after := time.Now()
+			if writer.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body=%s)", writer.Code, writer.Body.String())
+			}
+			assertArtifactErrorCode(t, writer.ResponseRecorder, lifecycle.ArtifactCodeInvalidRequest)
+			if len(writer.writeDeadlines) != 0 {
+				t.Fatalf("unexpected write deadlines=%v", writer.writeDeadlines)
+			}
+			if tc.body != nil {
+				if len(writer.readDeadlines) != 1 || writer.readDeadlines[0].IsZero() || writer.readDeadlines[0].After(after.Add(time.Second)) {
+					t.Fatalf("expected immediate read deadline expiration for unconsumed body, got %v", writer.readDeadlines)
+				}
+			} else if len(writer.readDeadlines) != 0 {
+				t.Fatalf("unexpected read deadlines for nil/NoBody=%v", writer.readDeadlines)
+			}
+			stRec := httptest.NewRecorder()
+			stReq := httptest.NewRequest(http.MethodGet, artifactStatusPath, nil)
+			stReq.Header.Set("Authorization", "Bearer runtime-token")
+			h.handler.ServeHTTP(stRec, stReq)
+			var st lifecycle.ArtifactStatusResponse
+			if err := json.NewDecoder(stRec.Body).Decode(&st); err != nil {
+				t.Fatal(err)
+			}
+			if st.Operation == nil || st.Operation.ID != seededOpID || st.Operation.Source != lifecycle.ArtifactSourceCDN {
+				t.Fatalf("rejected empty upload mutated currentOp: got %+v, want %q", st.Operation, seededOpID)
+			}
+		})
+	}
+}
+
+func TestArtifactUploadStalledOpenSocketsCloseAndShutdownPromptly(t *testing.T) {
+	h := newRouteTestHarness(t)
+
+	// Upload valid archive first so subsequent uploads enter serveUpload, extend budgets,
+	// and return 409 artifact_already_active without consuming the request stream.
+	initReq := httptest.NewRequest(http.MethodPut, artifactUploadPath, bytes.NewReader(h.archive))
+	initReq.Header.Set("Authorization", "Bearer runtime-token")
+	initReq.Header.Set("Content-Type", "application/gzip")
+	initRec := &readWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	beforeInit := time.Now()
+	h.handler.ServeHTTP(initRec, initReq)
+	afterInit := time.Now()
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("initial PUT upload = %d (%s)", initRec.Code, initRec.Body.String())
+	}
+	if len(initRec.readDeadlines) != 2 || len(initRec.writeDeadlines) != 1 ||
+		!initRec.readDeadlines[1].IsZero() ||
+		initRec.writeDeadlines[0].Before(beforeInit.Add(uploadArtifactWriteBudgetTimeout)) ||
+		initRec.writeDeadlines[0].After(afterInit.Add(uploadArtifactWriteBudgetTimeout)) {
+		t.Fatalf("consumed upload deadlines read=%v write=%v", initRec.readDeadlines, initRec.writeDeadlines)
+	}
+
+	// Also start a second harness for chunked >64 MiB 413 over real TCP with open socket.
+	oversizeHarness := newRouteTestHarness(t)
+
+	runOpenSocketServerChecks := func(t *testing.T, handler http.Handler, cases []struct {
+		name       string
+		send       func(conn net.Conn) error
+		wantStatus int
+	}) {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := newHTTPServer(handler)
+		serveDone := make(chan error, 1)
+		go func() {
+			serveDone <- server.Serve(listener)
+		}()
+		var serverStopped bool
+		t.Cleanup(func() {
+			if !serverStopped {
+				_ = server.Close()
+				<-serveDone
+			}
+		})
+
+		parentT := t
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Leave client socket open until after server.Shutdown completes.
+				parentT.Cleanup(func() { _ = conn.Close() })
+				if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if err := tc.send(conn); err != nil {
+					t.Fatal(err)
+				}
+				br := bufio.NewReader(conn)
+				resp, err := http.ReadResponse(br, nil)
+				if err != nil {
+					t.Fatalf("ReadResponse() error = %v", err)
+				}
+				_, _ = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				elapsed := time.Since(start)
+				if resp.StatusCode != tc.wantStatus {
+					t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+				}
+				if !resp.Close && !strings.EqualFold(resp.Header.Get("Connection"), "close") {
+					t.Fatalf("response did not close unconsumed connection: Close=%v Connection=%q", resp.Close, resp.Header.Get("Connection"))
+				}
+				if elapsed >= time.Second {
+					t.Fatalf("open-socket upload delayed response for %s; want < 1s", elapsed)
+				}
+				var extra [1]byte
+				if _, eofErr := br.Read(extra[:]); !errors.Is(eofErr, io.EOF) {
+					t.Fatalf("server kept unconsumed connection open instead of aborting 256 KiB drain: err = %v", eofErr)
+				}
+			})
+		}
+
+		shutdownStart := time.Now()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("server.Shutdown() with client sockets still open error = %v", err)
+		}
+		serverStopped = true
+		if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("server.Serve() error = %v", err)
+		}
+		if shutdownElapsed := time.Since(shutdownStart); shutdownElapsed >= time.Second {
+			t.Fatalf("server.Shutdown() took %s; want < 1s", shutdownElapsed)
+		}
+	}
+
+	t.Run("409 already active open sockets", func(t *testing.T) {
+		runOpenSocketServerChecks(t, h.handler, []struct {
+			name       string
+			send       func(conn net.Conn) error
+			wantStatus int
+		}{
+			{
+				name: "Content-Length<=256KiB",
+				send: func(conn net.Conn) error {
+					_, err := fmt.Fprintf(
+						conn,
+						"PUT %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Type: application/gzip\r\nContent-Length: 4096\r\n\r\na",
+						artifactUploadPath,
+					)
+					return err
+				},
+				wantStatus: http.StatusConflict,
+			},
+			{
+				name: "Transfer-Encoding chunked",
+				send: func(conn net.Conn) error {
+					_, err := fmt.Fprintf(
+						conn,
+						"PUT %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Type: application/gzip\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+						artifactUploadPath,
+					)
+					return err
+				},
+				wantStatus: http.StatusConflict,
+			},
+		})
+	})
+
+	t.Run("413 chunked overflow open socket", func(t *testing.T) {
+		runOpenSocketServerChecks(t, oversizeHarness.handler, []struct {
+			name       string
+			send       func(conn net.Conn) error
+			wantStatus int
+		}{
+			{
+				name: "Transfer-Encoding chunked over 64MiB without closing chunk",
+				send: func(conn net.Conn) error {
+					const chunkLen = runtimeupdate.MaxAcquisitionArchiveBytes + 4096
+					header := fmt.Sprintf(
+						"PUT %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer runtime-token\r\nContent-Type: application/gzip\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n",
+						artifactUploadPath,
+						chunkLen,
+					)
+					if _, err := io.WriteString(conn, header); err != nil {
+						return err
+					}
+					// Stream 64 MiB + 1024 bytes asynchronously while leaving 3072 bytes + trailing chunk framing unsent on the open socket.
+					go func() {
+						_, _ = io.CopyN(conn, zeroReader{}, runtimeupdate.MaxAcquisitionArchiveBytes+1024)
+					}()
+					return nil
+				},
+				wantStatus: http.StatusRequestEntityTooLarge,
+			},
+		})
+	})
 }
 
 func TestArtifactRoutesUploadAndIdempotentAcquireAndProtocolCoexistence(t *testing.T) {
@@ -573,4 +841,115 @@ func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersi
 			}
 		})
 	}
+}
+
+func TestArtifactRoutesUnconsumedEarlyRejectionClosesOpenHTTP11SocketPromptly(t *testing.T) {
+	h := newRouteTestHarness(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newHTTPServer(h.handler)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	raw := fmt.Sprintf(
+		"PUT %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/gzip\r\nContent-Length: 4096\r\n\r\npartial",
+		artifactUploadPath,
+		ln.Addr().String(),
+	)
+	started := time.Now()
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	br := bufio.NewReader(conn)
+	parseReq, _ := http.NewRequest(http.MethodPut, "http://127.0.0.1"+artifactUploadPath, nil)
+	resp, err := http.ReadResponse(br, parseReq)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	var extra [1]byte
+	n, closeErr := br.Read(extra[:])
+	elapsed := time.Since(started)
+	if resp.StatusCode != http.StatusUnauthorized || !resp.Close {
+		t.Fatalf("resp = (%d, close=%v), want (401, true)", resp.StatusCode, resp.Close)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("unconsumed artifact socket close took %v, want immediate close well below 10s ReadTimeout", elapsed)
+	}
+	if n != 0 || closeErr == nil || errors.Is(closeErr, os.ErrDeadlineExceeded) {
+		t.Fatalf("post-response read = (%d, %v), want immediate EOF/close", n, closeErr)
+	}
+}
+
+func TestArtifactResponseWriterImplicitWriteCommitsHeaderAndClosesWhenUnconsumed(t *testing.T) {
+	t.Run("unconsumed_body_sets_connection_close_and_expires_read_deadline_once", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, artifactUploadPath, strings.NewReader("unconsumed-archive-bytes"))
+		recorder := &readWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		wrapped := &artifactResponseWriter{
+			ResponseWriter: recorder,
+			body:           trackArtifactRequestBody(req),
+		}
+		before := time.Now()
+		n, err := wrapped.Write([]byte("part1-"))
+		after := time.Now()
+		if err != nil || n != len("part1-") {
+			t.Fatalf("first Write = (%d, %v), want (%d, nil)", n, err, len("part1-"))
+		}
+		if !wrapped.wroteHeader {
+			t.Fatal("expected wroteHeader=true after implicit 200 Write")
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", recorder.Code)
+		}
+		if got := recorder.Header().Get("Connection"); got != "close" {
+			t.Fatalf("Connection = %q, want close", got)
+		}
+		if len(recorder.readDeadlines) != 1 || recorder.readDeadlines[0].IsZero() ||
+			recorder.readDeadlines[0].Before(before) || recorder.readDeadlines[0].After(after) {
+			t.Fatalf("readDeadlines = %v, want 1 immediate deadline in [%v, %v]", recorder.readDeadlines, before, after)
+		}
+		if _, err := wrapped.Write([]byte("part2")); err != nil {
+			t.Fatalf("second Write error = %v", err)
+		}
+		if len(recorder.readDeadlines) != 1 {
+			t.Fatalf("readDeadlines after second Write = %v, want 1", recorder.readDeadlines)
+		}
+		if got := recorder.Body.String(); got != "part1-part2" {
+			t.Fatalf("body = %q, want part1-part2", got)
+		}
+	})
+
+	t.Run("consumed_body_commits_200_without_connection_close_or_expired_deadline", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, artifactProbePath, strings.NewReader(`{}`))
+		recorder := &readWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		wrapped := &artifactResponseWriter{
+			ResponseWriter: recorder,
+			body:           trackArtifactRequestBody(req),
+		}
+		if _, err := io.ReadAll(req.Body); err != nil {
+			t.Fatalf("ReadAll(req.Body): %v", err)
+		}
+		if _, err := wrapped.Write([]byte("ok")); err != nil {
+			t.Fatalf("Write error = %v", err)
+		}
+		if !wrapped.wroteHeader || recorder.Code != http.StatusOK {
+			t.Fatalf("wroteHeader=%t status=%d, want true and 200", wrapped.wroteHeader, recorder.Code)
+		}
+		if got := recorder.Header().Get("Connection"); got != "" {
+			t.Fatalf("Connection = %q, want empty", got)
+		}
+		if len(recorder.readDeadlines) != 0 {
+			t.Fatalf("readDeadlines = %v, want none", recorder.readDeadlines)
+		}
+	})
 }
