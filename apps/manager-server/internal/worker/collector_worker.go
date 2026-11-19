@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
-
+	"sync/atomic"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -37,6 +37,10 @@ type CollectorWorker struct {
 	collectorService *collectorservice.Service
 	gateMu           sync.RWMutex
 	runtimeGate      func(ctx context.Context, cfg collectorpkg.RuntimeConfig) bool
+	runtimeStarter   func(ctx context.Context, cfg collectorpkg.RuntimeConfig, start func(context.Context, collectorpkg.RuntimeConfig) error)
+	lifecycleLocker  sync.Locker
+	lifecycleMu      sync.Mutex
+	stopped          atomic.Bool
 }
 
 func NewCollectorWorker(cfg config.Config, store *store.Store, collectorService *collectorservice.Service) *CollectorWorker {
@@ -55,11 +59,62 @@ func (w *CollectorWorker) SetRuntimeGate(gate func(ctx context.Context, cfg coll
 	}
 	w.gateMu.Lock()
 	w.runtimeGate = gate
+	w.runtimeStarter = nil
 	w.gateMu.Unlock()
+}
+
+// SetRuntimeStarter installs an atomic gate-and-start hook invoked while the
+// worker holds its lifecycle lock so target binding and collector.Manager.Start
+// execute without an interleaving window.
+func (w *CollectorWorker) SetRuntimeStarter(
+	starter func(ctx context.Context, cfg collectorpkg.RuntimeConfig, start func(context.Context, collectorpkg.RuntimeConfig) error),
+) {
+	if w == nil {
+		return
+	}
+	w.gateMu.Lock()
+	w.runtimeStarter = starter
+	w.gateMu.Unlock()
+}
+
+// SetLifecycleLocker registers an optional shared mutex (such as Upgrade's
+// reconcile mutex) so CollectorWorker.Start and Stop serialize strictly against
+// HTTP-triggered collector reconciliation.
+func (w *CollectorWorker) SetLifecycleLocker(locker sync.Locker) {
+	if w == nil {
+		return
+	}
+	w.gateMu.Lock()
+	w.lifecycleLocker = locker
+	w.gateMu.Unlock()
+}
+
+func (w *CollectorWorker) lockLifecycle() func() {
+	w.gateMu.RLock()
+	ext := w.lifecycleLocker
+	w.gateMu.RUnlock()
+	if ext != nil {
+		ext.Lock()
+	}
+	w.lifecycleMu.Lock()
+	return func() {
+		w.lifecycleMu.Unlock()
+		if ext != nil {
+			ext.Unlock()
+		}
+	}
 }
 
 func (w *CollectorWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil || w.collectorService == nil {
+		return
+	}
+	if w.stopped.Load() || (ctx != nil && ctx.Err() != nil) {
+		return
+	}
+	unlock := w.lockLifecycle()
+	defer unlock()
+	if w.stopped.Load() || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 	managerCfg, managerOK, err := w.store.LoadManagerConfig(ctx)
@@ -85,20 +140,58 @@ func (w *CollectorWorker) Start(ctx context.Context) {
 			TLSSkipVerify:  w.cfg.TLSSkipVerify,
 		}
 		hasRuntimeCfg = true
-	} else if managerOK && managerCfg.CPAConnection.CPABaseURL != "" && managerCfg.CPAConnection.ManagementKey != "" {
+	} else if managerOK && managerconfig.ConnectionComplete(managerCfg) {
+		managerCfg.Collector.Queue = strings.TrimSpace(managerCfg.Collector.Queue)
+		managerCfg.Collector.PopSide = validCollectorPopSide(managerCfg.Collector.PopSide)
+		if setup, setupOK, setupErr := w.store.LoadSetup(ctx); setupErr == nil && setupOK {
+			inheritSetupCollectorSettings(&managerCfg, setup)
+		}
 		runtimeCfg = collectorservice.RuntimeConfigFromManagerConfigWithFallback(managerCfg, w.cfg)
 		hasRuntimeCfg = true
 	} else if setup, ok, err := w.store.LoadSetup(ctx); err == nil && ok {
-		runtimeCfg = collectorpkg.RuntimeConfig{
-			CPAUpstreamURL: setup.CPAUpstreamURL,
-			ManagementKey:  setup.ManagementKey,
-			CollectorMode:  w.cfg.CollectorMode,
-			Queue:          setup.Queue,
-			PopSide:        setup.PopSide,
-			BatchSize:      w.cfg.BatchSize,
-			PollInterval:   w.cfg.PollInterval,
-			TLSSkipVerify:  w.cfg.TLSSkipVerify,
+		resolution, resolveErr := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, true)
+		if resolveErr != nil {
+			log.Printf("resolve legacy CPA connection: %v", resolveErr)
+			return
 		}
+		if resolution.Authority == managerconfig.LegacyConnectionAuthorityNone {
+			return
+		}
+		merged := store.ManagerConfig{
+			CPAConnection: store.ManagerCPAConnectionConfig{
+				CPABaseURL:    setup.CPAUpstreamURL,
+				ManagementKey: setup.ManagementKey,
+			},
+			Collector: store.ManagerCollectorConfig{
+				Queue:   strings.TrimSpace(setup.Queue),
+				PopSide: validCollectorPopSide(setup.PopSide),
+			},
+		}
+		if managerOK {
+			if strings.TrimSpace(managerCfg.Collector.CollectorMode) != "" {
+				merged.Collector.CollectorMode = managerconfig.CollectorMode(managerCfg.Collector.CollectorMode)
+			}
+			if strings.TrimSpace(managerCfg.Collector.Queue) != "" {
+				merged.Collector.Queue = strings.TrimSpace(managerCfg.Collector.Queue)
+			}
+			if strings.TrimSpace(managerCfg.Collector.PopSide) != "" {
+				merged.Collector.PopSide = managerconfig.NormalizePopSide(managerCfg.Collector.PopSide, merged.Collector.PopSide)
+			}
+			if managerCfg.Collector.BatchSize > 0 {
+				merged.Collector.BatchSize = managerCfg.Collector.BatchSize
+			}
+			if managerCfg.Collector.PollIntervalMS > 0 {
+				merged.Collector.PollIntervalMS = managerCfg.Collector.PollIntervalMS
+			}
+			if managerCfg.Collector.QueryLimit > 0 {
+				merged.Collector.QueryLimit = managerCfg.Collector.QueryLimit
+			}
+			if managerCfg.Collector.TLSSkipVerifyExplicit || managerCfg.Collector.TLSSkipVerify {
+				merged.Collector.TLSSkipVerify = managerCfg.Collector.TLSSkipVerify
+				merged.Collector.TLSSkipVerifyExplicit = true
+			}
+		}
+		runtimeCfg = collectorservice.RuntimeConfigFromManagerConfigWithFallback(merged, w.cfg)
 		hasRuntimeCfg = true
 	} else if err != nil {
 		log.Printf("load setup: %v", err)
@@ -107,10 +200,26 @@ func (w *CollectorWorker) Start(ctx context.Context) {
 	if !hasRuntimeCfg {
 		return
 	}
+	if w.stopped.Load() || (ctx != nil && ctx.Err() != nil) {
+		return
+	}
+	startFn := func(runCtx context.Context, cfg collectorpkg.RuntimeConfig) error {
+		if w.stopped.Load() || (runCtx != nil && runCtx.Err() != nil) {
+			return nil
+		}
+		return w.collectorService.StartRuntime(runCtx, cfg)
+	}
+	w.gateMu.RLock()
+	starter := w.runtimeStarter
+	w.gateMu.RUnlock()
+	if starter != nil {
+		starter(ctx, runtimeCfg, startFn)
+		return
+	}
 	if !w.allowStart(ctx, runtimeCfg, managerCfg, managerOK) {
 		return
 	}
-	_ = w.collectorService.StartRuntime(ctx, runtimeCfg)
+	_ = startFn(ctx, runtimeCfg)
 }
 
 func (w *CollectorWorker) allowStart(
@@ -502,7 +611,40 @@ func workerManagedDestinationOperationID(sourceIdentity string, attempt int) str
 }
 
 func (w *CollectorWorker) Stop(ctx context.Context) {
+	if w == nil || w.collectorService == nil {
+		return
+	}
+	w.stopped.Store(true)
+	unlock := w.lockLifecycle()
+	defer unlock()
 	if err := w.collectorService.Stop(ctx); err != nil {
 		log.Printf("stop collector: %v", err)
+	}
+}
+
+func validCollectorPopSide(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "left":
+		return "left"
+	case "right":
+		return "right"
+	default:
+		return ""
+	}
+}
+
+func inheritSetupCollectorSettings(managerCfg *store.ManagerConfig, setup store.Setup) {
+	if managerCfg == nil {
+		return
+	}
+	if strings.TrimSpace(managerCfg.Collector.Queue) == "" {
+		if queue := strings.TrimSpace(setup.Queue); queue != "" {
+			managerCfg.Collector.Queue = queue
+		}
+	}
+	if validCollectorPopSide(managerCfg.Collector.PopSide) == "" {
+		if side := validCollectorPopSide(setup.PopSide); side != "" {
+			managerCfg.Collector.PopSide = side
+		}
 	}
 }

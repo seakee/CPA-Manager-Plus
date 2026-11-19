@@ -27,6 +27,7 @@ type UsageHourlyAggregateWorker struct {
 	continuationDelay time.Duration
 	reportedStarted   bool
 	lastReported      int64
+	lifecycle         workerLifecycle
 }
 
 func NewUsageHourlyAggregateWorker(store *store.Store) *UsageHourlyAggregateWorker {
@@ -44,8 +45,16 @@ func (w *UsageHourlyAggregateWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	go w.loop(ctx)
-	w.Wake()
+	if w.lifecycle.goRun(ctx, func() { w.loop(ctx) }) {
+		w.Wake()
+	}
+}
+
+func (w *UsageHourlyAggregateWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *UsageHourlyAggregateWorker) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {

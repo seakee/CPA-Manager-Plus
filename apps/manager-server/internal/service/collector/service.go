@@ -93,6 +93,10 @@ func RuntimeConfigFromManagerConfigWithFallback(managerCfg store.ManagerConfig, 
 	if batchSize <= 0 {
 		batchSize = base.BatchSize
 	}
+	tlsSkipVerify := base.TLSSkipVerify
+	if managerCfg.Collector.TLSSkipVerifyExplicit || managerCfg.Collector.TLSSkipVerify {
+		tlsSkipVerify = managerCfg.Collector.TLSSkipVerify
+	}
 	return collectorpkg.RuntimeConfig{
 		CPAUpstreamURL: managerCfg.CPAConnection.CPABaseURL,
 		ManagementKey:  managerCfg.CPAConnection.ManagementKey,
@@ -101,7 +105,7 @@ func RuntimeConfigFromManagerConfigWithFallback(managerCfg store.ManagerConfig, 
 		PopSide:        valueOr(managerCfg.Collector.PopSide, base.PopSide),
 		BatchSize:      batchSize,
 		PollInterval:   pollInterval,
-		TLSSkipVerify:  managerCfg.Collector.TLSSkipVerify,
+		TLSSkipVerify:  tlsSkipVerify,
 	}
 }
 

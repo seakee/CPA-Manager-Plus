@@ -610,3 +610,35 @@ func TestMutationProtocolErrorsNeverFabricateOperationResult(t *testing.T) {
 		})
 	}
 }
+
+func TestPrepareForwardsValidatedCDNPrefixAndRejectsCDNOnActivate(t *testing.T) {
+	var captured model.RuntimePrepareUpdateRequest
+	runtimeClient := &mutationRuntime{status: mutationReadyStatus("7.3.3", testArtifactID, model.RuntimeCapabilityPrepareUpdate, model.RuntimeCapabilityActivateUpdate)}
+	runtimeClient.prepareFn = func(req model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+		captured = req
+		return model.RuntimeOperationResult{
+			OperationID: req.OperationID, OperationType: model.RuntimeOperationPrepareUpdate,
+			RuntimeIdentity: req.ExpectedRuntimeIdentity, RuntimeGeneration: req.ExpectedRuntimeGeneration,
+			State: model.RuntimeOperationSucceeded,
+		}, nil
+	}
+	service, _, _ := mutationTestService(t, runtimeClient)
+	req := validMutationRequest()
+	req.SourceMode = "cdn"
+	req.CDNPrefix = "https://cdn.example.com/proxy/"
+	if _, err := service.Prepare(t.Context(), req); err != nil {
+		t.Fatalf("Prepare with valid CDN failed: %v", err)
+	}
+	if captured.SourceMode != "cdn" || captured.CDNPrefix != "https://cdn.example.com/proxy/" {
+		t.Fatalf("captured = %+v", captured)
+	}
+	bad := validMutationRequest()
+	bad.SourceMode = "cdn"
+	bad.CDNPrefix = "http://cdn.example.com/"
+	if _, err := service.Prepare(t.Context(), bad); err == nil {
+		t.Fatal("expected HTTP CDN prefix to be rejected")
+	}
+	if _, err := service.Activate(t.Context(), req); err == nil {
+		t.Fatal("expected CDN fields on Activate to be rejected")
+	}
+}

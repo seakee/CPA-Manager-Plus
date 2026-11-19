@@ -2,6 +2,7 @@ package setting
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -416,5 +417,67 @@ func TestPatchManagerCollectorEnabledHandlesNullJSONShapes(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"enabled":false`) || !strings.Contains(raw, `"futureKnob":{"mode":"latent"}`) {
 		t.Fatalf("patched raw = %s", raw)
+	}
+}
+
+func TestPatchManagerCollectorEnabledMissingRowAndLegacyNormalizationRevisionInvariants(t *testing.T) {
+	db, r, _, _ := revisionFixture(t)
+	defer db.Close()
+	ctx := t.Context()
+
+	// Empty DB: PatchManagerCollectorEnabled initializes minimal document without minting revision.
+	patched, err := r.PatchManagerCollectorEnabled(ctx, false)
+	if err != nil || !patched {
+		t.Fatalf("empty DB PatchManagerCollectorEnabled(false) = (%v, %v), want (true, nil)", patched, err)
+	}
+	var raw string
+	if err := db.QueryRow(`select value from settings where key = 'manager_config_v1'`).Scan(&raw); err != nil {
+		t.Fatalf("query manager_config_v1: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal manager_config_v1: %v", err)
+	}
+	if len(doc) != 2 || string(doc["collector"]) != `{"enabled":false}` || len(doc["updatedAtMs"]) == 0 {
+		t.Fatalf("unexpected minimal patched document = %s", raw)
+	}
+	if _, found, err := r.LoadPersistedCPAConnectionRevision(ctx); err != nil || found {
+		t.Fatalf("empty DB patch minted revision: found=%v err=%v", found, err)
+	}
+
+	// NormalizeLegacyConnectionStorage + PatchManagerCollectorEnabled(false) must NOT mint cpa_connection_revision_v1.
+	cfg, setup := revisionPair("legacy-normalized-key")
+	if err := r.NormalizeLegacyConnectionStorage(ctx, cfg, true, setup, true); err != nil {
+		t.Fatalf("NormalizeLegacyConnectionStorage: %v", err)
+	}
+	if _, found, err := r.LoadPersistedCPAConnectionRevision(ctx); err != nil || found {
+		t.Fatalf("NormalizeLegacyConnectionStorage minted revision: found=%v err=%v", found, err)
+	}
+	patched, err = r.PatchManagerCollectorEnabled(ctx, false)
+	if err != nil || !patched {
+		t.Fatalf("post-normalize PatchManagerCollectorEnabled(false) = (%v, %v), want (true, nil)", patched, err)
+	}
+	if _, found, err := r.LoadPersistedCPAConnectionRevision(ctx); err != nil || found {
+		t.Fatalf("PatchManagerCollectorEnabled after NormalizeLegacyConnectionStorage minted revision: found=%v err=%v", found, err)
+	}
+	var revisionCount int
+	if err := db.QueryRow(`select count(*) from settings where key = 'cpa_connection_revision_v1'`).Scan(&revisionCount); err != nil || revisionCount != 0 {
+		t.Fatalf("cpa_connection_revision_v1 row count = %d (err=%v), want 0", revisionCount, err)
+	}
+
+	// An existing authorized revision is preserved across PatchManagerCollectorEnabled.
+	if err := r.SaveManagerConfigAndSetup(ctx, cfg, setup); err != nil {
+		t.Fatalf("SaveManagerConfigAndSetup: %v", err)
+	}
+	revBefore, found, err := r.LoadPersistedCPAConnectionRevision(ctx)
+	if err != nil || !found || revBefore == "" {
+		t.Fatalf("authorized revision = (%q, %v, %v)", revBefore, found, err)
+	}
+	if patched, err := r.PatchManagerCollectorEnabled(ctx, false); err != nil || !patched {
+		t.Fatalf("PatchManagerCollectorEnabled on authorized row = (%v, %v)", patched, err)
+	}
+	revAfter, found, err := r.LoadPersistedCPAConnectionRevision(ctx)
+	if err != nil || !found || revAfter != revBefore {
+		t.Fatalf("PatchManagerCollectorEnabled altered authorized revision: before=%q after=%q found=%v err=%v", revBefore, revAfter, found, err)
 	}
 }

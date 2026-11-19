@@ -122,6 +122,35 @@ func TestLegacyQuotaSnapshotMigrationWorkerIsSilentWhenNoMigrationWorkExists(t *
 	}
 }
 
+func TestLegacyQuotaSnapshotMigrationWorkerAllowsValidStartAfterNilAndCanceledContext(t *testing.T) {
+	rawDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	st := store.New(rawDB)
+	t.Cleanup(func() { _ = st.Close() })
+	seedWorkerLegacySnapshot(t, rawDB, "group-1", 1000)
+
+	w := NewLegacyQuotaSnapshotMigrationWorker(st)
+	w.delay = time.Millisecond
+	w.retryDelay = time.Millisecond
+
+	var nilCtx context.Context
+	w.Start(nilCtx)
+
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	w.Start(canceledCtx)
+
+	liveCtx, cancelLive := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelLive()
+		w.Wait()
+	})
+	w.Start(liveCtx)
+	waitForLegacyMigrationStatus(t, rawDB, "completed")
+}
+
 func seedWorkerLegacySnapshot(t *testing.T, db *sql.DB, sourceObservationID string, observedAtMS int64) {
 	t.Helper()
 	if _, err := db.Exec(`insert into account_quota_snapshots (

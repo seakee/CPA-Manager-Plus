@@ -100,7 +100,7 @@ func TestPluginSwitchWritesThroughTheSharedJournalAndReadsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Groups) != 11 || len(page.Fields) != 39 || len(page.Families) != 5 {
+	if len(page.Groups) != 21 || len(page.Fields) != 88 || len(page.Families) != 6 {
 		t.Fatalf("gateway projection sizes %d %d %d", len(page.Groups), len(page.Fields), len(page.Families))
 	}
 	for _, entry := range page.Groups {

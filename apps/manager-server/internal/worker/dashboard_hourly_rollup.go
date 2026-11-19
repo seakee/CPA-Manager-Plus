@@ -25,6 +25,7 @@ type DashboardHourlyRollupWorker struct {
 	maxBatches        int
 	checkInterval     time.Duration
 	continuationDelay time.Duration
+	lifecycle         workerLifecycle
 }
 
 func NewDashboardHourlyRollupWorker(store *store.Store) *DashboardHourlyRollupWorker {
@@ -42,8 +43,16 @@ func (w *DashboardHourlyRollupWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	go w.loop(ctx)
-	w.Wake()
+	if w.lifecycle.goRun(ctx, func() { w.loop(ctx) }) {
+		w.Wake()
+	}
+}
+
+func (w *DashboardHourlyRollupWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *DashboardHourlyRollupWorker) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {

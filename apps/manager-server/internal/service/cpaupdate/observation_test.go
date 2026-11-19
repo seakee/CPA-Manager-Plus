@@ -312,3 +312,73 @@ func TestObservationRequestUsesMutationIdentityValidationBeforeRuntime(t *testin
 		}
 	}
 }
+
+func TestObservePrepareForwardsTransientProgressOnlyWhileActive(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		activate     bool
+		state        model.RuntimeOperationState
+		wantProgress bool
+	}{
+		{name: "prepare accepted includes progress", activate: false, state: model.RuntimeOperationAccepted, wantProgress: true},
+		{name: "prepare running includes progress", activate: false, state: model.RuntimeOperationRunning, wantProgress: true},
+		{name: "prepare succeeded omits progress", activate: false, state: model.RuntimeOperationSucceeded, wantProgress: false},
+		{name: "prepare failed omits progress", activate: false, state: model.RuntimeOperationFailed, wantProgress: false},
+		{name: "activate accepted omits progress", activate: true, state: model.RuntimeOperationAccepted, wantProgress: false},
+		{name: "activate running omits progress", activate: true, state: model.RuntimeOperationRunning, wantProgress: false},
+		{name: "activate succeeded omits progress", activate: true, state: model.RuntimeOperationSucceeded, wantProgress: false},
+		{name: "activate failed omits progress", activate: true, state: model.RuntimeOperationFailed, wantProgress: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, client, _ := updateObservationService(t)
+			client.observeFn = func(_ context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+				result := retainedUpdateObservation(request, tc.state)
+				if tc.state == model.RuntimeOperationFailed {
+					result.FailureCode = "binary_missing"
+				}
+				result.Phase = "downloading"
+				result.ReceivedBytes = 2048
+				result.TotalBytes = 4096
+				return result, nil
+			}
+
+			req := ObservationRequest{RequestID: "recover", TargetVersion: "7.3.4"}
+			var (
+				got ObservationResult
+				err error
+			)
+			if tc.activate {
+				got, err = service.ObserveActivate(t.Context(), req)
+			} else {
+				got, err = service.ObservePrepare(t.Context(), req)
+			}
+			if err != nil {
+				t.Fatalf("Observe error = %v", err)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			jsonBody := string(encoded)
+			if tc.wantProgress {
+				if got.StagePhase != "downloading" || got.ReceivedBytes != 2048 || got.TotalBytes != 4096 {
+					t.Fatalf("progress = %+v, want downloading 2048/4096", got)
+				}
+				if !strings.Contains(jsonBody, `"stage_phase":"downloading"`) ||
+					!strings.Contains(jsonBody, `"received_bytes":2048`) ||
+					!strings.Contains(jsonBody, `"total_bytes":4096`) {
+					t.Fatalf("json = %s, expected progress fields", jsonBody)
+				}
+				return
+			}
+			if got.StagePhase != "" || got.ReceivedBytes != 0 || got.TotalBytes != 0 {
+				t.Fatalf("unexpected transient progress in %s: %+v", tc.name, got)
+			}
+			for _, forbidden := range []string{`"stage_phase"`, `"received_bytes"`, `"total_bytes"`} {
+				if strings.Contains(jsonBody, forbidden) {
+					t.Fatalf("json = %s, must omit %s", jsonBody, forbidden)
+				}
+			}
+		})
+	}
+}

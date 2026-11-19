@@ -2,16 +2,19 @@ package requestbody
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -829,4 +832,591 @@ func TestConcurrentReaderCloseKeepsCancelWatcherArmedUntilDrainFinishes(t *testi
 			t.Fatal("real-TCP concurrent Close() did not unblock on context cancel")
 		}
 	})
+}
+
+func TestReaderCloseSkipsDrainWhenHandlerSetsConnectionClose(t *testing.T) {
+	t.Run("unit_close_preserves_expired_deadline_without_clearing", func(t *testing.T) {
+		rw := newDeadlineRecordingResponseWriter(nil)
+		rw.Header().Set("Connection", "keep-alive, close")
+		inner := io.NopCloser(strings.NewReader("remaining-unread-bytes"))
+		wrapped, stopWrap := Wrap(context.Background(), inner, rw, DefaultReadIdleTimeout)
+		defer stopWrap()
+
+		if err := wrapped.Close(); err != nil {
+			t.Fatalf("Close() = %v, want nil", err)
+		}
+		if got := rw.Header().Get("Connection"); got != "close" {
+			t.Fatalf("Connection header = %q, want normalized \"close\"", got)
+		}
+		deadlines := rw.recordedDeadlines()
+		if len(deadlines) != 1 || deadlines[0].IsZero() || deadlines[0].After(time.Now()) {
+			t.Fatalf("recorded deadlines = %v, want single immediate expired deadline without trailing zero reset", deadlines)
+		}
+	})
+
+	t.Run("real_tcp_early_connection_close_returns_without_drain_timeout_stall", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := middleware.RequestLogger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := WithEarlyCloseDrainTimeout(r.Context(), 5*time.Second)
+			body, stopBody := Wrap(ctx, r.Body, w, DefaultReadIdleTimeout)
+			defer stopBody()
+			defer func() { _ = body.Close() }()
+			r.Body = body
+			w.Header().Set("Connection", "close")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte("too large"))
+		}))
+		server := &http.Server{Handler: handler}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		started := time.Now()
+		rawReq := fmt.Sprintf("POST /upload HTTP/1.1\r\nHost: %s\r\nContent-Length: 4096\r\n\r\npartial", listener.Addr().String())
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		parseReq, _ := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/upload", nil)
+		br := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(br, parseReq)
+		if err != nil {
+			t.Fatalf("ReadResponse: %v", err)
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read response body: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		var extra [1]byte
+		n, closeErr := br.Read(extra[:])
+		elapsed := time.Since(started)
+
+		if elapsed >= 500*time.Millisecond {
+			t.Fatalf("Connection: close response + socket close took %v, want immediate close without 5s drain stall", elapsed)
+		}
+		if resp.StatusCode != http.StatusRequestEntityTooLarge || !resp.Close || string(respBody) != "too large" {
+			t.Fatalf("response = (%d, close=%v, %q), want (413, true, \"too large\")", resp.StatusCode, resp.Close, string(respBody))
+		}
+		if n != 0 || closeErr == nil || errors.Is(closeErr, os.ErrDeadlineExceeded) {
+			t.Fatalf("post-response TCP read = (%d, %v), want immediate connection close", n, closeErr)
+		}
+	})
+
+	t.Run("real_tcp_comma_separated_connection_close_closes_socket_on_http_server", func(t *testing.T) {
+		var healthHits atomic.Int32
+		mux := http.NewServeMux()
+		mux.HandleFunc("/upload", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Connection", "keep-alive, close")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte("too large"))
+		})
+		mux.HandleFunc("/upload-eof", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.Header().Set("Connection", "keep-alive, Close")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("done"))
+		})
+		mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+			healthHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		})
+
+		withDrainOverride := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(WithEarlyCloseDrainTimeout(r.Context(), 5*time.Second))
+			Middleware(DefaultReadIdleTimeout, mux).ServeHTTP(w, r)
+		})
+		ts := httptest.NewServer(middleware.RequestLogger(withDrainOverride))
+		t.Cleanup(ts.Close)
+		addr := ts.Listener.Addr().String()
+
+		t.Run("unread_body_skips_drain_and_closes_tcp", func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			unreadFollowUp := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+			rawReq := fmt.Sprintf("POST /upload HTTP/1.1\r\nHost: %s\r\nContent-Length: 4096\r\n\r\n%s", addr, unreadFollowUp)
+			started := time.Now()
+			if _, err := conn.Write([]byte(rawReq)); err != nil {
+				t.Fatal(err)
+			}
+			assertHTTP11ResponseAndImmediateClose(t, conn, started, 500*time.Millisecond, http.StatusRequestEntityTooLarge, "too large", true)
+			if got := healthHits.Load(); got != 0 {
+				t.Fatalf("/health hit count = %d, want 0", got)
+			}
+		})
+
+		t.Run("eof_body_normalizes_comma_close_and_closes_tcp", func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			rawReq := fmt.Sprintf("POST /upload-eof HTTP/1.1\r\nHost: %s\r\nContent-Length: 7\r\n\r\nallread", addr)
+			started := time.Now()
+			if _, err := conn.Write([]byte(rawReq)); err != nil {
+				t.Fatal(err)
+			}
+			assertHTTP11ResponseAndImmediateClose(t, conn, started, 500*time.Millisecond, http.StatusOK, "done", true)
+		})
+	})
+
+	t.Run("real_tcp_post_writeheader_connection_close_drains_small_body_or_closes_on_timeout", func(t *testing.T) {
+		var healthHits atomic.Int32
+		mux := http.NewServeMux()
+		mux.HandleFunc("/late-close", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("committed-before-close-header"))
+			// Mutating Header() after WriteHeader does not alter net/http's committed header snapshot.
+			w.Header().Set("Connection", "close")
+		})
+		mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+			healthHits.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+		withShortDrain := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(WithEarlyCloseDrainTimeout(r.Context(), 40*time.Millisecond))
+			Middleware(DefaultReadIdleTimeout, mux).ServeHTTP(w, r)
+		})
+		ts := httptest.NewServer(middleware.RequestLogger(withShortDrain))
+		t.Cleanup(ts.Close)
+		addr := ts.Listener.Addr().String()
+
+		// Small unread body already on the wire is drained instead of leaving bytes on keep-alive conn.
+		conn1, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn1.Close() })
+		br1 := bufio.NewReader(conn1)
+		req1 := fmt.Sprintf("POST /late-close HTTP/1.1\r\nHost: %s\r\nContent-Length: 16\r\n\r\n0123456789abcdef", addr)
+		if _, err := conn1.Write([]byte(req1)); err != nil {
+			t.Fatal(err)
+		}
+		parsePost, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/late-close", nil)
+		resp1, err := http.ReadResponse(br1, parsePost)
+		if err != nil {
+			t.Fatalf("ReadResponse #1: %v", err)
+		}
+		_, _ = io.ReadAll(resp1.Body)
+		_ = resp1.Body.Close()
+
+		req2 := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+		if _, err := conn1.Write([]byte(req2)); err != nil {
+			t.Fatal(err)
+		}
+		parseGet, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/health", nil)
+		resp2, err := http.ReadResponse(br1, parseGet)
+		if err != nil {
+			t.Fatalf("keep-alive GET /health after drained body failed: %v", err)
+		}
+		_ = resp2.Body.Close()
+		if resp2.StatusCode != http.StatusNoContent || healthHits.Load() != 1 {
+			t.Fatalf("keep-alive follow-up = (%d, hits=%d), want (204, 1)", resp2.StatusCode, healthHits.Load())
+		}
+
+		// Stalled unread body exceeding drain timeout forces TCP close without second-request bleed.
+		healthHits.Store(0)
+		conn2, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn2.Close() })
+		stalledReq := fmt.Sprintf("POST /late-close HTTP/1.1\r\nHost: %s\r\nContent-Length: 256\r\n\r\npartial", addr)
+		started := time.Now()
+		if _, err := conn2.Write([]byte(stalledReq)); err != nil {
+			t.Fatal(err)
+		}
+		assertHTTP11ResponseAndImmediateClose(t, conn2, started, time.Second, http.StatusOK, "committed-before-close-header", false)
+		_, _ = conn2.Write([]byte(fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)))
+		if got := healthHits.Load(); got != 0 {
+			t.Fatalf("/health hit count after timed-out drain = %d, want 0", got)
+		}
+	})
+}
+
+func TestEarlyUnreadBodyResponsesCloseHTTP11TCPWithoutSecondRequestBleed(t *testing.T) {
+	const overDrainThresholdLength = 512 << 10
+	flushedAsset := strings.Repeat("A", 5542)
+
+	var healthHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/config", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/unread-small-reply", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	mux.HandleFunc("/unread-flushed-reply", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(flushedAsset))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		healthHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var drainTimeoutOverride atomic.Int64
+	routes := middleware.RejectCrossSiteAdmin(mux, nil)
+	wrapped := middleware.RequestLogger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if customNS := drainTimeoutOverride.Load(); customNS != 0 {
+			r = r.WithContext(WithEarlyCloseDrainTimeout(r.Context(), time.Duration(customNS)))
+		}
+		Middleware(DefaultReadIdleTimeout, routes).ServeHTTP(w, r)
+	}))
+	ts := httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+	addr := ts.Listener.Addr().String()
+
+	t.Run("403_reject_cross_site_admin_with_over_256kib_body_closes_promptly_without_bleed", func(t *testing.T) {
+		healthHits.Store(0)
+		drainTimeoutOverride.Store(0)
+
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		followUpLine := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+		rawReq := fmt.Sprintf(
+			"POST /admin/config HTTP/1.1\r\nHost: %s\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\nContent-Length: %d\r\n\r\n%s",
+			addr,
+			overDrainThresholdLength,
+			followUpLine,
+		)
+		started := time.Now()
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatal(err)
+		}
+		assertHTTP11ResponseAndImmediateClose(t, conn, started, 200*time.Millisecond, http.StatusForbidden, "cross-site admin request rejected", true)
+		if got := healthHits.Load(); got != 0 {
+			t.Fatalf("/health hit count = %d, want 0", got)
+		}
+	})
+
+	t.Run("301_non_canonical_servemux_path_with_over_256kib_body_closes_promptly_without_bleed", func(t *testing.T) {
+		healthHits.Store(0)
+		drainTimeoutOverride.Store(0)
+
+		t.Run("declared_content_length_over_256kib", func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			followUpLine := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+			rawReq := fmt.Sprintf(
+				"POST /admin//config HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n%s",
+				addr,
+				overDrainThresholdLength,
+				followUpLine,
+			)
+			started := time.Now()
+			if _, err := conn.Write([]byte(rawReq)); err != nil {
+				t.Fatal(err)
+			}
+			resp := assertHTTP11ResponseAndImmediateClose(t, conn, started, 200*time.Millisecond, http.StatusTemporaryRedirect, "", true)
+			if got := resp.Header.Get("Location"); got != "/admin/config" {
+				t.Fatalf("307 Location = %q, want /admin/config", got)
+			}
+			if got := healthHits.Load(); got != 0 {
+				t.Fatalf("/health hit count = %d, want 0", got)
+			}
+		})
+
+		t.Run("chunked_stream_over_256kib_restores_orig_body_for_early_close", func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			bigChunk := strings.Repeat("x", 300<<10)
+			followUpLine := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+			rawReq := fmt.Sprintf(
+				"POST /admin//config HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n%s",
+				addr,
+				len(bigChunk),
+				bigChunk,
+				followUpLine,
+			)
+			started := time.Now()
+			go func() {
+				_, _ = conn.Write([]byte(rawReq))
+			}()
+			resp := assertHTTP11ResponseAndImmediateClose(t, conn, started, time.Second, http.StatusTemporaryRedirect, "", false)
+			if got := resp.Header.Get("Location"); got != "/admin/config" {
+				t.Fatalf("307 Location = %q, want /admin/config", got)
+			}
+			if got := healthHits.Load(); got != 0 {
+				t.Fatalf("/health hit count = %d, want 0", got)
+			}
+		})
+	})
+
+	t.Run("under_256kib_slow_unread_body_exceeding_drain_timeout_closes_without_bleed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			path        string
+			wantStatus  int
+			wantSubstr  string
+			wantWireHdr bool
+		}{
+			{
+				name:        "unflushed_small_response_marks_connection_close",
+				path:        "/unread-small-reply",
+				wantStatus:  http.StatusAccepted,
+				wantSubstr:  "accepted",
+				wantWireHdr: true,
+			},
+			{
+				name:        "already_flushed_large_response_still_closes_socket",
+				path:        "/unread-flushed-reply",
+				wantStatus:  http.StatusOK,
+				wantSubstr:  "AAAA",
+				wantWireHdr: false,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				healthHits.Store(0)
+				drainTimeoutOverride.Store(int64(40 * time.Millisecond))
+
+				conn, err := net.Dial("tcp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+
+				followUpLine := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+				rawReq := fmt.Sprintf(
+					"POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 4096\r\n\r\n%s",
+					tc.path,
+					addr,
+					followUpLine,
+				)
+				started := time.Now()
+				if _, err := conn.Write([]byte(rawReq)); err != nil {
+					t.Fatal(err)
+				}
+				assertHTTP11ResponseAndImmediateClose(t, conn, started, time.Second, tc.wantStatus, tc.wantSubstr, tc.wantWireHdr)
+				_, _ = conn.Write([]byte(followUpLine))
+				if got := healthHits.Load(); got != 0 {
+					t.Fatalf("/health hit count = %d, want 0", got)
+				}
+			})
+		}
+	})
+}
+
+func assertHTTP11ResponseAndImmediateClose(
+	t *testing.T,
+	conn net.Conn,
+	started time.Time,
+	maxElapsed time.Duration,
+	wantStatus int,
+	wantSubstr string,
+	requireWireCloseHeader bool,
+) *http.Response {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var rawWire bytes.Buffer
+	br := bufio.NewReader(io.TeeReader(conn, &rawWire))
+	parseReq, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	resp, err := http.ReadResponse(br, parseReq)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	var extra [1]byte
+	n, closeErr := br.Read(extra[:])
+	elapsed := time.Since(started)
+
+	if elapsed >= maxElapsed {
+		t.Fatalf("response + TCP close took %v, want under %v", elapsed, maxElapsed)
+	}
+	if resp.StatusCode != wantStatus || !strings.Contains(string(respBody), wantSubstr) {
+		t.Fatalf("response = (%d, %q), want (%d containing %q)", resp.StatusCode, string(respBody), wantStatus, wantSubstr)
+	}
+	if requireWireCloseHeader {
+		if !resp.Close || !strings.Contains(strings.ToLower(rawWire.String()), "\r\nconnection: close\r\n") {
+			t.Fatalf("response Close=%v wire=%q, want Connection: close on wire", resp.Close, rawWire.String())
+		}
+	}
+	if n != 0 || closeErr == nil || errors.Is(closeErr, os.ErrDeadlineExceeded) {
+		t.Fatalf("post-response TCP read = (%d, %v), want immediate socket close without second response", n, closeErr)
+	}
+	return resp
+}
+
+type eofWithBytesReader struct {
+	data      []byte
+	cancel    context.CancelFunc
+	splitZero bool
+	nonEOFErr error
+	step      int
+}
+
+func (r *eofWithBytesReader) Read(p []byte) (int, error) {
+	r.step++
+	if r.nonEOFErr != nil {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		return 0, r.nonEOFErr
+	}
+	if r.splitZero {
+		if r.step == 1 {
+			return copy(p, r.data), nil
+		}
+		if r.cancel != nil {
+			r.cancel()
+		}
+		return 0, io.EOF
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	if r.step > 1 {
+		return 0, io.EOF
+	}
+	return copy(p, r.data), io.EOF
+}
+
+func (r *eofWithBytesReader) Close() error { return nil }
+
+func TestReaderPreservesEOFWhenContextCancelsConcurrently(t *testing.T) {
+	t.Run("single read returning (n, io.EOF) while ctx cancels", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		wrapped, stop := Wrap(ctx, &eofWithBytesReader{data: []byte("abcd"), cancel: cancel}, nil, 0)
+		defer stop()
+		defer func() { _ = wrapped.Close() }()
+
+		buf := make([]byte, 8)
+		n, err := wrapped.Read(buf)
+		if n != 4 || !errors.Is(err, io.EOF) {
+			t.Fatalf("Read on concurrent ctx cancel with io.EOF = (%d, %v), want (4, io.EOF)", n, err)
+		}
+		n2, err2 := wrapped.Read(buf)
+		if n2 != 0 || !errors.Is(err2, io.EOF) {
+			t.Fatalf("subsequent Read after io.EOF = (%d, %v), want (0, io.EOF)", n2, err2)
+		}
+	})
+
+	t.Run("two-step io.ReadAll returning (0, io.EOF) while ctx cancels", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		wrapped, stop := Wrap(ctx, &eofWithBytesReader{data: []byte("abcd"), cancel: cancel, splitZero: true}, nil, 0)
+		defer stop()
+		defer func() { _ = wrapped.Close() }()
+
+		got, err := io.ReadAll(wrapped)
+		if err != nil || string(got) != "abcd" {
+			t.Fatalf("io.ReadAll = (%q, %v), want (\"abcd\", nil)", string(got), err)
+		}
+	})
+
+	t.Run("non-EOF error with canceled ctx still surfaces context error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		wrapped, stop := Wrap(ctx, &eofWithBytesReader{cancel: cancel, nonEOFErr: os.ErrDeadlineExceeded}, nil, 0)
+		defer stop()
+		defer func() { _ = wrapped.Close() }()
+
+		buf := make([]byte, 8)
+		_, err := wrapped.Read(buf)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Read non-EOF error with canceled ctx = %v, want context.Canceled", err)
+		}
+	})
+}
+
+func TestChunkedOver256KiBUnreadBodyClosesWithoutRestoringOrigBody(t *testing.T) {
+	var healthHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/early-no-restore", func(w http.ResponseWriter, r *http.Request) {
+		body, stop := Wrap(r.Context(), r.Body, w, 0)
+		defer stop()
+		// Deliberately do NOT restore r.Body = body; Close() must drain-probe >256KiB and close TCP.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("done"))
+		_ = body.Close()
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		healthHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	addr := ts.Listener.Addr().String()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	bigChunk := strings.Repeat("z", 300<<10)
+	followUp := fmt.Sprintf("GET /health HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+	rawReq := fmt.Sprintf(
+		"POST /early-no-restore HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n%s",
+		addr,
+		len(bigChunk),
+		bigChunk,
+		followUp,
+	)
+	started := time.Now()
+	if _, err := conn.Write([]byte(rawReq)); err != nil {
+		t.Fatal(err)
+	}
+	assertHTTP11ResponseAndImmediateClose(t, conn, started, time.Second, http.StatusOK, "done", true)
+	if got := healthHits.Load(); got != 0 {
+		t.Fatalf("/health hit count = %d, want 0", got)
+	}
+}
+
+func TestWrapUnknownLengthSmallBodyCloseClearsTemporaryDrainDeadline(t *testing.T) {
+	rw := newDeadlineRecordingResponseWriter(nil)
+	body, stop := Wrap(
+		context.Background(),
+		io.NopCloser(strings.NewReader("small-unknown-length-unread-body")),
+		rw,
+		0,
+	)
+	defer stop()
+
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	deadlines := rw.recordedDeadlines()
+	if len(deadlines) != 2 {
+		t.Fatalf("recorded deadlines = %v (len=%d), want 2 ([drainDeadline, zero])", deadlines, len(deadlines))
+	}
+	if deadlines[0].IsZero() {
+		t.Fatalf("first deadline = %v, want non-zero temporary drain deadline", deadlines[0])
+	}
+	if !deadlines[1].IsZero() {
+		t.Fatalf("final deadline = %v, want zero time.Time{} after draining unknown-length body to EOF", deadlines[1])
+	}
 }

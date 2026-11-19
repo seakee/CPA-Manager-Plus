@@ -19,7 +19,6 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // Stable codes of a Collector start this Manager refused to claim. They reach
@@ -70,7 +69,7 @@ func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, mana
 			}
 			batchSize = managerconfig.PositiveOrDefault(managerCfg.Collector.BatchSize, batchSize, 100)
 			pollIntervalMS = managerconfig.PositiveOrDefault(managerCfg.Collector.PollIntervalMS, pollIntervalMS, 500)
-			if persistedCollectorTransportConfigured(managerCfg.Collector) {
+			if managerCfg.Collector.TLSSkipVerifyExplicit || managerCfg.Collector.TLSSkipVerify {
 				tlsSkipVerify = managerCfg.Collector.TLSSkipVerify
 			}
 		}
@@ -85,18 +84,6 @@ func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, mana
 		PollInterval:   time.Duration(pollIntervalMS) * time.Millisecond,
 		TLSSkipVerify:  tlsSkipVerify,
 	}, nil
-}
-
-// persistedCollectorTransportConfigured reports whether a stored ManagerConfig
-// row carries explicit Collector transport fields (as written by a whole-config
-// PUT) rather than a Fresh-seeded skeleton row containing only collector.enabled.
-func persistedCollectorTransportConfigured(c store.ManagerCollectorConfig) bool {
-	return strings.TrimSpace(c.CollectorMode) != "" ||
-		strings.TrimSpace(c.Queue) != "" ||
-		strings.TrimSpace(c.PopSide) != "" ||
-		c.BatchSize > 0 ||
-		c.PollIntervalMS > 0 ||
-		c.TLSSkipVerify
 }
 
 // sampleUsageAuthority proves, with one authenticated management read, that the

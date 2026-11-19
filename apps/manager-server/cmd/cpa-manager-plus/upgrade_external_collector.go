@@ -7,7 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
-
+	"weak"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -33,6 +33,108 @@ type upgradeCollectorController struct {
 	boundTarget verifiedUpgradeUsageTarget
 }
 
+var (
+	upgradeCollectorRegistryMu sync.Mutex
+	upgradeCollectorRegistry   []weak.Pointer[upgradeCollectorController]
+)
+
+func registerUpgradeCollectorController(ctrl *upgradeCollectorController) {
+	if ctrl == nil || ctrl.manager == nil {
+		return
+	}
+	upgradeCollectorRegistryMu.Lock()
+	defer upgradeCollectorRegistryMu.Unlock()
+	kept := upgradeCollectorRegistry[:0]
+	replaced := false
+	for _, entry := range upgradeCollectorRegistry {
+		existing := entry.Value()
+		if existing == nil {
+			continue
+		}
+		if existing.manager == ctrl.manager {
+			kept = append(kept, weak.Make(ctrl))
+			replaced = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !replaced {
+		kept = append(kept, weak.Make(ctrl))
+	}
+	upgradeCollectorRegistry = kept
+}
+
+func lookupUpgradeCollectorController(manager *collector.Manager) *upgradeCollectorController {
+	if manager == nil {
+		return nil
+	}
+	upgradeCollectorRegistryMu.Lock()
+	defer upgradeCollectorRegistryMu.Unlock()
+	kept := upgradeCollectorRegistry[:0]
+	var found *upgradeCollectorController
+	for _, entry := range upgradeCollectorRegistry {
+		ctrl := entry.Value()
+		if ctrl == nil {
+			continue
+		}
+		kept = append(kept, entry)
+		if ctrl.manager == manager {
+			found = ctrl
+		}
+	}
+	upgradeCollectorRegistry = kept
+	return found
+}
+
+func bindUpgradeCollectorWorkerLocker(manager *collector.Manager, locker sync.Locker) {
+	if ctrl := lookupUpgradeCollectorController(manager); ctrl != nil && ctrl.cfg.CollectorWorker != nil {
+		ctrl.cfg.CollectorWorker.SetLifecycleLocker(locker)
+	}
+}
+
+func startUpgradeExternalCollector(
+	ctx context.Context,
+	manager *collector.Manager,
+	rejection *upgradeExternalRejection,
+	identity string,
+	credDigest string,
+	baseURL string,
+	managementKey string,
+	rtCfg collector.RuntimeConfig,
+) {
+	if manager == nil {
+		return
+	}
+	if ctrl := lookupUpgradeCollectorController(manager); ctrl != nil {
+		canonicalURL, _ := canonicalUpgradeUsageURL(baseURL)
+		ctrl.mu.Lock()
+		defer ctrl.mu.Unlock()
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
+		if rejection != nil && identity != "" && credDigest != "" && rejection.isLocallyBlocked(identity, credDigest) {
+			return
+		}
+		if identity != "" && credDigest != "" {
+			ctrl.boundRunID = manager.StartCount() + 1
+			ctrl.boundTarget = verifiedUpgradeUsageTarget{
+				mode:            model.UpgradeTargetExternal,
+				committedURL:    baseURL,
+				canonicalURL:    canonicalURL,
+				committedSecret: strings.TrimSpace(managementKey),
+				targetIdentity:  identity,
+				credDigest:      credDigest,
+			}
+		}
+		manager.Start(ctx, rtCfg)
+		return
+	}
+	if rejection != nil {
+		rejection.noteCollectorStart(identity, credDigest, baseURL, managementKey)
+	}
+	manager.Start(ctx, rtCfg)
+}
+
 func newUpgradeCollectorController(
 	manager *collector.Manager,
 	cfg upgradeUsageStartupConfig,
@@ -47,8 +149,10 @@ func (c *upgradeCollectorController) attach() {
 	if c == nil || c.manager == nil {
 		return
 	}
+	registerUpgradeCollectorController(c)
 	if c.cfg.CollectorWorker != nil {
 		c.cfg.CollectorWorker.SetRuntimeGate(c.allowCollectorWorkerStart)
+		c.cfg.CollectorWorker.SetRuntimeStarter(c.startCollectorWorkerRuntime)
 	}
 	if c.cfg.Rejection != nil {
 		c.cfg.Rejection.setOnRecord(c.handleExternalRejectionRecorded)
@@ -93,6 +197,61 @@ func (c *upgradeCollectorController) noteExternalCollectorStart(identity, credDi
 		credDigest:      credDigest,
 	}
 	c.mu.Unlock()
+}
+
+func (c *upgradeCollectorController) startCollectorWorkerRuntime(
+	ctx context.Context,
+	runtimeCfg collector.RuntimeConfig,
+	start func(context.Context, collector.RuntimeConfig) error,
+) {
+	if start == nil {
+		return
+	}
+	if c == nil || c.cfg.DB == nil || c.cfg.Store == nil || c.cfg.Protector == nil {
+		_ = start(ctx, runtimeCfg)
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	isUpgrade, err := isUpgradeStoreDB(ctx, c.cfg.DB)
+	if err != nil {
+		return
+	}
+	if !isUpgrade {
+		_ = start(ctx, runtimeCfg)
+		return
+	}
+	target, ok, err := verifyUpgradeStartupCollectorTarget(ctx, c.cfg, runtimeCfg)
+	if err != nil || !ok {
+		return
+	}
+	if target.mode == model.UpgradeTargetExternal && c.manager != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		if c.cfg.Rejection != nil && target.targetIdentity != "" && target.credDigest != "" &&
+			c.cfg.Rejection.isLocallyBlocked(target.targetIdentity, target.credDigest) {
+			return
+		}
+		prevRunID := c.boundRunID
+		prevTarget := c.boundTarget
+		nextRunID := c.manager.StartCount() + 1
+		c.boundRunID = nextRunID
+		c.boundTarget = target
+		_ = start(ctx, runtimeCfg)
+		if c.manager.StartCount() != nextRunID {
+			c.boundRunID = prevRunID
+			c.boundTarget = prevTarget
+		}
+		return
+	}
+	_ = start(ctx, runtimeCfg)
 }
 
 func (c *upgradeCollectorController) allowCollectorWorkerStart(

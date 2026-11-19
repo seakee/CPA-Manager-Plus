@@ -39,6 +39,9 @@ type ObservationResult struct {
 	TargetVersion      string           `json:"target_version"`
 	RuntimeOperationID string           `json:"runtime_operation_id"`
 	State              ObservationState `json:"state"`
+	StagePhase         string           `json:"stage_phase,omitempty"`
+	ReceivedBytes      int64            `json:"received_bytes,omitempty"`
+	TotalBytes         int64            `json:"total_bytes,omitempty"`
 	FailureCode        string           `json:"failure_code,omitempty"`
 	CreatedAt          *time.Time       `json:"created_at,omitempty"`
 	UpdatedAt          *time.Time       `json:"updated_at,omitempty"`
@@ -152,6 +155,12 @@ func (s *Service) observe(ctx context.Context, phase MutationPhase, request Obse
 		return ObservationResult{}, newObservationError(ObservationErrorUnavailable, "runtime_result_unreliable")
 	}
 	result.State = ObservationState(operation.State)
+	if phase == MutationPhasePrepare &&
+		(operation.State == model.RuntimeOperationAccepted || operation.State == model.RuntimeOperationRunning) {
+		result.StagePhase = operation.Phase
+		result.ReceivedBytes = operation.ReceivedBytes
+		result.TotalBytes = operation.TotalBytes
+	}
 	createdAt, updatedAt := operation.CreatedAt, operation.UpdatedAt
 	result.CreatedAt, result.UpdatedAt = &createdAt, &updatedAt
 	if operation.CompletedAt != nil {

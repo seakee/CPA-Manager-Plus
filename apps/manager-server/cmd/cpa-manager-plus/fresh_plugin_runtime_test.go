@@ -195,7 +195,7 @@ func TestPluginRuntimeWritesTheSwitchAndReadsItBack(t *testing.T) {
 	if err := json.Unmarshal(page.Body.Bytes(), &pageView); err != nil {
 		t.Fatal(err)
 	}
-	if len(pageView.Groups) != 11 || len(pageView.Fields) != 39 {
+	if len(pageView.Groups) != 21 || len(pageView.Fields) != 88 {
 		t.Fatalf("gateway page sizes %d %d", len(pageView.Groups), len(pageView.Fields))
 	}
 	for _, group := range pageView.Groups {

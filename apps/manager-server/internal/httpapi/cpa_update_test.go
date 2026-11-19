@@ -266,7 +266,7 @@ func TestCPAUpdateMutationStrictBody(t *testing.T) {
 		"invalid target":     strings.Replace(valid, "7.3.4", "7.3.4-rc.1", 1),
 		"invalid artifact":   strings.Replace(valid, cpaUpdateTestArtifactID, "sha256:not-a-digest", 1),
 		"invalid UTF-8":      string(append([]byte(`{"request_id":"`), 0xff)),
-		"oversized":          `{"request_id":"` + strings.Repeat("a", 600) + `"}`,
+		"oversized":          valid + strings.Repeat(" ", 2049-len(valid)),
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {

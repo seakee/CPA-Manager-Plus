@@ -15,19 +15,23 @@ import (
 const testArtifactID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type memoryStore struct {
-	mu      sync.Mutex
-	data    []byte
-	loadErr error
-	saveErr error
+	mu        sync.Mutex
+	data      []byte
+	loadErr   error
+	saveErr   error
+	saveCalls atomic.Int32
+	loadCalls atomic.Int32
 }
 
 func (s *memoryStore) LoadCPAUpdateCheck(context.Context) ([]byte, error) {
+	s.loadCalls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]byte(nil), s.data...), s.loadErr
 }
 
 func (s *memoryStore) SaveCPAUpdateCheck(_ context.Context, data []byte) error {
+	s.saveCalls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.saveErr != nil {
@@ -392,5 +396,89 @@ func TestRuntimeObservationFailureIsReturned(t *testing.T) {
 	).Status(t.Context())
 	if !errors.Is(err, want) {
 		t.Fatalf("Status() error = %v, want wrapped Runtime error", err)
+	}
+}
+
+func TestCheckFailsClosedOnInvalidModeBeforeDiscoveryOrPersistence(t *testing.T) {
+	previous := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		mode     model.RuntimeMode
+		resolver func() model.RuntimeMode
+		seeded   bool
+	}{
+		{name: "empty static mode on empty store", mode: ""},
+		{name: "invalid static mode on seeded store", mode: model.RuntimeMode("unsupported"), seeded: true},
+		{
+			name:     "invalid dynamic mode resolver on seeded store",
+			mode:     model.RuntimeModeEmbedded,
+			resolver: func() model.RuntimeMode { return "" },
+			seeded:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &memoryStore{}
+			if tc.seeded {
+				store = persistedDiscovery(t, "7.3.4", previous)
+			}
+			before := append([]byte(nil), store.data...)
+			source := &fakeSource{target: "7.3.5"}
+			runtimeClient := &observationOnlyRuntime{status: embeddedObservation("7.3.3")}
+			service := New(store, runtimeClient, tc.mode)
+			if tc.resolver != nil {
+				service.WithModeResolver(tc.resolver)
+			}
+			service.source = source
+			service.now = func() time.Time { return previous.Add(10 * time.Minute) }
+
+			if _, err := service.Check(t.Context()); err == nil {
+				t.Fatal("Check() accepted invalid Runtime mode")
+			}
+			if source.requests.Load() != 0 {
+				t.Fatalf("Check() discovery requests = %d, want 0", source.requests.Load())
+			}
+			if store.saveCalls.Load() != 0 {
+				t.Fatalf("Check() SaveCPAUpdateCheck calls = %d, want 0", store.saveCalls.Load())
+			}
+			if runtimeClient.statusCalls.Load() != 0 {
+				t.Fatalf("Check() Runtime Status calls = %d, want 0", runtimeClient.statusCalls.Load())
+			}
+			if string(store.data) != string(before) {
+				t.Fatalf("Check() mutated persisted cpa_update_check_v1: got %q, want %q", store.data, before)
+			}
+		})
+	}
+}
+
+func TestStatusFailsClosedOnInvalidModeBeforeLoadingStore(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     model.RuntimeMode
+		resolver func() model.RuntimeMode
+	}{
+		{name: "invalid static mode", mode: model.RuntimeMode("unsupported")},
+		{
+			name:     "invalid dynamic mode resolver",
+			mode:     model.RuntimeModeEmbedded,
+			resolver: func() model.RuntimeMode { return "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &memoryStore{loadErr: errors.New("unexpected LoadCPAUpdateCheck")}
+			runtimeClient := &observationOnlyRuntime{status: embeddedObservation("7.3.3")}
+			service := New(store, runtimeClient, tc.mode)
+			if tc.resolver != nil {
+				service.WithModeResolver(tc.resolver)
+			}
+			if _, err := service.Status(t.Context()); err == nil || err.Error() != "CPA update Runtime mode is invalid" {
+				t.Fatalf("Status() error = %v, want invalid mode error", err)
+			}
+			if got := store.loadCalls.Load(); got != 0 {
+				t.Fatalf("Status() LoadCPAUpdateCheck calls = %d, want 0", got)
+			}
+			if got := runtimeClient.statusCalls.Load(); got != 0 {
+				t.Fatalf("Status() Runtime Status calls = %d, want 0", got)
+			}
+		})
 	}
 }

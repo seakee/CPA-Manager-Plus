@@ -94,6 +94,39 @@ func TestUsageCacheAccountingMigrationWorkerCompletesOnce(t *testing.T) {
 	}
 }
 
+func TestUsageCacheAccountingMigrationWorkerAllowsValidStartAfterNilAndCanceledContext(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	completed := make(chan struct{}, 1)
+	w := NewUsageCacheAccountingMigrationWorker(db, func() {
+		completed <- struct{}{}
+	})
+
+	var nilCtx context.Context
+	w.Start(nilCtx)
+
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	w.Start(canceledCtx)
+
+	liveCtx, cancelLive := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelLive()
+		w.Wait()
+	})
+	w.Start(liveCtx)
+
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("migration completion callback timed out after nil and canceled Start calls")
+	}
+}
+
 func TestUsageCacheAccountingMigrationWorkerRediscoverSemanticsRevision(t *testing.T) {
 	rawDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

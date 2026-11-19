@@ -1130,6 +1130,24 @@ func (c gatedEmbeddedRuntimeClient) PrepareUpdate(ctx context.Context, request m
 	return client.PrepareUpdate(ctx, request)
 }
 
+func (c gatedEmbeddedRuntimeClient) PrepareUpdateUpload(
+	ctx context.Context,
+	request model.RuntimePrepareUpdateRequest,
+	archive io.Reader,
+	contentLength int64,
+) (model.RuntimeOperationResult, error) {
+	client, release, err := c.enterMutation(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	uploader, ok := client.(runtimeservice.PrepareUpdateUploader)
+	if !ok {
+		return model.RuntimeOperationResult{}, runtimeservice.ErrRuntimeMutationUnsupported
+	}
+	return uploader.PrepareUpdateUpload(ctx, request, archive, contentLength)
+}
+
 func (c gatedEmbeddedRuntimeClient) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
 	if err := request.Validate(); err != nil {
 		return model.RuntimeOperationResult{}, err
@@ -1432,6 +1450,23 @@ func (c freshRuntimeClientAdapter) PrepareUpdate(ctx context.Context, request mo
 		return model.RuntimeOperationResult{}, err
 	}
 	return client.PrepareUpdate(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) PrepareUpdateUpload(
+	ctx context.Context,
+	request model.RuntimePrepareUpdateRequest,
+	archive io.Reader,
+	contentLength int64,
+) (model.RuntimeOperationResult, error) {
+	client, err := c.embeddedClient(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	uploader, ok := client.(runtimeservice.PrepareUpdateUploader)
+	if !ok {
+		return model.RuntimeOperationResult{}, runtimeservice.ErrRuntimeMutationUnsupported
+	}
+	return uploader.PrepareUpdateUpload(ctx, request, archive, contentLength)
 }
 
 func (c freshRuntimeClientAdapter) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {

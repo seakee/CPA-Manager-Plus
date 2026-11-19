@@ -53,6 +53,9 @@ func RejectCrossSiteAdmin(next http.Handler, exempt func(*http.Request) bool) ht
 		}
 		if adminFetchMetadataRejected(r) {
 			w.Header().Set("Cache-Control", "no-store")
+			if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+				w.Header().Set("Connection", "close")
+			}
 			http.Error(w, "cross-site admin request rejected", http.StatusForbidden)
 			return
 		}

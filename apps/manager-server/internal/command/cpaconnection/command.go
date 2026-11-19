@@ -245,6 +245,8 @@ func storeConnection(ctx context.Context, cfg config.Config, st *store.Store, ba
 	}
 	if !managerOK {
 		managerCfg = managerconfig.New(cfg, st, nil).DefaultManagerConfig()
+		managerCfg.Collector.TLSSkipVerify = false
+		managerCfg.Collector.TLSSkipVerifyExplicit = false
 	}
 	resolution, resolveErr := managerconfig.ResolveLegacyConnectionAuthority(
 		managerCfg,

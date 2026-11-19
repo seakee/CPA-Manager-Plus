@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -472,7 +475,14 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 type externalCredentialGate struct {
 	once   sync.Once
 	slot   chan struct{}
+	mu     sync.Mutex
 	onWait func()
+}
+
+func (g *externalCredentialGate) setOnWait(fn func()) {
+	g.mu.Lock()
+	g.onWait = fn
+	g.mu.Unlock()
 }
 
 func (g *externalCredentialGate) acquire(ctx context.Context) bool {
@@ -482,8 +492,11 @@ func (g *externalCredentialGate) acquire(ctx context.Context) bool {
 		return true
 	default:
 	}
-	if g.onWait != nil {
-		g.onWait()
+	g.mu.Lock()
+	onWait := g.onWait
+	g.mu.Unlock()
+	if onWait != nil {
+		onWait()
 	}
 	select {
 	case g.slot <- struct{}{}:
@@ -922,12 +935,40 @@ func (a *freshApplication) serveLegacyResource(
 		a.legacy.ServeHTTP(w, clone)
 		return
 	}
+	hasCollectorPatch := false
+	hasEnabledPatch := false
+	if r.Method == http.MethodPatch && clone.Body != nil {
+		rawBody, readErr := io.ReadAll(io.LimitReader(clone.Body, 4096+1))
+		if readErr != nil || len(rawBody) > 4096 {
+			w.Header().Set("Connection", "close")
+			_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+			_ = clone.Body.Close()
+		} else {
+			_ = clone.Body.Close()
+		}
+		if readErr == nil {
+			clone.Body = io.NopCloser(bytes.NewReader(rawBody))
+			if len(rawBody) <= 4096 {
+				var bodyMap map[string]json.RawMessage
+				if json.Unmarshal(rawBody, &bodyMap) == nil {
+					for key := range bodyMap {
+						if strings.EqualFold(key, "collector") {
+							hasCollectorPatch = true
+						} else if strings.EqualFold(key, "enabled") {
+							hasEnabledPatch = true
+						}
+					}
+				}
+			}
+		}
+	}
 	recorder := &legacyStatusRecorder{ResponseWriter: w}
 	a.legacy.ServeHTTP(recorder, clone)
 	if recorder.status >= http.StatusOK && recorder.status < http.StatusMultipleChoices {
-		if r.Method == http.MethodPut {
+		switch {
+		case r.Method == http.MethodPut || hasCollectorPatch:
 			a.applyUsageManagerConfig(r.Context(), op)
-		} else {
+		case hasEnabledPatch:
 			a.applyUsageMonitoringSwitch(r.Context(), op)
 		}
 	}
@@ -1006,7 +1047,7 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet)
 	case "usage-service/runtime/updates/check":
 		return allowed(http.MethodPost)
-	case "usage-service/runtime/updates/prepare", "usage-service/runtime/updates/activate":
+	case "usage-service/runtime/updates/prepare", "usage-service/runtime/updates/prepare-upload", "usage-service/runtime/updates/activate":
 		return allowed(http.MethodPost)
 	case "usage-service/runtime/updates/operations/prepare", "usage-service/runtime/updates/operations/activate":
 		return allowed(http.MethodGet)
@@ -1040,8 +1081,12 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet)
 	case "v0/management/api-call", "v0/management/vertex/import":
 		return allowed(http.MethodPost)
-	case "v0/management/dashboard/summary", "v0/management/usage", "v0/management/usage/export", "v0/management/model-prices/usage-summary":
+	case "v0/management/dashboard/summary", "v0/management/usage", "v0/management/usage/export", "v0/management/usage/maintenance", "v0/management/model-prices/usage-summary":
 		return allowed(http.MethodGet)
+	case "v0/management/usage/archives":
+		return allowed(http.MethodGet, http.MethodPost)
+	case "v0/management/usage/archives/preview":
+		return allowed(http.MethodPost)
 	case "v0/management/usage/import", "v0/management/usage/import-sessions":
 		return allowed(http.MethodPost)
 	case "v0/management/model-prices":
@@ -1109,6 +1154,15 @@ func legacyBridgeDynamicPathAllowed(resource, method string, allowed func(...str
 	}
 	if len(parts) == 2 && parts[0] == "usage" && parts[1] == "import-sessions" {
 		return allowed(http.MethodPost)
+	}
+	if len(parts) == 3 && parts[0] == "usage" && parts[1] == "archives" {
+		return allowed(http.MethodGet)
+	}
+	if len(parts) == 4 && parts[0] == "usage" && parts[1] == "archives" && safeBridgePathSegment(parts[2]) {
+		switch parts[3] {
+		case "resume", "verify", "delete", "cancel":
+			return allowed(http.MethodPost)
+		}
 	}
 	if len(parts) == 3 && parts[0] == "codex-inspection" && parts[1] == "runs" && safeBridgeNumericSegment(parts[2]) {
 		return allowed(http.MethodGet)

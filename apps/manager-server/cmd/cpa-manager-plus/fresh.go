@@ -290,7 +290,15 @@ type freshApplication struct {
 	closeOnce                      sync.Once
 	maintenanceMu                  sync.Mutex
 	maintenanceStopped             bool
+	derivedWorkersStarted          bool
 	beforeDatabaseMaintenanceStart func()
+	legacyStore                    *store.Store
+	initialUsageProjection         *identityprojection.Worker
+	accountHistoryRollupWorker     *worker.AccountHistoryRollupWorker
+	usageDerivedRollupWorker       *worker.UsagePricingRollupWorker
+	usageHourlyAggregateWorker     *worker.UsageHourlyAggregateWorker
+	usageCacheMigrationWorker      *worker.UsageCacheAccountingMigrationWorker
+	retentionWorker                *worker.UsageArchiveRetentionWorker
 	afterCloseMarked               func()
 	onRequestBodyRead              func(r *http.Request, attempt int)
 	onBeforeNonEOFBodyClose        func(r *http.Request)
@@ -362,18 +370,95 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
 		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
 	}
+	a.legacyStore = legacyStore
+	a.accountHistoryRollupWorker = worker.NewAccountHistoryRollupWorker(legacyStore)
+	a.usageDerivedRollupWorker = worker.NewUsagePricingRollupWorker(legacyStore)
+	if legacyContext.ModelPriceService != nil {
+		legacyContext.ModelPriceService.SetPricesChangedNotifier(a.usageDerivedRollupWorker.Wake)
+	}
+	if cfg.DashboardHourlyRollupEnabled {
+		a.usageHourlyAggregateWorker = worker.NewUsageHourlyAggregateWorker(legacyStore)
+	}
+	if cfg.DashboardHourlyRollupEnabled && legacyContext.UsageService != nil && legacyContext.ManagerConfigService != nil {
+		initialDays := 0
+		if cfg.UsageArchiveRetentionEnabled && cfg.UsageArchiveRetentionDays > 0 {
+			initialDays = cfg.UsageArchiveRetentionDays
+		}
+		retentionWorker := worker.NewUsageArchiveRetentionWorker(legacyContext.UsageService, initialDays)
+		retentionWorker.SetSettingsResolver(legacyContext.ManagerConfigService.ResolveRetention)
+		legacyContext.ManagerConfigService.SetRetentionChangedNotifier(retentionWorker.Wake)
+		a.retentionWorker = retentionWorker
+	}
 	a.collectorWorker = worker.NewCollectorWorker(cfg, legacyStore, legacyCollectorService)
 	// A CPA that refuses the management credential this Collector runs with is
 	// terminal, not a retry: the Collector stops itself and reports, and this
 	// application records the blocker and drops the started latch so the
 	// workspace stops claiming coverage.
 	legacyCollector.SetAuthRejectionRunHandler(a.reportCollectorAuthRejection)
-	// The Collector is the only writer of Fresh usage events, so its inserts are
-	// exactly what the canonical identity projection must attribute.
-	a.usageProjection = identityprojection.NewWorker(legacyStore.IdentityProjections)
-	legacyCollector.SetUsageEventHandler(collector.UsageEventHandlerFunc(func(ctx context.Context, _ collector.RuntimeConfig, events []usage.Event) {
-		a.usageProjection.HandleUsageEvents(ctx, events)
-	}))
+	// The Collector and usage imports feed the canonical identity projection and
+	// derived usage rollups so archive verification and retention have complete coverage.
+	initialProjection := identityprojection.NewWorker(legacyStore.IdentityProjections)
+	a.usageProjection = initialProjection
+	a.initialUsageProjection = initialProjection
+	if legacyContext.UsageService != nil {
+		legacyContext.UsageService.SetEventsInsertedNotifier(func() {
+			if a.accountHistoryRollupWorker != nil {
+				a.accountHistoryRollupWorker.Wake()
+			}
+			if a.usageDerivedRollupWorker != nil {
+				a.usageDerivedRollupWorker.Wake()
+			}
+			if a.usageHourlyAggregateWorker != nil {
+				a.usageHourlyAggregateWorker.Wake()
+			}
+			if a.usageProjection != nil {
+				a.usageProjection.Wake()
+			}
+		})
+	}
+	a.usageCacheMigrationWorker = worker.NewUsageCacheAccountingMigrationWorker(legacyStore, func() {
+		if a.accountHistoryRollupWorker != nil {
+			a.accountHistoryRollupWorker.Wake()
+		}
+		if a.usageDerivedRollupWorker != nil {
+			a.usageDerivedRollupWorker.Wake()
+		}
+		if a.usageHourlyAggregateWorker != nil {
+			a.usageHourlyAggregateWorker.Wake()
+		}
+		if a.usageProjection != nil {
+			a.usageProjection.Wake()
+		}
+		a.launchBackground(func() {
+			workerCtx := a.lifecycleContext(a.runCtx)
+			if workerCtx == nil {
+				workerCtx = a.closeCtx
+			}
+			if err := waitForUsageResponseMetadataBackfill(workerCtx, legacyStore); err != nil {
+				if workerCtx.Err() == nil {
+					log.Printf("fresh usage response metadata backfill: %v", err)
+				}
+				return
+			}
+			a.maintenanceMu.Lock()
+			stopped := a.maintenanceStopped || a.isClosing()
+			retention := a.retentionWorker
+			a.maintenanceMu.Unlock()
+			if !stopped && retention != nil {
+				retention.Start(workerCtx)
+			}
+		})
+	})
+	legacyCollector.SetUsageEventHandler(worker.NewUsageEventFanout(
+		a.accountHistoryRollupWorker,
+		a.usageDerivedRollupWorker,
+		a.usageHourlyAggregateWorker,
+		collector.UsageEventHandlerFunc(func(ctx context.Context, _ collector.RuntimeConfig, events []usage.Event) {
+			if a.usageProjection != nil {
+				a.usageProjection.HandleUsageEvents(ctx, events)
+			}
+		}),
+	))
 	a.usage = usageapp.New(identityusage.New(opened.DB), a.collectionPhase)
 	a.keyRepo = keyrepo.New(opened.DB)
 	a.keys = freshkeys.New(a.keyRepo, opened.Protector, freshkeys.WithSourceRuntime(a.installedRuntimeIdentity))
@@ -759,6 +844,32 @@ func (a *freshApplication) startDatabaseMaintenance(ctx context.Context) {
 		return
 	}
 	startFreshDatabaseMaintenance(ctx, a.cfg.DBPath)
+	if !a.derivedWorkersStarted && a.usageProjection != nil && a.usageProjection == a.initialUsageProjection {
+		a.derivedWorkersStarted = true
+		if a.legacyApp != nil && a.legacyApp.UsageService != nil {
+			if err := a.legacyApp.UsageService.StartArchiveJobs(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("[fresh] start usage archive jobs: %v", err)
+			}
+		}
+		if a.accountHistoryRollupWorker != nil {
+			a.accountHistoryRollupWorker.Start(ctx)
+		}
+		if a.usageDerivedRollupWorker != nil {
+			a.usageDerivedRollupWorker.Start(ctx)
+		}
+		if a.usageHourlyAggregateWorker != nil {
+			a.usageHourlyAggregateWorker.Start(ctx)
+		}
+		a.usageProjection.Start(ctx)
+		if a.legacyStore != nil {
+			a.legacyStore.StartDerivedMaintenance(ctx)
+		}
+		if a.usageCacheMigrationWorker != nil {
+			a.usageCacheMigrationWorker.Start(ctx)
+		} else if a.retentionWorker != nil {
+			a.retentionWorker.Start(ctx)
+		}
+	}
 }
 
 func (a *freshApplication) stopDatabaseMaintenance() {
@@ -807,6 +918,16 @@ func (a *freshApplication) Close() {
 			if a.legacyApp.UsageService != nil {
 				_ = a.legacyApp.UsageService.StopAndWaitImportSessions(context.Background())
 			}
+			if a.retentionWorker != nil {
+				stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = a.retentionWorker.StopAndWait(stopCtx)
+				cancelStop()
+			}
+			if a.legacyApp.UsageService != nil {
+				stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = a.legacyApp.UsageService.WaitArchiveJobs(stopCtx)
+				cancelStop()
+			}
 		}
 		// 5. Stop and join the Collector without holding usageStartMu (the
 		// Collector's auth-rejection callback acquires usageStartMu and writes
@@ -814,16 +935,34 @@ func (a *freshApplication) Close() {
 		a.usageStartMu.Lock()
 		a.stopUsageCollectionLocked(context.Background())
 		a.usageStartMu.Unlock()
+		if a.collectorWorker != nil {
+			a.collectorWorker.Stop(context.Background())
+		}
 		if a.legacyCollector != nil {
 			_ = a.legacyCollector.StopAndWait(context.Background())
 		}
-		// 6. Now that no producer can wake usageProjection, wait for it.
+		// 6. Close WAL maintenance and drain derived rollup/migration workers
+		// after all producers have stopped.
+		a.stopDatabaseMaintenance()
+		if a.legacyStore != nil {
+			a.legacyStore.WaitDerivedMaintenance()
+		}
+		if a.usageCacheMigrationWorker != nil {
+			a.usageCacheMigrationWorker.Wait()
+		}
+		if a.accountHistoryRollupWorker != nil {
+			a.accountHistoryRollupWorker.Wait()
+		}
+		if a.usageDerivedRollupWorker != nil {
+			a.usageDerivedRollupWorker.Wait()
+		}
+		if a.usageHourlyAggregateWorker != nil {
+			a.usageHourlyAggregateWorker.Wait()
+		}
 		if a.usageProjection != nil {
 			a.usageProjection.Wait()
 		}
-		// 7. Close WAL maintenance and its private SQLite connection.
-		a.stopDatabaseMaintenance()
-		// 8. Drain externalRejection last after all its callers have stopped.
+		// 7. Drain externalRejection last after all its callers have stopped.
 		if a.rejection != nil {
 			a.rejection.close()
 		}
@@ -869,16 +1008,17 @@ func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	if r != nil {
-		reqCtx, cancelReq := a.requestContext(r.Context())
+		origReq := r
+		reqCtx, cancelReq := a.requestContext(origReq.Context())
 		defer cancelReq()
 		if obs := a.onRequestBodyRead; obs != nil {
-			reqClone := r
+			reqClone := origReq
 			reqCtx = requestbody.WithReadObserver(reqCtx, func(attempt int) {
 				obs(reqClone, attempt)
 			})
 		}
 		if closeObs := a.onBeforeNonEOFBodyClose; closeObs != nil {
-			reqClone := r
+			reqClone := origReq
 			reqCtx = requestbody.WithNonEOFCloseObserver(reqCtx, func() {
 				closeObs(reqClone)
 			})
@@ -888,17 +1028,21 @@ func (a *freshApplication) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ctrl := newFreshRequestControl(a.closeCtx, w, a.effectiveShutdownWriteGrace())
 		defer ctrl.stop()
-		if r.Body != nil && r.Body != http.NoBody {
-			body, stopBody := requestbody.Wrap(reqCtx, r.Body, w, a.effectiveBodyReadTimeout())
+		if origReq.Body != nil && origReq.Body != http.NoBody {
+			origBody := origReq.Body
+			body, stopBody := requestbody.Wrap(reqCtx, origBody, w, a.effectiveBodyReadTimeout())
 			if body != nil {
-				defer stopBody()
-				defer func() { _ = body.Close() }()
-				r.Body = body
+				origReq.Body = body
+				defer func() {
+					_ = body.Close()
+					origReq.Body = origBody
+					stopBody()
+				}()
 			}
 		}
 		reqCtx = context.WithValue(reqCtx, freshRequestTrackedKey{}, true)
 		reqCtx = context.WithValue(reqCtx, freshRequestControlKey{}, ctrl)
-		r = r.WithContext(reqCtx)
+		r = origReq.WithContext(reqCtx)
 	}
 	// The plugin capability is a claim about the saved connection, so it is
 	// announced only when that connection proves it; a route existing is not a
@@ -1630,18 +1774,61 @@ func validateFreshHostAuthority(cfg config.Config) error {
 	return nil
 }
 
-func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) func() {
+func (h *startupHTTPHandler) Close(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	h.BeginShutdown()
+	if target := h.fresh.Load(); target != nil && target.handler != nil {
+		switch closer := target.handler.(type) {
+		case interface{ Close(context.Context) error }:
+			return closer.Close(ctx)
+		case interface{ Close() }:
+			closer.Close()
+		}
+	}
+	return nil
+}
+
+type freshStoreAwaiter struct {
+	handler     *startupHTTPHandler
+	cancelAwait context.CancelFunc
+	done        chan struct{}
+
+	mu        sync.Mutex
+	opened    *fresh.Opened
+	stopOnce  sync.Once
+	drainOnce sync.Once
+	closeOnce sync.Once
+}
+
+func startFreshStoreAwaiter(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) *freshStoreAwaiter {
+	return startFreshStoreAwaiterWithInterval(ctx, cfg, paths, h, time.Second)
+}
+
+func startFreshStoreAwaiterWithInterval(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler, pollInterval time.Duration) *freshStoreAwaiter {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
 	awaitCtx, cancelAwait := context.WithCancel(ctx)
-	var (
-		opened *fresh.Opened
-		done   = make(chan struct{})
-	)
+	var stopShutdownWatch func() bool
+	if h != nil && h.shutdownCtx != nil {
+		stopShutdownWatch = context.AfterFunc(h.shutdownCtx, cancelAwait)
+	}
+	awaiter := &freshStoreAwaiter{
+		handler:     h,
+		cancelAwait: cancelAwait,
+		done:        make(chan struct{}),
+	}
 	go func() {
-		defer close(done)
-		ticker := time.NewTicker(time.Second)
+		defer close(awaiter.done)
+		if stopShutdownWatch != nil {
+			defer stopShutdownWatch()
+		}
+		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1652,22 +1839,105 @@ func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqlitere
 			if !freshMarkerPresent(paths.Database) {
 				continue
 			}
+			if awaitCtx.Err() != nil {
+				return
+			}
 			admitted, err := serveExistingFresh(awaitCtx, cfg, paths, h)
 			if err != nil {
 				continue
 			}
-			opened = admitted
+			awaiter.mu.Lock()
+			awaiter.opened = admitted
+			awaiter.mu.Unlock()
 			return
 		}
 	}()
-	var stopOnce sync.Once
-	return func() {
-		stopOnce.Do(func() {
-			cancelAwait()
-			<-done
-			if opened != nil {
-				_ = opened.Close()
-			}
-		})
+	return awaiter
+}
+
+func (a *freshStoreAwaiter) StopPolling() {
+	if a == nil {
+		return
+	}
+	a.stopOnce.Do(func() {
+		if a.cancelAwait != nil {
+			a.cancelAwait()
+		}
+		if a.done != nil {
+			<-a.done
+		}
+	})
+}
+
+func (a *freshStoreAwaiter) DrainHandler(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	var drainErr error
+	a.drainOnce.Do(func() {
+		if a.handler != nil {
+			drainErr = a.handler.Close(ctx)
+		}
+	})
+	return drainErr
+}
+
+func (a *freshStoreAwaiter) CloseOpened() error {
+	if a == nil {
+		return nil
+	}
+	var closeErr error
+	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		opened := a.opened
+		a.opened = nil
+		a.mu.Unlock()
+		if opened != nil {
+			closeErr = opened.Close()
+		}
+	})
+	return closeErr
+}
+
+func (a *freshStoreAwaiter) Close() {
+	if a == nil {
+		return
+	}
+	a.StopPolling()
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), freshHTTPShutdownTimeout)
+	_ = a.DrainHandler(drainCtx)
+	cancelDrain()
+	_ = a.CloseOpened()
+}
+
+func startAwaitFreshStore(ctx context.Context, cfg config.Config, paths sqliterepo.InspectionPaths, h *startupHTTPHandler) func() {
+	return startFreshStoreAwaiter(ctx, cfg, paths, h).Close
+}
+
+func waitForFreshShutdown(
+	ctx context.Context,
+	server *http.Server,
+	result <-chan error,
+	handler *startupHTTPHandler,
+	await *freshStoreAwaiter,
+	opened *fresh.Opened,
+) {
+	awaitReadOnlyShutdownSignal(ctx, result)
+	if await != nil {
+		await.StopPolling()
+	}
+	shutdownHTTPServer(server, freshHTTPShutdownTimeout)
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), freshHTTPShutdownTimeout)
+	if await != nil {
+		_ = await.DrainHandler(drainCtx)
+	} else if handler != nil {
+		_ = handler.Close(drainCtx)
+	}
+	cancelDrain()
+	if await != nil {
+		_ = await.CloseOpened()
+	}
+	if opened != nil {
+		_ = opened.Close()
 	}
 }

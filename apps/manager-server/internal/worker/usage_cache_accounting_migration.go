@@ -25,11 +25,11 @@ type UsageCacheAccountingMigrationWorker struct {
 	delay        time.Duration
 	retryDelay   time.Duration
 	onCompletion func()
-	start        sync.Once
 	logStarted   sync.Once
 	completion   sync.Once
 	lastStatus   string
 	clearedRows  int64
+	lifecycle    workerLifecycle
 }
 
 func NewUsageCacheAccountingMigrationWorker(st *store.Store, onCompletion func()) *UsageCacheAccountingMigrationWorker {
@@ -46,9 +46,14 @@ func (w *UsageCacheAccountingMigrationWorker) Start(ctx context.Context) {
 	if w == nil || w.store == nil {
 		return
 	}
-	w.start.Do(func() {
-		go w.run(ctx)
-	})
+	w.lifecycle.goRun(ctx, func() { w.run(ctx) })
+}
+
+func (w *UsageCacheAccountingMigrationWorker) Wait() {
+	if w == nil {
+		return
+	}
+	w.lifecycle.wait()
 }
 
 func (w *UsageCacheAccountingMigrationWorker) run(ctx context.Context) {

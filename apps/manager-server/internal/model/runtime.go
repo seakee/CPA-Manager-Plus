@@ -283,6 +283,8 @@ type RuntimePrepareUpdateRequest struct {
 	RuntimeMutationRequest
 	ExpectedActiveArtifactID RuntimeArtifactID
 	TargetVersion            string
+	SourceMode               string
+	CDNPrefix                string
 }
 
 type RuntimeActivateUpdateRequest struct {
@@ -335,6 +337,18 @@ func (r RuntimePrepareUpdateRequest) Validate() error {
 	}
 	if !validRuntimeTargetVersion(r.TargetVersion) {
 		return errors.New("target version must be an exact canonical release version")
+	}
+	switch r.SourceMode {
+	case "", "github":
+		if strings.TrimSpace(r.CDNPrefix) != "" {
+			return errors.New("CDN prefix is only allowed when source mode is cdn")
+		}
+	case "cdn":
+		if !strings.HasPrefix(strings.TrimSpace(r.CDNPrefix), "https://") {
+			return errors.New("CDN prefix must use https://")
+		}
+	default:
+		return errors.New("unsupported prepare source mode")
 	}
 	return nil
 }
@@ -420,6 +434,9 @@ type RuntimeUpdateOperationObservation struct {
 	RuntimeIdentity   RuntimeIdentity
 	RuntimeGeneration RuntimeGeneration
 	State             RuntimeOperationState
+	Phase             string
+	ReceivedBytes     int64
+	TotalBytes        int64
 	FailureCode       string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time

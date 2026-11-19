@@ -13,7 +13,7 @@ import (
 // ParseConfigRules decodes one whole payload rule family and rejects anything
 // that is not an array of well-shaped rules for that family.
 func ParseConfigRules(family string, raw json.RawMessage) ([]any, error) {
-	entry, ok := gatewayFamilyIndex[family]
+	entry, ok := gatewayPageFamilyIndex[family]
 	if !ok {
 		return nil, ErrInvalidConfigPath
 	}
@@ -71,6 +71,9 @@ func validateConfigRule(entry ConfigRuleFamily, rule any) error {
 	if !ok {
 		return ErrInvalidConfigPath
 	}
+	if entry.Replace {
+		return validateReplaceConfigRule(object)
+	}
 	for key := range object {
 		switch key {
 		case "models", "params":
@@ -117,6 +120,93 @@ func validateConfigRule(entry ConfigRuleFamily, rule any) error {
 	return nil
 }
 
+func validateReplaceConfigRule(object map[string]any) error {
+	for key := range object {
+		switch key {
+		case "models", "target", "replacements":
+		default:
+			return ErrInvalidConfigPath
+		}
+	}
+	models, ok := object["models"].([]any)
+	if !ok || len(models) == 0 {
+		return ErrInvalidConfigPath
+	}
+	for _, model := range models {
+		if err := validateConfigModel(model); err != nil {
+			return err
+		}
+	}
+	target, ok := object["target"].(map[string]any)
+	if !ok {
+		return ErrInvalidConfigPath
+	}
+	for key := range target {
+		switch key {
+		case "role", "positions", "all":
+		default:
+			return ErrInvalidConfigPath
+		}
+	}
+	role, ok := target["role"].(string)
+	if !ok || role != "user" {
+		return ErrInvalidConfigPath
+	}
+	allVal, hasAll := target["all"]
+	allFlag := false
+	if hasAll {
+		flag, ok := allVal.(bool)
+		if !ok {
+			return ErrInvalidConfigPath
+		}
+		allFlag = flag
+	}
+	posVal, hasPos := target["positions"]
+	var positions []any
+	if hasPos {
+		list, ok := posVal.([]any)
+		if !ok {
+			return ErrInvalidConfigPath
+		}
+		positions = list
+		for _, rawPos := range positions {
+			num, ok := rawPos.(json.Number)
+			if !ok {
+				return ErrInvalidConfigPath
+			}
+			n, err := num.Int64()
+			if err != nil || n <= 0 {
+				return ErrInvalidConfigPath
+			}
+		}
+	}
+	if allFlag {
+		if len(positions) != 0 {
+			return ErrInvalidConfigPath
+		}
+	} else if len(positions) == 0 {
+		return ErrInvalidConfigPath
+	}
+	replacements, ok := object["replacements"].([]any)
+	if !ok || len(replacements) == 0 {
+		return ErrInvalidConfigPath
+	}
+	for _, rawEntry := range replacements {
+		entryMap, ok := rawEntry.(map[string]any)
+		if !ok || len(entryMap) != 1 {
+			return ErrInvalidConfigPath
+		}
+		for k, v := range entryMap {
+			if k == "" {
+				return ErrInvalidConfigPath
+			}
+			if _, ok := v.(string); !ok {
+				return ErrInvalidConfigPath
+			}
+		}
+	}
+	return nil
+}
 func validateConfigModel(model any) error {
 	object, ok := model.(map[string]any)
 	if !ok {
