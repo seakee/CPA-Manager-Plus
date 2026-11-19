@@ -153,6 +153,20 @@ jobs:
       - name: Test Gate B/C readiness harness
         run: node --test bin/ci/readiness-gate-bc.test.mjs
 
+      # The Docker upgrade host orchestration script and its synthetic suite are
+      # native bash + node:test under bin/upgrade, so `npm run test` never
+      # collects them. Neither requires a live Docker daemon.
+      - name: Test Docker upgrade orchestration
+        run: |
+          bash -n bin/upgrade-cpamp-v2.sh
+          node --test bin/upgrade/upgrade-cpamp-v2.test.mjs
+
+      # The Upgrade Docker acceptance harness unit suite is native node:test
+      # under bin/ci (`upgrade-docker.yml` is manual/scheduled only, so PRs must
+      # exercise its Docker-free contract suite here).
+      - name: Test Upgrade Docker acceptance harness
+        run: node --test bin/ci/upgrade-docker.test.mjs
+
       - name: Build
         run: npm --workspace apps/web run build:bundle
         env:

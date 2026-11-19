@@ -860,6 +860,31 @@ describe('GitHub Actions workflow integrity', () => {
     );
   });
 
+  it('runs the Docker upgrade orchestration and harness suites in the Frontend PR check job', () => {
+    const frontendJob = jobBlock(readWorkflow('pr-check.yml'), 'frontend');
+    const orchestrationStep = stepBlock(frontendJob, 'Test Docker upgrade orchestration');
+    const harnessStep = stepBlock(frontendJob, 'Test Upgrade Docker acceptance harness');
+
+    expect(orchestrationStep).toContain('bash -n bin/upgrade-cpamp-v2.sh');
+    expect(orchestrationStep).toContain('node --test bin/upgrade/upgrade-cpamp-v2.test.mjs');
+    expect(orchestrationStep).not.toMatch(/^\s+if:/m);
+    expect(orchestrationStep).not.toContain('continue-on-error');
+
+    expect(harnessStep).toContain('run: node --test bin/ci/upgrade-docker.test.mjs');
+    expect(harnessStep).not.toMatch(/^\s+if:/m);
+    expect(harnessStep).not.toContain('continue-on-error');
+
+    expect(frontendJob.indexOf('- name: Test Gate B/C readiness harness')).toBeLessThan(
+      frontendJob.indexOf('- name: Test Docker upgrade orchestration')
+    );
+    expect(frontendJob.indexOf('- name: Test Docker upgrade orchestration')).toBeLessThan(
+      frontendJob.indexOf('- name: Test Upgrade Docker acceptance harness')
+    );
+    expect(frontendJob.indexOf('- name: Test Upgrade Docker acceptance harness')).toBeLessThan(
+      frontendJob.indexOf('- name: Build')
+    );
+  });
+
   it('uses NUL-delimited Git paths before classification and release validation', () => {
     const workflow = readWorkflow('pr-check.yml');
 

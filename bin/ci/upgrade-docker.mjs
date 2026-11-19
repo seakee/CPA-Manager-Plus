@@ -68,23 +68,20 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANAGER_SERVER = path.join(ROOT, 'apps', 'manager-server');
 
-// The planned direct-upgrade release. It is also the release the contract
-// pins, so the whole acceptance chain runs against this one fixture instead of
-// recording a version gap.
+// Default real release fixture. Compatibility is decided by the product's
+// schema/semantic checks, not by requiring every source to share this tag.
 const DEFAULT_V1_TAG = 'v1.14.10';
-// The upstream commit that tag must resolve to. It is bootstrap
-// `PlannedDirectSourceCommit`, and it is asserted against the fixture's own
-// recorded commit: a moved tag is a different source than the one the contract
-// qualified, and the run must be refused instead of qualifying the new bytes.
+// Keep fixture provenance independent of the product admission policy: a moved
+// tag is not the same test input, even when both inputs claim v1.14.x.
 const EXPECTED_V1_COMMIT = 'a67ed8834a914ab24c36d2490fa6bb6d4166724c';
-// The release the v1.14.10 contract replaced. The acceptance run declares it
-// against the same source that just passed under the pinned declaration, so the
-// declared-version rule is proved against the real binary and not only read out
-// of a report.
-const STALE_DECLARATION_TAG = 'v1.14.4';
-// The tag this harness inspects beside the planned fixture. It is an input to
-// the shared-image snapshot only: the accepted release is always the one the
-// product's preflight report names, never this value.
+const SUPPORTED_SOURCE_FAMILY = 'v1.14.x';
+// An intra-family declaration older than the v1.14.10 fixture's recorded
+// schema/revision markers must be refused on those contradictory markers.
+const CONTRADICTORY_DECLARATION_TAG = 'v1.14.4';
+// A declaration outside the supported family must be refused by admission.
+const UNSUPPORTED_DECLARATION_TAG = 'v1.13.9';
+// Inspected only as part of the shared-image snapshot, not used to fabricate a
+// version for the source under test.
 const DEFAULT_SOURCE_TAG = 'v1.14.10';
 
 const ADMIN_V1 = 'Cpamp_U1D_Harness_Legacy_Admin_Key_11410';
@@ -183,10 +180,8 @@ const EVIDENCE_DIR = evidenceDirectory();
 const ROLLBACK_ALIAS_REPOSITORY = `${PREFIX}/upgrade`;
 const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
 
-// The release every source-reading command declares. The probe declares the
-// fixture tag it is inspecting; once the product's own preflight report names
-// the accepted release, that value replaces it, so the harness holds no second
-// copy of the pin.
+// The actual fixture release, when known from verified image provenance.
+// Explicitly unlabeled probes omit it and exercise structural admission.
 let acceptedRelease = null;
 
 // The harness contract this file and its test both read. It names what the
@@ -765,48 +760,15 @@ async function runAcceptance() {
   const nextFixture = await acceptanceStep('fixture', () => ensureFixture(args.v1Tag));
   const nextSource = await acceptanceStep('seed', () => seedSource(nextFixture));
 
-  // Read the release the running contract accepts from the product itself, so
-  // no second copy of the pinned version lives in this harness. The probe is a
-  // preflight, so it declares the tag it actually reads; the report's
-  // `expected=` value is then the single declared version every later command
-  // receives.
   acceptedRelease = args.v1Tag;
   const probe = runCli(binary, ['upgrade', 'preflight', '--legacy', nextSource.sourceRoot, '--json'], 'preflight(next-fixture)');
-  // The report's `expected=` value is the single declared version every later
-  // command receives. It is required: falling back to the tag this harness
-  // planned would let the run agree with itself while the product accepts
-  // something else, which is the one disagreement a re-pin has to surface.
-  const expected = expectedReleaseOf(probe);
-  if (!expected || !RELEASE_TAG_PATTERN.test(String(expected))) {
-    throw new Error(
-      `could not read the release the contract accepts from the preflight report (got ${JSON.stringify(expected)}; report: ${preview(probe.stdout)})`,
-    );
-  }
-  acceptedRelease = expected;
-  evidence.mode.acceptedRelease = expected;
+  assertAcceptedFixture({ binary, probe, tag: args.v1Tag, fixture: nextFixture, sourceRoot: nextSource.sourceRoot });
+  const sourceFixture = nextFixture;
+  const source = nextSource;
+  evidence.mode.acceptedRelease = acceptedRelease;
   evidence.mode.declaredSourceVersion = acceptedRelease;
-
-  let sourceFixture = nextFixture;
-  let source = nextSource;
-  if (expected !== args.v1Tag) {
-    // The planned fixture is not the release the contract accepts. The U1-1b
-    // re-pin closed that gap for v1.14.10, so this branch is the guard for the
-    // next one: the harness records the typed refusal and proves the chain
-    // against the accepted release instead of pretending the planned one works.
-    assertVersionGap(binary, probe, expected, nextFixture, nextSource);
-    sourceFixture = await acceptanceStep('accepted-fixture', () => ensureFixture(expected));
-    source = await acceptanceStep('accepted-seed', () => seedSource(sourceFixture));
-    stableFacts.push(`version-gap:${args.v1Tag}>${expected}`);
-  } else {
-    // The planned fixture is the accepted release, and that is proved from the
-    // product's own report rather than assumed from the tag this run passed in.
-    assertAcceptedFixture({ binary, probe, expected, tag: args.v1Tag, fixture: nextFixture, sourceRoot: nextSource.sourceRoot });
-    evidence.mode.sourceFixture = 'same';
-  }
+  evidence.mode.sourceFixture = 'same';
   evidence.fixtures.push({ role: 'source', ...sourceFixture, dataset: source.dataset });
-  if (sourceFixture.tag !== nextFixture.tag) {
-    evidence.fixtures.push({ role: 'next', ...nextFixture, dataset: nextSource.dataset });
-  }
 
   const workspace = createWorkspace(source);
   for (const [name, dir] of Object.entries(workspace.snapshots)) {
@@ -1481,40 +1443,50 @@ function assertReconcileReport(label, report, { sourceDays = null, domainsDone =
 }
 
 // chain runs the whole CLI chain and asserts each exit code and report.
-function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domainsDone = null } = {}) {
-  const preflight = runCli(binary, ['upgrade', 'preflight', '--legacy', sourceRoot, '--json'], `${label}:preflight`, { expectExit: 0 });
+function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domainsDone = null, sourceVersion = acceptedRelease } = {}) {
+  const expectedSourceVersion = sourceVersion ?? 'unknown';
+  const preflight = runCli(binary, ['upgrade', 'preflight', '--legacy', sourceRoot, '--json'], `${label}:preflight`, {
+    expectExit: 0,
+    sourceVersion,
+  });
   const preflightReport = parseJson(preflight.stdout, `${label}:preflight`);
   assertValue(preflightReport.ready === true, `${label}: preflight ready=false (blocked=${JSON.stringify(preflightReport.blocked)})`);
+  assertValue(
+    preflightReport.sourceVersion === expectedSourceVersion,
+    `${label}: preflight sourceVersion=${preflightReport.sourceVersion} want ${expectedSourceVersion}`,
+  );
   assertValue(preflightReport.checks.every((check) => check.status !== 'blocked'), `${label}: preflight has a blocked check`);
 
-  const run = runCli(binary, ['upgrade', 'run', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:run`, { expectExit: 0 });
+  const run = runCli(binary, ['upgrade', 'run', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:run`, {
+    expectExit: 0,
+    sourceVersion,
+  });
   const runReport = parseJson(run.stdout, `${label}:run`);
   assertValue(runReport.result?.stage === 'copy_in', `${label}: run stage=${runReport.result?.stage}`);
   assertValue(runReport.result?.restored === true, `${label}: run restored=${runReport.result?.restored}`);
-  // The next command the run prints is the reconciliation the operator can
-  // actually run. Exact tokens, not a substring: the source, the target and the
-  // declared release are each one argument, and no extra word can hide in them.
+  const expectedNextTokens = [
+    'cpa-manager-plus',
+    'upgrade',
+    'reconcile',
+    '--legacy',
+    sourceRoot,
+    '--target',
+    targetRoot,
+    ...(sourceVersion ? ['--source-version', sourceVersion] : []),
+  ];
   assertValue(
     typeof runReport.next === 'string' && runReport.next !== '',
     `${label}: run printed no reconcile next step: ${JSON.stringify(runReport.next)}`,
   );
   assertValue(
-    JSON.stringify(shellTokens(runReport.next)) ===
-      JSON.stringify([
-        'cpa-manager-plus',
-        'upgrade',
-        'reconcile',
-        '--legacy',
-        sourceRoot,
-        '--target',
-        targetRoot,
-        '--source-version',
-        acceptedRelease,
-      ]),
-    `${label}: the printed next step is not the exact reconcile command for this source and release: ${JSON.stringify(runReport.next)}`,
+    JSON.stringify(shellTokens(runReport.next)) === JSON.stringify(expectedNextTokens),
+    `${label}: the printed next step is not the exact reconcile command for this source and declaration: ${JSON.stringify(runReport.next)}`,
   );
 
-  const reconcile = runCli(binary, ['upgrade', 'reconcile', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:reconcile`, { expectExit: 0 });
+  const reconcile = runCli(binary, ['upgrade', 'reconcile', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:reconcile`, {
+    expectExit: 0,
+    sourceVersion,
+  });
   const reconcileReport = parseJson(reconcile.stdout, `${label}:reconcile`);
   assertReconcileReport(`${label}:reconcile`, reconcileReport.report, { sourceDays, domainsDone });
 
@@ -1522,6 +1494,10 @@ function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domai
   const statusReport = parseJson(status.stdout, `${label}:status`);
   assertValue(statusReport.recorded === true, `${label}: status recorded=false`);
   assertValue(statusReport.operation?.stage === 'reconcile', `${label}: status stage=${statusReport.operation?.stage}`);
+  assertValue(
+    statusReport.operation?.sourceVersion === expectedSourceVersion,
+    `${label}: status sourceVersion=${statusReport.operation?.sourceVersion} want ${expectedSourceVersion}`,
+  );
   assertValue(
     (statusReport.operation?.domainsDone ?? []).join(',') === (reconcileReport.report?.domainsDone ?? []).join(','),
     `${label}: the persisted row records ${JSON.stringify(statusReport.operation?.domainsDone)} but the reconcile report compared ${JSON.stringify(reconcileReport.report?.domainsDone)}`,
@@ -1573,104 +1549,104 @@ function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domai
   };
 }
 
-function assertVersionGap(binary, probe, expected, fixture, source) {
-  const report = parseJson(probe.stdout, 'preflight(next-fixture)');
-  const versionCheck = sourceVersionCheckOf(probe, 'preflight(next-fixture)');
-  assertValue(probe.code === 1, `preflight of ${fixture.tag}: exit=${probe.code} want 1`);
-  assertValue(versionCheck?.code === 'upgrade_source_version_unsupported', `preflight of ${fixture.tag}: code=${versionCheck?.code}`);
-  assertValue(report.ready === false, `preflight of ${fixture.tag}: ready=${report.ready}`);
-  assertValue(
-    Boolean(versionCheck?.detail) && versionCheck.detail.includes(versionMismatchDetail(expected, fixture.tag)),
-    `preflight of ${fixture.tag}: the refusal does not name ${versionMismatchDetail(expected, fixture.tag)} (${preview(versionCheck?.detail)})`,
-  );
-
-  // The target root was never created: a blocked preflight writes nothing.
-  const target = path.join(SCRATCH, 'work', `next-${fixture.tag}`, 'target');
-  const run = runCli(
-    binary,
-    ['upgrade', 'run', '--legacy', source.sourceRoot, '--target', target, '--json'],
-    `next-fixture:run`,
-    { expectExit: 1, allowMissingBinary: true },
-  );
-  const runReport = parseJson(run.stdout, 'next-fixture:run');
-  assertValue(runReport.preflight?.ready === false, 'next-fixture: run refused a blocked preflight');
-  assertValue(!fs.existsSync(path.join(target, 'usage.sqlite')), 'next-fixture: run wrote a store for a blocked source');
-
-  evidence.versionGap = {
-    plannedTag: fixture.tag,
-    acceptedRelease: expected,
-    image: fixture.image,
-    imageId: fixture.imageId,
-    commit: fixture.commit,
-    preflight: {
-      exitCode: probe.code,
-      code: versionCheck?.code,
-      detail: versionCheck?.detail,
-      reportSha256: sha256(probe.stdout),
-    },
-    targetRootCreated: fs.existsSync(path.join(target, 'usage.sqlite')),
-  };
-  evidence.findings.push({
-    code: 'upgrade_source_version_pinned',
-    severity: 'blocker-for-re-pin',
-    detail: `the contract accepts ${expected}, so a real ${fixture.tag} source is refused with upgrade_source_version_unsupported; a re-pin to ${expected} is what makes the planned fixture usable`,
-    file: 'apps/manager-server/internal/domain/bootstrap/contract.go:12',
-    fixtureReusedForRePin: `${fixture.image} (${fixture.imageId})`,
-  });
-}
-
-// assertAcceptedFixture proves that the planned fixture is the release the
-// product says it accepts, and that the product refuses the release the
-// contract replaced.
-//
-// The report is the authority: the run declares the tag it planned, so a passing
-// preflight whose detail binds that declaration to the pin is what makes the
-// fixture usable. The fixture's own source commit is checked against the pin as
-// well, so a moved tag cannot be qualified as the bytes the contract names.
-//
-// The second probe is the declared-version rule end to end: the same source that
-// just passed under the pinned declaration is refused, by the real binary, when
-// the operator declares v1.14.4 instead. It is read-only and takes one
-// preflight, and without it the re-pin would only be visible in the contract
-// constant, not in what the product does.
-function assertAcceptedFixture({ binary, probe, expected, tag, fixture, sourceRoot }) {
+// Qualify the real fixture both with its observed release and without a
+// recoverable patch label. Neither case may substitute a different release.
+function assertAcceptedFixture({ binary, probe, tag, fixture, sourceRoot }) {
+  const probeReport = parseJson(probe.stdout, 'preflight(next-fixture)');
   const versionCheck = sourceVersionCheckOf(probe, 'preflight(next-fixture)');
   assertValue(probe.code === 0, `preflight of ${tag}: exit=${probe.code} want 0`);
+  assertValue(probeReport.ready === true, `preflight of ${tag}: ready=${probeReport.ready} want true`);
+  assertValue(probeReport.sourceVersion === tag, `preflight of ${tag}: sourceVersion=${probeReport.sourceVersion} want ${tag}`);
   assertValue(versionCheck?.status === 'pass', `preflight of ${tag}: status=${versionCheck?.status} want pass`);
   assertValue(
-    Boolean(versionCheck?.detail) && versionCheck.detail.includes(versionMismatchDetail(expected, tag)),
-    `preflight of ${tag}: the report does not bind the declaration to the pin (${preview(versionCheck?.detail)})`,
+    versionCheck?.detail === sourceCompatibilityDetail(tag),
+    `preflight of ${tag}: detail=${preview(versionCheck?.detail)} want ${sourceCompatibilityDetail(tag)}`,
   );
   if (tag === DEFAULT_V1_TAG) {
-    assertValue(
-      fixture.commit === EXPECTED_V1_COMMIT,
-      `the ${tag} fixture resolved to ${fixture.commit}, want ${EXPECTED_V1_COMMIT} (bootstrap.PlannedDirectSourceCommit)`,
-    );
+    assertValue(fixture.commit === EXPECTED_V1_COMMIT, `the ${tag} fixture resolved to ${fixture.commit}, want ${EXPECTED_V1_COMMIT}`);
   }
-  const staleProbe = runCli(
+
+  const unlabeled = runCli(
     binary,
-    ['upgrade', 'preflight', '--legacy', sourceRoot, '--source-version', STALE_DECLARATION_TAG, '--json'],
-    `preflight(stale-${STALE_DECLARATION_TAG}-declaration)`,
+    ['upgrade', 'preflight', '--legacy', sourceRoot, '--json'],
+    'preflight(unlabeled-fixture)',
+    { expectExit: 0, sourceVersion: null },
+  );
+  const unlabeledReport = parseJson(unlabeled.stdout, 'preflight(unlabeled-fixture)');
+  const unlabeledCheck = sourceVersionCheckOf(unlabeled, 'preflight(unlabeled-fixture)');
+  assertValue(unlabeledReport.ready === true, 'the compatible unlabeled fixture was refused');
+  assertValue(
+    unlabeledReport.sourceVersion === 'unknown',
+    `unlabeled preflight fabricated sourceVersion=${unlabeledReport.sourceVersion} instead of unknown`,
+  );
+  assertValue(unlabeledCheck?.status === 'pass', 'unlabeled source did not pass structural admission');
+  assertValue(
+    unlabeledCheck?.detail === sourceCompatibilityDetail(null),
+    `unlabeled preflight detail=${preview(unlabeledCheck?.detail)} want ${sourceCompatibilityDetail(null)}`,
+  );
+
+  const unlabeledTarget = path.join(SCRATCH, 'work', 'unlabeled-compatibility', 'target');
+  const unlabeledChain = chain(binary, sourceRoot, unlabeledTarget, 'unlabeled-compatibility', { sourceVersion: null });
+
+  let contradictorySummary = null;
+  if (tag === DEFAULT_V1_TAG) {
+    const contradictory = runCli(
+      binary,
+      ['upgrade', 'preflight', '--legacy', sourceRoot, '--source-version', CONTRADICTORY_DECLARATION_TAG, '--json'],
+      `preflight(contradictory-${CONTRADICTORY_DECLARATION_TAG})`,
+      { expectExit: 1 },
+    );
+    const contradictoryCheck = sourceVersionCheckOf(contradictory, `preflight(contradictory-${CONTRADICTORY_DECLARATION_TAG})`);
+    const contradictoryPrefix = `source is newer than the pinned release ${CONTRADICTORY_DECLARATION_TAG}; markers from later releases: `;
+    assertValue(
+      contradictoryCheck?.status === 'blocked' && contradictoryCheck?.code === 'upgrade_source_version_unsupported',
+      `contradictory ${CONTRADICTORY_DECLARATION_TAG} declaration was not refused with upgrade_source_version_unsupported`,
+    );
+    assertValue(
+      Boolean(contradictoryCheck?.detail) && contradictoryCheck.detail.startsWith(contradictoryPrefix),
+      `contradictory ${CONTRADICTORY_DECLARATION_TAG} detail=${preview(contradictoryCheck?.detail)} missing prefix ${contradictoryPrefix}`,
+    );
+    contradictorySummary = {
+      declared: CONTRADICTORY_DECLARATION_TAG,
+      exitCode: contradictory.code,
+      code: contradictoryCheck.code,
+      detail: contradictoryCheck.detail,
+      reportSha256: sha256(contradictory.stdout),
+    };
+  }
+
+  const outsideFamily = runCli(
+    binary,
+    ['upgrade', 'preflight', '--legacy', sourceRoot, '--source-version', UNSUPPORTED_DECLARATION_TAG, '--json'],
+    'preflight(outside-family)',
     { expectExit: 1 },
   );
-  const staleLabel = `preflight(stale-${STALE_DECLARATION_TAG}-declaration)`;
-  const staleCheck = sourceVersionCheckOf(staleProbe, staleLabel);
-  const mismatch = versionMismatchDetail(expected, STALE_DECLARATION_TAG);
+  const refusal = sourceVersionCheckOf(outsideFamily, 'preflight(outside-family)');
+  const outsideDetail = sourceCompatibilityDetail(UNSUPPORTED_DECLARATION_TAG, { compatible: false });
+  assertValue(refusal?.status === 'blocked' && refusal?.code === 'upgrade_source_version_unsupported', 'outside-family declaration was not refused by admission');
   assertValue(
-    staleCheck?.code === 'upgrade_source_version_unsupported',
-    `${staleLabel}: code=${staleCheck?.code} want upgrade_source_version_unsupported`,
+    refusal?.detail === outsideDetail,
+    `outside-family detail=${preview(refusal?.detail)} want ${outsideDetail}`,
   );
-  assertValue(
-    Boolean(staleCheck?.detail) && staleCheck.detail.includes(mismatch),
-    `${staleLabel}: detail ${preview(staleCheck?.detail)} does not name ${mismatch}`,
-  );
-  evidence.versionMismatch = {
-    expected,
-    declared: STALE_DECLARATION_TAG,
-    exitCode: staleProbe.code,
-    code: staleCheck?.code,
-    detail: staleCheck?.detail,
-    reportSha256: sha256(staleProbe.stdout),
+  evidence.sourceCompatibility = {
+    fixtureRelease: tag,
+    expectedFamily: expectedFamilyOf(probe),
+    labeled: { exitCode: probe.code, detail: versionCheck.detail, reportSha256: sha256(probe.stdout) },
+    unlabeled: {
+      exitCode: unlabeled.code,
+      sourceVersion: unlabeledReport.sourceVersion,
+      detail: unlabeledCheck.detail,
+      reportSha256: sha256(unlabeled.stdout),
+      chainStage: unlabeledChain.status.stage,
+    },
+    ...(contradictorySummary ? { contradictoryPatch: contradictorySummary } : {}),
+    outsideFamily: {
+      declared: UNSUPPORTED_DECLARATION_TAG,
+      exitCode: outsideFamily.code,
+      code: refusal.code,
+      detail: refusal.detail,
+      reportSha256: sha256(outsideFamily.stdout),
+    },
   };
 }
 
@@ -1683,24 +1659,18 @@ function sourceVersionCheckOf(command, label) {
   return (report.checks ?? []).find((check) => check.name === 'source_version') ?? null;
 }
 
-// versionMismatchDetail is the exact detail a preflight prints when the
-// declaration is not the pinned release. The harness asserts the whole string
-// instead of a loose `expected=` substring: a report that names the pin but not
-// the declaration it refused would not prove the declared-version rule.
-export function versionMismatchDetail(expected, declared) {
-  return `expected=${expected} declared=${declared}`;
+export function sourceCompatibilityDetail(declared, { compatible = true } = {}) {
+  const label = declared == null || declared === '' ? 'none' : String(declared);
+  if (!compatible) return `expected=${SUPPORTED_SOURCE_FAMILY} declared=${label}`;
+  return `expected=${SUPPORTED_SOURCE_FAMILY} declared=${label}; compatible ${SUPPORTED_SOURCE_FAMILY} profile verified`;
 }
 
-// expectedReleaseOf reads the release the product says it accepts out of a
-// preflight report. Every refusal that is about the declaration names it as
-// `expected=<release>`; the newer-marker refusal deliberately does not, and an
-// empty answer means the report cannot bind this run to a release at all. The
-// caller must fail instead of substituting a planned tag.
-export function expectedReleaseOf(command) {
+export function expectedFamilyOf(command) {
   const check = sourceVersionCheckOf(command, 'preflight(next-fixture)');
-  const match = /expected=(v\d+\.\d+\.\d+)/.exec(check?.detail ?? '');
+  const match = /expected=(v\d+\.\d+\.x)\b/.exec(check?.detail ?? '');
   return match ? match[1] : null;
 }
+
 
 // ---------------------------------------------------------------------------
 // wizard read routes
@@ -1828,25 +1798,14 @@ async function assertWizard(binary, sourceRoot) {
   assertValue(preflight.body?.contractVersion === 'cpamp.upgrade-wizard.v1', `wizard contract = ${preflight.body?.contractVersion}`);
   assertValue(preflight.body?.sourceKind === 'legacy-manager', `wizard source kind = ${preflight.body?.sourceKind}`);
   assertValue(preflight.body?.ready === true, `wizard preflight ready = ${preflight.body?.ready}`);
-  // The read-only preflight cannot declare the 1.x release: the CLI copy-in
-  // declares it. That is a pending observation, never the exact-equality
-  // acceptance the CLI makes, and never a refusal of a sound source.
-  assertValue(
-    preflight.body?.pendingDeclaration === true,
-    `wizard preflight pendingDeclaration = ${preflight.body?.pendingDeclaration}`,
-  );
-  assertValue(
-    preflight.body?.expectedVersion === acceptedRelease,
-    `wizard preflight expectedVersion = ${preflight.body?.expectedVersion} want ${acceptedRelease}`,
-  );
+  assertValue(preflight.body?.sourceVersion === 'unknown', `wizard preflight sourceVersion = ${preflight.body?.sourceVersion} want unknown`);
+  assertValue(preflight.body?.pendingDeclaration === false, `wizard preflight pendingDeclaration = ${preflight.body?.pendingDeclaration} want false`);
+  assertValue(preflight.body?.expectedVersion === undefined, `wizard preflight expectedVersion = ${preflight.body?.expectedVersion} want undefined`);
   const wizardVersionCheck = (preflight.body?.checks ?? []).find((check) => check.name === 'source_version');
+  assertValue(wizardVersionCheck?.status === 'pass', 'wizard refused a structurally compatible source without a patch declaration');
   assertValue(
-    wizardVersionCheck?.status === 'pending',
-    `wizard source version status = ${wizardVersionCheck?.status}`,
-  );
-  assertValue(
-    wizardVersionCheck?.code === 'upgrade_source_version_declared_at_copy_in',
-    `wizard source version code = ${wizardVersionCheck?.code}`,
+    wizardVersionCheck?.detail === sourceCompatibilityDetail(null),
+    `wizard source_version detail = ${preview(wizardVersionCheck?.detail)} want ${sourceCompatibilityDetail(null)}`,
   );
   assertValue(
     (preflight.body?.checks ?? []).every((check) => check.status !== 'blocked'),
@@ -1883,9 +1842,9 @@ async function assertWizard(binary, sourceRoot) {
         contractVersion: preflight.body?.contractVersion,
         ready: preflight.body?.ready,
         sourceKind: preflight.body?.sourceKind,
-        // The read cannot declare the release, so it reports the declaration as
-        // pending and names the release the copy-in must be told. The document
-        // records the pair it asserted, not only their hash.
+        // Structural v1.14.x admission qualifies the unlabeled mount directly
+        // without requiring a pending CLI patch declaration or fabricating a tag.
+        sourceVersion: preflight.body?.sourceVersion,
         pendingDeclaration: preflight.body?.pendingDeclaration,
         expectedVersion: preflight.body?.expectedVersion,
       },
@@ -3887,27 +3846,21 @@ function httpJson(method, url, { headers = {}, body } = {}) {
 // CLI
 // ---------------------------------------------------------------------------
 
-// withDeclaredSourceVersion keeps one rule for every source-reading command:
-// preflight, run and reconcile always declare the pinned accepted release. A
-// caller cannot forget the flag, and a flag the caller already passed is kept.
+// Only a verified fixture label is attached to source-reading commands. An
+// explicitly unlabeled probe lets the real product prove compatibility itself.
 export function withDeclaredSourceVersion(cliArgs, release) {
   const declared = [...cliArgs];
   if (declared[0] !== 'upgrade' || !['preflight', 'run', 'reconcile'].includes(declared[1])) return declared;
-  if (declared.includes('--source-version')) return declared;
-  if (!RELEASE_TAG_PATTERN.test(String(release ?? ''))) {
-    throw new Error(
-      `the harness must know the pinned accepted release before it runs upgrade ${declared[1]}, got ${JSON.stringify(release)}`,
-    );
-  }
+  if (declared.includes('--source-version') || release == null) return declared;
+  if (!RELEASE_TAG_PATTERN.test(String(release))) throw new Error('fixture release must be an exact observed vX.Y.Z tag');
   return [declared[0], declared[1], '--source-version', release, ...declared.slice(2)];
 }
 
-
 // shellTokens splits a printed command the way a shell reads the quoting
 // ShellQuote produces: single-quoted runs (including the '\'' escape) and
-// backslash escapes outside them. The harness asserts the exact argv of the next
-// command it prints, so a substring match cannot accept a different flag value
-// or an extra word.
+// backslash escapes outside them. The harness asserts the exact argv of the
+// next command `upgrade run` prints so a substring match cannot accept a
+// drifted flag value or an extra word.
 export function shellTokens(command) {
   const text = String(command ?? '');
   const tokens = [];
@@ -3945,8 +3898,10 @@ export function shellTokens(command) {
   return tokens;
 }
 
-function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false, env = null } = {}) {
-  const effectiveArgs = withDeclaredSourceVersion(cliArgs, acceptedRelease);
+
+
+function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false, env = null, sourceVersion = acceptedRelease } = {}) {
+  const effectiveArgs = withDeclaredSourceVersion(cliArgs, sourceVersion);
   const result = sh(binary, effectiveArgs, { timeout: 600_000, ...(env ? { env } : {}) });
   evidence.commands.push(commandRecord(name, result.code, result.stdout, result.stderr));
   if (result.code === null && !allowMissingBinary) {

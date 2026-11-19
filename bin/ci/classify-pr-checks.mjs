@@ -89,6 +89,12 @@ const triggersFrontend = (filePath) =>
   // same change and must keep that job scheduled.
   filePath === 'bin/ci/readiness-gate-bc.mjs' ||
   filePath === 'bin/ci/readiness-gate-bc.test.mjs' ||
+  // The Docker upgrade host script, its synthetic `node:test` suite, and the
+  // Upgrade Docker harness `node:test` suite run in the Frontend job.
+  filePath === 'bin/upgrade-cpamp-v2.sh' ||
+  startsWithPath(filePath, 'bin/upgrade') ||
+  filePath === 'bin/ci/upgrade-docker.mjs' ||
+  filePath === 'bin/ci/upgrade-docker.test.mjs' ||
   // The design-token checker, its committed baseline and its runtime property
   // registry run in the Frontend job alongside tests/designTokenCheck.test.mjs.
   filePath === 'bin/ci/check-design-tokens.mjs' ||
