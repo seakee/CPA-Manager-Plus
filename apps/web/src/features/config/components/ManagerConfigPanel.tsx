@@ -26,6 +26,9 @@ type ManagerConfigPanelProps = {
   managerPollIntervalMs: string;
   managerBatchSize: string;
   managerQueryLimit: string;
+  managerQueue: string;
+  managerPopSide: string;
+  managerTlsSkipVerify: boolean;
   managerRetentionSeconds: number;
   managerConfigSourceLabel: string;
   managerUsageStatisticsEnabled: boolean;
@@ -39,8 +42,10 @@ type ManagerConfigPanelProps = {
   onPollIntervalMsChange: (value: string) => void;
   onBatchSizeChange: (value: string) => void;
   onQueryLimitChange: (value: string) => void;
+  onQueueChange: (value: string) => void;
+  onPopSideChange: (value: string) => void;
+  onTlsSkipVerifyChange: (value: boolean) => void;
 };
-
 export function ManagerConfigPanel({
   managerLoading,
   managerSaving,
@@ -60,6 +65,9 @@ export function ManagerConfigPanel({
   managerPollIntervalMs,
   managerBatchSize,
   managerQueryLimit,
+  managerQueue,
+  managerPopSide,
+  managerTlsSkipVerify,
   managerRetentionSeconds,
   managerConfigSourceLabel,
   managerUsageStatisticsEnabled,
@@ -73,6 +81,9 @@ export function ManagerConfigPanel({
   onPollIntervalMsChange,
   onBatchSizeChange,
   onQueryLimitChange,
+  onQueueChange,
+  onPopSideChange,
+  onTlsSkipVerifyChange,
 }: ManagerConfigPanelProps) {
   const { t } = useTranslation();
   const connectionInputDisabled =
@@ -300,6 +311,59 @@ export function ManagerConfigPanel({
             }
           />
         </div>
+        {managerCollectorMode === 'auto' ||
+        managerCollectorMode === 'resp' ||
+        managerCollectorMode === 'subscribe' ? (
+          <div className={styles.managerConfigGrid}>
+            <Input
+              label={t('config_management.manager.queue')}
+              placeholder="usage"
+              value={managerQueue}
+              onChange={(event) => onQueueChange(event.target.value)}
+              disabled={
+                disableControls ||
+                managerLoading ||
+                !managerRequestMonitoringEnabled ||
+                !canConfigureRequestMonitoring
+              }
+            />
+            {managerCollectorMode === 'auto' || managerCollectorMode === 'resp' ? (
+              <div className={styles.managerField}>
+                <span className={styles.managerFieldLabel}>
+                  {t('config_management.manager.pop_side')}
+                </span>
+                <Select
+                  value={managerPopSide}
+                  options={[
+                    { value: 'right', label: t('config_management.manager.pop_side_right') },
+                    { value: 'left', label: t('config_management.manager.pop_side_left') },
+                  ]}
+                  triggerClassName={styles.managerSelectTrigger}
+                  onChange={onPopSideChange}
+                  disabled={
+                    disableControls ||
+                    managerLoading ||
+                    !managerRequestMonitoringEnabled ||
+                    !canConfigureRequestMonitoring
+                  }
+                  ariaLabel={t('config_management.manager.pop_side')}
+                />
+              </div>
+            ) : null}
+            <ToggleSwitch
+              label={t('config_management.manager.tls_skip_verify')}
+              labelPosition="left"
+              checked={managerTlsSkipVerify}
+              onChange={onTlsSkipVerifyChange}
+              disabled={
+                disableControls ||
+                managerLoading ||
+                !managerRequestMonitoringEnabled ||
+                !canConfigureRequestMonitoring
+              }
+            />
+          </div>
+        ) : null}
       </section>
 
       <section className={styles.managerSection}>

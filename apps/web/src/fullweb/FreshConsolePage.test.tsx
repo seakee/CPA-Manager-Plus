@@ -292,29 +292,23 @@ describe('Fresh installation and Console authority boundary', () => {
     await mount(retryTransport);
     await login();
     await navigate('/config');
-    await act(async () => find('gateway-tab-retry').props.onClick());
+    await act(async () => find('gateway-tab-routing').props.onClick());
     await act(async () =>
       find('gateway-field-routing.retry.request-retry')
         .findByType('input')
         .props.onChange({ target: { value: '4' } })
     );
   }
-  it('keeps existing system information and session tools in a collapsed section below product settings', async () => {
+  it('keeps clear-login inside FreshSystemWorkspace without the redundant quick-links footer', async () => {
     await mount();
     await login();
     await navigate('/system');
     const system = renderer.root.findByType(SystemPage);
-    const details = system.findByProps({ className: 'system-additional-info' });
-    expect(details.type).toBe('details');
-    expect(details.props.open).not.toBe(true);
-    expect(details.findByType('summary').props.children).toBe(c('additionalInfo'));
-    expect(details.findAllByType(FreshSystemWorkspace)).toHaveLength(0);
+    expect(system.findAllByProps({ className: 'system-additional-info' })).toHaveLength(0);
     expect(system.findAllByType(FreshSystemWorkspace)).toHaveLength(1);
-    expect(
-      details
-        .findAllByType(Button)
-        .some((button) => button.props.children === i18n.t('system_info.clear_login_button'))
-    ).toBe(true);
+    expect(system.findByProps({ 'data-testid': 'system-clear-login-btn' }).props.children).toBe(
+      i18n.t('system_info.clear_login_button')
+    );
   });
   it('keeps a real gateway draft on logout cancellation and clears the session only after confirmation', async () => {
     await editGateway();
@@ -709,7 +703,7 @@ describe('Fresh installation and Console authority boundary', () => {
       expect(has('logs-empty-authority-notice')).toBe(true);
     });
   });
-  it('follows the Gateway observability.logs.* ownership link into LogsPage and writes a credited field', async () => {
+  it('navigates from Gateway to LogsPage and writes a credited field when Managed capability is active', async () => {
     useConfigStore.getState().clearCache();
     vi.spyOn(configApi, 'getConfig').mockResolvedValue({
       loggingToFile: false,
@@ -737,23 +731,8 @@ describe('Fresh installation and Console authority boundary', () => {
     await act(async () => {
       await vi.dynamicImportSettled();
     });
-    await act(async () => {
-      find('gateway-tab-owners').props.onClick();
-    });
-    const ownerLink = find('gateway-owner-link-/logs').findByType('a');
-    expect(ownerLink.props.href).toBe('/console/logs');
-    await act(async () => {
-      ownerLink.props.onClick({
-        button: 0,
-        preventDefault: vi.fn(),
-        currentTarget: null,
-        target: null,
-        metaKey: false,
-        altKey: false,
-        ctrlKey: false,
-        shiftKey: false,
-      });
-    });
+    expect(find('gateway-config-workspace')).toBeDefined();
+    await navigate('/logs');
     await act(async () => {
       await vi.dynamicImportSettled();
     });

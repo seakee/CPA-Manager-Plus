@@ -4,8 +4,11 @@ import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 import {
   canPrepareCPAUpdate,
+  CPA_UPDATE_MAX_UPLOAD_BYTES,
   cpaUpdateApi,
   CPAUpdateAPIError,
+  isValidHttpsCDNPrefix,
+  type CPAUpdateRequest,
   type CPAUpdateStatus,
 } from './cpaUpdateApi';
 import {
@@ -38,12 +41,26 @@ export type CPAUpdateFlowStage =
   | 'succeeded'
   | 'already_applied';
 
+export interface CPAUpdatePrepareProgress {
+  phase?: string;
+  receivedBytes: number;
+  totalBytes: number;
+}
+
+export interface CPAUpdatePrepareOptions {
+  sourceMode?: 'github' | 'cdn';
+  cdnPrefix?: string;
+  uploadFile?: Blob;
+}
+
 interface Snapshot {
   status: CPAUpdateStatus | null;
   statusError: boolean;
   intent: CPAUpdateIntent | null;
   recoveryRecord: CPAUpdateRecordSnapshot | null;
   stage: CPAUpdateFlowStage;
+  recoveredSession: boolean;
+  prepareProgress: CPAUpdatePrepareProgress | null;
   initialized: boolean;
   busy: boolean;
   storageError: CPAUpdateStorageError['kind'] | null;
@@ -56,6 +73,8 @@ const initialSnapshot = (): Snapshot => ({
   intent: null,
   recoveryRecord: null,
   stage: 'idle',
+  recoveredSession: false,
+  prepareProgress: null,
   initialized: false,
   busy: false,
   storageError: null,
@@ -93,12 +112,54 @@ function compatible(status: CPAUpdateStatus | null, intent: CPAUpdateIntent): bo
 const sameFlow = (left: CPAUpdateIntent, right: CPAUpdateIntent) =>
   left.request_id === right.request_id &&
   left.target_version === right.target_version &&
-  left.expected_active_artifact_id === right.expected_active_artifact_id;
+  left.expected_active_artifact_id === right.expected_active_artifact_id &&
+  left.source_mode === right.source_mode &&
+  left.cdn_prefix === right.cdn_prefix;
+const withoutUnrecordedContextChanged = (intent: CPAUpdateIntent): CPAUpdateIntent => {
+  if (!('unrecorded_context_changed' in intent)) return intent;
+  const next = { ...intent };
+  delete next.unrecorded_context_changed;
+  return next;
+};
+// Earlier builds did not store the source, even for CDN and upload prepares.
+const canReplaySource = (intent: CPAUpdateIntent) =>
+  intent.phase === 'activate' || intent.source_mode === 'github' || intent.source_mode === 'cdn';
+const PREPARE_PHASE_ORDER: Record<string, number> = {
+  resolving: 0,
+  uploading: 1,
+  downloading: 1,
+  verifying: 2,
+  staging: 3,
+};
+
+function mergePrepareProgress(
+  previous: CPAUpdatePrepareProgress | null,
+  incoming: { phase?: string; receivedBytes?: number; totalBytes?: number }
+): CPAUpdatePrepareProgress {
+  const previousPhase = previous?.phase;
+  const nextPhase = incoming.phase;
+  let phase = nextPhase ?? previousPhase;
+  if (
+    previousPhase &&
+    nextPhase &&
+    previousPhase in PREPARE_PHASE_ORDER &&
+    nextPhase in PREPARE_PHASE_ORDER &&
+    PREPARE_PHASE_ORDER[nextPhase] < PREPARE_PHASE_ORDER[previousPhase]
+  ) {
+    phase = previousPhase;
+  }
+  return {
+    phase,
+    receivedBytes: Math.max(previous?.receivedBytes ?? 0, incoming.receivedBytes ?? 0),
+    totalBytes: Math.max(previous?.totalBytes ?? 0, incoming.totalBytes ?? 0),
+  };
+}
 
 interface Actions {
   refresh: () => Promise<void>;
   check: () => Promise<void>;
-  prepare: () => Promise<void>;
+  prepare: (options?: CPAUpdatePrepareOptions) => Promise<void>;
+  prepareUpload: (file: Blob) => Promise<void>;
   activate: (expected: CPAUpdateIntent) => Promise<void>;
   retry: (expected: CPAUpdateIntent) => Promise<void>;
   forget: (expected: CPAUpdateRecordSnapshot) => Promise<void>;
@@ -125,6 +186,7 @@ export function useCPAUpdateFlow() {
     let pending = false;
     let timer: number | undefined;
     let view = initialSnapshot();
+    let unrecordedOperation: { request_id: string; phase: CPAUpdateIntent['phase'] } | null = null;
     const waiting = new AbortController();
     const connection = { base: context.base, key: context.key };
     const scope = context.scope;
@@ -143,7 +205,18 @@ export function useCPAUpdateFlow() {
       publish({ storageError: kind, ...(kind === 'changed' ? { stage: 'context_changed' } : {}) });
     };
     const applyStatus = (status: CPAUpdateStatus) => {
-      publish({ status, statusError: false });
+      const staleTerminalIntent =
+        !!view.intent &&
+        terminal(view.stage) &&
+        (status.state === 'up_to_date' ||
+          status.mode !== 'embedded' ||
+          status.target_version !== view.intent.target_version ||
+          status.active_artifact_id !== view.intent.expected_active_artifact_id);
+      publish({
+        status,
+        statusError: false,
+        ...(staleTerminalIntent ? { intent: null } : {}),
+      });
       if (
         view.intent &&
         ['prepared', 'not_found'].includes(view.stage) &&
@@ -167,9 +240,17 @@ export function useCPAUpdateFlow() {
       stage: 'confirmed_failed' | 'succeeded' | 'already_applied',
       failureCode?: string
     ) => {
-      publish({ stage, failureCode });
+      const current = view.intent!;
+      unrecordedOperation = null;
+      publish({
+        stage,
+        failureCode,
+        prepareProgress: null,
+        recoveredSession: false,
+        intent: withoutUnrecordedContextChanged(current),
+      });
       try {
-        await clearCPAUpdateIntent(scope, view.intent!, waiting.signal);
+        await clearCPAUpdateIntent(scope, current, waiting.signal);
         publish({ storageError: null, recoveryRecord: { raw: null } });
       } catch (error) {
         blockStorage(error);
@@ -177,12 +258,13 @@ export function useCPAUpdateFlow() {
     };
     const prepared = async (): Promise<void> => {
       const previous = view.intent!;
-      publish({ stage: 'prepared', failureCode: undefined });
+      unrecordedOperation = null;
+      publish({ stage: 'prepared', failureCode: undefined, prepareProgress: null });
       // Reobserving prepared evidence must not rewrite its revision and cause
       // storage-event ping-pong between tabs.
-      if (previous.client_stage === 'prepared') return;
+      if (previous.client_stage === 'prepared' && !previous.unrecorded_context_changed) return;
       const next: CPAUpdateIntent = {
-        ...previous,
+        ...withoutUnrecordedContextChanged(previous),
         client_stage: 'prepared',
         updated_at_ms: Math.max(Date.now(), previous.updated_at_ms),
       };
@@ -213,12 +295,30 @@ export function useCPAUpdateFlow() {
         } else if (result.state === 'failed') {
           await complete('confirmed_failed', result.failure_code);
         } else {
-          publish({ stage: result.state, failureCode: undefined });
+          const hasProgress =
+            result.stage_phase !== undefined ||
+            result.received_bytes !== undefined ||
+            result.total_bytes !== undefined;
+          publish({
+            stage: result.state,
+            failureCode: undefined,
+            ...(hasProgress
+              ? {
+                  prepareProgress: mergePrepareProgress(view.prepareProgress, {
+                    phase: result.stage_phase,
+                    receivedBytes: result.received_bytes,
+                    totalBytes: result.total_bytes,
+                  }),
+                }
+              : {}),
+          });
         }
       } catch (error) {
         publish({
+          prepareProgress: null,
           stage:
-            error instanceof CPAUpdateAPIError && error.kind === 'context_changed'
+            error instanceof CPAUpdateAPIError &&
+            (error.kind === 'context_changed' || error.kind === 'rejected')
               ? 'context_changed'
               : 'outcome_unknown',
         });
@@ -243,18 +343,49 @@ export function useCPAUpdateFlow() {
           ) {
             throw new CPAUpdateStorageError('changed');
           }
+          const isSameActiveFlow = view.initialized && !!view.intent && sameFlow(stored, view.intent);
+          const isUnrecordedContextChanged =
+            !!stored.unrecorded_context_changed ||
+            (isSameActiveFlow &&
+              view.stage === 'context_changed' &&
+              unrecordedOperation?.request_id === stored.request_id &&
+              unrecordedOperation?.phase === stored.phase);
+          let nextIntent = stored;
+          let nextRecord = record;
+          if (!isUnrecordedContextChanged) {
+            unrecordedOperation = null;
+          } else if (!stored.unrecorded_context_changed) {
+            const patched: CPAUpdateIntent = {
+              ...withoutUnrecordedContextChanged(stored),
+              unrecorded_context_changed: true,
+              updated_at_ms: Math.max(Date.now(), stored.updated_at_ms),
+            };
+            publish({
+              stage: 'context_changed',
+              failureCode: undefined,
+              prepareProgress: null,
+            });
+            await persistCPAUpdateIntent(scope, patched, stored, waiting.signal);
+            if (!alive) return;
+            nextIntent = patched;
+            nextRecord = { raw: JSON.stringify(patched) };
+          }
           publish({
-            intent: stored,
-            recoveryRecord: record,
+            intent: nextIntent,
+            recoveryRecord: nextRecord,
             storageError: null,
-            ...(!view.initialized ? { stage: 'recovering' } : {}),
+            recoveredSession: isSameActiveFlow ? view.recoveredSession : true,
+            ...(isUnrecordedContextChanged
+              ? { stage: 'context_changed', failureCode: undefined, prepareProgress: null }
+              : !isSameActiveFlow
+                ? { stage: 'recovering', failureCode: undefined, prepareProgress: null }
+                : {}),
           });
-          // Recovery always queries durable evidence, even for client_stage=prepared.
-          await observe();
+          if (!isUnrecordedContextChanged) {
+            await observe();
+          }
         } else if (unresolved(view)) {
           throw new CPAUpdateStorageError('changed');
-        } else {
-          publish({ storageError: null, recoveryRecord: record });
         }
       } catch (error) {
         blockStorage(error);
@@ -287,39 +418,158 @@ export function useCPAUpdateFlow() {
         schedule();
       }
     };
-    const submit = async (intent: CPAUpdateIntent) => {
+    const submit = async (intent: CPAUpdateIntent, options?: CPAUpdatePrepareOptions) => {
+      unrecordedOperation = null;
       publish({
         intent,
         recoveryRecord: { raw: JSON.stringify(intent) },
         stage: 'submitting',
+        recoveredSession: false,
+        prepareProgress:
+          intent.phase === 'prepare'
+            ? {
+                phase: options?.uploadFile ? 'uploading' : 'resolving',
+                receivedBytes: 0,
+                totalBytes: options?.uploadFile ? options.uploadFile.size : 0,
+              }
+            : null,
         failureCode: undefined,
       });
+      let progressWatching = true;
+      let progressPollTimer: number | undefined;
+      const stopProgressWatch = () => {
+        progressWatching = false;
+        if (progressPollTimer !== undefined) window.clearTimeout(progressPollTimer);
+        progressPollTimer = undefined;
+        waiting.signal.removeEventListener('abort', stopProgressWatch);
+      };
+      waiting.signal.addEventListener('abort', stopProgressWatch, { once: true });
+      if (intent.phase === 'prepare') {
+        const pollProgress = async () => {
+          if (!alive || !progressWatching) return;
+          try {
+            const res = await cpaUpdateApi.observe(connection, 'prepare', intent, waiting.signal);
+            if (!alive || !progressWatching) return;
+            if (
+              res.stage_phase !== undefined ||
+              res.received_bytes !== undefined ||
+              res.total_bytes !== undefined
+            ) {
+              publish({
+                prepareProgress: mergePrepareProgress(view.prepareProgress, {
+                  phase: res.stage_phase,
+                  receivedBytes: res.received_bytes,
+                  totalBytes: res.total_bytes,
+                }),
+              });
+            }
+          } catch {
+            // Progress polling is strictly best-effort while POST is in flight.
+          }
+          if (alive && progressWatching) {
+            progressPollTimer = window.setTimeout(() => {
+              void pollProgress();
+            }, 1000);
+          }
+        };
+        progressPollTimer = window.setTimeout(() => {
+          void pollProgress();
+        }, 700);
+      }
       try {
-        const result = await cpaUpdateApi.mutate(connection, intent.phase, intent, waiting.signal);
+        let result;
+        if (intent.phase === 'prepare' && intent.source_mode === 'upload') {
+          if (!options?.uploadFile) {
+            throw new CPAUpdateAPIError('rejected', 'invalid_request');
+          }
+          result = await cpaUpdateApi.prepareUpload(
+            connection,
+            intent,
+            options.uploadFile,
+            (loaded, total) => {
+              publish({
+                prepareProgress: mergePrepareProgress(view.prepareProgress, {
+                  phase: loaded >= total && total > 0 ? 'verifying' : 'uploading',
+                  receivedBytes: loaded,
+                  totalBytes: total,
+                }),
+              });
+            },
+            waiting.signal
+          );
+        } else {
+          const requestIntent: CPAUpdateRequest =
+            intent.phase === 'prepare' && intent.source_mode === 'cdn'
+              ? {
+                  request_id: intent.request_id,
+                  target_version: intent.target_version,
+                  expected_active_artifact_id: intent.expected_active_artifact_id,
+                  source_mode: 'cdn',
+                  cdn_prefix: intent.cdn_prefix,
+                }
+              : {
+                  request_id: intent.request_id,
+                  target_version: intent.target_version,
+                  expected_active_artifact_id: intent.expected_active_artifact_id,
+                };
+          result = await cpaUpdateApi.mutate(connection, intent.phase, requestIntent, waiting.signal);
+        }
+        stopProgressWatch();
         if (!alive) return;
         if (result.state === 'failed') await complete('confirmed_failed', result.failure_code);
         else if (intent.phase === 'prepare') await prepared();
         else await complete(result.already_applied ? 'already_applied' : 'succeeded');
       } catch (error) {
+        stopProgressWatch();
         if (!alive) return;
-        if (error instanceof CPAUpdateAPIError && error.kind === 'context_changed') {
-          publish({ stage: 'context_changed' });
+        if (error instanceof CPAUpdateAPIError && error.kind === 'rejected') {
+          await complete('confirmed_failed', error.code);
+        } else if (error instanceof CPAUpdateAPIError && error.kind === 'context_changed') {
+          unrecordedOperation = { request_id: intent.request_id, phase: intent.phase };
+          publish({ stage: 'context_changed', prepareProgress: null });
+          const next: CPAUpdateIntent = {
+            ...withoutUnrecordedContextChanged(intent),
+            unrecorded_context_changed: true,
+            updated_at_ms: Math.max(Date.now(), intent.updated_at_ms),
+          };
+          try {
+            await persistCPAUpdateIntent(scope, next, intent, waiting.signal);
+            publish({
+              intent: next,
+              recoveryRecord: { raw: JSON.stringify(next) },
+              storageError: null,
+            });
+          } catch (persistError) {
+            if (!alive) return;
+            if (
+              persistError instanceof CPAUpdateStorageError &&
+              persistError.kind === 'changed'
+            ) {
+              await refresh();
+              return;
+            }
+            blockStorage(persistError);
+          }
         } else {
-          publish({ stage: 'outcome_unknown' });
+          publish({ stage: 'outcome_unknown', prepareProgress: null });
           // A browser timeout is not a Runtime failure. Never POST from recovery.
           await observe();
         }
       }
       if (alive) await readStatus();
     };
-    const persistAndSubmit = async (next: CPAUpdateIntent, previous: CPAUpdateIntent | null) => {
+    const persistAndSubmit = async (
+      next: CPAUpdateIntent,
+      previous: CPAUpdateIntent | null,
+      options?: CPAUpdatePrepareOptions
+    ) => {
       try {
         await persistCPAUpdateIntent(scope, next, previous, waiting.signal);
       } catch (error) {
         blockStorage(error);
         return;
       }
-      if (alive) await submit(next);
+      if (alive) await submit(next, options);
     };
     const controls: Actions = {
       refresh: () => run(refresh),
@@ -354,8 +604,20 @@ export function useCPAUpdateFlow() {
           }
         });
       },
-      prepare: async () => {
+      prepare: async (options?: CPAUpdatePrepareOptions) => {
         if (!canPrepare(view)) return;
+        if (options?.uploadFile) {
+          if (
+            typeof options.uploadFile.size !== 'number' ||
+            !Number.isFinite(options.uploadFile.size) ||
+            options.uploadFile.size <= 0 ||
+            options.uploadFile.size > CPA_UPDATE_MAX_UPLOAD_BYTES
+          ) {
+            return;
+          }
+        } else if (options?.sourceMode === 'cdn') {
+          if (!isValidHttpsCDNPrefix(options.cdnPrefix?.trim() ?? '')) return;
+        }
         const displayed = view.status!;
         await run(async () => {
           const fresh = await readStatus();
@@ -364,7 +626,16 @@ export function useCPAUpdateFlow() {
             displayed.target_version !== fresh.target_version ||
             displayed.active_artifact_id !== fresh.active_artifact_id
           ) {
-            publish({ stage: 'context_changed' });
+            let hasPersistedIntent = (view.recoveryRecord?.raw ?? null) !== null;
+            try {
+              hasPersistedIntent = !!readCPAUpdateIntent(scope);
+            } catch {
+              hasPersistedIntent = (view.recoveryRecord?.raw ?? null) !== null;
+            }
+            publish({
+              stage: 'context_changed',
+              ...(terminal(view.stage) || !hasPersistedIntent ? { intent: null } : {}),
+            });
             return;
           }
           try {
@@ -372,6 +643,11 @@ export function useCPAUpdateFlow() {
               scope,
               () => {
                 const now = Date.now();
+                const sourceFields = options?.uploadFile
+                  ? { source_mode: 'upload' as const }
+                  : options?.sourceMode === 'cdn'
+                    ? { source_mode: 'cdn' as const, cdn_prefix: options.cdnPrefix!.trim() }
+                    : { source_mode: 'github' as const };
                 return {
                   schema_version: 1,
                   request_id: createCPAUpdateRequestID(),
@@ -379,6 +655,7 @@ export function useCPAUpdateFlow() {
                   expected_active_artifact_id: fresh.active_artifact_id!,
                   phase: 'prepare',
                   client_stage: 'submitted',
+                  ...sourceFields,
                   created_at_ms: now,
                   updated_at_ms: now,
                 };
@@ -390,11 +667,24 @@ export function useCPAUpdateFlow() {
               await refresh();
               return;
             }
-            await submit(claimed.intent);
+            await submit(claimed.intent, options);
           } catch (error) {
             blockStorage(error);
           }
         });
+      },
+      prepareUpload: async (file: Blob) => {
+        if (
+          !canPrepare(view) ||
+          !file ||
+          typeof file.size !== 'number' ||
+          !Number.isFinite(file.size) ||
+          file.size <= 0 ||
+          file.size > CPA_UPDATE_MAX_UPLOAD_BYTES
+        ) {
+          return;
+        }
+        await controls.prepare({ uploadFile: file });
       },
       activate: async (expected) => {
         if (
@@ -412,7 +702,7 @@ export function useCPAUpdateFlow() {
           }
           await persistAndSubmit(
             {
-              ...expected,
+              ...withoutUnrecordedContextChanged(expected),
               phase: 'activate',
               client_stage: 'submitted',
               updated_at_ms: Math.max(Date.now(), expected.updated_at_ms),
@@ -425,7 +715,8 @@ export function useCPAUpdateFlow() {
         if (
           !ready(view) ||
           view.stage !== 'not_found' ||
-          !sameCPAUpdateIntent(view.intent, expected)
+          !sameCPAUpdateIntent(view.intent, expected) ||
+          !canReplaySource(expected)
         )
           return;
         await run(async () => {
@@ -437,7 +728,7 @@ export function useCPAUpdateFlow() {
           }
           await persistAndSubmit(
             {
-              ...expected,
+              ...withoutUnrecordedContextChanged(expected),
               client_stage: 'submitted',
               updated_at_ms: Math.max(Date.now(), expected.updated_at_ms),
             },
@@ -449,14 +740,16 @@ export function useCPAUpdateFlow() {
         run(async () => {
           try {
             await clearCPAUpdateIntent(scope, expected, waiting.signal);
+            unrecordedOperation = null;
             publish({
               intent: null,
               recoveryRecord: { raw: null },
               stage: 'idle',
+              recoveredSession: false,
+              prepareProgress: null,
               storageError: null,
               failureCode: undefined,
             });
-            await readStatus();
           } catch (error) {
             blockStorage(error);
           }
@@ -487,7 +780,8 @@ export function useCPAUpdateFlow() {
     return () => {
       alive = false;
       stopTimer();
-      // Abort only browser waiting. The persisted intent and Runtime operation survive.
+      // Abort browser waiting. Non-upload Runtime operations survive, while an
+      // in-flight upload request is canceled with its body stream.
       waiting.abort();
       document.removeEventListener('visibilitychange', visible);
       window.removeEventListener('online', online);
@@ -497,19 +791,29 @@ export function useCPAUpdateFlow() {
   }, [context]);
 
   const invoke = useCallback(
-    (name: keyof Actions, expected?: CPAUpdateIntent | CPAUpdateRecordSnapshot) => {
+    (
+      name: keyof Actions,
+      arg?: CPAUpdateIntent | CPAUpdateRecordSnapshot | CPAUpdatePrepareOptions | Blob
+    ) => {
       const current = actions.current;
       // Old confirmation callbacks cannot act under a different auth/service scope.
       if (current?.context !== context) return Promise.resolve();
       if (name === 'activate' || name === 'retry') {
-        return expected && 'request_id' in expected
-          ? current.controls[name](expected)
+        return arg && typeof arg === 'object' && 'request_id' in arg
+          ? current.controls[name](arg)
           : Promise.resolve();
       }
-      if (name === 'forget')
-        return expected && 'raw' in expected
-          ? current.controls.forget(expected)
+      if (name === 'forget') {
+        return arg && typeof arg === 'object' && 'raw' in arg
+          ? current.controls.forget(arg)
           : Promise.resolve();
+      }
+      if (name === 'prepare') {
+        return current.controls.prepare(arg as CPAUpdatePrepareOptions | undefined);
+      }
+      if (name === 'prepareUpload') {
+        return arg instanceof Blob ? current.controls.prepareUpload(arg) : Promise.resolve();
+      }
       return current.controls[name]();
     },
     [context]
@@ -536,10 +840,12 @@ export function useCPAUpdateFlow() {
       !view.statusError &&
       view.stage === 'not_found' &&
       !!view.intent &&
+      canReplaySource(view.intent) &&
       compatible(view.status, view.intent),
     refresh,
     check: () => invoke('check'),
-    prepare: () => invoke('prepare'),
+    prepare: (options?: CPAUpdatePrepareOptions) => invoke('prepare', options),
+    prepareUpload: (file: Blob) => invoke('prepareUpload', file),
     activate: (intent: CPAUpdateIntent) => invoke('activate', intent),
     retry: (intent: CPAUpdateIntent) => invoke('retry', intent),
     forget: (expected: CPAUpdateRecordSnapshot) => invoke('forget', expected),

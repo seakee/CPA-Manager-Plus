@@ -183,6 +183,9 @@ export function resolveManagerFormDirty({
   pollIntervalMs,
   batchSize,
   queryLimit,
+  queue,
+  popSide,
+  tlsSkipVerify,
 }: {
   managerConfig: ManagerConfig | null;
   cpaBaseUrlInput: string;
@@ -192,6 +195,9 @@ export function resolveManagerFormDirty({
   pollIntervalMs: string;
   batchSize: string;
   queryLimit: string;
+  queue?: string;
+  popSide?: string;
+  tlsSkipVerify?: boolean;
 }): boolean {
   if (!managerConfig) return false;
 
@@ -208,6 +214,19 @@ export function resolveManagerFormDirty({
   const savedCollectorMode =
     savedCollector.collectorMode || MANAGER_COLLECTOR_DEFAULT.collectorMode;
   if ((collectorMode || MANAGER_COLLECTOR_DEFAULT.collectorMode) !== savedCollectorMode) {
+    return true;
+  }
+  if (queue !== undefined && queue.trim() !== (savedCollector.queue || MANAGER_COLLECTOR_DEFAULT.queue)) {
+    return true;
+  }
+  if (
+    popSide !== undefined &&
+    (popSide || MANAGER_COLLECTOR_DEFAULT.popSide) !==
+      (savedCollector.popSide || MANAGER_COLLECTOR_DEFAULT.popSide)
+  ) {
+    return true;
+  }
+  if (tlsSkipVerify !== undefined && Boolean(tlsSkipVerify) !== Boolean(savedCollector.tlsSkipVerify)) {
     return true;
   }
 
@@ -399,6 +418,9 @@ export function ConfigPage() {
   const [managerQueryLimit, setManagerQueryLimit] = useState(
     String(MANAGER_COLLECTOR_DEFAULT.queryLimit)
   );
+  const [managerQueue, setManagerQueue] = useState(MANAGER_COLLECTOR_DEFAULT.queue);
+  const [managerPopSide, setManagerPopSide] = useState(MANAGER_COLLECTOR_DEFAULT.popSide);
+  const [managerTlsSkipVerify, setManagerTlsSkipVerify] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -555,6 +577,9 @@ export function ConfigPage() {
         pollIntervalMs: managerPollIntervalMs,
         batchSize: managerBatchSize,
         queryLimit: managerQueryLimit,
+        queue: managerQueue,
+        popSide: managerPopSide,
+        tlsSkipVerify: managerTlsSkipVerify,
       }),
     [
       managerBatchSize,
@@ -563,8 +588,11 @@ export function ConfigPage() {
       managerCollectorMode,
       managerConfig,
       managerPollIntervalMs,
+      managerPopSide,
       managerQueryLimit,
+      managerQueue,
       managerRequestMonitoringEnabled,
+      managerTlsSkipVerify,
     ]
   );
   const managerSaveState = resolveManagerSaveState({
@@ -794,6 +822,9 @@ export function ConfigPage() {
     );
     setManagerBatchSize(String(collector.batchSize || MANAGER_COLLECTOR_DEFAULT.batchSize));
     setManagerQueryLimit(String(collector.queryLimit || MANAGER_COLLECTOR_DEFAULT.queryLimit));
+    setManagerQueue(collector.queue || MANAGER_COLLECTOR_DEFAULT.queue);
+    setManagerPopSide(collector.popSide || MANAGER_COLLECTOR_DEFAULT.popSide);
+    setManagerTlsSkipVerify(Boolean(collector.tlsSkipVerify));
     setManagerCPAManagementKeyInput('');
     setManagerCPAManagementKeyVisible(false);
   }, []);
@@ -1042,9 +1073,12 @@ export function ConfigPage() {
           ...(managerConfig?.collector ?? MANAGER_COLLECTOR_DEFAULT),
           enabled: managerRequestMonitoringEnabled,
           collectorMode: managerCollectorMode,
+          queue: managerQueue.trim() || MANAGER_COLLECTOR_DEFAULT.queue,
+          popSide: managerPopSide || MANAGER_COLLECTOR_DEFAULT.popSide,
           pollIntervalMs,
           batchSize,
           queryLimit,
+          tlsSkipVerify: managerTlsSkipVerify,
         },
         externalUsageService: {
           enabled: false,
@@ -1677,6 +1711,9 @@ export function ConfigPage() {
               managerPollIntervalMs={managerPollIntervalMs}
               managerBatchSize={managerBatchSize}
               managerQueryLimit={managerQueryLimit}
+              managerQueue={managerQueue}
+              managerPopSide={managerPopSide}
+              managerTlsSkipVerify={managerTlsSkipVerify}
               managerRetentionSeconds={managerRetentionSeconds}
               managerConfigSourceLabel={managerConfigSourceLabel}
               managerUsageStatisticsEnabled={Boolean(managerCPAUsage?.usageStatisticsEnabled)}
@@ -1708,6 +1745,15 @@ export function ConfigPage() {
               }}
               onQueryLimitChange={(value) => {
                 setManagerQueryLimit(value);
+              }}
+              onQueueChange={(value) => {
+                setManagerQueue(value);
+              }}
+              onPopSideChange={(value) => {
+                setManagerPopSide(value);
+              }}
+              onTlsSkipVerifyChange={(value) => {
+                setManagerTlsSkipVerify(value);
               }}
             />
           ) : activeTab === 'visual' ? (

@@ -13,6 +13,12 @@
   gap: 16px;
 }
 
+.page-header-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 .runtime-status-page .page-header .page-subtitle {
   margin: 0;
   color: var(--text-secondary);
@@ -20,35 +26,23 @@
   line-height: 1.6;
 }
 
-.runtime-status-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 14px 18px;
-  border: 1px solid var(--border-subtle, var(--border-color));
-  border-radius: var(--app-radius-md);
-  background: var(--app-surface);
-}
-
-.runtime-status-summary strong {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  border-radius: var(--app-radius-pill);
-  background: var(--accent-soft, var(--app-accent-soft));
-  color: var(--primary-text);
-  font-size: 13px;
-  font-weight: 600;
-  text-transform: capitalize;
-}
-
-.runtime-status-summary span,
+.runtime-observed-time,
 .runtime-status-page small {
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.page-header-actions strong {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: capitalize;
 }
 
 .runtime-status-cards {
@@ -57,18 +51,57 @@
   gap: 16px;
 }
 
-.runtime-status-cards h2 {
-  margin: 0 0 8px;
-  font-size: 16px;
+.runtime-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.runtime-inline-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
   font-weight: 600;
 }
 
-.runtime-status-cards p {
-  margin: 0 0 8px;
-  font-size: 20px;
+.runtime-inline-status.is-success {
+  color: var(--data-badge-success-text);
+}
+
+.runtime-inline-status.is-success .status-dot {
+  background: var(--status-graphic-success);
+}
+
+.runtime-inline-status.is-warning {
+  color: var(--data-badge-warning-text);
+}
+
+.runtime-inline-status.is-warning .status-dot {
+  background: var(--status-graphic-warning);
+}
+
+.runtime-inline-status.is-danger {
+  color: var(--data-badge-danger-text);
+}
+
+.runtime-inline-status.is-danger .status-dot {
+  background: var(--status-graphic-danger);
+}
+
+.runtime-inline-status.is-neutral {
+  color: var(--text-secondary);
+}
+
+.runtime-inline-status.is-neutral .status-dot {
+  background: var(--text-tertiary);
+}
+.runtime-status-cards h2 {
+  margin: 0;
+  font-size: 16px;
   font-weight: 600;
-  color: var(--text-primary);
-  text-transform: capitalize;
 }
 
 .runtime-status-cards small {
@@ -79,18 +112,25 @@
 .runtime-status-links {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 16px;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 .runtime-status-links a {
   color: var(--primary-text);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.runtime-status-links a:hover {
+  text-decoration: underline;
 }
 
 .runtime-status-version {
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid var(--border-subtle, var(--border-color));
+  border-top: 1px solid var(--border-color);
 }
 
 .runtime-status-version dl {
@@ -103,13 +143,147 @@
 .runtime-status-version dt {
   margin-bottom: 4px;
   font-size: 11px;
-  color: var(--text-tertiary, var(--text-secondary));
+  color: var(--text-tertiary);
 }
 
 .runtime-status-version dd {
   margin: 0;
   font-size: 13px;
   font-weight: 600;
+}
+
+.runtime-observability-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.runtime-database-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.runtime-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.runtime-kpi-tile {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+}
+
+.runtime-kpi-tile span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.runtime-kpi-tile strong {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kpi-value-color);
+}
+
+.runtime-collector-details {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+}
+
+.runtime-collector-detail-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+}
+
+.runtime-collector-detail-item span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.runtime-collector-detail-item strong {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runtime-error-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--data-badge-warning-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-migration-meta {
+  margin: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.runtime-models-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.runtime-models-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.runtime-model-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.runtime-model-group {
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-model-group strong {
+  font-size: 13px;
+}
+
+.runtime-model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-model-tag {
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-xs);
+  background: var(--surface-subtle);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 .runtime-status-anomaly dl {
@@ -135,19 +309,28 @@
 .runtime-status-operation {
   margin: 0;
   padding: 12px 14px;
-  border: 1px solid var(--border-subtle, var(--border-color));
+  border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-subtle, var(--surface-subtle));
+  background: var(--surface-subtle);
   color: var(--text-primary);
 }
 
-.runtime-status-page details {
+.runtime-status-page details,
+.runtime-details-box {
   padding: 14px 18px;
-  border: 1px solid var(--border-subtle, var(--border-color));
+  border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
   background: var(--app-surface);
 }
-
+.runtime-details-box {
+  position: relative;
+}
+.runtime-details-box details {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
 .runtime-status-page details > summary {
   cursor: pointer;
   font-size: 13px;
@@ -155,28 +338,43 @@
   color: var(--text-secondary);
 }
 
+.runtime-details-summary {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding-right: 132px;
+  gap: 12px;
+}
+.runtime-details-copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+}
 .runtime-status-page pre {
   overflow: auto;
   max-width: 100%;
   margin: 12px 0 0;
   padding: 14px;
-  border: 1px solid var(--border-subtle, var(--border-color));
+  border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-subtle, var(--surface-subtle));
+  background: var(--surface-subtle);
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.6;
 }
 
-@media (max-width: 760px) {
-  .runtime-status-cards,
-  .runtime-status-version dl {
+@media (max-width: 900px) {
+  .runtime-observability-grid {
     grid-template-columns: 1fr;
   }
+}
 
-  .runtime-status-summary {
-    align-items: flex-start;
-    flex-direction: column;
+@media (max-width: 760px) {
+  .runtime-status-cards,
+  .runtime-status-version dl,
+  .runtime-kpi-grid,
+  .runtime-collector-details {
+    grid-template-columns: 1fr;
   }
 
   .runtime-status-anomaly dl div {

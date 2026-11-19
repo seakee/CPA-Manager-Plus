@@ -343,4 +343,64 @@ describe('CPA browser recovery records', () => {
     vi.stubGlobal('crypto', {});
     expect(() => createCPAUpdateRequestID()).toThrow('secure_random_unavailable');
   });
+
+  it('persists and reads back valid CDN, upload, github, and legacy prepare intents', async () => {
+    const cdn = updateIntent({ source_mode: 'cdn', cdn_prefix: 'https://cdn.example.com/mirror/' });
+    await persistCPAUpdateIntent(key, cdn, null);
+    expect(readCPAUpdateIntent(key)).toEqual(cdn);
+    await clearCPAUpdateIntent(key, cdn);
+
+    const upload = updateIntent({ source_mode: 'upload' });
+    await persistCPAUpdateIntent(key, upload, null);
+    expect(readCPAUpdateIntent(key)).toEqual(upload);
+    await clearCPAUpdateIntent(key, upload);
+
+    const github = updateIntent({ source_mode: 'github' });
+    await persistCPAUpdateIntent(key, github, null);
+    expect(readCPAUpdateIntent(key)).toEqual(github);
+  });
+
+  it.each([
+    JSON.stringify({ ...updateIntent(), source_mode: 'cdn' }),
+    JSON.stringify({ ...updateIntent(), source_mode: 'cdn', cdn_prefix: 'https://127.0.0.1/' }),
+    JSON.stringify({
+      ...updateIntent(),
+      source_mode: 'cdn',
+      cdn_prefix: ' https://cdn.example.com/ ',
+    }),
+    JSON.stringify({
+      ...updateIntent(),
+      source_mode: 'cdn',
+      cdn_prefix: 'https://cdn.example.com/../x',
+    }),
+    JSON.stringify({
+      ...updateIntent(),
+      source_mode: 'upload',
+      cdn_prefix: 'https://cdn.example.com/',
+    }),
+    JSON.stringify({
+      ...updateIntent(),
+      cdn_prefix: 'https://cdn.example.com/',
+    }),
+    JSON.stringify({ ...updateIntent(), source_mode: 'ftp' }),
+  ])('preserves invalid source-mode recovery records as corrupt: %s', async (raw) => {
+    storage.setItem(key, raw);
+    expect(() => readCPAUpdateIntent(key)).toThrow('corrupt');
+    await expect(persistCPAUpdateIntent(key, updateIntent(), null)).rejects.toThrow();
+    expect(storage.getItem(key)).toBe(raw);
+  });
+
+  it('refuses changing source_mode or cdn_prefix on an existing persisted intent', async () => {
+    const cdn = updateIntent({ source_mode: 'cdn', cdn_prefix: 'https://cdn.example.com/' });
+    await persistCPAUpdateIntent(key, cdn, null);
+    await expect(
+      persistCPAUpdateIntent(
+        key,
+        updateIntent({ source_mode: 'cdn', cdn_prefix: 'https://other.example.com/' }),
+        cdn
+      )
+    ).rejects.toThrow('changed');
+    await expect(persistCPAUpdateIntent(key, updateIntent(), cdn)).rejects.toThrow('changed');
+    expect(readCPAUpdateIntent(key)).toEqual(cdn);
+  });
 });

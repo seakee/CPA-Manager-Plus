@@ -1,8 +1,10 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CPA_UPDATE_MAX_UPLOAD_BYTES,
   cpaUpdateApi,
   canPrepareCPAUpdate,
+  isValidHttpsCDNPrefix,
   type CPAUpdatePhase,
   type CPAUpdateStatus,
 } from './cpaUpdateApi';
@@ -10,9 +12,15 @@ import {
   mutationResult,
   observationResult,
   replacementArtifact,
-  updateIntent,
+  updateIntent as updateIntentFixture,
   updateStatus,
 } from './cpaUpdateTestFixtures';
+import type { CPAUpdateIntent } from './cpaUpdateIntentStorage';
+
+const updateIntent = (patch: Partial<Omit<CPAUpdateIntent, 'source_mode'>> = {}) => ({
+  ...updateIntentFixture(patch),
+  source_mode: undefined,
+});
 
 const connection = { base: 'https://manager.test/v0/management/', key: 'test-key' };
 const response = (data: unknown) => ({ data }) as AxiosResponse;
@@ -255,4 +263,159 @@ describe('accepted CPA update HTTP contract', () => {
       expect(request).not.toHaveBeenCalled();
     }
   );
+
+  it('forwards cdn source_mode/cdn_prefix on prepare, streams prepareUpload, and parses observation progress', async () => {
+    const intent = updateIntent({ phase: 'prepare' });
+    request.mockResolvedValueOnce(response(mutationResult('prepare', intent)));
+    await cpaUpdateApi.mutate(connection, 'prepare', {
+      ...intent,
+      source_mode: 'cdn',
+      cdn_prefix: 'https://cdn.example.com/',
+    });
+    expect(request.mock.calls[0][0].data).toEqual({
+      request_id: intent.request_id,
+      target_version: intent.target_version,
+      expected_active_artifact_id: intent.expected_active_artifact_id,
+      source_mode: 'cdn',
+      cdn_prefix: 'https://cdn.example.com/',
+    });
+
+    const archive = new Blob(['gz']);
+    request.mockResolvedValueOnce(response(mutationResult('prepare', intent)));
+    await cpaUpdateApi.prepareUpload(connection, intent, archive);
+    expect(request.mock.calls[1][0].url?.endsWith('/prepare-upload')).toBe(true);
+    expect(request.mock.calls[1][0].params).toEqual({
+      request_id: intent.request_id,
+      target_version: intent.target_version,
+      expected_active_artifact_id: intent.expected_active_artifact_id,
+    });
+    expect(request.mock.calls[1][0].data).toBe(archive);
+
+    request.mockResolvedValueOnce(
+      response({
+        ...observationResult(intent, 'running'),
+        stage_phase: 'downloading',
+        received_bytes: 512,
+        total_bytes: 1024,
+      })
+    );
+    expect(await cpaUpdateApi.observe(connection, 'prepare', intent)).toMatchObject({
+      state: 'running',
+      stage_phase: 'downloading',
+      received_bytes: 512,
+      total_bytes: 1024,
+    });
+  });
+
+  it.each([
+    'https://cdn.example.com/mirror/',
+    'https://cdn.example.com:443/mirror',
+    'https://8.8.8.8/mirror',
+    'https://192.0.0.9/mirror',
+    'https://[2606:4700::1111]/mirror',
+  ])('accepts valid public HTTPS CDN prefix: %s', (prefix) => {
+    expect(isValidHttpsCDNPrefix(prefix)).toBe(true);
+  });
+
+  it.each([
+    '',
+    ' https://cdn.example.com/ ',
+    'http://cdn.example.com/',
+    'HTTPS://cdn.example.com/',
+    'https://localhost./',
+    'https://x.localhost/',
+    'https://127.0.0.1/',
+    'https://10.0.0.1/',
+    'https://172.16.0.1/',
+    'https://192.168.1.1/',
+    'https://100.64.1.1/',
+    'https://169.254.169.254/',
+    'https://198.18.0.1/',
+    'https://192.0.0.1/',
+    'https://2130706433/',
+    'https://0x7f000001/',
+    'https://127.1/',
+    'https://0177.0.0.1/',
+    'https://[::1]/',
+    'https://[fc00::1]/',
+    'https://[fe80::1%25en0]/',
+    'https://[::ffff:127.0.0.1]/',
+    'https://[64:ff9b::7f00:1]/',
+    'https://[2001:db8::1]/',
+    'https://[2002::1]/',
+    'https://[3fff::1]/',
+    'https://cdn.example.com:/',
+    'https://cdn.example.com:0/',
+    'https://cdn.example.com:65536/',
+    'https://cdn.example.com/../x',
+    'https://cdn.example.com/./x',
+    'https://cdn.example.com/%2e/x',
+    'https://cdn.example.com/a/%2f/b',
+    'https://cdn.example.com/a//b',
+    'https://cdn.example.com/a b',
+    'https://cdn.example.com/a\\b',
+    'https://cdn.example.com/?',
+    'https://cdn.example.com/#',
+    'https://user@cdn.example.com/',
+    'https://cdn.example.com/' + 'a'.repeat(512),
+  ])('rejects disallowed or malformed CDN prefix: %s', (prefix) => {
+    expect(isValidHttpsCDNPrefix(prefix)).toBe(false);
+  });
+
+  it('blocks disallowed CDN prefixes, upload fallback on mutate, and empty or oversize uploads without sending a request', async () => {
+    const intent = updateIntent({ phase: 'prepare' });
+    await expect(
+      cpaUpdateApi.mutate(connection, 'prepare', {
+        ...intent,
+        source_mode: 'cdn',
+        cdn_prefix: 'https://198.18.0.1/',
+      })
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'invalid_request' });
+    await expect(
+      cpaUpdateApi.mutate(connection, 'prepare', {
+        ...intent,
+        source_mode: 'upload' as 'github',
+      })
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'invalid_request' });
+    await expect(
+      cpaUpdateApi.prepareUpload(connection, intent, new Blob([]))
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'invalid_request' });
+    await expect(
+      cpaUpdateApi.prepareUpload(connection, intent, {
+        size: CPA_UPDATE_MAX_UPLOAD_BYTES + 1,
+      } as Blob)
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'archive_too_large' });
+    expect(request).not.toHaveBeenCalled();
+
+    request.mockResolvedValueOnce(response(mutationResult('prepare', intent)));
+    await cpaUpdateApi.prepareUpload(connection, intent, {
+      size: CPA_UPDATE_MAX_UPLOAD_BYTES,
+    } as Blob);
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('maps HTTP 413 and 400 to deterministic rejected errors', async () => {
+    const intent = updateIntent({ phase: 'prepare' });
+    request.mockRejectedValueOnce(httpError(413, { code: 'archive_too_large' }));
+    await expect(
+      cpaUpdateApi.prepareUpload(connection, intent, new Blob(['gz']))
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'archive_too_large' });
+
+    request.mockRejectedValueOnce(httpError(413, '<html>Entity Too Large</html>'));
+    await expect(
+      cpaUpdateApi.prepareUpload(connection, intent, new Blob(['gz']))
+    ).rejects.toMatchObject({ kind: 'rejected', code: 'archive_too_large' });
+
+    request.mockRejectedValueOnce(httpError(400, { code: 'invalid_request' }));
+    await expect(cpaUpdateApi.mutate(connection, 'prepare', intent)).rejects.toMatchObject({
+      kind: 'rejected',
+      code: 'invalid_request',
+    });
+
+    request.mockRejectedValueOnce(httpError(400, {}));
+    await expect(cpaUpdateApi.mutate(connection, 'prepare', intent)).rejects.toMatchObject({
+      kind: 'rejected',
+      code: 'invalid_request',
+    });
+  });
 });

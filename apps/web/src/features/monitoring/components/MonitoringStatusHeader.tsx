@@ -98,11 +98,7 @@ export function MonitoringStatusHeader({
           <strong>{monitoringUnavailableTitle}</strong>
           <span>{monitoringUnavailableBody}</span>
           {monitoringUnavailableAction ?? (
-            <Link
-              to="/config"
-              className={styles.configLink}
-              onClick={() => localStorage.setItem('config-management:tab', 'manager')}
-            >
+            <Link to="/system" className={styles.configLink}>
               {t('monitoring.open_manager_config')}
             </Link>
           )}

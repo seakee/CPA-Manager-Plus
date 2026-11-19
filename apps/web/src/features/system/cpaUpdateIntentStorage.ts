@@ -1,11 +1,19 @@
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 import { sha256RawTextHex } from '@/utils/apiKeyHash';
-import { isCPAUpdateRequest, type CPAUpdatePhase, type CPAUpdateRequest } from './cpaUpdateApi';
+import {
+  isCPAUpdateRequest,
+  isValidHttpsCDNPrefix,
+  type CPAUpdateIntentSourceMode,
+  type CPAUpdatePhase,
+  type CPAUpdateRequest,
+} from './cpaUpdateApi';
 
-export interface CPAUpdateIntent extends CPAUpdateRequest {
+export interface CPAUpdateIntent extends Omit<CPAUpdateRequest, 'source_mode'> {
   schema_version: 1;
   phase: CPAUpdatePhase;
   client_stage: 'submitted' | 'prepared';
+  unrecorded_context_changed?: boolean;
+  source_mode?: CPAUpdateIntentSourceMode;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -29,7 +37,7 @@ export class CPAUpdateStorageError extends Error {
   }
 }
 
-const fields: (keyof CPAUpdateIntent)[] = [
+const requiredFields: (keyof CPAUpdateIntent)[] = [
   'schema_version',
   'request_id',
   'target_version',
@@ -39,6 +47,13 @@ const fields: (keyof CPAUpdateIntent)[] = [
   'created_at_ms',
   'updated_at_ms',
 ];
+const optionalFields: (keyof CPAUpdateIntent)[] = [
+  'source_mode',
+  'cdn_prefix',
+  'unrecorded_context_changed',
+];
+const allFields: (keyof CPAUpdateIntent)[] = [...requiredFields, ...optionalFields];
+const allowedFieldSet = new Set<string>(allFields);
 
 export function cpaUpdateStorageKey(base: string, managementKey: string): string {
   return (
@@ -50,8 +65,8 @@ export function cpaUpdateStorageKey(base: string, managementKey: string): string
 function parseIntent(value: unknown): CPAUpdateIntent {
   if (
     !isCPAUpdateRequest(value) ||
-    Object.keys(value).length !== fields.length ||
-    !fields.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+    !requiredFields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
+    !Object.keys(value).every((key) => allowedFieldSet.has(key))
   ) {
     throw new CPAUpdateStorageError('corrupt');
   }
@@ -61,11 +76,30 @@ function parseIntent(value: unknown): CPAUpdateIntent {
     !['prepare', 'activate'].includes(intent.phase) ||
     !['submitted', 'prepared'].includes(intent.client_stage) ||
     (intent.client_stage === 'prepared' && intent.phase !== 'prepare') ||
+    (intent.unrecorded_context_changed !== undefined &&
+      typeof intent.unrecorded_context_changed !== 'boolean') ||
     !Number.isSafeInteger(intent.created_at_ms) ||
     intent.created_at_ms <= 0 ||
     !Number.isSafeInteger(intent.updated_at_ms) ||
     intent.updated_at_ms < intent.created_at_ms
   ) {
+    throw new CPAUpdateStorageError('corrupt');
+  }
+  const hasSourceMode = Object.prototype.hasOwnProperty.call(value, 'source_mode');
+  const hasCDNPrefix = Object.prototype.hasOwnProperty.call(value, 'cdn_prefix');
+  if (!hasSourceMode) {
+    if (hasCDNPrefix) throw new CPAUpdateStorageError('corrupt');
+  } else if (intent.source_mode === 'cdn') {
+    if (
+      !hasCDNPrefix ||
+      typeof intent.cdn_prefix !== 'string' ||
+      !isValidHttpsCDNPrefix(intent.cdn_prefix)
+    ) {
+      throw new CPAUpdateStorageError('corrupt');
+    }
+  } else if (intent.source_mode === 'github' || intent.source_mode === 'upload') {
+    if (hasCDNPrefix) throw new CPAUpdateStorageError('corrupt');
+  } else {
     throw new CPAUpdateStorageError('corrupt');
   }
   return intent;
@@ -216,7 +250,7 @@ export function sameCPAUpdateIntent(
   right: CPAUpdateIntent | null
 ): boolean {
   return (
-    left === right || (!!left && !!right && fields.every((field) => left[field] === right[field]))
+    left === right || (!!left && !!right && allFields.every((field) => left[field] === right[field]))
   );
 }
 
@@ -231,7 +265,9 @@ function persistLockedIntent(
     (previous &&
       (previous.request_id !== intent.request_id ||
         previous.target_version !== intent.target_version ||
-        previous.expected_active_artifact_id !== intent.expected_active_artifact_id))
+        previous.expected_active_artifact_id !== intent.expected_active_artifact_id ||
+        previous.source_mode !== intent.source_mode ||
+        previous.cdn_prefix !== intent.cdn_prefix))
   ) {
     throw new CPAUpdateStorageError('changed');
   }

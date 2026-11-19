@@ -4,6 +4,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
 import i18n from '@/i18n';
 import { RuntimeStatusPage } from './RuntimeStatusPage';
+import { apiKeysApi } from '@/services/api/apiKeys';
+import { modelsApi } from '@/services/api/models';
+import { usageServiceApi } from '@/services/api/usageService';
+import { memoryStorage } from './cpaUpdateTestFixtures';
+import { useAuthStore, useConfigStore, useModelsStore } from '@/stores';
+const availabilityMock = vi.hoisted(() => ({
+  managerServiceAvailable: false,
+  managerServiceBase: '',
+}));
+
+vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
+  usePanelFeatureAvailability: () => availabilityMock,
+}));
 
 const DIGEST = 'sha256:' + 'd'.repeat(64);
 
@@ -27,6 +40,8 @@ describe('RuntimeStatusPage artifact origin display', () => {
 
   beforeEach(async () => {
     await i18n.changeLanguage('zh-CN');
+    availabilityMock.managerServiceAvailable = false;
+    availabilityMock.managerServiceBase = '';
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.useFakeTimers();
     vi.stubGlobal('window', {
@@ -53,12 +68,18 @@ describe('RuntimeStatusPage artifact origin display', () => {
   });
 
   async function mount(client: PublicApiClient) {
+    if (renderer) {
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+    }
     await act(async () => {
       renderer = create(
         <MemoryRouter>
           <RuntimeStatusPage client={client} credential="admin-secret" />
         </MemoryRouter>
       );
+      await Promise.resolve();
+      await Promise.resolve();
     });
   }
 
@@ -169,12 +190,443 @@ describe('RuntimeStatusPage artifact origin display', () => {
     ).toHaveLength(0);
     expect(JSON.stringify(renderer!.toJSON())).toContain('healthy');
   });
-});
+  it('uses prop credential in refreshUsageStatus when auth.managementKey is empty', async () => {
+    availabilityMock.managerServiceAvailable = true;
+    availabilityMock.managerServiceBase = 'https://manager.test';
+    const getStatusSpy = vi
+      .spyOn(usageServiceApi, 'getStatus')
+      .mockResolvedValue({ service: 'ok', events: 12, deadLetters: 0 });
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
 
+    await mount(client);
+
+    expect(getStatusSpy).toHaveBeenCalledWith('https://manager.test', 'admin-secret');
+    getStatusSpy.mockRestore();
+  });
+  it('copies diagnostic snapshot through copyToClipboard fallback when navigator.clipboard is unavailable', async () => {
+    const execCommand = vi.fn(() => true);
+    const textarea = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: vi.fn(),
+      focus: vi.fn(),
+      select: vi.fn(),
+      setSelectionRange: vi.fn(),
+      remove: vi.fn(),
+    };
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('document', {
+      createElement: vi.fn(() => textarea),
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      execCommand,
+    });
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    await mount(client);
+    const copyButton = renderer!.root.findByProps({
+      'data-testid': 'runtime-copy-snapshot-btn',
+    });
+    await act(async () => {
+      await copyButton.props.onClick({ preventDefault: vi.fn(), stopPropagation: vi.fn() });
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(textarea.value).toContain('healthy');
+
+    const summaries = renderer!.root.findAllByType('summary');
+    for (const summary of summaries) {
+      expect(
+        summary.findAllByProps({ 'data-testid': 'runtime-copy-snapshot-btn' })
+      ).toHaveLength(0);
+    }
+  });
+
+  it('fetches models in manager_embedded mode even when apiKeys list is empty', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: '/console/api/v2/cpamp',
+      sessionMode: 'manager_embedded',
+      managementKey: 'admin-secret',
+    });
+    useConfigStore.setState({ config: { apiKeys: [] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const apiKeysSpy = vi.spyOn(apiKeysApi, 'list').mockResolvedValue([]);
+    const fetchModelsSpy = vi
+      .spyOn(modelsApi, 'fetchModels')
+      .mockResolvedValue([{ name: 'gpt-4o' }, { name: 'claude-3-7-sonnet' }]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).toHaveBeenCalledWith(
+        '/console/api/v2/cpamp',
+        undefined,
+        { Authorization: 'Bearer admin-secret' }
+      );
+      expect(useModelsStore.getState().models).toHaveLength(2);
+      expect(renderer!.root.findByProps({ 'data-testid': 'runtime-models-card' })).toBeTruthy();
+      expect(JSON.stringify(renderer!.toJSON())).toContain('gpt-4o');
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      apiKeysSpy.mockRestore();
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('skips fetching models in non-embedded mode when apiKeys list is empty and no modelManagerCredential exists', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: 'https://cpa.example/v0/management',
+      sessionMode: 'external_panel',
+      managementKey: 'direct-key',
+    });
+    useConfigStore.setState({ config: { apiKeys: [] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const apiKeysSpy = vi.spyOn(apiKeysApi, 'list').mockResolvedValue([]);
+    const fetchModelsSpy = vi.spyOn(modelsApi, 'fetchModels').mockResolvedValue([]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).not.toHaveBeenCalled();
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      apiKeysSpy.mockRestore();
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('tolerates apiKeysApi.list() failure in both embedded and external modes', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: '/console/api/v2/cpamp',
+      sessionMode: 'manager_embedded',
+      managementKey: 'admin-secret',
+    });
+    useConfigStore.setState({ config: { apiKeys: [] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const apiKeysSpy = vi.spyOn(apiKeysApi, 'list').mockRejectedValue(new Error('list failed'));
+    const fetchModelsSpy = vi
+      .spyOn(modelsApi, 'fetchModels')
+      .mockResolvedValue([{ name: 'fallback-embedded-model' }]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).toHaveBeenCalledWith('/console/api/v2/cpamp', undefined, {
+        Authorization: 'Bearer admin-secret',
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain('fallback-embedded-model');
+
+      fetchModelsSpy.mockClear();
+      apiKeysSpy.mockClear();
+      useAuthStore.setState({
+        connectionStatus: 'connected',
+        apiBase: 'https://cpa.example/v0/management',
+        sessionMode: 'external_panel',
+        managementKey: 'direct-key',
+      });
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).not.toHaveBeenCalled();
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      apiKeysSpy.mockRestore();
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('ignores stale refreshModels(false) once manual refreshModels(true) has started and keeps forced models', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: 'https://cpa.example/v0/management',
+      sessionMode: 'external_panel',
+      managementKey: 'direct-key',
+    });
+    useConfigStore.setState({ config: { apiKeys: [] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    let resolveInitialList!: (value: string[]) => void;
+    const apiKeysSpy = vi
+      .spyOn(apiKeysApi, 'list')
+      .mockImplementationOnce(
+        () =>
+          new Promise<string[]>((resolve) => {
+            resolveInitialList = resolve;
+          })
+      )
+      .mockResolvedValueOnce(['sk-manual']);
+    const fetchModelsSpy = vi
+      .spyOn(modelsApi, 'fetchModels')
+      .mockResolvedValue([{ name: 'forced-model' }]);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).not.toHaveBeenCalled();
+
+      // Trigger manual refreshModels(true) while initial refreshModels(false) is still awaiting apiKeysApi.list()
+      const modelsCard = renderer!.root.findByProps({ 'data-testid': 'runtime-models-card' });
+      const refreshBtn = modelsCard.findByType('button');
+      await act(async () => {
+        refreshBtn.props.onClick();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiKeysSpy).toHaveBeenCalledTimes(2);
+      expect(fetchModelsSpy).toHaveBeenCalledTimes(1);
+      expect(fetchModelsSpy).toHaveBeenCalledWith(
+        'https://cpa.example/v0/management',
+        'sk-manual',
+        {}
+      );
+      expect(JSON.stringify(renderer!.toJSON())).toContain('forced-model');
+
+      // Late resolution of initial refreshModels(false) must be ignored by refreshModelsSeqRef
+      await act(async () => {
+        resolveInitialList(['sk-stale']);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(fetchModelsSpy).toHaveBeenCalledTimes(1);
+      expect(useModelsStore.getState().models.map((m) => m.name)).toEqual(['forced-model']);
+      expect(JSON.stringify(renderer!.toJSON())).toContain('forced-model');
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      apiKeysSpy.mockRestore();
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+
+  it('localizes 503 gateway pending configuration errors and avoids refetching when config.apiKeys keeps identical values', async () => {
+    const prevAuth = {
+      connectionStatus: useAuthStore.getState().connectionStatus,
+      apiBase: useAuthStore.getState().apiBase,
+      sessionMode: useAuthStore.getState().sessionMode,
+      managementKey: useAuthStore.getState().managementKey,
+    };
+    const prevConfig = useConfigStore.getState().config;
+
+    vi.stubGlobal('localStorage', memoryStorage());
+    useAuthStore.setState({
+      connectionStatus: 'connected',
+      apiBase: '/console/api/v2/cpamp',
+      sessionMode: 'manager_embedded',
+      managementKey: 'admin-secret',
+    });
+    useConfigStore.setState({ config: { apiKeys: ['sk-same'] } as never });
+    useModelsStore.getState().clearCache();
+    useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+
+    const pending503 = Object.assign(new Error('Request failed with status code 503'), {
+      isAxiosError: true,
+      response: {
+        status: 503,
+        data: { error: 'gateway pending configuration' },
+      },
+    });
+    const fetchModelsSpy = vi.spyOn(modelsApi, 'fetchModels').mockRejectedValue(pending503);
+
+    const client: PublicApiClient = {
+      get: vi.fn(async (resource: string) => {
+        if (resource === 'runtime/status') return embeddedStatus();
+        if (resource === 'runtime/artifact') throw new PublicApiError('network');
+        throw new Error(`unexpected resource ${resource}`);
+      }) as PublicApiClient['get'],
+      post: vi.fn(),
+      put: vi.fn(),
+    };
+
+    try {
+      await mount(client);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(fetchModelsSpy).toHaveBeenCalledTimes(1);
+      const modelsCard = renderer!.root.findByProps({ 'data-testid': 'runtime-models-card' });
+      const errorBox = modelsCard.findByProps({ className: 'error-box' });
+      expect(errorBox.props.children).toBe(
+        i18n.t('system_info.models_gateway_pending', { lng: 'zh-CN' })
+      );
+
+      // Updating config with a new array holding identical keys must not trigger another fetchModels call
+      await act(async () => {
+        useConfigStore.setState({ config: { apiKeys: [' sk-same '] } as never });
+        await Promise.resolve();
+      });
+      expect(fetchModelsSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      if (renderer) {
+        await act(async () => renderer!.unmount());
+        renderer = undefined;
+      }
+      fetchModelsSpy.mockRestore();
+      useModelsStore.getState().clearCache();
+      useModelsStore.setState({ models: [], loading: false, error: null, cache: null });
+      useConfigStore.setState({ config: prevConfig });
+      useAuthStore.setState(prevAuth);
+    }
+  });
+});
 describe('RuntimeStatusPage state wording', () => {
   let renderer: ReactTestRenderer | undefined;
 
   beforeEach(async () => {
+    availabilityMock.managerServiceAvailable = false;
+    availabilityMock.managerServiceBase = '';
     await i18n.changeLanguage('zh-CN');
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.useFakeTimers();

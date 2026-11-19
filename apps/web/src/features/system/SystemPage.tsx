@@ -319,31 +319,32 @@ function SystemPageContent({
   }, [fetchConfig]);
 
   useEffect(() => {
+    if (workspace) return;
     fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.connectionStatus, auth.apiBase]);
+  }, [auth.connectionStatus, auth.apiBase, workspace]);
 
   useEffect(() => {
-    if (featureAvailability.checking) return;
+    if (workspace || featureAvailability.checking) return;
     void refreshDatabaseStatus();
-  }, [featureAvailability.checking, refreshDatabaseStatus]);
+  }, [featureAvailability.checking, refreshDatabaseStatus, workspace]);
 
   useEffect(() => {
-    if (!featureAvailability.managerServiceAvailable) return;
+    if (workspace || !featureAvailability.managerServiceAvailable) return;
     const timer = window.setInterval(() => {
       void refreshDatabaseStatus();
     }, DATABASE_STATUS_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [featureAvailability.managerServiceAvailable, refreshDatabaseStatus]);
+  }, [featureAvailability.managerServiceAvailable, refreshDatabaseStatus, workspace]);
 
-  useHeaderRefresh(refreshDatabaseStatus, featureAvailability.managerServiceAvailable);
-  const InformationContainer = workspace ? 'details' : 'div';
+  useHeaderRefresh(refreshDatabaseStatus, !workspace && featureAvailability.managerServiceAvailable);
+  if (workspace) {
+    return <div className={styles.container}>{workspace}</div>;
+  }
 
   return (
     <div className={styles.container}>
-      {workspace && <div style={{ marginBottom: '24px' }}>{workspace}</div>}
-      <InformationContainer className={workspace ? 'system-additional-info' : undefined}>
-        {workspace && <summary>{configurationText('additionalInfo')}</summary>}
+      <div>
         <div className={styles.content}>
           <Card
             title={t('system_info.quick_links_title')}
@@ -414,7 +415,7 @@ function SystemPageContent({
             </div>
           </Card>
 
-          {featureAvailability.managerServiceAvailable && (
+          {!workspace && featureAvailability.managerServiceAvailable && (
             <DatabaseStatusCard
               status={databaseStatus}
               loading={databaseLoading}
@@ -422,65 +423,67 @@ function SystemPageContent({
             />
           )}
 
-          <Card
-            title={t('system_info.models_title')}
-            extra={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => fetchModels({ forceRefresh: true })}
-                loading={modelsLoading}
-              >
-                {t('common.refresh')}
-              </Button>
-            }
-          >
-            <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
-            {modelStatus && (
-              <div className={`status-badge ${modelStatus.type}`}>{modelStatusText}</div>
-            )}
-            {modelsCache && modelsError && modelStatus?.type !== 'error' && (
-              <div className="error-box">{modelsError}</div>
-            )}
-            {modelsLoading && !modelsCache ? (
-              <div className="hint">{t('common.loading')}</div>
-            ) : !modelsCache ? null : models.length === 0 ? (
-              <div className="hint">{t('system_info.models_empty')}</div>
-            ) : (
-              <div className="item-list">
-                {groupedModels.map((group) => {
-                  const iconSrc = getIconForCategory(group.id);
-                  return (
-                    <div key={group.id} className="item-row">
-                      <div className="item-meta">
-                        <div className={styles.groupTitle}>
-                          {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
-                          <span className="item-title">{group.label}</span>
+          {!workspace && (
+            <Card
+              title={t('system_info.models_title')}
+              extra={
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => fetchModels({ forceRefresh: true })}
+                  loading={modelsLoading}
+                >
+                  {t('common.refresh')}
+                </Button>
+              }
+            >
+              <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
+              {modelStatus && (
+                <div className={`status-badge ${modelStatus.type}`}>{modelStatusText}</div>
+              )}
+              {modelsCache && modelsError && modelStatus?.type !== 'error' && (
+                <div className="error-box">{modelsError}</div>
+              )}
+              {modelsLoading && !modelsCache ? (
+                <div className="hint">{t('common.loading')}</div>
+              ) : !modelsCache ? null : models.length === 0 ? (
+                <div className="hint">{t('system_info.models_empty')}</div>
+              ) : (
+                <div className="item-list">
+                  {groupedModels.map((group) => {
+                    const iconSrc = getIconForCategory(group.id);
+                    return (
+                      <div key={group.id} className="item-row">
+                        <div className="item-meta">
+                          <div className={styles.groupTitle}>
+                            {iconSrc && <img src={iconSrc} alt="" className={styles.groupIcon} />}
+                            <span className="item-title">{group.label}</span>
+                          </div>
+                          <div className="item-subtitle">
+                            {t('system_info.models_count', { count: group.items.length })}
+                          </div>
                         </div>
-                        <div className="item-subtitle">
-                          {t('system_info.models_count', { count: group.items.length })}
+                        <div className={styles.modelTags}>
+                          {group.items.map((model) => (
+                            <span
+                              key={`${model.name}-${model.alias ?? 'default'}`}
+                              className={styles.modelTag}
+                              title={model.description || ''}
+                            >
+                              <span className={styles.modelName}>{model.name}</span>
+                              {model.alias && (
+                                <span className={styles.modelAlias}>{model.alias}</span>
+                              )}
+                            </span>
+                          ))}
                         </div>
                       </div>
-                      <div className={styles.modelTags}>
-                        {group.items.map((model) => (
-                          <span
-                            key={`${model.name}-${model.alias ?? 'default'}`}
-                            className={styles.modelTag}
-                            title={model.description || ''}
-                          >
-                            <span className={styles.modelName}>{model.name}</span>
-                            {model.alias && (
-                              <span className={styles.modelAlias}>{model.alias}</span>
-                            )}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          )}
 
           <Card title={t('system_info.clear_login_title')}>
             <p className={styles.sectionDescription}>{t('system_info.clear_login_desc')}</p>
@@ -491,7 +494,7 @@ function SystemPageContent({
             </div>
           </Card>
         </div>
-      </InformationContainer>
+      </div>
     </div>
   );
 }

@@ -31,6 +31,10 @@ const GATEWAY_CONFIG_ERROR_CODES: Record<string, true> = {
   proxy_url_credentials: true,
   // A value outside the private profile's field range.
   invalid_config: true,
+  // Source YAML editor rejections decided before CPA is asked.
+  invalid_source_yaml: true,
+  protected_source_path: true,
+  source_no_changes: true,
 };
 
 // The completion refusals an adoption's operator can act on. A code outside this
@@ -318,7 +322,7 @@ export function createPublicApiClient(
               response.status === 503 ||
               ((retryResource || accessCompletionResource || keyResource) && response.status === 400) ||
               (retryResource && response.status === 422) ||
-              (keyResource && response.status === 404)))
+              ((keyResource || retryResource) && response.status === 404)))
         ) {
           try {
             const payload = (await response.json()) as Record<string, unknown>;

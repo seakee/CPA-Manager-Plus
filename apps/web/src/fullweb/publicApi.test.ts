@@ -752,4 +752,55 @@ describe('canonical Full Web Public API transport', () => {
       expect(JSON.stringify(error)).not.toContain('internal ingress detail secret');
     }
   });
+  it('preserves gateway/config/source 422 rejection codes, field, and message', async () => {
+    browserOrigin();
+    const cases: Array<[string, string | undefined, string | undefined]> = [
+      ['protected_source_path', 'management.secret-key', undefined],
+      ['invalid_source_yaml', 'requests.proxy-url', 'invalid YAML syntax'],
+      ['source_no_changes', undefined, undefined],
+    ];
+    for (const [serverCode, field, message] of cases) {
+      const transport = vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json(
+          { code: serverCode, ...(field ? { field } : {}), ...(message ? { message } : {}) },
+          { status: 422 }
+        )
+      );
+      const error = (await createPublicApiClient(() => context, transport)
+        .post(
+          'gateway/config/source',
+          { requestId: 'a'.repeat(32), expected: { generation: '1', baseline: 'b'.repeat(64) }, yaml: 'routing:\n  strategy: round-robin\n' },
+          credential
+        )
+        .catch((value: unknown) => value)) as Error & {
+        kind?: string;
+        status?: number;
+        code?: string;
+        field?: string;
+        detail?: string;
+      };
+      expect(error).toMatchObject({
+        kind: 'http',
+        status: 422,
+        code: serverCode,
+        field,
+        detail: message,
+      });
+    }
+  });
+
+  it('retains operation_not_found on gateway/config operation reconcile 404 responses', async () => {
+    browserOrigin();
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ code: 'operation_not_found' }, { status: 404 }));
+    const error = await createPublicApiClient(() => context, transport)
+      .post('gateway/config/operations/' + 'a'.repeat(32) + '/reconcile', {}, credential)
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      kind: 'http',
+      status: 404,
+      code: 'operation_not_found',
+    });
+  });
 });

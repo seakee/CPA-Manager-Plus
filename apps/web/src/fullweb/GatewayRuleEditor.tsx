@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Modal } from '../components/ui/Modal';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import type { GatewayFamilyMeta } from './gatewayCatalog';
@@ -59,12 +59,17 @@ export function GatewayRuleEditor({
   const [jsonText, setJsonText] = useState('');
   const [mode, setMode] = useState<'structured' | 'json'>('structured');
   const [issue, setIssue] = useState<string>('');
+  const initialTemplateRef = useRef<{ formJson: string; json: string } | null>(null);
 
   const hint = c(family.hintKey);
   function startEdit(index: number | null) {
     const target = index === null ? emptyRule(family) : list[index];
-    setForm(ruleToForm(target, family));
-    setJsonText(stringifyGatewayJSON(target));
+    const nextForm = ruleToForm(target, family);
+    const nextJson = stringifyGatewayJSON(target);
+    initialTemplateRef.current =
+      index === null ? { formJson: JSON.stringify(nextForm), json: nextJson } : null;
+    setForm(nextForm);
+    setJsonText(nextJson);
     setMode('structured');
     setIssue('');
     setEditing(index === null ? list.length : index);
@@ -82,24 +87,49 @@ export function GatewayRuleEditor({
       next[editing] = result.rule;
       return next;
     });
+    initialTemplateRef.current = null;
     setEditing(null);
     setForm(null);
     setIssue('');
   }
 
   function switchMode(next: 'structured' | 'json') {
-    if (!form) return;
+    if (!form || next === mode) return;
     if (next === 'json') {
       const result = formToRule(form, family);
-      if (result.ok) setJsonText(stringifyGatewayJSON(result.rule));
+      if (!result.ok) {
+        const untouchedNew =
+          initialTemplateRef.current !== null &&
+          JSON.stringify(form) === initialTemplateRef.current.formJson;
+        if (!untouchedNew) {
+          setIssue(c(RULE_ISSUE_TEXT[result.issue]));
+          return;
+        }
+        setJsonText(initialTemplateRef.current!.json);
+        setMode('json');
+        setIssue('');
+        return;
+      }
+      initialTemplateRef.current = null;
+      setJsonText(stringifyGatewayJSON(result.rule));
       setMode('json');
+      setIssue('');
       return;
     }
     const result = parseRuleText(jsonText, family);
     if (!result.ok) {
-      setIssue(c(RULE_ISSUE_TEXT[result.issue]));
+      const untouchedNew =
+        initialTemplateRef.current !== null && jsonText === initialTemplateRef.current.json;
+      if (!untouchedNew) {
+        setIssue(c(RULE_ISSUE_TEXT[result.issue]));
+        return;
+      }
+      setForm(ruleToForm(emptyRule(family), family));
+      setMode('structured');
+      setIssue('');
       return;
     }
+    initialTemplateRef.current = null;
     setForm(ruleToForm(result.rule, family));
     setMode('structured');
     setIssue('');
@@ -125,10 +155,11 @@ export function GatewayRuleEditor({
 
   const footer = editing === null ? (
     <>
-      <button className="btn btn-secondary" data-testid="rule-close" onClick={onCancel}>
+      <button type="button" className="btn btn-secondary" data-testid="rule-close" onClick={onCancel}>
         {c('ruleCancel')}
       </button>
       <button
+        type="button"
         className="btn btn-primary"
         data-testid="rule-save"
         disabled={readOnly}
@@ -139,10 +170,19 @@ export function GatewayRuleEditor({
     </>
   ) : (
     <>
-      <button className="btn btn-secondary" data-testid="rule-editor-cancel" onClick={() => setEditing(null)}>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        data-testid="rule-editor-cancel"
+        onClick={() => {
+          setEditing(null);
+          setForm(null);
+          setIssue('');
+        }}
+      >
         {c('ruleBackToList')}
       </button>
-      <button className="btn btn-primary" data-testid="rule-editor-apply" onClick={commitEdit}>
+      <button type="button" className="btn btn-primary" data-testid="rule-editor-apply" onClick={commitEdit}>
         {c('ruleApplyToDraft')}
       </button>
     </>
@@ -175,9 +215,9 @@ export function GatewayRuleEditor({
           <div className="rule-list" data-testid="rule-list">
             {list.map((rule, index) => (
               <div className="rule-summary" key={index} data-testid={'rule-' + index}>
-                <div>
+                <div className="rule-summary-main">
                   <span className="badge">{index + 1}</span>
-                  <strong>{ruleSummary(rule, family)}</strong>
+                  <strong className="rule-summary-text">{ruleSummary(rule, family)}</strong>
                 </div>
                 <div className="actions">
                   <button
@@ -262,6 +302,7 @@ export function GatewayRuleEditor({
               <label className="dialog-label">
                 {c('ruleJsonLabel')}
                 <textarea
+                  className="input rule-json-textarea"
                   data-testid="rule-json"
                   rows={16}
                   value={jsonText}
@@ -278,6 +319,7 @@ export function GatewayRuleEditor({
                       <label>
                         {c('ruleModelName')}
                         <input
+                          className="input rule-mono-input"
                           data-testid={'rule-model-name-' + modelIndex}
                           value={model.name}
                           placeholder="gpt-*"
@@ -298,6 +340,7 @@ export function GatewayRuleEditor({
                       <label>
                         {c('ruleProtocol')}
                         <select
+                          className="input"
                           data-testid={'rule-model-protocol-' + modelIndex}
                           value={model.protocol}
                           onChange={(event) =>
@@ -323,6 +366,7 @@ export function GatewayRuleEditor({
                       <label>
                         {c('ruleFromProtocol')}
                         <select
+                          className="input"
                           data-testid={'rule-model-from-' + modelIndex}
                           value={model.from}
                           onChange={(event) =>
@@ -353,6 +397,7 @@ export function GatewayRuleEditor({
                         <label>
                           {c('ruleConditionKind')}
                           <select
+                            className="input"
                             value={row.kind}
                             onChange={(event) =>
                               updateRow(setForm, modelIndex, rowIndex, {
@@ -372,6 +417,7 @@ export function GatewayRuleEditor({
                         <label>
                           {c('rulePath')}
                           <input
+                            className="input rule-mono-input"
                             value={row.path}
                             placeholder={row.kind === 'headers' ? 'X-Client-Tier' : 'metadata.client'}
                             onChange={(event) =>
@@ -384,8 +430,8 @@ export function GatewayRuleEditor({
                             <label>
                               {c('ruleType')}
                               <select
+                                className="input"
                                 value={row.type}
-                                disabled={row.kind === 'headers'}
                                 onChange={(event) =>
                                   updateRow(setForm, modelIndex, rowIndex, {
                                     type: event.target.value as RuleValueType,
@@ -403,6 +449,7 @@ export function GatewayRuleEditor({
                             <label>
                               {c('ruleValue')}
                               <input
+                                className="input"
                                 value={row.value}
                                 disabled={row.type === 'null'}
                                 onChange={(event) =>
@@ -489,75 +536,69 @@ export function GatewayRuleEditor({
                 >
                   {c('ruleAddModel')}
                 </button>
-                <h3>{c(family.filter ? 'rulePaths' : 'ruleParams')}</h3>
-                {form.params.map((row, rowIndex) => (
-                  <div
-                    className={'structured-row' + (family.filter ? ' path-only' : '')}
-                    key={rowIndex}
-                    data-param-row={rowIndex}
-                  >
-                    <label>
-                      {c('rulePath')}
-                      <input
-                        value={row.path}
-                        placeholder={family.filter ? 'metadata.client' : 'reasoning.effort'}
-                        onChange={(event) =>
+                {family.replace ? (
+                  <>
+                    <h3>{c('ruleReplaceTarget')}</h3>
+                    <div className="editor-modes" role="group" aria-label={c('ruleReplaceTarget')}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        aria-pressed={form.replaceTargetMode === 'all'}
+                        onClick={() =>
                           setForm((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  params: current.params.map((item, at) =>
-                                    at === rowIndex ? { ...item, path: event.target.value } : item
-                                  ),
-                                }
-                              : current
+                            current ? { ...current, replaceTargetMode: 'all' } : current
                           )
                         }
-                      />
-                    </label>
-                    {family.filter ? null : (
-                      <>
+                      >
+                        {c('ruleReplaceAll')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        aria-pressed={form.replaceTargetMode === 'positions'}
+                        onClick={() =>
+                          setForm((current) =>
+                            current ? { ...current, replaceTargetMode: 'positions' } : current
+                          )
+                        }
+                      >
+                        {c('ruleReplacePositions')}
+                      </button>
+                    </div>
+                    {form.replaceTargetMode === 'positions' ? (
+                      <label className="dialog-label">
+                        {c('ruleReplacePositionsLabel')}
+                        <input
+                          className="input rule-mono-input"
+                          data-testid="rule-replace-positions"
+                          value={form.replacePositions}
+                          placeholder="1, 2"
+                          onChange={(event) =>
+                            setForm((current) =>
+                              current ? { ...current, replacePositions: event.target.value } : current
+                            )
+                          }
+                        />
+                      </label>
+                    ) : null}
+                    <h3>{c('ruleReplacePairs')}</h3>
+                    <p className="detail">{c('ruleReplacePairsHelp')}</p>
+                    {form.replaceEntries.map((entry, rowIndex) => (
+                      <div className="structured-row replace-row" key={rowIndex}>
                         <label>
-                          {c('ruleType')}
-                          <select
-                            value={row.type}
-                            disabled={family.raw}
-                            onChange={(event) =>
-                              setForm((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      params: current.params.map((item, at) =>
-                                        at === rowIndex
-                                          ? { ...item, type: event.target.value as RuleParamType }
-                                          : item
-                                      ),
-                                    }
-                                  : current
-                              )
-                            }
-                          >
-                            {(family.raw ? (['raw'] as RuleParamType[]) : (VALUE_TYPES as RuleParamType[])).map(
-                              (type) => (
-                                <option key={type} value={type}>
-                                  {type === 'raw' ? c('typeRaw') : c(ROW_TYPE_LABEL[type as RuleValueType])}
-                                </option>
-                              )
-                            )}
-                          </select>
-                        </label>
-                        <label>
-                          {c('ruleValue')}
+                          {c('ruleReplaceSearch')}
                           <input
-                            value={row.value}
-                            disabled={row.type === 'null'}
+                            className="input rule-mono-input"
+                            data-testid={'rule-replace-search-' + rowIndex}
+                            value={entry.search}
+                            placeholder={c('ruleReplaceSearchPlaceholder')}
                             onChange={(event) =>
                               setForm((current) =>
                                 current
                                   ? {
                                       ...current,
-                                      params: current.params.map((item, at) =>
-                                        at === rowIndex ? { ...item, value: event.target.value } : item
+                                      replaceEntries: current.replaceEntries.map((item, at) =>
+                                        at === rowIndex ? { ...item, search: event.target.value } : item
                                       ),
                                     }
                                   : current
@@ -565,41 +606,191 @@ export function GatewayRuleEditor({
                             }
                           />
                         </label>
-                      </>
-                    )}
+                        <label>
+                          {c('ruleReplaceWith')}
+                          <input
+                            className="input rule-mono-input"
+                            data-testid={'rule-replace-with-' + rowIndex}
+                            value={entry.replace}
+                            placeholder={c('ruleReplaceWithPlaceholder')}
+                            onChange={(event) =>
+                              setForm((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      replaceEntries: current.replaceEntries.map((item, at) =>
+                                        at === rowIndex ? { ...item, replace: event.target.value } : item
+                                      ),
+                                    }
+                                  : current
+                              )
+                            }
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          disabled={form.replaceEntries.length <= 1}
+                          onClick={() =>
+                            setForm((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    replaceEntries: current.replaceEntries.filter((_, at) => at !== rowIndex),
+                                  }
+                                : current
+                            )
+                          }
+                        >
+                          {c('ruleRemove')}
+                        </button>
+                      </div>
+                    ))}
                     <button
+                      type="button"
                       className="btn btn-secondary btn-sm"
+                      data-testid="rule-replace-add"
                       onClick={() =>
                         setForm((current) =>
                           current
-                            ? { ...current, params: current.params.filter((_, index) => index !== rowIndex) }
+                            ? {
+                                ...current,
+                                replaceEntries: [...current.replaceEntries, { search: '', replace: '' }],
+                              }
                             : current
                         )
                       }
                     >
-                      {c('ruleRemove')}
+                      {c('ruleReplaceAddPair')}
                     </button>
-                  </div>
-                ))}
-                <button
-                  className="btn btn-secondary btn-sm"
-                  data-testid="rule-param-add"
-                  onClick={() =>
-                    setForm((current) =>
-                      current
-                        ? {
-                            ...current,
-                            params: [
-                              ...current.params,
-                              { path: '', type: family.raw ? 'raw' : 'string', value: '' },
-                            ],
+                  </>
+                ) : (
+                  <>
+                    <h3>{c(family.filter ? 'rulePaths' : 'ruleParams')}</h3>
+                    {form.params.map((row, rowIndex) => (
+                      <div
+                        className={'structured-row' + (family.filter ? ' path-only' : '')}
+                        key={rowIndex}
+                        data-param-row={rowIndex}
+                      >
+                        <label>
+                          {c('rulePath')}
+                          <input
+                            className="input rule-mono-input"
+                            value={row.path}
+                            placeholder={family.filter ? 'metadata.client' : 'reasoning.effort'}
+                            onChange={(event) =>
+                              setForm((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      params: current.params.map((item, at) =>
+                                        at === rowIndex ? { ...item, path: event.target.value } : item
+                                      ),
+                                    }
+                                  : current
+                              )
+                            }
+                          />
+                        </label>
+                        {family.filter ? null : (
+                          <>
+                            <label>
+                              {c('ruleType')}
+                              <select
+                                className="input"
+                                value={row.type}
+                                disabled={family.raw}
+                                onChange={(event) =>
+                                  setForm((current) =>
+                                    current
+                                      ? {
+                                          ...current,
+                                          params: current.params.map((item, at) =>
+                                            at === rowIndex
+                                              ? {
+                                                  ...item,
+                                                  type: event.target.value as RuleParamType,
+                                                  value:
+                                                    event.target.value === 'boolean'
+                                                      ? 'true'
+                                                      : item.value,
+                                                }
+                                              : item
+                                          ),
+                                        }
+                                      : current
+                                  )
+                                }
+                              >
+                                {(family.raw ? (['raw'] as RuleParamType[]) : (VALUE_TYPES as RuleParamType[])).map(
+                                  (type) => (
+                                    <option key={type} value={type}>
+                                      {type === 'raw' ? c('typeRaw') : c(ROW_TYPE_LABEL[type as RuleValueType])}
+                                    </option>
+                                  )
+                                )}
+                              </select>
+                            </label>
+                            <label>
+                              {c('ruleValue')}
+                              <input
+                                className="input"
+                                value={row.value}
+                                disabled={row.type === 'null'}
+                                onChange={(event) =>
+                                  setForm((current) =>
+                                    current
+                                      ? {
+                                          ...current,
+                                          params: current.params.map((item, at) =>
+                                            at === rowIndex ? { ...item, value: event.target.value } : item
+                                          ),
+                                        }
+                                      : current
+                                  )
+                                }
+                              />
+                            </label>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() =>
+                            setForm((current) =>
+                              current
+                                ? { ...current, params: current.params.filter((_, index) => index !== rowIndex) }
+                                : current
+                            )
                           }
-                        : current
-                    )
-                  }
-                >
-                  {c(family.filter ? 'ruleAddPath' : 'ruleAddParam')}
-                </button>
+                        >
+                          {c('ruleRemove')}
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      data-testid="rule-param-add"
+                      onClick={() =>
+                        setForm((current) =>
+                          current
+                            ? {
+                                ...current,
+                                params: [
+                                  ...current.params,
+                                  { path: '', type: family.raw ? 'raw' : 'string', value: '' },
+                                ],
+                              }
+                            : current
+                        )
+                      }
+                    >
+                      {c(family.filter ? 'ruleAddPath' : 'ruleAddParam')}
+                    </button>
+                  </>
+                )}
               </>
             )}
             <p className="detail">{c('ruleDraftNotice')}</p>
@@ -621,14 +812,19 @@ const RULE_ISSUE_TEXT: Record<RuleIssue, Parameters<typeof c>[0]> = {
   paramValue: 'ruleIssueParamValue',
   rawValue: 'ruleIssueRawValue',
   emptyParams: 'ruleIssueEmptyParams',
+  replacePositions: 'issueReplacePositions',
+  replacePairs: 'issueReplacePairs',
   jsonInvalid: 'ruleIssueJsonInvalid',
   jsonConditions: 'ruleIssueJsonConditions',
   jsonParams: 'ruleIssueJsonParams',
 };
 
 function emptyRule(family: GatewayFamilyMeta): unknown {
+  if (family.replace) {
+    return { models: [{ name: '*' }], target: { role: 'user', all: true }, replacements: [] };
+  }
   return family.filter
-    ? { models: [{ name: '*', params: [] }], params: [] }
+    ? { models: [{ name: '*' }], params: [] }
     : { models: [{ name: '*' }], params: {} };
 }
 
