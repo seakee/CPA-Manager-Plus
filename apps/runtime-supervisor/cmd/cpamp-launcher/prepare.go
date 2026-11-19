@@ -856,14 +856,40 @@ func repairGatewayTree(ctx context.Context, layout RuntimeLayout, cpaUID, cpaGID
 	return nil
 }
 
+const maxGatewayWalkDepth = 16
+
 func repairGatewayTreeNoFollowFD(ctx context.Context, layout RuntimeLayout, cpaUID, cpaGID int) error {
-	rootFD, err := openRealDirFD(unix.AT_FDCWD, layout.GatewayDir, layout.GatewayDir)
+	return repairGatewayTreeNoFollowFDWithChown(ctx, layout, cpaUID, cpaGID, fchownGatewayEntryFD)
+}
+
+func repairGatewayTreeNoFollowFDWithChown(
+	ctx context.Context,
+	layout RuntimeLayout,
+	cpaUID, cpaGID int,
+	chownFD func(fd int, uid, gid int) error,
+) error {
+	rootFD, rootDev, err := openRealDirFDWithDev(unix.AT_FDCWD, layout.GatewayDir, layout.GatewayDir)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(rootFD)
 
-	if err := walkGatewayDirFD(ctx, rootFD, layout.GatewayDir, cpaUID, cpaGID); err != nil {
+	for _, fullSubPath := range layout.GatewayDirs() {
+		if fullSubPath == layout.GatewayDir {
+			continue
+		}
+		subName := filepath.Base(fullSubPath)
+		subFD, subDev, openErr := openRealDirFDWithDev(rootFD, subName, fullSubPath)
+		if openErr != nil {
+			return openErr
+		}
+		_ = unix.Close(subFD)
+		if subDev != rootDev {
+			return fmt.Errorf("Gateway state path crosses filesystem boundary: %s", fullSubPath)
+		}
+	}
+
+	if err := walkGatewayDirFD(ctx, rootFD, layout.GatewayDir, rootDev, 0, cpaUID, cpaGID, chownFD); err != nil {
 		return err
 	}
 	if err := unix.Fchmod(rootFD, uint32(NormalizeUnixPerm(GatewayDirMode))); err != nil {
@@ -874,11 +900,15 @@ func repairGatewayTreeNoFollowFD(ctx context.Context, layout RuntimeLayout, cpaU
 			continue
 		}
 		subName := filepath.Base(fullSubPath)
-		subFD, openErr := openRealDirFD(rootFD, subName, fullSubPath)
+		subFD, subDev, openErr := openRealDirFDWithDev(rootFD, subName, fullSubPath)
 		if openErr != nil {
 			return openErr
 		}
-		chownErr := unix.Fchown(subFD, cpaUID, cpaGID)
+		if subDev != rootDev {
+			_ = unix.Close(subFD)
+			return fmt.Errorf("Gateway state path crosses filesystem boundary: %s", fullSubPath)
+		}
+		chownErr := chownFD(subFD, cpaUID, cpaGID)
 		chmodErr := unix.Fchmod(subFD, uint32(NormalizeUnixPerm(GatewayDirMode)))
 		_ = unix.Close(subFD)
 		if chownErr != nil {
@@ -892,16 +922,21 @@ func repairGatewayTreeNoFollowFD(ctx context.Context, layout RuntimeLayout, cpaU
 }
 
 func openRealDirFD(parentFD int, name, displayPath string) (int, error) {
+	fd, _, err := openRealDirFDWithDev(parentFD, name, displayPath)
+	return fd, err
+}
+
+func openRealDirFDWithDev(parentFD int, name, displayPath string) (int, uint64, error) {
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, fmt.Errorf("Gateway state path is not a real directory: %s: %w", displayPath, err)
+		return -1, 0, fmt.Errorf("Gateway state path is not a real directory: %s: %w", displayPath, err)
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil || (st.Mode&unix.S_IFMT) != unix.S_IFDIR {
 		_ = unix.Close(fd)
-		return -1, fmt.Errorf("Gateway state path is not a real directory: %s", displayPath)
+		return -1, 0, fmt.Errorf("Gateway state path is not a real directory: %s", displayPath)
 	}
-	return fd, nil
+	return fd, uint64(st.Dev), nil
 }
 
 func readDirFromFD(dirFD int, displayPath string) ([]fs.DirEntry, error) {
@@ -935,12 +970,35 @@ func readDirNoFollow(path string) ([]fs.DirEntry, error) {
 	return readDirFromFD(fd, path)
 }
 
-func walkGatewayDirFD(ctx context.Context, dirFD int, dirPath string, uid, gid int) error {
+func walkGatewayDirFD(
+	ctx context.Context,
+	dirFD int,
+	dirPath string,
+	expectedDev uint64,
+	depth int,
+	uid, gid int,
+	chownFD func(fd int, uid, gid int) error,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := unix.Fchown(dirFD, uid, gid); err != nil {
-		return fmt.Errorf("failed to fchown %s: %w", dirPath, err)
+	if depth > maxGatewayWalkDepth {
+		return fmt.Errorf("Gateway state path exceeds maximum depth %d: %s", maxGatewayWalkDepth, dirPath)
+	}
+	var dirSt unix.Stat_t
+	if err := unix.Fstat(dirFD, &dirSt); err != nil {
+		return fmt.Errorf("failed to fstat %s: %w", dirPath, err)
+	}
+	if (dirSt.Mode & unix.S_IFMT) != unix.S_IFDIR {
+		return fmt.Errorf("Gateway state path is not a real directory: %s", dirPath)
+	}
+	if uint64(dirSt.Dev) != expectedDev {
+		return fmt.Errorf("Gateway state path crosses filesystem boundary: %s", dirPath)
+	}
+	if depth == 0 {
+		if err := chownFD(dirFD, uid, gid); err != nil {
+			return fmt.Errorf("failed to fchown %s: %w", dirPath, err)
+		}
 	}
 	entries, err := readDirFromFD(dirFD, dirPath)
 	if err != nil {
@@ -950,29 +1008,71 @@ func walkGatewayDirFD(ctx context.Context, dirFD int, dirPath string, uid, gid i
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		name := entry.Name()
-		childPath := filepath.Join(dirPath, name)
-		var st unix.Stat_t
-		if err := unix.Fstatat(dirFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fmt.Errorf("failed to fstatat %s: %w", childPath, err)
-		}
-		if (st.Mode & unix.S_IFMT) == unix.S_IFDIR {
-			childFD, openErr := openRealDirFD(dirFD, name, childPath)
-			if openErr != nil {
-				return openErr
-			}
-			walkErr := walkGatewayDirFD(ctx, childFD, childPath, uid, gid)
-			_ = unix.Close(childFD)
-			if walkErr != nil {
-				return walkErr
-			}
-			continue
-		}
-		if err := unix.Fchownat(dirFD, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fmt.Errorf("failed to fchownat %s: %w", childPath, err)
+		if err := visitGatewayChildFD(ctx, dirFD, dirPath, entry.Name(), expectedDev, depth+1, uid, gid, chownFD); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func visitGatewayChildFD(
+	ctx context.Context,
+	dirFD int,
+	dirPath, name string,
+	expectedDev uint64,
+	childDepth int,
+	uid, gid int,
+	chownFD func(fd int, uid, gid int) error,
+) error {
+	childPath := filepath.Join(dirPath, name)
+	if childDepth > maxGatewayWalkDepth {
+		return fmt.Errorf("Gateway state path exceeds maximum depth %d: %s", maxGatewayWalkDepth, childPath)
+	}
+	entryFD, st, openErr := openGatewayEntryNoFollow(dirFD, name, childPath)
+	if openErr != nil {
+		return openErr
+	}
+	if uint64(st.Dev) != expectedDev {
+		_ = unix.Close(entryFD)
+		return fmt.Errorf("Gateway state path crosses filesystem boundary: %s", childPath)
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		if err := chownFD(entryFD, uid, gid); err != nil {
+			_ = unix.Close(entryFD)
+			return fmt.Errorf("failed to fchown %s: %w", childPath, err)
+		}
+		childDirFD, dirOpenErr := openGatewayDirFromEntryFD(entryFD, childPath)
+		_ = unix.Close(entryFD)
+		if dirOpenErr != nil {
+			return dirOpenErr
+		}
+		var childDirSt unix.Stat_t
+		if statErr := unix.Fstat(childDirFD, &childDirSt); statErr != nil ||
+			(childDirSt.Mode&unix.S_IFMT) != unix.S_IFDIR ||
+			uint64(childDirSt.Dev) != expectedDev ||
+			childDirSt.Ino != st.Ino {
+			_ = unix.Close(childDirFD)
+			return fmt.Errorf("Gateway state path is not a real directory: %s", childPath)
+		}
+		walkErr := walkGatewayDirFD(ctx, childDirFD, childPath, expectedDev, childDepth, uid, gid, chownFD)
+		_ = unix.Close(childDirFD)
+		return walkErr
+	case unix.S_IFREG:
+		if uint64(st.Nlink) > 1 {
+			_ = unix.Close(entryFD)
+			return fmt.Errorf("Gateway state regular file has multiple hard links: %s", childPath)
+		}
+		chownErr := chownFD(entryFD, uid, gid)
+		_ = unix.Close(entryFD)
+		if chownErr != nil {
+			return fmt.Errorf("failed to fchown %s: %w", childPath, chownErr)
+		}
+		return nil
+	default:
+		_ = unix.Close(entryFD)
+		return fmt.Errorf("Gateway state path has unsupported file type: %s", childPath)
+	}
 }
 
 func requireGatewayAncestorsRealDirs(rootDir, targetPath string, sys System) error {

@@ -11,10 +11,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -1015,4 +1018,216 @@ func TestShutdownBudgetFitsContainerGrace(t *testing.T) {
 	if drain+ShutdownFixedBudgetLimit > 150*time.Second {
 		t.Fatalf("default container grace must cover drain+limit (%s)", drain+ShutdownFixedBudgetLimit)
 	}
+}
+
+func TestWalkGatewayDirFDRefusesMultiHardlinkedRegularFiles(t *testing.T) {
+	base := t.TempDir()
+	layout := ResolveRuntimeLayout(
+		filepath.Join(base, "data"),
+		filepath.Join(base, "data", "runtime"),
+		filepath.Join(base, "data", "runtime-secret", "token"),
+	)
+	for _, dir := range layout.GatewayDirs() {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(layout.GatewayConfigPath, []byte(testSeedYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if err := repairGatewayTreeNoFollowFD(context.Background(), layout, uid, gid); err != nil {
+		t.Fatalf("single-link gateway repair unexpectedly failed: %v", err)
+	}
+
+	outsideTarget := filepath.Join(base, "outside-regular.json")
+	if err := os.WriteFile(outsideTarget, []byte(`{"token":"secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hardlinkedChild := filepath.Join(layout.GatewayAuthDir, "linked-credential.json")
+	if err := os.Link(outsideTarget, hardlinkedChild); err != nil {
+		t.Fatal(err)
+	}
+
+	err := repairGatewayTreeNoFollowFD(context.Background(), layout, uid, gid)
+	if err == nil || !strings.Contains(err.Error(), "multiple hard links") {
+		t.Fatalf("expected multi-hardlinked regular file refusal, got: %v", err)
+	}
+
+	if err := os.Remove(outsideTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := repairGatewayTreeNoFollowFD(context.Background(), layout, uid, gid); err != nil {
+		t.Fatalf("gateway repair after dropping extra hard link failed: %v", err)
+	}
+}
+
+func TestWalkGatewayDirFDBindsDescriptorAndEnforcesTypeDeviceAndDepthBounds(t *testing.T) {
+	newSeededLayout := func(t *testing.T) (string, RuntimeLayout) {
+		t.Helper()
+		base := t.TempDir()
+		layout := ResolveRuntimeLayout(
+			filepath.Join(base, "data"),
+			filepath.Join(base, "data", "runtime"),
+			filepath.Join(base, "data", "runtime-secret", "token"),
+		)
+		for _, dir := range layout.GatewayDirs() {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(layout.GatewayConfigPath, []byte(testSeedYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return base, layout
+	}
+
+	t.Run("binds_fstat_and_fchown_to_open_descriptor_up_to_depth_16", func(t *testing.T) {
+		_, layout := newSeededLayout(t)
+		// auth is depth 1; create d2..d15 (depth 2..15) and leaf.json at depth 16.
+		deepDir := layout.GatewayAuthDir
+		for d := 2; d <= maxGatewayWalkDepth-1; d++ {
+			deepDir = filepath.Join(deepDir, "d"+strconv.Itoa(d))
+		}
+		if err := os.MkdirAll(deepDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		leafFile := filepath.Join(deepDir, "leaf.json")
+		if err := os.WriteFile(leafFile, []byte(`{"ok":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var rootSt unix.Stat_t
+		if err := unix.Lstat(layout.GatewayDir, &rootSt); err != nil {
+			t.Fatal(err)
+		}
+		var leafSt unix.Stat_t
+		if err := unix.Lstat(leafFile, &leafSt); err != nil {
+			t.Fatal(err)
+		}
+
+		visitedInodes := make(map[uint64]bool)
+		err := repairGatewayTreeNoFollowFDWithChown(context.Background(), layout, os.Getuid(), os.Getgid(), func(fd, uid, gid int) error {
+			if fd < 0 {
+				t.Fatalf("expected valid open fd >= 0, got %d", fd)
+			}
+			var st unix.Stat_t
+			if err := unix.Fstat(fd, &st); err != nil {
+				t.Fatalf("fstat bound chown fd: %v", err)
+			}
+			if uint64(st.Dev) != uint64(rootSt.Dev) {
+				t.Fatalf("fd device = %d, want %d", st.Dev, rootSt.Dev)
+			}
+			mode := st.Mode & unix.S_IFMT
+			if mode != unix.S_IFDIR && (mode != unix.S_IFREG || uint64(st.Nlink) > 1) {
+				t.Fatalf("unexpected mode/nlink on chown fd: mode=%#o nlink=%d", mode, st.Nlink)
+			}
+			visitedInodes[uint64(st.Ino)] = true
+			return fchownGatewayEntryFD(fd, uid, gid)
+		})
+		if err != nil {
+			t.Fatalf("repairGatewayTreeNoFollowFDWithChown at depth 16: %v", err)
+		}
+		if !visitedInodes[uint64(leafSt.Ino)] {
+			t.Fatal("expected leaf.json at depth 16 to be visited via bound descriptor")
+		}
+	})
+
+	t.Run("refuses_symlink_entry_inside_gateway_subdir_without_chown", func(t *testing.T) {
+		base, layout := newSeededLayout(t)
+		outsideFile := filepath.Join(base, "outside-secret.json")
+		if err := os.WriteFile(outsideFile, []byte(`{"secret":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var outsideSt unix.Stat_t
+		if err := unix.Lstat(outsideFile, &outsideSt); err != nil {
+			t.Fatal(err)
+		}
+		linkPath := filepath.Join(layout.GatewayAuthDir, "linked-secret.json")
+		if err := os.Symlink(outsideFile, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		var linkSt unix.Stat_t
+		if err := unix.Lstat(linkPath, &linkSt); err != nil {
+			t.Fatal(err)
+		}
+
+		err := repairGatewayTreeNoFollowFDWithChown(context.Background(), layout, os.Getuid(), os.Getgid(), func(fd, uid, gid int) error {
+			var st unix.Stat_t
+			if err := unix.Fstat(fd, &st); err == nil {
+				if uint64(st.Ino) == uint64(outsideSt.Ino) || uint64(st.Ino) == uint64(linkSt.Ino) {
+					t.Fatalf("unexpected chown on symlink or target inode %d", uint64(st.Ino))
+				}
+			}
+			return fchownGatewayEntryFD(fd, uid, gid)
+		})
+		if err == nil || !strings.Contains(err.Error(), "unsupported file type") {
+			t.Fatalf("expected symlink refusal, got: %v", err)
+		}
+	})
+
+	t.Run("refuses_special_fifo_entry_without_blocking_or_chown", func(t *testing.T) {
+		_, layout := newSeededLayout(t)
+		fifoPath := filepath.Join(layout.GatewayPluginsDir, "state.fifo")
+		if err := unix.Mkfifo(fifoPath, 0o600); err != nil {
+			t.Fatalf("mkfifo: %v", err)
+		}
+		var fifoSt unix.Stat_t
+		if err := unix.Lstat(fifoPath, &fifoSt); err != nil {
+			t.Fatal(err)
+		}
+
+		err := repairGatewayTreeNoFollowFDWithChown(context.Background(), layout, os.Getuid(), os.Getgid(), func(fd, uid, gid int) error {
+			var st unix.Stat_t
+			if err := unix.Fstat(fd, &st); err == nil && uint64(st.Ino) == uint64(fifoSt.Ino) {
+				t.Fatalf("unexpected chown on FIFO inode %d", uint64(st.Ino))
+			}
+			return fchownGatewayEntryFD(fd, uid, gid)
+		})
+		if err == nil || !strings.Contains(err.Error(), "unsupported file type") {
+			t.Fatalf("expected FIFO refusal, got: %v", err)
+		}
+	})
+
+	t.Run("refuses_cross_device_entry_and_depth_above_16", func(t *testing.T) {
+		_, layout := newSeededLayout(t)
+		rootFD, rootDev, err := openRealDirFDWithDev(unix.AT_FDCWD, layout.GatewayDir, layout.GatewayDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(rootFD)
+
+		crossErr := visitGatewayChildFD(
+			context.Background(),
+			rootFD,
+			layout.GatewayDir,
+			"config.yaml",
+			rootDev^1,
+			1,
+			os.Getuid(),
+			os.Getgid(),
+			func(int, int, int) error {
+				t.Fatal("unexpected chown on cross-device entry")
+				return nil
+			},
+		)
+		if crossErr == nil || !strings.Contains(crossErr.Error(), "crosses filesystem boundary") {
+			t.Fatalf("expected cross-device refusal, got: %v", crossErr)
+		}
+
+		// plugins is depth 1; create d2..d17 so d17 exceeds maxGatewayWalkDepth (16).
+		tooDeep := layout.GatewayPluginsDir
+		for d := 2; d <= maxGatewayWalkDepth+1; d++ {
+			tooDeep = filepath.Join(tooDeep, "d"+strconv.Itoa(d))
+		}
+		if err := os.MkdirAll(tooDeep, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		depthErr := repairGatewayTreeNoFollowFDWithChown(context.Background(), layout, os.Getuid(), os.Getgid(), fchownGatewayEntryFD)
+		if depthErr == nil || !strings.Contains(depthErr.Error(), "exceeds maximum depth 16") {
+			t.Fatalf("expected depth > 16 refusal, got: %v", depthErr)
+		}
+	})
 }
