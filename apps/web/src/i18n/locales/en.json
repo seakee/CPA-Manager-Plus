@@ -718,6 +718,12 @@
     "group_resources": "Resources",
     "group_clients": "Client Access",
     "group_observe": "Monitoring & Analytics",
+    "group_pinned": "Pinned",
+    "manage_pinned": "Pin",
+    "manage_pinned_done": "Done",
+    "manage_pinned_aria": "Manage pinned navigation",
+    "pin_item": "Pin {{label}}",
+    "unpin_item": "Unpin {{label}}",
     "model_prices": "Model Prices",
     "provider_models": "Provider Models"
   },

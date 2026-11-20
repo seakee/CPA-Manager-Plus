@@ -17,15 +17,22 @@ import { DatabaseMaintenanceBanner } from '@/components/common/DatabaseMaintenan
 import { DatabaseMaintenanceProvider } from '@/components/common/DatabaseMaintenanceContext';
 import { MainRoutes } from '@/router/MainRoutes';
 import {
+  IconChevronRight,
   IconGithub,
+  IconPin,
+  IconPinOff,
   IconSidebarAuthFiles,
+  IconSidebarClients,
   IconSidebarConfig,
   IconSidebarDashboard,
   IconSidebarLogs,
   IconSidebarMonitor,
   IconSidebarOauth,
+  IconSidebarObserve,
+  IconSidebarPinned,
   IconSidebarPlugins,
   IconSidebarProviders,
+  IconSidebarResources,
   IconSidebarSystem,
   IconSidebarUsage,
 } from '@/components/ui/icons';
@@ -48,7 +55,6 @@ import {
   isPluginManagementNavVisible,
   isPluginResourceNavVisible,
   PLUGIN_RESOURCES_REFRESH_EVENT,
-  resolvePluginAssetURL,
   type PluginResourceEntry,
 } from '@/features/plugins/pluginResources';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -57,13 +63,37 @@ import { prefixRouteBase, stripRouteBase } from '@/router/routeBase';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER, STORAGE_KEY_SIDEBAR } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
 import type { Theme, VisualEffectsMode } from '@/types';
+import {
+  getNavSectionsStorageKey,
+  getPinnedNavStorageKey,
+  parsePinnedNavPreference,
+  pinNavItem,
+  readOpenNavSections,
+  readPinnedNavIds,
+  unpinNavItem,
+  writeOpenNavSections,
+  writePinnedNavIds,
+  type NavPreferenceMode,
+} from './navPreferences';
+import {
+  buildCanonicalNavModel,
+  findNavSectionByItemId,
+  PINNED_SECTION_ID,
+  projectNavSections,
+  type NavItem,
+  type NavSidebarIconSet,
+} from './navRegistry';
 
 const SIDEBAR_ICON_SIZE = 20;
+const PIN_BUTTON_ICON_SIZE = 13;
 const GITHUB_REPOSITORY_URL = 'https://github.com/seakee/CPA-Manager-Plus';
 const NAV_SECTIONS_STORAGE_KEY = `${STORAGE_KEY_SIDEBAR}-sections`;
 
-const sidebarIcons: Record<string, ReactNode> = {
+const sidebarIcons: NavSidebarIconSet = {
   dashboard: <IconSidebarDashboard size={SIDEBAR_ICON_SIZE} />,
+  resources: <IconSidebarResources size={SIDEBAR_ICON_SIZE} />,
+  clients: <IconSidebarClients size={SIDEBAR_ICON_SIZE} />,
+  observe: <IconSidebarObserve size={SIDEBAR_ICON_SIZE} />,
   aiProviders: <IconSidebarProviders size={SIDEBAR_ICON_SIZE} />,
   authFiles: <IconSidebarAuthFiles size={SIDEBAR_ICON_SIZE} />,
   oauth: <IconSidebarOauth size={SIDEBAR_ICON_SIZE} />,
@@ -73,6 +103,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
   logs: <IconSidebarLogs size={SIDEBAR_ICON_SIZE} />,
   system: <IconSidebarSystem size={SIDEBAR_ICON_SIZE} />,
+  pinned: <IconSidebarPinned size={SIDEBAR_ICON_SIZE} />,
 };
 
 // Header action icons - smaller size for header buttons
@@ -219,24 +250,20 @@ function PluginSidebarIcon({ src }: { src: string }) {
   );
 }
 
-type NavItem = {
-  path: string;
-  label: string;
-  shortLabel?: string;
-  icon: ReactNode;
-  exact?: boolean;
-};
-
-type NavSection = {
-  id: string;
-  label: string;
-  icon: ReactNode;
-  items: NavItem[];
+type PendingPinFocus = {
+  mode: 'pin' | 'unpin';
+  inFlyout: boolean;
+  keyboardTrigger: boolean;
+  itemId: string;
+  sourceSectionId: string;
+  canonicalSectionId?: string;
+  siblingItemIds: string[];
 };
 
 interface MainLayoutProps {
   routeBase?: string;
   navigationBase?: string;
+  enablePinnedNav?: boolean;
   onLogout?: () => void;
   logoutDisabled?: boolean;
   hasUnsavedChanges?: boolean;
@@ -255,6 +282,7 @@ interface MainLayoutProps {
 function MainLayoutContent({
   routeBase = '',
   navigationBase = '',
+  enablePinnedNav = false,
   renderRoute,
   onLogout,
   logoutDisabled = false,
@@ -298,25 +326,36 @@ function MainLayoutContent({
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [visualEffectsMenuOpen, setVisualEffectsMenuOpen] = useState(false);
-  const [openNavSections, setOpenNavSections] = useState<Record<string, boolean>>(() => {
-    try {
-      const saved: unknown = JSON.parse(localStorage.getItem(NAV_SECTIONS_STORAGE_KEY) ?? '{}');
-      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-        return Object.fromEntries(
-          Object.entries(saved).filter(([, value]) => typeof value === 'boolean')
-        );
-      }
-    } catch {
-      // Navigation remains usable when browser storage is unavailable.
-    }
-    return {};
-  });
+  const preferenceMode: NavPreferenceMode = enablePinnedNav ? 'fullweb' : 'panel';
+  const pinnedStorageKey = getPinnedNavStorageKey(routeBase, preferenceMode);
+  const sectionsStorageKey = getNavSectionsStorageKey(
+    routeBase,
+    preferenceMode,
+    NAV_SECTIONS_STORAGE_KEY
+  );
+  const [openNavSections, setOpenNavSections] = useState<Record<string, boolean>>(() =>
+    readOpenNavSections(
+      sectionsStorageKey,
+      enablePinnedNav ? NAV_SECTIONS_STORAGE_KEY : undefined
+    )
+  );
+  const [pinnedNavIds, setPinnedNavIds] = useState<string[]>(() =>
+    enablePinnedNav ? readPinnedNavIds(pinnedStorageKey) : []
+  );
+  const [loadedSectionsKey, setLoadedSectionsKey] = useState(sectionsStorageKey);
+  const [loadedPinnedKey, setLoadedPinnedKey] = useState(enablePinnedNav ? pinnedStorageKey : '');
+  const [pinEditMode, setPinEditMode] = useState(false);
+  const [prevSidebarOpen, setPrevSidebarOpen] = useState(sidebarOpen);
   const [navFlyout, setNavFlyout] = useState<{ id: string; top: number; left: number } | null>(
     null
   );
   const navFlyoutRef = useRef<HTMLDivElement | null>(null);
-  const [lastNavPath, setLastNavPath] = useState<string | null>(null);
+  const [lastNavRoute, setLastNavRoute] = useState<string | null>(null);
+  const [lastAutoExpandedKey, setLastAutoExpandedKey] = useState<string | null>(null);
   const navToggleRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const navPinButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const dashboardLinkRef = useRef<HTMLAnchorElement | null>(null);
+  const pendingPinFocusRef = useRef<PendingPinFocus | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
   const [pluginResources, setPluginResources] = useState<PluginResourceEntry[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -556,165 +595,28 @@ function MainLayoutContent({
     };
   }, [apiBase, configPluginsEnabled, loadPluginResources]);
 
-  const navShortLabel = (key: string, fallback: string) => {
-    const shortKey = `${key}_short`;
-    const label = t(shortKey, { defaultValue: fallback });
-    return label === shortKey ? fallback : label;
-  };
-  const dashboardNavItem: NavItem = {
-    path: '/',
-    label: t('nav.dashboard'),
-    shortLabel: navShortLabel('nav.dashboard', t('nav.dashboard')),
-    icon: sidebarIcons.dashboard,
-  };
-  const usageAnalyticsNavItem = featureAvailability.requestMonitoringAvailable
-    ? {
-        path: '/usage-analytics',
-        label: t('nav.usage_analytics'),
-        shortLabel: navShortLabel('nav.usage_analytics', t('nav.usage_analytics')),
-        icon: sidebarIcons.usageAnalytics,
-      }
-    : null;
-  // Request monitoring is a switch: while only the collector is off the entry
-  // stays in the sidebar and the page explains how to start it. Hiding it here
-  // is what made a disabled collector look like a missing feature.
-  const monitoringNavItem =
-    featureAvailability.requestMonitoringAvailable || featureAvailability.reason === 'monitoring_disabled'
-      ? {
-          path: '/monitoring',
-          label: t('nav.monitoring_center'),
-          shortLabel: navShortLabel('nav.monitoring_center', t('nav.monitoring_center')),
-          icon: sidebarIcons.monitoring,
-        }
-      : null;
-  const pluginControlNavItems: NavItem[] = pluginControlMenuVisible
-    ? [
-        {
-          path: '/plugins',
-          label: t('nav.plugins'),
-          shortLabel: navShortLabel('nav.plugins', t('nav.plugins')),
-          icon: sidebarIcons.plugins,
-        },
-      ]
-    : [];
-  const pluginResourceNavItems: NavItem[] = pluginControlMenuVisible
-    ? pluginResources.map((resource) => ({
-        path: resource.route,
-        label: resource.label,
-        shortLabel: resource.label,
-        icon: <PluginSidebarIcon src={resolvePluginAssetURL(resource.pluginLogo, apiBase)} />,
-      }))
-    : [];
-  const navSections: NavSection[] = [
-    {
-      id: 'resources',
-      label: t('nav.group_resources'),
-      icon: sidebarIcons.authFiles,
-      items: [
-        {
-          path: '/accounts',
-          label: t('nav.accounts', { defaultValue: t('accounts.title') }),
-          icon: sidebarIcons.authFiles,
-        },
-        {
-          path: '/ai-providers',
-          label: t('nav.ai_providers'),
-          shortLabel: navShortLabel('nav.ai_providers', t('nav.ai_providers')),
-          icon: sidebarIcons.aiProviders,
-        },
-        {
-          path: '/oauth',
-          label: t('nav.oauth', { defaultValue: 'OAuth' }),
-          shortLabel: navShortLabel('nav.oauth', t('nav.oauth', { defaultValue: 'OAuth' })),
-          icon: sidebarIcons.oauth,
-        },
-      ],
-    },
-    {
-      id: 'clients',
-      label: t('nav.group_clients'),
-      icon: sidebarIcons.config,
-      items: renderRoute
-        ? [
-            {
-              path: '/api-keys',
-              label: t('nav.api_keys'),
-              icon: sidebarIcons.config,
-            },
-          ]
-        : [],
-    },
-    {
-      id: 'observe',
-      label: t('nav.group_observe'),
-      icon: sidebarIcons.monitoring,
-      items: [
-        ...(monitoringNavItem ? [monitoringNavItem] : []),
-        ...(usageAnalyticsNavItem ? [usageAnalyticsNavItem] : []),
-        ...(featureAvailability.modelPricesAvailable
-          ? [
-              {
-                path: '/model-prices',
-                label: t('nav.model_prices'),
-                icon: sidebarIcons.usageAnalytics,
-              },
-            ]
-          : []),
-      ],
-    },
-    {
-      id: 'system',
-      label: t('nav.group_system'),
-      icon: sidebarIcons.system,
-      items: [
-        {
-          path: '/system',
-          label: renderRoute
-            ? t('nav.system_config')
-            : t('nav.system_info'),
-          shortLabel: renderRoute
-            ? navShortLabel('nav.system_config', t('nav.system_config'))
-            : navShortLabel('nav.system_info', t('nav.system_info')),
-          icon: sidebarIcons.system,
-          exact: true,
-        },
-        {
-          path: '/system/runtime',
-          label: t('nav.runtime_status', { defaultValue: 'Runtime status' }),
-          shortLabel: navShortLabel('nav.runtime_status', t('nav.runtime_status', { defaultValue: 'Runtime' })),
-          icon: sidebarIcons.system,
-        },
-        {
-          path: '/config',
-          label: renderRoute
-            ? t('nav.gateway_management')
-            : t('nav.config_management'),
-          shortLabel: renderRoute
-            ? navShortLabel('nav.gateway_management', t('nav.gateway_management'))
-            : navShortLabel('nav.config_management', t('nav.config_management')),
-          icon: sidebarIcons.config,
-        },
-        {
-          path: '/system/updates',
-          label: t('manager_updates.title'),
-          icon: sidebarIcons.system,
-        },
-        {
-          path: '/logs',
-          label: t('nav.logs'),
-          icon: sidebarIcons.logs,
-        },
-      ],
-    },
-    {
-      id: 'plugins',
-      label: t('nav.group_plugins'),
-      icon: sidebarIcons.plugins,
-      items: [...pluginControlNavItems, ...pluginResourceNavItems],
-    },
-  ].filter((section) => section.items.length > 0);
-  const navItems = [dashboardNavItem, ...navSections.flatMap((section) => section.items)];
-  const navOrder = navItems.map((item) => item.path);
+  const {
+    dashboardItem: dashboardNavItem,
+    canonicalSections,
+    canonicalItems: navItems,
+    canonicalNavOrder: navOrder,
+  } = buildCanonicalNavModel({
+    t,
+    icons: sidebarIcons,
+    featureAvailability,
+    hasHostRoutes: Boolean(renderRoute),
+    pluginControlMenuVisible,
+    pluginResources,
+    apiBase,
+    renderPluginIcon: (src) => <PluginSidebarIcon src={src} />,
+  });
+  const { displaySections, pinnedItemIds } = projectNavSections({
+    canonicalSections,
+    pinnedIds: pinnedNavIds,
+    enablePinnedNav,
+    pinnedSectionLabel: t('nav.group_pinned', { defaultValue: 'Pinned' }),
+    pinnedSectionIcon: sidebarIcons.pinned,
+  });
   const getRouteOrder = (pathname: string) => {
     const trimmedPath =
       pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
@@ -821,11 +723,10 @@ function MainLayoutContent({
   const standaloneRouteLabel =
     currentPath === '/accounts' ? t('nav.accounts', { defaultValue: t('accounts.title') }) : null;
   const currentRouteLabel = activeNavItem?.label ?? standaloneRouteLabel ?? fullBrandName;
-  const currentSection = navSections.find((section) =>
-    section.items.some((item) => item === activeNavItem)
-  );
-  const currentSectionId = currentSection?.id;
-  const flyoutSection = navSections.find((section) => section.id === navFlyout?.id);
+  const canonicalSection = findNavSectionByItemId(canonicalSections, activeNavItem?.id);
+  const displaySection = findNavSectionByItemId(displaySections, activeNavItem?.id);
+  const displaySectionId = displaySection?.id;
+  const flyoutSection = displaySections.find((section) => section.id === navFlyout?.id);
   const nestedRouteLabel = currentPath.startsWith('/ai-providers/')
     ? currentPath.endsWith('/models')
       ? t('nav.provider_models')
@@ -836,23 +737,137 @@ function MainLayoutContent({
       ? t('nav.account_actions')
       : null;
 
-  // Manual collapse remains respected until navigation changes the route.
-  const navRouteKey = `${currentPath}:${currentSectionId ?? ''}`;
-  if (lastNavPath !== navRouteKey) {
-    setLastNavPath(navRouteKey);
+  // Reload scoped preferences if the deployment scope changes.
+  if (loadedSectionsKey !== sectionsStorageKey) {
+    setLoadedSectionsKey(sectionsStorageKey);
+    setOpenNavSections(
+      readOpenNavSections(
+        sectionsStorageKey,
+        enablePinnedNav ? NAV_SECTIONS_STORAGE_KEY : undefined
+      )
+    );
+  }
+  const expectedPinnedKey = enablePinnedNav ? pinnedStorageKey : '';
+  if (loadedPinnedKey !== expectedPinnedKey) {
+    setLoadedPinnedKey(expectedPinnedKey);
+    setPinnedNavIds(enablePinnedNav ? readPinnedNavIds(pinnedStorageKey) : []);
+  }
+
+  // Manual collapse remains respected until navigation changes the route or the
+  // active item's section resolves for the first time.
+  const navRouteChanged = lastNavRoute !== currentPath;
+  const autoExpandKey = `${currentPath}:${displaySectionId ?? ''}`;
+  if (navRouteChanged) {
+    setLastNavRoute(currentPath);
     setNavFlyout(null);
-    if (currentSectionId) {
-      setOpenNavSections((current) => ({ ...current, [currentSectionId]: true }));
+  }
+  if (lastAutoExpandedKey !== autoExpandKey) {
+    setLastAutoExpandedKey(autoExpandKey);
+    if (displaySectionId) {
+      setOpenNavSections((current) =>
+        current[displaySectionId] ? current : { ...current, [displaySectionId]: true }
+      );
     }
   }
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(NAV_SECTIONS_STORAGE_KEY, JSON.stringify(openNavSections));
-    } catch {
-      // Persistence is optional; the current navigation state still works.
+  // Reset mobile/touch pin edit mode when closing the drawer or disabling pinned nav.
+  if (prevSidebarOpen !== sidebarOpen) {
+    setPrevSidebarOpen(sidebarOpen);
+    if (!sidebarOpen && pinEditMode) {
+      setPinEditMode(false);
     }
-  }, [openNavSections]);
+  }
+  if ((!enablePinnedNav || !showSidebarLabels) && pinEditMode) {
+    setPinEditMode(false);
+  }
+
+  // Close the collapsed flyout cleanly if its section disappears after pinning/unpinning.
+  if (navFlyout && !flyoutSection) {
+    setNavFlyout(null);
+  }
+  useEffect(() => {
+    writeOpenNavSections(sectionsStorageKey, openNavSections);
+  }, [sectionsStorageKey, openNavSections]);
+
+  useEffect(() => {
+    if (!enablePinnedNav) return;
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== pinnedStorageKey) return;
+      setPinnedNavIds(parsePinnedNavPreference(event.newValue));
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [enablePinnedNav, pinnedStorageKey]);
+
+  useLayoutEffect(() => {
+    const pending = pendingPinFocusRef.current;
+    if (!pending) return;
+    pendingPinFocusRef.current = null;
+
+    const focusElement = (element: HTMLElement | null | undefined): boolean => {
+      if (!element || typeof element.focus !== 'function') return false;
+      element.focus();
+      return true;
+    };
+
+    const focusFirstPinButton = (ids: string[], prefix: string): boolean => {
+      for (const candidateId of ids) {
+        if (focusElement(navPinButtonRefs.current[`${prefix}${candidateId}`])) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (pending.inFlyout) {
+      const stillOpen = Boolean(navFlyout && displaySections.some((s) => s.id === navFlyout.id));
+      if (stillOpen) {
+        if (!pending.keyboardTrigger) return;
+        if (focusFirstPinButton(pending.siblingItemIds, 'flyout:')) return;
+        if (focusElement(navFlyoutRef.current?.querySelector?.<HTMLElement>('a, button'))) return;
+        return;
+      }
+      if (
+        pending.mode === 'pin' &&
+        focusElement(navToggleRefs.current[PINNED_SECTION_ID])
+      ) {
+        return;
+      }
+      if (
+        pending.canonicalSectionId &&
+        focusElement(navToggleRefs.current[pending.canonicalSectionId])
+      ) {
+        return;
+      }
+      if (focusElement(navToggleRefs.current[pending.sourceSectionId])) return;
+      const fallbackToggle = displaySections
+        .map((section) => navToggleRefs.current[section.id])
+        .find(Boolean);
+      if (focusElement(fallbackToggle)) return;
+      focusElement(dashboardLinkRef.current);
+      return;
+    }
+
+    if (!pending.keyboardTrigger) return;
+
+    if (pending.mode === 'pin') {
+      if (focusElement(navPinButtonRefs.current[`sidebar:${pending.itemId}`])) return;
+      if (focusElement(navToggleRefs.current[PINNED_SECTION_ID])) return;
+    } else {
+      if (focusFirstPinButton(pending.siblingItemIds, 'sidebar:')) return;
+      if (focusElement(navPinButtonRefs.current[`sidebar:${pending.itemId}`])) return;
+      if (
+        pending.canonicalSectionId &&
+        focusElement(navToggleRefs.current[pending.canonicalSectionId])
+      ) {
+        return;
+      }
+    }
+    if (focusElement(navToggleRefs.current[pending.sourceSectionId])) return;
+    focusElement(dashboardLinkRef.current);
+  }, [displaySections, navFlyout, openNavSections, pinnedNavIds]);
 
   useEffect(() => {
     if (!navFlyout) return;
@@ -912,12 +927,70 @@ function MainLayoutContent({
     };
   }, [sidebarOpen]);
 
-  const renderNavLink = (item: NavItem, inFlyout = false) => {
+  const handleTogglePin = (
+    item: NavItem,
+    sourceSectionId: string,
+    inFlyout: boolean,
+    event?: { detail?: number }
+  ) => {
+    if (!enablePinnedNav || item.pinnable === false) return;
+    const currentlyPinned = pinnedItemIds.has(item.id);
+    const sourceSection = displaySections.find((section) => section.id === sourceSectionId);
+    const sourceIds = sourceSection ? sourceSection.items.map((entry) => entry.id) : [];
+    const currentIndex = sourceIds.indexOf(item.id);
+    const siblingItemIds = [
+      ...sourceIds.slice(currentIndex + 1),
+      ...sourceIds.slice(0, Math.max(0, currentIndex)).reverse(),
+    ];
+    const itemCanonicalSectionId = findNavSectionByItemId(canonicalSections, item.id)?.id;
+
+    pendingPinFocusRef.current = {
+      mode: currentlyPinned ? 'unpin' : 'pin',
+      inFlyout,
+      keyboardTrigger: !event || event.detail === 0,
+      itemId: item.id,
+      sourceSectionId,
+      canonicalSectionId: itemCanonicalSectionId,
+      siblingItemIds,
+    };
+    const nextPinnedIds = currentlyPinned
+      ? unpinNavItem(pinnedNavIds, item.id)
+      : pinNavItem(pinnedNavIds, item.id);
+    writePinnedNavIds(pinnedStorageKey, nextPinnedIds);
+    setPinnedNavIds(nextPinnedIds);
+
+    if (!currentlyPinned) {
+      // Always reveal Pinned immediately without collapsing the source section.
+      setOpenNavSections((current) =>
+        current[PINNED_SECTION_ID] ? current : { ...current, [PINNED_SECTION_ID]: true }
+      );
+      return;
+    }
+
+    setOpenNavSections((current) => {
+      let changed = false;
+      const next = { ...current };
+      if (nextPinnedIds.length === 0 && PINNED_SECTION_ID in next) {
+        delete next[PINNED_SECTION_ID];
+        changed = true;
+      }
+      if (activeNavItem?.id === item.id && itemCanonicalSectionId && !next[itemCanonicalSectionId]) {
+        next[itemCanonicalSectionId] = true;
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  };
+
+  const renderNavLink = (item: NavItem, inFlyout = false, sectionId?: string) => {
     const target = prefixRouteBase(item.path, navigationBase || routeBase);
-    const active = activeNavItem === item;
-    return (
+    const active = activeNavItem?.id === item.id;
+    const canPin = Boolean(enablePinnedNav && sectionId && item.pinnable !== false);
+    const isPinned = canPin && pinnedItemIds.has(item.id);
+    const link = (
       <a
-        key={item.path}
+        ref={!sectionId ? dashboardLinkRef : undefined}
+        key={!canPin ? item.id : undefined}
         href={target}
         aria-current={active ? 'page' : undefined}
         aria-disabled={navigationDisabled || undefined}
@@ -938,6 +1011,7 @@ function MainLayoutContent({
             return;
           event.preventDefault();
           setSidebarOpen(false);
+          setPinEditMode(false);
           setNavFlyout(null);
           navigate(navigationBase ? item.path : routeBase ? target : item.path);
         }}
@@ -946,6 +1020,44 @@ function MainLayoutContent({
         <span className="nav-icon">{item.icon}</span>
         {(showSidebarLabels || inFlyout) && <span className="nav-label">{item.label}</span>}
       </a>
+    );
+
+    if (!canPin || !sectionId) {
+      return link;
+    }
+
+    const pinRefKey = `${inFlyout ? 'flyout:' : 'sidebar:'}${item.id}`;
+    const pinLabel = isPinned
+      ? t('nav.unpin_item', { label: item.label, defaultValue: `Unpin ${item.label}` })
+      : t('nav.pin_item', { label: item.label, defaultValue: `Pin ${item.label}` });
+    return (
+      <div
+        key={item.id}
+        className={`nav-item-row ${active ? 'active' : ''} ${isPinned ? 'is-pinned' : ''}`}
+      >
+        {link}
+        <button
+          ref={(element) => {
+            if (element) {
+              navPinButtonRefs.current[pinRefKey] = element;
+            } else {
+              delete navPinButtonRefs.current[pinRefKey];
+            }
+          }}
+          type="button"
+          className={`nav-pin-button ${isPinned ? 'is-pinned' : ''}`}
+          aria-label={pinLabel}
+          aria-pressed={isPinned}
+          title={pinLabel}
+          onClick={(event) => handleTogglePin(item, sectionId, inFlyout, event)}
+        >
+          {isPinned ? (
+            <IconPinOff size={PIN_BUTTON_ICON_SIZE} />
+          ) : (
+            <IconPin size={PIN_BUTTON_ICON_SIZE} fill="none" />
+          )}
+        </button>
+      </div>
     );
   };
 
@@ -995,9 +1107,9 @@ function MainLayoutContent({
               className="app-breadcrumb"
               aria-label={t('common.navigation', { defaultValue: 'Navigation' })}
             >
-              {currentSection && (
+              {canonicalSection && (
                 <>
-                  <span className="breadcrumb-item">{currentSection.label}</span>
+                  <span className="breadcrumb-item">{canonicalSection.label}</span>
                   <span className="breadcrumb-separator" aria-hidden="true">
                     /
                   </span>
@@ -1208,7 +1320,14 @@ function MainLayoutContent({
         <aside
           ref={sidebarRef}
           aria-label={t('common.navigation')}
-          className={`sidebar ${sidebarOpen ? 'open' : ''} ${sidebarCollapsed ? 'collapsed' : ''}`}
+          className={[
+            'sidebar',
+            sidebarOpen ? 'open' : '',
+            sidebarCollapsed ? 'collapsed' : '',
+            pinEditMode ? 'pin-edit-mode' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
         >
           <div className="sidebar-brand" title={fullBrandName}>
             <div className="sidebar-brand-main">
@@ -1232,71 +1351,108 @@ function MainLayoutContent({
                 </>
               )}
             </div>
+            {enablePinnedNav && showSidebarLabels && (
+              <button
+                type="button"
+                className={`sidebar-pin-edit-toggle ${pinEditMode ? 'active' : ''}`}
+                aria-pressed={pinEditMode}
+                aria-label={t('nav.manage_pinned_aria', {
+                  defaultValue: 'Manage pinned navigation',
+                })}
+                onClick={() => setPinEditMode((current) => !current)}
+              >
+                <IconPin size={PIN_BUTTON_ICON_SIZE} fill={pinEditMode ? 'currentColor' : 'none'} />
+                <span>
+                  {pinEditMode
+                    ? t('nav.manage_pinned_done', { defaultValue: 'Done' })
+                    : t('nav.manage_pinned', { defaultValue: 'Pin' })}
+                </span>
+              </button>
+            )}
           </div>
 
           <nav className="nav-section" onScroll={() => setNavFlyout(null)}>
             {renderNavLink(dashboardNavItem)}
-            {navSections.map((section) => (
-              <div className="nav-menu-section" key={section.id}>
-                <button
-                  ref={(element) => {
-                    navToggleRefs.current[section.id] = element;
-                  }}
-                  type="button"
-                  className={`nav-section-toggle nav-item ${!showSidebarLabels && currentSectionId === section.id ? 'active' : ''}`}
-                  aria-label={section.label}
-                  aria-expanded={
-                    showSidebarLabels ? !!openNavSections[section.id] : navFlyout?.id === section.id
-                  }
-                  aria-controls={`nav-${section.id}`}
-                  onClick={(event) => {
-                    if (!showSidebarLabels) {
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setNavFlyout((current) =>
-                        current?.id === section.id
-                          ? null
-                          : {
-                              id: section.id,
-                              top: Math.max(
-                                8,
-                                Math.min(
-                                  rect.top,
-                                  window.innerHeight - (section.items.length * 42 + 64)
-                                )
-                              ),
-                              left: rect.right + 12,
-                            }
-                      );
-                      return;
+            {displaySections.map((section) => {
+              const isSectionOpen = !!openNavSections[section.id];
+              const isSectionActiveCollapsed =
+                displaySectionId === section.id && (!showSidebarLabels || !isSectionOpen);
+              return (
+                <div className="nav-menu-section" key={section.id}>
+                  <button
+                    ref={(element) => {
+                      if (element) {
+                        navToggleRefs.current[section.id] = element;
+                      } else {
+                        delete navToggleRefs.current[section.id];
+                      }
+                    }}
+                    type="button"
+                    className={[
+                      'nav-section-toggle',
+                      'nav-item',
+                      !showSidebarLabels && displaySectionId === section.id ? 'active' : '',
+                      showSidebarLabels && isSectionActiveCollapsed ? 'section-has-active' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    aria-label={section.label}
+                    aria-expanded={
+                      showSidebarLabels ? isSectionOpen : navFlyout?.id === section.id
                     }
-                    setOpenNavSections((current) => ({
-                      ...current,
-                      [section.id]: !current[section.id],
-                    }));
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'ArrowDown' && !showSidebarLabels) {
-                      event.preventDefault();
-                      event.currentTarget.click();
-                    }
-                  }}
-                  title={section.label}
-                >
-                  <span className="nav-icon">{section.icon}</span>
-                  {showSidebarLabels && <span className="nav-label">{section.label}</span>}
-                  {showSidebarLabels && (
-                    <span className="nav-section-chevron" aria-hidden="true">
-                      {openNavSections[section.id] ? '⌄' : '›'}
-                    </span>
+                    aria-controls={`nav-${section.id}`}
+                    onClick={(event) => {
+                      if (!showSidebarLabels) {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setNavFlyout((current) =>
+                          current?.id === section.id
+                            ? null
+                            : {
+                                id: section.id,
+                                top: Math.max(
+                                  8,
+                                  Math.min(
+                                    rect.top,
+                                    window.innerHeight - (section.items.length * 42 + 64)
+                                  )
+                                ),
+                                left: rect.right + 12,
+                              }
+                        );
+                        return;
+                      }
+                      setOpenNavSections((current) => ({
+                        ...current,
+                        [section.id]: !current[section.id],
+                      }));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'ArrowDown' && !showSidebarLabels) {
+                        event.preventDefault();
+                        event.currentTarget.click();
+                      }
+                    }}
+                    title={section.label}
+                  >
+                    <span className="nav-icon">{section.icon}</span>
+                    {showSidebarLabels && <span className="nav-label">{section.label}</span>}
+                    {showSidebarLabels && (
+                      <span
+                        className={`nav-section-chevron ${isSectionOpen ? 'is-open' : ''}`}
+                        aria-hidden="true"
+                      >
+                        <IconChevronRight size={14} />
+                      </span>
+                    )}
+                  </button>
+                  {showSidebarLabels && isSectionOpen && (
+                    <div className="nav-section-children" id={`nav-${section.id}`}>
+                      {section.items.map((item) => renderNavLink(item, false, section.id))}
+                    </div>
                   )}
-                </button>
-                {showSidebarLabels && openNavSections[section.id] && (
-                  <div className="nav-section-children" id={`nav-${section.id}`}>
-                    {section.items.map((item) => renderNavLink(item))}
-                  </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </nav>
         </aside>
         {navFlyout &&
@@ -1310,7 +1466,8 @@ function MainLayoutContent({
               aria-label={flyoutSection.label}
               style={{ top: navFlyout.top, left: navFlyout.left }}
               onBlur={(event) => {
-                const next = event.relatedTarget as Node;
+                if (pendingPinFocusRef.current) return;
+                const next = event.relatedTarget as Node | null;
                 const isGroupToggle = Object.values(navToggleRefs.current).some((toggle) =>
                   toggle?.contains(next)
                 );
@@ -1321,13 +1478,34 @@ function MainLayoutContent({
                   event.preventDefault();
                   setNavFlyout(null);
                   navToggleRefs.current[flyoutSection.id]?.focus();
+                  return;
+                }
+                const activeElement = document.activeElement as HTMLElement | null;
+                if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                  const row = activeElement?.closest?.('.nav-item-row');
+                  if (!row) return;
+                  const target =
+                    event.key === 'ArrowRight'
+                      ? row.querySelector<HTMLElement>('.nav-pin-button')
+                      : row.querySelector<HTMLElement>('a');
+                  if (target && target !== activeElement) {
+                    event.preventDefault();
+                    target.focus();
+                  }
+                  return;
                 }
                 if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
                 event.preventDefault();
                 const links = Array.from(
                   event.currentTarget.querySelectorAll<HTMLAnchorElement>('a')
                 );
-                const current = links.indexOf(document.activeElement as HTMLAnchorElement);
+                if (links.length === 0) return;
+                const activeRow = activeElement?.closest?.('.nav-item-row');
+                const onPinButton = Boolean(activeElement?.classList?.contains('nav-pin-button'));
+                const currentLink = activeRow
+                  ? activeRow.querySelector<HTMLAnchorElement>('a')
+                  : (activeElement as HTMLAnchorElement | null);
+                const current = currentLink ? links.indexOf(currentLink) : -1;
                 const next =
                   event.key === 'Home'
                     ? 0
@@ -1335,11 +1513,20 @@ function MainLayoutContent({
                       ? links.length - 1
                       : (current + (event.key === 'ArrowUp' ? -1 : 1) + links.length) %
                         links.length;
-                links[next]?.focus();
+                const nextLink = links[next];
+                if (!nextLink) return;
+                if (onPinButton) {
+                  const nextPin = nextLink
+                    .closest?.('.nav-item-row')
+                    ?.querySelector<HTMLElement>('.nav-pin-button');
+                  (nextPin ?? nextLink).focus();
+                  return;
+                }
+                nextLink.focus();
               }}
             >
               <div className="nav-flyout-title">{flyoutSection.label}</div>
-              {flyoutSection.items.map((item) => renderNavLink(item, true))}
+              {flyoutSection.items.map((item) => renderNavLink(item, true, flyoutSection.id))}
             </div>,
             document.body
           )}

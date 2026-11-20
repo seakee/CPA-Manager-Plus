@@ -1,24 +1,53 @@
+import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
 import routesSource from '@/router/MainRoutes.tsx?raw';
-import layoutSource from '@/components/layout/MainLayout.tsx?raw';
 import accountsPageSource from '@/features/accounts/AccountsPage.tsx?raw';
 import localStatusPanelSource from '@/features/monitoring/components/CodexInspectionStatusPanel.tsx?raw';
 import serverInspectionPageSource from '@/features/monitoring/ServerCodexInspectionPage.tsx?raw';
+import { buildCanonicalNavModel, type NavSidebarIconSet } from '@/components/layout/navRegistry';
 import en from '@/i18n/locales/en.json';
 import ru from '@/i18n/locales/ru.json';
 import zhCN from '@/i18n/locales/zh-CN.json';
 import zhTW from '@/i18n/locales/zh-TW.json';
 
 const legacyPagesRoot = ['@', 'pages'].join('/');
+const stubIcons: NavSidebarIconSet = {
+  dashboard: null,
+  resources: null,
+  clients: null,
+  observe: null,
+  aiProviders: null,
+  authFiles: null,
+  oauth: null,
+  usageAnalytics: null,
+  monitoring: null,
+  plugins: null,
+  config: null,
+  logs: null,
+  system: null,
+  pinned: null,
+};
+const stubT = ((key: string) => key) as unknown as TFunction;
 
 describe('accounts workspace wiring', () => {
   it('uses Accounts as the single credential-management sidebar entry', () => {
-    expect(layoutSource).toContain("path: '/accounts'");
-    expect(layoutSource).toContain("label: t('nav.accounts'");
-    expect(layoutSource).not.toContain("path: '/auth-files',\n        label: t('nav.auth_files')");
-    expect(layoutSource).not.toContain("path: '/quota',\n        label: t('nav.quota_management')");
-    expect(layoutSource).not.toContain("path: '/codex-inspection'");
-    expect(layoutSource).not.toContain("label: t('nav.codex_inspection')");
+    const model = buildCanonicalNavModel({
+      t: stubT,
+      icons: stubIcons,
+      featureAvailability: { requestMonitoringAvailable: true, modelPricesAvailable: true },
+      hasHostRoutes: true,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => null,
+    });
+    const paths = model.canonicalItems.map((item) => item.path);
+    const accountsItem = model.canonicalItems.find((item) => item.path === '/accounts');
+
+    expect(accountsItem?.label).toBe('nav.accounts');
+    expect(paths).not.toContain('/auth-files');
+    expect(paths).not.toContain('/quota');
+    expect(paths).not.toContain('/codex-inspection');
   });
 
   it('removes legacy credential and quota routes while retaining inspection compatibility', () => {
