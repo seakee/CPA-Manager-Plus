@@ -45,6 +45,9 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	cpaAuthDirectory := flags.String("cpa-auth-dir", "", "credential directory; defaults to the source's configured auth directory, then <cpa-dir>/auths")
 	cpaVersion := flags.String("cpa-version", "", "CPA v8 release of the source CPA (for example 8.0.55); required when config.yaml or the stack does not name an exact v8 release")
 	target := flags.String("target", "", "v2 data directory holding the recorded operation; defaults to the Manager data directory")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
+	bundle := flags.String("bundle", "", "external backup directory when placed outside <target>/upgrade-backup")
+	backup := flags.String("backup", "", "alias for --bundle")
 	destination := flags.String("destination-url", "", "destination CPA base URL; defaults to CPA_UPSTREAM_URL")
 	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of a recorded destination attempt when resuming")
 	plugins := flags.String("plugins", "", "v2's plugin-runtime choice for the destination: true or false; required")
@@ -65,16 +68,41 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
-	// This subcommand writes the operation row, the destination attempt and the
-	// Manager's own connection, so it holds the v2 data-root process lock for the
-	// whole write path. A held lock means Manager Server is still running: the
-	// run refuses with its own code and exit status 1 instead of racing a live
-	// writer, and it has read and written nothing yet.
-	storeLock, err := processlock.Acquire(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName))
+	bundleDir, err := resolveOptionalBundleFlag(*bundle, *backup)
 	if err != nil {
-		return refuseTyped(stderr, fmt.Errorf("%w: another process holds the v2 Manager store; stop Manager Server and re-run the import: %v", upgradeservice.ErrStoreLocked, err))
+		return err
 	}
-	defer func() { _ = storeLock.Close() }()
+	effectiveBundle := bundleDir
+	if effectiveBundle == "" {
+		effectiveBundle = upgradeservice.DefaultBundleDirectory(targetRoot)
+	}
+	// Refuse overlapping roots before touching either directory so a misplaced
+	// --target matching or inside --legacy, --cpa-dir, or --cpa-auth-dir never
+	// opens a preserved lock writable or creates directories inside preserved trees.
+	if err := upgradeservice.RefuseCPAImportOverlappingRoots(*legacy, strings.TrimSpace(*cpaDirectory), strings.TrimSpace(*cpaAuthDirectory), targetRoot, effectiveBundle); err != nil {
+		output := cpaImportOutput{Error: err.Error()}
+		if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
+			output.ErrorCode = string(code)
+		}
+		writeCPAImportOutput(stdout, *asJSON, output)
+		return refuseTyped(stderr, err)
+	}
+	if scratchErr := upgradeservice.ValidateCPAImportScratchDir(*scratchDir, *legacy, strings.TrimSpace(*cpaDirectory), strings.TrimSpace(*cpaAuthDirectory), targetRoot, effectiveBundle); scratchErr != nil {
+		wrapped := codedFailure(upgradeservice.CodeSnapshotFailed, scratchErr)
+		output := cpaImportOutput{Error: wrapped.Error(), ErrorCode: string(upgradeservice.UpgradeErrorSnapshotFailed)}
+		writeCPAImportOutput(stdout, *asJSON, output)
+		return refuseTyped(stderr, upgradeservice.CodedError(upgradeservice.UpgradeErrorSnapshotFailed, scratchErr.Error(), scratchErr))
+	}
+	// uncopied targetRoot never receives a stray usage.sqlite.manager.lock file,
+	// while a running Manager Server is refused immediately with store_locked.
+	// Release an unlocked probe handle immediately so lock acquisition strictly
+	// follows sourceLock -> targetLock and never skips the pre-fence stage gate.
+	probeLock, probeErr := processlock.AcquireExisting(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName))
+	if probeErr == nil && probeLock != nil {
+		_ = probeLock.Close()
+	} else if probeErr != nil && !errors.Is(probeErr, processlock.ErrNoExistingLock) && !errors.Is(probeErr, os.ErrNotExist) {
+		return refuseTyped(stderr, fmt.Errorf("%w: another process holds the v2 Manager store; stop Manager Server and re-run the import: %v", upgradeservice.ErrStoreLocked, probeErr))
+	}
 	// The import reads a source it assumes is stopped and writes a destination,
 	// so it takes the same 1.x ownership marker the copy-in took and keeps it for
 	// the whole run. The descriptor is read-only: the source may be preserved on a
@@ -91,6 +119,19 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return refuseTyped(stderr, fmt.Errorf("%w: %s: %v", upgradeservice.ErrCPASourceLocked, reason, err))
 	}
 	defer func() { _ = sourceLock.Close() }()
+	if stageErr := upgradeservice.RequireActionStageWithBackup(ctx, upgradeservice.TargetDatabasePath(targetRoot), *scratchDir, *legacy, effectiveBundle, "cpa-import", nil); stageErr != nil {
+		output := cpaImportOutput{Error: stageErr.Error()}
+		if code, ok := upgradeservice.UpgradeErrorCodeOf(stageErr); ok {
+			output.ErrorCode = string(code)
+		}
+		writeCPAImportOutput(stdout, *asJSON, output)
+		return refuseTyped(stderr, stageErr)
+	}
+	storeLock, err := processlock.Acquire(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName))
+	if err != nil {
+		return refuseTyped(stderr, fmt.Errorf("%w: another process holds the v2 Manager store; stop Manager Server and re-run the import: %v", upgradeservice.ErrStoreLocked, err))
+	}
+	defer func() { _ = storeLock.Close() }()
 	destinationURL := strings.TrimSpace(*destination)
 	if destinationURL == "" {
 		cfg, err := config.LoadWithoutCreatingDefault()
@@ -118,6 +159,8 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		CPAAuthDirectory:         strings.TrimSpace(*cpaAuthDirectory),
 		CPAVersion:               strings.TrimSpace(*cpaVersion),
 		TargetRoot:               targetRoot,
+		ScratchDir:               *scratchDir,
+		BundleDir:                bundleDir,
 		Runtime:                  runtime,
 		DestinationURL:           destinationURL,
 		DestinationManagementKey: destinationManagementKey,

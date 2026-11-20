@@ -60,6 +60,8 @@ const en = {
     'Cross-site requests to the upgrade runtime artifact endpoint are not permitted.',
   error_upgrade_artifact_unavailable:
     'The CPA engine can only be prepared while an active upgrade operation is in progress.',
+  error_upgrade_execution_busy: 'Another upgrade execution step is currently running.',
+  error_upgrade_bootstrap_retired: 'The temporary upgrade bootstrap entry has been retired.',
   error_upgrade_source_timeout: 'The upgrade source check is taking longer than expected.',
   error_upgrade_legacy_root_missing: 'No 1.x data directory is mounted.',
   error_upgrade_legacy_root_unusable: 'The mounted 1.x data directory cannot be used.',
@@ -72,6 +74,14 @@ const en = {
     'The 1.x database is reached through a link, not as the file itself.',
   error_upgrade_source_unstamped:
     'The 1.x data is on a filesystem without file change times, so the upgrade cannot verify that the source is unchanged.',
+  error_upgrade_worker_unavailable: 'The upgrade executor is temporarily unreachable.',
+  error_upgrade_worker_peer_refused:
+    'The upgrade executor rejected the caller process credentials.',
+  error_source_ownership_unavailable: 'The 1.x source ownership lock cannot be verified right now.',
+  error_upgrade_store_locked: 'The upgrade operation store is currently locked by another process.',
+  error_upgrade_store_unavailable: 'The upgrade operation store is temporarily unavailable.',
+  error_upgrade_store_schema_outdated:
+    'The target database schema version does not match this v2 binary.',
   error_pinned_mismatch:
     'The active CPA engine on this host does not match the version pinned in this image ({version}).',
   error_unknown: 'The CPA engine could not be prepared.',
@@ -97,6 +107,9 @@ const en = {
     'Open the wizard directly from the configured CPAMP public origin and try again.',
   remedy_upgrade_artifact_unavailable:
     'Start the upgrade copy-in on the Manager host first, or refresh the upgrade status if it has already completed.',
+  remedy_upgrade_execution_busy: 'Wait for the active upgrade step to finish, then retry.',
+  remedy_upgrade_bootstrap_retired:
+    'Refresh the upgrade status or open the configured v2 console route.',
   remedy_upgrade_source_timeout: 'Retry shortly once the source check finishes.',
   remedy_upgrade_legacy_root_missing: 'Mount the 1.x data directory read-only and try again.',
   remedy_upgrade_legacy_root_unusable:
@@ -111,6 +124,17 @@ const en = {
     'Mount the data directory itself, without linked files, then try again.',
   remedy_upgrade_source_unstamped:
     'Move or copy the 1.x data directory to an NTFS, ext4, or APFS volume, remount it, and retry.',
+  remedy_upgrade_worker_unavailable:
+    'Wait a moment and retry, or check that the upgrade executor is running on the host.',
+  remedy_upgrade_worker_peer_refused:
+    'Verify the container user/UID configuration between Manager and the upgrade executor on the host, then retry.',
+  remedy_source_ownership_unavailable:
+    'Ensure the 1.x container is stopped and its data volume is mounted read-only, then retry.',
+  remedy_upgrade_store_locked: 'Wait for the active upgrade operation to finish, then retry.',
+  remedy_upgrade_store_unavailable:
+    'Wait a moment and retry, or inspect the target data volume and permissions on the host.',
+  remedy_upgrade_store_schema_outdated:
+    'Align the container image and target v2 database schema on the host before retrying.',
   remedy_pinned_mismatch:
     'Browser preparation refuses to overwrite a different active engine. Align the container image and runtime store on the host, then retry.',
 };
@@ -172,6 +196,8 @@ const zh: typeof en = {
   error_admin_unauthorized: '当前会话无权访问升级运行时引擎接口。',
   error_origin_rejected: '拒绝跨站点访问升级运行时引擎接口。',
   error_upgrade_artifact_unavailable: '仅在已记录且尚未完成的升级操作期间可准备 CPA 引擎。',
+  error_upgrade_execution_busy: '当前已有另一项升级执行步骤正在运行。',
+  error_upgrade_bootstrap_retired: '临时升级引导入口已停用。',
   error_upgrade_source_timeout: '升级来源检查耗时较长，暂未完成。',
   error_upgrade_legacy_root_missing: '未挂载 1.x 数据目录。',
   error_upgrade_legacy_root_unusable: '已挂载的 1.x 数据目录不可用。',
@@ -182,6 +208,12 @@ const zh: typeof en = {
   error_upgrade_source_symlinked: '1.x 数据库是通过链接访问的，而不是普通文件。',
   error_upgrade_source_unstamped:
     '1.x 数据所在的文件系统不记录文件变更时间，升级流程无法校验源数据未被改动。',
+  error_upgrade_worker_unavailable: '升级执行器暂时不可达。',
+  error_upgrade_worker_peer_refused: '升级执行器拒绝了当前调用进程的身份凭据。',
+  error_source_ownership_unavailable: '当前无法核验 1.x 来源归属锁状态。',
+  error_upgrade_store_locked: '升级状态库正被其他进程锁定。',
+  error_upgrade_store_unavailable: '升级状态库暂时不可用。',
+  error_upgrade_store_schema_outdated: '目标数据库表结构版本与当前 v2 二进制不匹配。',
   error_pinned_mismatch: '当前宿主机已激活的 CPA 引擎与本镜像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎准备。',
   remedy_archive:
@@ -203,6 +235,8 @@ const zh: typeof en = {
   remedy_origin_rejected: '请直接通过已配置的 CPAMP 公共 Origin 打开向导后重试。',
   remedy_upgrade_artifact_unavailable:
     '请先在 Manager 宿主机上启动升级复制操作，或刷新升级状态确认是否已完成。',
+  remedy_upgrade_execution_busy: '请等待当前升级步骤完成后重试。',
+  remedy_upgrade_bootstrap_retired: '请刷新升级状态，或直接访问已配置的 v2 控制台路由。',
   remedy_upgrade_source_timeout: '请稍候片刻后重试。',
   remedy_upgrade_legacy_root_missing: '请只读挂载 1.x 数据目录后重试。',
   remedy_upgrade_legacy_root_unusable: '请在宿主机上检查挂载的 1.x 卷和权限后重试。',
@@ -213,6 +247,14 @@ const zh: typeof en = {
   remedy_upgrade_source_symlinked: '请挂载数据目录本身（不要使用链接文件）后重试。',
   remedy_upgrade_source_unstamped:
     '请将 1.x 数据目录移动或复制到 NTFS、ext4 或 APFS 卷，重新挂载后重试。',
+  remedy_upgrade_worker_unavailable: '请稍候重试，或在宿主机上确认升级执行器正在运行。',
+  remedy_upgrade_worker_peer_refused:
+    '请在宿主机上检查 Manager 与升级执行器之间的容器用户/UID 配置后重试。',
+  remedy_source_ownership_unavailable: '请确认 1.x 容器已停止且其数据卷以只读方式挂载后重试。',
+  remedy_upgrade_store_locked: '请等待当前正在进行的升级操作完成后重试。',
+  remedy_upgrade_store_unavailable: '请稍候重试，或在宿主机上检查目标数据卷及其权限。',
+  remedy_upgrade_store_schema_outdated:
+    '请在宿主机上使容器镜像版本与目标 v2 数据库结构保持一致后重试。',
   remedy_pinned_mismatch:
     '浏览器准备操作不会覆盖已激活的其他版本引擎。请在宿主机上使容器镜像与运行时目录保持一致后重试。',
 };
@@ -274,6 +316,8 @@ const tw: typeof en = {
   error_admin_unauthorized: '目前工作階段無權存取升級執行階段引擎介面。',
   error_origin_rejected: '拒絕跨站點存取升級執行階段引擎介面。',
   error_upgrade_artifact_unavailable: '僅在已記錄且尚未完成的升級操作期間可準備 CPA 引擎。',
+  error_upgrade_execution_busy: '目前已有另一項升級執行步驟正在執行。',
+  error_upgrade_bootstrap_retired: '暫時升級引導入口已停用。',
   error_upgrade_source_timeout: '升級來源檢查耗時較長，暫未完成。',
   error_upgrade_legacy_root_missing: '未掛載 1.x 資料目錄。',
   error_upgrade_legacy_root_unusable: '已掛載的 1.x 資料目錄不可用。',
@@ -284,6 +328,12 @@ const tw: typeof en = {
   error_upgrade_source_symlinked: '1.x 資料庫是透過連結存取，而不是一般檔案。',
   error_upgrade_source_unstamped:
     '1.x 資料所在的檔案系統不記錄檔案變更時間，升級流程無法驗證來源資料未被更動。',
+  error_upgrade_worker_unavailable: '升級執行器暫時無法連線。',
+  error_upgrade_worker_peer_refused: '升級執行器拒絕了目前呼叫程序的身分憑證。',
+  error_source_ownership_unavailable: '目前無法核驗 1.x 來源歸屬鎖狀態。',
+  error_upgrade_store_locked: '升級狀態庫正被其他程序鎖定。',
+  error_upgrade_store_unavailable: '升級狀態庫暫時無法使用。',
+  error_upgrade_store_schema_outdated: '目標資料庫結構版本與目前 v2 二進位檔不相符。',
   error_pinned_mismatch: '目前主機已啟用的 CPA 引擎與本映像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎準備。',
   remedy_archive:
@@ -305,6 +355,8 @@ const tw: typeof en = {
   remedy_origin_rejected: '請直接透過已設定的 CPAMP 公開 Origin 開啟精靈後重試。',
   remedy_upgrade_artifact_unavailable:
     '請先在 Manager 主機上啟動升級複製操作，或重新整理升級狀態確認是否已完成。',
+  remedy_upgrade_execution_busy: '請等待目前升級步驟完成後重試。',
+  remedy_upgrade_bootstrap_retired: '請重新整理升級狀態，或直接造訪已設定的 v2 控制台路由。',
   remedy_upgrade_source_timeout: '請稍候片刻後重試。',
   remedy_upgrade_legacy_root_missing: '請以唯讀方式掛載 1.x 資料目錄後重試。',
   remedy_upgrade_legacy_root_unusable: '請在主機上檢查掛載的 1.x 磁碟區與權限後重試。',
@@ -315,6 +367,14 @@ const tw: typeof en = {
   remedy_upgrade_source_symlinked: '請掛載資料目錄本身（不要使用連結檔案）後重試。',
   remedy_upgrade_source_unstamped:
     '請將 1.x 資料目錄移動或複製到 NTFS、ext4 或 APFS 磁碟區，重新掛載後重試。',
+  remedy_upgrade_worker_unavailable: '請稍候重試，或在主機上確認升級執行器正在運作。',
+  remedy_upgrade_worker_peer_refused:
+    '請在主機上檢查 Manager 與升級執行器之間的容器使用者/UID 設定後重試。',
+  remedy_source_ownership_unavailable: '請確認 1.x 容器已停止且其資料磁碟區以唯讀方式掛載後重試。',
+  remedy_upgrade_store_locked: '請等待目前正在進行的升級操作完成後重試。',
+  remedy_upgrade_store_unavailable: '請稍候重試，或在主機上檢查目標資料磁碟區與權限。',
+  remedy_upgrade_store_schema_outdated:
+    '請在主機上使容器映像版本與目標 v2 資料庫結構保持一致後重試。',
   remedy_pinned_mismatch:
     '瀏覽器準備操作不會覆寫已啟用的其他版本引擎。請在主機上使容器映像與執行階段目錄保持一致後重試。',
 };
@@ -379,6 +439,9 @@ const ru: typeof en = {
     'Межсайтовые запросы к ресурсу артефакта обновления запрещены.',
   error_upgrade_artifact_unavailable:
     'Подготовка движка CPA доступна только при наличии активной незавершённой операции обновления.',
+  error_upgrade_execution_busy: 'Другой шаг выполнения обновления сейчас уже запущен.',
+  error_upgrade_bootstrap_retired:
+    'Временный bootstrap-вход обновления выведен из эксплуатации.',
   error_upgrade_source_timeout:
     'Проверка источника обновления занимает больше времени, чем ожидалось.',
   error_upgrade_legacy_root_missing: 'Каталог данных 1.x не смонтирован.',
@@ -392,6 +455,16 @@ const ru: typeof en = {
     'База 1.x доступна через ссылку, а не как сам файл.',
   error_upgrade_source_unstamped:
     'Данные 1.x находятся на файловой системе без меток изменения файлов, поэтому обновление не может подтвердить неизменность источника.',
+  error_upgrade_worker_unavailable: 'Исполнитель обновления временно недоступен.',
+  error_upgrade_worker_peer_refused:
+    'Исполнитель обновления отклонил учётные данные вызывающего процесса.',
+  error_source_ownership_unavailable:
+    'Сейчас не удаётся проверить блокировку владения источником 1.x.',
+  error_upgrade_store_locked:
+    'Хранилище операций обновления сейчас заблокировано другим процессом.',
+  error_upgrade_store_unavailable: 'Хранилище операций обновления временно недоступно.',
+  error_upgrade_store_schema_outdated:
+    'Версия схемы целевой базы данных не совпадает с этим бинарным файлом v2.',
   error_pinned_mismatch:
     'Активный движок CPA на этом хосте не соответствует версии, зафиксированной в этом образе ({version}).',
   error_unknown: 'Не удалось подготовить движок CPA.',
@@ -417,6 +490,10 @@ const ru: typeof en = {
     'Откройте мастер напрямую с настроенного публичного источника CPAMP и повторите попытку.',
   remedy_upgrade_artifact_unavailable:
     'Сначала запустите копирование обновления на хосте Manager или обновите статус операции, если она уже завершена.',
+  remedy_upgrade_execution_busy:
+    'Дождитесь завершения текущего шага обновления и повторите попытку.',
+  remedy_upgrade_bootstrap_retired:
+    'Обновите статус обновления или откройте настроенный маршрут консоли v2.',
   remedy_upgrade_source_timeout: 'Повторите попытку немного позже.',
   remedy_upgrade_legacy_root_missing: 'Смонтируйте каталог данных 1.x только для чтения и повторите.',
   remedy_upgrade_legacy_root_unusable:
@@ -431,6 +508,18 @@ const ru: typeof en = {
     'Смонтируйте сам каталог данных, без файлов-ссылок, и повторите.',
   remedy_upgrade_source_unstamped:
     'Переместите или скопируйте каталог данных 1.x на том NTFS, ext4 или APFS, перемонтируйте его и повторите попытку.',
+  remedy_upgrade_worker_unavailable:
+    'Подождите немного и повторите попытку либо убедитесь, что исполнитель обновления запущен на хосте.',
+  remedy_upgrade_worker_peer_refused:
+    'Проверьте настройки пользователя/UID контейнера между Manager и исполнителем обновления на хосте, затем повторите попытку.',
+  remedy_source_ownership_unavailable:
+    'Убедитесь, что контейнер 1.x остановлен, а его том данных смонтирован только для чтения, и повторите попытку.',
+  remedy_upgrade_store_locked:
+    'Дождитесь завершения текущей операции обновления и повторите попытку.',
+  remedy_upgrade_store_unavailable:
+    'Подождите немного и повторите попытку либо проверьте целевой том данных и права доступа на хосте.',
+  remedy_upgrade_store_schema_outdated:
+    'Приведите версию образа контейнера и схему целевой базы данных v2 на хосте в соответствие перед повторной попыткой.',
   remedy_pinned_mismatch:
     'Подготовка через браузер не перезаписывает другой активный движок. Приведите образ контейнера и хранилище среды выполнения на хосте в соответствие, затем повторите попытку.',
 };

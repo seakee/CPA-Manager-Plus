@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -29,8 +30,10 @@ import {
   imageRepository,
   isOwnedImageAlias,
   rollbackAliasReference,
-  shellTokens,
   stableImageRef,
+  expectedFamilyOf,
+  shellTokens,
+  sourceCompatibilityDetail,
   withDeclaredSourceVersion,
   assertNoSecretInBody,
   canonicalEvidenceDocument,
@@ -44,8 +47,6 @@ import {
   createRedactor,
   createResourceRegistry,
   evidenceHash,
-  expectedReleaseOf,
-  versionMismatchDetail,
   finalExitCode,
   installSignalGuard,
   isOwnedResourceName,
@@ -427,19 +428,28 @@ test('a document without a binary digest or a clean tree is refused', () => {
   }
 });
 
-test('the printed next command is compared as exact shell tokens', () => {
-  assert.deepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/a b' --source-version 'v1.14.4'"), [
+test('the printed next command is compared as exact shell tokens for labeled and unlabeled runs', () => {
+  assert.deepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/a b' --target '/srv/t' --source-version 'v1.14.10'"), [
     'cpa-manager-plus',
     'upgrade',
     'reconcile',
     '--legacy',
     '/srv/a b',
+    '--target',
+    '/srv/t',
     '--source-version',
-    'v1.14.4',
+    'v1.14.10',
   ]);
-  // The ShellQuote escape for a literal quote must not split the argument.
+  assert.deepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/a b' --target '/srv/t'"), [
+    'cpa-manager-plus',
+    'upgrade',
+    'reconcile',
+    '--legacy',
+    '/srv/a b',
+    '--target',
+    '/srv/t',
+  ]);
   assert.deepEqual(shellTokens(`'it'\\''s'`), ["it's"]);
-  // A substring check would accept this; the tokens are what the test asserts.
   assert.notDeepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/source'"), [
     'cpa-manager-plus',
     'upgrade',
@@ -465,72 +475,217 @@ test('an implementation identity is invalid until the commit and harness digest 
 });
 
 // ---------------------------------------------------------------------------
-// declared source version: every source-reading command names the pinned release
+// source version declaration and v1.14.x family compatibility checks
 // ---------------------------------------------------------------------------
 
-test('preflight, run and reconcile always declare the pinned accepted release', () => {
+test('withDeclaredSourceVersion attaches exact observed tags and keeps unlabeled probes untouched', () => {
   for (const subcommand of ['preflight', 'run', 'reconcile']) {
-    const declared = withDeclaredSourceVersion(['upgrade', subcommand, '--legacy', '/source', '--json'], 'v1.14.4');
-    assert.deepEqual(declared, ['upgrade', subcommand, '--source-version', 'v1.14.4', '--legacy', '/source', '--json']);
+    const declared = withDeclaredSourceVersion(['upgrade', subcommand, '--legacy', '/source', '--json'], 'v1.14.10');
+    assert.deepEqual(declared, ['upgrade', subcommand, '--source-version', 'v1.14.10', '--legacy', '/source', '--json']);
+    const unlabeled = withDeclaredSourceVersion(['upgrade', subcommand, '--legacy', '/source', '--json'], null);
+    assert.deepEqual(unlabeled, ['upgrade', subcommand, '--legacy', '/source', '--json']);
+    const omitted = withDeclaredSourceVersion(['upgrade', subcommand, '--legacy', '/source', '--json'], undefined);
+    assert.deepEqual(omitted, ['upgrade', subcommand, '--legacy', '/source', '--json']);
   }
-  // A caller that already declared a version keeps exactly what it passed.
-  const explicit = ['upgrade', 'run', '--source-version', 'v1.14.10', '--legacy', '/source'];
-  assert.deepEqual(withDeclaredSourceVersion(explicit, 'v1.14.4'), explicit);
-  // Commands that read the recorded row rather than a source are untouched.
-  for (const command of [['upgrade', 'status', '--json'], ['upgrade', 'rollback', '--prepare'], ['initialize']]) {
-    assert.deepEqual(withDeclaredSourceVersion(command, 'v1.14.4'), command);
+  const explicit = ['upgrade', 'run', '--source-version', 'v1.14.6', '--legacy', '/source'];
+  assert.deepEqual(withDeclaredSourceVersion(explicit, 'v1.14.10'), explicit);
+  for (const command of [['upgrade', 'status', '--json'], ['upgrade', 'rollback', '--prepare'], ['upgrade', 'verify', '--target', '/target'], ['initialize']]) {
+    assert.deepEqual(withDeclaredSourceVersion(command, 'v1.14.10'), command);
   }
-  // There is no implicit version: the harness fails closed instead of calling
-  // the product without the declaration the accepted copy-in requires.
-  assert.throws(
-    () => withDeclaredSourceVersion(['upgrade', 'run', '--legacy', '/source'], null),
-    /must know the pinned accepted release/,
-  );
-  assert.throws(
-    () => withDeclaredSourceVersion(['upgrade', 'reconcile'], '1.14.4'),
-    /must know the pinned accepted release/,
-  );
+  for (const bad of ['1.14.10', 'v1.14', 'v1.14.10-rc1', 'latest', '']) {
+    assert.throws(() => withDeclaredSourceVersion(['upgrade', 'run', '--legacy', '/source'], bad), /exact observed vX\.Y\.Z tag/);
+  }
 });
 
+test('sourceCompatibilityDetail and expectedFamilyOf bind labeled, unlabeled and refused source_version reports', () => {
+  assert.equal(sourceCompatibilityDetail('v1.14.10'), 'expected=v1.14.x declared=v1.14.10; compatible v1.14.x profile verified');
+  assert.equal(sourceCompatibilityDetail(null), 'expected=v1.14.x declared=none; compatible v1.14.x profile verified');
+  assert.equal(sourceCompatibilityDetail('v1.13.9', { compatible: false }), 'expected=v1.14.x declared=v1.13.9');
 
-test('the accepted release is read from the report and a mismatch names both releases', () => {
-  const report = (detail, code = 'ok') =>
-    JSON.stringify({
+  const report = (detail, code = 'ok') => ({
+    stdout: JSON.stringify({
       ready: code === 'ok',
       checks: [{ name: 'source_version', status: code === 'ok' ? 'pass' : 'blocked', code, detail }],
-    });
-
-  // The pass detail binds the declaration to the pin.
+    }),
+  });
+  assert.equal(expectedFamilyOf(report(sourceCompatibilityDetail('v1.14.10'))), 'v1.14.x');
+  assert.equal(expectedFamilyOf(report(sourceCompatibilityDetail(null))), 'v1.14.x');
+  assert.equal(expectedFamilyOf(report(sourceCompatibilityDetail('v1.13.9', { compatible: false }), 'upgrade_source_version_unsupported')), 'v1.14.x');
   assert.equal(
-    expectedReleaseOf({ stdout: report('expected=v1.14.10 declared=v1.14.10; structural lower bound satisfied') }),
-    'v1.14.10',
-  );
-  // A declaration refusal names both releases, which is what a version gap is
-  // read from: the tag this run planned against and the one the product accepts.
-  assert.equal(
-    expectedReleaseOf({ stdout: report('expected=v1.14.10 declared=v1.14.6', 'upgrade_source_version_unsupported') }),
-    'v1.14.10',
-  );
-  // The newer-marker refusal deliberately names no accepted release. An empty
-  // answer must fail the run instead of falling back to the planned tag.
-  assert.equal(
-    expectedReleaseOf({
-      stdout: report(
-        'source is newer than the pinned release v1.14.10; markers from later releases: idx_usage_events_ts_latency_ttft_cover (v1.14.7)',
+    expectedFamilyOf(
+      report(
+        'source is newer than the pinned release v1.14.4; markers from later releases: idx_usage_events_ts_latency_ttft_cover (v1.14.7)',
         'upgrade_source_version_unsupported',
       ),
-    }),
+    ),
     null,
   );
-  // A report without a source_version check cannot bind a release either.
-  assert.equal(expectedReleaseOf({ stdout: JSON.stringify({ ready: true, checks: [] }) }), null);
-
-  // The mismatch detail is exact: naming the pin without the refused
-  // declaration would not prove the declared-version rule.
-  assert.equal(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10 declared=v1.14.4');
-  assert.notEqual(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10');
-
 });
+
+test('assertAcceptedFixture and chain enforce labeled, unlabeled, contradictory-patch and outside-family CLI contracts', () => {
+  const buildContext = (overrides = {}) => {
+    const calls = [];
+    const evidence = { sourceCompatibility: null };
+    const stableFacts = [];
+    const sha256 = (value) => createHash('sha256').update(String(value)).digest('hex');
+    const makePreflight = (sourceVersion, detail, ready = true, code = '') => ({
+      code: ready ? 0 : 1,
+      stdout: JSON.stringify({
+        ready,
+        sourceKind: 'legacy-manager',
+        sourceVersion,
+        fingerprint: 'f'.repeat(64),
+        parityGaps: { applicable: true, missingDays: [] },
+        blocked: ready ? [] : [code],
+        checks: [{ name: 'source_version', status: ready ? 'pass' : 'blocked', ...(code ? { code } : {}), detail }],
+      }),
+      stderr: '',
+    });
+    const runCli = (binary, cliArgs, name, options = {}) => {
+      const effective = withDeclaredSourceVersion(cliArgs, options.sourceVersion !== undefined ? options.sourceVersion : 'v1.14.10');
+      calls.push({ name, effective, options });
+      const sub = effective[1];
+      const verIdx = effective.indexOf('--source-version');
+      const declared = verIdx >= 0 ? effective[verIdx + 1] : null;
+      if (sub === 'preflight') {
+        if (declared === 'v1.13.9') {
+          if (overrides.allowOutsideFamily) return makePreflight('v1.13.9', sourceCompatibilityDetail('v1.13.9'), true);
+          return makePreflight('v1.13.9', sourceCompatibilityDetail('v1.13.9', { compatible: false }), false, 'upgrade_source_version_unsupported');
+        }
+        if (declared === 'v1.14.4') {
+          if (overrides.allowContradictoryPatch) return makePreflight('v1.14.4', sourceCompatibilityDetail('v1.14.4'), true);
+          return makePreflight(
+            'v1.14.4',
+            'source is newer than the pinned release v1.14.4; markers from later releases: idx_usage_events_ts_latency_ttft_cover (v1.14.7)',
+            false,
+            'upgrade_source_version_unsupported',
+          );
+        }
+        if (declared === null) {
+          const reportedVersion = overrides.fabricateUnlabeledVersion || 'unknown';
+          return makePreflight(reportedVersion, sourceCompatibilityDetail(null), true);
+        }
+        return makePreflight(declared, sourceCompatibilityDetail(declared), true);
+      }
+      if (sub === 'run') {
+        const legacy = effective[effective.indexOf('--legacy') + 1];
+        const target = effective[effective.indexOf('--target') + 1];
+        const next = overrides.tamperNext ?? (
+          `cpa-manager-plus upgrade reconcile --legacy '${legacy}' --target '${target}'` +
+          (declared ? ` --source-version '${declared}'` : '')
+        );
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            next,
+            result: {
+              stage: 'copy_in',
+              restored: true,
+              domainsDone: ['source_copy'],
+              backupManifestSha256: 'b'.repeat(64),
+              sourceFingerprintBefore: '1'.repeat(64),
+              sourceFingerprintAfter: '1'.repeat(64),
+            },
+          }),
+          stderr: '',
+        };
+      }
+      if (sub === 'reconcile') {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            report: {
+              stage: 'reconcile',
+              domainsDone: ['source_copy', 'retained_projection'],
+              domains: [{ domain: 'retained', table: 'usage_events', applicable: true, sourceDays: 2, comparedDays: 2, mismatches: [] }],
+              incompleteDays: [],
+            },
+          }),
+          stderr: '',
+        };
+      }
+      if (sub === 'status') {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            recorded: true,
+            operation: {
+              stage: 'reconcile',
+              sourceVersion: overrides.statusSourceVersion ?? (calls.some((c) => c.name.startsWith('unlabeled-compatibility:')) ? 'unknown' : 'v1.14.10'),
+              domainsDone: ['source_copy', 'retained_projection'],
+            },
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected CLI call ${effective.join(' ')}`);
+    };
+    const context = vm.createContext({
+      acceptedRelease: 'v1.14.10',
+      runCli,
+      parseJson: (raw) => JSON.parse(raw),
+      assertValue: (cond, msg) => {
+        if (!cond) throw new Error(msg);
+      },
+      shellTokens,
+      assertReconcileReport: (_label, report) => ({ domains: report.domains, domainsDone: report.domainsDone }),
+      path,
+      stableFacts,
+      sha256,
+      sourceCompatibilityDetail,
+      expectedFamilyOf,
+      preview: (val) => JSON.stringify(val),
+      DEFAULT_V1_TAG: 'v1.14.10',
+      EXPECTED_V1_COMMIT: 'a67ed8834a914ab24c36d2490fa6bb6d4166724c',
+      CONTRADICTORY_DECLARATION_TAG: 'v1.14.4',
+      UNSUPPORTED_DECLARATION_TAG: 'v1.13.9',
+      SCRATCH: '/owned/scratch',
+      evidence,
+    });
+    for (const fn of ['sourceVersionCheckOf', 'chain', 'assertAcceptedFixture']) {
+      vm.runInContext(harnessFunction(fn), context);
+    }
+    const initialProbe = runCli('/fake/bin', ['upgrade', 'preflight', '--legacy', '/src', '--json'], 'preflight(next-fixture)');
+    return { context, calls, evidence, initialProbe };
+  };
+
+  const ok = buildContext();
+  ok.context.assertAcceptedFixture({
+    binary: '/fake/bin',
+    probe: ok.initialProbe,
+    tag: 'v1.14.10',
+    fixture: { commit: 'a67ed8834a914ab24c36d2490fa6bb6d4166724c' },
+    sourceRoot: '/src',
+  });
+  assert.equal(ok.evidence.sourceCompatibility.expectedFamily, 'v1.14.x');
+  assert.equal(ok.evidence.sourceCompatibility.unlabeled.sourceVersion, 'unknown');
+  assert.equal(ok.evidence.sourceCompatibility.unlabeled.chainStage, 'reconcile');
+  assert.equal(ok.evidence.sourceCompatibility.contradictoryPatch.declared, 'v1.14.4');
+  assert.equal(ok.evidence.sourceCompatibility.outsideFamily.declared, 'v1.13.9');
+
+  for (const [label, overrides, fixtureCommit, pattern] of [
+    ['fabricated unlabeled version', { fabricateUnlabeledVersion: 'v1.14.10' }, 'a67ed8834a914ab24c36d2490fa6bb6d4166724c', /fabricated sourceVersion/],
+    ['contradictory v1.14.4 not blocked', { allowContradictoryPatch: true }, 'a67ed8834a914ab24c36d2490fa6bb6d4166724c', /contradictory v1\.14\.4/],
+    ['outside-family v1.13.9 not blocked', { allowOutsideFamily: true }, 'a67ed8834a914ab24c36d2490fa6bb6d4166724c', /outside-family/],
+    ['drifted fixture commit', {}, '0'.repeat(40), /fixture resolved to/],
+    ['tampered run next command', { tamperNext: "cpa-manager-plus upgrade reconcile --legacy '/src' --target '/owned/scratch/work/unlabeled-compatibility/target' --source-version 'v1.14.10'" }, 'a67ed8834a914ab24c36d2490fa6bb6d4166724c', /printed next step/],
+  ]) {
+    const bad = buildContext(overrides);
+    assert.throws(
+      () =>
+        bad.context.assertAcceptedFixture({
+          binary: '/fake/bin',
+          probe: bad.initialProbe,
+          tag: 'v1.14.10',
+          fixture: { commit: fixtureCommit },
+          sourceRoot: '/src',
+        }),
+      pattern,
+      label,
+    );
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // rollback alias: run-owned, vX.Y.Z, removed with the run
@@ -862,7 +1017,6 @@ function createLifecycleHarness({ failWizardRelease = false } = {}) {
     ensureFixture: async (tag) => ({ tag }),
     seedSource: async () => ({ sourceRoot: '/fake/source', dataset: {} }),
     runCli: () => ({}),
-    expectedReleaseOf: () => 'v1.14.10',
     assertAcceptedFixture: noop,
     createWorkspace: () => ({ main: { source: '/fake/source', target: '/fake/target' }, snapshots: {} }),
     DATASET_DAYS: [1, 2, 3],

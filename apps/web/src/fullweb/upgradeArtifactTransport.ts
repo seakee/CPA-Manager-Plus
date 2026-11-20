@@ -130,6 +130,9 @@ export function createUpgradeArtifactTransport(
             code: code ?? 'unauthorized',
           };
         }
+        if (!code && response.status === 404) {
+          code = 'upgrade_bootstrap_retired';
+        }
         throw {
           kind: 'http',
           status: response.status,

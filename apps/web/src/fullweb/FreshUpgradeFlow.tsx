@@ -9,6 +9,7 @@ import {
   reconciliationBoundText,
   reconciliationTotalText,
   stageText,
+  upgradeExecutionText as e,
   upgradeWizardText as t,
 } from '../i18n/upgradeWizard';
 import {
@@ -31,11 +32,8 @@ import type { ArtifactTransportLike } from './freshArtifact';
 import { FullWebIcon } from './FullWebIcon';
 import { PublicApiError, type PublicApiClient } from './publicApi';
 import { readRoutingContext } from './routingContext';
-// The reads only report what the operation recorded: the read-only preflight
-// report and the operation row projection. The action is the same completion gate
-// the command line runs, so the page can never declare the upgrade finished on
-// its own. The copy-in, the reconciliation, the CPA import and the connection are
-// started from the Manager host.
+// Recorded operations and worker observations are authoritative; accepted jobs
+// never advance a local stage or imply that the unique verification gate passed.
 export const UPGRADE_WIZARD_CONTRACT = 'cpamp.upgrade-wizard.v1';
 const SOURCE_VERSION_UNKNOWN = 'unknown';
 
@@ -48,7 +46,7 @@ function formatPreflightSourceVersion(
     return reported;
   }
   if (report?.pendingDeclaration && report.expectedVersion) {
-    return `${t('checkPending', language)} (--source-version ${report.expectedVersion})`;
+    return `${t('checkPending', language)} (${report.expectedVersion})`;
   }
   return t('preflightUnknown', language);
 }
@@ -96,6 +94,40 @@ export type UpgradeWizardVerify = (
   signal: AbortSignal,
   input?: UpgradeRoutingInput
 ) => Promise<unknown>;
+
+export type UpgradeExecutionInput =
+  | {
+      action: 'reconcile';
+      acknowledgeDays?: string[];
+      acknowledgeAllMismatches?: boolean;
+      acknowledgeParityGaps?: boolean;
+    }
+  | { action: 'cpa-import'; pluginsEnabled: boolean }
+  | { action: 'external-connect'; baseUrl?: string; managementKey?: string }
+  | { action: 'verify' }
+  | { action: 'activate' };
+export type UpgradeWizardExecute = (signal: AbortSignal, input: UpgradeExecutionInput) => Promise<unknown>;
+export interface UpgradeExecution {
+  available: boolean;
+  running: boolean;
+  action?: UpgradeExecutionInput['action'];
+  code?: string;
+  managedAvailable: boolean;
+}
+const EXECUTION_ACTIONS = ['reconcile', 'cpa-import', 'external-connect', 'verify', 'activate'] as const;
+export function parseUpgradeExecution(value: unknown): UpgradeExecution | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const doc = value as Record<string, unknown>;
+  if (typeof doc.available !== 'boolean' || typeof doc.running !== 'boolean' ||
+      typeof doc.managedAvailable !== 'boolean') return null;
+  if (doc.action !== undefined && !EXECUTION_ACTIONS.includes(doc.action as UpgradeExecutionInput['action'])) return null;
+  if (doc.code !== undefined && (typeof doc.code !== 'string' || !/^[a-zA-Z0-9_:-]{0,96}$/.test(doc.code))) return null;
+  return {
+    available: doc.available, running: doc.running, managedAvailable: doc.managedAvailable,
+    ...(doc.action ? { action: doc.action as UpgradeExecutionInput['action'] } : {}),
+    ...(doc.code ? { code: doc.code as string } : {}),
+  };
+}
 
 export type UpgradeWizardFailure = 'authentication' | 'network' | 'unavailable' | 'response';
 
@@ -156,12 +188,16 @@ export interface UpgradeStatus {
   mismatchDays: string[];
   mismatchDaysTotal: number;
   mismatchDaysTruncated: boolean;
+  hasParityGaps?: boolean;
   manualItems: string[];
   errorCode: string;
   errorDetail: string;
   targetMode?: string;
   routing?: UpgradeRoutingState;
   accessInfo?: AccessInfo;
+  canonicalConfirmed?: boolean;
+  bootstrapRetiredRecovery?: boolean;
+  execution?: UpgradeExecution;
 }
 
 const PREFLIGHT_TIMEOUT_MS = 45_000;
@@ -176,6 +212,68 @@ const VERIFY_TIMEOUT_MS = 60_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_POLL_DELAYS = [1000, 2000, 4000, 8000, 15000];
 const TERMINAL_STAGES = ['complete', 'failed', 'rolled_back'];
+const CANONICAL_CONFIRMED_MARKER = Symbol('cpamp.upgrade.canonicalConfirmed');
+const BOOTSTRAP_RETIRED_RECOVERY_MARKER = Symbol('cpamp.upgrade.bootstrapRetiredRecovery');
+
+export function markCanonicalUpgradeStatus<T extends Record<string, unknown>>(value: T): T {
+  Object.defineProperty(value, CANONICAL_CONFIRMED_MARKER, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+  });
+  return value;
+}
+
+function hasCanonicalUpgradeStatusMarker(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as Record<symbol, unknown>)[CANONICAL_CONFIRMED_MARKER] === true
+  );
+}
+
+export function markBootstrapRetiredRecovery<T extends Record<string, unknown>>(value: T): T {
+  Object.defineProperty(value, BOOTSTRAP_RETIRED_RECOVERY_MARKER, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+  });
+  return value;
+}
+
+function hasBootstrapRetiredRecoveryMarker(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as Record<symbol, unknown>)[BOOTSTRAP_RETIRED_RECOVERY_MARKER] === true
+  );
+}
+
+function isResumableInFlightActivation(
+  parsed: UpgradeStatus,
+  activationPersisted = false
+): boolean {
+  if (
+    !parsed.recorded ||
+    parsed.stage !== 'complete' ||
+    !parsed.stageKnown ||
+    parsed.routing?.committed !== true ||
+    parsed.accessInfo?.ready ||
+    !parsed.execution
+  ) {
+    return false;
+  }
+  if (parsed.execution.action === 'activate' && !parsed.execution.code) {
+    return true;
+  }
+  if (!activationPersisted && !parsed.bootstrapRetiredRecovery) {
+    return false;
+  }
+  return Boolean(
+    parsed.execution.available === false &&
+      (!parsed.execution.code || parsed.execution.code === 'upgrade_worker_unavailable')
+  );
+}
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
@@ -344,6 +442,7 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
   const mismatchDays = strings(reconciliation.mismatchDays);
   const mismatchDaysTotal = count(reconciliation.mismatchDaysTotal);
   const mismatchDaysTruncated = reconciliation.mismatchDaysTruncated === true;
+  const hasParityGaps = reconciliation.hasParityGaps === true;
   // The bound is part of the document: the total can never be smaller than the
   // list it stands for, and the flag is exactly the difference between them. A
   // reply that contradicts this is not a history this build can present.
@@ -352,6 +451,8 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
   const targetMode = text(document.targetMode);
   const routing = parseUpgradeRouting(document.routing);
   const accessInfo = parseUpgradeAccessInfo(document.accessInfo, targetMode);
+  const execution = document.execution === undefined ? undefined : parseUpgradeExecution(document.execution);
+  if (execution === null) return null;
   return {
     recorded: document.recorded,
     stage: document.stage,
@@ -363,12 +464,16 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
     mismatchDays,
     mismatchDaysTotal,
     mismatchDaysTruncated,
+    ...(hasParityGaps ? { hasParityGaps: true } : {}),
     manualItems: strings(document.manualItems),
     errorCode: text(document.errorCode),
     errorDetail: text(document.errorDetail),
     ...(targetMode ? { targetMode } : {}),
     ...(routing ? { routing } : {}),
     ...(accessInfo ? { accessInfo } : {}),
+    ...(execution ? { execution } : {}),
+    ...(hasCanonicalUpgradeStatusMarker(value) ? { canonicalConfirmed: true } : {}),
+    ...(hasBootstrapRetiredRecoveryMarker(value) ? { bootstrapRetiredRecovery: true } : {}),
   };
 }
 
@@ -447,23 +552,30 @@ function upgradeAPIBase(): string {
 
 // The credential is a getter so the entry keeps it in its own ref: the wizard
 // never stores, renders or copies the key.
-function createUpgradeWizardRequest(credential: () => string, transport: typeof fetch) {
+function createUpgradeWizardRequest(
+  credential: () => string, transport: typeof fetch, continuationBase?: () => string
+) {
   return async (
     resource:
       | UpgradeWizardResource
+      | 'bootstrap/identity'
+      | 'operation'
+      | 'api-keys/access-info'
       | 'installation/upgrade/verify'
-      | 'installation/upgrade/routing',
+      | 'installation/upgrade/routing'
+      | 'installation/upgrade/execute',
     method: 'GET' | 'POST',
     signal: AbortSignal,
     body?: unknown
   ) => {
-    const base = upgradeAPIBase();
+    const rawBase = continuationBase?.() || upgradeAPIBase();
+    const base = rawBase.startsWith('/') ? rawBase.replace(/\/+$/, '') : rawBase;
     const target = new URL(`${base}/${resource}`, window.location.origin);
     if (target.origin !== window.location.origin || target.pathname !== `${base}/${resource}`) {
       throw new UpgradeWizardError('unavailable');
     }
-    const key = credential();
-    if (!key) throw new UpgradeWizardError('authentication');
+    const key = resource === 'bootstrap/identity' ? '' : credential();
+    if (!key && resource !== 'bootstrap/identity') throw new UpgradeWizardError('authentication');
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal.addEventListener('abort', abort);
@@ -482,7 +594,7 @@ function createUpgradeWizardRequest(credential: () => string, transport: typeof 
       let response: Response;
       const headers: Record<string, string> = {
         Accept: 'application/json',
-        Authorization: `Bearer ${key}`,
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
       };
       if (body !== undefined) {
         headers['Content-Type'] = 'application/json';
@@ -517,10 +629,14 @@ function createUpgradeWizardRequest(credential: () => string, transport: typeof 
           if (typeof payload?.error?.code === 'string') code = payload.error.code;
           else if (typeof payload?.code === 'string') code = payload.code;
           else if (typeof payload?.Code === 'string') code = payload.Code;
+          if (!/^[a-zA-Z0-9_:-]{1,96}$/.test(code)) code = '';
         } catch {
           /* A failure without an envelope stays a plain status failure. */
         }
         throw new UpgradeWizardError('unavailable', code, response.status);
+      }
+      if (resource === 'bootstrap/identity' && response.headers.get('X-CPAMP-Route-Owner') !== 'manager') {
+        throw new UpgradeWizardError('response');
       }
       try {
         return await response.json();
@@ -536,10 +652,18 @@ function createUpgradeWizardRequest(credential: () => string, transport: typeof 
 
 export function createUpgradeWizardRead(
   credential: () => string,
-  transport: typeof fetch = globalThis.fetch
+  transport: typeof fetch = globalThis.fetch,
+  continuationBase?: () => string
 ): UpgradeWizardRead {
-  const request = createUpgradeWizardRequest(credential, transport);
+  const request = createUpgradeWizardRequest(credential, transport, continuationBase);
   return (resource, signal) => request(resource, 'GET', signal);
+}
+
+export function createUpgradeActivationRead(credential: () => string) {
+  return (prefix: string, resource: 'bootstrap/identity' | 'operation' | 'api-keys/access-info', signal: AbortSignal) => {
+    if (!isCanonicalPrefix(prefix)) throw new UpgradeWizardError('response');
+    return createUpgradeWizardRequest(credential, globalThis.fetch, () => `${prefix}/api/v2`)(resource, 'GET', signal);
+  };
 }
 
 // The action's transport. It is a POST to the one verification route: the route
@@ -547,18 +671,29 @@ export function createUpgradeWizardRead(
 // record anything.
 export function createUpgradeWizardSaveRouting(
   credential: () => string,
-  transport: typeof fetch = globalThis.fetch
+  transport: typeof fetch = globalThis.fetch,
+  continuationBase?: () => string
 ): UpgradeWizardSaveRouting {
-  const request = createUpgradeWizardRequest(credential, transport);
+  const request = createUpgradeWizardRequest(credential, transport, continuationBase);
   return (signal, input) => request('installation/upgrade/routing', 'POST', signal, input);
 }
 
 export function createUpgradeWizardVerify(
   credential: () => string,
-  transport: typeof fetch = globalThis.fetch
+  transport: typeof fetch = globalThis.fetch,
+  continuationBase?: () => string
 ): UpgradeWizardVerify {
-  const request = createUpgradeWizardRequest(credential, transport);
+  const request = createUpgradeWizardRequest(credential, transport, continuationBase);
   return (signal, input) => request('installation/upgrade/verify', 'POST', signal, input);
+}
+
+export function createUpgradeWizardExecute(
+  credential: () => string,
+  transport: typeof fetch = globalThis.fetch,
+  continuationBase?: () => string
+): UpgradeWizardExecute {
+  const request = createUpgradeWizardRequest(credential, transport, continuationBase);
+  return (signal, input) => request('installation/upgrade/execute', 'POST', signal, input);
 }
 
 function asWizardError(error: unknown): UpgradeWizardError {
@@ -632,31 +767,25 @@ type BootState =
   | { phase: 'reading' }
   | { phase: 'failed'; error: UpgradeWizardError }
   | { phase: 'ready'; resumed: boolean };
-/**
- * The Full Web Upgrade wizard. Four steps over the two read-only routes:
- * preflight, confirm, progress and result. Every sentence about what the
- * upgrade does is written as a description of the operation, because this page
- * can only read it.
- *
- * It reads the recorded operation before anything else. An operation that has
- * already recorded a stage resumes at that stage (progress, or the result when it
- * is terminal) without a preflight; the preflight is the first step only when the
- * store says nothing is recorded. A status read that fails is a typed failure
- * with its own retry — it is not evidence that no operation exists.
- */
+// Existing operations resume without repeating script-owned confirmation or copy-in.
 export function FreshUpgradeFlow({
   read,
   verify,
+  execute,
   saveRouting,
   artifact,
   language = fullWebLanguage(),
   pollDelays = DEFAULT_POLL_DELAYS,
   onRecordedOperation,
+  onExecutionActivity,
+  onActivation,
+  canonicalConfirmed: canonicalConfirmedProp = false,
+  bootstrapRetired = false,
+  activationPersisted = false,
+  onOpenConsole,
 }: {
   read: UpgradeWizardRead;
-  // The one action of this surface. It is injected exactly like the reads, so a
-  // wizard without it offers no way to advance the operation and the page stays
-  // a reader.
+  execute?: UpgradeWizardExecute;
   verify?: UpgradeWizardVerify;
   saveRouting?: UpgradeWizardSaveRouting;
   artifact?: ArtifactTransportLike;
@@ -666,6 +795,12 @@ export function FreshUpgradeFlow({
   // is recorded — to keep its own copy honest: a recorded operation is not a
   // source with no migration path.
   onRecordedOperation?: (recorded: boolean) => void;
+  onExecutionActivity?: (active: boolean) => void;
+  onActivation?: (controlBasePath: string) => void;
+  canonicalConfirmed?: boolean;
+  bootstrapRetired?: boolean;
+  activationPersisted?: boolean;
+  onOpenConsole?: () => void;
 }) {
   const [step, setStep] = useState<Step>('preflight');
   const [boot, setBoot] = useState<BootState>({ phase: 'reading' });
@@ -676,10 +811,32 @@ export function FreshUpgradeFlow({
   const [artifactReady, setArtifactReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const routingInitializedRef = useRef(false);
+  const prevTargetModeRef = useRef<string | undefined>(undefined);
   const routingWriteEpochRef = useRef(0);
-  const routingWritePendingRef = useRef(false);
+  const pendingWritesRef = useRef(0);
   const onRecordedOperationRef = useRef(onRecordedOperation);
   onRecordedOperationRef.current = onRecordedOperation;
+  const [localAction, setLocalAction] = useState<UpgradeExecutionInput['action'] | null>(null);
+  const actionPendingRef = useRef(false);
+  const [executionError, setExecutionError] = useState<UpgradeWizardError>();
+  const restartUntilRef = useRef(0);
+  const restartingRef = useRef(false);
+  const [restarting, setRestarting] = useState(false);
+  const workerReadUntilRef = useRef(0);
+  const activateDeliveryUnknownRef = useRef(false);
+  const activateDeliveryFailureRef = useRef<UpgradeWizardError | undefined>(undefined);
+  const postCutoverPollUntilRef = useRef(0);
+  const bootstrapRetiredRef = useRef(bootstrapRetired);
+  bootstrapRetiredRef.current = bootstrapRetired;
+  const activationPersistedRef = useRef(activationPersisted);
+  activationPersistedRef.current = activationPersisted;
+  const resumedActivationRef = useRef(false);
+  const [canonicalConfirmedState, setCanonicalConfirmedState] = useState(canonicalConfirmedProp);
+  const canonicalConfirmedRef = useRef(canonicalConfirmedProp);
+  const activityCallbackRef = useRef(onExecutionActivity);
+  activityCallbackRef.current = onExecutionActivity;
+  const onActivationRef = useRef(onActivation);
+  onActivationRef.current = onActivation;
   const [controlPrefix, setControlPrefix] = useState('');
   const [inferencePrefix, setInferencePrefix] = useState('');
   const [sharedPrefix, setSharedPrefix] = useState(false);
@@ -703,6 +860,12 @@ export function FreshUpgradeFlow({
     (index: number) => pollDelays[Math.min(index, pollDelays.length - 1)] ?? 15_000,
     [pollDelays]
   );
+  useEffect(() => {
+    if (canonicalConfirmedProp) {
+      canonicalConfirmedRef.current = true;
+      setCanonicalConfirmedState(true);
+    }
+  }, [canonicalConfirmedProp]);
   // Boot reads the recorded operation once, before any preflight. A recorded
   // operation is resumed where it stands; only an empty record asks for
   // preflight. The read is left in `reading` until it answers, so a retry is one
@@ -718,7 +881,41 @@ export function FreshUpgradeFlow({
         if (stopped) return;
         if (!parsed) throw new UpgradeWizardError('response');
         onRecordedOperationRef.current?.(parsed.recorded);
+        const parsedCanonicalConfirmed =
+          canonicalConfirmedRef.current || Boolean(parsed.canonicalConfirmed);
+        if (parsedCanonicalConfirmed) {
+          canonicalConfirmedRef.current = true;
+          setCanonicalConfirmedState(true);
+          restartingRef.current = false;
+          setRestarting(false);
+          restartUntilRef.current = 0;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          setExecutionError(undefined);
+        }
         if (parsed.recorded) {
+          if (!parsedCanonicalConfirmed && !restartingRef.current && !resumedActivationRef.current && isResumableInFlightActivation(parsed, activationPersistedRef.current)) {
+            resumedActivationRef.current = true;
+            activateDeliveryUnknownRef.current = false;
+            activateDeliveryFailureRef.current = undefined;
+            restartingRef.current = true;
+            setRestarting(true);
+            restartUntilRef.current = Date.now() + 120_000;
+            const prefix =
+              parsed.routing?.controlBasePath || parsed.accessInfo?.managementBasePath || '';
+            if (isCanonicalPrefix(prefix)) onActivationRef.current?.(prefix);
+          } else if (
+            !parsedCanonicalConfirmed &&
+            activationPersistedRef.current &&
+            !isResumableInFlightActivation(parsed, true) &&
+            !parsed.accessInfo?.ready &&
+            (parsed.execution?.code ||
+              (parsed.execution?.available &&
+                !parsed.execution.running &&
+                parsed.execution.action !== 'activate'))
+          ) {
+            onActivationRef.current?.('');
+          }
           // The first answer is the resume: the poll effect continues from it
           // instead of asking the operator to qualify the source again.
           setStatus({ phase: 'live', value: parsed, failures: 0 });
@@ -727,7 +924,26 @@ export function FreshUpgradeFlow({
         setBoot({ phase: 'ready', resumed: parsed.recorded });
       } catch (error) {
         if (stopped) return;
-        setBoot({ phase: 'failed', error: asWizardError(error) });
+        const failure = asWizardError(error);
+        if (
+          bootstrapRetiredRef.current &&
+          failure.failure !== 'authentication' &&
+          failure.failure !== 'response' &&
+          (failure.failure === 'network' ||
+            (!failure.code && failure.status === 404) ||
+            failure.status === 502 ||
+            failure.status === 503 ||
+            failure.status === 504 ||
+            failure.code === 'upgrade_bootstrap_retired')
+        ) {
+          restartingRef.current = true;
+          setRestarting(true);
+          restartUntilRef.current = Date.now() + 120_000;
+          setStep('progress');
+          setBoot({ phase: 'ready', resumed: true });
+          return;
+        }
+        setBoot({ phase: 'failed', error: failure });
       }
     })();
     return () => {
@@ -772,7 +988,7 @@ export function FreshUpgradeFlow({
         const raw = await read('installation/upgrade/status', controller.signal);
         const parsed = parseUpgradeStatus(raw);
         if (stopped) return;
-        if (routingWritePendingRef.current || routingEpoch !== routingWriteEpochRef.current) {
+        if (pendingWritesRef.current > 0 || routingEpoch !== routingWriteEpochRef.current) {
           timer = window.setTimeout(tick, delayFor(0));
           return;
         }
@@ -781,24 +997,163 @@ export function FreshUpgradeFlow({
         delayIndex = 0;
         setStatus({ phase: 'live', value: parsed, failures: 0 });
         onRecordedOperationRef.current?.(parsed.recorded);
-        if (operationSettled(parsed)) return;
+        actionPendingRef.current = false;
+        setLocalAction(null);
+        workerReadUntilRef.current = parsed.execution?.running ? Date.now() + 120_000 : 0;
+        const parsedCanonicalConfirmed =
+          canonicalConfirmedRef.current || Boolean(parsed.canonicalConfirmed);
+        const expectedShutdownWorkerUnavailable =
+          (restartingRef.current ||
+            activationPersistedRef.current ||
+            Boolean(parsed.bootstrapRetiredRecovery)) &&
+          parsed.stage === 'complete' &&
+          parsed.routing?.committed === true &&
+          parsed.execution?.code === 'upgrade_worker_unavailable';
+        if (parsed.execution?.action === 'activate' && !parsed.execution.code) {
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+        }
+        if (parsedCanonicalConfirmed) {
+          canonicalConfirmedRef.current = true;
+          setCanonicalConfirmedState(true);
+          restartingRef.current = false;
+          setRestarting(false);
+          restartUntilRef.current = 0;
+          resumedActivationRef.current = false;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          setExecutionError(undefined);
+        } else if (
+          !restartingRef.current &&
+          !resumedActivationRef.current &&
+          isResumableInFlightActivation(parsed, activationPersistedRef.current)
+        ) {
+          resumedActivationRef.current = true;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          restartingRef.current = true;
+          setRestarting(true);
+          restartUntilRef.current = Date.now() + 120_000;
+          setExecutionError(undefined);
+          const prefix =
+            parsed.routing?.controlBasePath || parsed.accessInfo?.managementBasePath || '';
+          if (isCanonicalPrefix(prefix)) onActivationRef.current?.(prefix);
+        } else if (
+          (restartingRef.current || activationPersistedRef.current) &&
+          !expectedShutdownWorkerUnavailable &&
+          !parsed.accessInfo?.ready &&
+          (parsed.execution?.code ||
+            (parsed.execution?.available &&
+              !parsed.execution.running &&
+              parsed.execution.action !== 'activate'))
+        ) {
+          const wasRestarting = restartingRef.current;
+          const hadCode = Boolean(parsed.execution?.code);
+          const wasDeliveryUnknown = activateDeliveryUnknownRef.current;
+          const deliveryFailure = activateDeliveryFailureRef.current;
+          restartingRef.current = false;
+          setRestarting(false);
+          restartUntilRef.current = 0;
+          resumedActivationRef.current = false;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          onActivationRef.current?.('');
+          if (wasRestarting && !hadCode && wasDeliveryUnknown) {
+            setExecutionError(deliveryFailure ?? new UpgradeWizardError('network'));
+          }
+        } else if (parsed.accessInfo?.ready) {
+          restartingRef.current = false;
+          setRestarting(false);
+          restartUntilRef.current = 0;
+          resumedActivationRef.current = false;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          setExecutionError(undefined);
+        }
+        const postCutoverPendingCode = parsed.accessInfo?.code ?? '';
+        const postCutoverPollable =
+          parsedCanonicalConfirmed &&
+          parsed.stage === 'complete' &&
+          !parsed.accessInfo?.ready &&
+          (postCutoverPendingCode === 'gateway_pending' ||
+            postCutoverPendingCode === 'routing_unavailable' ||
+            postCutoverPendingCode === 'external_target_unavailable' ||
+            postCutoverPendingCode === 'upgrade_authority_unavailable' ||
+            postCutoverPendingCode === 'installation_incomplete');
+        let postCutoverShouldPoll = false;
+        if (postCutoverPollable) {
+          const budget = postCutoverPendingCode === 'gateway_pending' ? 300_000 : 120_000;
+          if (!postCutoverPollUntilRef.current) {
+            postCutoverPollUntilRef.current = Date.now() + budget;
+          } else if (postCutoverPendingCode !== 'gateway_pending') {
+            postCutoverPollUntilRef.current = Math.min(
+              postCutoverPollUntilRef.current,
+              Date.now() + 120_000
+            );
+          }
+          postCutoverShouldPoll = Date.now() < postCutoverPollUntilRef.current;
+        } else if (parsedCanonicalConfirmed) {
+          postCutoverPollUntilRef.current = 0;
+        }
+        const shouldContinuePolling =
+          !operationSettled(parsed) ||
+          Boolean(parsed.execution?.running) ||
+          Boolean(
+            parsed.stage === 'complete' &&
+              !parsed.accessInfo?.ready &&
+              (parsedCanonicalConfirmed
+                ? postCutoverShouldPoll
+                : Boolean(parsed.execution || restartingRef.current))
+          );
+        if (!shouldContinuePolling) {
+          return;
+        }
+        if (!parsedCanonicalConfirmed && restartingRef.current && Date.now() >= restartUntilRef.current) {
+          restartingRef.current = false;
+          setRestarting(false);
+          restartUntilRef.current = 0;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+          onActivationRef.current?.('');
+          setExecutionError(new UpgradeWizardError('unavailable', 'upgrade_activation_timeout'));
+          setStatus((current) => ({ ...current, phase: 'stalled' }));
+          return;
+        }
         timer = window.setTimeout(tick, delayFor(delayIndex++));
       } catch (error) {
         if (stopped) return;
-        if (routingWritePendingRef.current || routingEpoch !== routingWriteEpochRef.current) {
+        if (pendingWritesRef.current > 0 || routingEpoch !== routingWriteEpochRef.current) {
           timer = window.setTimeout(tick, delayFor(0));
           return;
         }
         failures += 1;
         const failure = asWizardError(error);
+        const recovering = ((restartingRef.current && Date.now() < restartUntilRef.current) ||
+          Date.now() < workerReadUntilRef.current) &&
+          failure.failure !== 'authentication' && failure.failure !== 'response';
         setStatus((current) => ({
-          phase: failures >= MAX_CONSECUTIVE_FAILURES ? 'stalled' : current.phase,
-          value: current.value,
-          error: failure,
-          failures,
+          phase: !recovering && failures >= MAX_CONSECUTIVE_FAILURES ? 'stalled' : current.phase,
+          value: current.value, error: failure, failures,
         }));
-        if (failures >= MAX_CONSECUTIVE_FAILURES) return;
-        timer = window.setTimeout(tick, delayFor(delayIndex++));
+        if (!recovering && failures >= MAX_CONSECUTIVE_FAILURES) {
+          actionPendingRef.current = false;
+          setLocalAction(null);
+          if (restartingRef.current) {
+            restartingRef.current = false;
+            setRestarting(false);
+            restartUntilRef.current = 0;
+            activateDeliveryUnknownRef.current = false;
+            activateDeliveryFailureRef.current = undefined;
+            onActivationRef.current?.('');
+            setExecutionError(
+              failure.failure === 'authentication' || failure.failure === 'response'
+                ? failure
+                : new UpgradeWizardError('unavailable', 'upgrade_activation_timeout')
+            );
+          }
+          return;
+        }
+        timer = window.setTimeout(tick, recovering ? 2000 : delayFor(delayIndex++));
       }
     };
     void tick();
@@ -813,36 +1168,130 @@ export function FreshUpgradeFlow({
     step === 'progress' && operationSettled(status.value) ? 'result' : step;
   const record = status.value;
   const preflightReport = preflight.phase === 'ok' ? preflight.value : undefined;
+  const canonicalConfirmed =
+    canonicalConfirmedState || canonicalConfirmedProp || Boolean(status.value?.canonicalConfirmed);
+  const bootstrapIsRetired = bootstrapRetired || canonicalConfirmed;
+  const workerMode = record?.execution !== undefined;
+  const executionAvailable = Boolean(execute && record?.execution?.available);
+  const executionBusy = Boolean(localAction || record?.execution?.running);
+  const isActivating = Boolean(
+    !canonicalConfirmed &&
+      (restarting ||
+        localAction === 'activate' ||
+        (record?.execution?.running && record.execution.action === 'activate'))
+  );
+  const isNonActivateBusy = Boolean(executionBusy && !isActivating);
+  const expectedShutdownWorkerUnavailable = Boolean(
+    !canonicalConfirmed &&
+      (restarting ||
+        localAction === 'activate' ||
+        Boolean(activationPersisted) ||
+        Boolean(record?.bootstrapRetiredRecovery)) &&
+      record?.stage === 'complete' &&
+      record.routing?.committed === true &&
+      record.execution?.code === 'upgrade_worker_unavailable'
+  );
+  const hasExecutionFailure = Boolean(
+    !canonicalConfirmed &&
+      record?.execution &&
+      !record.execution.running &&
+      record.execution.code &&
+      !expectedShutdownWorkerUnavailable
+  );
+  const isCleanComplete = Boolean(
+    record?.stage === 'complete' &&
+      record.stageKnown &&
+      !hasExecutionFailure &&
+      !isNonActivateBusy
+  );
   const showArtifactStep =
-    Boolean(artifact) && Boolean(record?.recorded) && record?.nextAction === 'cpa_import';
+    Boolean(artifact) &&
+    Boolean(record?.recorded) &&
+    (record?.nextAction === 'cpa_import' ||
+      (workerMode &&
+        record?.nextAction === 'external_connect' &&
+        record.execution?.managedAvailable === true)) &&
+    (!workerMode || record.execution?.managedAvailable === true);
+  useEffect(() => {
+    activityCallbackRef.current?.(status.phase !== 'stalled' && (executionBusy || restarting));
+    return () => activityCallbackRef.current?.(false);
+  }, [executionBusy, record, restarting, status.phase]);
 
   const [guideMode, setGuideMode] = useState<'managed' | 'external'>('managed');
   const guideModeTouchedRef = useRef(false);
 
   useEffect(() => {
     if (guideModeTouchedRef.current) return;
-    const detectedExternal =
-      record?.nextAction === 'external_connect' ||
-      preflightReport?.checks.some(
-        (c) => c.name === 'cpa_classification' && c.detail.includes('kind=external')
-      ) === true;
-    setGuideMode(detectedExternal ? 'external' : 'managed');
-  }, [preflightReport, record?.nextAction]);
+    if (workerMode) {
+      if (
+        record?.targetMode === 'external' ||
+        (record?.nextAction === 'external_connect' && record.errorCode.startsWith('external_'))
+      ) {
+        setGuideMode('external');
+        return;
+      }
+      setGuideMode(record?.execution?.managedAvailable ? 'managed' : 'external');
+      return;
+    }
+    setGuideMode(record?.nextAction === 'external_connect' ? 'external' : 'managed');
+  }, [workerMode, record?.execution?.managedAvailable, record?.nextAction, record?.targetMode, record?.errorCode]);
   useEffect(() => {
-    if (!showArtifactStep) {
+    if (!showArtifactStep || guideMode !== 'managed') {
       setArtifactReady(false);
     }
-  }, [showArtifactStep]);
+  }, [showArtifactStep, guideMode]);
+  const artifactStepContent =
+    showArtifactStep && artifact && guideMode === 'managed' && !executionBusy ? (
+      <div className="upgrade-artifact" data-testid="upgrade-cpa-import-artifact">
+        {!artifactReady ? (
+          <div className="upgrade-artifact-card" data-testid="upgrade-artifact-prep">
+            <div className="upgrade-artifact-head">
+              <span className="upgrade-artifact-badge">
+                {t('slimEngineStepBadge', language)}
+              </span>
+              <h3>{t('slimEngineTitle', language)}</h3>
+              <p className="upgrade-step-help">{t('slimEngineHelp', language)}</p>
+            </div>
+            <FreshArtifactStep
+              hideHeader
+              transport={artifact}
+              onReady={() => setArtifactReady(true)}
+            />
+          </div>
+        ) : (
+          <div
+            className="upgrade-ready-strip"
+            role="status"
+            data-testid="upgrade-cpa-import-ready"
+          >
+            <FullWebIcon name="check" size={18} />
+            <div className="upgrade-ready-strip-text">
+              <h3>{t('cpaImportReadyTitle', language)}</h3>
+              <p>{t('cpaImportReadyHelp', language)}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    ) : null;
   useEffect(() => {
     if (!record?.recorded) return;
     const routing = record.routing;
     const mode = record.targetMode ?? '';
+    if (prevTargetModeRef.current !== undefined && prevTargetModeRef.current !== mode) {
+      prevTargetModeRef.current = mode;
+      routingInitializedRef.current = false;
+      setRoutingDirty(false);
+      setRoutingSaved(false);
+      setRoutingError('');
+    } else if (prevTargetModeRef.current === undefined) {
+      prevTargetModeRef.current = mode;
+    }
     if (!routing && mode !== 'managed' && mode !== 'external') return;
     if (!routingInitializedRef.current) {
       routingInitializedRef.current = true;
       if (routing && (routing.configured || routing.committed || routing.existingPrefixesPreserved)) {
         setControlPrefix(routing.controlBasePath);
-        setInferencePrefix(routing.inferenceBasePath);
+        setInferencePrefix(mode === 'external' ? '' : routing.inferenceBasePath);
         setSharedPrefix(mode === 'managed' && routing.sharedEntry);
         return;
       }
@@ -855,11 +1304,9 @@ export function FreshUpgradeFlow({
       const initialInference =
         mode === 'external'
           ? ''
-          : routing && isCanonicalPrefix(routing.inferenceBasePath)
-            ? routing.inferenceBasePath
-            : routing && isCanonicalPrefix(routing.suggestedInferenceBasePath)
-              ? routing.suggestedInferenceBasePath
-              : generateRandomAccessPrefix([initialControl]);
+          : [routing?.inferenceBasePath, routing?.suggestedInferenceBasePath].find(
+              (value): value is string => Boolean(value && isCanonicalPrefix(value) && !isSameOrNestedPrefix(value, initialControl))
+            ) ?? generateRandomAccessPrefix([initialControl]);
       setControlPrefix(initialControl);
       setInferencePrefix(initialInference);
       setSharedPrefix(mode === 'managed' && Boolean(routing?.sharedEntry));
@@ -867,7 +1314,7 @@ export function FreshUpgradeFlow({
     }
     if (routing && (routing.configured || routing.committed || routing.existingPrefixesPreserved) && !routingDirty) {
       setControlPrefix(routing.controlBasePath);
-      setInferencePrefix(routing.inferenceBasePath);
+      setInferencePrefix(mode === 'external' ? '' : routing.inferenceBasePath);
       setSharedPrefix(mode === 'managed' && routing.sharedEntry);
     }
   }, [record, routingDirty]);
@@ -918,6 +1365,7 @@ export function FreshUpgradeFlow({
   );
   const resultAccessInfo = verifiedAccessInfo;
   const reread = () => {
+    postCutoverPollUntilRef.current = 0;
     setStatus((current) => ({ phase: 'idle', value: current.value, failures: 0 }));
     setAttempt((current) => current + 1);
   };
@@ -953,7 +1401,7 @@ export function FreshUpgradeFlow({
   // the recorded row is re-read afterwards so the page shows what the store
   // holds instead of what this reply happened to say.
   const saveUpgradeRouting = async () => {
-    if (!saveRouting || routingWritePendingRef.current || routingSaving || verification.phase === 'running' || showPreservedRouting || committedRouting) return;
+    if (!saveRouting || executionBusy || actionPendingRef.current || pendingWritesRef.current > 0 || routingSaving || verification.phase === 'running' || showPreservedRouting || committedRouting) return;
     const check = validatePrefixPair({
       controlBasePath: currentRoutingPayload.controlBasePath,
       inferenceBasePath: currentRoutingPayload.inferenceBasePath,
@@ -969,14 +1417,14 @@ export function FreshUpgradeFlow({
     setRoutingSaving(true);
     setRoutingError('');
     setRoutingSaved(false);
-    routingWritePendingRef.current = true;
+    pendingWritesRef.current += 1;
     routingWriteEpochRef.current += 1;
     try {
       await saveRoutingSnapshot(new AbortController().signal);
     } catch (error) {
       setRoutingError(errorText(asWizardError(error), language));
     } finally {
-      routingWritePendingRef.current = false;
+      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
       routingWriteEpochRef.current += 1;
       reread();
       setRoutingSaving(false);
@@ -984,7 +1432,7 @@ export function FreshUpgradeFlow({
   };
 
   const runVerification = async () => {
-    if (!verify || routingWritePendingRef.current || routingSaving || verification.phase === 'running') return;
+    if ((!verify && !execute) || executionBusy || actionPendingRef.current || (workerMode && !executionAvailable) || pendingWritesRef.current > 0 || routingSaving || verification.phase === 'running') return;
     if (showRoutingEditor) {
       const check = validatePrefixPair({
         controlBasePath: currentRoutingPayload.controlBasePath,
@@ -1001,23 +1449,111 @@ export function FreshUpgradeFlow({
     }
     setRoutingError('');
     setVerification({ phase: 'running' });
-    routingWritePendingRef.current = true;
+    pendingWritesRef.current += 1;
     routingWriteEpochRef.current += 1;
     try {
       const signal = new AbortController().signal;
-      if (showRoutingEditor && saveRouting && (!record?.routing?.configured || routingDirty)) {
-        await saveRoutingSnapshot(signal);
+      if (showRoutingEditor && (!record?.routing?.configured || routingDirty)) {
+        if (saveRouting) await saveRoutingSnapshot(signal);
+        else if (workerMode) throw new UpgradeWizardError('unavailable');
       }
-      const raw = showRoutingEditor
-        ? await verify(signal, currentRoutingPayload)
-        : await verify(signal);
-      const parsed = parseUpgradeVerify(raw);
-      if (!parsed) throw new UpgradeWizardError('response');
-      setVerification({ phase: 'done', value: parsed });
+      if (workerMode) {
+        await dispatchExecution({ action: 'verify' });
+        setVerification({ phase: 'idle' });
+      } else {
+        const raw = showRoutingEditor
+          ? await verify!(signal, currentRoutingPayload)
+          : await verify!(signal);
+        const parsed = parseUpgradeVerify(raw);
+        if (!parsed) throw new UpgradeWizardError('response');
+        setVerification({ phase: 'done', value: parsed });
+      }
     } catch (error) {
       setVerification({ phase: 'failed', error: asWizardError(error) });
     } finally {
-      routingWritePendingRef.current = false;
+      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+      routingWriteEpochRef.current += 1;
+      reread();
+    }
+  };
+
+  const dispatchExecution = async (input: UpgradeExecutionInput): Promise<boolean> => {
+    if (
+      !execute ||
+      !executionAvailable ||
+      actionPendingRef.current ||
+      record?.execution?.running ||
+      bootstrapIsRetired
+    ) {
+      return false;
+    }
+    actionPendingRef.current = true;
+    setLocalAction(input.action);
+    setExecutionError(undefined);
+    pendingWritesRef.current += 1;
+    routingWriteEpochRef.current += 1;
+    workerReadUntilRef.current = Date.now() + 120_000;
+    if (input.action === 'activate') {
+      resumedActivationRef.current = true;
+      activateDeliveryUnknownRef.current = false;
+      activateDeliveryFailureRef.current = undefined;
+    }
+    let mayRestart = false;
+    try {
+      const raw = await execute(new AbortController().signal, input);
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        (raw as Record<string, unknown>).contractVersion !== 'cpamp.upgrade-execution.v1' ||
+        !parseUpgradeExecution(raw)
+      ) {
+        throw new UpgradeWizardError('response');
+      }
+      // This is acceptance only. The next status read owns both position and busy state.
+      mayRestart = true;
+      if (input.action === 'activate') {
+        activateDeliveryUnknownRef.current = false;
+        activateDeliveryFailureRef.current = undefined;
+      }
+      return true;
+    } catch (error) {
+      const failure = asWizardError(error);
+      mayRestart =
+        failure.failure === 'network' ||
+        (input.action === 'activate' &&
+          ((failure.failure === 'unavailable' &&
+            (failure.code === 'upgrade_worker_unavailable' ||
+              failure.code === 'upgrade_bootstrap_retired' ||
+              (!failure.code &&
+                (failure.status === 0 ||
+                  failure.status === 404 ||
+                  failure.status === 502 ||
+                  failure.status === 503 ||
+                  failure.status === 504)))) ||
+            (failure.status === 404 && !failure.code)));
+      if (input.action === 'activate' && mayRestart) {
+        activateDeliveryUnknownRef.current = true;
+        activateDeliveryFailureRef.current = failure;
+      } else {
+        if (input.action === 'activate') {
+          resumedActivationRef.current = false;
+          activateDeliveryUnknownRef.current = false;
+          activateDeliveryFailureRef.current = undefined;
+        }
+        setExecutionError(failure);
+      }
+      actionPendingRef.current = false;
+      setLocalAction(null);
+      return false;
+    } finally {
+      if (input.action === 'activate' && mayRestart) {
+        restartingRef.current = true;
+        setRestarting(true);
+        restartUntilRef.current = Date.now() + 120_000;
+        const prefix = record?.routing?.controlBasePath || record?.accessInfo?.managementBasePath || '';
+        if (isCanonicalPrefix(prefix)) onActivationRef.current?.(prefix);
+      }
+      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
       routingWriteEpochRef.current += 1;
       reread();
     }
@@ -1025,6 +1561,43 @@ export function FreshUpgradeFlow({
 
   return (
     <section className="upgrade-flow" data-testid="upgrade-flow" aria-label={t('flowLabel', language)}>
+      {boot.phase === 'ready' && executionBusy && (
+        <p className="upgrade-step-status" role="status" data-testid="upgrade-execution-running">
+          <FullWebIcon name="refresh" size={18} />
+          {e('running', language)}
+        </p>
+      )}
+      {boot.phase === 'ready' && executionError && (
+        <div className="upgrade-notice" role="alert" data-testid="upgrade-execution-error">
+          <FullWebIcon name="alert" size={20} />
+          <div>
+            <h3>{e('actionFailed', language)}</h3>
+            <p>
+              {executionError.code === 'upgrade_activation_timeout'
+                ? e('activationTimeout', language)
+                : executionError.code
+                  ? blockedCodeText(executionError.code, language)
+                  : executionError.status === 409
+                    ? e('conflict', language)
+                    : errorText(executionError, language)}
+            </p>
+            {executionError.code && <code>{executionError.code}</code>}
+          </div>
+        </div>
+      )}
+      {boot.phase === 'ready' &&
+        record?.execution?.available &&
+        !record.execution.running &&
+        record.execution.code && (
+          <div className="upgrade-notice" role="alert" data-testid="upgrade-execution-status-error">
+            <FullWebIcon name="alert" size={20} />
+            <div>
+              <h3>{e('executionStatusFailedTitle', language)}</h3>
+              <p>{blockedCodeText(record.execution.code, language)}</p>
+              <code>{record.execution.code}</code>
+            </div>
+          </div>
+        )}
       {boot.phase === 'reading' && (
         <div className="upgrade-step-body" data-testid="upgrade-boot">
           <h2>{t('bootTitle', language)}</h2>
@@ -1064,11 +1637,7 @@ export function FreshUpgradeFlow({
             {STEP_ORDER.map((key, index) => {
               const current = STEP_ORDER.indexOf(shownStep);
               const isDone = index < current;
-              const isCompleteResult =
-                key === 'result' &&
-                shownStep === 'result' &&
-                record?.stage === 'complete' &&
-                record?.stageKnown === true;
+              const isCompleteResult = key === 'result' && shownStep === 'result' && isCleanComplete;
               return (
                 <li
                   key={key}
@@ -1148,10 +1717,7 @@ export function FreshUpgradeFlow({
                   data-testid="upgrade-preflight-pending-declaration"
                 >
                   <h3>{t('preflightPendingTitle', language)}</h3>
-                  <p>
-                    {t('preflightPendingHelp', language)}{' '}
-                    <code>{`--source-version ${preflightReport.expectedVersion}`}</code>
-                  </p>
+                  <p>{t('preflightPendingHelp', language)}</p>
                   <p>{t('preflightPendingTail', language)}</p>
                 </div>
               )}
@@ -1380,12 +1946,15 @@ export function FreshUpgradeFlow({
 
       {boot.phase === 'ready' && shownStep === 'progress' && (() => {
         const isReadyToVerify = Boolean(record?.recorded && record.nextAction === 'verify');
-        const showCliGuide = Boolean(
+        const needsPreparation = Boolean(
           record &&
             (!record.recorded ||
               record.nextAction === 'reconcile' ||
               record.nextAction === 'cpa_import' ||
-              record.nextAction === 'external_connect')
+              record.nextAction === 'external_connect' ||
+              (executionAvailable &&
+                record.stage === 'copy_in' &&
+                record.domainsDone.includes('source_copy')))
         );
         const hasHardProgressAnomalies = Boolean(
           record && (record.mismatchDays.length > 0 || Boolean(record.errorCode))
@@ -1394,24 +1963,10 @@ export function FreshUpgradeFlow({
           <div className="upgrade-step-body" data-testid="upgrade-progress">
             <div className="upgrade-step-head">
               <h2>
-                {t(
-                  isReadyToVerify
-                    ? 'progressVerifyTitle'
-                    : showCliGuide
-                      ? 'progressCliTitle'
-                      : 'progressTitle',
-                  language
-                )}
+                {t(isReadyToVerify ? 'progressVerifyTitle' : 'progressTitle', language)}
               </h2>
               <p className="upgrade-step-help">
-                {t(
-                  isReadyToVerify
-                    ? 'progressVerifySubtitle'
-                    : showCliGuide
-                      ? 'progressCliHelp'
-                      : 'progressHelp',
-                  language
-                )}
+                {t(isReadyToVerify ? 'progressVerifySubtitle' : 'progressHelp', language)}
               </p>
             </div>
             {!record && (
@@ -1422,7 +1977,7 @@ export function FreshUpgradeFlow({
             )}
             {record && !record.recorded && (
               <p
-                className={showCliGuide ? 'upgrade-sr-only' : 'upgrade-step-status'}
+                className="upgrade-step-status"
                 role="status"
                 data-testid="upgrade-progress-unrecorded"
               >
@@ -1431,7 +1986,7 @@ export function FreshUpgradeFlow({
               </p>
             )}
             {record?.recorded && (
-              !hasHardProgressAnomalies && (isReadyToVerify || showCliGuide) ? (
+              !hasHardProgressAnomalies && (isReadyToVerify || needsPreparation) ? (
                 <>
                   <details className="upgrade-summary-disclosure">
                     <summary>
@@ -1512,53 +2067,13 @@ export function FreshUpgradeFlow({
                 </>
               )
             )}
-            {showArtifactStep && artifact && guideMode === 'managed' && (
-              <div className="upgrade-artifact" data-testid="upgrade-cpa-import-artifact">
-                <div className={artifactReady ? 'upgrade-sr-only' : 'upgrade-artifact-card'}>
-                  <div className="upgrade-artifact-head">
-                    <span className="upgrade-artifact-badge">
-                      {t('slimEngineStepBadge', language)}
-                    </span>
-                    <h3>{t('slimEngineTitle', language)}</h3>
-                    <p className="upgrade-step-help">{t('slimEngineHelp', language)}</p>
-                  </div>
-                  <FreshArtifactStep
-                    hideHeader
-                    transport={artifact}
-                    onReady={() => setArtifactReady(true)}
-                  />
-                </div>
-                {artifactReady && (
-                  <div
-                    className="upgrade-ready-strip"
-                    role="status"
-                    data-testid="upgrade-cpa-import-ready"
-                  >
-                    <FullWebIcon name="check" size={18} />
-                    <div className="upgrade-ready-strip-text">
-                      <h3>{t('cpaImportReadyTitle', language)}</h3>
-                      <p>
-                        {t('cpaImportReadyHelp', language)} <code>upgrade cpa-import</code>
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {showCliGuide && record && (
-              <HostCliGuide
-                record={record}
-                preflightReport={preflightReport}
-                language={language}
-                guideMode={guideMode}
-                onGuideModeChange={(nextMode) => {
-                  guideModeTouchedRef.current = true;
-                  setGuideMode(nextMode);
-                }}
-                waitingForEngine={Boolean(
-                  showArtifactStep && guideMode === 'managed' && !artifactReady
-                )}
-              />
+            {artifactStepContent}
+            {needsPreparation && record && (
+              executionAvailable ? (
+                <UpgradeExecutionActions record={record} language={language} busy={executionBusy}
+                  mode={guideMode} onModeChange={(mode) => { guideModeTouchedRef.current = true; setGuideMode(mode); }}
+                  waitingForEngine={showArtifactStep && !artifactReady} execute={dispatchExecution} />
+              ) : <ExecutionRecovery language={language} code={record.execution?.code} />
             )}
             {showPreservedRouting && record?.routing && (
               <div className="upgrade-notice upgrade-notice-info" data-testid="upgrade-preserved-routing">
@@ -1726,19 +2241,17 @@ export function FreshUpgradeFlow({
                             setRoutingSaved(false);
                             setRoutingError('');
                           }}
-                          disabled={routingSaving || verification.phase === 'running'}
+                          disabled={executionBusy || routingSaving || verification.phase === 'running'}
                         />
                         <button
                           type="button"
                           className="btn btn-secondary btn-sm"
                           data-testid="upgrade-randomize-control-prefix"
-                          disabled={routingSaving || verification.phase === 'running'}
+                          disabled={executionBusy || routingSaving || verification.phase === 'running'}
                           onClick={() => {
-                            const avoid =
-                              isManagedTarget && !effectiveShared && inferencePrefix
-                                ? [inferencePrefix]
-                                : [];
-                            setControlPrefix(generateRandomAccessPrefix(avoid));
+                            const next = generateRandomAccessPrefix([controlPrefix, inferencePrefix]);
+                            setControlPrefix(next);
+                            if (effectiveShared) setInferencePrefix(next);
                             setRoutingDirty(true);
                             setRoutingSaved(false);
                             setRoutingError('');
@@ -1768,7 +2281,7 @@ export function FreshUpgradeFlow({
                                 setRoutingError('');
                               }}
                               disabled={
-                                effectiveShared || routingSaving || verification.phase === 'running'
+                                executionBusy || effectiveShared || routingSaving || verification.phase === 'running'
                               }
                             />
                             <button
@@ -1776,10 +2289,10 @@ export function FreshUpgradeFlow({
                               className="btn btn-secondary btn-sm"
                               data-testid="upgrade-randomize-inference-prefix"
                               disabled={
-                                effectiveShared || routingSaving || verification.phase === 'running'
+                                executionBusy || effectiveShared || routingSaving || verification.phase === 'running'
                               }
                               onClick={() => {
-                                setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                                setInferencePrefix(generateRandomAccessPrefix([controlPrefix, inferencePrefix]));
                                 setRoutingDirty(true);
                                 setRoutingSaved(false);
                                 setRoutingError('');
@@ -1797,16 +2310,16 @@ export function FreshUpgradeFlow({
                               type="checkbox"
                               data-testid="upgrade-shared-prefix-checkbox"
                               checked={sharedPrefix}
-                              disabled={routingSaving || verification.phase === 'running'}
+                              disabled={executionBusy || routingSaving || verification.phase === 'running'}
                               onChange={(event) => {
                                 const nextShared = event.target.checked;
                                 setSharedPrefix(nextShared);
-                                if (
-                                  !nextShared &&
+                                if (nextShared) setInferencePrefix(controlPrefix);
+                                else if (
                                   (!isCanonicalPrefix(inferencePrefix) ||
                                     isSameOrNestedPrefix(inferencePrefix, controlPrefix))
                                 ) {
-                                  setInferencePrefix(generateRandomAccessPrefix([controlPrefix]));
+                                  setInferencePrefix(generateRandomAccessPrefix([controlPrefix, inferencePrefix]));
                                 }
                                 setRoutingDirty(true);
                                 setRoutingSaved(false);
@@ -1852,7 +2365,7 @@ export function FreshUpgradeFlow({
                           type="button"
                           className="btn btn-secondary btn-sm"
                           data-testid="upgrade-save-routing"
-                          disabled={routingSaving || verification.phase === 'running'}
+                          disabled={executionBusy || routingSaving || verification.phase === 'running'}
                           onClick={saveUpgradeRouting}
                         >
                           {routingSaving ? t('routingSaving', language) : t('routingSave', language)}
@@ -1911,7 +2424,7 @@ export function FreshUpgradeFlow({
                 </div>
               </div>
             )}
-            {isReadyToVerify && verify && (
+            {isReadyToVerify && (workerMode ? executionAvailable : verify) && (
               <div className="upgrade-verify-footer">
                 <p className="upgrade-verify-hint" data-testid="upgrade-verify-offer">
                   <FullWebIcon name="info" size={15} />
@@ -1920,7 +2433,7 @@ export function FreshUpgradeFlow({
                 <button
                   className="btn btn-primary"
                   data-testid="upgrade-verify-action"
-                  disabled={routingSaving || verification.phase === 'running'}
+                  disabled={executionBusy || routingSaving || verification.phase === 'running'}
                   onClick={runVerification}
                 >
                   {verification.phase === 'done'
@@ -1929,6 +2442,9 @@ export function FreshUpgradeFlow({
                   <FullWebIcon name="arrowRight" size={16} />
                 </button>
               </div>
+            )}
+            {isReadyToVerify && workerMode && !executionAvailable && (
+              <ExecutionRecovery language={language} code={record?.execution?.code} />
             )}
             {record && status.phase !== 'stalled' && (
               isReadyToVerify ? (
@@ -1991,10 +2507,32 @@ export function FreshUpgradeFlow({
       })()}
 
       {boot.phase === 'ready' && shownStep === 'result' && (() => {
-        const isCleanComplete = Boolean(record?.stage === 'complete' && record.stageKnown);
         const hasResultAnomalies = Boolean(
           record && (record.mismatchDays.length > 0 || record.manualItems.length > 0)
         );
+        const pendingRestartAccess = Boolean(
+          isCleanComplete &&
+            !canonicalConfirmed &&
+            ((resultAccessInfo && !resultAccessInfo.ready) || (!resultAccessInfo && executionAvailable))
+        );
+        const canonicalPendingTarget = Boolean(
+          isCleanComplete &&
+            canonicalConfirmed &&
+            resultAccessInfo &&
+            !resultAccessInfo.ready
+        );
+        const canonicalPendingExternal = Boolean(
+          canonicalPendingTarget &&
+            (resultAccessInfo?.mode === 'connect_external' ||
+              resultAccessInfo?.code === 'external_target_unavailable')
+        );
+        const canonicalPendingGateway = Boolean(
+          canonicalPendingTarget && !canonicalPendingExternal
+        );
+        const consolePrefix =
+          resultAccessInfo?.managementBasePath ||
+          (canonicalConfirmed ? record?.routing?.controlBasePath : '') ||
+          '';
         const sourceSummary = record
           ? [formatSourceKind(record.sourceKind, language), record.sourceVersion]
               .filter(Boolean)
@@ -2002,16 +2540,26 @@ export function FreshUpgradeFlow({
           : '';
         return (
           <div className="upgrade-step-body" data-testid="upgrade-result">
-            <ResultHeadline status={record} language={language} />
-            <p className="upgrade-step-help">
-              {isCleanComplete && !hasResultAnomalies
-                ? t('resultCompleteSummary', language).replace(
-                    '{source}',
-                    sourceSummary || t('sourceKindLegacyManager', language)
-                  )
-                : record?.stage === 'complete'
-                  ? t('resultCompleteHelp', language)
-                  : t('resultIncompleteHelp', language)}
+            <ResultHeadline status={record} cleanComplete={isCleanComplete} language={language} />
+            <p className="upgrade-step-help" data-testid="upgrade-result-help">
+              {pendingRestartAccess
+                ? isActivating
+                  ? e('activationWaiting', language)
+                  : executionAvailable
+                    ? e('resultPendingRestartHelp', language)
+                    : t('resultAccessPendingRestart', language)
+                : canonicalPendingExternal
+                  ? e('resultCanonicalExternalPendingHelp', language)
+                  : canonicalPendingGateway
+                    ? e('resultCanonicalGatewayPendingHelp', language)
+                    : isCleanComplete && !hasResultAnomalies
+                      ? t('resultCompleteSummary', language).replace(
+                          '{source}',
+                          sourceSummary || t('sourceKindLegacyManager', language)
+                        )
+                      : isCleanComplete
+                        ? t('resultCompleteHelp', language)
+                        : t('resultIncompleteHelp', language)}
             </p>
             {record && (
               <>
@@ -2121,6 +2669,7 @@ export function FreshUpgradeFlow({
                         {t('resultAccessActive', language)}
                       </p>
                     ) : (
+                      !canonicalConfirmed &&
                       (resultAccessInfo.code === 'upgrade_restart_required' ||
                         !resultAccessInfo.code) && (
                         <p className="upgrade-sr-only" data-testid="upgrade-access-pending-restart">
@@ -2128,12 +2677,20 @@ export function FreshUpgradeFlow({
                         </p>
                       )
                     )}
+                    {canonicalPendingGateway && (
+                      <p className="upgrade-step-status" role="status" data-testid="upgrade-gateway-waiting">
+                        <FullWebIcon name="clock" size={18} />
+                        {e('gatewayWaiting', language)}
+                      </p>
+                    )}
                     <AccessInfoSummary
                       client={FAIL_CLOSED_ACCESS_CLIENT}
                       auth={{ kind: 'admin', value: '' }}
                       info={resultAccessInfo}
                       defaultProtocolsCollapsed
+                      completionRecovery
                       pendingRestart={
+                        !canonicalConfirmed &&
                         !resultAccessInfo.ready &&
                         resultAccessInfo.code === 'upgrade_restart_required'
                       }
@@ -2142,7 +2699,77 @@ export function FreshUpgradeFlow({
                 )}
               </>
             )}
+            {record?.stage === 'complete' && record.stageKnown && !resultAccessInfo?.ready && !canonicalConfirmed && (
+              <div className="upgrade-promise-card" data-testid="upgrade-activation">
+                <h3>{e('activateTitle', language)}</h3>
+                <p>{bootstrapIsRetired ? e('activateBootstrapRetiredHelp', language) : e('activateHelp', language)}</p>
+                {!bootstrapIsRetired &&
+                  (executionAvailable ? (
+                    <button
+                      className="btn btn-primary"
+                      data-testid="upgrade-execute-activate"
+                      disabled={executionBusy || restarting}
+                      onClick={() => void dispatchExecution({ action: 'activate' })}
+                    >
+                      {e('activateAction', language)}
+                    </button>
+                  ) : (
+                    !isActivating && (
+                      <ExecutionRecovery language={language} code={record?.execution?.code} />
+                    )
+                  ))}
+                {bootstrapIsRetired && !isActivating && (
+                  <p className="upgrade-step-help" role="status" data-testid="upgrade-bootstrap-retired-notice">
+                    {e('activateBootstrapRetiredNote', language)}
+                  </p>
+                )}
+                {isActivating && (
+                  <p role="status" data-testid="upgrade-activation-waiting">
+                    {e('activationWaiting', language)}
+                  </p>
+                )}
+              </div>
+            )}
+            {!isCleanComplete && record?.stageKnown ? artifactStepContent : null}
+            {!isCleanComplete &&
+              record?.stageKnown &&
+              (record.nextAction === 'reconcile' ||
+                record.nextAction === 'cpa_import' ||
+                record.nextAction === 'external_connect') &&
+              (executionAvailable ? (
+                <UpgradeExecutionActions
+                  record={record}
+                  language={language}
+                  busy={executionBusy}
+                  mode={guideMode}
+                  onModeChange={(mode) => {
+                    guideModeTouchedRef.current = true;
+                    setGuideMode(mode);
+                  }}
+                  waitingForEngine={showArtifactStep && !artifactReady}
+                  execute={dispatchExecution}
+                />
+              ) : (
+                <ExecutionRecovery language={language} code={record.execution?.code} />
+              ))}
+            {status.phase === 'stalled' && status.error && !restarting && (
+              <div className="upgrade-notice" role="alert" data-testid="upgrade-result-stalled">
+                <FullWebIcon name="alert" size={20} />
+                <div>
+                  <h3>{t('progressStalledTitle', language)}</h3>
+                  <p>{errorText(status.error, language)}</p>
+                  {status.error.code && <code>{status.error.code}</code>}
+                </div>
+              </div>
+            )}
             <div className="upgrade-actions">
+              {isCleanComplete && (resultAccessInfo?.ready || canonicalConfirmed) && isCanonicalPrefix(consolePrefix) && (
+                <a className="btn btn-primary" data-testid="upgrade-open-console"
+                  href={buildPrefixPreviewUrls(previewOrigin, consolePrefix).consoleUrl}
+                  onClick={() => onOpenConsole?.()}>
+                  {e('openConsole', language)}
+                </a>
+              )}
               <button
                 className={isCleanComplete ? 'btn btn-secondary btn-sm' : 'btn btn-primary'}
                 data-testid="upgrade-result-reread"
@@ -2160,8 +2787,16 @@ export function FreshUpgradeFlow({
 
 // The success headline is rendered for `complete` and nothing else: a failed,
 // rolled-back or unrecognised operation always gets the incomplete headline.
-function ResultHeadline({ status, language }: { status?: UpgradeStatus; language: string }) {
-  if (status?.stage === 'complete' && status.stageKnown) {
+function ResultHeadline({
+  status,
+  cleanComplete,
+  language,
+}: {
+  status?: UpgradeStatus;
+  cleanComplete: boolean;
+  language: string;
+}) {
+  if (cleanComplete && status?.stage === 'complete' && status.stageKnown) {
     return (
       <div className="upgrade-result-hero">
         <span className="upgrade-complete-badge" aria-hidden="true">
@@ -2382,9 +3017,7 @@ function summarizePreflightCheck(check: PreflightCheck, language: string): strin
   }
   if (check.name === 'source_version') {
     if (check.status === 'pending') {
-      const m = detail.match(/expected=([^\s;]+)/);
-      const ver = m?.[1] || 'v1.14.10';
-      return t('checkSummaryVersionPending', language).replace('{version}', ver);
+      return t('checkPending', language);
     }
     return t('checkSummaryVersionPass', language);
   }
@@ -2427,153 +3060,263 @@ function summarizePreflightCheck(check: PreflightCheck, language: string): strin
   return null;
 }
 
-function HostCliGuide({
+function ExecutionRecovery({ language, code }: { language: string; code?: string }) {
+  return (
+    <div className="upgrade-notice" role="status" data-testid="upgrade-execution-recovery">
+      <FullWebIcon name="info" size={20} />
+      <div>
+        <h3>{e('recoveryTitle', language)}</h3>
+        <p>{e('recoveryHelp', language)}</p>
+        {code && <p>{blockedCodeText(code, language)}</p>}
+        {code && <code>{code}</code>}
+      </div>
+    </div>
+  );
+}
+
+function UpgradeExecutionActions({
   record,
-  preflightReport,
   language,
-  guideMode,
-  onGuideModeChange,
-  waitingForEngine = false,
+  busy,
+  mode,
+  onModeChange,
+  waitingForEngine,
+  execute,
 }: {
   record: UpgradeStatus;
-  preflightReport: UpgradePreflight | undefined;
   language: string;
-  guideMode: 'managed' | 'external';
-  onGuideModeChange: (mode: 'managed' | 'external') => void;
-  waitingForEngine?: boolean;
+  busy: boolean;
+  mode: 'managed' | 'external';
+  onModeChange: (mode: 'managed' | 'external') => void;
+  waitingForEngine: boolean;
+  execute: (input: UpgradeExecutionInput) => Promise<boolean>;
 }) {
-  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-
-  const sourceVer =
-    preflightReport?.expectedVersion ||
-    (record.sourceVersion && record.sourceVersion !== 'unknown'
-      ? record.sourceVersion
-      : 'v1.14.10');
-
-  const step1Done = record.recorded;
-  const step2Done = record.recorded && record.stage !== 'copy_in';
-  const currentStep = !step1Done ? 1 : !step2Done ? 2 : 3;
-  const defaultOpenStep = currentStep === 3 && waitingForEngine ? 0 : currentStep;
-  const [openStep, setOpenStep] = useState<number>(defaultOpenStep);
-
+  const [acknowledgedDays, setAcknowledgedDays] = useState<string[]>([]);
+  const [acknowledgedTruncatedTotal, setAcknowledgedTruncatedTotal] = useState<number | null>(null);
+  const acknowledgedAllTruncated =
+    Boolean(record.mismatchDaysTruncated) &&
+    acknowledgedTruncatedTotal === record.mismatchDaysTotal;
+  const [acknowledgedParity, setAcknowledgedParity] = useState(false);
+  const [pluginsChoice, setPluginsChoice] = useState<'' | 'disabled' | 'enabled'>('');
+  const [externalOverride, setExternalOverride] = useState(false);
+  const [externalBaseUrl, setExternalBaseUrl] = useState('');
+  const externalKeyRef = useRef<HTMLInputElement | null>(null);
+  const managedAvailable = Boolean(record.execution?.managedAvailable);
+  const activeMode = managedAvailable ? mode : 'external';
+  const externalSecretScope = `${activeMode}:${record.stage}`;
+  const externalSecretEditable =
+    activeMode === 'external' &&
+    record.stage !== 'external_connect' &&
+    record.stage !== 'verify' &&
+    record.stage !== 'complete';
+  const [externalKeyScope, setExternalKeyScope] = useState<string | null>(null);
+  const externalHasKey = externalSecretEditable && externalKeyScope === externalSecretScope;
+  const bindExternalKeyRef = useCallback((node: HTMLInputElement | null) => {
+    if (node === null && externalKeyRef.current) {
+      externalKeyRef.current.value = '';
+    }
+    externalKeyRef.current = node;
+  }, []);
+  const clearExternalSecret = useCallback(() => {
+    if (externalKeyRef.current) externalKeyRef.current.value = '';
+    setExternalKeyScope(null);
+  }, []);
   useEffect(() => {
-    setOpenStep(defaultOpenStep);
-  }, [defaultOpenStep]);
-  const cmd1 = `docker run --rm -u 10002:10002 --entrypoint /usr/local/bin/cpa-manager-plus \\\n  -v <1x_data_vol>:/legacy:ro -v <v2_data_vol>:/data -v <backup_vol>:/bundle \\\n  <cpamp_v2_image> upgrade run --legacy /legacy --source-version ${sourceVer} --target /data --bundle /bundle/backup-1`;
-  const cmd2 = `docker run --rm -u 10002:10002 --entrypoint /usr/local/bin/cpa-manager-plus \\\n  -v <1x_data_vol>:/legacy:ro -v <v2_data_vol>:/data -v <backup_vol>:/bundle \\\n  <cpamp_v2_image> upgrade reconcile --legacy /legacy --source-version ${sourceVer} --target /data --bundle /bundle/backup-1`;
-  const cmd3 =
-    guideMode === 'managed'
-      ? `docker exec -u 10002:10002 -e CPAMP_RUNTIME_URL=http://127.0.0.1:9081 \\\n  -e CPAMP_RUNTIME_TOKEN_FILE=/data/runtime-secret/token <v2_container> \\\n  /usr/local/bin/cpa-manager-plus upgrade cpa-import --legacy /legacy \\\n  --cpa-dir /legacy-cpa --cpa-version 8.0.55 --plugins false --target /data --destination-url http://127.0.0.1:8317`
-      : `docker exec -u 10002:10002 <v2_container> \\\n  /usr/local/bin/cpa-manager-plus upgrade external-connect \\\n  --cpa-base-url http://<external-cpa>:8317 --management-key-file /path/to/cpa.key --target /data`;
-
-  const steps = [
-    { idx: 1, title: t('cliStep1Title', language), cmd: cmd1, done: step1Done },
-    { idx: 2, title: t('cliStep2Title', language), cmd: cmd2, done: step2Done },
-    {
-      idx: 3,
-      title: t(
-        guideMode === 'managed' ? 'cliStep3ManagedTitle' : 'cliStep3ExternalTitle',
-        language
-      ),
-      cmd: cmd3,
-      done: false,
+    if (!externalSecretEditable && externalKeyRef.current) {
+      externalKeyRef.current.value = '';
+    }
+  }, [externalSecretEditable]);
+  useEffect(
+    () => () => {
+      if (externalKeyRef.current) externalKeyRef.current.value = '';
     },
-  ];
-
-  const copyCmd = (idx: number, textToCopy: string) => {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(textToCopy);
-    }
-    setCopiedIdx(idx);
-    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
-      window.setTimeout(() => setCopiedIdx((cur) => (cur === idx ? null : cur)), 1800);
-    }
-  };
-
-  return (
-    <div className="upgrade-cli-guide" data-testid="upgrade-host-cli-guide">
-      <div className="upgrade-cli-guide-head">
-        <span className="upgrade-cli-mode-label">{t('cliGuideTitle', language)}</span>
-        <div className="upgrade-cli-mode-tabs" role="group">
-          <button
-            type="button"
-            className={`btn btn-xs ${guideMode === 'managed' ? 'btn-primary' : 'btn-secondary'}`}
-            data-testid="upgrade-cli-tab-managed"
-            onClick={() => onGuideModeChange('managed')}
-          >
-            {t('modeBadgeManaged', language)}
-          </button>
-          <button
-            type="button"
-            className={`btn btn-xs ${guideMode === 'external' ? 'btn-primary' : 'btn-secondary'}`}
-            data-testid="upgrade-cli-tab-external"
-            onClick={() => onGuideModeChange('external')}
-          >
-            {t('modeBadgeExternal', language)}
-          </button>
+    [],
+  );
+  if (record.nextAction === 'reconcile' || (record.stage === 'copy_in' && record.domainsDone.includes('source_copy'))) {
+    const days = record.mismatchDays;
+    const allDaysChecked = days.every((day) => acknowledgedDays.includes(day));
+    const daysSatisfied = record.mismatchDaysTruncated ? acknowledgedAllTruncated : allDaysChecked;
+    const needsParityAck =
+      Boolean(record.hasParityGaps) ||
+      (days.length === 0 && record.execution?.code === 'upgrade_reconcile_mismatch');
+    const blocked = busy || !daysSatisfied || (needsParityAck && !acknowledgedParity);
+    return (
+      <div className="upgrade-execution-panel" data-testid="upgrade-execution-actions">
+        <div className="upgrade-execution-section">
+          <h3>{e('reconcileTitle', language)}</h3>
+          <p>{e('reconcileHelp', language)}</p>
+          {record.mismatchDaysTruncated && (
+            <div className="upgrade-notice" role="alert" data-testid="upgrade-truncated-days">
+              <FullWebIcon name="alert" size={18} /><p>{e('truncatedDays', language)}</p>
+            </div>
+          )}
+          {days.length > 0 && (
+            <ul className="upgrade-days">{days.map((day) => (
+              <li key={day}>
+                <label className="upgrade-ack" htmlFor={`upgrade-ack-day-${day}-input`}>
+                  <span className="journey-checkbox-control">
+                    <input
+                      id={`upgrade-ack-day-${day}-input`}
+                      type="checkbox"
+                      data-testid={`upgrade-ack-day-${day}`}
+                      checked={acknowledgedDays.includes(day)}
+                      disabled={busy}
+                      onChange={(ev) => setAcknowledgedDays((cur) => ev.target.checked ? [...cur, day] : cur.filter((d) => d !== day))}
+                    />
+                    <span className="journey-checkbox-box" aria-hidden="true">
+                      <FullWebIcon name="check" size={13} />
+                    </span>
+                  </span>
+                  <span>{e('acknowledgeDay', language).replace('{day}', day)}</span>
+                </label>
+              </li>
+            ))}</ul>
+          )}
+          {record.mismatchDaysTruncated && (
+            <label className="upgrade-ack" htmlFor="upgrade-ack-all-truncated-input">
+              <span className="journey-checkbox-control">
+                <input
+                  id="upgrade-ack-all-truncated-input"
+                  type="checkbox"
+                  data-testid="upgrade-ack-all-truncated"
+                  checked={acknowledgedAllTruncated}
+                  disabled={busy}
+                  onChange={(ev) =>
+                    setAcknowledgedTruncatedTotal(ev.target.checked ? record.mismatchDaysTotal : null)
+                  }
+                />
+                <span className="journey-checkbox-box" aria-hidden="true">
+                  <FullWebIcon name="check" size={13} />
+                </span>
+              </span>
+              <span>{e('acknowledgeAllTruncated', language).replace('{total}', String(record.mismatchDaysTotal))}</span>
+            </label>
+          )}
+          <label className="upgrade-ack" htmlFor="upgrade-ack-parity-input">
+            <span className="journey-checkbox-control">
+              <input
+                id="upgrade-ack-parity-input"
+                type="checkbox"
+                data-testid="upgrade-ack-parity"
+                checked={acknowledgedParity}
+                disabled={busy}
+                onChange={(ev) => setAcknowledgedParity(ev.target.checked)}
+              />
+              <span className="journey-checkbox-box" aria-hidden="true">
+                <FullWebIcon name="check" size={13} />
+              </span>
+            </span>
+            <span>{e('acknowledgeParity', language)}</span>
+          </label>
+        </div>
+        <div className="upgrade-actions">
+          <button className="btn btn-primary" data-testid="upgrade-execute-reconcile" disabled={blocked}
+            onClick={() => {
+              const selectedDays = acknowledgedAllTruncated
+                ? days
+                : days.filter((d) => acknowledgedDays.includes(d));
+              void execute({
+                action: 'reconcile',
+                ...(selectedDays.length > 0 ? { acknowledgeDays: selectedDays } : {}),
+                ...(record.mismatchDaysTruncated && acknowledgedAllTruncated
+                  ? { acknowledgeAllMismatches: true }
+                  : {}),
+                ...(acknowledgedParity ? { acknowledgeParityGaps: true } : {}),
+              });
+            }}>{e('reconcileAction', language)}</button>
         </div>
       </div>
-      <ol className="upgrade-cli-steps">
-        {steps.map(({ idx, title, cmd, done }) => {
-          const isBlockedByEngine = idx === 3 && waitingForEngine;
-          const isCurrent = idx === currentStep && !isBlockedByEngine;
-          const isOpen = openStep === idx;
-          return (
-            <li
-              key={idx}
-              className={`upgrade-cli-step ${done ? 'is-done' : isCurrent ? 'is-current' : ''}`.trim()}
-              data-testid={`upgrade-cli-step-${idx}`}
-            >
-              <div
-                className="upgrade-cli-step-top"
-                onClick={() => setOpenStep((prev) => (prev === idx ? 0 : idx))}
-              >
-                <span className="upgrade-cli-step-title">
-                  <FullWebIcon
-                    name="chevronRight"
-                    size={14}
-                    className={`upgrade-drawer-chevron ${isOpen ? 'is-open' : ''}`.trim()}
-                  />
-                  <strong>{title}</strong>
-                </span>
-                <div
-                  className="upgrade-cli-step-actions"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <span
-                    className={`upgrade-check-outcome ${
-                      done ? 'is-pass' : isCurrent ? 'is-pending' : ''
-                    }`.trim()}
-                  >
-                    {done
-                      ? t('cliStepDone', language)
-                      : isBlockedByEngine
-                        ? t('cliStepWaitEngine', language)
-                        : isCurrent
-                          ? t('cliStepCurrent', language)
-                          : t('cliStepPending', language)}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-xs"
-                    data-testid={`upgrade-cli-copy-${idx}`}
-                    onClick={() => copyCmd(idx, cmd)}
-                  >
-                    <FullWebIcon name={copiedIdx === idx ? 'check' : 'copy'} size={13} />
-                    {t(copiedIdx === idx ? 'cliCopied' : 'cliCopy', language)}
-                  </button>
-                </div>
-              </div>
-              <details className="upgrade-cli-details" open={isOpen}>
-                <summary className="upgrade-sr-only">{title}</summary>
-                <pre className="upgrade-cli-code">
-                  <code>{cmd}</code>
-                </pre>
-              </details>
-            </li>
-          );
-        })}
-      </ol>
+    );
+  }
+  if (record.nextAction !== 'cpa_import' && record.nextAction !== 'external_connect') return null;
+  // activeMode is derived above before hooks so the secret-clear effect observes mode switches.
+  const externalPairInvalid = externalOverride && (!externalBaseUrl.trim() || !externalHasKey);
+  return (
+    <div className="upgrade-execution-panel" data-testid="upgrade-execution-actions">
+      <div className="upgrade-execution-section">
+        <h3>{e('targetTitle', language)}</h3>
+        <p>{e('targetHelp', language)}</p>
+        {!managedAvailable && (
+          <div className="upgrade-notice" data-testid="upgrade-managed-unavailable">
+            <FullWebIcon name="info" size={18} /><p>{e('managedUnavailable', language)}</p>
+          </div>
+        )}
+        <div className="upgrade-mode-switch">
+          {managedAvailable && (
+            <button type="button" className={`upgrade-mode-card${activeMode === 'managed' ? ' is-selected' : ''}`}
+              data-testid="upgrade-mode-managed" aria-pressed={activeMode === 'managed'} disabled={busy}
+              onClick={() => onModeChange('managed')}>{e('managedRecommended', language)}</button>
+          )}
+          <button type="button" className={`upgrade-mode-card${activeMode === 'external' ? ' is-selected' : ''}`}
+            data-testid="upgrade-mode-external" aria-pressed={activeMode === 'external'} disabled={busy}
+            onClick={() => onModeChange('external')}>{e('externalAlternate', language)}</button>
+        </div>
+      </div>
+      {activeMode === 'managed' ? (
+        <div className="upgrade-execution-section">
+          <label className="upgrade-field" htmlFor="upgrade-plugins-select"><span>{e('pluginsLabel', language)}</span>
+            <select id="upgrade-plugins-select" data-testid="upgrade-plugins" value={pluginsChoice} disabled={busy}
+              onChange={(ev) => setPluginsChoice(ev.target.value as '' | 'disabled' | 'enabled')}>
+              <option value="">{e('pluginsChoose', language)}</option>
+              <option value="disabled">{e('pluginsDisabled', language)}</option>
+              <option value="enabled">{e('pluginsEnabled', language)}</option>
+            </select></label>
+          <p className="upgrade-step-help">{e('pluginsHelp', language)}</p>
+          <button className="btn btn-primary" data-testid="upgrade-execute-import"
+            disabled={busy || waitingForEngine || !pluginsChoice}
+            onClick={() => void execute({ action: 'cpa-import', pluginsEnabled: pluginsChoice === 'enabled' })}>{e('importAction', language)}</button>
+        </div>
+      ) : (
+        <div className="upgrade-execution-section">
+          <p>{e('externalReuse', language)}</p>
+          <label className="upgrade-ack" htmlFor="upgrade-external-override-input">
+            <span className="journey-checkbox-control">
+              <input
+                id="upgrade-external-override-input"
+                type="checkbox"
+                data-testid="upgrade-external-override"
+                checked={externalOverride}
+                disabled={busy}
+                onChange={(ev) => {
+                  setExternalOverride(ev.target.checked);
+                  if (!ev.target.checked) clearExternalSecret();
+                }}
+              />
+              <span className="journey-checkbox-box" aria-hidden="true">
+                <FullWebIcon name="check" size={13} />
+              </span>
+            </span>
+            <span>{e('externalOverride', language)}</span>
+          </label>
+          {externalOverride && (
+            <div className="upgrade-execution-fields">
+              <label className="upgrade-field"><span>{e('externalUrl', language)}</span>
+                <input type="url" data-testid="upgrade-external-url" value={externalBaseUrl} disabled={busy}
+                  onChange={(ev) => setExternalBaseUrl(ev.target.value)} /></label>
+              <label className="upgrade-field"><span>{e('externalKey', language)}</span>
+                <input ref={bindExternalKeyRef} type="password" autoComplete="off" data-testid="upgrade-external-key"
+                  disabled={busy} onChange={(ev) => setExternalKeyScope(ev.target.value.trim() !== '' ? externalSecretScope : null)} /></label>
+              {externalPairInvalid && (
+                <p className="upgrade-step-help" data-testid="upgrade-external-pair-hint">
+                  {e('externalOverridePairRequired', language)}
+                </p>
+              )}
+            </div>
+          )}
+          <button className="btn btn-primary" data-testid="upgrade-execute-external"
+            disabled={busy || externalPairInvalid}
+            onClick={() => {
+              if (!externalOverride) {
+                void execute({ action: 'external-connect' });
+                return;
+              }
+              const url = externalBaseUrl.trim();
+              const key = externalKeyRef.current?.value.trim() || '';
+              if (!url || !key) return;
+              void execute({ action: 'external-connect', baseUrl: url, managementKey: key });
+            }}>{e('externalAction', language)}</button>
+        </div>
+      )}
     </div>
   );
 }

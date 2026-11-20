@@ -30,12 +30,14 @@
 package freshadopt
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -670,8 +672,8 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	// is never overwritten by a write that changes nothing.
 	if state, stateErr := e.destination.CredentialState(ctx, file.Name); stateErr == nil && state.Present {
 		if existing, readErr := e.destination.DownloadCredential(ctx, file.Name); readErr == nil {
-			if digestSHA256(existing) == digestSHA256(data) {
-				return e.credentialOutcome(ctx, item, file.Name, file, state, digestSHA256(data), digestSHA256(data))
+			if equalCredentialDocument(data, existing, file.Disabled && state.Disabled) {
+				return e.credentialOutcome(ctx, item, file.Name, data, file, state, digestSHA256(data), digestSHA256(existing))
 			}
 		}
 	}
@@ -702,8 +704,9 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 	// reply whose bytes did land IS a successful copy, and it is never resent.
 	state, stateErr := e.destination.CredentialState(ctx, file.Name)
 	readBack, readErr := e.destination.DownloadCredential(ctx, file.Name)
-	bytesMatch := stateErr == nil && state.Present && readErr == nil && digestSHA256(readBack) == sourceDigest
-	if !bytesMatch {
+	docMatch := stateErr == nil && state.Present && readErr == nil &&
+		equalCredentialDocument(data, readBack, file.Disabled && state.Disabled)
+	if !docMatch {
 		if errors.Is(uploadErr, errCredentialServerRefusal) && stateErr == nil && !state.Present {
 			// CPA answered 500 and the file is absent: it refused the bytes, and
 			// no resend of the same bytes can succeed. This is the answer CPA
@@ -725,8 +728,9 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 		}
 	}
 
-	// The bytes are byte-identical, observed from the destination.
-	return e.credentialOutcome(ctx, item, file.Name, file, state, sourceDigest, digestSHA256(readBack))
+	// The destination holds a losslessly equivalent credential document, observed
+	// directly from the destination read-back.
+	return e.credentialOutcome(ctx, item, file.Name, data, file, state, sourceDigest, digestSHA256(readBack))
 }
 
 // credentialOutcome resolves a credential whose bytes the destination holds.
@@ -736,7 +740,7 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 //
 // Both digests are what this run observed: the source bytes it read, and the
 // destination bytes it read back. Neither is copied from the other.
-func (e *Executor) credentialOutcome(ctx context.Context, item, name string, file CredentialFile, state CredentialState, sourceDigest, destinationDigest string) freshstore.AdoptionItem {
+func (e *Executor) credentialOutcome(ctx context.Context, item, name string, sourceData []byte, file CredentialFile, state CredentialState, sourceDigest, destinationDigest string) freshstore.AdoptionItem {
 	reason, instruction := "", ""
 	if file.Type != "" && state.Type != "" && !strings.EqualFold(state.Type, file.Type) {
 		reason, instruction = "type_diverged",
@@ -754,7 +758,24 @@ func (e *Executor) credentialOutcome(ctx context.Context, item, name string, fil
 		after, afterErr := e.destination.CredentialState(ctx, name)
 		switch {
 		case afterErr == nil && after.Present && after.Disabled:
-			// The read-back is the answer, whatever the PATCH replied.
+			// CPA v8's PATCH /v8/management/credentials/status persists
+			// metadata["disabled"]=true through FileTokenStore.Save, rewriting the
+			// credential JSON on disk. Re-read and verify lossless preservation
+			// after the status write and record the final observed digest.
+			afterBytes, dlErr := e.destination.DownloadCredential(ctx, name)
+			if dlErr != nil {
+				reason, instruction = "status_unverified",
+					"The credential was copied and disabled, but its final credential file could not be read back. Check it in the destination Console."
+				break
+			}
+			if !equalCredentialDocument(sourceData, afterBytes, true) {
+				return freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionFailed,
+					Reason: "verify_mismatch", Instruction: manualInstruction(freshstore.AdoptionKindCredential, file.Name),
+					SourceSHA256: sourceDigest,
+				}
+			}
+			destinationDigest = digestSHA256(afterBytes)
 		case afterErr == nil && after.Present:
 			// The destination answers and reports the credential enabled: the
 			// disable did not take, whether or not the PATCH said it did.
@@ -1156,4 +1177,273 @@ func isDefiniteRefusal(err error) bool {
 		return rejection.Definite()
 	}
 	return errors.Is(err, ErrCredentialNotUploadable)
+}
+
+// cpaV8CredentialMetadataKeyAliases is the closed top-level legacy hyphenated
+// metadata key table CPA v8 normalizes to snake_case on persist
+// (`sdk/cliproxy/auth/metadata_keys.go:10-49`, `NormalizeCredentialMetadata`).
+// Unknown and provider-specific keys are never renamed or stripped.
+var cpaV8CredentialMetadataKeyAliases = [][2]string{
+	{"api-key", "api_key"},
+	{"base-url", "base_url"},
+	{"disable-cooling", "disable_cooling"},
+	{"excluded-models", "excluded_models"},
+	{"fingerprint-profile", "fingerprint_profile"},
+	{"model-aliases", "model_aliases"},
+	{"proxy-url", "proxy_url"},
+	{"request-retry", "request_retry"},
+	{"request-scoped-errors", "request_scoped_errors"},
+	{"tool-prefix-disabled", "tool_prefix_disabled"},
+}
+
+// equalCredentialDocument reports whether destinationBytes is either byte-exact
+// or a narrowly proven lossless CPA v8 normalization of sourceBytes.
+//
+// CPA v8 rewrites stored credential files when persisting status or provider
+// storage (`sdk/auth/filestore.go:100-119`, `sdk/cliproxy/auth/codex_persist.go:53`,
+// `internal/api/handlers/management/auth_files_fields.go:254-260`,
+// `sdk/cliproxy/auth/metadata_keys.go:10-49`, `internal/watcher/synthesizer/file.go:148-193`,
+// `internal/auth/{claude,codex,kimi,meta,vertex,xai}` `SaveTokenToFile`):
+//   - JSON indentation, whitespace, and object key ordering (`MarshalIndent`);
+//   - top-level `"disabled"` boolean default (`false` when omitted, or `true`
+//     only when allowTargetDisabled permits an applied status PATCH);
+//   - the 10 recognized top-level hyphenated metadata keys to `snake_case`;
+//   - provider storage struct empty-string / fixed defaults only when absent in
+//     the source document.
+//
+// Every meaningful auth token, secret, identifier, nested structure, and
+// unknown field must be preserved identically; any dropped, altered, blanked,
+// or unexpected field fails closed.
+func equalCredentialDocument(sourceBytes, destinationBytes []byte, allowTargetDisabled bool) bool {
+	if bytes.Equal(sourceBytes, destinationBytes) {
+		return true
+	}
+	src, ok := decodeSingleCredentialObject(sourceBytes)
+	if !ok {
+		return false
+	}
+	dst, ok := decodeSingleCredentialObject(destinationBytes)
+	if !ok {
+		return false
+	}
+	reconcileCPAV8MetadataAliases(src, dst)
+	if !reconcileCPAV8DisabledField(src, dst, allowTargetDisabled) {
+		return false
+	}
+	reconcileCPAV8ProviderDefaults(src, dst)
+	return equalConfigValue(src, dst)
+}
+
+func decodeSingleCredentialObject(raw []byte) (map[string]any, bool) {
+	if len(raw) == 0 || !utf8.Valid(raw) || hasDuplicateJSONObjectKeys(raw) {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	obj, ok := value.(map[string]any)
+	if !ok || obj == nil {
+		return nil, false
+	}
+	return obj, true
+}
+
+func hasDuplicateJSONObjectKeys(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	type frame struct {
+		isObject  bool
+		expectKey bool
+		seenKeys  map[string]bool
+	}
+	var stack []frame
+	afterConsumedValue := func() {
+		if len(stack) > 0 && stack[len(stack)-1].isObject {
+			stack[len(stack)-1].expectKey = true
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		if delim, ok := tok.(json.Delim); ok {
+			switch delim {
+			case '{':
+				stack = append(stack, frame{isObject: true, expectKey: true, seenKeys: map[string]bool{}})
+			case '[':
+				stack = append(stack, frame{isObject: false})
+			case '}', ']':
+				if len(stack) == 0 {
+					return true
+				}
+				stack = stack[:len(stack)-1]
+				afterConsumedValue()
+			}
+			continue
+		}
+		if len(stack) > 0 && stack[len(stack)-1].isObject && stack[len(stack)-1].expectKey {
+			key, ok := tok.(string)
+			if !ok {
+				return true
+			}
+			top := &stack[len(stack)-1]
+			if top.seenKeys[key] {
+				return true
+			}
+			top.seenKeys[key] = true
+			top.expectKey = false
+			continue
+		}
+		afterConsumedValue()
+	}
+}
+
+func reconcileCPAV8MetadataAliases(src, dst map[string]any) {
+	for _, pair := range cpaV8CredentialMetadataKeyAliases {
+		legacyKey, canonicalKey := pair[0], pair[1]
+		legacyVal, hasSrcLegacy := src[legacyKey]
+		canonicalVal, hasSrcCanonical := src[canonicalKey]
+		_, hasDstLegacy := dst[legacyKey]
+		_, hasDstCanonical := dst[canonicalKey]
+		if !hasSrcLegacy || hasDstLegacy || !hasDstCanonical {
+			continue
+		}
+		if !hasSrcCanonical {
+			src[canonicalKey] = legacyVal
+			delete(src, legacyKey)
+		} else if equalConfigValue(legacyVal, canonicalVal) {
+			delete(src, legacyKey)
+		}
+	}
+}
+
+func reconcileCPAV8DisabledField(src, dst map[string]any, allowTargetDisabled bool) bool {
+	srcDisabled, srcBoolOK := effectiveCredentialDisabled(src)
+	dstDisabled, dstBoolOK := effectiveCredentialDisabled(dst)
+	if !srcBoolOK || !dstBoolOK {
+		return true
+	}
+	if dstDisabled != srcDisabled && !(allowTargetDisabled && dstDisabled) {
+		return false
+	}
+	delete(src, "disabled")
+	delete(dst, "disabled")
+	return true
+}
+
+func effectiveCredentialDisabled(obj map[string]any) (bool, bool) {
+	raw, present := obj["disabled"]
+	if !present || raw == nil {
+		return false, true
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return false, false
+	}
+	return b, true
+}
+
+func reconcileCPAV8ProviderDefaults(src, dst map[string]any) {
+	srcTypeRaw, srcHasType := src["type"].(string)
+	dstTypeRaw, dstHasType := dst["type"].(string)
+	providerType := ""
+	if srcHasType && dstHasType {
+		canon := strings.ToLower(strings.TrimSpace(srcTypeRaw))
+		switch canon {
+		case "claude", "codex", "xai", "meta", "vertex", "kimi", "kimi-ai":
+			if dstTypeRaw == canon {
+				src["type"] = canon
+				providerType = canon
+			}
+		default:
+			if srcTypeRaw == dstTypeRaw {
+				providerType = canon
+			}
+		}
+	}
+
+	dropAbsentEmptyStrings := func(keys ...string) {
+		for _, k := range keys {
+			if _, existsInSrc := src[k]; existsInSrc {
+				continue
+			}
+			if dstVal, ok := dst[k].(string); ok && dstVal == "" {
+				delete(dst, k)
+			}
+		}
+	}
+	dropAbsentFixedString := func(key, want string) {
+		if _, existsInSrc := src[key]; existsInSrc {
+			return
+		}
+		if dstVal, ok := dst[key].(string); ok && dstVal == want {
+			delete(dst, key)
+		}
+	}
+
+	switch providerType {
+	case "claude":
+		dropAbsentEmptyStrings("id_token", "access_token", "refresh_token", "last_refresh", "email", "expired")
+	case "codex":
+		dropAbsentEmptyStrings("id_token", "access_token", "refresh_token", "account_id", "last_refresh", "email", "expired")
+	case "xai":
+		dropAbsentEmptyStrings("access_token", "refresh_token")
+		dropAbsentFixedString("auth_kind", "oauth")
+	case "meta":
+		dropAbsentEmptyStrings("access_token")
+		dropAbsentFixedString("auth_kind", "oauth")
+	case "vertex":
+		sa, _ := src["service_account"].(map[string]any)
+		wantProject, _ := sa["project_id"].(string)
+		wantEmail, _ := sa["client_email"].(string)
+		if _, hasProject := src["project_id"]; !hasProject {
+			if dstProject, ok := dst["project_id"].(string); ok && (dstProject == "" || dstProject == strings.TrimSpace(wantProject)) {
+				delete(dst, "project_id")
+			}
+		}
+		if _, hasEmail := src["email"]; !hasEmail {
+			if dstEmail, ok := dst["email"].(string); ok && (dstEmail == "" || dstEmail == strings.TrimSpace(wantEmail)) {
+				delete(dst, "email")
+			}
+		}
+	case "kimi", "kimi-ai":
+		dropAbsentEmptyStrings("access_token", "refresh_token", "token_type")
+		wantDomain := "kimi.com"
+		if providerType == "kimi-ai" {
+			wantDomain = "kimi.ai"
+		}
+		if srcDomain, ok := src["domain"].(string); ok && strings.TrimSpace(srcDomain) != "" {
+			if strings.EqualFold(strings.TrimSpace(srcDomain), "kimi.ai") {
+				wantDomain = "kimi.ai"
+			} else if strings.EqualFold(strings.TrimSpace(srcDomain), "kimi.com") {
+				wantDomain = "kimi.com"
+			}
+		} else {
+			dropAbsentFixedString("domain", wantDomain)
+		}
+		wantBaseURL := "https://api.kimi.com/coding"
+		if wantDomain == "kimi.ai" {
+			wantBaseURL = "https://api.kimi.ai/coding"
+		}
+		dropAbsentFixedString("base_url", wantBaseURL)
+	}
+
+	if _, hasOAuthProvider := src["oauth_provider"]; !hasOAuthProvider {
+		if portal, ok := src["portal"].(string); ok {
+			if wantProvider := strings.ToLower(strings.TrimSpace(portal)); wantProvider != "" {
+				dropAbsentFixedString("oauth_provider", wantProvider)
+			}
+		}
+	}
 }

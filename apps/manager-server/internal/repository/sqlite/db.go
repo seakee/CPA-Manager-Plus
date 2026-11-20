@@ -30,7 +30,23 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	return db, err
 }
 
+// OpenUpgradeOperations opens the SQLite database at path and ensures only the
+// upgrade operation state tables and columns exist without inspecting,
+// recreating, or rebuilding usage monitoring or pricing derivations. Callers
+// that record reconciliation refusal/invalidation or rollback state on a
+// potentially damaged v2 target database must use this entrypoint rather than
+// Open so missing derived tables neither block recovery nor get rebuilt as a
+// side effect.
+func OpenUpgradeOperations(path string) (*sql.DB, error) {
+	db, _, err := openTrackedWithMigrator(Options{Path: path}, MigrateUpgradeOperations)
+	return db, err
+}
+
 func OpenTrackedWithOptions(options Options) (*sql.DB, func(), error) {
+	return openTrackedWithMigrator(options, Migrate)
+}
+
+func openTrackedWithMigrator(options Options, migrate func(*sql.DB) error) (*sql.DB, func(), error) {
 	dbPath, err := filepath.Abs(options.Path)
 	if err != nil {
 		return nil, nil, err
@@ -51,7 +67,7 @@ func OpenTrackedWithOptions(options Options) (*sql.DB, func(), error) {
 	db.SetMaxOpenConns(options.maxOpenConns())
 	db.SetMaxIdleConns(options.maxIdleConns())
 	db.SetConnMaxIdleTime(options.connMaxIdleTime())
-	if err := Migrate(db); err != nil {
+	if err := migrate(db); err != nil {
 		_ = db.Close()
 		waitClosed()
 		if precreated {

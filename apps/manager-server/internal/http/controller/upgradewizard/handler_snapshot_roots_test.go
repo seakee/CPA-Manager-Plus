@@ -291,8 +291,8 @@ func TestUnresolvedRootRefusesTheMaterializingSnapshot(t *testing.T) {
 	stop()
 	waitForMountFlight(t, handler)
 	t.Logf("unresolved root status=%d body=%s snapshots staged=%v", status, body, names)
-	if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeSourceUnreadable) {
-		t.Fatalf("unresolved root answered %d: %s", status, body)
+	if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeMountTimeout) {
+		t.Fatalf("unresolved timed-out root answered %d: %s", status, body)
 	}
 	if len(names) != 0 {
 		t.Fatalf("the unresolved root staged %v instead of refusing", names)

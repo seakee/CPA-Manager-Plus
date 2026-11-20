@@ -34,6 +34,8 @@ export type ArtifactErrorCode =
   | 'origin_rejected'
   | 'method_not_allowed'
   | 'upgrade_artifact_unavailable'
+  | 'upgrade_execution_busy'
+  | 'upgrade_bootstrap_retired'
   | 'upgrade_credential_timeout'
   | 'upgrade_mount_timeout'
   | 'upgrade_preflight_timeout'
@@ -44,7 +46,15 @@ export type ArtifactErrorCode =
   | 'upgrade_operation_unreadable'
   | 'upgrade_operation_invalid'
   | 'upgrade_source_symlinked'
-  | 'upgrade_source_unstamped';
+  | 'upgrade_source_unstamped'
+  | 'upgrade_worker_unavailable'
+  | 'upgrade_worker_peer_refused'
+  | 'source_ownership_unavailable'
+  | 'upgrade_source_lock_unavailable'
+  | 'upgrade_store_locked'
+  | 'upgrade_store_unavailable'
+  | 'upgrade_store_schema_outdated'
+  | 'upgrade_request_invalid';
 
 export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   archive_invalid: true,
@@ -65,6 +75,8 @@ export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   origin_rejected: true,
   method_not_allowed: true,
   upgrade_artifact_unavailable: true,
+  upgrade_execution_busy: true,
+  upgrade_bootstrap_retired: true,
   upgrade_credential_timeout: true,
   upgrade_mount_timeout: true,
   upgrade_preflight_timeout: true,
@@ -76,6 +88,14 @@ export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   upgrade_operation_invalid: true,
   upgrade_source_symlinked: true,
   upgrade_source_unstamped: true,
+  upgrade_worker_unavailable: true,
+  upgrade_worker_peer_refused: true,
+  source_ownership_unavailable: true,
+  upgrade_source_lock_unavailable: true,
+  upgrade_store_locked: true,
+  upgrade_store_unavailable: true,
+  upgrade_store_schema_outdated: true,
+  upgrade_request_invalid: true,
 };
 
 export function isArtifactErrorCode(value: unknown): value is ArtifactErrorCode {
@@ -201,6 +221,14 @@ export const ARTIFACT_ERROR_MAP: Record<
     messageKey: 'error_upgrade_artifact_unavailable',
     remedyKey: 'remedy_upgrade_artifact_unavailable',
   },
+  upgrade_execution_busy: {
+    messageKey: 'error_upgrade_execution_busy',
+    remedyKey: 'remedy_upgrade_execution_busy',
+  },
+  upgrade_bootstrap_retired: {
+    messageKey: 'error_upgrade_bootstrap_retired',
+    remedyKey: 'remedy_upgrade_bootstrap_retired',
+  },
   upgrade_credential_timeout: {
     messageKey: 'error_upgrade_source_timeout',
     remedyKey: 'remedy_upgrade_source_timeout',
@@ -244,6 +272,38 @@ export const ARTIFACT_ERROR_MAP: Record<
   upgrade_source_unstamped: {
     messageKey: 'error_upgrade_source_unstamped',
     remedyKey: 'remedy_upgrade_source_unstamped',
+  },
+  upgrade_worker_unavailable: {
+    messageKey: 'error_upgrade_worker_unavailable',
+    remedyKey: 'remedy_upgrade_worker_unavailable',
+  },
+  upgrade_worker_peer_refused: {
+    messageKey: 'error_upgrade_worker_peer_refused',
+    remedyKey: 'remedy_upgrade_worker_peer_refused',
+  },
+  source_ownership_unavailable: {
+    messageKey: 'error_source_ownership_unavailable',
+    remedyKey: 'remedy_source_ownership_unavailable',
+  },
+  upgrade_source_lock_unavailable: {
+    messageKey: 'error_source_ownership_unavailable',
+    remedyKey: 'remedy_source_ownership_unavailable',
+  },
+  upgrade_store_locked: {
+    messageKey: 'error_upgrade_store_locked',
+    remedyKey: 'remedy_upgrade_store_locked',
+  },
+  upgrade_store_unavailable: {
+    messageKey: 'error_upgrade_store_unavailable',
+    remedyKey: 'remedy_upgrade_store_unavailable',
+  },
+  upgrade_store_schema_outdated: {
+    messageKey: 'error_upgrade_store_schema_outdated',
+    remedyKey: 'remedy_upgrade_store_schema_outdated',
+  },
+  upgrade_request_invalid: {
+    messageKey: 'error_invalid_request',
+    remedyKey: 'remedy_invalid_request',
   },
 };
 
@@ -318,10 +378,18 @@ export function extractArtifactErrorCode(error: unknown): ArtifactErrorCode | un
   if (!error || typeof error !== 'object') return undefined;
   const candidate = error as {
     code?: unknown;
+    error?: { code?: unknown } | null;
     kind?: unknown;
     status?: unknown;
   };
   if (isArtifactErrorCode(candidate.code)) return candidate.code;
+  if (
+    candidate.error &&
+    typeof candidate.error === 'object' &&
+    isArtifactErrorCode(candidate.error.code)
+  ) {
+    return candidate.error.code;
+  }
   if (
     candidate.kind === 'authentication' ||
     candidate.kind === 'rejected' ||
@@ -340,11 +408,16 @@ const NON_TRANSIENT_READ_CODES: Partial<Record<ArtifactErrorCode, true>> = {
   method_not_allowed: true,
   unsupported_platform: true,
   upgrade_artifact_unavailable: true,
+  upgrade_bootstrap_retired: true,
   upgrade_legacy_root_missing: true,
   upgrade_source_missing: true,
   upgrade_operation_invalid: true,
   upgrade_source_symlinked: true,
   upgrade_source_unstamped: true,
+  upgrade_legacy_root_unusable: true,
+  upgrade_store_schema_outdated: true,
+  upgrade_request_invalid: true,
+  upgrade_worker_peer_refused: true,
 };
 
 export function isNonTransientArtifactReadError(error: unknown): boolean {

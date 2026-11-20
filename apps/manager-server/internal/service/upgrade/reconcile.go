@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
@@ -241,6 +242,13 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	if err := ctx.Err(); err != nil {
 		return ReconcileReport{}, err
 	}
+	if trimmedDeclared := strings.TrimSpace(options.DeclaredVersion); trimmedDeclared != "" {
+		if !bootstrap.IsSupportedUpgradeSourceRelease(trimmedDeclared) {
+			return ReconcileReport{}, newUpgradeError(UpgradeErrorCode(CodeSourceVersionUnsupported),
+				fmt.Sprintf("declared source release %q is outside the supported %s family",
+					trimmedDeclared, bootstrap.SupportedUpgradeSourceFamily), nil)
+		}
+	}
 	sourceRoot, targetRoot, bundleDir, err := reconcileRoots(options)
 	if err != nil {
 		return ReconcileReport{}, err
@@ -261,11 +269,11 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 
-	scratch, err := reconcileScratchRoot(targetRoot, sourceRoot, options.ScratchDir)
+	scratch, err := reconcileScratchRoot(targetRoot, sourceRoot, bundleDir, options.ScratchDir)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	recorded, found, targetSnapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, scratch)
+	recorded, found, targetSnapshot, err := readCopyInCandidateWithBackup(ctx, paths.Database, sourceRoot, targetRoot, bundleDir, scratch)
 	if targetSnapshot != nil {
 		defer func() { _ = targetSnapshot.Close() }()
 	}
@@ -273,8 +281,14 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, snapshotReadError(ctx, err)
 	}
 	if !found {
-		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileNotCopiedIn,
-			"the v2 data root holds no recorded copy-in, so there is nothing to reconcile against; nothing was compared and nothing was marked", nil)
+		return ReconcileReport{}, RequireReconcileStage(recorded, false)
+	}
+	if trimmedDeclared := strings.TrimSpace(options.DeclaredVersion); trimmedDeclared != "" &&
+		recorded.SourceVersion != "" && recorded.SourceVersion != VersionUnknown &&
+		declaredVersion(trimmedDeclared) != declaredVersion(recorded.SourceVersion) {
+		return ReconcileReport{}, fmt.Errorf(
+			"the recorded copy-in names source version %s and this run declared %s",
+			recorded.SourceVersion, declaredVersion(trimmedDeclared))
 	}
 	// The step may only run where it could still record its result. A store the
 	// operation already carried past "reconcile", or one a rollback closed, can
@@ -282,10 +296,8 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	// numbers that no longer match by design and report a success it cannot
 	// record. This is the same monotonicity rule Advance enforces, asked before
 	// anything is read or written.
-	if recorded.Stage != "" && !recorded.Stage.CanAdvanceTo(model.UpgradeStageReconcile) {
-		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileStageClosed, fmt.Sprintf(
-			"the recorded operation is at stage %q, which cannot enter the reconcile step; nothing was compared and nothing was marked",
-			recorded.Stage), nil)
+	if err := RequireReconcileStage(recorded, found); err != nil {
+		return ReconcileReport{}, err
 	}
 	if err := verifyCompletedMembers(ctx, paths, bundleDir, recorded); err != nil {
 		return ReconcileReport{}, err
@@ -297,7 +309,8 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 
 	before, err := fingerprintSource(ctx, sourceRoot)
 	if err != nil {
-		return ReconcileReport{}, err
+		return ReconcileReport{}, sourceFingerprintError(ctx, err,
+			"the 1.x source changed while it was being fingerprinted; nothing was compared and nothing was marked")
 	}
 	if strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileRecordIncomplete,
@@ -308,16 +321,41 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 			"the 1.x source is not the volume the recorded copy-in copied; nothing was compared and nothing was marked", nil)
 	}
 
-	// Both observations use unique private directories outside both roots.
-	// Each snapshot owns its cleanup; no caller directory is cleared or removed.
-	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, targetSnapshot.DB(), targetSchema, scratch)
+	targetObs, err := observeSide(ctx, targetSnapshot.DB(), targetSchema)
+	if err != nil {
+		return ReconcileReport{}, fmt.Errorf("read the v2 store: %w", err)
+	}
+	_ = targetSnapshot.Close()
+	targetSnapshot = nil
+
+	// Both observations use unique private directories outside both roots,
+	// opened sequentially so scratch never holds more than one database copy.
+	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, targetObs, scratch)
 	if compareErr != nil {
-		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before.Digest, domains, parityDays)}, compareErr
+		report := ReconcileReport{ReconcileEvidence: newReconcileEvidence(before.Digest, domains, parityDays)}
+		if code, ok := UpgradeErrorCodeOf(compareErr); ok &&
+			(code == UpgradeErrorReconcileTargetIncomplete || code == UpgradeErrorReconcileNothingCompared) &&
+			hasPriorReconciliationState(recorded) {
+			after, fpErr := fingerprintSource(ctx, sourceRoot)
+			if fpErr != nil {
+				return ReconcileReport{}, sourceFingerprintError(ctx, fpErr,
+					"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked")
+			}
+			if after != before {
+				return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
+					"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked", nil)
+			}
+			if invErr := invalidateRecordedReconciliation(ctx, paths.Database, code, compareErr); invErr != nil {
+				return report, invErr
+			}
+		}
+		return report, compareErr
 	}
 
 	after, err := fingerprintSource(ctx, sourceRoot)
 	if err != nil {
-		return ReconcileReport{}, err
+		return ReconcileReport{}, sourceFingerprintError(ctx, err,
+			"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked")
 	}
 	if after != before {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
@@ -333,24 +371,33 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	// report still names the domains and the days that were seen.
 	established := establishedDomains(evidence.Domains)
 	if len(established) == 0 {
-		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileNothingCompared,
+		nothingErr := newUpgradeError(UpgradeErrorReconcileNothingCompared,
 			"no compared domain could be established: this run compared no day of any domain, so nothing was marked and the operation did not advance", nil)
+		if hasPriorReconciliationState(recorded) {
+			if invErr := invalidateRecordedReconciliation(ctx, paths.Database, UpgradeErrorReconcileNothingCompared, nothingErr); invErr != nil {
+				return ReconcileReport{ReconcileEvidence: evidence}, invErr
+			}
+		}
+		return ReconcileReport{ReconcileEvidence: evidence}, nothingErr
 	}
 	measured := measuredMismatchDays(domains)
 	derived := derivedLossDays(domains)
 	evidence.AcknowledgedDays, evidence.UnacknowledgedDays = decideAcknowledged(
 		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps,
 		parityDays, unionDays(measured, derived))
+	if err := runCheckpoint(options, "reconcile-compared"); err != nil {
+		return ReconcileReport{ReconcileEvidence: evidence}, err
+	}
 	if len(evidence.UnacknowledgedDays) > 0 {
+		pendingDays := unionDays(unionDays(evidence.MismatchDays, parityDays), evidence.UnacknowledgedDays)
+		if err := RecordPendingReconcileDays(ctx, paths.Database, pendingDays); err != nil {
+			return ReconcileReport{ReconcileEvidence: evidence}, err
+		}
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileMismatch,
 			fmt.Sprintf("%s must be acknowledged before they can be marked incomplete; nothing was marked: %s",
 				plural(len(evidence.UnacknowledgedDays), "day", "days"), strings.Join(evidence.UnacknowledgedDays, ", ")), nil)
 	}
 	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measured, derived)
-
-	if err := runCheckpoint(options, "reconcile-compared"); err != nil {
-		return ReconcileReport{ReconcileEvidence: evidence}, err
-	}
 	operation, inserted, err := recordReconciliation(ctx, paths.Database, evidence, established)
 	if err != nil {
 		return ReconcileReport{ReconcileEvidence: evidence}, err
@@ -411,8 +458,8 @@ func reconcileRoots(options Options) (string, string, string, error) {
 
 // reconcileScratchRoot resolves the private snapshot base before any target
 // read. Empty uses the OS temporary directory, never the target data root.
-func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, error) {
-	if err := ValidateScratchDir(configured, sourceRoot, targetRoot); err != nil {
+func reconcileScratchRoot(targetRoot, sourceRoot, bundleDir, configured string) (string, error) {
+	if err := ValidateScratchDirWithBackup(configured, sourceRoot, targetRoot, bundleDir); err != nil {
 		return "", snapshotReadError(context.Background(), err)
 	}
 	callerRoot := strings.TrimSpace(configured)
@@ -449,9 +496,10 @@ func acknowledgedDays(values []string) (map[string]bool, error) {
 // nothing was read and nothing was written.
 var ErrUsage = errors.New("invalid upgrade request")
 
-// compareStores reads both stores and returns the per-domain comparison plus
-// the days the 1.x source can never complete again.
-func compareStores(ctx context.Context, sourceRoot string, targetDB *sql.DB, targetTables sourceSchema, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
+// compareStores reads the 1.x source snapshot against the already-observed v2
+// target snapshot and returns the per-domain comparison plus the days the 1.x
+// source can never complete again.
+func compareStores(ctx context.Context, sourceRoot string, target sideObservation, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
 	// The source is read through the package's private snapshot: the database
 	// and its WAL sidecars are copied into the reconciliation scratch area, the
 	// source is digested before and after the copy, and only the copy is opened.
@@ -459,11 +507,18 @@ func compareStores(ctx context.Context, sourceRoot string, targetDB *sql.DB, tar
 	// and change the fingerprint the copy-in recorded.
 	snapshot, err := OpenSnapshot(ctx, SourceDatabasePath(sourceRoot), scratchRoot)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		if errors.Is(err, ErrSourceChanged) {
 			return nil, nil, newUpgradeError(UpgradeErrorSourceChanged,
 				"the 1.x source changed while its database was being copied into the reconciliation scratch area; nothing was compared and nothing was marked", err)
 		}
-		return nil, nil, fmt.Errorf("copy the 1.x database into the reconciliation scratch area: %w", err)
+		if errors.Is(err, ErrSnapshotFailed) {
+			return nil, nil, snapshotReadError(ctx, err)
+		}
+		code, detail := ownershipFailure(err)
+		return nil, nil, newUpgradeError(UpgradeErrorCode(code), detail, err)
 	}
 	defer func() { _ = snapshot.Close() }()
 	sourceDB := snapshot.DB()
@@ -483,11 +538,6 @@ func compareStores(ctx context.Context, sourceRoot string, targetDB *sql.DB, tar
 		return nil, nil, fmt.Errorf("read the 1.x source: %w", err)
 	}
 
-	// The target row and schema were already read from this same private copy.
-	target, err := observeSide(ctx, targetDB, targetTables)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read the v2 store: %w", err)
-	}
 	domains, err := compareObservations(source, target)
 	return domains, gaps.AffectedDates, err
 }
@@ -1485,7 +1535,7 @@ func recordReconciliation(ctx context.Context, databasePath string, evidence Rec
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return model.UpgradeOperation{}, 0, err
 	}
-	db, err := managersqlite.Open(databasePath)
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, 0, fmt.Errorf("open the v2 database to record the reconciliation: %w", err)
 	}
@@ -1520,10 +1570,68 @@ func recordReconciliation(ctx context.Context, databasePath string, evidence Rec
 	if err != nil {
 		return model.UpgradeOperation{}, 0, recordInterrupted(err)
 	}
+	if operation.ErrorCode != "" || operation.ErrorDetail != "" {
+		if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
+			return model.UpgradeOperation{}, 0, recordInterrupted(err)
+		}
+		var found bool
+		operation, found, err = upgradeoperation.GetTx(ctx, tx)
+		if err != nil || !found {
+			return model.UpgradeOperation{}, 0, recordInterrupted(err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.UpgradeOperation{}, 0, recordInterrupted(err)
 	}
 	return operation, inserted, nil
+}
+
+// RecordPendingReconcileDays durably records unacknowledged reconciliation UTC
+// dates on the operation row without advancing its stage or marking coverage
+// incomplete.
+func RecordPendingReconcileDays(ctx context.Context, databasePath string, days []string) error {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
+	if err != nil {
+		return fmt.Errorf("open the v2 database to record pending reconciliation dates: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := upgradeoperation.New(db).RecordPendingReconcileDays(ctx, days); err != nil {
+		return fmt.Errorf("record pending reconciliation dates: %w", err)
+	}
+	return nil
+}
+
+func hasPriorReconciliationState(recorded model.UpgradeOperation) bool {
+	if recorded.Stage != model.UpgradeStageCopyIn || len(recorded.DomainsDone) > 1 || len(recorded.PendingReconcileDays) > 0 {
+		return true
+	}
+	trimmed := strings.TrimSpace(string(recorded.Reconciliation))
+	return trimmed != "" && trimmed != "{}"
+}
+
+func invalidateRecordedReconciliation(ctx context.Context, databasePath string, code UpgradeErrorCode, cause error) error {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
+	if err != nil {
+		return fmt.Errorf("open the v2 database to invalidate stale reconciliation: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	detail := ""
+	var typed *UpgradeError
+	if errors.As(cause, &typed) && typed != nil {
+		detail = typed.Message
+	} else if cause != nil {
+		detail = cause.Error()
+	}
+	if err := upgradeoperation.New(db).InvalidateReconciliation(ctx, string(code), detail); err != nil {
+		return fmt.Errorf("invalidate stale reconciliation: %w", err)
+	}
+	return nil
 }
 
 // recordInterrupted says what an interrupted recording left behind. The marks,

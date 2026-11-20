@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,25 +22,65 @@ const (
 // read or import is attempted here.
 func classifyCPA(legacyRoot string) Check {
 	configPath := filepath.Clean(filepath.Join(legacyRoot, managedCPAConfigRelativePath))
-	info, err := os.Stat(configPath)
-	if err != nil || !info.Mode().IsRegular() {
+	legacyCPADir := filepath.Dir(configPath)
+	dirInfo, err := os.Lstat(legacyCPADir)
+	if err != nil {
 		return Check{Name: CheckCPAClassification, Status: StatusPass, Detail: "kind=" + CPAKindExternal}
 	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return Check{
+			Name:   CheckCPAClassification,
+			Status: StatusBlocked,
+			Code:   CodeSourceSymlinked,
+			Detail: "legacy-cpa: a symbolic link is not accepted for this directory",
+		}
+	}
+	if !dirInfo.IsDir() {
+		return Check{Name: CheckCPAClassification, Status: StatusPass, Detail: "kind=" + CPAKindExternal}
+	}
+	cfgInfo, err := os.Lstat(configPath)
+	if err != nil {
+		return Check{Name: CheckCPAClassification, Status: StatusPass, Detail: "kind=" + CPAKindExternal}
+	}
+	if cfgInfo.Mode()&os.ModeSymlink != 0 {
+		return Check{
+			Name:   CheckCPAClassification,
+			Status: StatusBlocked,
+			Code:   CodeSourceSymlinked,
+			Detail: "legacy-cpa/config.yaml: a symbolic link is not accepted for this file",
+		}
+	}
+	if !cfgInfo.Mode().IsRegular() {
+		return Check{Name: CheckCPAClassification, Status: StatusPass, Detail: "kind=" + CPAKindExternal}
+	}
+	file, _, err := openRegularFileNoFollow(configPath)
+	if err != nil {
+		if errors.Is(err, ErrSourceSymlinked) {
+			return Check{
+				Name:   CheckCPAClassification,
+				Status: StatusBlocked,
+				Code:   CodeSourceSymlinked,
+				Detail: "legacy-cpa/config.yaml: a symbolic link is not accepted for this file",
+			}
+		}
+		return Check{
+			Name:   CheckCPAClassification,
+			Status: StatusPass,
+			Detail: "kind=" + CPAKindManagedStack + " cpaVersion=" + CPAVersionUnknown,
+		}
+	}
+	defer func() { _ = file.Close() }()
 	return Check{
 		Name:   CheckCPAClassification,
 		Status: StatusPass,
-		Detail: "kind=" + CPAKindManagedStack + " cpaVersion=" + readCPAConfigVersion(configPath),
+		Detail: "kind=" + CPAKindManagedStack + " cpaVersion=" + readCPAConfigVersionFrom(file),
 	}
 }
 
-// readCPAConfigVersion returns the first top-level "version:" scalar, or
-// unknown. Anything less trivial than that is left for the import step.
-func readCPAConfigVersion(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		return CPAVersionUnknown
-	}
-	defer func() { _ = file.Close() }()
+// readCPAConfigVersionFrom returns the first top-level "version:" scalar from an
+// already verified regular file, or unknown. Anything less trivial than that is
+// left for the import step.
+func readCPAConfigVersionFrom(file io.Reader) string {
 	scanner := bufio.NewScanner(io.LimitReader(file, 64<<10))
 	scanner.Buffer(make([]byte, 0, 64<<10), 64<<10)
 	for scanner.Scan() {

@@ -131,14 +131,7 @@ func (r *Repository) Get(ctx context.Context) (model.UpgradeOperation, bool, err
 	if err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
-	cols := selectColumns
-	if routingCols.present {
-		if routingCols.inferenceCommitted {
-			cols = selectColumnsWithRouting
-		} else {
-			cols = selectColumnsWithLegacyRouting
-		}
-	}
+	cols := selectColumnsFor(routingCols)
 	return scanOperationWithRouting(r.db.QueryRowContext(ctx, `select `+cols+` from `+tableName+` where id = 1`), routingCols)
 }
 
@@ -151,8 +144,9 @@ type columnQueryer interface {
 }
 
 type routingColumnSet struct {
-	present            bool
-	inferenceCommitted bool
+	present              bool
+	inferenceCommitted   bool
+	pendingReconcileDays bool
 }
 
 func queryerRoutingColumns(ctx context.Context, q columnQueryer) (routingColumnSet, error) {
@@ -172,18 +166,36 @@ func queryerRoutingColumns(ctx context.Context, q columnQueryer) (routingColumnS
 	if err := rows.Err(); err != nil {
 		return routingColumnSet{}, err
 	}
+	routingPresent := true
 	for _, col := range []string{
 		"control_base_path", "inference_base_path", "shared_entry", "routing_committed",
 		"suggested_control_base_path", "suggested_inference_base_path",
 	} {
 		if !present[col] {
-			return routingColumnSet{}, nil
+			routingPresent = false
+			break
 		}
 	}
 	return routingColumnSet{
-		present:            true,
-		inferenceCommitted: present["inference_committed"],
+		present:              routingPresent,
+		inferenceCommitted:   routingPresent && present["inference_committed"],
+		pendingReconcileDays: present["pending_reconcile_days"],
 	}, nil
+}
+
+func selectColumnsFor(routingCols routingColumnSet) string {
+	cols := selectColumns
+	if routingCols.present {
+		if routingCols.inferenceCommitted {
+			cols = selectColumnsWithRouting
+		} else {
+			cols = selectColumnsWithLegacyRouting
+		}
+	}
+	if routingCols.pendingReconcileDays {
+		cols += `, pending_reconcile_days`
+	}
+	return cols
 }
 
 func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
@@ -205,6 +217,7 @@ func scanOperationWithRouting(row rowScanner, routingCols routingColumnSet) (mod
 		controlBasePath, inferenceBasePath                    sql.NullString
 		sharedEntry, routingCommitted, inferenceCommitted     sql.NullInt64
 		suggestedControlBasePath, suggestedInferenceBasePath  sql.NullString
+		pendingReconcileDays                                  string
 	)
 	dest := []any{
 		&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion, &sourceRoot,
@@ -220,6 +233,9 @@ func scanOperationWithRouting(row rowScanner, routingCols routingColumnSet) (mod
 			dest = append(dest, &inferenceCommitted)
 		}
 		dest = append(dest, &suggestedControlBasePath, &suggestedInferenceBasePath)
+	}
+	if routingCols.pendingReconcileDays {
+		dest = append(dest, &pendingReconcileDays)
 	}
 	err := row.Scan(dest...)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -267,6 +283,11 @@ func scanOperationWithRouting(row rowScanner, routingCols routingColumnSet) (mod
 	}
 	if op.ManualItems, err = decodeStringList(manualItems, "manual_items"); err != nil {
 		return model.UpgradeOperation{}, false, err
+	}
+	if routingCols.pendingReconcileDays {
+		if op.PendingReconcileDays, err = decodeStringList(pendingReconcileDays, "pending_reconcile_days"); err != nil {
+			return model.UpgradeOperation{}, false, err
+		}
 	}
 	// Only construction and Put input apply defaults. An existing row must
 	// carry an actual JSON object: an empty string here is corruption, not an
@@ -473,6 +494,11 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	// replaces every column, so the stored value is carried forward: erasing it
 	// would leave a Managed verify row with a stage no reader could re-check.
 	op.Verification = current.Verification
+	if op.Stage == model.UpgradeStageRolledBack {
+		op.PendingReconcileDays = nil
+	} else if len(op.PendingReconcileDays) == 0 && len(current.PendingReconcileDays) > 0 {
+		op.PendingReconcileDays = append([]string(nil), current.PendingReconcileDays...)
+	}
 	if op.ControlBasePath == "" && !op.RoutingCommitted {
 		op.ControlBasePath = current.ControlBasePath
 		op.InferenceBasePath = current.InferenceBasePath
@@ -565,6 +591,14 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 	if err != nil {
 		return err
 	}
+	pendingDaysSlice := op.PendingReconcileDays
+	if pendingDaysSlice == nil {
+		pendingDaysSlice = []string{}
+	}
+	pendingDaysJSON, err := json.Marshal(pendingDaysSlice)
+	if err != nil {
+		return err
+	}
 	var rollbackImage, rollbackImageSource, rollbackImageForm any
 	var rollbackStatusURL, rollbackFingerprint any
 	var rollbackObservedAtMS any
@@ -634,9 +668,10 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 			op.ControlBasePath, op.InferenceBasePath, boolInt(op.SharedEntry), boolInt(op.RoutingCommitted), boolInt(op.InferenceCommitted),
 			op.SuggestedControlBasePath, op.SuggestedInferenceBasePath,
 			op.CreatedAtMS, op.UpdatedAtMS)
-		return err
-	}
-	if routingCols.present {
+		if err != nil {
+			return err
+		}
+	} else if routingCols.present {
 		_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
 			id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
@@ -687,9 +722,11 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 			op.ControlBasePath, op.InferenceBasePath, boolInt(op.SharedEntry), boolInt(op.RoutingCommitted),
 			op.SuggestedControlBasePath, op.SuggestedInferenceBasePath,
 			op.CreatedAtMS, op.UpdatedAtMS)
-		return err
-	}
-	_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
 		id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
 		reconciliation, verification, manual_items, error_code, error_detail,
@@ -721,14 +758,21 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		rollback_observed_at_ms = excluded.rollback_observed_at_ms,
 		created_at_ms = excluded.created_at_ms,
 		updated_at_ms = excluded.updated_at_ms`,
-		string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
-		nullString(op.SourceRoot),
-		nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
-		nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(verification), string(manualItems),
-		nullString(op.ErrorCode), nullString(op.ErrorDetail),
-		rollbackImage, rollbackImageSource, rollbackImageForm,
-		rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
-		op.CreatedAtMS, op.UpdatedAtMS)
+			string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
+			nullString(op.SourceRoot),
+			nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
+			nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(verification), string(manualItems),
+			nullString(op.ErrorCode), nullString(op.ErrorDetail),
+			rollbackImage, rollbackImageSource, rollbackImageForm,
+			rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
+			op.CreatedAtMS, op.UpdatedAtMS)
+		if err != nil {
+			return err
+		}
+	}
+	if routingCols.pendingReconcileDays {
+		_, err = writer.ExecContext(ctx, `update `+tableName+` set pending_reconcile_days = ? where id = 1`, string(pendingDaysJSON))
+	}
 	return err
 }
 
@@ -745,14 +789,7 @@ func getInTx(ctx context.Context, tx Tx) (model.UpgradeOperation, bool, error) {
 	if err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
-	cols := selectColumns
-	if routingCols.present {
-		if routingCols.inferenceCommitted {
-			cols = selectColumnsWithRouting
-		} else {
-			cols = selectColumnsWithLegacyRouting
-		}
-	}
+	cols := selectColumnsFor(routingCols)
 	return scanOperationWithRouting(tx.QueryRowContext(ctx, `select `+cols+` from `+tableName+` where id = 1`), routingCols)
 }
 
@@ -1109,23 +1146,204 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if err := requireMutableStage(current); err != nil {
 		return err
 	}
-	// The report is assigned before validation, so the row that is validated is
-	// the row this statement writes: checking the replaced value only proves the
-	// record the write discards.
+	routingCols, err := queryerRoutingColumns(ctx, tx)
+	if err != nil {
+		return err
+	}
+	// The report and cleared pending dates are assigned before validation, so
+	// the row that is validated is the row this statement writes, and pending
+	// reconciliation dates clear atomically alongside the recorded evidence.
 	current.Reconciliation = report
+	current.PendingReconcileDays = []string{}
 	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
 	expectedRevision := current.Revision
 	current.Revision = expectedRevision + 1
 	if err := current.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
-	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set reconciliation = ?, revision = ?, updated_at_ms = ?
-		where id = 1 and revision = ?`, string(report), current.Revision, current.UpdatedAtMS, expectedRevision)
+	var result sql.Result
+	if routingCols.pendingReconcileDays {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set reconciliation = ?, pending_reconcile_days = '[]', revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`, string(report), current.Revision, current.UpdatedAtMS, expectedRevision)
+	} else {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set reconciliation = ?, revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`, string(report), current.Revision, current.UpdatedAtMS, expectedRevision)
+	}
 	if err != nil {
 		return err
 	}
 	return revisionGuard(result, expectedRevision)
+}
+
+// RecordPendingReconcileDays durably persists unacknowledged reconciliation UTC
+// dates on the operation row without advancing its stage or overwriting an
+// earlier recorded reconciliation payload.
+func (r *Repository) RecordPendingReconcileDays(ctx context.Context, days []string) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated, err := RecordPendingReconcileDaysTx(ctx, tx, days)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return updated, nil
+}
+
+// RecordPendingReconcileDaysTx stores unacknowledged reconciliation UTC dates
+// inside the caller's transaction behind the revision CAS. Clearing pending
+// dates is never done here; only RecordReconciliationTx and RecordRollback may
+// clear them atomically with their verdict.
+func RecordPendingReconcileDaysTx(ctx context.Context, tx Tx, days []string) (model.UpgradeOperation, error) {
+	normalized := make([]string, 0, len(days))
+	for _, raw := range days {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return model.UpgradeOperation{}, fmt.Errorf("%w: pending reconciliation date is empty", ErrInvalidRow)
+		}
+		normalized = append(normalized, trimmed)
+	}
+	slices.Sort(normalized)
+	normalized = slices.Compact(normalized)
+	if len(normalized) == 0 {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: pending reconciliation dates must not be empty", ErrInvalidRow)
+	}
+	routingCols, err := queryerRoutingColumns(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !routingCols.pendingReconcileDays {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: pending_reconcile_days column is missing", ErrInvalidRow)
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to record pending reconciliation dates on", ErrInvalidRow)
+	}
+	if err := requireMutableStage(current); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current.PendingReconcileDays = normalized
+	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	payload, err := json.Marshal(current.PendingReconcileDays)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set pending_reconcile_days = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`, string(payload), current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// InvalidateReconciliation atomically resets an uncompleted, un-rolled-back
+// operation row back to copy_in with only source_copy retained, empty
+// reconciliation state, and the unwaivable reconciliation error recorded.
+func (r *Repository) InvalidateReconciliation(ctx context.Context, errorCode, errorDetail string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := InvalidateReconciliationTx(ctx, tx, errorCode, errorDetail); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// InvalidateReconciliationTx is the transactional form of
+// InvalidateReconciliation.
+func InvalidateReconciliationTx(ctx context.Context, tx Tx, errorCode, errorDetail string) (model.UpgradeOperation, error) {
+	if strings.TrimSpace(errorCode) == "" {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
+	}
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	routingCols, err := queryerRoutingColumns(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := getInTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to invalidate reconciliation on", ErrInvalidRow)
+	}
+	if err := requireMutableStage(current); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	highWater := current.HighWater()
+	if !current.HasDomain(model.UpgradeDomainSourceCopy) || highWater == model.UpgradeStagePreflight {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: reconciliation invalidation requires a copied-in operation row", ErrInvalidRow)
+	}
+	if highWater != model.UpgradeStageCopyIn && highWater != model.UpgradeStageReconcile {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: reconciliation invalidation is not permitted past reconcile (high-water %q)", ErrStageRegression, highWater)
+	}
+	current.Stage = model.UpgradeStageCopyIn
+	current.LastForwardStage = model.UpgradeStageCopyIn
+	current.DomainsDone = []string{model.UpgradeDomainSourceCopy}
+	current.Reconciliation = json.RawMessage("{}")
+	current.PendingReconcileDays = []string{}
+	current.ErrorCode = strings.TrimSpace(errorCode)
+	current.ErrorDetail = strings.TrimSpace(errorDetail)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	domainsPayload, err := json.Marshal(current.DomainsDone)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	var result sql.Result
+	if routingCols.pendingReconcileDays {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, last_forward_stage = ?, domains_done = ?, reconciliation = '{}',
+				pending_reconcile_days = '[]', error_code = ?, error_detail = ?,
+				revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(current.Stage), string(current.LastForwardStage), string(domainsPayload),
+			current.ErrorCode, nullString(current.ErrorDetail),
+			current.Revision, current.UpdatedAtMS, expectedRevision)
+	} else {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, last_forward_stage = ?, domains_done = ?, reconciliation = '{}',
+				error_code = ?, error_detail = ?,
+				revision = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(current.Stage), string(current.LastForwardStage), string(domainsPayload),
+			current.ErrorCode, nullString(current.ErrorDetail),
+			current.Revision, current.UpdatedAtMS, expectedRevision)
+	}
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
 }
 
 // RecordErrorTx records the typed refusal inside the caller's transaction, so a
@@ -1413,8 +1631,13 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 		// parked the row at failed, and preflight never copied a root at all.
 		return current, fmt.Errorf("%w: %q -> %q", ErrStageRegression, current.Stage, model.UpgradeStageRolledBack)
 	}
+	routingCols, err := queryerRoutingColumns(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	current.Stage = model.UpgradeStageRolledBack
 	current.Rollback = &evidence
+	current.PendingReconcileDays = nil
 	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
@@ -1431,14 +1654,27 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	// The verdict carries the revision this transaction read, so a row another
 	// writer advanced since is reported as ErrConflict instead of being
 	// re-described as abandoned.
-	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
-			rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
-			revision = ?, created_at_ms = ?, updated_at_ms = ?
-		where id = 1 and revision = ?`,
-		string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
-		evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
-		current.Revision, current.CreatedAtMS, current.UpdatedAtMS, expectedRevision)
+	var result sql.Result
+	if routingCols.pendingReconcileDays {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
+				rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
+				pending_reconcile_days = '[]',
+				revision = ?, created_at_ms = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
+			evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
+			current.Revision, current.CreatedAtMS, current.UpdatedAtMS, expectedRevision)
+	} else {
+		result, err = tx.ExecContext(ctx, `update `+tableName+`
+			set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
+				rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
+				revision = ?, created_at_ms = ?, updated_at_ms = ?
+			where id = 1 and revision = ?`,
+			string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
+			evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
+			current.Revision, current.CreatedAtMS, current.UpdatedAtMS, expectedRevision)
+	}
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}

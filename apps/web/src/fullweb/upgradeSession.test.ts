@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  clearCommittedUpgradeStatus,
+  rememberCommittedUpgradeStatus,
+  rememberedCommittedUpgradeStatus,
   rememberedUpgradeCredential,
+  UPGRADE_COMMITTED_STATUS_KEY,
   verifyUpgradeCredential,
   UPGRADE_AUTH_PATH,
 } from './upgradeSession';
@@ -146,6 +150,48 @@ describe('existing Manager credential provenance', () => {
     await expect(verifyUpgradeCredential('old-key', signal, 'a'.repeat(64))).rejects.toMatchObject({
       reason: 'changed',
     });
+    // Server-validated 200 OK renewals may bridge source_revision from fallback to live worker
+    // while returning a validated 64-char lowercase hex operation_revision.
+    fetcher.mockResolvedValue(
+      Response.json({
+        contract_version: 'cpamp.upgrade-auth.v1',
+        authenticated: true,
+        source_revision: 'b'.repeat(64),
+        operation_revision: 'c'.repeat(64),
+        status: 'unsupported_upgrade',
+        migration_available: false,
+        expires_in_seconds: 60,
+      })
+    );
+    await expect(verifyUpgradeCredential('old-key', signal, 'a'.repeat(64))).resolves.toEqual({
+      revision: 'b'.repeat(64),
+      operationRevision: 'c'.repeat(64),
+      observation: 'unsupported_upgrade',
+    });
+    expect(fetcher).toHaveBeenLastCalledWith(
+      UPGRADE_AUTH_PATH,
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-CPAMP-Upgrade-Source': 'a'.repeat(64),
+        }),
+      })
+    );
+    for (const invalidOpRev of ['', 'short', 'C'.repeat(64), 'g'.repeat(64), 123, null]) {
+      fetcher.mockResolvedValue(
+        Response.json({
+          contract_version: 'cpamp.upgrade-auth.v1',
+          authenticated: true,
+          source_revision: 'b'.repeat(64),
+          operation_revision: invalidOpRev,
+          status: 'unsupported_upgrade',
+          migration_available: false,
+          expires_in_seconds: 60,
+        })
+      );
+      await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+        reason: 'network',
+      });
+    }
     fetcher.mockResolvedValue(
       Response.json(
         {
@@ -226,5 +272,168 @@ describe('existing Manager credential provenance', () => {
         expectedOrigin: undefined,
       });
     }
+  });
+
+  it('persists non-secret committed routing metadata in sessionStorage without credentials or execution state', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+
+    rememberCommittedUpgradeStatus({
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'complete',
+      stageKnown: true,
+      nextAction: 'complete',
+      domainsDone: ['source_copy'],
+      sourceKind: 'legacy',
+      sourceVersion: '1.9.0',
+      reconciliation: {},
+      manualItems: [],
+      targetMode: 'external',
+      routing: {
+        configured: true,
+        committed: true,
+        controlBasePath: '/ctl-next',
+        inferenceBasePath: '',
+        sharedEntry: false,
+        externalBaseUrl: 'https://user:pass@cpa.example:8317/base?token=leak#frag',
+      },
+      accessInfo: {
+        mode: 'connect_external',
+        managementBasePath: '/ctl-next',
+        inferenceBasePath: '',
+        externalBaseUrl: 'https://user:pass@cpa.example:8317/base?token=leak',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: {
+        available: true,
+        running: true,
+        action: 'activate',
+        managedAvailable: false,
+      },
+    });
+
+    const raw = store.get(UPGRADE_COMMITTED_STATUS_KEY);
+    expect(raw).toBeTruthy();
+    expect(raw).not.toContain('pass');
+    expect(raw).not.toContain('token=leak');
+    expect(raw).not.toContain('"execution"');
+
+    const hydrated = rememberedCommittedUpgradeStatus();
+    expect(hydrated?.controlBasePath).toBe('/ctl-next');
+    expect(hydrated?.snapshot.stage).toBe('complete');
+    expect((hydrated?.snapshot.routing as Record<string, unknown>).externalBaseUrl).toBe(
+      'https://cpa.example:8317/base'
+    );
+
+    clearCommittedUpgradeStatus();
+    expect(rememberedCommittedUpgradeStatus()).toBeUndefined();
+  });
+
+  it('ignores uncommitted, incomplete, or unsafe committed status snapshots', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+
+    rememberCommittedUpgradeStatus({
+      stage: 'verify',
+      stageKnown: true,
+      routing: { committed: true, controlBasePath: '/ctl-next' },
+    });
+    expect(store.size).toBe(0);
+
+    rememberCommittedUpgradeStatus({
+      stage: 'complete',
+      stageKnown: true,
+      routing: { committed: true, controlBasePath: '//evil.example/ctl' },
+    });
+    expect(store.size).toBe(0);
+
+    store.set(
+      UPGRADE_COMMITTED_STATUS_KEY,
+      JSON.stringify({
+        controlBasePath: '/other',
+        snapshot: {
+          stage: 'complete',
+          stageKnown: true,
+          routing: { committed: true, controlBasePath: '/ctl-next' },
+        },
+      })
+    );
+    expect(rememberedCommittedUpgradeStatus()).toBeUndefined();
+  });
+
+  it('scopes persisted committed status to revision and preserves or resets activationRequested explicitly', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+
+    const snapshot = {
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'complete',
+      stageKnown: true,
+      nextAction: 'complete',
+      domainsDone: ['source_copy'],
+      sourceKind: 'cpamp_1x',
+      sourceVersion: 'v1.14.10',
+      reconciliation: {},
+      manualItems: [],
+      targetMode: 'managed',
+      routing: {
+        configured: true,
+        committed: true,
+        controlBasePath: '/ctl-next',
+        inferenceBasePath: '/inf-next',
+        sharedEntry: false,
+      },
+    };
+
+    const revA = 'a'.repeat(64);
+    const revB = 'b'.repeat(64);
+    rememberCommittedUpgradeStatus(snapshot, { revision: revA, activationRequested: true });
+
+    // Matching revision hydrates activationRequested: true.
+    expect(rememberedCommittedUpgradeStatus(revA)).toMatchObject({
+      controlBasePath: '/ctl-next',
+      revision: revA,
+      activationRequested: true,
+    });
+
+    // Subsequent status write for the same revision preserves activationRequested.
+    rememberCommittedUpgradeStatus(snapshot, { revision: revA });
+    expect(rememberedCommittedUpgradeStatus(revA)?.activationRequested).toBe(true);
+
+    // Explicit reset clears activationRequested to false.
+    rememberCommittedUpgradeStatus(snapshot, { revision: revA, activationRequested: false });
+    expect(rememberedCommittedUpgradeStatus(revA)?.activationRequested).toBe(false);
+
+    // New revision does not inherit activationRequested from previous revision, and mismatched read evicts storage.
+    rememberCommittedUpgradeStatus(snapshot, { revision: revA, activationRequested: true });
+    expect(rememberedCommittedUpgradeStatus(revB)).toBeUndefined();
+    expect(store.has(UPGRADE_COMMITTED_STATUS_KEY)).toBe(false);
+
+    // Legacy stored snapshot without revision is evicted when an expectedRevision is supplied.
+    rememberCommittedUpgradeStatus(snapshot);
+    expect(rememberedCommittedUpgradeStatus()).toBeDefined();
+    expect(rememberedCommittedUpgradeStatus(revB)).toBeUndefined();
+    expect(store.has(UPGRADE_COMMITTED_STATUS_KEY)).toBe(false);
+
+    // Changing revision on write does not inherit prior activationRequested.
+    rememberCommittedUpgradeStatus(snapshot, { revision: revA, activationRequested: true });
+    rememberCommittedUpgradeStatus(snapshot, { revision: revB });
+    expect(rememberedCommittedUpgradeStatus(revB)?.activationRequested).toBeUndefined();
   });
 });

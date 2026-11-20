@@ -15,17 +15,17 @@ const freshExternalPermitPath = "/run/cpamp-a3/permit.json"
 const freshExternalPrivateProfile = "plan77-private-fresh-external"
 
 type freshExternalPermit struct {
-	Scope          string `json:"scope"`
-	RunID          string `json:"runId"`
-	AdmissionID    string `json:"admissionId"`
-	InstallationID string `json:"installationId"`
-	Generation     string `json:"generation"`
-	DatabasePath   string `json:"databasePath"`
-	OperationID    string `json:"operationId"`
-	IssuedAtMS     int64  `json:"issuedAtMs"`
-	ExpiresAtMS    int64  `json:"expiresAtMs"`
+	Scope            string `json:"scope"`
+	RunID            string `json:"runId"`
+	AdmissionID      string `json:"admissionId"`
+	InstallationID   string `json:"installationId"`
+	Generation       string `json:"generation"`
+	DatabasePath     string `json:"databasePath"`
+	OperationID      string `json:"operationId"`
+	IssuedAtMS       int64  `json:"issuedAtMs"`
+	ExpiresAtMS      int64  `json:"expiresAtMs"`
 	ExpectedRevision uint64 `json:"expectedRevision"`
-	IntentDigest string `json:"intentDigest"`
+	IntentDigest     string `json:"intentDigest"`
 }
 
 func (p freshExternalPermit) valid(op bootstrap.FreshOperation, now time.Time) bool {

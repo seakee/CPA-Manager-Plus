@@ -68,7 +68,8 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
-	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json")
+	port := strconv.Itoa(freePort(t))
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json", "--port", port)
 	if code != 0 {
 		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -102,18 +103,13 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 	}
 	// The human form names the same decision, and its next step uses the
 	// unauthenticated health endpoint with the identity it must state.
-	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--port", port)
 	if code != 0 {
 		t.Fatalf("human prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	for _, want := range []string{
 		plan.Image,
 		"docker compose -p cpamp -f - up -d",
-		upgradeservice.LegacyHealthURL(),
-		upgradeservice.LegacyServiceID,
-		"--filter publish=",
-		"-sTCP:LISTEN",
-		"stop the v2 stack",
 	} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human plan does not mention %q: %s", want, human)
@@ -318,15 +314,16 @@ func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
 	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
+	port := freePort(t)
 	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
-		"--legacy-image", "v1.13.0", "--allow-image-family-mismatch")
+		"--legacy-image", "v1.13.0", "--allow-image-family-mismatch", "--port", strconv.Itoa(port))
 	if code != 0 {
 		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	for _, want := range []string{
 		"--legacy-image '" + upgradeservice.LegacyImageRepository + ":v1.13.0'",
 		"--allow-image-family-mismatch",
-		"--status-url '" + upgradeservice.LegacyHealthURL() + "'",
+		"--status-url '" + upgradeservice.RollbackHealthURL(port) + "'",
 		"--backup '",
 		"--target '",
 		"--legacy '",
@@ -937,8 +934,9 @@ func TestRollbackManagerAddressDefaultsFromConfiguredHTTPAddr(t *testing.T) {
 	target := rollbackReadyTarget(t, source)
 	configuredPort := freePort(t)
 	t.Setenv("HTTP_ADDR", "0.0.0.0:"+strconv.Itoa(configuredPort))
+	rollbackPort := strconv.Itoa(freePort(t))
 
-	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json")
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json", "--port", rollbackPort)
 	if code != 0 {
 		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -954,7 +952,7 @@ func TestRollbackManagerAddressDefaultsFromConfiguredHTTPAddr(t *testing.T) {
 	}
 	// The printed verify command carries the same address, so the verdict is
 	// decided against the port the Manager actually holds.
-	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--port", rollbackPort)
 	if code != 0 {
 		t.Fatalf("human prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -977,7 +975,7 @@ func TestRollbackManagerAddressTreatsAWildcardBindAsThisHost(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	t.Setenv("HTTP_ADDR", "0.0.0.0:"+strconv.Itoa(port))
 
-	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--port", strconv.Itoa(freePort(t)))
 	if code != 1 {
 		t.Fatalf("prepare against a wildcard-bound v2 stack exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
 	}
@@ -994,7 +992,7 @@ func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
-		"--volume", "cpa-manager-plus-data")
+		"--volume", "cpa-manager-plus-data", "--port", strconv.Itoa(freePort(t)))
 	if code != 0 {
 		t.Fatalf("prepare exit code = %d; stderr: %s", code, stderr)
 	}

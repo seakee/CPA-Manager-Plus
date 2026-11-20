@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,8 +24,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	keyrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	settingrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -1966,6 +1968,248 @@ func TestCompletedManagedUpgradeSeedsDesiredRunningOnceAndExternalFencesReconcil
 	if _, extFound, extErr := extDesiredStore.LoadEmbeddedRuntimeDesiredState(ctx); extErr != nil || extFound {
 		t.Fatalf("External desired state = (found=%v, err=%v), want absent", extFound, extErr)
 	}
+}
+
+type syncCanonicalLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncCanonicalLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncCanonicalLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestCompletedUpgradeFastInitialIngressConvergence(t *testing.T) {
+	prevDist := testUpgradeFullWebDist
+	testUpgradeFullWebDist = fstest.MapFS{
+		"index.html":               {Data: []byte("<!doctype html><html><head><script type=\"module\" src=\"./assets/index-AbCd1234.js\"></script><script>__CPAMP_ROUTING_CONTEXT__</script></head><body><div id=\"root\"></div></body></html>")},
+		"assets/index-AbCd1234.js": {Data: []byte("console.log('cpamp-upgrade-test');")},
+	}
+	t.Cleanup(func() { testUpgradeFullWebDist = prevDist })
+
+	st, cfg, _ := seedCompletedManagedUpgradeStore(t, "/cpamp-admin", "/cpamp-api")
+	serverApp := httpapi.New(cfg, st, nil)
+	mgrTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverApp.Handler().ServeHTTP(w, r)
+	}))
+	defer mgrTS.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "http://"+controlAddr)
+	t.Setenv("CPAMP_PUBLIC_ORIGIN", "")
+
+	var logBuf syncCanonicalLogBuffer
+	prevLogOut := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(prevLogOut) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := attachCompletedUpgradeRouting(ctx, cfg, st, serverApp, func(context.Context) bool { return true }); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "publish upgraded routing state to ingress") {
+		t.Fatalf("unexpected startup error logged while Ingress was not yet listening: %s", logBuf.String())
+	}
+
+	var (
+		stateMu        sync.Mutex
+		currentState   freshrouting.State
+		publishedOnce  sync.Once
+		publishedReady = make(chan freshrouting.State, 1)
+	)
+	controlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != freshrouting.InternalPath {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			stateMu.Lock()
+			cur := currentState
+			stateMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cur)
+		case http.MethodPut:
+			var requested freshrouting.State
+			if decErr := json.NewDecoder(r.Body).Decode(&requested); decErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			authRes, authErr := mgrTS.Client().Get(mgrTS.URL + freshrouting.AuthorityPath)
+			if authErr != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			var authReply freshAuthorityReply
+			decErr := json.NewDecoder(authRes.Body).Decode(&authReply)
+			_ = authRes.Body.Close()
+			if authRes.StatusCode != http.StatusOK || decErr != nil || authReply.State != requested {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			stateMu.Lock()
+			currentState = requested
+			stateMu.Unlock()
+			publishedOnce.Do(func() {
+				publishedReady <- requested
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(requested)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	time.Sleep(80 * time.Millisecond)
+	controlLn, err := net.Listen("tcp", controlAddr)
+	if err != nil {
+		t.Fatalf("bind delayed Ingress control listener on %s: %v", controlAddr, err)
+	}
+	controlSrv := &http.Server{Handler: controlHandler}
+	defer func() { _ = controlSrv.Close() }()
+	ingressStartedAt := time.Now()
+	go func() { _ = controlSrv.Serve(controlLn) }()
+
+	select {
+	case got := <-publishedReady:
+		elapsed := time.Since(ingressStartedAt)
+		if elapsed >= 200*time.Millisecond {
+			t.Fatalf("route publication took %s after Ingress started, want < 200ms", elapsed)
+		}
+		if got.Target != "/cpamp-admin" || got.InferenceTarget != "/cpamp-api" || !got.Committed || !got.InferenceCommitted {
+			t.Fatalf("unexpected published routing state: %+v", got)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for fast initial Ingress route publication")
+	}
+}
+
+func TestCompletedUpgradeCrossSiteMutationEnforcesSchemeAndPublicOrigin(t *testing.T) {
+	t.Run("configured_https_public_origin_rejects_http_scheme_and_allows_https", func(t *testing.T) {
+		t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+		t.Setenv("CPAMP_PUBLIC_ORIGIN", "https://example.com")
+		st, cfg, adminKey := seedCompletedManagedUpgradeStore(t, "/upg-console", "")
+		serverApp := httpapi.New(cfg, st, nil)
+		if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, func(context.Context) bool { return true }); err != nil {
+			t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+		}
+		ts := httptest.NewServer(serverApp.Handler())
+		defer ts.Close()
+
+		// Cross-scheme Origin: http://example.com must be rejected with 403 origin_rejected.
+		crossSchemeReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/upg-console/api/v2/installation/access/completion", bytes.NewBufferString(`{"inferenceBasePath":"/upg-api","sharedEntry":false}`))
+		crossSchemeReq.Host = "example.com"
+		crossSchemeReq.Header.Set("Authorization", "Bearer "+adminKey)
+		crossSchemeReq.Header.Set("Origin", "http://example.com")
+		crossSchemeRes, err := http.DefaultClient.Do(crossSchemeReq)
+		if err != nil {
+			t.Fatalf("cross-scheme POST completion: %v", err)
+		}
+		crossBody, _ := io.ReadAll(crossSchemeRes.Body)
+		_ = crossSchemeRes.Body.Close()
+		if crossSchemeRes.StatusCode != http.StatusForbidden || !strings.Contains(string(crossBody), "origin_rejected") {
+			t.Fatalf("cross-scheme POST completion = %d (%s), want 403 origin_rejected", crossSchemeRes.StatusCode, string(crossBody))
+		}
+
+		// Same-origin Origin: https://example.com passes the origin check and reaches driver availability (503).
+		sameOriginReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/upg-console/api/v2/installation/access/completion", bytes.NewBufferString(`{"inferenceBasePath":"/upg-api","sharedEntry":false}`))
+		sameOriginReq.Host = "example.com"
+		sameOriginReq.Header.Set("Authorization", "Bearer "+adminKey)
+		sameOriginReq.Header.Set("Origin", "https://example.com")
+		sameOriginRes, err := http.DefaultClient.Do(sameOriginReq)
+		if err != nil {
+			t.Fatalf("same-origin POST completion: %v", err)
+		}
+		sameBody, _ := io.ReadAll(sameOriginRes.Body)
+		_ = sameOriginRes.Body.Close()
+		if sameOriginRes.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("same-origin POST completion without driver = %d (%s), want 503", sameOriginRes.StatusCode, string(sameBody))
+		}
+	})
+
+	t.Run("end_to_end_completion_allows_matching_public_origin_and_rejects_cross_scheme", func(t *testing.T) {
+		st, cfg, adminKey := seedCompletedManagedUpgradeStore(t, "/upg-console", "")
+		var mgrURL atomic.Value
+		mgrURL.Store("")
+		ingress := newUpgradeIngressCallbackHarness(t, func() string { return mgrURL.Load().(string) })
+		t.Setenv("CPAMP_INGRESS_CONTROL_URL", ingress.control.URL)
+		t.Setenv("CPAMP_PUBLIC_ORIGIN", ingress.public.URL)
+
+		serverApp := httpapi.New(cfg, st, nil)
+		var handler atomic.Value
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h, ok := handler.Load().(http.Handler); ok && h != nil {
+				h.ServeHTTP(w, r)
+				return
+			}
+			serverApp.Handler().ServeHTTP(w, r)
+		}))
+		defer ts.Close()
+		mgrURL.Store(ts.URL)
+
+		if err := attachCompletedUpgradeRouting(context.Background(), cfg, st, serverApp, func(context.Context) bool { return true }); err != nil {
+			t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+		}
+		handler.Store(serverApp.Handler())
+
+		crossSchemeOrigin := strings.Replace(ingress.public.URL, "http://", "https://", 1)
+		crossReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/upg-console/api/v2/installation/access/completion", bytes.NewBufferString(`{"inferenceBasePath":"/upg-api","sharedEntry":false}`))
+		crossReq.Host = strings.TrimPrefix(ingress.public.URL, "http://")
+		crossReq.Header.Set("Authorization", "Bearer "+adminKey)
+		crossReq.Header.Set("Origin", crossSchemeOrigin)
+		crossRes, err := http.DefaultClient.Do(crossReq)
+		if err != nil {
+			t.Fatalf("cross-scheme POST completion: %v", err)
+		}
+		crossBody, _ := io.ReadAll(crossRes.Body)
+		_ = crossRes.Body.Close()
+		if crossRes.StatusCode != http.StatusForbidden || !strings.Contains(string(crossBody), "origin_rejected") {
+			t.Fatalf("cross-scheme POST completion = %d (%s), want 403 origin_rejected", crossRes.StatusCode, string(crossBody))
+		}
+
+		sameReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/upg-console/api/v2/installation/access/completion", bytes.NewBufferString(`{"inferenceBasePath":"/upg-api","sharedEntry":false}`))
+		sameReq.Header.Set("Authorization", "Bearer "+adminKey)
+		sameReq.Header.Set("Origin", ingress.public.URL)
+		sameRes, err := http.DefaultClient.Do(sameReq)
+		if err != nil {
+			t.Fatalf("same-origin POST completion: %v", err)
+		}
+		sameBody, _ := io.ReadAll(sameRes.Body)
+		_ = sameRes.Body.Close()
+		if sameRes.StatusCode != http.StatusOK {
+			t.Fatalf("same-origin POST completion = %d (%s), want 200", sameRes.StatusCode, string(sameBody))
+		}
+	})
+
+	t.Run("fallback_without_public_origin_enforces_request_scheme", func(t *testing.T) {
+		u := &upgradeCanonicalServer{}
+		httpReq := httptest.NewRequest(http.MethodPost, "http://example.com/upg-console/api/v2/installation/access/completion", nil)
+		httpReq.Header.Set("Origin", "https://example.com")
+		if !u.rejectUpgradeCrossSiteMutation(httpReq) {
+			t.Fatal("expected http request with https Origin to be rejected")
+		}
+		httpSame := httptest.NewRequest(http.MethodPost, "http://example.com/upg-console/api/v2/installation/access/completion", nil)
+		httpSame.Header.Set("Origin", "http://example.com")
+		if u.rejectUpgradeCrossSiteMutation(httpSame) {
+			t.Fatal("expected same-scheme same-host Origin to be allowed")
+		}
+	})
 }
 
 func TestCompletedManagedUpgradeFencesForeignCPAConnectionPutAndReenablesCollection(t *testing.T) {

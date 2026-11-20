@@ -68,9 +68,12 @@ type fakeCPA struct {
 	// listCalls counts credential list requests, and listFilters records the
 	// `?name=` filter of each, so a test can prove the run reads one entry per
 	// credential rather than the whole inventory per credential.
-	listCalls   int
-	listFilters []string
-	server      *httptest.Server
+	listCalls              int
+	listFilters            []string
+	transformOnUpload      func(name string, raw []byte) []byte
+	transformOnStatusPatch func(name string, current []byte, disabled bool) []byte
+	statusPatchCount       int
+	server                 *httptest.Server
 }
 
 func newFakeCPA(t *testing.T, auth string) *fakeCPA {
@@ -211,12 +214,16 @@ func (c *fakeCPA) uploadCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CPA derives the listed type from the stored file, so the fake does too.
+	c.mu.Lock()
+	storedBytes := body
+	if c.transformOnUpload != nil {
+		storedBytes = c.transformOnUpload(name, body)
+	}
 	var stored struct {
 		Type string `json:"type"`
 	}
-	_ = json.Unmarshal(body, &stored)
-	c.mu.Lock()
-	c.credentials[name] = body
+	_ = json.Unmarshal(storedBytes, &stored)
+	c.credentials[name] = storedBytes
 	if c.credentialTypes[name] == "" {
 		c.credentialTypes[name] = stored.Type
 	}
@@ -239,8 +246,12 @@ func (c *fakeCPA) patchStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.Lock()
 	c.statusPatched = true
+	c.statusPatchCount++
 	if !c.ignoreStatusPatch {
 		c.disabled[request.Name] = request.Disabled
+		if c.transformOnStatusPatch != nil {
+			c.credentials[request.Name] = c.transformOnStatusPatch(request.Name, c.credentials[request.Name], request.Disabled)
+		}
 	}
 	c.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
@@ -2646,6 +2657,299 @@ func TestProviderSectionReadBackRejectsGroupAuthIndexWithoutCPAAtPrecondition(t 
 			item := itemByName(t, summary, providerSectionItemName("api-keys.openai-compatibility"))
 			if item.Outcome != freshstore.AdoptionFailed || item.Reason != "verify_mismatch" {
 				t.Fatalf("post-write read-back: got outcome=%s reason=%s, want failed/verify_mismatch", item.Outcome, item.Reason)
+			}
+		})
+	}
+}
+
+// simulateCPAV8CredentialPersist reproduces CPA 8.0.55's on-disk credential
+// normalization (`sdk/auth/filestore.go:100-119`, `metadata_keys.go:10-49`,
+// `synthesizer/file.go:148-193`, provider `SaveTokenToFile`): pretty-printed
+// sorted JSON, explicit `"disabled"` boolean, canonical snake_case metadata
+// aliases, and provider empty-string / fixed defaults when absent.
+func simulateCPAV8CredentialPersist(raw []byte, forceDisabled *bool) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return raw
+	}
+	for _, pair := range cpaV8CredentialMetadataKeyAliases {
+		if val, ok := obj[pair[0]]; ok {
+			if _, hasCanon := obj[pair[1]]; !hasCanon {
+				obj[pair[1]] = val
+			}
+			delete(obj, pair[0])
+		}
+	}
+	disabled := false
+	if b, ok := obj["disabled"].(bool); ok {
+		disabled = b
+	}
+	if forceDisabled != nil {
+		disabled = *forceDisabled
+	}
+	obj["disabled"] = disabled
+
+	if rawType, ok := obj["type"].(string); ok {
+		canon := strings.ToLower(strings.TrimSpace(rawType))
+		obj["type"] = canon
+		ensureEmpty := func(keys ...string) {
+			for _, k := range keys {
+				if _, exists := obj[k]; !exists {
+					obj[k] = ""
+				}
+			}
+		}
+		switch canon {
+		case "claude":
+			ensureEmpty("id_token", "access_token", "refresh_token", "last_refresh", "email", "expired")
+		case "codex":
+			ensureEmpty("id_token", "access_token", "refresh_token", "account_id", "last_refresh", "email", "expired")
+		case "xai":
+			ensureEmpty("access_token", "refresh_token")
+			if _, exists := obj["auth_kind"]; !exists {
+				obj["auth_kind"] = "oauth"
+			}
+		case "meta":
+			ensureEmpty("access_token")
+			if _, exists := obj["auth_kind"]; !exists {
+				obj["auth_kind"] = "oauth"
+			}
+		case "vertex":
+			sa, _ := obj["service_account"].(map[string]any)
+			if _, exists := obj["project_id"]; !exists {
+				p, _ := sa["project_id"].(string)
+				obj["project_id"] = p
+			}
+			if _, exists := obj["email"]; !exists {
+				e, _ := sa["client_email"].(string)
+				obj["email"] = e
+			}
+		case "kimi", "kimi-ai":
+			ensureEmpty("access_token", "refresh_token", "token_type")
+			if _, exists := obj["domain"]; !exists {
+				if canon == "kimi-ai" {
+					obj["domain"] = "kimi.ai"
+				} else {
+					obj["domain"] = "kimi.com"
+				}
+			}
+			if _, exists := obj["base_url"]; !exists {
+				if obj["domain"] == "kimi.ai" {
+					obj["base_url"] = "https://api.kimi.ai/coding"
+				} else {
+					obj["base_url"] = "https://api.kimi.com/coding"
+				}
+			}
+		}
+	}
+	if _, exists := obj["oauth_provider"]; !exists {
+		if portal, ok := obj["portal"].(string); ok && strings.TrimSpace(portal) != "" {
+			obj["oauth_provider"] = strings.ToLower(strings.TrimSpace(portal))
+		}
+	}
+	formatted, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return raw
+	}
+	return append(formatted, '\n')
+}
+
+func TestCredentialMigrationAcceptsNarrowCPAV8LosslessNormalizationAndPreservesUnknownFields(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{"config-version": 8}
+	sourceFiles := map[string]struct {
+		typ      string
+		disabled bool
+		raw      string
+	}{
+		"claude-norm.json": {
+			typ: "claude",
+			raw: `{"type":"Claude","access_token":"sk-ant-oat-1","refresh_token":"rt-1","request-retry":3,"proxy-url":"http://proxy.internal:8080","provider-specific-key":"keep-verbatim","custom_nested":{"tier":"max","quota":100}}`,
+		},
+		"codex-disabled.json": {
+			typ:      "codex",
+			disabled: true,
+			raw:      `{"type":"codex","access_token":"codex-access-1","account_id":"acct-42","disable-cooling":true,"excluded-models":["o1-preview"],"x_unknown_token":"opaque-secret"}`,
+		},
+		"kimi-norm.json": {
+			typ: "kimi-ai",
+			raw: `{"type":"kimi-ai","access_token":"kimi-tok","portal":"Kimi-Portal","tool-prefix-disabled":true}`,
+		},
+		"vertex-norm.json": {
+			typ: "vertex",
+			raw: `{"type":"vertex","service_account":{"project_id":"gcp-proj-1","client_email":"sa@gcp-proj-1.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"},"model-aliases":[{"from":"g1","to":"g2"}]}`,
+		},
+		"xai-meta-norm.json": {
+			typ: "xai",
+			raw: `{"type":"xai","access_token":"xai-tok","api-key":"xai-k","base-url":"https://api.x.ai/v1","fingerprint-profile":"chrome","request-scoped-errors":true}`,
+		},
+		"claude-redundant-alias.json": {
+			typ: "claude",
+			raw: `{"type":"claude","access_token":"sk-ant-oat-2","proxy-url":"http://proxy.internal:8080","proxy_url":"http://proxy.internal:8080"}`,
+		},
+	}
+	for name, entry := range sourceFiles {
+		source.credentials[name] = []byte(entry.raw)
+		source.credentialTypes[name] = entry.typ
+		source.disabled[name] = entry.disabled
+	}
+
+	destination := destinationFixture(t)
+	destination.transformOnUpload = func(_ string, raw []byte) []byte {
+		return simulateCPAV8CredentialPersist(raw, nil)
+	}
+	destination.transformOnStatusPatch = func(_ string, current []byte, disabled bool) []byte {
+		return simulateCPAV8CredentialPersist(current, &disabled)
+	}
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	for name, entry := range sourceFiles {
+		item := itemByName(t, summary, credentialItemName(name))
+		if item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("%s outcome = %s (reason=%q), want migrated", name, item.Outcome, item.Reason)
+		}
+		observed, ok := destination.credential(name)
+		if !ok {
+			t.Fatalf("destination missing %s", name)
+		}
+		if item.SourceSHA256 != digestSHA256([]byte(entry.raw)) {
+			t.Fatalf("%s SourceSHA256 = %s, want %s", name, item.SourceSHA256, digestSHA256([]byte(entry.raw)))
+		}
+		if item.DestinationSHA256 != digestSHA256(observed) {
+			t.Fatalf("%s DestinationSHA256 = %s, want observed %s", name, item.DestinationSHA256, digestSHA256(observed))
+		}
+		if item.SourceSHA256 == item.DestinationSHA256 {
+			t.Fatalf("%s digests matched despite CPA v8 normalization", name)
+		}
+	}
+
+	// Crash-retry before checkpoint settlement (empty summary, populated
+	// destination) recognizes the normalized destination documents and neither
+	// re-uploads nor re-patches disabled state.
+	uploadsBefore := len(destination.uploads)
+	patchesBefore := destination.statusPatchCount
+	rerunSummary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if len(destination.uploads) != uploadsBefore || destination.statusPatchCount != patchesBefore {
+		t.Fatalf("idempotent rerun wrote again: uploads %d->%d, statusPatches %d->%d",
+			uploadsBefore, len(destination.uploads), patchesBefore, destination.statusPatchCount)
+	}
+	for name := range sourceFiles {
+		if got := itemByName(t, rerunSummary, credentialItemName(name)); got.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("rerun %s = %+v, want migrated", name, got)
+		}
+	}
+}
+
+func TestCredentialMigrationRefusesSemanticChangesAndFieldLoss(t *testing.T) {
+	cases := []struct {
+		name           string
+		sourceType     string
+		sourceDisabled bool
+		sourceJSON     string
+		destJSON       string
+	}{
+		{
+			name:       "altered access_token",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"real-token-1"}`,
+			destJSON:   `{"type":"codex","access_token":"different-token","disabled":false}`,
+		},
+		{
+			name:       "non-empty source token blanked to empty string",
+			sourceType: "claude",
+			sourceJSON: `{"type":"claude","access_token":"sk-ant-1","refresh_token":"rt-keep"}`,
+			destJSON:   `{"type":"claude","access_token":"sk-ant-1","refresh_token":"","disabled":false}`,
+		},
+		{
+			name:       "non-empty source email blanked to empty string",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok","email":"ops@example.com"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","email":"","disabled":false}`,
+		},
+		{
+			name:       "unknown hyphenated field dropped",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok","provider-specific-key":"must-keep"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","disabled":false}`,
+		},
+		{
+			name:       "unknown hyphenated field renamed to snake_case",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok","provider-specific-key":"must-keep"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","provider_specific_key":"must-keep","disabled":false}`,
+		},
+		{
+			name:       "unknown nested field altered",
+			sourceType: "claude",
+			sourceJSON: `{"type":"claude","access_token":"tok","custom_meta":{"tier":"pro"}}`,
+			destJSON:   `{"type":"claude","access_token":"tok","custom_meta":{"tier":"free"},"disabled":false}`,
+		},
+		{
+			name:       "unexpected extra field added on destination",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","unexpected_extra":"added","disabled":false}`,
+		},
+		{
+			name:       "non-empty provider field forged when absent at source",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","account_id":"forged-acct","disabled":false}`,
+		},
+		{
+			name:       "enabled credential returned with disabled true in JSON",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok"}`,
+			destJSON:   `{"type":"codex","access_token":"tok","disabled":true}`,
+		},
+		{
+			name:           "disabled credential rewritten with disabled false after status patch",
+			sourceType:     "codex",
+			sourceDisabled: true,
+			sourceJSON:     `{"type":"codex","access_token":"tok","disabled":true}`,
+			destJSON:       `{"type":"codex","access_token":"tok","disabled":false}`,
+		},
+		{
+			name:       "provider type changed",
+			sourceType: "codex",
+			sourceJSON: `{"type":"codex","access_token":"tok"}`,
+			destJSON:   `{"type":"claude","access_token":"tok","disabled":false}`,
+		},
+		{
+			name:       "conflicting legacy and canonical api-key metadata aliases fail closed",
+			sourceType: "xai",
+			sourceJSON: `{"type":"xai","access_token":"tok","api-key":"legacy-secret","api_key":"canonical-secret"}`,
+			destJSON:   `{"type":"xai","access_token":"tok","api_key":"canonical-secret","auth_kind":"oauth","refresh_token":"","disabled":false}`,
+		},
+		{
+			name:       "conflicting legacy and canonical proxy-url metadata aliases fail closed",
+			sourceType: "claude",
+			sourceJSON: `{"type":"claude","access_token":"tok","proxy-url":"http://proxy-legacy:8080","proxy_url":"http://proxy-canonical:8080"}`,
+			destJSON:   `{"type":"claude","access_token":"tok","proxy_url":"http://proxy-canonical:8080","id_token":"","refresh_token":"","last_refresh":"","email":"","expired":"","disabled":false}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := newFakeCPA(t, "src-key")
+			source.config = map[string]any{"config-version": 8}
+			source.credentials["cred.json"] = []byte(tc.sourceJSON)
+			source.credentialTypes["cred.json"] = tc.sourceType
+			source.disabled["cred.json"] = tc.sourceDisabled
+
+			destination := destinationFixture(t)
+			destination.transformOnUpload = func(_ string, _ []byte) []byte {
+				return []byte(tc.destJSON)
+			}
+			destination.transformOnStatusPatch = func(_ string, _ []byte, _ bool) []byte {
+				return []byte(tc.destJSON)
+			}
+
+			summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+			item := itemByName(t, summary, credentialItemName("cred.json"))
+			if item.Outcome != freshstore.AdoptionFailed || item.Reason != "verify_mismatch" {
+				t.Fatalf("case %q: got outcome=%s reason=%q, want failed/verify_mismatch",
+					tc.name, item.Outcome, item.Reason)
 			}
 		})
 	}

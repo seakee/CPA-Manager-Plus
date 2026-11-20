@@ -2,9 +2,15 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createUpgradeWizardRead,
+  createUpgradeWizardExecute,
+  parseUpgradeExecution,
+  parseUpgradeStatus,
+  type UpgradeWizardExecute,
   createUpgradeWizardSaveRouting,
   createUpgradeWizardVerify,
   FreshUpgradeFlow,
+  markBootstrapRetiredRecovery,
+  markCanonicalUpgradeStatus,
   parseUpgradePreflight,
   parseUpgradeVerify,
   type UpgradeStatus,
@@ -15,11 +21,10 @@ import {
   type UpgradeWizardVerify,
 } from './FreshUpgradeFlow';
 import type { ArtifactOperation, ArtifactStatus, ArtifactTransport } from './freshArtifact';
-import { blockedCodeText, upgradeWizardText as t } from '../i18n/upgradeWizard';
+import { blockedCodeText, upgradeExecutionText as e, upgradeWizardText as t } from '../i18n/upgradeWizard';
 import type { AccessInfo } from './FreshAccessInfo';
-// The wizard is a reader. These tests drive the four steps with injected reads:
-// the routes themselves are proven by the Go handler tests, so nothing here
-// touches a server or the browser credential.
+// Drive recorded operation and worker observations independently: an accepted
+// job is never sufficient to advance the rendered operation.
 
 const CONTRACT = 'cpamp.upgrade-wizard.v1';
 
@@ -64,6 +69,7 @@ function statusDocument(
     mismatchDays = [],
     mismatchDaysTotal,
     mismatchDaysTruncated,
+    hasParityGaps,
     targetMode,
     routing,
     accessInfo,
@@ -83,6 +89,7 @@ function statusDocument(
       mismatchDays,
       mismatchDaysTotal: total,
       mismatchDaysTruncated: mismatchDaysTruncated ?? total > mismatchDays.length,
+      ...(hasParityGaps !== undefined ? { hasParityGaps } : {}),
     },
     manualItems: [],
     errorCode: '',
@@ -121,6 +128,12 @@ function verifyDocument(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function executionDocument(overrides: Record<string, unknown> = {}) {
+  return { contractVersion: 'cpamp.upgrade-execution.v1', available: true,
+    running: true, managedAvailable: true, ...overrides };
+}
+
+const workerReady = { available: true, running: false, managedAvailable: true };
 describe('Full Web upgrade wizard', () => {
   let renderer: ReactTestRenderer | undefined;
 
@@ -141,7 +154,10 @@ describe('Full Web upgrade wizard', () => {
     read: UpgradeWizardRead,
     verify?: UpgradeWizardVerify,
     artifact?: ArtifactTransport,
-    saveRouting?: UpgradeWizardSaveRouting
+    saveRouting?: UpgradeWizardSaveRouting,
+    execute?: UpgradeWizardExecute,
+    onActivation?: (prefix: string) => void,
+    activationPersisted?: boolean
   ) {
     await act(async () => {
       renderer = create(
@@ -150,6 +166,9 @@ describe('Full Web upgrade wizard', () => {
           verify={verify}
           saveRouting={saveRouting}
           artifact={artifact}
+          execute={execute}
+          onActivation={onActivation}
+          activationPersisted={activationPersisted}
           language="en"
           pollDelays={[10_000]}
         />
@@ -256,76 +275,18 @@ describe('Full Web upgrade wizard', () => {
     expect(byTestId('upgrade-continue').props.disabled).toBe(true);
   });
 
-  it('shows a pending version declaration as information, not as a failure', async () => {
-    const pendingRead = wizardRead({
-      preflight: () =>
-        preflightDocument({
-          checks: [
-            { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
-            {
-              name: 'source_version',
-              status: 'pending',
-              code: 'upgrade_source_version_declared_at_copy_in',
-              detail: 'expected=v1.14.10 declared=none',
-            },
-            { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
-            { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
-            { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
-            { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
-          ],
-          sourceVersion: 'unknown',
-          pendingDeclaration: true,
-          expectedVersion: 'v1.14.10',
-        }),
-    });
-    await mount(pendingRead);
-
-    expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
-    expect(byTestId('upgrade-preflight-version').children.join('')).toContain(
-      '--source-version v1.14.10'
-    );
-    expect(byTestId('upgrade-preflight-version').children.join('')).not.toBe('unknown');
-    expect(view()).toContain('--source-version v1.14.10');
-    expect(view()).toContain('declared at copy-in');
-    // The row is labelled pending, in the same vocabulary as every other check.
+  it('keeps pending source evidence distinct without supplying a CLI declaration', async () => {
+    await mount(wizardRead({ preflight: () => preflightDocument({
+      sourceVersion: 'unknown', pendingDeclaration: true, expectedVersion: 'v1.14.10',
+      checks: [{ name: 'source_version', status: 'pending', code: '', detail: '' }],
+    }) }));
     expect(byTestId('upgrade-check-source_version').props['data-status']).toBe('pending');
-    expect(view()).toContain('Pending');
-    // Nothing is presented as blocked, and the step stays usable: readiness is a
-    // separate fact from the declaration this read cannot make.
-    expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
-    expect(view()).not.toContain('Preflight blocked the upgrade');
     expect(byTestId('upgrade-continue').props.disabled).toBe(false);
-    const readyHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
-    const readyBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
-    expect(readyHeading).not.toBe(t('preflightReadyTitle', 'en'));
-    expect(`${readyHeading} ${readyBody}`).toContain('--source-version');
-
+    expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
+    expect(view()).not.toContain('--source-version');
     await press('upgrade-continue');
-    expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
-      '--source-version v1.14.10'
-    );
-
-    for (const locale of ['zh-CN', 'zh-TW', 'ru'] as const) {
-      await act(async () => {
-        renderer!.update(
-          <FreshUpgradeFlow
-            read={pendingRead}
-            language={locale}
-            pollDelays={[10]}
-          />
-        );
-      });
-      await press('upgrade-confirm-back');
-      const localizedHeading = byTestId('upgrade-preflight-ready').findByType('h3').children.join('');
-      const localizedBody = byTestId('upgrade-preflight-ready').findByType('p').children.join('');
-      expect(localizedHeading).not.toBe(t('preflightReadyTitle', locale));
-      expect(`${localizedHeading} ${localizedBody}`).toContain('--source-version');
-      await press('upgrade-continue');
-      expect(byTestId('upgrade-confirm-version').children.join('')).not.toBe('unknown');
-      expect(byTestId('upgrade-confirm-version').children.join('')).toContain(
-        '--source-version v1.14.10'
-      );
-    }
+    expect(byTestId('upgrade-confirm-version').children.join('')).toContain('v1.14.10');
+    expect(view()).not.toContain('docker run');
   });
 
   it('formats an unknown sourceVersion without pending declaration as localized Not reported rather than raw unknown', async () => {
@@ -466,7 +427,7 @@ describe('Full Web upgrade wizard', () => {
     // Both facts the document states are shown: the version this read cannot
     // declare and the check that actually stops the upgrade.
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
-    expect(view()).toContain('--source-version v1.14.10');
+    expect(view()).not.toContain('--source-version');
     expect(view()).toContain(t('preflightPendingTitle', 'en'));
     expect(byTestId('upgrade-preflight-blocked')).toBeTruthy();
     expect(view()).toContain(blockedCodeText('upgrade_insufficient_disk_space', 'en'));
@@ -939,7 +900,7 @@ describe('Full Web upgrade wizard', () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
-  it('renders FreshArtifactStep only on cpa_import when artifact transport is provided, and shows host hint when ready', async () => {
+  it('renders the pinned engine preparation only at the CPA import stage', async () => {
     const digest = 'sha256:' + 'd'.repeat(64);
     const makeArtifactStatus = (overrides: Partial<ArtifactStatus> = {}): ArtifactStatus => ({
       schemaVersion: 1,
@@ -1075,14 +1036,14 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
     expect(artifactTransport.readStatus).toHaveBeenCalledTimes(3);
 
-    // Acquire succeeds -> onReady -> shows host hint to run `upgrade cpa-import`.
+    // Engine readiness does not claim the recorded CPA import completed.
     currentArtifactStatus = makeArtifactStatus({
       active: { artifactId: digest, origin: 'acquired' },
       required: false,
     });
     await press('artifact-acquire-btn');
     expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
-    expect(view()).toContain('upgrade cpa-import');
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
   });
 
   it('configures dual random prefixes for first-time Managed upgrade, blocks overlaps locally, saves routing, and runs verify', async () => {
@@ -1716,7 +1677,7 @@ describe('Full Web upgrade wizard', () => {
     expect(view()).toContain(t('modeBadgeManaged', 'en'));
   });
 
-  it('formats preflight key-value diagnostics into human-readable summaries and shows host CLI guide on unrecorded progress', async () => {
+  it('keeps diagnostics optional and offers deployment-specific recovery without execution support', async () => {
     await mount(
       wizardRead({
         recorded: () => unrecordedStatus(),
@@ -1743,10 +1704,10 @@ describe('Full Web upgrade wizard', () => {
     await press('upgrade-continue');
     await acknowledge();
     await press('upgrade-confirm-continue');
-    expect(byTestId('upgrade-host-cli-guide')).toBeTruthy();
-    expect(view()).toContain('upgrade cpa-import');
-    await press('upgrade-cli-tab-external');
-    expect(view()).toContain('upgrade external-connect');
+    expect(byTestId('upgrade-execution-recovery')).toBeTruthy();
+    expect(view()).not.toContain('docker run');
+    expect(view()).not.toContain('docker exec');
+    expect(allByTestId('upgrade-execution-actions')).toHaveLength(0);
     expect(byTestId('upgrade-progress-refresh')).toBeTruthy();
     await press('upgrade-progress-back');
     expect(byTestId('upgrade-confirm')).toBeTruthy();
@@ -1787,7 +1748,7 @@ describe('Full Web upgrade wizard', () => {
     );
   });
 
-  it('prioritizes slim engine preparation above host CLI guide, syncs with External tab, and opens step 3 once engine is ready', async () => {
+  it('gates Managed import on pinned engine readiness and keeps External an explicit alternate', async () => {
     const digest = 'sha256:' + 'd'.repeat(64);
     const artifactTransport: ArtifactTransport = {
       readStatus: vi.fn<ArtifactTransport['readStatus']>(async () => ({
@@ -1811,30 +1772,1822 @@ describe('Full Web upgrade wizard', () => {
     };
 
     await mount(
-      resumeRead(() => statusDocument({ stage: 'reconcile', nextAction: 'cpa_import' })),
+      resumeRead(() => statusDocument({ stage: 'reconcile', nextAction: 'cpa_import', execution: workerReady })),
       vi.fn(),
-      artifactTransport
+      artifactTransport,
+      undefined,
+      vi.fn(async () => executionDocument())
     );
 
     const serializedBefore = view();
     expect(serializedBefore.indexOf('upgrade-cpa-import-artifact')).toBeLessThan(
-      serializedBefore.indexOf('upgrade-host-cli-guide')
+      serializedBefore.indexOf('upgrade-execution-actions')
     );
-    expect(serializedBefore).toContain('Waiting for engine');
-    expect(
-      byTestId('upgrade-cli-step-3').findByType('details').props.open
-    ).toBe(false);
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+    await act(async () => byTestId('upgrade-plugins').props.onChange({ target: { value: 'disabled' } }));
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
 
-    await press('upgrade-cli-tab-external');
+    await press('upgrade-mode-external');
     expect(allByTestId('upgrade-cpa-import-artifact')).toHaveLength(0);
 
-    await press('upgrade-cli-tab-managed');
+    await press('upgrade-mode-managed');
     expect(byTestId('upgrade-cpa-import-artifact')).toBeTruthy();
 
     await press('artifact-acquire-btn');
     expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(false);
+  });
+
+  it('accepts optional execution observations but refuses malformed worker state', () => {
+    expect(parseUpgradeStatus(statusDocument())?.execution).toBeUndefined();
+    expect(parseUpgradeStatus(statusDocument({ execution: workerReady }))?.execution).toEqual(workerReady);
+    for (const execution of [null, {}, { ...workerReady, running: 'yes' },
+      { ...workerReady, action: 'unknown' }, { ...workerReady, code: 'unbounded diagnostic text' }]) {
+      expect(parseUpgradeStatus(statusDocument({ execution: execution as never }))).toBeNull();
+      expect(parseUpgradeExecution(execution)).toBeNull();
+    }
+  });
+
+  it('resumes a prepared Managed operation, requires plugin choice and never advances on acceptance alone', async () => {
+    let current = statusDocument({ nextAction: 'cpa_import', execution: workerReady, sourceVersion: '' });
+    const read = resumeRead(() => current);
+    const execute = vi.fn<UpgradeWizardExecute>(async () => executionDocument({ action: 'cpa-import' }));
+    await mount(read, undefined, undefined, undefined, execute);
+    expect(allByTestId('upgrade-preflight')).toHaveLength(0);
+    expect(allByTestId('upgrade-confirm')).toHaveLength(0);
+    expect(byTestId('upgrade-mode-managed').props['aria-pressed']).toBe(true);
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+    await act(async () => byTestId('upgrade-plugins').props.onChange({ target: { value: 'disabled' } }));
+    current = statusDocument({ nextAction: 'cpa_import', execution: { ...workerReady, running: true, action: 'cpa-import' } });
+    let pending!: Promise<void>;
+    await act(async () => {
+      const action = byTestId('upgrade-execute-import').props.onClick;
+      pending = action();
+      await action();
+      await pending;
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'cpa-import', pluginsEnabled: false });
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
+    expect(view()).not.toContain('docker exec');
+    current = statusDocument({ stage: 'cpa_import', nextAction: 'verify', targetMode: 'managed', execution: workerReady });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(byTestId('upgrade-verify-action')).toBeTruthy();
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
+  });
+
+  it('requires the exact disclosed history days and refuses a truncated acknowledgement window', async () => {
+    let current = statusDocument({ nextAction: 'reconcile', mismatchDays: ['2026-10-01', '2026-10-02'], execution: workerReady });
+    const execute = vi.fn<UpgradeWizardExecute>(async () => executionDocument());
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute);
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    await act(async () => {
+      byTestId('upgrade-ack-day-2026-10-01').props.onChange({ target: { checked: true } });
+      byTestId('upgrade-ack-parity').props.onChange({ target: { checked: true } });
+    });
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    await act(async () => byTestId('upgrade-ack-day-2026-10-02').props.onChange({ target: { checked: true } }));
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(false);
+    await press('upgrade-execute-reconcile');
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'reconcile', acknowledgeDays: ['2026-10-01', '2026-10-02'], acknowledgeParityGaps: true });
+    current = statusDocument({ nextAction: 'reconcile', mismatchDays: ['2026-10-01'], mismatchDaysTotal: 400, execution: workerReady });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers External reuse only explicitly and reports an unavailable executor without commands', async () => {
+    let current = statusDocument({ nextAction: 'cpa_import', execution: { ...workerReady, managedAvailable: false } });
+    const execute = vi.fn<UpgradeWizardExecute>(async () => { throw new UpgradeWizardError('unavailable', 'upgrade_execution_conflict', 409); });
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute);
+    expect(allByTestId('upgrade-mode-managed')).toHaveLength(0);
+    expect(allByTestId('upgrade-execute-import')).toHaveLength(0);
+    await press('upgrade-execute-external');
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'external-connect' });
+    expect(byTestId('upgrade-execution-error')).toBeTruthy();
+    current = statusDocument({ nextAction: 'cpa_import', execution: { ...workerReady, available: false, code: 'upgrade_worker_unavailable' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(byTestId('upgrade-execution-recovery')).toBeTruthy();
+    expect(allByTestId('upgrade-execute-external')).toHaveLength(0);
+    expect(view()).not.toContain('docker run');
+    expect(view()).not.toContain('--cpa-version');
+  });
+
+  it('uses the one worker verify gate, keeps verified state while activating, and survives restart reads until actual routes are ready', async () => {
+    vi.stubGlobal('window', { setTimeout, clearTimeout, location: { origin: 'https://manager.example' } });
+    const routing = { configured: true, committed: true, existingPrefixesPreserved: true,
+      controlBasePath: '/control', inferenceBasePath: '/infer', sharedEntry: false,
+      externalBaseUrl: '', suggestedControlBasePath: '', suggestedInferenceBasePath: '' };
+    const accessInfo = { mode: 'migrate_legacy' as const, managementBasePath: '/control', inferenceBasePath: '/infer',
+      protocols: [], ready: false, code: 'upgrade_restart_required' };
+    const manualItems = ['section:legacy.proxy:socks (not_in_import_scope)'];
+    let current = statusDocument({ stage: 'cpa_import', nextAction: 'verify', targetMode: 'managed', routing, manualItems, execution: workerReady });
+    let pollPhase: 'idle' | 'running-activate' | 'network' = 'idle';
+    let unavailableReads = 0;
+    const read = resumeRead(() => {
+      if (pollPhase === 'running-activate') {
+        pollPhase = 'network';
+        return statusDocument({
+          stage: 'complete',
+          nextAction: 'complete',
+          targetMode: 'managed',
+          routing,
+          manualItems,
+          accessInfo,
+          execution: { ...workerReady, running: true, action: 'activate' },
+        });
+      }
+      if (unavailableReads-- > 0) throw new UpgradeWizardError('network');
+      return current;
+    });
+    let resolveActivate!: (value: unknown) => void;
+    const execute = vi.fn<UpgradeWizardExecute>(async (_signal, input) => {
+      if (input.action === 'verify') {
+        current = statusDocument({ stage: 'complete', nextAction: 'complete', targetMode: 'managed', routing, manualItems, accessInfo, execution: workerReady });
+        return executionDocument({ action: input.action });
+      }
+      return new Promise<unknown>((resolve) => {
+        resolveActivate = resolve;
+      });
+    });
+    const verify = vi.fn<UpgradeWizardVerify>();
+    const onActivation = vi.fn();
+    await mount(read, verify, undefined, undefined, execute, onActivation);
+    await press('upgrade-verify-action');
+    expect(verify).not.toHaveBeenCalled();
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'verify' });
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(byTestId('upgrade-manual-items').type).toBe('details');
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    // In-flight activate POST must keep verified completion intact and manual details collapsed.
+    await press('upgrade-execute-activate');
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(allByTestId('upgrade-result-incomplete')).toHaveLength(0);
+    expect(byTestId('upgrade-step-result').props['data-complete']).toBe('true');
+    expect(byTestId('upgrade-manual-items').type).toBe('details');
+    expect(byTestId('upgrade-access-pending-restart')).toBeTruthy();
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(true);
+
+    // Resumed/polled worker running action: 'activate' also stays verified-complete (not incomplete).
+    pollPhase = 'running-activate';
+    unavailableReads = 3;
+    current = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      manualItems,
+      accessInfo: { ...accessInfo, ready: true, code: '' },
+    });
+    await act(async () => {
+      resolveActivate(executionDocument({ action: 'activate' }));
+    });
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(allByTestId('upgrade-result-incomplete')).toHaveLength(0);
+    expect(byTestId('upgrade-manual-items').type).toBe('details');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(18_000); });
+    expect(allByTestId('upgrade-progress-stalled')).toHaveLength(0);
+    expect(byTestId('upgrade-open-console').props.href).toBe('https://manager.example/control');
+    expect(allByTestId('upgrade-activation')).toHaveLength(0);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps polling through transient reads during a recorded root job without resubmitting it', async () => {
+    let failures = 0;
+    const read = resumeRead(() => {
+      if (failures > 0) { failures -= 1; throw new UpgradeWizardError('network'); }
+      return statusDocument({ nextAction: 'cpa_import', execution: { ...workerReady, running: true, action: 'cpa-import' } });
+    });
+    const execute = vi.fn<UpgradeWizardExecute>();
+    await mount(read, undefined, undefined, undefined, execute);
+    failures = 4;
+    await act(async () => { await vi.advanceTimersByTimeAsync(18_000); });
+    expect(allByTestId('upgrade-progress-stalled')).toHaveLength(0);
+    expect(byTestId('upgrade-execution-running')).toBeTruthy();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('sends execution only to the authenticated same-origin POST route and follows committed continuation', async () => {
+    vi.stubGlobal('window', { setTimeout, clearTimeout, location: { origin: 'https://manager.example' } });
+    const transport = vi.fn<typeof fetch>(async () => Response.json(executionDocument(), { status: 202 }));
+    let base = '';
+    const execute = createUpgradeWizardExecute(() => 'private-admin-key', transport, () => base);
+    await execute(new AbortController().signal, { action: 'cpa-import', pluginsEnabled: false });
+    const [url, init] = transport.mock.calls[0];
+    expect(String(url)).toBe('https://manager.example/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/execute');
+    expect(init).toMatchObject({ method: 'POST', credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store' });
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer private-admin-key' });
+    expect(JSON.parse(String(init?.body))).toEqual({ action: 'cpa-import', pluginsEnabled: false });
+    base = '/control/api/v2';
+    const read = createUpgradeWizardRead(() => 'private-admin-key', transport, () => base);
+    await read('installation/upgrade/status', new AbortController().signal);
+    expect(String(transport.mock.calls[1][0])).toBe('https://manager.example/control/api/v2/installation/upgrade/status');
+    base = 'https://other.example/api/v2';
+    await expect(execute(new AbortController().signal, { action: 'verify' })).rejects.toMatchObject({ failure: 'unavailable' });
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport.mock.calls.every(([target]) => !String(target).includes('private-admin-key'))).toBe(true);
+  });
+
+  it('renders async status.execution.code separately from HTTP request errors including 409 busy and restart disabled', async () => {
+    const digest = 'sha256:' + 'd'.repeat(64);
+    const current = statusDocument({
+      nextAction: 'cpa_import',
+      execution: { ...workerReady, code: 'upgrade_cpa_destination_unready' },
+    });
+    const execute = vi
+      .fn<UpgradeWizardExecute>()
+      .mockRejectedValueOnce(new UpgradeWizardError('unavailable', 'upgrade_execution_busy', 409))
+      .mockRejectedValueOnce(new UpgradeWizardError('unavailable', 'upgrade_restart_disabled', 409));
+    const artifact: ArtifactTransport = {
+      readStatus: vi.fn<ArtifactTransport['readStatus']>(async () => ({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: digest },
+        active: { artifactId: digest, origin: 'acquired' },
+        required: false,
+        operation: null,
+        cdnPresets: [],
+      })),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-1',
+        source: 'github',
+        phase: 'succeeded',
+        receivedBytes: 100,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+    await mount(resumeRead(() => current), undefined, artifact, undefined, execute);
+
+    const statusErr = byTestId('upgrade-execution-status-error');
+    expect(statusErr.props.role).toBe('alert');
+    expect(statusErr.findByType('code').children.join('')).toBe('upgrade_cpa_destination_unready');
+    expect(statusErr.findAllByType('p').map((node) => node.children.join(''))).toContain(
+      blockedCodeText('upgrade_cpa_destination_unready', 'en')
+    );
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+
+    await act(async () => byTestId('upgrade-plugins').props.onChange({ target: { value: 'disabled' } }));
+    await press('upgrade-execute-import');
     expect(
-      byTestId('upgrade-cli-step-3').findByType('details').props.open
-    ).toBe(true);
+      byTestId('upgrade-execution-error').findAllByType('p').map((node) => node.children.join(''))
+    ).toContain(blockedCodeText('upgrade_execution_busy', 'en'));
+    expect(byTestId('upgrade-execution-status-error')).toBeTruthy();
+
+    await press('upgrade-execute-import');
+    expect(
+      byTestId('upgrade-execution-error').findAllByType('p').map((node) => node.children.join(''))
+    ).toContain(blockedCodeText('upgrade_restart_disabled', 'en'));
+  });
+
+  it('never masquerades stage complete with execution failure or pending restart as ready console completion', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const accessInfo = {
+      mode: 'migrate_legacy' as const,
+      managementBasePath: '/control',
+      inferenceBasePath: '/infer',
+      protocols: [],
+      ready: false,
+      code: 'upgrade_restart_required',
+    };
+    let current = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo,
+      execution: { ...workerReady, action: 'activate', code: 'upgrade_restart_failed' },
+    });
+    const execute = vi.fn<UpgradeWizardExecute>();
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute);
+
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
+    expect(byTestId('upgrade-result-incomplete')).toBeTruthy();
+    expect(byTestId('upgrade-step-result').props['data-complete']).toBeUndefined();
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+    expect(byTestId('upgrade-execution-status-error').findByType('code').children.join('')).toBe(
+      'upgrade_restart_failed'
+    );
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+
+    current = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo,
+      execution: { ...workerReady, action: 'verify', code: '' },
+    });
+    await press('upgrade-result-reread');
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(byTestId('upgrade-access-pending-restart')).toBeTruthy();
+    expect(allByTestId('upgrade-access-active')).toHaveLength(0);
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+    expect(view()).toContain(e('resultPendingRestartHelp', 'en'));
+  });
+
+  it('resets dirty/saved routing draft when targetMode switches between External and Managed', async () => {
+    const unconfigured = {
+      configured: false,
+      committed: false,
+      existingPrefixesPreserved: false,
+      controlBasePath: '',
+      inferenceBasePath: '',
+      sharedEntry: false,
+      externalBaseUrl: 'https://cpa.example:8317',
+      suggestedControlBasePath: '/ext-ctl',
+      suggestedInferenceBasePath: '',
+    };
+    let current = statusDocument({
+      stage: 'external_connect',
+      nextAction: 'verify',
+      targetMode: 'external',
+      routing: unconfigured,
+      execution: workerReady,
+    });
+    const saveRouting = vi.fn<UpgradeWizardSaveRouting>(async (_signal, input) => ({
+      contractVersion: CONTRACT,
+      targetMode: current.targetMode,
+      routing: {
+        ...unconfigured,
+        configured: true,
+        controlBasePath: input.controlBasePath,
+        inferenceBasePath: input.inferenceBasePath,
+        sharedEntry: input.sharedEntry,
+      },
+    }));
+    const execute = vi.fn<UpgradeWizardExecute>(async () => executionDocument({ action: 'verify' }));
+    await mount(resumeRead(() => current), undefined, undefined, saveRouting, execute);
+
+    await act(async () => {
+      byTestId('upgrade-control-prefix-input').props.onChange({ target: { value: '/ext-dirty' } });
+    });
+    await press('upgrade-save-routing');
+    expect(saveRouting).toHaveBeenCalledTimes(1);
+    expect(byTestId('upgrade-routing-saved')).toBeTruthy();
+
+    current = statusDocument({
+      stage: 'cpa_import',
+      nextAction: 'verify',
+      targetMode: 'managed',
+      routing: {
+        ...unconfigured,
+        externalBaseUrl: '',
+        suggestedControlBasePath: '/man-ctl',
+        suggestedInferenceBasePath: '/man-inf',
+      },
+      execution: workerReady,
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+    expect(allByTestId('upgrade-routing-saved')).toHaveLength(0);
+    expect(byTestId('upgrade-control-prefix-input').props.value).toBe('/man-ctl');
+    expect(byTestId('upgrade-inference-prefix-input').props.value).toBe('/man-inf');
+
+    await press('upgrade-verify-action');
+    expect(saveRouting).toHaveBeenCalledTimes(2);
+    expect(saveRouting.mock.calls[1][1]).toEqual({
+      controlBasePath: '/man-ctl',
+      inferenceBasePath: '/man-inf',
+      sharedEntry: false,
+    });
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'verify' });
+  });
+
+  it('shows Managed engine prep at nextAction external_connect only when managedAvailable is true', async () => {
+    const digest = 'sha256:' + 'a'.repeat(64);
+    const artifact: ArtifactTransport = {
+      readStatus: vi.fn<ArtifactTransport['readStatus']>(async () => ({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: digest },
+        active: null,
+        required: true,
+        operation: null,
+        cdnPresets: [],
+      })),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-2',
+        source: 'github',
+        phase: 'succeeded',
+        receivedBytes: 100,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+    const current = statusDocument({
+      nextAction: 'external_connect',
+      errorCode: 'external_cpa_unreachable',
+      execution: workerReady,
+    });
+    await mount(resumeRead(() => current), undefined, artifact, undefined, vi.fn<UpgradeWizardExecute>());
+
+    expect(byTestId('upgrade-mode-external').props['aria-pressed']).toBe(true);
+    expect(allByTestId('upgrade-cpa-import-artifact')).toHaveLength(0);
+
+    await press('upgrade-mode-managed');
+    expect(byTestId('upgrade-cpa-import-artifact')).toBeTruthy();
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          nextAction: 'external_connect',
+          execution: { ...workerReady, managedAvailable: false },
+        })
+      ),
+      undefined,
+      artifact,
+      undefined,
+      vi.fn<UpgradeWizardExecute>()
+    );
+    expect(allByTestId('upgrade-mode-managed')).toHaveLength(0);
+    expect(allByTestId('upgrade-cpa-import-artifact')).toHaveLength(0);
+  });
+
+  it('requires paired External override URL and key without persisting the secret in state or UI', async () => {
+    const keyMockNode = { value: '' };
+    let current = statusDocument({
+      stage: 'reconcile',
+      nextAction: 'external_connect',
+      execution: { ...workerReady, managedAvailable: false },
+    });
+    const execute = vi.fn<UpgradeWizardExecute>(async () =>
+      executionDocument({ action: 'external-connect' })
+    );
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={resumeRead(() => current)}
+          execute={execute}
+          language="en"
+          pollDelays={[10_000]}
+        />,
+        {
+          createNodeMock: (element) =>
+            Object.getOwnPropertyDescriptor(element.props, 'data-testid')?.value === 'upgrade-external-key'
+              ? keyMockNode
+              : null,
+        }
+      );
+    });
+
+    expect(byTestId('upgrade-execute-external').props.disabled).toBe(false);
+    await act(async () => {
+      byTestId('upgrade-external-override').props.onChange({ target: { checked: true } });
+    });
+    expect(byTestId('upgrade-execute-external').props.disabled).toBe(true);
+    expect(byTestId('upgrade-external-pair-hint')).toBeTruthy();
+
+    await act(async () => {
+      byTestId('upgrade-external-url').props.onChange({
+        target: { value: 'https://cpa-new.example:8317' },
+      });
+    });
+    expect(byTestId('upgrade-execute-external').props.disabled).toBe(true);
+
+    const uniqueKey = 'ext-mgmt-unique-fixture-value';
+    keyMockNode.value = uniqueKey;
+    await act(async () => {
+      byTestId('upgrade-external-key').props.onChange({ target: keyMockNode });
+    });
+    expect(byTestId('upgrade-execute-external').props.disabled).toBe(false);
+    expect(byTestId('upgrade-external-key').props.type).toBe('password');
+    expect(byTestId('upgrade-external-key').props.value).toBeUndefined();
+
+    await press('upgrade-execute-external');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][1]).toEqual({
+      action: 'external-connect',
+      baseUrl: 'https://cpa-new.example:8317',
+      managementKey: uniqueKey,
+    });
+    // 202 Accepted keeps the key input intact until the connection actually succeeds past reconcile.
+    expect(keyMockNode.value).toBe(uniqueKey);
+    expect(view()).not.toContain(uniqueKey);
+
+    current = statusDocument({
+      stage: 'reconcile',
+      nextAction: 'external_connect',
+      execution: { ...workerReady, managedAvailable: false, code: 'external_management_key_rejected' },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(keyMockNode.value).toBe(uniqueKey);
+
+    await act(async () => {
+      byTestId('upgrade-external-override').props.onChange({ target: { checked: false } });
+    });
+    expect(keyMockNode.value).toBe('');
+    await act(async () => {
+      byTestId('upgrade-external-override').props.onChange({ target: { checked: true } });
+    });
+    keyMockNode.value = uniqueKey;
+    await act(async () => {
+      byTestId('upgrade-external-key').props.onChange({ target: keyMockNode });
+    });
+    expect(keyMockNode.value).toBe(uniqueKey);
+
+    current = statusDocument({
+      stage: 'external_connect',
+      nextAction: 'verify',
+      execution: workerReady,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(keyMockNode.value).toBe('');
+    expect(view()).not.toContain(uniqueKey);
+  });
+
+  it('surfaces reconcile panel from copy_in source_copy when mismatch requires parity ack', async () => {
+    const current = statusDocument({
+      stage: 'copy_in',
+      nextAction: 'copy_in',
+      domainsDone: ['source_copy'],
+      mismatchDays: [],
+      execution: { ...workerReady, action: 'reconcile', code: 'upgrade_reconcile_mismatch' },
+    });
+    const execute = vi.fn<UpgradeWizardExecute>(async () =>
+      executionDocument({ action: 'reconcile' })
+    );
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute);
+
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    await act(async () => {
+      byTestId('upgrade-ack-parity').props.onChange({ target: { checked: true } });
+    });
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(false);
+    await press('upgrade-execute-reconcile');
+    expect(execute.mock.calls[0][1]).toEqual({
+      action: 'reconcile',
+      acknowledgeParityGaps: true,
+    });
+  });
+
+  it('keeps 503 worker unavailable typed as unavailable and surfaces 120s activation timeout cleanly', async () => {
+    vi.stubGlobal('window', { setTimeout, clearTimeout, location: { origin: 'https://manager.example' } });
+    const transport = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: { code: 'upgrade_worker_unavailable' } }, { status: 503 })
+    );
+    const executeTransport = createUpgradeWizardExecute(() => 'admin-secret', transport);
+    await expect(
+      executeTransport(new AbortController().signal, { action: 'verify' })
+    ).rejects.toMatchObject({
+      failure: 'unavailable',
+      code: 'upgrade_worker_unavailable',
+      status: 503,
+    });
+
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const pendingStatus = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: workerReady,
+    });
+    let activateCalled = false;
+    const read = resumeRead(() => {
+      if (activateCalled) throw new UpgradeWizardError('network');
+      return pendingStatus;
+    });
+    const execute = vi.fn<UpgradeWizardExecute>(async () => {
+      activateCalled = true;
+      return executionDocument({ action: 'activate' });
+    });
+    await mount(read, undefined, undefined, undefined, execute);
+    await press('upgrade-execute-activate');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(122_000); });
+    expect(
+      byTestId('upgrade-execution-error').findAllByType('p').map((node) => node.children.join(''))
+    ).toContain(e('activationTimeout', 'en'));
+    expect(byTestId('upgrade-result-stalled')).toBeTruthy();
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+  });
+
+  it('removes artifact preparation controls from DOM/AX subtree once ready while preserving plugin gate', async () => {
+    const digest = 'sha256:' + 'c'.repeat(64);
+    const unreadyArtifact: ArtifactStatus = {
+      schemaVersion: 1,
+      pinned: { version: '8.0.55', artifactId: digest },
+      active: null,
+      required: true,
+      operation: null,
+      cdnPresets: [],
+    };
+    const readyArtifact: ArtifactStatus = {
+      schemaVersion: 1,
+      pinned: { version: '8.0.55', artifactId: digest },
+      active: { artifactId: digest, origin: 'acquired' },
+      required: false,
+      operation: null,
+      cdnPresets: [],
+    };
+    let resolvePendingRead!: (value: ArtifactStatus) => void;
+    let mode: 'pending' | 'ready' = 'pending';
+    const artifact: ArtifactTransport = {
+      readStatus: vi.fn<ArtifactTransport['readStatus']>(() => {
+        if (mode === 'pending') {
+          return new Promise<ArtifactStatus>((resolve) => {
+            resolvePendingRead = resolve;
+          });
+        }
+        return Promise.resolve(readyArtifact);
+      }),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<ArtifactTransport['acquire']>(async () => {
+        mode = 'ready';
+        return {
+          id: 'op-ready-1',
+          source: 'github',
+          phase: 'succeeded',
+          receivedBytes: 100,
+          totalBytes: 100,
+          code: '',
+        };
+      }),
+      upload: vi.fn(),
+    };
+    const execute = vi.fn<UpgradeWizardExecute>(async () =>
+      executionDocument({ action: 'cpa-import' })
+    );
+    const current = statusDocument({
+      stage: 'reconcile',
+      nextAction: 'cpa_import',
+      domainsDone: ['source_copy', 'usage_events'],
+      execution: workerReady,
+    });
+
+    await mount(resumeRead(() => current), undefined, artifact, undefined, execute);
+
+    // Initial async undefined/loading state never falsely reports ready.
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+
+    await act(async () => {
+      resolvePendingRead(unreadyArtifact);
+    });
+    expect(byTestId('upgrade-artifact-prep')).toBeTruthy();
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(byTestId('artifact-acquire-btn')).toBeTruthy();
+    expect(byTestId('upgrade-cpa-import-artifact').findAllByProps({ role: 'button' }).length).toBeGreaterThan(0);
+
+    await press('artifact-acquire-btn');
+
+    // Once ready, preparation subtree and all interactive controls leave the DOM/AX/Tab tree.
+    expect(allByTestId('upgrade-artifact-prep')).toHaveLength(0);
+    expect(allByTestId('fresh-artifact-step')).toHaveLength(0);
+    expect(allByTestId('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByTestId('artifact-source-github')).toHaveLength(0);
+    expect(allByTestId('artifact-source-upload')).toHaveLength(0);
+    const artifactRegion = byTestId('upgrade-cpa-import-artifact');
+    expect(artifactRegion.findAllByProps({ role: 'button' })).toHaveLength(0);
+    expect(artifactRegion.findAllByType('button')).toHaveLength(0);
+    expect(artifactRegion.findAllByType('input')).toHaveLength(0);
+    expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+
+    // Managed import stays gated until explicit plugin choice is made.
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+    await act(async () => {
+      byTestId('upgrade-plugins').props.onChange({ target: { value: 'enabled' } });
+    });
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(false);
+    await press('upgrade-execute-import');
+    expect(execute.mock.calls[0][1]).toEqual({ action: 'cpa-import', pluginsEnabled: true });
+
+    // Pre-ready artifact on initial mount also unmounts prep immediately after async check resolves.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    await mount(resumeRead(() => current), undefined, artifact, undefined, execute);
+    expect(allByTestId('upgrade-artifact-prep')).toHaveLength(0);
+    expect(allByTestId('fresh-artifact-step')).toHaveLength(0);
+    expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+  });
+
+  it('keeps console access gated until routes are ready with no execution worker', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const manualItems = ['section:legacy.proxy:socks (not_in_import_scope)'];
+    const nativePending = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      manualItems,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+    });
+    await mount(resumeRead(() => nativePending));
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(byTestId('upgrade-execution-recovery')).toBeTruthy();
+    expect(allByTestId('upgrade-open-console')).toHaveLength(0);
+
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    const zhActive = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      manualItems,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: true,
+        code: '',
+      },
+    });
+    vi.stubGlobal('window', { setTimeout, clearTimeout, location: { origin: 'https://manager.example' } });
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow read={resumeRead(() => zhActive)} language="zh-CN" pollDelays={[10_000]} />
+      );
+    });
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+    expect(byTestId('upgrade-open-console').props.href).toBe('https://manager.example/control');
+  });
+
+  it('resumes in-flight activate without running flag, handles omitted-action restart failure, and covers gateway waiting and completion copy without keys', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const inFlightResume = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: { ...workerReady, action: 'activate', code: '' },
+    });
+    const delayedFailure = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: { ...workerReady, action: undefined, code: 'upgrade_restart_failed' },
+    });
+
+    let phase: 'in-flight' | 'failed' = 'in-flight';
+    const onActivation = vi.fn();
+    const execute = vi.fn<UpgradeWizardExecute>(async () =>
+      executionDocument({ action: 'activate', running: false, code: '' })
+    );
+    const read: UpgradeWizardRead = vi.fn(async () =>
+      phase === 'in-flight' ? inFlightResume : delayedFailure
+    );
+
+    await mount(read, undefined, undefined, undefined, execute, onActivation);
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+
+    phase = 'failed';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).toHaveBeenCalledWith('');
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-execution-status-error').findByType('code').children.join('')).toBe(
+      'upgrade_restart_failed'
+    );
+    expect(byTestId('upgrade-result-incomplete')).toBeTruthy();
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+
+    // Canonical proof with gateway pending clears activation card, opens console, and never times out.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    let gatewayReady = false;
+    let rejectClipboard = true;
+    const writeText = vi.fn(async () => {
+      if (rejectClipboard) throw new Error('clipboard unavailable');
+    });
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'https://manager.example' },
+    });
+
+    const canonicalRead: UpgradeWizardRead = vi.fn(async () =>
+      markCanonicalUpgradeStatus(
+        statusDocument({
+          stage: 'complete',
+          nextAction: 'complete',
+          targetMode: 'managed',
+          routing,
+          accessInfo: gatewayReady
+            ? {
+                mode: 'migrate_legacy' as const,
+                managementBasePath: '/control',
+                inferenceBasePath: '/infer',
+                protocols: [
+                  {
+                    id: 'openai',
+                    label: 'OpenAI',
+                    basePath: '/infer/v1',
+                    examplePath: '/infer/v1/chat/completions',
+                  },
+                ],
+                ready: true,
+                code: '',
+              }
+            : {
+                mode: 'migrate_legacy' as const,
+                managementBasePath: '/control',
+                inferenceBasePath: '/infer',
+                protocols: [],
+                ready: false,
+                code: 'gateway_pending',
+              },
+        })
+      )
+    );
+
+    await mount(canonicalRead, undefined, undefined, undefined, execute);
+    expect(byTestId('upgrade-gateway-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-activation')).toHaveLength(0);
+    expect(byTestId('upgrade-open-console').props.href).toBe('https://manager.example/control');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(125_000);
+    });
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+    expect(byTestId('upgrade-gateway-waiting')).toBeTruthy();
+
+    gatewayReady = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_500);
+    });
+    expect(allByTestId('upgrade-gateway-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+
+    await press('access-info-copy-access');
+    const fallback = byTestId('access-info-copy-access-fallback');
+    const expectedCopyText = String(fallback.props.value);
+    expect(fallback.type).toBe('textarea');
+    expect(expectedCopyText).toContain('https://manager.example/control');
+    expect(expectedCopyText).toContain('https://manager.example/infer');
+    expect(expectedCopyText).not.toContain('key');
+    rejectClipboard = false;
+    await press('access-info-copy-access');
+    expect(allByTestId('access-info-copy-access-fallback')).toHaveLength(0);
+    expect(writeText).toHaveBeenLastCalledWith(expectedCopyText);
+
+    // Retired bootstrap view never offers the bootstrap activation button.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={resumeRead(() =>
+            statusDocument({
+              stage: 'complete',
+              nextAction: 'complete',
+              targetMode: 'managed',
+              routing,
+              accessInfo: {
+                mode: 'migrate_legacy' as const,
+                managementBasePath: '/control',
+                inferenceBasePath: '/infer',
+                protocols: [],
+                ready: false,
+                code: 'upgrade_restart_required',
+              },
+              execution: workerReady,
+            })
+          )}
+          execute={execute}
+          bootstrapRetired
+          language="en"
+          pollDelays={[10_000]}
+        />
+      );
+    });
+    expect(allByTestId('upgrade-execute-activate')).toHaveLength(0);
+    expect(byTestId('upgrade-bootstrap-retired-notice')).toBeTruthy();
+  });
+
+  it('does not abort activation polling on upgrade_worker_unavailable during shutdown and resumes omitted-action unavailable worker state', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    let current = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: { ...workerReady, action: 'verify', code: '' },
+    });
+    const onActivation = vi.fn();
+    const execute = vi.fn<UpgradeWizardExecute>(async () => {
+      current = {
+        ...current,
+        execution: { ...workerReady, running: true, action: 'activate', code: '' },
+      };
+      return executionDocument({ action: 'activate', running: true, code: '' });
+    });
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute, onActivation);
+
+    // After verify without clicking Activate yet, Activate button must remain actionable.
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+    expect(onActivation).not.toHaveBeenCalled();
+
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    onActivation.mockClear();
+
+    // Worker exits before mgrSvc during shutdown -> serveWorkerUnavailable returns upgrade_worker_unavailable.
+    current = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: { available: false, running: false, managedAvailable: false, code: 'upgrade_worker_unavailable' },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).not.toHaveBeenCalled();
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(allByTestId('upgrade-result-incomplete')).toHaveLength(0);
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+
+    // Reloading in this shutdown transition resumes activation polling instead of flashing incomplete.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    onActivation.mockClear();
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute, onActivation, true);
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+
+    // Canonical confirmation clears activation waiting cleanly.
+    current = markCanonicalUpgradeStatus(
+      statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing,
+        accessInfo: {
+          mode: 'migrate_legacy' as const,
+          managementBasePath: '/control',
+          inferenceBasePath: '/infer',
+          protocols: [],
+          ready: true,
+        },
+      })
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+  });
+
+  it('bounds post-cutover polling for external outages and preserves 401/response errors during restart', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/ext-ctl',
+      inferenceBasePath: '',
+      sharedEntry: false,
+      externalBaseUrl: 'https://cpa.remote.example',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    let extReady = false;
+    let reads = 0;
+    const canonicalExternalRead: UpgradeWizardRead = vi.fn(async () => {
+      reads += 1;
+      return markCanonicalUpgradeStatus(
+        statusDocument({
+          stage: 'complete',
+          nextAction: 'complete',
+          targetMode: 'external',
+          routing,
+          accessInfo: {
+            mode: 'connect_external' as const,
+            managementBasePath: '/ext-ctl',
+            inferenceBasePath: '',
+            externalBaseUrl: 'https://cpa.remote.example',
+            protocols: [],
+            ready: extReady,
+            ...(extReady ? {} : { code: 'external_target_unavailable' }),
+          },
+        })
+      );
+    });
+    await mount(canonicalExternalRead);
+    expect(byTestId('access-info-not-ready')).toBeTruthy();
+    extReady = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+
+    // Unrecoverable External outage settles after the 120s post-cutover deadline.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    extReady = false;
+    reads = 0;
+    await mount(canonicalExternalRead);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(125_000);
+    });
+    const settledReads = reads;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(40_000);
+    });
+    expect(reads).toBe(settledReads);
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+
+    // 401 authentication failure during activation restart must not be overwritten by activation timeout.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    let failAuth = false;
+    const authRead: UpgradeWizardRead = vi.fn(async () => {
+      if (failAuth) throw new UpgradeWizardError('authentication', '', 401);
+      return statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing: { ...routing, controlBasePath: '/control', inferenceBasePath: '/infer', externalBaseUrl: '' },
+        accessInfo: {
+          mode: 'migrate_legacy' as const,
+          managementBasePath: '/control',
+          inferenceBasePath: '/infer',
+          protocols: [],
+          ready: false,
+          code: 'upgrade_restart_required',
+        },
+        execution: { ...workerReady, action: 'activate', code: '' },
+      });
+    });
+    await mount(authRead);
+    failAuth = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35_000);
+    });
+    expect(byTestId('upgrade-execution-error').findByType('p').children.join('')).toBe(
+      t('errorAuthentication', 'en')
+    );
+  });
+
+  it('decouples parity ack when hasParityGaps is absent, supports >366 truncated day ack, and uses journey checkbox styling', async () => {
+    let current = statusDocument({
+      nextAction: 'reconcile',
+      mismatchDays: ['2026-10-01', '2026-10-02'],
+      hasParityGaps: false,
+      execution: workerReady,
+    });
+    const execute = vi.fn<UpgradeWizardExecute>(async () => executionDocument({ action: 'reconcile' }));
+    await mount(resumeRead(() => current), undefined, undefined, undefined, execute);
+
+    expect(renderer!.root.findAllByProps({ className: 'journey-checkbox-control' }).length).toBeGreaterThanOrEqual(3);
+    expect(renderer!.root.findAllByProps({ className: 'journey-checkbox-box' }).length).toBeGreaterThanOrEqual(3);
+    expect(allByTestId('upgrade-ack-all-truncated')).toHaveLength(0);
+
+    // Only individual days are required when hasParityGaps is not true.
+    await act(async () => {
+      byTestId('upgrade-ack-day-2026-10-01').props.onChange({ target: { checked: true } });
+      byTestId('upgrade-ack-day-2026-10-02').props.onChange({ target: { checked: true } });
+    });
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(false);
+    await press('upgrade-execute-reconcile');
+    expect(execute.mock.calls[0][1]).toEqual({
+      action: 'reconcile',
+      acknowledgeDays: ['2026-10-01', '2026-10-02'],
+    });
+
+    // Truncated (>366) mismatch days + hasParityGaps requires explicit truncated confirmation + parity confirmation.
+    current = statusDocument({
+      nextAction: 'reconcile',
+      mismatchDays: ['2026-10-01', '2026-10-02'],
+      mismatchDaysTotal: 400,
+      mismatchDaysTruncated: true,
+      hasParityGaps: true,
+      execution: workerReady,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(byTestId('upgrade-ack-all-truncated')).toBeTruthy();
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    await act(async () => {
+      byTestId('upgrade-ack-all-truncated').props.onChange({ target: { checked: true } });
+    });
+    // Still blocked until parity is confirmed when hasParityGaps is true.
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+    await act(async () => {
+      byTestId('upgrade-ack-parity').props.onChange({ target: { checked: true } });
+    });
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(false);
+    await press('upgrade-execute-reconcile');
+    expect(execute.mock.calls[1][1]).toEqual({
+      action: 'reconcile',
+      acknowledgeDays: ['2026-10-01', '2026-10-02'],
+      acknowledgeAllMismatches: true,
+      acknowledgeParityGaps: true,
+    });
+  });
+
+  it('mounts FreshArtifactStep and gates Managed import on Step 4 failure recovery', async () => {
+    const digest = 'sha256:' + 'e'.repeat(64);
+    const artifactTransport: ArtifactTransport = {
+      readStatus: vi.fn<ArtifactTransport['readStatus']>(async () => ({
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: digest },
+        active: null,
+        required: true,
+        operation: null,
+        cdnPresets: [],
+      })),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-slim-step4',
+        source: 'github',
+        phase: 'succeeded',
+        receivedBytes: 100,
+        totalBytes: 100,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'failed',
+          nextAction: 'cpa_import',
+          errorCode: 'upgrade_cpa_destination_unready',
+          errorDetail: 'engine not ready',
+          execution: workerReady,
+        })
+      ),
+      vi.fn(),
+      artifactTransport,
+      undefined,
+      vi.fn(async () => executionDocument())
+    );
+
+    expect(byTestId('upgrade-cpa-import-artifact')).toBeTruthy();
+    expect(byTestId('upgrade-artifact-prep')).toBeTruthy();
+    await act(async () => byTestId('upgrade-plugins').props.onChange({ target: { value: 'disabled' } }));
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(true);
+
+    await press('artifact-acquire-btn');
+    expect(byTestId('upgrade-cpa-import-ready')).toBeTruthy();
+    expect(byTestId('upgrade-execute-import').props.disabled).toBe(false);
+  });
+
+  it('treats pre-activation upgrade_worker_unavailable on boot and live poll as execution recovery, and clears restarting when healthy idle verify status returns', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const pendingAccess = {
+      mode: 'migrate_legacy' as const,
+      managementBasePath: '/control',
+      inferenceBasePath: '/infer',
+      protocols: [],
+      ready: false,
+      code: 'upgrade_restart_required',
+    };
+    let statusMode: 'unavailable' | 'verify' | 'activating' = 'unavailable';
+    const readCurrent = () =>
+      statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing,
+        accessInfo: pendingAccess,
+        execution:
+          statusMode === 'unavailable'
+            ? {
+                available: false,
+                running: false,
+                managedAvailable: false,
+                code: 'upgrade_worker_unavailable',
+              }
+            : statusMode === 'activating'
+              ? { ...workerReady, action: 'activate', running: true, code: '' }
+              : { ...workerReady, action: 'verify', code: '' },
+      });
+    const onActivation = vi.fn();
+    const execute = vi.fn<UpgradeWizardExecute>(async () => {
+      statusMode = 'activating';
+      return executionDocument({ action: 'activate', running: true, code: '' });
+    });
+
+    // 1. Pre-activation boot with upgrade_worker_unavailable must render recovery instead of activation waiting.
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, execute, onActivation);
+    expect(onActivation).not.toHaveBeenCalled();
+    expect(byTestId('upgrade-execution-recovery')).toBeTruthy();
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-result-incomplete')).toBeTruthy();
+
+    // Worker becomes healthy idle -> Activate becomes enabled.
+    statusMode = 'verify';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(allByTestId('upgrade-execution-recovery')).toHaveLength(0);
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+
+    // 2. Live poll dropping to upgrade_worker_unavailable BEFORE Activate also shows recovery.
+    statusMode = 'unavailable';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).not.toHaveBeenCalled();
+    expect(byTestId('upgrade-execution-recovery')).toBeTruthy();
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+
+    // Recover worker, then click Activate.
+    statusMode = 'verify';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+
+    // 3. While restarting is active, if the next poll reports healthy idle verify (!accessInfo.ready),
+    // restarting clears immediately and Activate unlocks without locking for 120s.
+    statusMode = 'verify';
+    onActivation.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).toHaveBeenCalledWith('');
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+  });
+
+  it('handles POST /execute activate 503 upgrade_worker_unavailable for both restart-to-ready and recovery-to-idle, and resets resumedActivationRef on non-restart failures', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const pendingAccess = {
+      mode: 'migrate_legacy' as const,
+      managementBasePath: '/control',
+      inferenceBasePath: '/infer',
+      protocols: [],
+      ready: false,
+      code: 'upgrade_restart_required',
+    };
+    let statusMode: 'verify' | 'unavailable' | 'canonical' | 'activating' = 'verify';
+    const readCurrent = () => {
+      if (statusMode === 'canonical') {
+        return markCanonicalUpgradeStatus(
+          statusDocument({
+            stage: 'complete',
+            nextAction: 'complete',
+            targetMode: 'managed',
+            routing,
+            accessInfo: {
+              ...pendingAccess,
+              ready: true,
+              code: '',
+            },
+          })
+        );
+      }
+      return statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing,
+        accessInfo: pendingAccess,
+        execution:
+          statusMode === 'unavailable'
+            ? {
+                available: false,
+                running: false,
+                managedAvailable: false,
+                code: 'upgrade_worker_unavailable',
+              }
+            : statusMode === 'activating'
+              ? { ...workerReady, action: 'activate', running: true, code: '' }
+              : { ...workerReady, action: 'verify', code: '' },
+      });
+    };
+
+    // 1. POST /execute activate -> 503 upgrade_worker_unavailable followed by worker shutdown -> canonical ready.
+    const onActivation = vi.fn();
+    const executeRestart = vi.fn<UpgradeWizardExecute>(async () => {
+      statusMode = 'unavailable';
+      throw new UpgradeWizardError('unavailable', 'upgrade_worker_unavailable', 503);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executeRestart, onActivation);
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+
+    statusMode = 'canonical';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+
+    // 2. POST /execute activate -> 503 upgrade_worker_unavailable followed by worker recovering to idle verify:
+    // surfaces the actual upgrade_worker_unavailable failure and clears activation.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    statusMode = 'verify';
+    onActivation.mockClear();
+    const executeRecoverIdle = vi.fn<UpgradeWizardExecute>(async () => {
+      throw new UpgradeWizardError('unavailable', 'upgrade_worker_unavailable', 503);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executeRecoverIdle, onActivation);
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(onActivation).toHaveBeenCalledWith('');
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-execution-error').findByType('code').children.join('')).toBe(
+      'upgrade_worker_unavailable'
+    );
+
+    // 3. Non-restart failure on activate (e.g. 409) resets resumedActivationRef so subsequent status poll can still resume.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    statusMode = 'verify';
+    onActivation.mockClear();
+    const executeConflict = vi.fn<UpgradeWizardExecute>(async () => {
+      throw new UpgradeWizardError('unavailable', 'upgrade_execution_busy', 409);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executeConflict, onActivation);
+    await press('upgrade-execute-activate');
+    expect(onActivation).not.toHaveBeenCalled();
+    expect(byTestId('upgrade-execution-error').findByType('code').children.join('')).toBe(
+      'upgrade_execution_busy'
+    );
+
+    // Next status poll observes in-flight activation and enters restarting because resumedActivationRef was reset.
+    statusMode = 'activating';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+  });
+
+  it('clears stale activationRequested: true on boot and tick when worker has already recovered to idle', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const idleComplete = statusDocument({
+      stage: 'complete',
+      nextAction: 'complete',
+      targetMode: 'managed',
+      routing,
+      accessInfo: {
+        mode: 'migrate_legacy' as const,
+        managementBasePath: '/control',
+        inferenceBasePath: '/infer',
+        protocols: [],
+        ready: false,
+        code: 'upgrade_restart_required',
+      },
+      execution: { ...workerReady, action: 'verify', code: '' },
+    });
+    const onActivation = vi.fn();
+    const execute = vi.fn<UpgradeWizardExecute>(async () => executionDocument({ action: 'activate' }));
+
+    await mount(resumeRead(() => idleComplete), undefined, undefined, undefined, execute, onActivation, true);
+    expect(onActivation).toHaveBeenCalledWith('');
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+    expect(byTestId('upgrade-execute-activate').props.disabled).toBe(false);
+  });
+
+  it('keeps localAction and action button disabled when a status poll fires while POST /execute is still in flight', async () => {
+    const current = statusDocument({
+      stage: 'copy_in',
+      nextAction: 'reconcile',
+      mismatchDays: [],
+      hasParityGaps: false,
+      execution: { ...workerReady, running: false, code: '' },
+    });
+    let statusReads = 0;
+    const read = resumeRead(() => {
+      statusReads += 1;
+      return current;
+    });
+    let resolveExecute!: (value: unknown) => void;
+    const execute = vi.fn<UpgradeWizardExecute>(
+      () =>
+        new Promise((resolve) => {
+          resolveExecute = resolve;
+        })
+    );
+
+    await mount(read, undefined, undefined, undefined, execute);
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(false);
+    const readsBeforeExecute = statusReads;
+
+    // Start dispatchExecution while leaving POST /execute pending.
+    await act(async () => {
+      byTestId('upgrade-execute-reconcile').props.onClick();
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(byTestId('upgrade-execution-running')).toBeTruthy();
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+
+    // Advance past the 10s poll timer so an armed status poll fires and receives running: false.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(statusReads).toBeGreaterThan(readsBeforeExecute);
+    expect(byTestId('upgrade-execution-running')).toBeTruthy();
+    expect(byTestId('upgrade-execute-reconcile').props.disabled).toBe(true);
+
+    // A duplicate click while POST /execute is still in flight remains blocked by actionPendingRef.
+    await act(async () => {
+      byTestId('upgrade-execute-reconcile').props.onClick();
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveExecute(executionDocument({ action: 'reconcile', running: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
+
+  it('enters restart recovery on plain 503 and plain 404 from activate and clears prior execution error upon entering bootstrap-retired recovery', async () => {
+    const routing = {
+      configured: true,
+      committed: true,
+      existingPrefixesPreserved: false,
+      controlBasePath: '/control',
+      inferenceBasePath: '/infer',
+      sharedEntry: false,
+      externalBaseUrl: '',
+      suggestedControlBasePath: '',
+      suggestedInferenceBasePath: '',
+    };
+    const pendingAccess = {
+      mode: 'migrate_legacy' as const,
+      managementBasePath: '/control',
+      inferenceBasePath: '/infer',
+      protocols: [],
+      ready: false,
+      code: 'upgrade_restart_required',
+    };
+    let statusMode: 'verify' | 'unavailable' | 'retiredRecovery' | 'canonical' = 'verify';
+    const readCurrent = () => {
+      if (statusMode === 'canonical') {
+        return markCanonicalUpgradeStatus(
+          statusDocument({
+            stage: 'complete',
+            nextAction: 'complete',
+            targetMode: 'managed',
+            routing,
+            accessInfo: { ...pendingAccess, ready: true, code: '' },
+          })
+        );
+      }
+      if (statusMode === 'retiredRecovery') {
+        return markBootstrapRetiredRecovery(
+          statusDocument({
+            stage: 'complete',
+            nextAction: 'complete',
+            targetMode: 'managed',
+            routing,
+            accessInfo: pendingAccess,
+            execution: {
+              available: false,
+              running: false,
+              managedAvailable: false,
+              code: 'upgrade_worker_unavailable',
+            },
+          })
+        );
+      }
+      return statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing,
+        accessInfo: pendingAccess,
+        execution:
+          statusMode === 'unavailable'
+            ? {
+                available: false,
+                running: false,
+                managedAvailable: false,
+                code: 'upgrade_worker_unavailable',
+              }
+            : { ...workerReady, action: 'verify', code: '' },
+      });
+    };
+
+    // 1. Plain 503 (empty code) on activate enters restart recovery and calls onActivation(prefix).
+    const onActivation = vi.fn();
+    const executePlain503 = vi.fn<UpgradeWizardExecute>(async () => {
+      statusMode = 'unavailable';
+      throw new UpgradeWizardError('unavailable', '', 503);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executePlain503, onActivation);
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+    statusMode = 'canonical';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+
+    // 2. Plain 404 (empty code) on activate enters restart recovery and calls onActivation(prefix).
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    statusMode = 'verify';
+    onActivation.mockClear();
+    const executePlain404 = vi.fn<UpgradeWizardExecute>(async () => {
+      statusMode = 'unavailable';
+      throw new UpgradeWizardError('unavailable', '', 404);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executePlain404, onActivation);
+    await press('upgrade-execute-activate');
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+    statusMode = 'canonical';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(allByTestId('upgrade-activation-waiting')).toHaveLength(0);
+    expect(byTestId('upgrade-access-active')).toBeTruthy();
+
+    // 3. Prior execution error banner is cleared when entering bootstrap-retired recovery on tick.
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    statusMode = 'verify';
+    onActivation.mockClear();
+    const executeConflict = vi.fn<UpgradeWizardExecute>(async () => {
+      throw new UpgradeWizardError('unavailable', 'upgrade_execution_busy', 409);
+    });
+    await mount(resumeRead(readCurrent), undefined, undefined, undefined, executeConflict, onActivation);
+    await press('upgrade-execute-activate');
+    expect(byTestId('upgrade-execution-error')).toBeTruthy();
+
+    statusMode = 'retiredRecovery';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_500);
+    });
+    expect(onActivation).toHaveBeenCalledWith('/control');
+    expect(byTestId('upgrade-activation-waiting')).toBeTruthy();
+    expect(allByTestId('upgrade-execution-error')).toHaveLength(0);
+  });
+
+  it.each([404, 502, 503, 504])(
+    'resumes canonical activation recovery on manual boot retry when reverse proxy returns plain %s while bootstrap is retired',
+    async (proxyStatus) => {
+      const routing = {
+        configured: true,
+        committed: true,
+        existingPrefixesPreserved: false,
+        controlBasePath: '/control',
+        inferenceBasePath: '/infer',
+        sharedEntry: false,
+        externalBaseUrl: '',
+        suggestedControlBasePath: '',
+        suggestedInferenceBasePath: '',
+      };
+      const readyStatus = markCanonicalUpgradeStatus(
+        statusDocument({
+          stage: 'complete',
+          nextAction: 'complete',
+          targetMode: 'managed',
+          routing,
+          accessInfo: {
+            mode: 'migrate_legacy' as const,
+            managementBasePath: '/control',
+            inferenceBasePath: '/infer',
+            protocols: [],
+            ready: true,
+            code: '',
+          },
+        })
+      );
+
+      let phase: 'initial500' | 'proxyError' | 'canonical' = 'initial500';
+      const read = vi.fn<UpgradeWizardRead>(async (resource) => {
+        if (resource !== 'installation/upgrade/status') return preflightDocument();
+        if (phase === 'initial500') {
+          throw new UpgradeWizardError('unavailable', '', 500);
+        }
+        if (phase === 'proxyError') {
+          throw new UpgradeWizardError('unavailable', '', proxyStatus);
+        }
+        return readyStatus;
+      });
+
+      await act(async () => {
+        renderer = create(
+          <FreshUpgradeFlow
+            read={read}
+            bootstrapRetired
+            language="en"
+            pollDelays={[2_000]}
+          />
+        );
+      });
+      // Non-recoverable 500 lands on upgrade-boot-failed so manual retry can be exercised.
+      expect(byTestId('upgrade-boot-failed')).toBeTruthy();
+
+      // Manual retry hitting plain reverse-proxy 404/502/503/504 enters canonical activation recovery.
+      phase = 'proxyError';
+      await press('upgrade-boot-retry');
+      expect(allByTestId('upgrade-boot-failed')).toHaveLength(0);
+      expect(byTestId('upgrade-progress')).toBeTruthy();
+      expect(byTestId('upgrade-progress-reading')).toBeTruthy();
+
+      // Repeated proxy 404/502/503/504 polls keep recovering without stalling.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(allByTestId('upgrade-boot-failed')).toHaveLength(0);
+      expect(allByTestId('upgrade-result-stalled')).toHaveLength(0);
+      expect(byTestId('upgrade-progress-reading')).toBeTruthy();
+
+      // Once canonical endpoint responds, activation completes cleanly.
+      phase = 'canonical';
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(byTestId('upgrade-access-active')).toBeTruthy();
+    }
+  );
+
+  it('keeps manual boot retry on upgrade-boot-failed for structured 404 with a non-retired code while bootstrap is retired', async () => {
+    let phase: 'initial500' | 'structured404' = 'initial500';
+    const read = vi.fn<UpgradeWizardRead>(async (resource) => {
+      if (resource !== 'installation/upgrade/status') return preflightDocument();
+      if (phase === 'initial500') {
+        throw new UpgradeWizardError('unavailable', '', 500);
+      }
+      throw new UpgradeWizardError('unavailable', 'upgrade_source_missing', 404);
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={read}
+          bootstrapRetired
+          language="en"
+          pollDelays={[2_000]}
+        />
+      );
+    });
+    expect(byTestId('upgrade-boot-failed')).toBeTruthy();
+
+    phase = 'structured404';
+    await press('upgrade-boot-retry');
+    expect(byTestId('upgrade-boot-failed')).toBeTruthy();
+    expect(allByTestId('upgrade-progress')).toHaveLength(0);
+    expect(allByTestId('upgrade-progress-reading')).toHaveLength(0);
   });
 });

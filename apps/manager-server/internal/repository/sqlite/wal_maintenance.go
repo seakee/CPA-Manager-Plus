@@ -18,7 +18,7 @@ const (
 	WALCheckpointModePassive    = "passive"
 	WALCheckpointModeTruncate   = "truncate"
 	WALCheckpointModeUnobserved = "unobserved"
-	WALJournalSizeLimitBytes = int64(256 << 20)
+	WALJournalSizeLimitBytes    = int64(256 << 20)
 
 	defaultWALMaintenanceInterval = 30 * time.Second
 	// PASSIVE checkpoints do not wait for readers or writers, but draining an

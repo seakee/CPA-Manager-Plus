@@ -4,6 +4,7 @@ import {
   nextActionText,
   reconciliationBoundText,
   reconciliationTotalText,
+  upgradeExecutionText,
   upgradeWizardText,
 } from './upgradeWizard';
 
@@ -18,6 +19,7 @@ const CODES = [
   'upgrade_source_unreadable',
   'upgrade_source_version_unsupported',
   'upgrade_disk_insufficient',
+  'upgrade_disk_probe_failed',
   'upgrade_credential_timeout',
   'upgrade_mount_timeout',
   'upgrade_legacy_root_missing',
@@ -25,6 +27,8 @@ const CODES = [
   'upgrade_preflight_timeout',
   'upgrade_preflight_failed',
   'upgrade_operation_unreadable',
+  'upgrade_operation_invalid',
+  'upgrade_authority_unavailable',
   // The verification's own vocabulary. Every one of them is answered as a typed
   // code on a route the wizard calls, so every one needs a sentence in every
   // locale: a refusal the operator cannot read is a dead end.
@@ -41,6 +45,17 @@ const CODES = [
   'upgrade_verify_conflict',
   'upgrade_verify_failed',
   'upgrade_request_invalid',
+  'upgrade_bootstrap_retired',
+  'upgrade_external_connect_conflict',
+  'upgrade_source_already_v2',
+  'upgrade_target_layout_mismatch',
+  'upgrade_source_version_undeclared',
+  'upgrade_execution_canceled',
+  'upgrade_v2_running',
+  'upgrade_store_unavailable',
+  'upgrade_verification_failed',
+  'database_unavailable',
+  'upgrade_migrate_not_copied_in',
 ] as const;
 
 const LOCALES = ['en-US', 'zh-CN', 'zh-TW', 'ru'] as const;
@@ -115,6 +130,47 @@ describe('upgrade wizard blocked codes', () => {
     const english = blockedCodeText('upgrade_source_missing', 'en-US');
     for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
       expect(blockedCodeText('upgrade_source_missing', language)).not.toBe(english);
+    }
+  });
+
+  it('translates external connect conflict, v2 source, layout mismatch, and undeclared version across all four locales', () => {
+    const additional = [
+      'upgrade_external_connect_conflict',
+      'upgrade_source_already_v2',
+      'upgrade_target_layout_mismatch',
+      'upgrade_source_version_undeclared',
+      'upgrade_bootstrap_retired',
+      'upgrade_execution_canceled',
+      'upgrade_v2_running',
+      'upgrade_store_unavailable',
+      'upgrade_verification_failed',
+      'database_unavailable',
+      'upgrade_migrate_not_copied_in',
+      'upgrade_disk_probe_failed',
+    ] as const;
+    for (const code of additional) {
+      const english = blockedCodeText(code, 'en-US');
+      expect(english, code).not.toBe('');
+      expect(english, code).not.toBe(upgradeWizardText('codeUnknown', 'en-US'));
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const localized = blockedCodeText(code, language);
+        expect(localized, `${code} in ${language}`).not.toBe('');
+        expect(localized, `${code} in ${language}`).not.toBe(upgradeWizardText('codeUnknown', language));
+        expect(localized, `${code} in ${language}`).not.toBe(english);
+      }
+      expect(blockedCodeText(code, 'zh-CN')).not.toBe(blockedCodeText(code, 'zh-TW'));
+      expect(blockedCodeText(code, 'ru')).toMatch(/[\u0400-\u04ff]/);
+    }
+  });
+
+  it('keeps disk probe failure distinct from insufficient disk space in all four locales', () => {
+    for (const language of LOCALES) {
+      expect(blockedCodeText('upgrade_disk_probe_failed', language)).not.toBe(
+        blockedCodeText('upgrade_disk_insufficient', language)
+      );
+      expect(blockedCodeText('upgrade_disk_probe_failed', language)).not.toBe(
+        upgradeWizardText('codeUnknown', language)
+      );
     }
   });
 });
@@ -201,6 +257,41 @@ describe('upgrade wizard verification copy', () => {
           upgradeWizardText(key, 'en-US')
         );
       }
+    }
+  });
+
+  it('translates canonical waiting and bootstrap-retired activation copy across all four locales', () => {
+    const keys = [
+      'resultCanonicalGatewayPendingHelp',
+      'resultCanonicalExternalPendingHelp',
+      'gatewayWaiting',
+      'activateBootstrapRetiredHelp',
+      'activateBootstrapRetiredNote',
+    ] as const;
+    for (const key of keys) {
+      const english = upgradeExecutionText(key, 'en-US');
+      expect(english, key).not.toBe('');
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const localized = upgradeExecutionText(key, language);
+        expect(localized, `${key} in ${language}`).not.toBe('');
+        expect(localized, `${key} in ${language}`).not.toBe(english);
+      }
+    }
+  });
+
+  it('translates truncated mismatch acknowledgement copy across all four locales', () => {
+    const keys = ['truncatedDays', 'acknowledgeAllTruncated'] as const;
+    for (const key of keys) {
+      const english = upgradeExecutionText(key, 'en-US');
+      expect(english, key).not.toBe('');
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const localized = upgradeExecutionText(key, language);
+        expect(localized, `${key} in ${language}`).not.toBe('');
+        expect(localized, `${key} in ${language}`).not.toBe(english);
+      }
+    }
+    for (const language of LOCALES) {
+      expect(upgradeExecutionText('acknowledgeAllTruncated', language)).toContain('{total}');
     }
   });
 

@@ -16,6 +16,7 @@
 package upgradewizard
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -42,6 +43,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgradeworker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
@@ -57,7 +59,8 @@ const (
 	// VerifySuffix is the one action route: it runs the completion gate the CLI
 	// runs. GET and HEAD on it are refused, so every read of the surface stays a
 	// read, and it is the only route here that writes.
-	VerifySuffix = "/installation/upgrade/verify"
+	VerifySuffix  = "/installation/upgrade/verify"
+	ExecuteSuffix = upgradeworker.ExecuteSuffix
 	// ArtifactStatusSuffix, ArtifactProbeSuffix, ArtifactAcquireSuffix and
 	// ArtifactUploadSuffix proxy the four bounded Runtime Supervisor artifact
 	// endpoints while a recorded Upgrade operation is still in progress.
@@ -178,8 +181,8 @@ var externalConnectRefusals = map[string]bool{
 }
 
 // externalConnectStages are the stages a recorded External refusal can be sitting
-// on. The step legitimately runs from the three of them — the copy-in of a legacy
-// second volume finished, reconciliation finished, or the CPA import finished —
+// on. The step legitimately runs from CopyIn, Reconcile, CPAImport, or External
+// (re-prove, key rotation, or target checks after an initial External connect) —
 // and it never advances the row, so a refusal is found on whichever stage the
 // operator ran it from. Offering reconciliation from any of them would send the
 // operator to a step that is already finished and has nothing to do with the
@@ -188,6 +191,8 @@ var externalConnectStages = map[string]bool{
 	StageCopyIn:    true,
 	StageReconcile: true,
 	StageCPAImport: true,
+	StageExternal:  true,
+	StageFailed:    true,
 }
 
 // nextActionForRecordedStage refines the stage table with the refusal the row
@@ -256,6 +261,22 @@ const domainCPAConfig = "cpa_config"
 //
 // Browser callers are same-origin only, exactly as on the entry leaf.
 type Handler struct {
+	// Worker delegates private-source reads and writes to the authenticated root
+	// worker. No legacy filesystem inspection runs in the public process.
+	Worker *upgradeworker.Client
+	// Authenticate and Execution are bound only by the worker composition root.
+	Authenticate func(context.Context, string) error
+	Execution    func() upgradeworker.Execution
+	// ReconciliationDays exposes only the latest worker comparison's exact date
+	// observation when an unacknowledged comparison intentionally wrote nothing.
+	ReconciliationDays func() []string
+	// ReconciliationHasParityGaps reports whether worker preflight or an
+	// unacknowledged reconciliation observed historical parity-gap dates.
+	ReconciliationHasParityGaps func() bool
+	// ReconciliationState atomically returns the latest worker pending
+	// reconciliation days and whether parity gaps were observed. When nil,
+	// serveStatus falls back to ReconciliationDays and ReconciliationHasParityGaps.
+	ReconciliationState func() ([]string, bool)
 	// LegacyRoot returns the configured 1.x data directory. It is read only,
 	// and it is what the preflight qualifies; it is not automatically the
 	// credential source.
@@ -305,8 +326,13 @@ type Handler struct {
 	// instead of starting another. Both live on the Handler: the one-in-flight
 	// rule is per handler, and the previous answer (or the bound's verdict) is
 	// shared by every poll that arrives while a hung mount is being probed.
-	mountMu     sync.Mutex
-	mountFlight *mountFlight
+	mountMu                sync.Mutex
+	mountFlight            *mountFlight
+	workerFallbackMu       sync.Mutex
+	workerFallback         *upgradeworker.PreparedCredentialVerifier
+	statusCacheMu          sync.Mutex
+	cachedStatus           *statusDocument
+	preflightHasParityGaps bool
 }
 
 // mountFlight is one mount lookup in progress. The goroutine that runs it
@@ -360,6 +386,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
 		return
 	}
+	if h.Worker != nil {
+		if r.Method == http.MethodGet && r.URL.RawQuery == "" && strings.HasSuffix(r.URL.Path, StatusSuffix) && r.URL.Path != StatusSuffix {
+			capture := &bufferedResponseWriter{header: make(http.Header)}
+			if h.Worker.Forward(capture, r) {
+				capture.replayTo(w)
+				if capture.status == http.StatusOK {
+					var observed statusDocument
+					if json.Unmarshal(capture.body.Bytes(), &observed) == nil && observed.Recorded &&
+						observed.SourceKind == string(upgradeservice.SourceKindUpgradedLegacy) {
+						h.rememberStatus(observed)
+					}
+				}
+				return
+			}
+		} else if h.Worker.Forward(w, r) {
+			return
+		}
+		h.serveWorkerUnavailable(w, r)
+		return
+	}
 	// One mount lookup serves the whole request: the credential's file is the
 	// surface's one resolved source — the mount's database when the shared file
 	// policy accepts it, otherwise the Manager store — so proving the key needs
@@ -377,7 +423,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
-	var preflight, verify, routingAction bool
+	var preflight, verify, routingAction, executeAction bool
 	switch {
 	case strings.HasSuffix(path, PreflightSuffix) && path != PreflightSuffix:
 		preflight = true
@@ -386,6 +432,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		verify = true
 	case strings.HasSuffix(path, RoutingSuffix) && path != RoutingSuffix:
 		routingAction = true
+	case strings.HasSuffix(path, ExecuteSuffix) && path != ExecuteSuffix:
+		executeAction = true
 	default:
 		http.NotFound(w, r)
 		return
@@ -393,10 +441,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The two reads stay reads: GET and HEAD only. The actions take POST and
 	// nothing else, so a browser prefetch, a link or a bookmark of an action's
 	// address can never advance or mutate the operation.
-	if verify || routingAction {
+	if verify || routingAction || executeAction {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if executeAction {
+			h.writeWorkerUnavailable(w)
 			return
 		}
 		if routingAction {
@@ -418,12 +470,283 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.serveStatus(w, r, mount)
 }
 
+func (h *Handler) writeWorkerUnavailable(w http.ResponseWriter) {
+	state := upgradeworker.Execution{
+		Available:        false,
+		Running:          false,
+		Code:             upgradeworker.CodeUnavailable,
+		ManagedAvailable: false,
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"contractVersion": upgradeworker.Contract,
+		"code":            upgradeworker.CodeUnavailable,
+		"error":           map[string]string{"code": upgradeworker.CodeUnavailable},
+		"execution":       &state,
+	})
+}
+
+func (h *Handler) fallbackCredentialVerifier() *upgradeworker.PreparedCredentialVerifier {
+	db := h.managerDatabase()
+	if db == "" {
+		return nil
+	}
+	h.workerFallbackMu.Lock()
+	defer h.workerFallbackMu.Unlock()
+	if h.workerFallback == nil {
+		h.workerFallback = upgradeworker.NewPreparedCredentialVerifier(db)
+	}
+	return h.workerFallback
+}
+
+type bufferedResponseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (b *bufferedResponseWriter) Header() http.Header {
+	return b.header
+}
+
+func (b *bufferedResponseWriter) WriteHeader(statusCode int) {
+	if b.status == 0 {
+		b.status = statusCode
+	}
+}
+
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	return b.body.Write(p)
+}
+
+func (b *bufferedResponseWriter) replayTo(w http.ResponseWriter) {
+	for name, values := range b.header {
+		w.Header()[name] = append([]string(nil), values...)
+	}
+	code := b.status
+	if code == 0 {
+		code = http.StatusOK
+	}
+	w.WriteHeader(code)
+	_, _ = w.Write(b.body.Bytes())
+}
+
+func (h *Handler) rememberStatus(doc statusDocument) {
+	cloned := doc
+	h.statusCacheMu.Lock()
+	h.cachedStatus = &cloned
+	h.statusCacheMu.Unlock()
+}
+
+func (h *Handler) recallStatus() (statusDocument, bool) {
+	h.statusCacheMu.Lock()
+	defer h.statusCacheMu.Unlock()
+	if h.cachedStatus == nil {
+		return statusDocument{}, false
+	}
+	return *h.cachedStatus, true
+}
+
+func (h *Handler) rememberPreflightParityGaps(hasGaps bool) {
+	h.statusCacheMu.Lock()
+	h.preflightHasParityGaps = hasGaps
+	h.statusCacheMu.Unlock()
+}
+
+func (h *Handler) recallPreflightParityGaps() bool {
+	h.statusCacheMu.Lock()
+	defer h.statusCacheMu.Unlock()
+	return h.preflightHasParityGaps
+}
+
+func (h *Handler) readDegradedStatusFromBaseCopy(ctx context.Context, database string) (statusDocument, error) {
+	baseSnap, err := upgradeworker.OpenReadOnlyBaseCopyWithRetry(ctx, database, "")
+	if err != nil {
+		return statusDocument{}, err
+	}
+	defer func() { _ = baseSnap.Close() }()
+	if !upgradeworker.ValidPreparedOperationInDB(ctx, baseSnap.DB()) {
+		return statusDocument{}, errStatusRowInvalid
+	}
+	baseDoc, recorded, err := readRecordedStatusFromDB(ctx, baseSnap.DB(), statusDocument{
+		ContractVersion: Contract,
+		SourceRoot:      upgradeworker.CodeUnavailable,
+	})
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if !recorded || baseDoc.SourceKind != string(upgradeservice.SourceKindUpgradedLegacy) {
+		return statusDocument{}, errors.New(upgradeworker.CodeUnavailable)
+	}
+	doc := baseDoc
+	if cached, ok := h.recallStatus(); ok && cached.UpdatedAtMS >= baseDoc.UpdatedAtMS {
+		doc = cached
+	}
+	// A base-file-only fallback while WAL/SHM is unreadable (0600 root:root) is
+	// strictly non-authoritative: never report StageComplete or ready AccessInfo.
+	doc.AccessInfo = nil
+	if doc.Stage == StageComplete {
+		doc.Stage = StageVerify
+		doc.NextAction = ActionVerify
+	}
+	return doc, nil
+}
+
+// serveWorkerUnavailable handles requests when Worker is configured in this
+// deployment but its private socket is temporarily unreachable. Transport or
+// WAL read errors never fold into 401; when the caller's inherited admin
+// credential can be verified against a current complete snapshot, GET /status
+// projects the recorded stage with execution.available=false so the UI renders
+// recovery rather than CLI templates or Fresh setup.
+func (h *Handler) serveWorkerUnavailable(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if h.Authenticate != nil {
+		if err := h.Authenticate(r.Context(), authHeader); err != nil {
+			if errors.Is(err, upgradeservice.ErrAdminUnauthorized) {
+				writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+				return
+			}
+			h.writeWorkerUnavailable(w)
+			return
+		}
+	} else if verifier := h.fallbackCredentialVerifier(); verifier != nil {
+		if err := verifier.Authenticate(r.Context(), authHeader); err != nil {
+			if errors.Is(err, upgradeservice.ErrAdminUnauthorized) {
+				writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+				return
+			}
+			h.writeWorkerUnavailable(w)
+			return
+		}
+	} else {
+		h.writeWorkerUnavailable(w)
+		return
+	}
+
+	if artifactResource, ok := matchArtifactSuffix(r.URL.Path); ok {
+		if r.URL.RawQuery != "" {
+			http.NotFound(w, r)
+			return
+		}
+		expectedMethod := artifactResourceMethod(artifactResource)
+		if expectedMethod == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != expectedMethod {
+			w.Header().Set("Allow", expectedMethod)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		h.writeWorkerUnavailable(w)
+		return
+	}
+	if r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	path := r.URL.Path
+	var statusRoute, readRoute, postRoute bool
+	switch {
+	case strings.HasSuffix(path, StatusSuffix) && path != StatusSuffix:
+		statusRoute = true
+		readRoute = true
+	case strings.HasSuffix(path, PreflightSuffix) && path != PreflightSuffix:
+		readRoute = true
+	case (strings.HasSuffix(path, ExecuteSuffix) && path != ExecuteSuffix) ||
+		(strings.HasSuffix(path, VerifySuffix) && path != VerifySuffix) ||
+		(strings.HasSuffix(path, RoutingSuffix) && path != RoutingSuffix):
+		postRoute = true
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	if postRoute {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		h.writeWorkerUnavailable(w)
+		return
+	}
+	if readRoute && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !statusRoute {
+		h.writeWorkerUnavailable(w)
+		return
+	}
+	database := h.managerDatabase()
+	if database == "" {
+		h.writeWorkerUnavailable(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	document, err := readStatusPreservingTarget(ctx, upgradeservice.PreservedSource{
+		Database: database,
+		DataKey:  h.managerDataKey(),
+	}, "")
+	if err == nil {
+		if cached, ok := h.recallStatus(); ok && cached.Stage == document.Stage && cached.UpdatedAtMS == document.UpdatedAtMS &&
+			cached.NextAction == ActionReconcile && len(cached.Reconciliation.MismatchDays) > 0 && len(document.Reconciliation.MismatchDays) == 0 {
+			document.Reconciliation = cached.Reconciliation
+			document.NextAction = ActionReconcile
+		}
+		if document.Recorded && document.SourceKind == string(upgradeservice.SourceKindUpgradedLegacy) {
+			h.rememberStatus(document)
+		}
+	} else if h.Authenticate != nil && errors.Is(err, os.ErrPermission) {
+		// Production PreparedCredentialVerifier fails closed with 503 at line 614 (or
+		// line 605 when wired via Authenticate) whenever -wal is unreadable, because
+		// uncheckpointed credential rotations live in -wal. Base-copy degraded status
+		// is only reachable when an explicit Authenticate callback independently
+		// verified the caller's current admin credential.
+		document, err = h.readDegradedStatusFromBaseCopy(ctx, database)
+	}
+	if err != nil {
+		if errors.Is(err, errStatusRowInvalid) {
+			writeError(w, http.StatusServiceUnavailable, CodeOperationInvalid)
+			return
+		}
+		h.writeWorkerUnavailable(w)
+		return
+	}
+	document.SourceRoot = upgradeworker.CodeUnavailable
+	if document.Evidence == EvidenceOperationRow && document.Stage == StageCopyIn && slices.Contains(document.DomainsDone, domainSourceCopy) {
+		document.NextAction = ActionReconcile
+	}
+	document.Execution = &upgradeworker.Execution{
+		Available:        false,
+		Running:          false,
+		Code:             upgradeworker.CodeUnavailable,
+		ManagedAvailable: false,
+	}
+	writeJSON(w, http.StatusOK, document)
+}
+
 // authenticate proves the caller holds the source administrator credential. The
 // key was bounded and trimmed by bearerKey, and the browser's origin was decided
 // before this runs; nothing else about the request (a session header, a cookie)
 // can stand in for the key. The mount was inspected once for this request, so
 // both routes and both questions share one answer.
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mountResolution, key string) bool {
+	if h.Authenticate != nil {
+		if err := h.Authenticate(r.Context(), r.Header.Get("Authorization")); err != nil {
+			if errors.Is(err, upgradeservice.ErrAdminUnauthorized) {
+				writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+			} else {
+				writeError(w, http.StatusServiceUnavailable, CodeSourceUnreadable)
+			}
+			return false
+		}
+		return true
+	}
 	if mount.expired {
 		// The caller's own deadline had already passed. The credential read
 		// reports that as a deadline, and it is the honest verdict here too: the
@@ -494,6 +817,12 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 		// The preflight refuses the same mount with the same code: both paths read
 		// the file itself, never whatever a link points at.
 		writeError(w, http.StatusServiceUnavailable, CodeSourceSymlinked)
+	case errors.Is(verifyErr, upgradeservice.ErrSnapshotFailed) && mount.code == CodeLegacyRootUnusable:
+		// Preserved snapshot validation refuses to stage when the configured 1.x
+		// source root itself cannot be resolved (for example EACCES or ELOOP).
+		// Surface the mount's own unusable-root verdict rather than masking it
+		// as an unreadable database.
+		writeError(w, http.StatusServiceUnavailable, CodeLegacyRootUnusable)
 	default:
 		// The credential is not wrong: the source could not be read to verify it.
 		// Naming that condition keeps a wrong-password message off a mount the
@@ -837,12 +1166,10 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	// The read cannot declare the 1.x release: only the operator's copy-in can.
-	// An undeclared version is therefore reported as a pending observation, not
-	// as a refusal, while every other check keeps its blocking power.
+	// Qualification is determined from the observed 1.x schema profile itself,
+	// without requiring a caller-supplied version string.
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
-		LegacyRoot:              root,
-		AcceptUndeclaredVersion: true,
+		LegacyRoot: root,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -879,6 +1206,14 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 		pendingDeclaration = true
 		expectedVersion = check.ExpectedVersion
 	}
+	hasGaps := false
+	for _, d := range dates {
+		if isDate(d) {
+			hasGaps = true
+			break
+		}
+	}
+	h.rememberPreflightParityGaps(hasGaps)
 	writeJSON(w, http.StatusOK, preflightDocument{
 		ContractVersion: Contract,
 		SourceKind:      report.SourceKind,
@@ -909,6 +1244,7 @@ type reconciliationDocument struct {
 	MismatchDays          []string `json:"mismatchDays"`
 	MismatchDaysTotal     int      `json:"mismatchDaysTotal"`
 	MismatchDaysTruncated bool     `json:"mismatchDaysTruncated"`
+	HasParityGaps         bool     `json:"hasParityGaps,omitempty"`
 }
 
 // maxMismatchDays bounds one response. It is a transport bound, not a judgement
@@ -953,6 +1289,7 @@ type statusDocument struct {
 	Routing        *upgradeRoutingDocument    `json:"routing,omitempty"`
 	AccessInfo     *upgradeAccessInfoDocument `json:"accessInfo,omitempty"`
 	UpdatedAtMS    int64                      `json:"updatedAtMs"`
+	Execution      *upgradeworker.Execution   `json:"execution,omitempty"`
 }
 
 func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
@@ -986,6 +1323,11 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 			writeError(w, http.StatusServiceUnavailable, CodeOperationInvalid)
 			return
 		}
+		if h.PreserveManagerStore && mount.database == "" && mount.code == CodeLegacyRootUnusable &&
+			errors.Is(err, upgradeservice.ErrSnapshotFailed) {
+			writeError(w, http.StatusServiceUnavailable, CodeLegacyRootUnusable)
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)
 		return
 	}
@@ -997,6 +1339,51 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 	// stricter preflight verdict (a busy writer, an absent ownership marker, a
 	// corrupt database) is not a mount-level refusal and is not claimed here.
 	document.SourceRoot = mount.state()
+	canReconcile := !document.Recorded || document.Stage == StageCopyIn || document.Stage == StageReconcile || document.Stage == StageFailed
+	hasParityGaps := document.Reconciliation.HasParityGaps || h.recallPreflightParityGaps()
+	var pendingDays []string
+	if h.ReconciliationState != nil {
+		workerDays, workerHasParityGaps := h.ReconciliationState()
+		hasParityGaps = hasParityGaps || workerHasParityGaps
+		if canReconcile {
+			pendingDays = workerDays
+		}
+	} else {
+		if h.ReconciliationHasParityGaps != nil && h.ReconciliationHasParityGaps() {
+			hasParityGaps = true
+		}
+		if h.ReconciliationDays != nil && canReconcile {
+			pendingDays = h.ReconciliationDays()
+		}
+	}
+	if canReconcile && len(pendingDays) > 0 {
+		raw, _ := json.Marshal(map[string]any{"mismatchDays": pendingDays})
+		if observation, err := reconciliationSummary(string(raw)); err == nil {
+			observation.HasParityGaps = observation.HasParityGaps || hasParityGaps
+			document.Reconciliation = observation
+		}
+	}
+	if canReconcile && hasParityGaps && len(document.Reconciliation.MismatchDays) > 0 {
+		document.Reconciliation.HasParityGaps = true
+	}
+	if h.Execution != nil {
+		state := h.Execution()
+		document.Execution = &state
+		if document.Evidence == EvidenceOperationRow && document.Stage == StageCopyIn && slices.Contains(document.DomainsDone, domainSourceCopy) {
+			document.NextAction = ActionReconcile
+		} else if document.Recorded && canReconcile &&
+			(len(pendingDays) > 0 || (state.Action == "reconcile" && (state.Running || state.Code != ""))) {
+			document.NextAction = ActionReconcile
+		} else if document.Recorded && externalConnectStages[document.Stage] &&
+			state.Action == "external-connect" &&
+			(state.Running || externalConnectRefusals[state.Code] ||
+				state.Code == "upgrade_external_connection_required" ||
+				state.Code == string(upgradeservice.UpgradeErrorExternalAuthorityUnavailable)) {
+			document.NextAction = ActionExternalConnect
+		}
+	} else if document.Recorded && canReconcile && len(pendingDays) > 0 {
+		document.NextAction = ActionReconcile
+	}
 	writeJSON(w, http.StatusOK, document)
 }
 
@@ -1137,7 +1524,11 @@ func actionFailureStatus(err error) int {
 	switch code {
 	case upgradeservice.UpgradeErrorVerifyV2Running,
 		upgradeservice.UpgradeErrorVerifySourceUnavailable,
-		upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy):
+		upgradeservice.UpgradeErrorSnapshotFailed,
+		upgradeservice.UpgradeErrorExternalAuthorityUnavailable,
+		upgradeservice.UpgradeErrorTargetLocked,
+		upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
+		upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceLockUnavailable):
 		return http.StatusServiceUnavailable
 	case upgradeservice.UpgradeErrorCode("invalid_access_prefix"),
 		upgradeservice.UpgradeErrorCode("inference_prefix_required"),
@@ -1475,6 +1866,10 @@ func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDo
 	if err != nil {
 		return statusDocument{}, false, err
 	}
+	pendingDays, err := readPendingReconcileDaysColumn(ctx, db)
+	if err != nil {
+		return statusDocument{}, false, err
+	}
 	document.Recorded = true
 	document.Evidence = EvidenceOperationRow
 	document.Stage = row.Stage
@@ -1494,6 +1889,14 @@ func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDo
 	document.ErrorDetail = scrubError(row.ErrorDetail.String)
 	document.UpdatedAtMS = row.UpdatedAtMS
 	document.Reconciliation = reconciliation
+	if len(pendingDays) > 0 && row.Stage != StageComplete && row.Stage != StageRolledBack {
+		rawPending, _ := json.Marshal(map[string]any{"mismatchDays": pendingDays})
+		if observation, pendingErr := reconciliationSummary(string(rawPending)); pendingErr == nil {
+			observation.HasParityGaps = observation.HasParityGaps || reconciliation.HasParityGaps
+			document.Reconciliation = observation
+		}
+		document.NextAction = ActionReconcile
+	}
 	enrichedOp, targetMode, extURL := readRoutingStatusColumns(ctx, db, model.UpgradeOperation{
 		Stage:       model.UpgradeStage(row.Stage),
 		DomainsDone: domains,
@@ -1505,6 +1908,51 @@ func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDo
 	document.Routing = &routeDoc
 	document.AccessInfo = &accessDoc
 	return document, true, nil
+}
+
+func readPendingReconcileDaysColumn(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `pragma table_info(upgrade_operations)`)
+	if err != nil {
+		return nil, err
+	}
+	hasPendingCol := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if name == "pending_reconcile_days" {
+			hasPendingCol = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	if !hasPendingCol {
+		return nil, nil
+	}
+	var raw string
+	if err := db.QueryRowContext(ctx, `select pending_reconcile_days from upgrade_operations where id = 1`).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	days, err := decodeStringColumn(raw, "pending_reconcile_days")
+	if err != nil {
+		return nil, err
+	}
+	for _, day := range days {
+		if !isDate(day) {
+			return nil, fmt.Errorf("%w: pending_reconcile_days contains an invalid date", errStatusRowInvalid)
+		}
+	}
+	return days, nil
 }
 
 // readCopyInMarker reads the provenance marker that describes this database.
@@ -1541,7 +1989,7 @@ func withCopyInMarker(document statusDocument, marker copyinmarker.Marker) statu
 	// The marker is written after the target was materialized, which is exactly
 	// the domain the recorded copy_in row names.
 	document.DomainsDone = []string{domainSourceCopy}
-	document.NextAction = nextAction(StageCopyIn, document.DomainsDone)
+	document.NextAction = ActionCopyIn
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
@@ -1630,7 +2078,8 @@ func reconciliationSummary(raw string) (reconciliationDocument, error) {
 	}
 	seen := map[string]bool{}
 	days := []string{}
-	for _, key := range []string{"mismatchDays", "affectedDates"} {
+	hasParityGaps := false
+	for _, key := range []string{"mismatchDays", "parityGapDays", "affectedDates"} {
 		value, ok := object[key]
 		if !ok {
 			continue
@@ -1642,7 +2091,13 @@ func reconciliationSummary(raw string) (reconciliationDocument, error) {
 			return empty, fmt.Errorf("%w: reconciliation.%s is not a string array", errStatusRowInvalid, key)
 		}
 		for _, day := range list {
-			if !isDate(day) || seen[day] {
+			if !isDate(day) {
+				continue
+			}
+			if key == "parityGapDays" || key == "affectedDates" {
+				hasParityGaps = true
+			}
+			if seen[day] {
 				continue
 			}
 			seen[day] = true
@@ -1662,6 +2117,7 @@ func reconciliationSummary(raw string) (reconciliationDocument, error) {
 		MismatchDays:          days,
 		MismatchDaysTotal:     total,
 		MismatchDaysTruncated: truncated,
+		HasParityGaps:         hasParityGaps,
 	}, nil
 }
 

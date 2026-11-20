@@ -66,6 +66,14 @@ func main() {
 	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "access":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := runAccess(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				log.Print(err)
+				os.Exit(1)
+			}
+			return
 		case "initialize":
 			if len(os.Args) == 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
 				fmt.Fprintln(os.Stdout, "Usage: cpa-manager-plus initialize\nAdmit the real Fresh Manager store and print one short-lived Bootstrap fragment handoff to this host caller, then exit. Existing Fresh operations resume without resetting Admin. Stop the writable service before reissue/resume; the initial read-only listener may remain running. No service-log credential delivery. Unknown/legacy sources remain blocked.")
@@ -581,6 +589,7 @@ func runServerWithOptions(options legacypreflight.Options) {
 		Runtime:         runtimeClient,
 		CollectorWorker: collectorWorker,
 		DesiredStateOut: &reconcilerDesiredStore,
+		Startup:         startupHandler,
 		CanonicalOut:    &upgradeCanonical,
 	}); err != nil {
 		if ctx.Err() != nil {

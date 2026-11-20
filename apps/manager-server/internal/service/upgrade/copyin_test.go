@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -79,7 +82,7 @@ func newLegacyVolume(t *testing.T) legacyVolume {
 		_ = db.Close()
 		t.Fatalf("disable fixture foreign keys: %v", err)
 	}
-	for _, pattern := range []string{`gateway\_%`, `fresh\_%`} {
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade\_%`} {
 		names, err := fixtureTableNames(conn, pattern)
 		if err != nil {
 			_ = conn.Close()
@@ -94,10 +97,10 @@ func newLegacyVolume(t *testing.T) legacyVolume {
 			}
 		}
 	}
-	if _, err := conn.ExecContext(context.Background(), `drop table if exists upgrade_operations`); err != nil {
+	if _, err := conn.ExecContext(context.Background(), `drop table if exists usage_coverage_incomplete_days`); err != nil {
 		_ = conn.Close()
 		_ = db.Close()
-		t.Fatalf("drop fixture upgrade table: %v", err)
+		t.Fatalf("drop v2-only coverage table: %v", err)
 	}
 	if err := conn.Close(); err != nil {
 		_ = db.Close()
@@ -375,6 +378,43 @@ func assertMigratedStore(t *testing.T, databasePath string) {
 	}
 	if marker != 1 {
 		t.Fatalf("migrated settings marker = %d, want 1", marker)
+	}
+}
+
+func TestCopyInSeedsIndependentAccessSuggestionsWithoutCommittingRoutes(t *testing.T) {
+	volume := newLegacyVolume(t)
+	lock := volume.lock(t)
+	seen := map[string]bool{}
+	for range 2 {
+		options := copyInOptions(volume, canonicalTempDir(t))
+		options.Lock = lock
+		result, err := CopyIn(t.Context(), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		op, found, err := ReadRecord(t.Context(), result.TargetDatabase)
+		if err != nil || !found {
+			t.Fatalf("read suggestions: found=%t err=%v", found, err)
+		}
+		if err := routing.ValidateAccessPrefixPair(op.SuggestedControlBasePath, op.SuggestedInferenceBasePath, false, false); err != nil {
+			t.Fatalf("independent suggestions were not persisted at copy-in: %v", err)
+		}
+		for _, prefix := range []string{op.SuggestedControlBasePath, op.SuggestedInferenceBasePath} {
+			if seen[prefix] {
+				t.Fatalf("independent upgrades of the same source reused a default prefix: %q", prefix)
+			}
+			seen[prefix] = true
+		}
+		if op.ControlBasePath != "" || op.InferenceBasePath != "" || op.RoutingCommitted || op.InferenceCommitted || op.SharedEntry {
+			t.Fatal("suggestions became routing authority without operator submission")
+		}
+		if _, err := CopyIn(t.Context(), options); err != nil {
+			t.Fatal(err)
+		}
+		resumed, found, err := ReadRecord(t.Context(), result.TargetDatabase)
+		if err != nil || !found || resumed.SuggestedControlBasePath != op.SuggestedControlBasePath || resumed.SuggestedInferenceBasePath != op.SuggestedInferenceBasePath {
+			t.Fatalf("resume replaced persisted access suggestions: found=%t err=%v", found, err)
+		}
 	}
 }
 
@@ -1782,4 +1822,691 @@ func TestCopyInPreservesCandidateReadErrorTypes(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestCopyInEnforcesV114FamilyAndProvenProfileWithoutFabricatingTag(t *testing.T) {
+	t.Run("unlabeled source records unknown without fabricating v1.14.10", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lock.Close() }()
+
+		res, err := CopyIn(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: target,
+			BundleDir:  bundle,
+			Lock:       lock,
+		})
+		if err != nil {
+			t.Fatalf("unlabeled CopyIn failed: %v", err)
+		}
+		if res.SourceVersion != VersionUnknown {
+			t.Fatalf("SourceVersion = %q, want %q", res.SourceVersion, VersionUnknown)
+		}
+	})
+
+	t.Run("explicit v1.14 patch canonicalizes and wrong family is refused before target write", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lock.Close() }()
+
+		_, err = CopyIn(context.Background(), Options{
+			LegacyRoot:      volume.root,
+			TargetRoot:      target,
+			BundleDir:       bundle,
+			DeclaredVersion: "v1.13.9",
+			Lock:            lock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceVersionUnsupported) {
+			t.Fatalf("CopyIn(v1.13.9) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceVersionUnsupported)
+		}
+		if _, statErr := os.Lstat(filepath.Join(target, databaseFileName)); !os.IsNotExist(statErr) {
+			t.Fatalf("refused CopyIn created target database: %v", statErr)
+		}
+
+		res, err := CopyIn(context.Background(), Options{
+			LegacyRoot:      volume.root,
+			TargetRoot:      target,
+			BundleDir:       bundle,
+			DeclaredVersion: "1.14.8",
+			Lock:            lock,
+		})
+		if err != nil {
+			t.Fatalf("CopyIn(1.14.8) failed: %v", err)
+		}
+		if res.SourceVersion != "v1.14.8" {
+			t.Fatalf("SourceVersion = %q, want canonical v1.14.8", res.SourceVersion)
+		}
+	})
+
+	t.Run("false v1.14.10 label cannot admit unproven source schema", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		db, err := sql.Open("sqlite", volume.databasePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`create table unknown_post_v114_state (id integer primary key)`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lock.Close() }()
+
+		_, err = CopyIn(context.Background(), Options{
+			LegacyRoot:      volume.root,
+			TargetRoot:      target,
+			BundleDir:       bundle,
+			DeclaredVersion: "v1.14.10",
+			Lock:            lock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceVersionUnsupported) {
+			t.Fatalf("CopyIn(unproven schema) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceVersionUnsupported)
+		}
+		if _, statErr := os.Lstat(filepath.Join(target, databaseFileName)); !os.IsNotExist(statErr) {
+			t.Fatalf("refused CopyIn published target database: %v", statErr)
+		}
+		for _, artifact := range []string{bundle, filepath.Join(target, copyInWorkDirectoryName)} {
+			if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+				t.Fatalf("refused CopyIn left %s (err=%v)", artifact, statErr)
+			}
+		}
+	})
+}
+
+func TestCopyInRefusesIncompatibleSourcesBeforeBackupOrMarker(t *testing.T) {
+	t.Run("native v2 database-only and full-layout sources fail before backup", func(t *testing.T) {
+		for _, withMembers := range []bool{false, true} {
+			name := "database-only"
+			if withMembers {
+				name = "full-layout"
+			}
+			t.Run(name, func(t *testing.T) {
+				sourceRoot := canonicalTempDir(t)
+				dbPath := filepath.Join(sourceRoot, databaseFileName)
+				db, err := managersqlite.Open(dbPath)
+				if err != nil {
+					t.Fatalf("open native v2 fixture: %v", err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatalf("close native v2 fixture: %v", err)
+				}
+				if withMembers {
+					if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(sourceRoot, dataKeyFileName)); err != nil {
+						t.Fatalf("create data.key: %v", err)
+					}
+					if err := os.MkdirAll(filepath.Join(sourceRoot, archivesDirName), 0o700); err != nil {
+						t.Fatalf("create usage-archives: %v", err)
+					}
+				}
+				// Ensure the lock marker exists so CopyIn can take the read-only fence.
+				seedLock, err := processlock.Acquire(dbPath)
+				if err != nil {
+					t.Fatalf("seed lock marker: %v", err)
+				}
+				_ = seedLock.Close()
+				lock, err := processlock.AcquireExistingReadOnly(dbPath)
+				if err != nil {
+					t.Fatalf("acquire read-only lock: %v", err)
+				}
+				defer func() { _ = lock.Close() }()
+
+				targetRoot := canonicalTempDir(t)
+				bundleDir := filepath.Join(targetRoot, bundleDirectoryName)
+				_, err = CopyIn(context.Background(), Options{
+					LegacyRoot: sourceRoot,
+					TargetRoot: targetRoot,
+					BundleDir:  bundleDir,
+					Lock:       lock,
+				})
+				if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceAlreadyV2) {
+					t.Fatalf("CopyIn(native-v2) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceAlreadyV2)
+				}
+				for _, path := range []string{
+					bundleDir,
+					filepath.Join(targetRoot, copyInWorkDirectoryName),
+					filepath.Join(targetRoot, databaseFileName),
+				} {
+					if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+						t.Fatalf("refused CopyIn created %s (err=%v)", path, statErr)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("incomplete database-only source fails before backup", func(t *testing.T) {
+		sourceRoot := canonicalTempDir(t)
+		dbPath := filepath.Join(sourceRoot, databaseFileName)
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatalf("open incomplete sqlite fixture: %v", err)
+		}
+		if _, err := db.Exec(`create table settings (key text primary key, value text, updated_at_ms integer)`); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed minimal table: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close incomplete sqlite fixture: %v", err)
+		}
+		seedLock, err := processlock.Acquire(dbPath)
+		if err != nil {
+			t.Fatalf("seed lock marker: %v", err)
+		}
+		_ = seedLock.Close()
+		lock, err := processlock.AcquireExistingReadOnly(dbPath)
+		if err != nil {
+			t.Fatalf("acquire read-only lock: %v", err)
+		}
+		defer func() { _ = lock.Close() }()
+
+		targetRoot := canonicalTempDir(t)
+		bundleDir := filepath.Join(targetRoot, bundleDirectoryName)
+		_, err = CopyIn(context.Background(), Options{
+			LegacyRoot: sourceRoot,
+			TargetRoot: targetRoot,
+			BundleDir:  bundleDir,
+			Lock:       lock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceUnreadable) {
+			t.Fatalf("CopyIn(incomplete schema) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceUnreadable)
+		}
+		for _, path := range []string{
+			bundleDir,
+			filepath.Join(targetRoot, copyInWorkDirectoryName),
+			filepath.Join(targetRoot, databaseFileName),
+		} {
+			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("refused CopyIn created %s (err=%v)", path, statErr)
+			}
+		}
+	})
+}
+
+func TestCopyInRollbackCleansWorkDirectoryWhenMovedIsEmpty(t *testing.T) {
+	t.Run("resumed copy-in with zero newly moved members cleans work directory and prior members on source change", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		targetRoot := canonicalTempDir(t)
+		options := copyInOptions(volume, targetRoot)
+		options.Lock = volume.lock(t)
+		interruptCopyIn(t, options, "target-restored")
+
+		// On resume, data.key and usage-archives already match in targetRoot so
+		// moveMembers returns len(moved) == 0. Mutate the source at target-restored.
+		options.checkpoint = func(phase string) error {
+			if phase != "target-restored" {
+				return nil
+			}
+			return os.WriteFile(volume.archives()[0], []byte("{\"segment\":\"changed-on-resume\"}\n"), 0o600)
+		}
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSourceChanged {
+			t.Fatalf("resumed CopyIn with changing source = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSourceChanged)
+		}
+		for _, name := range []string{databaseFileName, dataKeyFileName, archivesDirName, copyInWorkDirectoryName} {
+			if _, statErr := os.Lstat(filepath.Join(targetRoot, name)); !os.IsNotExist(statErr) {
+				t.Fatalf("aborted resumed CopyIn left %s in target root (err=%v)", name, statErr)
+			}
+		}
+	})
+
+	t.Run("database-only rollbackMaterialized with empty moved removes marker and staging", func(t *testing.T) {
+		targetRoot := canonicalTempDir(t)
+		paths := newTargetPaths(targetRoot)
+		provenance := Result{
+			SourceKind:              SourceKindUpgradedLegacy,
+			SourceFingerprintBefore: strings.Repeat("a", 64),
+			BackupDirectory:         filepath.Join(targetRoot, bundleDirectoryName),
+		}
+		if err := writeCopyInMarker(paths, strings.Repeat("b", 64), provenance, copyinmarker.PhaseMaterializing); err != nil {
+			t.Fatalf("writeCopyInMarker: %v", err)
+		}
+		if err := os.MkdirAll(paths.Staging, 0o700); err != nil {
+			t.Fatalf("mkdir staging: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(paths.Staging, "database"), []byte("staged-db"), 0o600); err != nil {
+			t.Fatalf("write staged database: %v", err)
+		}
+		manifest := maintenancebundle.Manifest{
+			Version: maintenancebundle.Version,
+			Entries: map[string]maintenancebundle.Entry{},
+		}
+		if err := rollbackMaterialized(context.Background(), paths, nil, manifest); err != nil {
+			t.Fatalf("rollbackMaterialized(empty moved): %v", err)
+		}
+		if _, statErr := os.Lstat(paths.Work); !os.IsNotExist(statErr) {
+			t.Fatalf("rollbackMaterialized left %s (err=%v)", paths.Work, statErr)
+		}
+	})
+}
+
+// writeUncheckpointedWALFixtures opens a disposable copy of dbPath in WAL mode,
+// pins a read snapshot on the baseline frames so SQLite cannot checkpoint new
+// commits into the main database file, executes statements on a second writer
+// connection with wal_autocheckpoint=0, and copies the resulting main database
+// plus uncheckpointed -wal bytes back to dbPath without leaving open handles
+// or -shm sidecars behind.
+func writeUncheckpointedWALFixtures(t *testing.T, dbPath string, statements ...string) {
+	t.Helper()
+	scratch := canonicalTempDir(t)
+	tmpDB := filepath.Join(scratch, "work.sqlite")
+	seed, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read seed database: %v", err)
+	}
+	if err := os.WriteFile(tmpDB, seed, 0o600); err != nil {
+		t.Fatalf("write temp database: %v", err)
+	}
+
+	keeper, err := sql.Open("sqlite", tmpDB)
+	if err != nil {
+		t.Fatalf("open keeper database: %v", err)
+	}
+	defer func() { _ = keeper.Close() }()
+	if _, err := keeper.Exec(`pragma journal_mode=wal; pragma wal_autocheckpoint=0; pragma wal_checkpoint(truncate)`); err != nil {
+		t.Fatalf("enable WAL on temp database: %v", err)
+	}
+	keeperConn, err := keeper.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin keeper connection: %v", err)
+	}
+	defer func() { _ = keeperConn.Close() }()
+	if _, err := keeperConn.ExecContext(context.Background(), `begin`); err != nil {
+		t.Fatalf("begin keeper transaction: %v", err)
+	}
+	var baselineCount int
+	if err := keeperConn.QueryRowContext(context.Background(), `select count(*) from settings`).Scan(&baselineCount); err != nil {
+		t.Fatalf("acquire WAL read mark: %v", err)
+	}
+
+	writer, err := sql.Open("sqlite", tmpDB)
+	if err != nil {
+		t.Fatalf("open writer database: %v", err)
+	}
+	if _, err := writer.Exec(`pragma wal_autocheckpoint=0`); err != nil {
+		_ = writer.Close()
+		t.Fatalf("disable writer autocheckpoint: %v", err)
+	}
+	for _, stmt := range statements {
+		if _, err := writer.Exec(stmt); err != nil {
+			_ = writer.Close()
+			t.Fatalf("execute WAL-only SQL %q: %v", stmt, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer database: %v", err)
+	}
+
+	walBytes, err := os.ReadFile(tmpDB + "-wal")
+	if err != nil || len(walBytes) == 0 {
+		t.Fatalf("expected non-empty uncheckpointed WAL: len=%d err=%v", len(walBytes), err)
+	}
+	mainBytes, err := os.ReadFile(tmpDB)
+	if err != nil {
+		t.Fatalf("read main temp database: %v", err)
+	}
+	if err := os.WriteFile(dbPath, mainBytes, 0o600); err != nil {
+		t.Fatalf("overwrite main database: %v", err)
+	}
+	if err := os.WriteFile(dbPath+"-wal", walBytes, 0o600); err != nil {
+		t.Fatalf("write uncheckpointed WAL sidecar: %v", err)
+	}
+	_, _ = keeperConn.ExecContext(context.Background(), `rollback`)
+}
+
+func TestCopyInReplaysUncheckpointedWALAndRejectsIncompatibleStagedWAL(t *testing.T) {
+	t.Run("positive WAL-only rows with wal_autocheckpoint=0 are migrated and preserved", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		writeUncheckpointedWALFixtures(t, volume.databasePath(),
+			`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+				values ('wal-only-event-1', 3000, '3000', 'gpt-test', 'gpt-test', 3000)`,
+			`insert into settings (key, value, updated_at_ms) values ('wal_only_setting', 'from-wal', 3)`,
+		)
+
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		options := copyInOptions(volume, target)
+		options.Lock = volume.lock(t)
+		result, err := CopyIn(context.Background(), options)
+		if err != nil {
+			t.Fatalf("CopyIn with uncheckpointed WAL failed: %v", err)
+		}
+
+		targetDB, err := managersqlite.Open(result.TargetDatabase)
+		if err != nil {
+			t.Fatalf("open migrated target: %v", err)
+		}
+		defer func() { _ = targetDB.Close() }()
+		var usageCount int
+		if err := targetDB.QueryRow(`select count(*) from usage_events`).Scan(&usageCount); err != nil || usageCount != 3 {
+			t.Fatalf("migrated usage_events count = %d/%v, want 3 (2 main + 1 WAL-only)", usageCount, err)
+		}
+		var settingVal string
+		if err := targetDB.QueryRow(`select value from settings where key = 'wal_only_setting'`).Scan(&settingVal); err != nil || settingVal != "from-wal" {
+			t.Fatalf("WAL-only setting in migrated target = %q/%v, want from-wal", settingVal, err)
+		}
+		var walEventCount int
+		if err := targetDB.QueryRow(`select count(*) from usage_events where event_hash = 'wal-only-event-1'`).Scan(&walEventCount); err != nil || walEventCount != 1 {
+			t.Fatalf("WAL-only event count = %d/%v, want 1", walEventCount, err)
+		}
+		recorded, found, err := ReadRecord(context.Background(), result.TargetDatabase)
+		if err != nil || !found || recorded.Stage != model.UpgradeStageCopyIn {
+			t.Fatalf("recorded operation = %+v (found=%t err=%v), want %s", recorded, found, err, model.UpgradeStageCopyIn)
+		}
+		if _, statErr := os.Lstat(bundle); statErr != nil {
+			t.Fatalf("expected backup bundle %s: %v", bundle, statErr)
+		}
+	})
+
+	t.Run("incompatible DDL only in source WAL is refused before backup or target write", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		writeUncheckpointedWALFixtures(t, volume.databasePath(),
+			`create table unknown_post_v114_wal_state (id integer primary key)`,
+		)
+
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		options := copyInOptions(volume, target)
+		options.BundleDir = bundle
+		options.DeclaredVersion = "v1.14.10"
+		options.Lock = volume.lock(t)
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceVersionUnsupported) {
+			t.Fatalf("CopyIn(incompatible source WAL DDL) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceVersionUnsupported)
+		}
+		for _, artifact := range []string{bundle, filepath.Join(target, copyInWorkDirectoryName), filepath.Join(target, databaseFileName)} {
+			if _, statErr := os.Lstat(artifact); !os.IsNotExist(statErr) {
+				t.Fatalf("refused CopyIn left %s (err=%v)", artifact, statErr)
+			}
+		}
+	})
+
+	t.Run("incompatible staged WAL substituted at target-restored is refused and rolled back", func(t *testing.T) {
+		incompatDir := canonicalTempDir(t)
+		incompatSeed := newLegacyVolume(t)
+		writeUncheckpointedWALFixtures(t, incompatSeed.databasePath(),
+			`create table unknown_post_v114_staged_wal (id integer primary key)`,
+		)
+		incompatMain, err := os.ReadFile(incompatSeed.databasePath())
+		if err != nil {
+			t.Fatalf("read incompatible main db: %v", err)
+		}
+		incompatWAL, err := os.ReadFile(incompatSeed.databasePath() + "-wal")
+		if err != nil {
+			t.Fatalf("read incompatible wal: %v", err)
+		}
+		_ = incompatDir
+
+		volume := newLegacyVolume(t)
+		target := canonicalTempDir(t)
+		options := copyInOptions(volume, target)
+		options.DeclaredVersion = "v1.14.10"
+		options.Lock = volume.lock(t)
+		staged := filepath.Join(newTargetPaths(target).Staging, "database")
+		options.checkpoint = func(phase string) error {
+			if phase != "target-restored" {
+				return nil
+			}
+			if err := os.WriteFile(staged, incompatMain, 0o600); err != nil {
+				return err
+			}
+			return os.WriteFile(staged+"-wal", incompatWAL, 0o600)
+		}
+		_, err = CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceVersionUnsupported) {
+			t.Fatalf("CopyIn(incompatible staged WAL) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceVersionUnsupported)
+		}
+		for _, name := range []string{databaseFileName, dataKeyFileName, archivesDirName, copyInWorkDirectoryName} {
+			if _, statErr := os.Lstat(filepath.Join(target, name)); !os.IsNotExist(statErr) {
+				t.Fatalf("aborted staged WAL CopyIn left %s (err=%v)", name, statErr)
+			}
+		}
+	})
+}
+
+func TestCopyInRefusesZeroByteAndSymlinkedSourceDatabases(t *testing.T) {
+	t.Run("zero-byte usage.sqlite returns CodeSourceMissing before backup or target writes", func(t *testing.T) {
+		sourceRoot := canonicalTempDir(t)
+		if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(sourceRoot, dataKeyFileName)); err != nil {
+			t.Fatalf("seed data.key: %v", err)
+		}
+		writeFixtureTree(t, filepath.Join(sourceRoot, archivesDirName, "2026-03", "segment-000001.jsonl"), "{\"segment\":1}\n")
+		dbPath := filepath.Join(sourceRoot, databaseFileName)
+		if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
+			t.Fatalf("write empty usage.sqlite: %v", err)
+		}
+		seedLock, err := processlock.Acquire(dbPath)
+		if err != nil {
+			t.Fatalf("seed lock marker: %v", err)
+		}
+		_ = seedLock.Close()
+		lock, err := processlock.AcquireExistingReadOnly(dbPath)
+		if err != nil {
+			t.Fatalf("acquire read-only lock: %v", err)
+		}
+		defer func() { _ = lock.Close() }()
+
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		_, err = CopyIn(context.Background(), Options{
+			LegacyRoot: sourceRoot,
+			TargetRoot: target,
+			BundleDir:  bundle,
+			Lock:       lock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceMissing) {
+			t.Fatalf("CopyIn(0-byte usage.sqlite) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceMissing)
+		}
+		for _, path := range []string{bundle, filepath.Join(target, copyInWorkDirectoryName), filepath.Join(target, databaseFileName)} {
+			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("refused 0-byte CopyIn left %s (err=%v)", path, statErr)
+			}
+		}
+	})
+
+	t.Run("symlinked source database and WAL return CodeSourceSymlinked", func(t *testing.T) {
+		realVolume := newLegacyVolume(t)
+		symlinkRoot := canonicalTempDir(t)
+		if err := os.Symlink(realVolume.databasePath(), filepath.Join(symlinkRoot, databaseFileName)); err != nil {
+			t.Fatalf("symlink usage.sqlite: %v", err)
+		}
+		target := canonicalTempDir(t)
+		err := validateSourceCompatibilitySnapshot(context.Background(), filepath.Join(symlinkRoot, databaseFileName), symlinkRoot, target, "", "")
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
+			t.Fatalf("validateSourceCompatibilitySnapshot(symlink db) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
+		}
+
+		// Also verify full CopyIn refuses a symlinked source -wal sidecar with CodeSourceSymlinked.
+		walSource := newLegacyVolume(t)
+		walCopy := walSource.databasePath() + ".wal-target"
+		if err := os.WriteFile(walCopy, []byte("not-a-real-wal"), 0o600); err != nil {
+			t.Fatalf("write external wal target: %v", err)
+		}
+		if err := os.Symlink(walCopy, walSource.databasePath()+"-wal"); err != nil {
+			t.Fatalf("symlink usage.sqlite-wal: %v", err)
+		}
+		options := copyInOptions(walSource, canonicalTempDir(t))
+		options.Lock = walSource.lock(t)
+		_, err = CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
+			t.Fatalf("CopyIn(symlink -wal) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
+		}
+	})
+}
+
+func TestCopyInWithExplicitScratchSucceedsWhenTMPDIRPointsToReadOnlyLegacyRoot(t *testing.T) {
+	volume := newLegacyVolume(t)
+	lock, err := processlock.AcquireExistingReadOnly(volume.databasePath())
+	if err != nil {
+		t.Fatalf("acquire read-only source lock: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+
+	setOSTempDir(t, volume.root)
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		if err := os.Chmod(volume.root, 0o555); err != nil {
+			t.Fatalf("chmod legacy root read-only: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(volume.root, 0o700) })
+	}
+	sourceBefore := fingerprintTree(t, volume.root)
+
+	target := canonicalTempDir(t)
+	scratch := canonicalTempDir(t)
+	options := copyInOptions(volume, target)
+	options.ScratchDir = scratch
+	options.Lock = lock
+
+	result, err := CopyIn(context.Background(), options)
+	if err != nil {
+		t.Fatalf("CopyIn with explicit ScratchDir and read-only TMPDIR=legacy failed: %v", err)
+	}
+	if result.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("result.Stage = %q, want %s", result.Stage, model.UpgradeStageCopyIn)
+	}
+	assertTreeUnchanged(t, "read-only legacy source", sourceBefore, fingerprintTree(t, volume.root))
+	if entries, readErr := os.ReadDir(scratch); readErr != nil || len(entries) != 0 {
+		t.Fatalf("CopyIn left temporary entries in scratchDir: entries=%v err=%v", entries, readErr)
+	}
+}
+
+func TestCopyInRefusesUnreservedSymlinksArchiveSymlinksAndNonRegularEntries(t *testing.T) {
+	t.Run("unreserved symlink in legacy root returns CodeSourceSymlinked without following target", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		outside := filepath.Join(canonicalTempDir(t), "outside.txt")
+		if err := os.WriteFile(outside, []byte("external-bytes"), 0o600); err != nil {
+			t.Fatalf("write external file: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(volume.root, "extra.bak")); err != nil {
+			t.Fatalf("create unreserved symlink: %v", err)
+		}
+		options := copyInOptions(volume, canonicalTempDir(t))
+		options.Lock = volume.lock(t)
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
+			t.Fatalf("CopyIn(unreserved symlink) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
+		}
+	})
+
+	t.Run("symlinked usage-archives root returns CodeSourceSymlinked", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		outsideArchives := canonicalTempDir(t)
+		if err := os.RemoveAll(filepath.Join(volume.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+		if err := os.Symlink(outsideArchives, filepath.Join(volume.root, archivesDirName)); err != nil {
+			t.Fatalf("symlink usage-archives: %v", err)
+		}
+		options := copyInOptions(volume, canonicalTempDir(t))
+		options.Lock = volume.lock(t)
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
+			t.Fatalf("CopyIn(symlinked usage-archives) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
+		}
+	})
+
+	t.Run("symlinked entry inside usage-archives returns CodeSourceSymlinked", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		outside := filepath.Join(canonicalTempDir(t), "archive.jsonl")
+		if err := os.WriteFile(outside, []byte("{\"events\":1}\n"), 0o600); err != nil {
+			t.Fatalf("write external archive: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(volume.root, archivesDirName, "2026-03", "linked.jsonl")); err != nil {
+			t.Fatalf("symlink archive entry: %v", err)
+		}
+		options := copyInOptions(volume, canonicalTempDir(t))
+		options.Lock = volume.lock(t)
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
+			t.Fatalf("CopyIn(symlinked archive file) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
+		}
+	})
+
+	t.Run("unreserved FIFO in legacy root fails fast without blocking", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("FIFO special files require a Unix filesystem")
+		}
+		volume := newLegacyVolume(t)
+		makeTestFIFO(t, filepath.Join(volume.root, "extra.fifo"))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			options := copyInOptions(volume, canonicalTempDir(t))
+			options.Lock = volume.lock(t)
+			_, err := CopyIn(ctx, options)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("CopyIn(unreserved FIFO) = %v, want immediate non-regular file error", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("CopyIn blocked on unreserved FIFO")
+		}
+	})
+}
+
+func TestCopyInRefusesScratchInsideExternalBackupDirectory(t *testing.T) {
+	t.Run("explicit ScratchDir inside external BundleDir fails closed with zero files written", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		target := canonicalTempDir(t)
+		bundleParent := canonicalTempDir(t)
+		bundleDir := filepath.Join(bundleParent, "external-backup")
+
+		options := copyInOptions(volume, target)
+		options.BundleDir = bundleDir
+		options.ScratchDir = filepath.Join(bundleDir, "scratch")
+		options.Lock = volume.lock(t)
+
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("CopyIn(ScratchDir inside BundleDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		if _, statErr := os.Lstat(bundleDir); !os.IsNotExist(statErr) {
+			t.Fatalf("CopyIn created external BundleDir on refused scratch: err=%v", statErr)
+		}
+	})
+
+	t.Run("default TMPDIR inside external BundleDir fails closed with zero snapshot files written", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		target := canonicalTempDir(t)
+		bundleDir := filepath.Join(canonicalTempDir(t), "external-backup")
+		if err := os.MkdirAll(bundleDir, 0o700); err != nil {
+			t.Fatalf("mkdir external bundleDir: %v", err)
+		}
+		setOSTempDir(t, bundleDir)
+
+		options := copyInOptions(volume, target)
+		options.BundleDir = bundleDir
+		options.Lock = volume.lock(t)
+
+		_, err := CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("CopyIn(TMPDIR=BundleDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		entries, readErr := os.ReadDir(bundleDir)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("CopyIn wrote into external BundleDir when TMPDIR=BundleDir: entries=%v err=%v", entries, readErr)
+		}
+	})
 }

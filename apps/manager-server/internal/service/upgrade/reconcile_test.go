@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,28 @@ func newCopiedVolume(t *testing.T) copiedVolume {
 func newCopiedVolumeUnlocked(t *testing.T) copiedVolume {
 	t.Helper()
 	return copyVolumeInto(t, newLegacyVolume(t), false)
+}
+
+// newReconciledVolumeUnlocked builds a copy-in that has completed durable
+// reconciliation and releases the target lock so steps that acquire their own
+// target fence (such as ExternalConnect) can run against it.
+func newReconciledVolumeUnlocked(t *testing.T) copiedVolume {
+	t.Helper()
+	copied := newCopiedVolumeUnlocked(t)
+	targetLock, err := processlock.Acquire(copied.databasePath())
+	if err != nil {
+		t.Fatalf("acquire target lock for reconciliation: %v", err)
+	}
+	reconcileOpts := copied.options
+	reconcileOpts.TargetLock = targetLock
+	if _, err := Reconcile(context.Background(), reconcileOpts); err != nil {
+		_ = targetLock.Close()
+		t.Fatalf("reconcile fixture: %v", err)
+	}
+	if err := targetLock.Close(); err != nil {
+		t.Fatalf("release target lock after reconciliation: %v", err)
+	}
+	return copied
 }
 
 // newCopiedVolumeWith seeds the stopped source before the copy-in and then
@@ -688,30 +711,42 @@ func TestReconcileBlocksWhenTheStoreLosesASourceTable(t *testing.T) {
 }
 
 // TestReconcileDoesNotRecordADomainTheSourceDoesNotHold keeps the other half of
-// H1: a domain the 1.x volume never had was not compared, so this step must not
-// claim it.
+// H1: a derived domain table the 1.x volume does not hold was not compared, so
+// this step must not claim it, while missing required v1.14.x base tables stay
+// refused up front by CopyIn.
 func TestReconcileDoesNotRecordADomainTheSourceDoesNotHold(t *testing.T) {
+	missingRequired := newLegacyVolume(t)
+	execSource(t, missingRequired, `drop table usage_archive_deleted_coverage_daily`)
+	refusedOpts := copyInOptions(missingRequired, canonicalTempDir(t))
+	refusedOpts.Lock = missingRequired.lock(t)
+	if _, err := CopyIn(context.Background(), refusedOpts); err == nil {
+		t.Fatal("CopyIn accepted a source missing required usage_archive_deleted_coverage_daily")
+	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceVersionUnsupported) {
+		t.Fatalf("CopyIn(missing coverage base table) = %v (code=%q/%t), want %s",
+			err, code, ok, CodeSourceVersionUnsupported)
+	}
+
 	volume := newLegacyVolume(t)
-	execSource(t, volume, `drop table usage_archive_deleted_coverage_daily`)
+	execSource(t, volume, `drop table usage_pricing_hourly_rollups_v1`)
 	copied := copyVolume(t, volume)
 
 	report, err := Reconcile(context.Background(), copied.reconcileOptions())
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if slicesContain(report.DomainsDone, model.UpgradeDomainCoverage) {
-		t.Fatalf("domains done = %v, want no coverage: the source holds no coverage table", report.DomainsDone)
+	if slicesContain(report.DomainsDone, model.UpgradeDomainPricing) {
+		t.Fatalf("domains done = %v, want no pricing: the source holds no pricing rollup table", report.DomainsDone)
 	}
-	if !slicesContain(report.DomainsDone, model.UpgradeDomainPricing) ||
+	if !slicesContain(report.DomainsDone, model.UpgradeDomainCoverage) ||
 		!slicesContain(report.DomainsDone, model.UpgradeDomainRetainedProjection) {
 		t.Fatalf("domains done = %v, want the compared domains", report.DomainsDone)
 	}
 	for _, domain := range report.Domains {
-		if domain.Domain != ReconcileDomainCoverage {
+		if domain.Domain != ReconcileDomainPricing {
 			continue
 		}
 		if domain.Applicable || domain.SourceDays != 0 {
-			t.Fatalf("coverage report = %+v, want an inapplicable domain with no source day", domain)
+			t.Fatalf("pricing report = %+v, want an inapplicable domain with no source day", domain)
 		}
 	}
 	assertNoScratch(t, copied.target)
@@ -1145,40 +1180,40 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 	}
 }
 
-// TestReconcileRecordsNothingWhenNoDomainWasCompared reproduces the round three
-// review's R2: a source that holds none of the compared tables established no
-// domain, and the old run advanced nothing while reporting Recorded with an
-// empty stage.
-func TestReconcileRecordsNothingWhenNoDomainWasCompared(t *testing.T) {
-	volume := newLegacyVolume(t)
-	execSource(t, volume,
+// Missing source tables cannot be copied, and deleting migrated target tables
+// cannot turn an invalid store into a successful empty reconciliation.
+func TestMissingMigrationTablesCannotAdvanceReconciliation(t *testing.T) {
+	unreadableSource := newLegacyVolume(t)
+	execSource(t, unreadableSource, `pragma foreign_keys = off`, `drop table usage_events`)
+	refusedOpts := copyInOptions(unreadableSource, canonicalTempDir(t))
+	refusedOpts.Lock = unreadableSource.lock(t)
+	if _, err := CopyIn(context.Background(), refusedOpts); err == nil {
+		t.Fatal("CopyIn accepted a source without usage_events")
+	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceUnreadable) {
+		t.Fatalf("CopyIn(missing usage_events) = %v (code=%q/%t), want %s",
+			err, code, ok, CodeSourceUnreadable)
+	}
+
+	copied := newCopiedVolume(t)
+	execTarget(t, copied.databasePath(),
 		`pragma foreign_keys = off`,
 		`drop table usage_events`,
 		`drop table usage_pricing_hourly_rollups_v1`,
 		`drop table usage_archive_deleted_coverage_daily`,
 		`drop table usage_monitoring_account_daily_rollups_v1`)
-	copied := copyVolume(t, volume)
 
 	report, err := Reconcile(context.Background(), copied.reconcileOptions())
-	if !errors.Is(err, ErrReconcileNothingCompared) {
-		t.Fatalf("reconcile error = %v, want the nothing-compared refusal", err)
+	if !errors.Is(err, ErrTargetModified) {
+		t.Fatalf("reconcile error = %v, want the target-modified refusal", err)
 	}
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileNothingCompared {
-		t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorReconcileNothingCompared)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorTargetModified {
+		t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorTargetModified)
 	}
 	if report.Recorded || report.Stage != "" {
 		t.Fatalf("report = %+v, want not-recorded and no stage", report)
 	}
 	if len(report.DomainsDone) != 0 {
 		t.Fatalf("domains done = %v, want none: nothing was compared", report.DomainsDone)
-	}
-	if len(report.Domains) != 4 {
-		t.Fatalf("report domains = %d, want the four domains it looked for", len(report.Domains))
-	}
-	for _, domain := range report.Domains {
-		if domain.Applicable || domain.SourceDays != 0 {
-			t.Fatalf("domain = %+v, want an inapplicable domain with no source day", domain)
-		}
 	}
 	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 		t.Fatalf("marked days = %v, want none", got)
@@ -1944,11 +1979,23 @@ func TestReconcileReadsTargetWALOnlyThroughPrivateSnapshots(t *testing.T) {
 			}
 			report, err := Reconcile(context.Background(), options)
 			assertTreeUnchanged(t, "reconciliation source", sourceBefore, fingerprintTree(t, copied.volume.root))
+			if !readPhaseObserved {
+				t.Fatal("comparison did not observe an unchanged target before persistence")
+			}
 			if outcome == "mismatch" {
 				if !errors.Is(err, ErrReconcileMismatch) || report.Recorded {
 					t.Errorf("WAL mismatch = %+v/%v", report, err)
 				}
-				assertTreeUnchanged(t, "refused reconciliation target", targetBefore, fingerprintTree(t, copied.target))
+				snapshot, err := OpenSnapshot(context.Background(), copied.databasePath(), options.ScratchDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				row, found, readErr := ReadRecordFrom(context.Background(), snapshot.DB())
+				marks, markErr := coverageincomplete.New(snapshot.DB()).DaysIn(context.Background(), 0, 1<<42)
+				closeErr := snapshot.Close()
+				if readErr != nil || markErr != nil || closeErr != nil || !found || row.Stage != model.UpgradeStageCopyIn || len(row.PendingReconcileDays) != 1 || len(marks) != 0 {
+					t.Fatalf("mismatch pending reconciliation persistence = %+v/%v/%v/%v/%v", row, marks, readErr, markErr, closeErr)
+				}
 			} else {
 				if err != nil || !report.Recorded || report.Stage != model.UpgradeStageReconcile {
 					t.Fatalf("WAL success = %+v/%v", report, err)
@@ -1975,4 +2022,391 @@ func TestReconcileReadsTargetWALOnlyThroughPrivateSnapshots(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePersistsPendingDatesClearsAtomicallyAndRetainsJSONShape(t *testing.T) {
+	copied := newCopiedVolume(t)
+	execTarget(t, copied.databasePath(),
+		`update usage_events set total_tokens = total_tokens + 1 where event_hash = 'legacy-event-1'`)
+
+	blockedReport, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if !errors.Is(err, ErrReconcileMismatch) || blockedReport.Recorded {
+		t.Fatalf("blocked Reconcile = %+v, %v; want ErrReconcileMismatch with Recorded=false", blockedReport, err)
+	}
+	assertCLIReconcileJSONShape(t, blockedReport, false)
+
+	afterBlocked := operationRow(t, copied.databasePath())
+	if afterBlocked.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("Stage after blocked reconcile = %q, want %q", afterBlocked.Stage, model.UpgradeStageCopyIn)
+	}
+	if !reflect.DeepEqual(afterBlocked.PendingReconcileDays, []string{"1970-01-01"}) {
+		t.Fatalf("PendingReconcileDays = %v, want [1970-01-01]", afterBlocked.PendingReconcileDays)
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("markedDays after blocked reconcile = %v, want none", got)
+	}
+
+	// An interrupted recording rolls back atomically and must not clear persisted pending dates.
+	ackOpts := copied.reconcileOptions()
+	ackOpts.Acknowledged = []string{"1970-01-01"}
+	faultErr := errors.New("interrupted before commit")
+	reconcileRecordingCut = func(point string) error {
+		if point == reconcileRecordingAfterEvidence {
+			return faultErr
+		}
+		return nil
+	}
+	if _, err := Reconcile(context.Background(), ackOpts); !errors.Is(err, faultErr) {
+		reconcileRecordingCut = nil
+		t.Fatalf("interrupted Reconcile = %v, want %v", err, faultErr)
+	}
+	reconcileRecordingCut = nil
+	if kept := operationRow(t, copied.databasePath()).PendingReconcileDays; !reflect.DeepEqual(kept, []string{"1970-01-01"}) {
+		t.Fatalf("PendingReconcileDays after rolled-back commit = %v, want [1970-01-01]", kept)
+	}
+
+	recordedReport, err := Reconcile(context.Background(), ackOpts)
+	if err != nil || !recordedReport.Recorded || recordedReport.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("acknowledged Reconcile = %+v, %v", recordedReport, err)
+	}
+	assertCLIReconcileJSONShape(t, recordedReport, true)
+	afterSuccess := operationRow(t, copied.databasePath())
+	if len(afterSuccess.PendingReconcileDays) != 0 {
+		t.Fatalf("PendingReconcileDays after successful reconcile = %v, want empty", afterSuccess.PendingReconcileDays)
+	}
+}
+
+func assertCLIReconcileJSONShape(t *testing.T, report ReconcileReport, wantRecorded bool) {
+	t.Helper()
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal ReconcileReport: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal ReconcileReport map: %v", err)
+	}
+	allowed := map[string]bool{
+		"sourceFingerprint":  true,
+		"domains":            true,
+		"mismatchDays":       true,
+		"parityGapDays":      true,
+		"acknowledgedDays":   true,
+		"unacknowledgedDays": true,
+		"incompleteDays":     true,
+		"newlyMarkedDays":    true,
+		"recorded":           true,
+		"stage":              true,
+		"domainsDone":        true,
+		"updatedAtMs":        true,
+	}
+	for key := range obj {
+		if !allowed[key] {
+			t.Fatalf("ReconcileReport JSON introduced unexpected key %q in %s", key, string(raw))
+		}
+	}
+	for _, required := range []string{
+		"sourceFingerprint", "domains", "mismatchDays", "parityGapDays",
+		"acknowledgedDays", "unacknowledgedDays", "incompleteDays", "newlyMarkedDays", "recorded",
+	} {
+		if _, ok := obj[required]; !ok {
+			t.Fatalf("ReconcileReport JSON missing required key %q in %s", required, string(raw))
+		}
+	}
+	if wantRecorded {
+		for _, recordedKey := range []string{"stage", "domainsDone", "updatedAtMs"} {
+			if _, ok := obj[recordedKey]; !ok {
+				t.Fatalf("recorded ReconcileReport JSON missing %q in %s", recordedKey, string(raw))
+			}
+		}
+	}
+}
+
+func TestReconcileTargetIncompleteRerunInvalidatesPriorReconciliation(t *testing.T) {
+	ctx := context.Background()
+	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
+		seedSourceRetention(t, volume)
+		seedSourcePricing(t, volume)
+	})
+
+	firstReport, err := Reconcile(ctx, copied.reconcileOptions())
+	if err != nil {
+		t.Fatalf("initial clean Reconcile failed: %v", err)
+	}
+	if !firstReport.Recorded || firstReport.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("initial Reconcile report = %+v, want recorded reconcile stage", firstReport)
+	}
+	if row := operationRow(t, copied.databasePath()); row.Stage != model.UpgradeStageReconcile || len(row.DomainsDone) <= 1 {
+		t.Fatalf("row after clean Reconcile = %+v, want reconcile stage with domains", row)
+	}
+
+	// Corrupt target store by deleting the retained day so rerun fails with UpgradeErrorReconcileTargetIncomplete.
+	execTarget(t, copied.databasePath(), `delete from usage_events`)
+
+	_, err = Reconcile(ctx, copied.reconcileOptions())
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileTargetIncomplete {
+		t.Fatalf("rerun Reconcile = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorReconcileTargetIncomplete)
+	}
+
+	invalidated := operationRow(t, copied.databasePath())
+	if invalidated.Stage != model.UpgradeStageCopyIn || invalidated.LastForwardStage != model.UpgradeStageCopyIn {
+		t.Fatalf("invalidated stage/lastForward = %q/%q, want copy_in/copy_in", invalidated.Stage, invalidated.LastForwardStage)
+	}
+	if !reflect.DeepEqual(invalidated.DomainsDone, []string{model.UpgradeDomainSourceCopy}) {
+		t.Fatalf("invalidated DomainsDone = %v, want [source_copy]", invalidated.DomainsDone)
+	}
+	if strings.TrimSpace(string(invalidated.Reconciliation)) != "{}" {
+		t.Fatalf("invalidated Reconciliation = %s, want {}", string(invalidated.Reconciliation))
+	}
+	if invalidated.ErrorCode != string(UpgradeErrorReconcileTargetIncomplete) || invalidated.ErrorDetail == "" {
+		t.Fatalf("invalidated error = %q / %q, want %s with non-empty detail",
+			invalidated.ErrorCode, invalidated.ErrorDetail, UpgradeErrorReconcileTargetIncomplete)
+	}
+
+	// Release Reconcile's held fences so downstream steps can acquire their own locks and hit the stage gates.
+	_ = copied.targetLock.Close()
+	_ = copied.sourceLock.Close()
+
+	_, extErr := ExternalConnect(ctx, ExternalConnectOptions{
+		TargetRoot:    copied.target,
+		BaseURL:       "https://cpa.example:8317",
+		ManagementKey: "external-management-secret",
+	})
+	if code, ok := UpgradeErrorCodeOf(extErr); !ok || code != UpgradeErrorExternalNotApplicable {
+		t.Fatalf("ExternalConnect after invalidation = %v (code=%q/%t), want %s",
+			extErr, code, ok, UpgradeErrorExternalNotApplicable)
+	}
+
+	_, cpaErr := ImportCPA(ctx, CPAImportOptions{
+		LegacyRoot:     copied.volume.root,
+		TargetRoot:     copied.target,
+		PluginsEnabled: boolPointer(false),
+		Runtime:        newFakeImportRuntime(model.RuntimeStateOffline),
+	})
+	if code, ok := UpgradeErrorCodeOf(cpaErr); !ok || code != UpgradeErrorCPAStageConflict {
+		t.Fatalf("ImportCPA after invalidation = %v (code=%q/%t), want %s",
+			cpaErr, code, ok, UpgradeErrorCPAStageConflict)
+	}
+
+	_, verifyErr := Verify(ctx, VerifyOptions{
+		LegacyRoot:      copied.volume.root,
+		TargetRoot:      copied.target,
+		ScratchDir:      copied.options.ScratchDir,
+		ControlBasePath: "/cpamp-control",
+	})
+	if code, ok := UpgradeErrorCodeOf(verifyErr); !ok || code != UpgradeErrorVerifyNotApplicable {
+		t.Fatalf("Verify after invalidation = %v (code=%q/%t), want %s",
+			verifyErr, code, ok, UpgradeErrorVerifyNotApplicable)
+	}
+}
+
+func TestReconcileUsesSequentialOneXScratchSnapshotBudget(t *testing.T) {
+	ctx := context.Background()
+	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
+		seedSourceRetention(t, volume)
+		seedSourcePricing(t, volume)
+	})
+	scratch := canonicalTempDir(t)
+	opts := copied.reconcileOptions()
+	opts.ScratchDir = scratch
+
+	var snapshotCalls int
+	var maxConcurrentSnapshots int
+	previousHook := afterSnapshotCopy
+	t.Cleanup(func() { afterSnapshotCopy = previousHook })
+	afterSnapshotCopy = func() {
+		snapshotCalls++
+		entries, err := os.ReadDir(scratch)
+		if err != nil {
+			t.Errorf("ReadDir(scratch): %v", err)
+			return
+		}
+		active := 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), snapshotDirPrefix) {
+				active++
+			}
+		}
+		if active > maxConcurrentSnapshots {
+			maxConcurrentSnapshots = active
+		}
+	}
+
+	report, err := Reconcile(ctx, opts)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+	if !report.Recorded || report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("Reconcile report = %+v, want recorded reconcile stage", report)
+	}
+	if snapshotCalls != 2 {
+		t.Fatalf("OpenSnapshot calls during Reconcile = %d, want 2 (target then source)", snapshotCalls)
+	}
+	if maxConcurrentSnapshots != 1 {
+		t.Fatalf("peak concurrent scratch snapshots = %d, want 1 (1x sequential scratch budget)", maxConcurrentSnapshots)
+	}
+	remaining, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatalf("ReadDir(scratch) after Reconcile: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("scratch directory retained entries after Reconcile: %v", remaining)
+	}
+}
+
+func TestReconcileFailsClosedWithoutInvalidatingWhenPostCompareFingerprintFails(t *testing.T) {
+	ctx := context.Background()
+	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
+		seedSourceRetention(t, volume)
+		seedSourcePricing(t, volume)
+	})
+
+	firstReport, err := Reconcile(ctx, copied.reconcileOptions())
+	if err != nil {
+		t.Fatalf("initial clean Reconcile failed: %v", err)
+	}
+	if !firstReport.Recorded || firstReport.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("initial Reconcile report = %+v, want recorded reconcile stage", firstReport)
+	}
+	beforeRow := operationRow(t, copied.databasePath())
+
+	// Make target incomplete so compareStores returns UpgradeErrorReconcileTargetIncomplete.
+	execTarget(t, copied.databasePath(), `delete from usage_events`)
+
+	outsideTarget := filepath.Join(t.TempDir(), "outside.ndjson")
+	if err := os.WriteFile(outsideTarget, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	// During Snapshot #2 (the source snapshot inside compareStores), place a
+	// symlink inside usage-archives so OpenSnapshot succeeds on usage.sqlite,
+	// compareStores returns UpgradeErrorReconcileTargetIncomplete, and the
+	// post-compare fingerprintSource call returns an error.
+	snapshotCall := 0
+	var symlinkErr error
+	previousHook := afterSnapshotCopy
+	t.Cleanup(func() { afterSnapshotCopy = previousHook })
+	afterSnapshotCopy = func() {
+		snapshotCall++
+		if snapshotCall == 2 {
+			symlinkErr = os.Symlink(outsideTarget, filepath.Join(copied.volume.root, archivesDirName, "untrusted-link.ndjson"))
+		}
+	}
+
+	_, err = Reconcile(ctx, copied.reconcileOptions())
+	if symlinkErr != nil {
+		t.Skipf("symlinks unsupported: %v", symlinkErr)
+	}
+	if err == nil {
+		t.Fatal("Reconcile succeeded despite post-compare fingerprint failure")
+	}
+	if code, ok := UpgradeErrorCodeOf(err); ok && code == UpgradeErrorReconcileTargetIncomplete {
+		t.Fatalf("Reconcile returned %v (%s) instead of failing closed on post-compare fingerprint error", err, code)
+	}
+
+	// Prior durable reconciliation state must remain intact (not invalidated).
+	afterRow := operationRow(t, copied.databasePath())
+	if afterRow.Stage != model.UpgradeStageReconcile || afterRow.LastForwardStage != beforeRow.LastForwardStage {
+		t.Fatalf("row stage after fingerprint error = %q/%q, want preserved %q/%q",
+			afterRow.Stage, afterRow.LastForwardStage, model.UpgradeStageReconcile, beforeRow.LastForwardStage)
+	}
+	if !reflect.DeepEqual(afterRow.DomainsDone, beforeRow.DomainsDone) {
+		t.Fatalf("DomainsDone after fingerprint error = %v, want preserved %v", afterRow.DomainsDone, beforeRow.DomainsDone)
+	}
+	if string(afterRow.Reconciliation) != string(beforeRow.Reconciliation) {
+		t.Fatalf("Reconciliation after fingerprint error = %s, want preserved %s",
+			string(afterRow.Reconciliation), string(beforeRow.Reconciliation))
+	}
+}
+
+func TestRequireActionStageWithScratchValidatesAndUsesScratchDir(t *testing.T) {
+	ctx := context.Background()
+	copied := newCopiedVolume(t)
+	dbPath := copied.databasePath()
+	validScratch := canonicalTempDir(t)
+
+	t.Setenv("TMPDIR", copied.target)
+	if err := RequireActionStageWithScratch(ctx, dbPath, validScratch, copied.volume.root, "reconcile", nil); err != nil {
+		t.Fatalf("RequireActionStageWithScratch with valid scratch and TMPDIR=target failed: %v", err)
+	}
+
+	// Default RequireActionStage("", "") must reject TMPDIR pointing inside target.
+	err := RequireActionStage(ctx, dbPath, "reconcile", nil)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+		t.Fatalf("RequireActionStage with TMPDIR=target = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+	}
+
+	// Explicit scratch inside legacyRoot or targetRoot must fail closed for every action.
+	for _, action := range []string{"reconcile", "cpa-import", "external-connect", "verify"} {
+		for _, badScratch := range []string{
+			filepath.Join(copied.volume.root, "nested-scratch"),
+			filepath.Join(copied.target, "nested-scratch"),
+		} {
+			err := RequireActionStageWithScratch(ctx, dbPath, badScratch, copied.volume.root, action, nil)
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+				t.Fatalf("RequireActionStageWithScratch(%q, %q) = %v (code=%q/%t), want %s",
+					action, badScratch, err, code, ok, UpgradeErrorSnapshotFailed)
+			}
+		}
+	}
+
+	// Reconcile also rejects an explicit scratch directory that contains legacyRoot.
+	parentScratch := filepath.Dir(copied.volume.root)
+	err = RequireActionStageWithScratch(ctx, dbPath, parentScratch, copied.volume.root, "reconcile", nil)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+		t.Fatalf("RequireActionStageWithScratch(ancestor of source) = %v (code=%q/%t), want %s",
+			err, code, ok, UpgradeErrorSnapshotFailed)
+	}
+}
+
+func TestReconcileRefusesScratchInsideExternalBackupDirectory(t *testing.T) {
+	volume := newLegacyVolume(t)
+	target := canonicalTempDir(t)
+	extBundle := filepath.Join(canonicalTempDir(t), "external-backup")
+	copyOpts := copyInOptions(volume, target)
+	copyOpts.BundleDir = extBundle
+	copyOpts.Lock = volume.lock(t)
+	if _, err := CopyIn(context.Background(), copyOpts); err != nil {
+		t.Fatalf("CopyIn with external bundle: %v", err)
+	}
+
+	sourceLock := copyOpts.Lock
+	targetLock, err := processlock.Acquire(filepath.Join(target, databaseFileName))
+	if err != nil {
+		t.Fatalf("acquire target lock: %v", err)
+	}
+	t.Cleanup(func() { _ = targetLock.Close() })
+
+	bundleBefore := fingerprintTree(t, extBundle)
+
+	t.Run("explicit ScratchDir inside external BundleDir fails closed with zero files written", func(t *testing.T) {
+		badScratch := filepath.Join(extBundle, "nested-scratch")
+		_, err := Reconcile(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: target,
+			BundleDir:  extBundle,
+			ScratchDir: badScratch,
+			Lock:       sourceLock,
+			TargetLock: targetLock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("Reconcile(ScratchDir inside BundleDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup bundle", bundleBefore, fingerprintTree(t, extBundle))
+	})
+
+	t.Run("default TMPDIR inside external BundleDir fails closed with zero files written", func(t *testing.T) {
+		setOSTempDir(t, extBundle)
+		_, err := Reconcile(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: target,
+			BundleDir:  extBundle,
+			Lock:       sourceLock,
+			TargetLock: targetLock,
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("Reconcile(TMPDIR=BundleDir) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+		assertTreeUnchanged(t, "external backup bundle", bundleBefore, fingerprintTree(t, extBundle))
+	})
 }

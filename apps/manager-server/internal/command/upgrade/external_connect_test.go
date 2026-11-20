@@ -85,12 +85,17 @@ func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 // 1.x database cannot carry.
 func copiedTarget(t *testing.T) string {
 	t.Helper()
-	source := copyReadySource(t)
-	target := t.TempDir()
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
 	if code, _, stderr := run(t, "run", "--legacy", source,
 		"--source-version", bootstrap.PlannedDirectRelease,
-		"--target", target, "--bundle", filepath.Join(t.TempDir(), "backup")); code != 0 {
+		"--target", target, "--bundle", bundle); code != 0 {
 		t.Fatalf("copy in: exit %d; stderr: %s", code, stderr)
+	}
+	if code, stdout, stderr := run(t, "reconcile", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("reconcile: exit %d; stderr: %s; stdout: %s", code, stderr, stdout)
 	}
 	return target
 }
@@ -183,8 +188,8 @@ func TestExternalConnectCLIExitsOneOnAV7CPA(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if status.Operation == nil || status.Operation.Stage != "copy_in" {
-		t.Fatalf("the v7 stop advanced the row: %+v", status.Operation)
+	if status.Operation == nil || status.Operation.Stage != "reconcile" {
+		t.Fatalf("the v7 stop moved the row from reconcile: %+v", status.Operation)
 	}
 	if status.Operation.ErrorCode != string(upgradeservice.UpgradeErrorExternalVersionUnsupported) {
 		t.Fatalf("recorded code = %q", status.Operation.ErrorCode)
@@ -256,8 +261,8 @@ func TestExternalConnectCLIRefusesATranslatedV7Document(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if status.Operation == nil || status.Operation.Stage != "copy_in" {
-		t.Fatalf("a refused document advanced the row: %+v", status.Operation)
+	if status.Operation == nil || status.Operation.Stage != "reconcile" {
+		t.Fatalf("a refused document moved the row from reconcile: %+v", status.Operation)
 	}
 }
 
@@ -319,7 +324,7 @@ func TestExternalConnectCLIExitsTwoWhenTheCPADoesNotAnswer(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if status.Operation == nil || status.Operation.Stage != "copy_in" || status.Operation.ErrorCode != "" {
+	if status.Operation == nil || status.Operation.Stage != "reconcile" || status.Operation.ErrorCode != "" {
 		t.Fatalf("an unreachable CPA was recorded: %+v", status.Operation)
 	}
 }
@@ -501,5 +506,44 @@ func TestExternalConnectCLIReproofRequiresARecordedConnection(t *testing.T) {
 	}
 	if !strings.Contains(output.Error, "recorded External connection") {
 		t.Fatalf("the refusal does not say what is missing: %q", output.Error)
+	}
+}
+
+func TestExternalConnectCLIRefusesCopyInBeforeReconcile(t *testing.T) {
+	source := copyReadySource(t)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+	if code, _, stderr := run(t, "run", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in: exit %d; stderr: %s", code, stderr)
+	}
+	server := newExternalCPAServer(t, "v8.0.13")
+	code, stdout, stderr := run(t, "external-connect", "--json",
+		"--target", target, "--cpa-base-url", server.URL,
+		"--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (reconciliation prerequisite missing); stderr: %s", code, stderr)
+	}
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorExternalNotApplicable) {
+		t.Fatalf("error code = %q, want %s", output.ErrorCode, upgradeservice.UpgradeErrorExternalNotApplicable)
+	}
+	if len(server.requests) != 0 {
+		t.Fatalf("unreconciled external-connect contacted CPA: %v", server.requests)
+	}
+	statusCode, statusJSON, statusStderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if statusCode != 0 {
+		t.Fatalf("status exit code = %d; stderr: %s", statusCode, statusStderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.Operation == nil || status.Operation.Stage != "copy_in" || status.Operation.ErrorCode != "" {
+		t.Fatalf("unreconciled external-connect mutated operation: %+v", status.Operation)
 	}
 }

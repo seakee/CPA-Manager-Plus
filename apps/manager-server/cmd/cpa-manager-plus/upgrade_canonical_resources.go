@@ -73,6 +73,7 @@ type upgradeCanonicalDependencies struct {
 	Runtime         runtimeservice.RuntimeClient
 	CollectorWorker *worker.CollectorWorker
 	DesiredStateOut *runtimeservice.DesiredStateStore
+	Startup         *startupHTTPHandler
 	CanonicalOut    **upgradeCanonicalServer
 }
 
@@ -177,7 +178,7 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 		})
 	}
 	u.configService = &upgradeConfigService{owner: u}
-	u.pluginCapability = newPluginCapabilityProbe(pluginCapabilityTTL, pluginCapabilityProbeTimeout, u.probePluginCapable)
+	u.pluginCapability = newPluginCapabilityProbeWithContext(ctx, pluginCapabilityTTL, pluginCapabilityProbeTimeout, u.probePluginCapable)
 	if ctx != nil && ctx.Done() != nil {
 		u.bgWG.Add(1)
 		go func() {

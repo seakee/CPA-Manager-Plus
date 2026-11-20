@@ -197,7 +197,13 @@ func NormalizeBaseURL(raw string) string {
 	if value == "" {
 		return ""
 	}
-	if !strings.Contains(value, "://") {
+	lower := strings.ToLower(value)
+	switch {
+	case strings.HasPrefix(lower, "http://"):
+		value = "http://" + value[len("http://"):]
+	case strings.HasPrefix(lower, "https://"):
+		value = "https://" + value[len("https://"):]
+	case !strings.Contains(value, "://"):
 		value = "http://" + value
 	}
 	value = strings.TrimRight(value, "/")

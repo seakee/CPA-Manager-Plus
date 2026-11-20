@@ -2210,3 +2210,103 @@ func TestSourceChangedSinceAuthorization(t *testing.T) {
 		t.Fatalf("restored count %d != 1", count)
 	}
 }
+
+func TestCreateAndRestoreWithScratchPreserveReadOnlySourceWhenTMPDIRPointsToSource(t *testing.T) {
+	l, _, _ := fixture(t)
+	// fixture(t) already holds a lock via t.Cleanup; reuse a dedicated source root
+	// with a read-only lock so chmod 0o555 reflects a read-only legacy mount.
+	roRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roLayout := Layout{
+		DatabasePath:    filepath.Join(roRoot, "usage.sqlite"),
+		DataKeyPath:     filepath.Join(roRoot, "data.key"),
+		ConfigPath:      filepath.Join(roRoot, "manager.json"),
+		ArchivesPath:    filepath.Join(roRoot, "usage-archives"),
+		RequireConfig:   true,
+		RequireArchives: true,
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if data, readErr := os.ReadFile(l.DatabasePath + suffix); readErr == nil {
+			put(t, roLayout.DatabasePath+suffix, data)
+		}
+	}
+	keyBytes, err := os.ReadFile(l.DataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, roLayout.DataKeyPath, keyBytes)
+	put(t, roLayout.ConfigPath, []byte(`{"dbPath":"`+filepath.ToSlash(roLayout.DatabasePath)+`"}`))
+	if err := os.MkdirAll(filepath.Join(roLayout.ArchivesPath, "2026", "10"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(roLayout.ArchivesPath, "2026", "10", "history.jsonl.gz"), []byte("opaque archive bytes\x00\xff"))
+	seedLock, err := processlock.Acquire(roLayout.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedLock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	heldReadOnly, err := processlock.AcquireExistingReadOnly(roLayout.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = heldReadOnly.Close() }()
+
+	beforeEntries, err := os.ReadDir(roRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", roRoot)
+	t.Setenv("TMP", roRoot)
+	t.Setenv("TEMP", roRoot)
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		if err := os.Chmod(roRoot, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roRoot, 0o700) })
+	}
+
+	workBase, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratchDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleDir := filepath.Join(workBase, "bundle")
+	restoredDir := filepath.Join(workBase, "restored")
+
+	if err := ValidateMatchingEvidenceWithScratch(context.Background(), roLayout, scratchDir); err != nil {
+		t.Fatalf("ValidateMatchingEvidenceWithScratch failed: %v", err)
+	}
+	if _, err := CreateWithScratch(context.Background(), roLayout, bundleDir, heldReadOnly, scratchDir); err != nil {
+		t.Fatalf("CreateWithScratch failed: %v", err)
+	}
+	if _, err := RestoreNewWithScratch(context.Background(), bundleDir, restoredDir, scratchDir); err != nil {
+		t.Fatalf("RestoreNewWithScratch failed: %v", err)
+	}
+
+	afterEntries, err := os.ReadDir(roRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterEntries) != len(beforeEntries) {
+		t.Fatalf("source root entry count changed: before=%d after=%d", len(beforeEntries), len(afterEntries))
+	}
+	for i := range beforeEntries {
+		if afterEntries[i].Name() != beforeEntries[i].Name() {
+			t.Fatalf("source root entry[%d] = %q, want %q", i, afterEntries[i].Name(), beforeEntries[i].Name())
+		}
+	}
+	scratchLeftovers, err := os.ReadDir(scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scratchLeftovers) != 0 {
+		t.Fatalf("scratchDir retained temporary entries: %v", scratchLeftovers)
+	}
+}

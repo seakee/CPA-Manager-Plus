@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -703,4 +704,199 @@ func TestCopySourceForReadFailsClosedOnCorruptWALHeaderAndPendingRollbackJournal
 			}
 		})
 	}
+}
+
+func TestValidateWALHeaderFrameIntegrity(t *testing.T) {
+	buildActiveWAL := func(t *testing.T) (string, []byte, uint32) {
+		t.Helper()
+		dir := t.TempDir()
+		database := filepath.Join(dir, "usage.sqlite")
+		db, err := sql.Open("sqlite", database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range []string{
+			`pragma journal_mode = wal`,
+			`pragma wal_autocheckpoint = 0`,
+			`create table settings (key text primary key, value text not null)`,
+			`insert into settings (key, value) values ('k1', 'v1')`,
+			`insert into settings (key, value) values ('k2', 'v2')`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+		}
+		walBytes, err := os.ReadFile(database + "-wal")
+		if err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		_ = os.Remove(database + "-shm")
+		pageSize := binary.BigEndian.Uint32(walBytes[8:12])
+		return database, walBytes, pageSize
+	}
+
+	t.Run("intact committed WAL without shm succeeds", func(t *testing.T) {
+		database, walBytes, _ := buildActiveWAL(t)
+		if err := os.WriteFile(database+"-wal", walBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateWALHeader(database); err != nil {
+			t.Fatalf("ValidateWALHeader failed on intact WAL: %v", err)
+		}
+	})
+
+	t.Run("recycled WAL with trailing old-salt frames succeeds", func(t *testing.T) {
+		database, walBytes, pageSize := buildActiveWAL(t)
+		frameSize := 24 + int(pageSize)
+		oldFrame := make([]byte, frameSize)
+		binary.BigEndian.PutUint32(oldFrame[0:4], 1)
+		binary.BigEndian.PutUint32(oldFrame[8:12], binary.BigEndian.Uint32(walBytes[16:20])-1)
+		binary.BigEndian.PutUint32(oldFrame[12:16], binary.BigEndian.Uint32(walBytes[20:24])^0x12345678)
+		recycled := append(append([]byte(nil), walBytes...), oldFrame...)
+		recycled = append(recycled, oldFrame[:64]...)
+		if err := os.WriteFile(database+"-wal", recycled, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateWALHeader(database); err != nil {
+			t.Fatalf("ValidateWALHeader failed on recycled WAL with trailing old-salt frames: %v", err)
+		}
+	})
+
+	t.Run("corrupted byte in committed active-salt WAL frame fails closed", func(t *testing.T) {
+		database, walBytes, _ := buildActiveWAL(t)
+		corrupt := append([]byte(nil), walBytes...)
+		corrupt[32+24+40] ^= 0x80
+		if err := os.WriteFile(database+"-wal", corrupt, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidateWALHeader(database)
+		if err == nil || !strings.Contains(err.Error(), "corrupt WAL frame") {
+			t.Fatalf("ValidateWALHeader = %v, want corrupt WAL frame error", err)
+		}
+	})
+
+	t.Run("corrupted salt2 on frame 0 and frame 1 with active salt1 fails closed", func(t *testing.T) {
+		database, walBytes, pageSize := buildActiveWAL(t)
+		frameSize := 24 + int(pageSize)
+		if gotFrames := (len(walBytes) - 32) / frameSize; gotFrames < 3 {
+			t.Fatalf("expected at least 3 active WAL frames in fixture, got %d", gotFrames)
+		}
+		for _, frameIdx := range []int{0, 1} {
+			corrupt := append([]byte(nil), walBytes...)
+			salt2Offset := 32 + frameIdx*frameSize + 12
+			corrupt[salt2Offset] ^= 0x01
+			if err := os.WriteFile(database+"-wal", corrupt, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateWALHeader(database)
+			if err == nil || !strings.Contains(err.Error(), "corrupt WAL frame") {
+				t.Fatalf("frame %d salt2 corruption: ValidateWALHeader = %v, want corrupt WAL frame", frameIdx, err)
+			}
+		}
+	})
+
+	t.Run("corrupted salt1 on frame 0 or frame 1 before valid active frame 2 fails closed", func(t *testing.T) {
+		database, walBytes, pageSize := buildActiveWAL(t)
+		frameSize := 24 + int(pageSize)
+		if gotFrames := (len(walBytes) - 32) / frameSize; gotFrames < 3 {
+			t.Fatalf("expected at least 3 active WAL frames in fixture, got %d", gotFrames)
+		}
+		for _, frameIdx := range []int{0, 1} {
+			corrupt := append([]byte(nil), walBytes...)
+			salt1Offset := 32 + frameIdx*frameSize + 8
+			corrupt[salt1Offset] ^= 0x01
+			if err := os.WriteFile(database+"-wal", corrupt, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateWALHeader(database)
+			if err == nil || !strings.Contains(err.Error(), "corrupt WAL frame") {
+				t.Fatalf("frame %d mid-WAL salt1 hole: ValidateWALHeader = %v, want corrupt WAL frame", frameIdx, err)
+			}
+		}
+	})
+
+	t.Run("truncated active-salt WAL frame fails closed across header and body boundaries", func(t *testing.T) {
+		database, walBytes, _ := buildActiveWAL(t)
+		if err := os.WriteFile(database+"-wal", walBytes[:32+24+64], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidateWALHeader(database)
+		if err == nil || !strings.Contains(err.Error(), "truncated active WAL frame") {
+			t.Fatalf("ValidateWALHeader (mid-page truncation) = %v, want truncated active WAL frame error", err)
+		}
+
+		for _, partialLen := range []int{12, 14, 15} {
+			if err := os.WriteFile(database+"-wal", walBytes[:32+partialLen], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateWALHeader(database)
+			if err == nil || !strings.Contains(err.Error(), "truncated active WAL frame") {
+				t.Fatalf("ValidateWALHeader (n=%d active-salt truncation) = %v, want truncated active WAL frame error", partialLen, err)
+			}
+		}
+
+		// Truncated active-salt frame with corrupted salt2 still fails closed.
+		corruptSalt2Truncated := append([]byte(nil), walBytes[:32+20]...)
+		corruptSalt2Truncated[32+12] ^= 0xff
+		if err := os.WriteFile(database+"-wal", corruptSalt2Truncated, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err = ValidateWALHeader(database)
+		if err == nil || !strings.Contains(err.Error(), "truncated active WAL frame") {
+			t.Fatalf("ValidateWALHeader (truncated active salt1 with altered salt2) = %v, want truncated active WAL frame error", err)
+		}
+
+		if err := os.WriteFile(database+"-wal", walBytes[:32+10], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err = ValidateWALHeader(database)
+		if err == nil || !strings.Contains(err.Error(), "truncated WAL frame header") {
+			t.Fatalf("ValidateWALHeader (header truncation) = %v, want truncated WAL frame header error", err)
+		}
+	})
+
+	t.Run("big-endian WAL magic 0x377f0683 validates checksums and rejects corruption", func(t *testing.T) {
+		database, walBytes, pageSize := buildActiveWAL(t)
+		frameSize := 24 + int(pageSize)
+		bigWAL := make([]byte, 32+frameSize)
+		copy(bigWAL[:32+frameSize], walBytes[:32+frameSize])
+		binary.BigEndian.PutUint32(bigWAL[0:4], 0x377f0683)
+
+		var s1, s2 uint32
+		for i := 0; i < 24; i += 8 {
+			s1 += binary.BigEndian.Uint32(bigWAL[i:i+4]) + s2
+			s2 += binary.BigEndian.Uint32(bigWAL[i+4:i+8]) + s1
+		}
+		binary.BigEndian.PutUint32(bigWAL[24:28], s1)
+		binary.BigEndian.PutUint32(bigWAL[28:32], s2)
+
+		frame := bigWAL[32 : 32+frameSize]
+		s1 += binary.BigEndian.Uint32(frame[0:4]) + s2
+		s2 += binary.BigEndian.Uint32(frame[4:8]) + s1
+		for i := 0; i < int(pageSize); i += 8 {
+			s1 += binary.BigEndian.Uint32(frame[24+i:24+i+4]) + s2
+			s2 += binary.BigEndian.Uint32(frame[24+i+4:24+i+8]) + s1
+		}
+		binary.BigEndian.PutUint32(frame[16:20], s1)
+		binary.BigEndian.PutUint32(frame[20:24], s2)
+
+		if err := os.WriteFile(database+"-wal", bigWAL, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateWALHeader(database); err != nil {
+			t.Fatalf("ValidateWALHeader on valid big-endian WAL (0x377f0683) failed: %v", err)
+		}
+
+		bigWAL[32+24+16] ^= 0x40
+		if err := os.WriteFile(database+"-wal", bigWAL, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidateWALHeader(database)
+		if err == nil || !strings.Contains(err.Error(), "corrupt WAL frame") {
+			t.Fatalf("ValidateWALHeader on corrupted big-endian WAL = %v, want corrupt WAL frame", err)
+		}
+	})
 }

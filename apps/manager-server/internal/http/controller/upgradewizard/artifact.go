@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/artifactproxy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
@@ -44,6 +46,14 @@ var (
 
 	defaultArtifactProofCache = newArtifactProofCache()
 )
+
+type artifactMountError struct {
+	code string
+}
+
+func (e artifactMountError) Error() string {
+	return "mounted 1.x source inspection failed: " + e.code
+}
 
 func matchArtifactSuffix(path string) (string, bool) {
 	switch {
@@ -116,13 +126,33 @@ func (h *Handler) requireUnfinishedOperation(w http.ResponseWriter, r *http.Requ
 		artifactproxy.WriteError(w, http.StatusConflict, CodeArtifactUnavailable)
 		return false
 	}
+	if h.PreserveManagerStore && (!mount.rootKnown || mount.code == CodeMountTimeout) {
+		writeArtifactServiceError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+		return false
+	}
 	baseTimeout := h.artifactTimeout()
 	sqlCtx, cancel := context.WithTimeout(r.Context(), baseTimeout)
-	prov, err := readArtifactProvenance(sqlCtx, database)
+	var (
+		prov artifactOperationProvenance
+		err  error
+	)
+	if h.PreserveManagerStore {
+		prov, err = readArtifactProvenancePreserved(sqlCtx, upgradeservice.PreservedSource{
+			Database: database,
+			DataKey:  h.managerDataKey(),
+		}, mount.root)
+	} else {
+		prov, err = readArtifactProvenance(sqlCtx, database)
+	}
 	cancel()
 	if err != nil {
 		if errors.Is(err, errStatusRowInvalid) {
 			writeArtifactServiceError(w, http.StatusServiceUnavailable, CodeOperationInvalid)
+			return false
+		}
+		if h.PreserveManagerStore && mount.database == "" && mount.code == CodeLegacyRootUnusable &&
+			errors.Is(err, upgradeservice.ErrSnapshotFailed) {
+			writeArtifactServiceError(w, http.StatusServiceUnavailable, CodeLegacyRootUnusable)
 			return false
 		}
 		writeArtifactServiceError(w, http.StatusServiceUnavailable, CodeOperationUnread)
@@ -134,9 +164,12 @@ func (h *Handler) requireUnfinishedOperation(w http.ResponseWriter, r *http.Requ
 		return false
 	}
 	if err := verifyProvenanceMatchesAuthenticatedSource(r.Context(), baseTimeout, prov, mount); err != nil {
+		var mountErr artifactMountError
 		switch {
 		case errors.Is(err, errArtifactProofMismatch):
 			artifactproxy.WriteError(w, http.StatusConflict, CodeArtifactUnavailable)
+		case errors.As(err, &mountErr):
+			writeArtifactServiceError(w, http.StatusServiceUnavailable, mountErr.code)
 		case errors.Is(err, errArtifactProofTimeout), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			writeArtifactServiceError(w, http.StatusServiceUnavailable, CodeCredentialTimeout)
 		case errors.Is(err, upgradeservice.ErrSourceSymlinked):
@@ -215,8 +248,17 @@ func verifyProvenanceMatchesAuthenticatedSource(
 		)
 	}
 
-	// The credential was proven against the Manager store fallback. The store
-	// itself must be the recorded copy-in target of this operation.
+	// The credential was proven against the Manager store fallback. A mounted
+	// 1.x source that failed mount inspection with tampering/readability errors
+	// must never bypass source proof and reach Supervisor.
+	switch mount.code {
+	case CodeSourceSymlinked:
+		return upgradeservice.ErrSourceSymlinked
+	case CodeLegacyRootUnusable, upgradeservice.CodeSourceLockUnavailable, CodeSourceUnreadable, CodeMountTimeout:
+		return artifactMountError{code: mount.code}
+	}
+	// Otherwise (no mount configured, or source unmounted/absent after copy-in),
+	// the Manager store itself must be the recorded copy-in target of this operation.
 	if prov.evidence == EvidenceOperationRow &&
 		mount.rootKnown && strings.TrimSpace(mount.root) != "" &&
 		mount.code != CodeLegacyRootMissing && strings.TrimSpace(prov.sourceRoot) != "" {
@@ -462,6 +504,28 @@ func readArtifactProvenance(ctx context.Context, databasePath string) (artifactO
 	return artifactOperationProvenance{stageKnown: true}, nil
 }
 
+func readArtifactProvenancePreserved(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string) (artifactOperationProvenance, error) {
+	databasePath := strings.TrimSpace(source.Database)
+	marker, inFlight, err := readCopyInMarker(databasePath)
+	if err != nil {
+		return artifactOperationProvenance{}, err
+	}
+	if inFlight && marker.AwaitingCommit(databasePath) {
+		return provenanceFromMarker(marker), nil
+	}
+	recorded, found, err := readRecordedArtifactProvenancePreserved(ctx, source, sourceRoot)
+	if err != nil {
+		return artifactOperationProvenance{}, err
+	}
+	if found {
+		return recorded, nil
+	}
+	if inFlight {
+		return provenanceFromMarker(marker), nil
+	}
+	return artifactOperationProvenance{stageKnown: true}, nil
+}
+
 func provenanceFromMarker(marker copyinmarker.Marker) artifactOperationProvenance {
 	return artifactOperationProvenance{
 		recorded:          true,
@@ -474,6 +538,63 @@ func provenanceFromMarker(marker copyinmarker.Marker) artifactOperationProvenanc
 		fingerprintAfter:  strings.TrimSpace(marker.SourceFingerprintAfter),
 		backupManifest:    strings.TrimSpace(marker.BackupManifestSHA256),
 	}
+}
+
+func readRecordedArtifactProvenancePreserved(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string) (artifactOperationProvenance, bool, error) {
+	databasePath := strings.TrimSpace(source.Database)
+	info, err := processlock.InspectSourceFile(databasePath)
+	if os.IsNotExist(err) {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return artifactOperationProvenance{}, false, sideErr
+		}
+		return artifactOperationProvenance{}, false, nil
+	}
+	if err != nil {
+		return artifactOperationProvenance{}, false, err
+	}
+	if err := upgradeservice.AuditSourceSidecars(databasePath); err != nil {
+		return artifactOperationProvenance{}, false, err
+	}
+	if info.Size() == 0 {
+		if sideErr := copyinmarker.DatabaseSidecarsAbsent(databasePath); sideErr != nil {
+			return artifactOperationProvenance{}, false, sideErr
+		}
+		return artifactOperationProvenance{}, false, nil
+	}
+	before, err := inspectPreservedDatabaseIdentity(databasePath)
+	if err != nil {
+		return artifactOperationProvenance{}, false, err
+	}
+	inFile, journalPending, probeErr := legacypreflight.RecordedOperationEvidence(ctx, databasePath)
+	if probeErr != nil {
+		return artifactOperationProvenance{}, false, probeErr
+	}
+	if !inFile && !journalPending {
+		after, afterErr := inspectPreservedDatabaseIdentity(databasePath)
+		if afterErr != nil {
+			return artifactOperationProvenance{}, false, afterErr
+		}
+		if after != before {
+			if after.wal.present && after.wal.size > 0 {
+				journalPending = true
+			} else {
+				return artifactOperationProvenance{}, false, errors.New("preserved database changed during artifact provenance probe")
+			}
+		}
+	}
+	if !inFile && !journalPending {
+		return artifactOperationProvenance{}, false, nil
+	}
+	if err := upgradeservice.ValidatePreservedScratchDir("", source,
+		upgradeservice.ScratchRoot{Label: "the configured source root", Dir: strings.TrimSpace(sourceRoot)}); err != nil {
+		return artifactOperationProvenance{}, false, err
+	}
+	snapshot, err := upgradeservice.OpenSnapshotWithRetry(ctx, upgradeservice.OpenSnapshot, databasePath, "")
+	if err != nil {
+		return artifactOperationProvenance{}, false, err
+	}
+	defer func() { _ = snapshot.Close() }()
+	return readRecordedArtifactProvenanceFromDB(ctx, snapshot.DB())
 }
 
 func readRecordedArtifactProvenance(ctx context.Context, databasePath string) (artifactOperationProvenance, bool, error) {
@@ -491,6 +612,10 @@ func readRecordedArtifactProvenance(ctx context.Context, databasePath string) (a
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	return readRecordedArtifactProvenanceFromDB(ctx, db)
+}
+
+func readRecordedArtifactProvenanceFromDB(ctx context.Context, db *sql.DB) (artifactOperationProvenance, bool, error) {
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
 		return artifactOperationProvenance{}, false, err
@@ -505,7 +630,7 @@ func readRecordedArtifactProvenance(ctx context.Context, databasePath string) (a
 		fingerprintAfter  sql.NullString
 		backupManifest    sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
+	err := db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
 		source_root, source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
 		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
 		from upgrade_operations where id = 1`).Scan(

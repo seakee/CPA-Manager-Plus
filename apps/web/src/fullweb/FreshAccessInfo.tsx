@@ -46,6 +46,7 @@ export interface AccessInfoSummaryProps {
   onLoaded?: (info: AccessInfo) => void;
   defaultProtocolsCollapsed?: boolean;
   subtitleNote?: string;
+  completionRecovery?: boolean;
 }
 
 const VALID_MODES: Record<AccessMode, true> = {
@@ -316,6 +317,16 @@ function notReadyTitleAndDesc(
         title: a('notReadyGatewayTitle', language),
         desc: a('notReadyGatewayDesc', language),
       };
+    case 'upgrade_authority_unavailable':
+      return {
+        title: a('notReadyUpgradeAuthorityTitle', language),
+        desc: a('notReadyUpgradeAuthorityDesc', language),
+      };
+    case 'upgrade_operation_invalid':
+      return {
+        title: a('notReadyUpgradeOperationInvalidTitle', language),
+        desc: a('notReadyUpgradeOperationInvalidDesc', language),
+      };
     default:
       return {
         title: a('notReadyGenericTitle', language),
@@ -371,6 +382,7 @@ export function AccessInfoSummary({
   onLoaded,
   defaultProtocolsCollapsed = false,
   subtitleNote,
+  completionRecovery = false,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
   const [fetched, setFetched] = useState<AccessInfo | null>(null);
@@ -616,6 +628,15 @@ export function AccessInfoSummary({
     effective.mode === 'connect_external' && effective.externalBaseUrl
       ? effective.externalBaseUrl
       : '';
+  const recoveryCommand = 'docker exec -u 10002:10002 <container> cpa-manager-plus access show';
+  const recoveryText = completionRecovery && effective.ready && managementUrl
+    ? [
+        `${a('consoleUrlLabel', language)}: ${managementUrl}`,
+        `${a('managementApiLabel', language)}: ${managementUrl}/api/v2`,
+        ...(externalUrl ? [`${a('externalBase', language)}: ${externalUrl}`] : []),
+        ...(inferenceUrl ? [`${a('inferenceBase', language)}: ${inferenceUrl}`] : []),
+      ].join('\n')
+    : '';
 
   const notReadyCopy = !effective.ready
     ? notReadyTitleAndDesc(
@@ -906,6 +927,35 @@ export function AccessInfoSummary({
         <p className="journey-help" data-testid={`${testIdPrefix}-external-note`}>
           {a('externalDirectNote', language)}
         </p>
+      )}
+
+      {recoveryText && (
+        <div className="journey-field">
+          <div className="header-actions">
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              data-testid={`${testIdPrefix}-copy-access`}
+              onClick={() => void copyValue('access', recoveryText)}
+            >
+              <FullWebIcon name={copiedTarget === 'access' ? 'check' : 'copy'} size={14} />
+              {a('copyAccess', language)}
+            </button>
+          </div>
+          {copyFeedback?.target === 'access' && copyFeedback.state === 'failed' && (
+            <textarea
+              className="form-input form-input-mono"
+              aria-label={a('copyAccess', language)}
+              data-testid={`${testIdPrefix}-copy-access-fallback`}
+              readOnly
+              rows={3}
+              value={recoveryText}
+            />
+          )}
+          <p className="journey-help">
+            {a('recoverDockerHelp', language)} <code className="info-val">{recoveryCommand}</code>
+          </p>
+        </div>
       )}
 
       {protocolsCard ? (

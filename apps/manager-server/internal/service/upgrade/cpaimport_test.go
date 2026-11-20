@@ -8,6 +8,7 @@ package upgrade
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,16 +24,20 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // cleanSourceConfig is a canonical CPA 8.0.55 configuration whose every key
@@ -81,7 +86,7 @@ func newImportFixture(t *testing.T, config string, credentials map[string]string
 	if err := os.WriteFile(paths.DataKey, verifyTemplateDataKey, 0o600); err != nil {
 		t.Fatalf("materialize the fixture v2 data key: %v", err)
 	}
-	execTarget(t, paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s', stage = '%s', domains_done = '[\"source_copy\"]' where id = 1",
+	execTarget(t, paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s', stage = '%s' where id = 1",
 		canonicalPath(volume.root), model.UpgradeStageReconcile))
 	return importFixture{
 		legacyRoot:  volume.root,
@@ -110,9 +115,11 @@ type fakeDestinationCPA struct {
 	// failConfigWrite makes the config endpoints answer as a destination that
 	// cannot take a configuration write, so a test with a zero-credential source
 	// can stop a run after the attempt was recorded and before cpa_config is.
-	failConfigWrite bool
-	emptyModels     bool
-	server          *httptest.Server
+	failConfigWrite   bool
+	emptyModels       bool
+	rejectUntilReady  *fakeImportRuntime
+	prematureRequests int
+	server            *httptest.Server
 }
 
 func newFakeDestinationCPA(t *testing.T, management string) *fakeDestinationCPA {
@@ -137,6 +144,22 @@ func (c *fakeDestinationCPA) requests() []string {
 }
 
 func (c *fakeDestinationCPA) serve(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	gate := c.rejectUntilReady
+	c.mu.Unlock()
+	if gate != nil && gate.currentState() != model.RuntimeStateReady {
+		c.mu.Lock()
+		c.prematureRequests++
+		c.mu.Unlock()
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	c.mu.Lock()
 	c.methods = append(c.methods, r.Method+" "+r.URL.Path)
 	c.mu.Unlock()
@@ -544,6 +567,8 @@ type fakeImportRuntime struct {
 	generation model.RuntimeGeneration
 	stageCall  *model.RuntimeDestinationRequest
 	startCall  *model.RuntimeMutationRequest
+	stageCalls int
+	startCalls int
 	staged     *fakeDestinationCPA
 	identity   model.RuntimeIdentity
 	artifact   model.RuntimeArtifactID
@@ -551,9 +576,11 @@ type fakeImportRuntime struct {
 	failStage bool
 	// failStart makes the start answer a terminal failure and leaves the CPA
 	// offline, which is the state the next run observes.
-	failStart bool
-	// journal holds the answer of every operation the Supervisor recorded.
-	journal map[string]model.RuntimeOperationResult
+	failStart                bool
+	startingPollsBeforeReady int
+	stayStartingForever      bool
+	transitionAfterStarting  model.RuntimeState
+	journal                  map[string]model.RuntimeOperationResult
 	// submitted holds the request fingerprint of every journalled operation, so a
 	// repeated ID with another source or artifact is refused as the journal's
 	// Resolve refuses it.
@@ -600,11 +627,36 @@ func (f *fakeImportRuntime) lastRefusal() string {
 	return f.refusal
 }
 
+func (f *fakeImportRuntime) currentState() model.RuntimeState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
+
+func (f *fakeImportRuntime) callCounts() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stageCalls, f.startCalls
+}
+
 func (f *fakeImportRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	current := f.state
+	if f.state == model.RuntimeStateStarting && !f.stayStartingForever && f.startingPollsBeforeReady >= 0 {
+		if f.startingPollsBeforeReady > 0 {
+			f.startingPollsBeforeReady--
+		}
+		if f.startingPollsBeforeReady == 0 {
+			next := f.transitionAfterStarting
+			if next == "" {
+				next = model.RuntimeStateReady
+			}
+			f.state = next
+		}
+	}
 	return model.RuntimeObservedStatus{
-		Identity: f.identity, Generation: f.generation, ProtocolVersion: "v1", State: f.state,
+		Identity: f.identity, Generation: f.generation, ProtocolVersion: "v1", State: current,
 		CPAObservedVersion:    "8.0.55",
 		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: f.artifact, Version: "8.0.55"},
 		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStageDestination, model.RuntimeCapabilityStart},
@@ -629,6 +681,7 @@ func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.Ru
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stageCall = &request
+	f.stageCalls++
 	if err := f.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -721,6 +774,7 @@ func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutati
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCall = &request
+	f.startCalls++
 	if err := f.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
@@ -736,6 +790,8 @@ func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutati
 		result.State = model.RuntimeOperationFailed
 		result.Failure = &model.RuntimeOperationFailure{Code: "start_failed"}
 		f.state = model.RuntimeStateOffline
+	} else if f.stayStartingForever || f.startingPollsBeforeReady > 0 {
+		f.state = model.RuntimeStateStarting
 	} else {
 		f.state = model.RuntimeStateReady
 	}
@@ -1653,11 +1709,30 @@ func writeOperationStage(t *testing.T, targetRoot string, stage model.UpgradeSta
 	if _, err := db.ExecContext(context.Background(), `delete from upgrade_operations`); err != nil {
 		t.Fatalf("clear the recorded operation: %v", err)
 	}
+	priorReconciliation := append([]byte(nil), recorded.Reconciliation...)
+	mergedDomains := slices.Clone(domains)
+	if stage != model.UpgradeStageCopyIn {
+		keepCPAConfig := slices.Contains(domains, model.UpgradeDomainCPAConfig)
+		for _, existingDomain := range recorded.DomainsDone {
+			if existingDomain == model.UpgradeDomainCPAConfig && !keepCPAConfig {
+				continue
+			}
+			if !slices.Contains(mergedDomains, existingDomain) {
+				mergedDomains = append(mergedDomains, existingDomain)
+			}
+		}
+	}
 	recorded.Revision = 0
 	recorded.Stage = stage
-	recorded.DomainsDone = domains
-	if err := upgradeoperation.New(db).Put(context.Background(), recorded); err != nil {
+	recorded.DomainsDone = mergedDomains
+	repo := upgradeoperation.New(db)
+	if err := repo.Put(context.Background(), recorded); err != nil {
 		t.Fatalf("write the operation stage: %v", err)
+	}
+	if stage != model.UpgradeStageCopyIn && len(priorReconciliation) > 0 && string(priorReconciliation) != "{}" {
+		if err := repo.RecordReconciliation(context.Background(), priorReconciliation); err != nil {
+			t.Fatalf("restore recorded reconciliation on stage fixture: %v", err)
+		}
 	}
 }
 
@@ -2146,7 +2221,7 @@ func TestImportCPARetryRefusesCompleteAttemptWithoutSourceCredentialsDigest(t *t
 	originalCredentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
 	changedCredentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"rotated-token"}`}
 	fixture := newVerifyFixture(t)
-	writeOperationStage(t, fixture.target, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
+	fixture.reconcile(t)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -2220,7 +2295,7 @@ func TestImportCPARetryRefusesCompleteAttemptWithoutSourceCredentialsDigest(t *t
 // credential set succeed without hitting the missing-digest refusal.
 func TestImportCPAZeroCredentialSourceRecordsNonEmptyDigestAndSucceedsOnStageAndRetry(t *testing.T) {
 	fixture := newVerifyFixture(t)
-	writeOperationStage(t, fixture.target, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
+	fixture.reconcile(t)
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
@@ -2458,5 +2533,484 @@ api-keys:
 	}
 	if !verified.Complete || verified.Stage != model.UpgradeStageComplete || verified.TargetMode != model.UpgradeTargetManaged {
 		t.Fatalf("verified = %+v, want completed Managed operation", verified)
+	}
+}
+
+func TestImportCPAGatesFirstImportOnActualRuntimeReadiness(t *testing.T) {
+	prevTimeout := cpaImportDestinationReadyTimeout
+	prevPoll := cpaImportDestinationReadyPoll
+	cpaImportDestinationReadyTimeout = 250 * time.Millisecond
+	cpaImportDestinationReadyPoll = 5 * time.Millisecond
+	t.Cleanup(func() {
+		cpaImportDestinationReadyTimeout = prevTimeout
+		cpaImportDestinationReadyPoll = prevPoll
+	})
+
+	t.Run("first import awaits RuntimeStateReady before probing listener", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, map[string]string{
+			"codex-1.json": `{"type":"codex","access_token":"tok-1"}`,
+		})
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.startingPollsBeforeReady = 3
+		destination.rejectUntilReady = runtime
+
+		result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if err != nil {
+			t.Fatalf("first ImportCPA with async Runtime start failed: %v", err)
+		}
+		if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		destination.mu.Lock()
+		premature := destination.prematureRequests
+		destination.mu.Unlock()
+		if premature != 0 {
+			t.Fatalf("destination received %d requests before RuntimeStateReady, want 0", premature)
+		}
+	})
+
+	t.Run("destination stuck in starting reports destination_unready without listener probe", func(t *testing.T) {
+		cpaImportDestinationReadyTimeout = 35 * time.Millisecond
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.stayStartingForever = true
+		destination.rejectUntilReady = runtime
+
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("stuck starting ImportCPA = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		if requests := destination.requests(); len(requests) != 0 {
+			t.Fatalf("destination received %v while unready, want none", requests)
+		}
+	})
+
+	t.Run("destination exiting to offline during start reports destination_unready", func(t *testing.T) {
+		cpaImportDestinationReadyTimeout = 250 * time.Millisecond
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.startingPollsBeforeReady = 2
+		runtime.transitionAfterStarting = model.RuntimeStateOffline
+		destination.rejectUntilReady = runtime
+
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("exited starting ImportCPA = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		if requests := destination.requests(); len(requests) != 0 {
+			t.Fatalf("destination received %v after exit, want none", requests)
+		}
+
+		// Once the same Runtime is confirmed offline, a retry respawns under a fresh
+		// Start operation ID for the same staged destination and completes cleanly.
+		runtime.mu.Lock()
+		runtime.startingPollsBeforeReady = 2
+		runtime.transitionAfterStarting = ""
+		runtime.mu.Unlock()
+		stageBefore, startBefore := runtime.callCounts()
+		result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if err != nil {
+			t.Fatalf("retry after confirmed offline exit failed: %v", err)
+		}
+		stageAfter, startAfter := runtime.callCounts()
+		if stageAfter != stageBefore+1 || startAfter != startBefore+1 {
+			t.Fatalf("confirmed-offline retry calls = stage %d->%d start %d->%d, want +1/+1",
+				stageBefore, stageAfter, startBefore, startAfter)
+		}
+		if runtime.startCall == nil || runtime.startCall.OperationID != runtime.stageCall.OperationID+":start:2" {
+			t.Fatalf("startCall = %+v, want %q", runtime.startCall, runtime.stageCall.OperationID+":start:2")
+		}
+		if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+	})
+}
+
+func seedLegacy1xConnectionWithoutV2Revision(t *testing.T, root string, cfg model.ManagerConfig) {
+	t.Helper()
+	key, err := security.LoadExistingDataKey("", filepath.Join(root, dataKeyFileName))
+	if err != nil {
+		t.Fatalf("load data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("new protector: %v", err)
+	}
+	encMgrKey, err := protector.ProtectString(cfg.CPAConnection.ManagementKey)
+	if err != nil {
+		t.Fatalf("encrypt management key: %v", err)
+	}
+	storedCfg := cfg
+	storedCfg.CPAConnection.ManagementKey = encMgrKey
+	rawCfg, err := json.Marshal(storedCfg)
+	if err != nil {
+		t.Fatalf("marshal manager_config_v1: %v", err)
+	}
+	setup := managerconfig.CanonicalSetupFromManagerConfig(cfg, model.Setup{}, false)
+	encSetupKey, err := protector.ProtectString(setup.ManagementKey)
+	if err != nil {
+		t.Fatalf("encrypt setup key: %v", err)
+	}
+	setup.ManagementKey = encSetupKey
+	rawSetup, err := json.Marshal(setup)
+	if err != nil {
+		t.Fatalf("marshal setup: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(root, databaseFileName))
+	if err != nil {
+		t.Fatalf("open sqlite %s: %v", root, err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, stmt := range []struct {
+		key string
+		val string
+	}{
+		{key: "manager_config_v1", val: string(rawCfg)},
+		{key: "setup", val: string(rawSetup)},
+	} {
+		if _, err := db.Exec(
+			`insert into settings (key, value, updated_at_ms) values (?, ?, 1)
+			 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+			stmt.key, stmt.val,
+		); err != nil {
+			t.Fatalf("seed legacy %s: %v", stmt.key, err)
+		}
+	}
+	if _, err := db.Exec(`delete from settings where key = 'cpa_connection_revision_v1'`); err != nil {
+		t.Fatalf("clear v2 connection revision: %v", err)
+	}
+}
+
+func TestImportCPAHandsOffProvenUnchangedSourceConnectionAndRefusesConflictingV2Identity(t *testing.T) {
+	t.Run("copied unchanged 1.x Manager connection hands off cleanly without touching 1.x source", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		enabled := true
+		legacyCfg := model.ManagerConfig{
+			CPAConnection: model.ManagerCPAConnectionConfig{
+				CPABaseURL:    "http://cli-proxy-api:8317",
+				ManagementKey: "legacy-1x-setup-management-key",
+			},
+			Collector: model.ManagerCollectorConfig{
+				Enabled:        &enabled,
+				PollIntervalMS: 42000,
+			},
+		}
+		seedLegacy1xConnectionWithoutV2Revision(t, volume.root, legacyCfg)
+		writeCPABeside(t, volume.root, cleanSourceConfig, map[string]string{
+			"codex-1.json": `{"type":"codex","access_token":"tok-1"}`,
+		})
+
+		target := canonicalTempDir(t)
+		bundle := filepath.Join(target, bundleDirectoryName)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := CopyIn(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: target,
+			BundleDir:  bundle,
+			Lock:       lock,
+		}); err != nil {
+			_ = lock.Close()
+			t.Fatalf("CopyIn: %v", err)
+		}
+		targetLock, err := processlock.Acquire(filepath.Join(target, databaseFileName))
+		if err != nil {
+			_ = lock.Close()
+			t.Fatalf("acquire target lock: %v", err)
+		}
+		if _, err := Reconcile(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: target,
+			BundleDir:  bundle,
+			Lock:       lock,
+			TargetLock: targetLock,
+		}); err != nil {
+			_ = targetLock.Close()
+			_ = lock.Close()
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if err := targetLock.Close(); err != nil {
+			_ = lock.Close()
+			t.Fatal(err)
+		}
+
+		beforeSourceTree := fingerprintTree(t, volume.root)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+
+		result, err := ImportCPA(context.Background(), CPAImportOptions{
+			LegacyRoot:     volume.root,
+			SourceLock:     lock,
+			CPAVersion:     "8.0.55",
+			TargetRoot:     target,
+			Runtime:        runtime,
+			DestinationURL: destination.url(),
+			PluginsEnabled: boolPointer(false),
+		})
+		_ = lock.Close()
+		if err != nil {
+			t.Fatalf("ImportCPA failed on unchanged 1.x connection: %v", err)
+		}
+		if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		assertTreeUnchanged(t, "preserved 1.x source volume", beforeSourceTree, fingerprintTree(t, volume.root))
+
+		key, err := security.LoadExistingDataKey("", filepath.Join(target, dataKeyFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		protector, err := security.NewProtector(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(filepath.Join(target, databaseFileName), protector)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		afterCfg, found, err := st.LoadManagerConfig(context.Background())
+		if err != nil || !found {
+			t.Fatalf("LoadManagerConfig = %t, %v", found, err)
+		}
+		if afterCfg.CPAConnection.CPABaseURL != destination.url() {
+			t.Fatalf("CPABaseURL = %q, want %q", afterCfg.CPAConnection.CPABaseURL, destination.url())
+		}
+		if afterCfg.CPAConnection.ManagementKey == "" || afterCfg.CPAConnection.ManagementKey == legacyCfg.CPAConnection.ManagementKey {
+			t.Fatalf("ManagementKey was not updated to staged destination secret")
+		}
+		if afterCfg.Collector.Enabled == nil || !*afterCfg.Collector.Enabled || afterCfg.Collector.PollIntervalMS != 42000 {
+			t.Fatalf("unrelated Collector config lost during handoff: %+v", afterCfg.Collector)
+		}
+	})
+
+	t.Run("same URL with different ManagementKey under v2-owned revision is refused", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+
+		// Seed a v2-owned connection (SaveManagerConfigAndSetup mints
+		// cpa_connection_revision_v1) at the SAME URL with a different secret.
+		seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+			CPAConnection: model.ManagerCPAConnectionConfig{
+				CPABaseURL:    destination.url(),
+				ManagementKey: "v2-owned-different-management-secret",
+			},
+		})
+
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+			t.Fatalf("same-URL v2-owned connection produced %v (code=%q/%t), want %s",
+				err, code, ok, UpgradeErrorCPAConnectionConflict)
+		}
+	})
+
+	t.Run("unrevisioned target connection that disagrees with 1.x source is refused", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+
+		seedLegacy1xConnectionWithoutV2Revision(t, fixture.targetRoot, model.ManagerConfig{
+			CPAConnection: model.ManagerCPAConnectionConfig{
+				CPABaseURL:    "http://unproven-drifted-cpa:8317",
+				ManagementKey: "drifted-key",
+			},
+		})
+
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+			t.Fatalf("drifted unrevisioned connection produced %v (code=%q/%t), want %s",
+				err, code, ok, UpgradeErrorCPAConnectionConflict)
+		}
+	})
+
+	t.Run("target carrying Fresh identity row is refused", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+
+		db, err := managersqlite.Open(filepath.Join(fixture.targetRoot, databaseFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values (?, '{}', 1)`, freshstore.OperationKey); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+
+		_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+			t.Fatalf("Fresh identity conflict produced %v (code=%q/%t), want %s",
+				err, code, ok, UpgradeErrorCPAConnectionConflict)
+		}
+	})
+}
+
+func TestImportCPAConfirmedOfflineRetryAndSharedStageGates(t *testing.T) {
+	t.Run("starting state replays same start ID without advancing startAttempt", func(t *testing.T) {
+		prevTimeout := cpaImportDestinationReadyTimeout
+		prevPoll := cpaImportDestinationReadyPoll
+		cpaImportDestinationReadyTimeout = 250 * time.Millisecond
+		cpaImportDestinationReadyPoll = 5 * time.Millisecond
+		t.Cleanup(func() {
+			cpaImportDestinationReadyTimeout = prevTimeout
+			cpaImportDestinationReadyPoll = prevPoll
+		})
+
+		fixture := newImportFixture(t, cleanSourceConfig, map[string]string{
+			"codex-1.json": `{"type":"codex","access_token":"tok-1"}`,
+		})
+		staged := newFakeDestinationCPA(t, "")
+		foreign := newFakeDestinationCPA(t, "foreign-management-secret-0123456789abcdef")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = staged
+
+		if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, foreign.url(), boolPointer(true))); err == nil {
+			t.Fatal("foreign destination URL unexpectedly succeeded")
+		}
+		firstStartID := runtime.startCall.OperationID
+
+		// Unconfirmed RuntimeStateUnknown must refuse without dispatching a new Start.
+		runtime.mu.Lock()
+		runtime.state = model.RuntimeStateUnknown
+		runtime.mu.Unlock()
+		stageBefore, startBefore := runtime.callCounts()
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("Unknown state retry = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		stageAfter, startAfter := runtime.callCounts()
+		if stageAfter != stageBefore || startAfter != startBefore {
+			t.Fatalf("Unknown state submitted runtime calls stage %d->%d start %d->%d", stageBefore, stageAfter, startBefore, startAfter)
+		}
+
+		// RuntimeStateStarting replays the existing Start ID rather than minting :start:2.
+		runtime.mu.Lock()
+		runtime.state = model.RuntimeStateStarting
+		runtime.startingPollsBeforeReady = 2
+		runtime.mu.Unlock()
+		result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+		if err != nil {
+			t.Fatalf("Starting replay failed: %v", err)
+		}
+		if runtime.startCall.OperationID != firstStartID {
+			t.Fatalf("Starting replay used %q, want original %q", runtime.startCall.OperationID, firstStartID)
+		}
+		if result.Stage != model.UpgradeStageCPAImport {
+			t.Fatalf("Stage = %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+		}
+	})
+
+	t.Run("failed restart on :start:2 stays retryable via :start:3 without superseding stage", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		staged := newFakeDestinationCPA(t, "")
+		foreign := newFakeDestinationCPA(t, "foreign-management-secret-0123456789abcdef")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = staged
+
+		if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, foreign.url(), boolPointer(false))); err == nil {
+			t.Fatal("foreign destination URL unexpectedly succeeded")
+		}
+		stageOpID := runtime.stageCall.OperationID
+
+		runtime.mu.Lock()
+		runtime.state = model.RuntimeStateOffline
+		runtime.failStart = true
+		runtime.mu.Unlock()
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("failed :start:2 = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		if runtime.startCall.OperationID != stageOpID+":start:2" {
+			t.Fatalf("second start op = %q, want %q", runtime.startCall.OperationID, stageOpID+":start:2")
+		}
+
+		runtime.mu.Lock()
+		runtime.failStart = false
+		runtime.mu.Unlock()
+		result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(false)))
+		if err != nil {
+			t.Fatalf("recovery on :start:3 failed: %v", err)
+		}
+		if runtime.stageCall.OperationID != stageOpID || runtime.startCall.OperationID != stageOpID+":start:3" {
+			t.Fatalf("recovery ops = stage %q start %q, want %q and %q",
+				runtime.stageCall.OperationID, runtime.startCall.OperationID, stageOpID, stageOpID+":start:3")
+		}
+		if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+	})
+
+	t.Run("shared stage gate blocks pending dates, unreconciled failed park, and missing reconciliation", func(t *testing.T) {
+		fixture := newImportFixture(t, cleanSourceConfig, nil)
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		dbPath := filepath.Join(fixture.targetRoot, databaseFileName)
+
+		if err := RecordPendingReconcileDays(context.Background(), dbPath, []string{"2026-03-01"}); err != nil {
+			t.Fatalf("RecordPendingReconcileDays: %v", err)
+		}
+		_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileMismatch {
+			t.Fatalf("ImportCPA with pending dates = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorReconcileMismatch)
+		}
+		if runtime.stageCall != nil {
+			t.Fatal("ImportCPA contacted Runtime while reconciliation dates remained pending")
+		}
+
+		fixtureFailed := newImportFixture(t, cleanSourceConfig, nil)
+		execTarget(t, filepath.Join(fixtureFailed.targetRoot, databaseFileName),
+			`update upgrade_operations set stage = 'failed', last_forward_stage = 'copy_in' where id = 1`)
+		_, err = ImportCPA(context.Background(), importOptions(fixtureFailed, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAStageConflict {
+			t.Fatalf("ImportCPA from failed copy_in = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPAStageConflict)
+		}
+
+		fixtureUnreconciled := newImportFixture(t, cleanSourceConfig, nil)
+		execTarget(t, filepath.Join(fixtureUnreconciled.targetRoot, databaseFileName),
+			`update upgrade_operations set reconciliation = '{}' where id = 1`)
+		_, err = ImportCPA(context.Background(), importOptions(fixtureUnreconciled, runtime, destination.url(), boolPointer(false)))
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAStageConflict {
+			t.Fatalf("ImportCPA without durable reconciliation = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPAStageConflict)
+		}
+	})
+}
+
+func TestImportCPAConnectionConflictRedactsURLUserinfo(t *testing.T) {
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	const userinfoURL = "http://admin-user:super-secret-token@other-cpa.example:8317/gateway"
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{
+			CPABaseURL:    userinfoURL,
+			ManagementKey: "another-cpa-management-key",
+		},
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+		t.Fatalf("ImportCPA = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPAConnectionConflict)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "admin-user") || strings.Contains(msg, "super-secret-token") {
+		t.Fatalf("connection conflict error leaked URL userinfo: %q", msg)
+	}
+	if !strings.Contains(msg, "http://other-cpa.example:8317/gateway") {
+		t.Fatalf("connection conflict error did not retain redacted host URL: %q", msg)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -60,6 +61,10 @@ const (
 // exhaustion without depending on a real race.
 var openSnapshot = upgradeservice.OpenSnapshot
 
+// availableBytesForCLI is a package-private test seam so command tests can
+// simulate distinct target and scratch volume free-space budgets.
+var availableBytesForCLI func(targetDir string) (int64, error)
+
 // ExitCode maps a Run result to the CLI contract: 0 ready, 1 a decision the
 // operator has to look at, and 2 anything else. The decision set is the single
 // table below, and every subcommand goes through it: run, status, migrate,
@@ -95,6 +100,13 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	// writer holds it, or the offline store already holds an operation that the
 	// step may not overwrite.
 	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceSymlinked),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceUnreadable),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceMissing),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceVersionUnsupported),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceLockUnavailable),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceAlreadyV2),
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceVersionUndeclared),
 	upgradeservice.UpgradeErrorV2Running,
 	upgradeservice.UpgradeErrorTargetLocked,
 	// The recorded copy-in or the reconciliation is a decision about what the
@@ -198,6 +210,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%w: subcommand is required", ErrUsage)
 	}
 	switch args[0] {
+	case "worker":
+		return runWorker(ctx, args[1:], stdout, stderr)
 	case "preflight":
 		return runPreflight(ctx, args[1:], stdout, stderr)
 	case "status":
@@ -227,12 +241,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage: cpa-manager-plus upgrade <subcommand>")
-	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> --source-version <vX.Y.Z> [--target-dir DIR] [--scratch-dir DIR] [--json]")
+	_, _ = fmt.Fprintln(w, "  worker [--check | --restart-parent]    serve the authenticated Linux Docker upgrade Unix socket")
+	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> [--source-version <vX.Y.Z>] [--target-dir DIR] [--scratch-dir DIR] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      inspect a stopped 1.x source; writes nothing")
 	_, _ = fmt.Fprintln(w, "                                      --target-dir is required when the Manager database path cannot be derived")
-	_, _ = fmt.Fprintln(w, "  run --legacy <dir> --source-version <vX.Y.Z> [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]")
+	_, _ = fmt.Fprintln(w, "  run --legacy <dir> [--source-version <vX.Y.Z>] [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      back up and copy a stopped 1.x source into the v2 data root")
-	_, _ = fmt.Fprintln(w, "  reconcile --legacy <dir> --source-version <vX.Y.Z> [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]")
+	_, _ = fmt.Fprintln(w, "  reconcile --legacy <dir> [--source-version <vX.Y.Z>] [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]")
 	_, _ = fmt.Fprintln(w, "            [--acknowledge <YYYY-MM-DD>]... [--acknowledge-parity-gaps]")
 	_, _ = fmt.Fprintln(w, "                                      compare the copied store with the 1.x source and mark")
 	_, _ = fmt.Fprintln(w, "                                      the days that can never be completed again")
@@ -240,18 +255,18 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      read the persisted upgrade operation")
 	_, _ = fmt.Fprintln(w, "  migrate [--json] [--db-path PATH]  add the current upgrade columns to an older store")
 	_, _ = fmt.Fprintln(w, "                                      (the v2 Manager must be stopped; it holds the store lock)")
-	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
-	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
+	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--target <dir>] [--volume <name-or-dir>] [--backup <dir>] [--scratch-dir DIR] [--legacy-image <ref>] [--allow-image-family-mismatch] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
+	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--target <dir>] [--backup <dir>] [--scratch-dir DIR] [--status-url <url>] [--legacy-image <ref>] [--allow-image-family-mismatch] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
-	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--cpa-version <v>] [--reprove] [--json]")
+	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--scratch-dir DIR] [--cpa-version <v>] [--reprove] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops,")
 	_, _ = fmt.Fprintln(w, "                                      and --reprove re-proves the recorded URL and build version to seal a rotated key")
 	_, _ = fmt.Fprintln(w, "  cpa-import --legacy <dir> --plugins <true|false> [--cpa-dir <dir>] [--cpa-version <release>]")
-	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--destination-url <url>]")
+	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--scratch-dir DIR] [--destination-url <url>]")
 	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA v8 state into the")
 	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it; a CPA below v8 stops")
-	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--control-base-path </prefix>] [--inference-base-path </prefix>] [--shared-entry] [--json]")
+	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--scratch-dir DIR] [--control-base-path </prefix>] [--inference-base-path </prefix>] [--shared-entry] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      verify the recorded operation and record the one verdict the")
 	_, _ = fmt.Fprintln(w, "                                      target supports: complete for both a Managed destination and")
 	_, _ = fmt.Fprintln(w, "                                      an External CPA")
@@ -264,8 +279,10 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	flags := flag.NewFlagSet("upgrade preflight", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
-	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
+	sourceVersion := flags.String("source-version", "", "optional observed 1.x release; the source schema remains the qualification authority")
 	targetDir := flags.String("target-dir", "", "directory on the volume that will receive the upgrade copy; defaults to the Manager data directory")
+	bundle := flags.String("bundle", "", "backup destination when placed outside <target-dir>/upgrade-backup")
+	backup := flags.String("backup", "", "alias for --bundle")
 	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the report as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -273,6 +290,10 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
 		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
+	}
+	bundleDir, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(*targetDir) == "" {
 		// The disk requirement belongs to the Manager volume, not to the source.
@@ -287,9 +308,11 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
 		LegacyRoot:      *legacy,
-		DeclaredVersion: *sourceVersion,
+		DeclaredVersion: strings.TrimSpace(*sourceVersion),
 		TargetDir:       *targetDir,
+		BundleDir:       bundleDir,
 		ScratchDir:      *scratchDir,
+		AvailableBytes:  availableBytesForCLI,
 	})
 	if err != nil {
 		return err
@@ -348,6 +371,9 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags.SetOutput(stderr)
 	dbPath := flags.String("db-path", "", "Manager SQLite path; defaults to the Manager configuration")
 	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
+	legacy := flags.String("legacy", "", "optional 1.x source data directory to exclude from scratch staging")
+	bundle := flags.String("bundle", "", "optional external backup directory to exclude from scratch staging")
+	backup := flags.String("backup", "", "alias for --bundle")
 	asJSON := flags.Bool("json", false, "print the operation as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -355,19 +381,47 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if flags.NArg() != 0 {
 		return fmt.Errorf("%w: no positional arguments are accepted", ErrUsage)
 	}
+	bundleDir, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
 	path, err := resolveManagerDatabasePath(*dbPath)
 	if err != nil {
 		return err
 	}
-	// A scratch copy under the Manager data directory would write the whole
-	// database back into the volume this operation is upgrading. An unset
-	// --scratch-dir means the OS temporary directory and is checked the same
-	// way, so a host whose TMPDIR points into that volume is refused instead of
-	// leaving a full copy behind.
-	if err := upgradeservice.ValidateScratchDir(*scratchDir, "", filepath.Dir(path)); err != nil {
+	statusRoots := []upgradeservice.ScratchRoot{
+		{Label: "the target root", Dir: filepath.Dir(path)},
+		{Label: "the legacy source root", Dir: strings.TrimSpace(*legacy)},
+		{Label: "the backup directory", Dir: bundleDir},
+	}
+	for _, cfgLegacy := range upgradeservice.ConfiguredLegacyRoots() {
+		statusRoots = append(statusRoots, upgradeservice.ScratchRoot{
+			Label: "the configured legacy source root",
+			Dir:   cfgLegacy,
+		})
+	}
+	for _, cfgBundle := range upgradeservice.ConfiguredBundleRoots() {
+		statusRoots = append(statusRoots, upgradeservice.ScratchRoot{
+			Label: "the configured backup directory",
+			Dir:   cfgBundle,
+		})
+	}
+	if strings.TrimSpace(*dbPath) == "" {
+		if cfg, cfgErr := config.LoadWithoutCreatingDefault(); cfgErr == nil && strings.TrimSpace(cfg.DataKeyPath) != "" {
+			statusRoots = append(statusRoots, upgradeservice.ScratchRoot{
+				Label: "the Manager data key directory",
+				Dir:   filepath.Dir(cfg.DataKeyPath),
+			})
+		}
+	}
+	// A scratch copy under the Manager data directory or preserved 1.x / backup
+	// directories would write a full database copy into a protected tree. An
+	// unset --scratch-dir means the OS temporary directory and is checked the
+	// same way, so a host whose TMPDIR points into any protected volume is
+	// refused instead of leaving a full copy behind.
+	if err := upgradeservice.ValidateScratchRoots(*scratchDir, statusRoots...); err != nil {
 		return codedFailure(upgradeservice.CodeSnapshotFailed, err)
 	}
-	// A read-only open of a WAL database creates -shm/-wal next to it, which
 	// fails on a read-only volume. The row is read from a private copy instead.
 	snapshot, err := openStatusSnapshot(ctx, path, *scratchDir)
 	if err != nil {
@@ -467,9 +521,10 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags := flag.NewFlagSet("upgrade run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
-	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
+	sourceVersion := flags.String("source-version", "", "optional observed 1.x release; the source schema remains the qualification authority")
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory when every target member lands there")
 	bundle := flags.String("bundle", "", "backup destination; defaults to <target>/upgrade-backup")
+	backup := flags.String("backup", "", "alias for --bundle: backup destination")
 	scratchDir := flags.String("scratch-dir", "", "directory for the transient preflight snapshot; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the preflight report and the copy-in result as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -486,9 +541,16 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return fmt.Errorf("resolve the 1.x source root: %w", err)
 	}
-	bundleDir := strings.TrimSpace(*bundle)
+	bundleOverride, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
+	bundleDir := bundleOverride
 	if bundleDir == "" {
 		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
+	}
+	if err := upgradeservice.RefuseOverlappingRoots(legacyRoot, targetRoot, bundleDir); err != nil {
+		return refuseTyped(stderr, err)
 	}
 	// A copy-in that already has a successor is not redone. The run only ever
 	// owns preflight and the copy-in, so a later recorded stage is reported and
@@ -500,7 +562,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	marker, markerPresent, markerErr := copyinmarker.Read(targetRoot)
 	databasePath := upgradeservice.TargetDatabasePath(targetRoot)
 	unpublished := markerErr != nil || markerPresent && (!copyinmarker.SameTarget(marker.TargetDatabase, databasePath) || marker.AwaitingCommit(databasePath))
-	if !unpublished && upgradeservice.ValidateScratchDir(*scratchDir, legacyRoot, targetRoot) == nil {
+	if !unpublished && upgradeservice.ValidateScratchDirWithBackup(*scratchDir, legacyRoot, targetRoot, bundleDir) == nil {
 		if operation, found, err := recordedOperationAt(ctx, targetRoot, *scratchDir); err != nil {
 			return refuseTyped(stderr, err)
 		} else if found && stagePastCopyIn(operation.Stage) {
@@ -509,11 +571,14 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return nil
 		}
 	}
+	declaredVersion := strings.TrimSpace(*sourceVersion)
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
 		LegacyRoot:      legacyRoot,
-		DeclaredVersion: *sourceVersion,
+		DeclaredVersion: declaredVersion,
 		TargetDir:       targetRoot,
+		BundleDir:       bundleDir,
 		ScratchDir:      *scratchDir,
+		AvailableBytes:  availableBytesForCLI,
 	})
 	if err != nil {
 		return refuseTyped(stderr, err)
@@ -535,7 +600,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	defer func() { _ = lock.Close() }()
 	result, err := upgradeservice.CopyIn(ctx, upgradeservice.Options{
 		LegacyRoot:      legacyRoot,
-		DeclaredVersion: *sourceVersion,
+		DeclaredVersion: declaredVersion,
 		TargetRoot:      targetRoot,
 		BundleDir:       bundleDir,
 		ScratchDir:      *scratchDir,
@@ -548,9 +613,52 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// The run stops at the copy-in by contract: reconciliation is a separate,
 	// authorized step, so the exact command to continue is printed rather than
 	// executed.
-	output.Next = nextReconcileCommand(legacyRoot, targetRoot, bundleDir, strings.TrimSpace(*sourceVersion), strings.TrimSpace(*bundle) != "")
+	output.Next = nextReconcileCommand(legacyRoot, targetRoot, bundleDir, strings.TrimSpace(*sourceVersion), bundleOverride != "")
 	writeRunOutput(stdout, *asJSON, output)
 	return nil
+}
+
+func resolveOptionalBundleFlag(bundleFlag, backupFlag string) (string, error) {
+	b1 := strings.TrimSpace(bundleFlag)
+	b2 := strings.TrimSpace(backupFlag)
+	if b1 != "" && b2 != "" {
+		c1, err1 := canonicalBundleFlagPath(b1)
+		c2, err2 := canonicalBundleFlagPath(b2)
+		if err1 != nil || err2 != nil || c1 != c2 {
+			return "", fmt.Errorf("%w: --bundle and --backup must not name different directories", ErrUsage)
+		}
+	}
+	if b1 != "" {
+		return b1, nil
+	}
+	return b2, nil
+}
+
+func canonicalBundleFlagPath(raw string) (string, error) {
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", err
+	}
+	current := abs
+	var missing []string
+	for {
+		resolved, evalErr := filepath.EvalSymlinks(current)
+		if evalErr == nil {
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
+		}
+		if info, lstatErr := os.Lstat(current); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("dangling or unresolvable symlink %q: %w", current, evalErr)
+		}
+		if !errors.Is(evalErr, os.ErrNotExist) {
+			return "", evalErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return abs, nil
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
 }
 
 // runReconcile compares the copied-in store with the stopped 1.x source. The
@@ -561,9 +669,10 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	flags := flag.NewFlagSet("upgrade reconcile", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
-	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
+	sourceVersion := flags.String("source-version", "", "optional observed 1.x release; the source schema remains the qualification authority")
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
 	bundle := flags.String("bundle", "", "backup destination of the recorded copy-in; defaults to <target>/upgrade-backup")
+	backup := flags.String("backup", "", "alias for --bundle: backup destination of the recorded copy-in")
 	scratchDir := flags.String("scratch-dir", "", "directory for the transient preflight and reconciliation copies; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the preflight report and the reconciliation as JSON")
 	acknowledgeParityGaps := flags.Bool("acknowledge-parity-gaps", false,
@@ -589,7 +698,19 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return fmt.Errorf("resolve the 1.x source root: %w", err)
 	}
-	bundleDir := strings.TrimSpace(*bundle)
+	switch info, statErr := os.Stat(legacyRoot); {
+	case statErr != nil && os.IsNotExist(statErr):
+		return fmt.Errorf("legacy source root %s does not exist", legacyRoot)
+	case statErr != nil:
+		return fmt.Errorf("inspect legacy source root: %w", statErr)
+	case !info.IsDir():
+		return fmt.Errorf("legacy source root %s is not a directory", legacyRoot)
+	}
+	bundleOverride, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
+	bundleDir := bundleOverride
 	if bundleDir == "" {
 		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
 	}
@@ -602,20 +723,7 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err := upgradeservice.RefuseOverlappingRoots(legacyRoot, targetRoot, bundleDir); err != nil {
 		return fmt.Errorf("%w: %v", ErrUsage, err)
 	}
-	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
-		LegacyRoot:      legacyRoot,
-		DeclaredVersion: *sourceVersion,
-		TargetDir:       targetRoot,
-		ScratchDir:      *scratchDir,
-	})
-	if err != nil {
-		return err
-	}
-	output := reconcileOutput{Preflight: &report}
-	if !report.Ready {
-		writeReconcileOutput(stdout, *asJSON, output)
-		return ErrBlocked
-	}
+	var output reconcileOutput
 	// Every refusal below still prints the report with its typed code, so a
 	// script reads the code and a person reads what to do next.
 	fail := func(err error) error {
@@ -625,6 +733,26 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		output.Error = err.Error()
 		writeReconcileOutput(stdout, *asJSON, output)
 		return err
+	}
+	if err := upgradeservice.RequireActionStageWithBackup(ctx, upgradeservice.TargetDatabasePath(targetRoot), *scratchDir, legacyRoot, bundleDir, "reconcile", nil); err != nil {
+		return fail(err)
+	}
+	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
+		LegacyRoot:           legacyRoot,
+		DeclaredVersion:      strings.TrimSpace(*sourceVersion),
+		TargetDir:            targetRoot,
+		BundleDir:            bundleDir,
+		ScratchDir:           *scratchDir,
+		AvailableBytes:       availableBytesForCLI,
+		ReconcileTargetReady: true,
+	})
+	if err != nil {
+		return err
+	}
+	output.Preflight = &report
+	if !report.Ready {
+		writeReconcileOutput(stdout, *asJSON, output)
+		return ErrBlocked
 	}
 	// The step reads a stopped 1.x source and writes the v2 store, so it holds
 	// both fences for the whole run, exactly as the copy-in holds the source one:
@@ -648,6 +776,7 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	defer func() { _ = targetLock.Close() }()
 	reconcileReport, err := upgradeservice.Reconcile(ctx, upgradeservice.Options{
 		LegacyRoot:            legacyRoot,
+		DeclaredVersion:       strings.TrimSpace(*sourceVersion),
 		TargetRoot:            targetRoot,
 		BundleDir:             bundleDir,
 		ScratchDir:            *scratchDir,
@@ -705,8 +834,11 @@ func stagePastCopyIn(stage model.UpgradeStage) bool {
 // argument is quoted for the shell, not for Go: the operator pastes this line,
 // so a path containing `$` or backticks must reach the command unchanged.
 func nextReconcileCommand(legacyRoot, targetRoot, bundleDir string, declaredVersion string, explicitBundle bool) string {
-	command := fmt.Sprintf("cpa-manager-plus upgrade reconcile --legacy %s --target %s --source-version %s",
-		upgradeservice.ShellQuote(legacyRoot), upgradeservice.ShellQuote(targetRoot), upgradeservice.ShellQuote(declaredVersion))
+	command := fmt.Sprintf("cpa-manager-plus upgrade reconcile --legacy %s --target %s",
+		upgradeservice.ShellQuote(legacyRoot), upgradeservice.ShellQuote(targetRoot))
+	if trimmed := strings.TrimSpace(declaredVersion); trimmed != "" {
+		command += fmt.Sprintf(" --source-version %s", upgradeservice.ShellQuote(trimmed))
+	}
 	if explicitBundle {
 		command += fmt.Sprintf(" --bundle %s", upgradeservice.ShellQuote(bundleDir))
 	}

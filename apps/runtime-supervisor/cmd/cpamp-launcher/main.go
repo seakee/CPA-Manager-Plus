@@ -30,6 +30,10 @@ func main() {
 	}
 
 	supCfg := NewSupervisorConfig(prepared, os.Environ())
+	if err := configureUpgradeWorker(ctx, &supCfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if err := RunSupervisor(ctx, supCfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
