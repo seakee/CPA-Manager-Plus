@@ -2898,16 +2898,17 @@ function readUpgradeOperationState(targetRoot) {
   const database = path.join(targetRoot, 'usage.sqlite');
   const db = new DatabaseSync(database, { readOnly: true });
   try {
-    const row = db.prepare('select stage, pending_reconcile_days from upgrade_operations where id = 1').get();
+    const row = db
+      .prepare('select stage, pending_reconcile_days, error_code from upgrade_operations where id = 1')
+      .get();
     assertValue(row && typeof row.stage === 'string', 'upgrade_operations row missing');
     const pendingDays = JSON.parse(row.pending_reconcile_days || '[]');
     assertValue(Array.isArray(pendingDays), 'upgrade_operations.pending_reconcile_days is not a JSON array');
-    return { stage: row.stage, pendingDays };
+    return { stage: row.stage, pendingDays, errorCode: row.error_code || '' };
   } finally {
     db.close();
   }
 }
-
 // faultClearedRollupRecoverable clears a derived rollup whose source raw rows
 // are still present, proves reconcile refuses without advancing stage or
 // marking incomplete days while recording pending_reconcile_days for the
@@ -2987,8 +2988,9 @@ function faultClearedRollupUnrecoverable(binary, workspace) {
   fs.mkdirSync(target, { recursive: true });
   chain(binary, source, target, 'rollup-unrecoverable');
 
+  const sourceDigest = dirDigest(source);
+  const database = path.join(target, 'usage.sqlite');
   injectClearedRollup(target, TABLES.pricing);
-  const digestAfterInjection = dirDigest(target);
   const lost = DATASET_DAYS[0];
   const refused = runCli(
     binary,
@@ -3000,8 +3002,25 @@ function faultClearedRollupUnrecoverable(binary, workspace) {
   const code = refusedReport.errorCode || typedCode(refused);
   assertValue(code === 'upgrade_reconcile_target_incomplete', `rollup-unrecoverable: code=${code}`);
   assertValue(/no retained events/.test(refusedReport.error ?? ''), `rollup-unrecoverable: refusal did not name the lost support: ${refusedReport.error}`);
-  assertValue(dirDigest(target) === digestAfterInjection, 'rollup-unrecoverable: the refused reconcile wrote the v2 data root');
-  recordFault('cleared-derived-rollup-without-support', refused, code, true, { acknowledgeAttempted: lost });
+  assertValue(dirDigest(source) === sourceDigest, 'rollup-unrecoverable: the refused reconcile modified the 1.x source root');
+
+  // Because chain() had already recorded stage=reconcile before the fault was
+  // injected, reconcile must invalidate that stale reconciliation back to
+  // copy_in with error_code=upgrade_reconcile_target_incomplete and mark zero
+  // incomplete days.
+  const afterRefusal = readUpgradeOperationState(target);
+  assertValue(afterRefusal.stage === 'copy_in', `rollup-unrecoverable: expected stale reconcile to be invalidated to copy_in, got ${afterRefusal.stage}`);
+  assertValue(afterRefusal.errorCode === 'upgrade_reconcile_target_incomplete', `rollup-unrecoverable: error_code=${afterRefusal.errorCode}`);
+  assertValue(afterRefusal.pendingDays.length === 0, `rollup-unrecoverable: pending_reconcile_days=${JSON.stringify(afterRefusal.pendingDays)}`);
+  assertValue(
+    sqliteCount(database, 'select count(*) as count from usage_coverage_incomplete_days') === 0,
+    'rollup-unrecoverable: refused reconcile marked incomplete days',
+  );
+  recordFault('cleared-derived-rollup-without-support', refused, code, false, {
+    acknowledgeAttempted: lost,
+    stageAfterRefusal: afterRefusal.stage,
+    errorCodeRecorded: afterRefusal.errorCode,
+  });
 }
 
 // 5. A compared table dropped on the target: lost data, never a disagreement.
@@ -3012,19 +3031,33 @@ function faultDroppedTable(binary, workspace) {
   fs.mkdirSync(target, { recursive: true });
   chain(binary, source, target, 'dropped');
 
-  sqliteExec(path.join(target, 'usage.sqlite'), `drop table ${TABLES.history}`);
+  const sourceDigest = dirDigest(source);
+  const database = path.join(target, 'usage.sqlite');
+  sqliteExec(database, `drop table ${TABLES.history}`);
   assertValue(
-    sqliteCount(path.join(target, 'usage.sqlite'), `select count(*) as count from sqlite_master where type = 'table' and name = '${TABLES.history}'`) === 0,
+    sqliteCount(database, `select count(*) as count from sqlite_master where type = 'table' and name = '${TABLES.history}'`) === 0,
     'dropped: the history table is still there after the injection',
   );
-  const digestAfterInjection = dirDigest(target);
   const refused = runCli(binary, ['upgrade', 'reconcile', '--legacy', source, '--target', target, '--json'], 'dropped:refused', { expectExit: 1 });
   const refusedReport = parseJson(refused.stdout, 'dropped:refused');
   const code = refusedReport.errorCode || typedCode(refused);
   assertValue(code === 'upgrade_reconcile_target_incomplete', `dropped: code=${code}`);
   assertValue((refusedReport.report?.domains ?? []).some((domain) => domain.domain === 'history' && domain.applicable === false), 'dropped: the report did not name the missing history table');
-  assertValue(dirDigest(target) === digestAfterInjection, 'dropped: the refused reconcile wrote the v2 data root');
-  recordFault('dropped-table-on-the-target', refused, code, true, { table: TABLES.history });
+  assertValue(dirDigest(source) === sourceDigest, 'dropped: the refused reconcile modified the 1.x source root');
+
+  const afterRefusal = readUpgradeOperationState(target);
+  assertValue(afterRefusal.stage === 'copy_in', `dropped: expected stale reconcile to be invalidated to copy_in, got ${afterRefusal.stage}`);
+  assertValue(afterRefusal.errorCode === 'upgrade_reconcile_target_incomplete', `dropped: error_code=${afterRefusal.errorCode}`);
+  assertValue(afterRefusal.pendingDays.length === 0, `dropped: pending_reconcile_days=${JSON.stringify(afterRefusal.pendingDays)}`);
+  assertValue(
+    sqliteCount(database, 'select count(*) as count from usage_coverage_incomplete_days') === 0,
+    'dropped: refused reconcile marked incomplete days',
+  );
+  recordFault('dropped-table-on-the-target', refused, code, false, {
+    table: TABLES.history,
+    stageAfterRefusal: afterRefusal.stage,
+    errorCodeRecorded: afterRefusal.errorCode,
+  });
 }
 
 // 6. A natively busy source: a live 1.x writer holds the source's ownership
