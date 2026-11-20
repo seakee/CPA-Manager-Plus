@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // UpgradeStage is the durable position of the single v2 Upgrade operation.
@@ -302,6 +303,12 @@ type UpgradeOperation struct {
 	SourceFingerprintAfter  string          `json:"sourceFingerprintAfter,omitempty"`
 	BackupManifestSHA256    string          `json:"backupManifestSha256,omitempty"`
 	Reconciliation          json.RawMessage `json:"reconciliation"`
+	// PendingReconcileDays holds canonical UTC calendar dates (YYYY-MM-DD)
+	// observed during a blocked reconciliation run that still require operator
+	// acknowledgment. They are persisted before returning the mismatch refusal,
+	// block every downstream step until cleared, and are cleared atomically in
+	// the same transaction that commits a successful reconciliation or rollback.
+	PendingReconcileDays []string `json:"pendingReconcileDays,omitempty"`
 	// Verification is the observation the verify/complete verdict rests on. It
 	// is written only by the completion gate, in the same statement as the stage
 	// it authorizes, and is `{}` for every step before it. The repository owns
@@ -461,6 +468,17 @@ func (o UpgradeOperation) Validate() error {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
 		}
 	}
+	for index, day := range o.PendingReconcileDays {
+		if !validUpgradeDate(day) {
+			return fmt.Errorf("upgrade operation pending reconciliation date %q is not YYYY-MM-DD", day)
+		}
+		if index > 0 && day <= o.PendingReconcileDays[index-1] {
+			return fmt.Errorf("upgrade operation pending reconciliation dates must be strictly ascending (%q after %q)", day, o.PendingReconcileDays[index-1])
+		}
+	}
+	if (o.Stage == UpgradeStageComplete || o.Stage == UpgradeStageRolledBack) && len(o.PendingReconcileDays) > 0 {
+		return fmt.Errorf("a %s upgrade operation cannot carry pending reconciliation dates", o.Stage)
+	}
 	if len(o.Verification) > 0 {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(o.Verification, &object); err != nil || object == nil {
@@ -513,4 +531,12 @@ func (o UpgradeOperation) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validUpgradeDate(day string) bool {
+	if len(day) != len("2006-01-02") {
+		return false
+	}
+	parsed, err := time.Parse("2006-01-02", day)
+	return err == nil && parsed.Format("2006-01-02") == day
 }

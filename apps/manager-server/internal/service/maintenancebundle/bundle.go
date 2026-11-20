@@ -154,6 +154,88 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
+func layoutProtectedRoots(l Layout) []string {
+	var roots []string
+	if strings.TrimSpace(l.DatabasePath) != "" {
+		roots = append(roots, filepath.Dir(l.DatabasePath))
+	}
+	if strings.TrimSpace(l.DataKeyPath) != "" {
+		roots = append(roots, filepath.Dir(l.DataKeyPath))
+	}
+	if strings.TrimSpace(l.ConfigPath) != "" {
+		roots = append(roots, filepath.Dir(l.ConfigPath))
+	}
+	if strings.TrimSpace(l.ArchivesPath) != "" {
+		roots = append(roots, l.ArchivesPath)
+	}
+	return roots
+}
+
+func canonicalScratchAncestor(path string) string {
+	cleaned := filepath.Clean(path)
+	var suffix []string
+	cur := cleaned
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return cleaned
+		}
+		suffix = append(suffix, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+func resolveValidatedScratchBase(scratchDir string, protectedRoots ...string) (string, error) {
+	base := strings.TrimSpace(scratchDir)
+	if base == "" {
+		base = os.TempDir()
+	}
+	if strings.TrimSpace(base) == "" {
+		return "", errors.New("scratch directory is required")
+	}
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve scratch directory: %w", err)
+	}
+	canonBase := canonicalScratchAncestor(absBase)
+	for _, rawRoot := range protectedRoots {
+		trimmed := strings.TrimSpace(rawRoot)
+		if trimmed == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(trimmed)
+		if err != nil {
+			return "", fmt.Errorf("resolve protected root: %w", err)
+		}
+		canonRoot := canonicalScratchAncestor(absRoot)
+		if overlaps(absRoot, absBase) || overlaps(canonRoot, canonBase) {
+			return "", fmt.Errorf("scratch directory %s must not sit inside protected root %s", absBase, absRoot)
+		}
+		physical, err := physicalOverlap(absRoot, absBase)
+		if err != nil {
+			return "", err
+		}
+		if physical {
+			return "", fmt.Errorf("scratch directory %s physically overlaps protected root %s", absBase, absRoot)
+		}
+		physicalCanon, err := physicalOverlap(canonRoot, canonBase)
+		if err != nil {
+			return "", err
+		}
+		if physicalCanon {
+			return "", fmt.Errorf("scratch directory %s physically overlaps protected root %s", absBase, absRoot)
+		}
+	}
+	return absBase, nil
+}
+
 func computeSourceRevision(entries map[string]Entry) string {
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
@@ -291,7 +373,10 @@ func validateWALHeader(walPath string, expectedPageSize uint32) error {
 		return errors.New("unsupported WAL file format version")
 	}
 	walPageSize := binary.BigEndian.Uint32(header[8:12])
-	if walPageSize != expectedPageSize {
+	if walPageSize < 512 || walPageSize > 65536 || walPageSize&(walPageSize-1) != 0 {
+		return fmt.Errorf("WAL header contains invalid page size %d", walPageSize)
+	}
+	if expectedPageSize != 0 && walPageSize != expectedPageSize {
 		return fmt.Errorf("WAL page size %d does not match database page size %d", walPageSize, expectedPageSize)
 	}
 	var order binary.ByteOrder = binary.LittleEndian
@@ -337,11 +422,27 @@ func sqliteURI(path string) string {
 //     stages. A separate writable copy passes production open/migration and
 //     archive reader queries; only the original file set is ever published.
 func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
+	return ValidateMatchingEvidenceWithScratch(ctx, l, "")
+}
+
+// ValidateMatchingEvidenceWithScratch validates l using scratchDir as the base
+// directory for transient SQLite inspection copies. Empty scratchDir uses
+// os.TempDir.
+func ValidateMatchingEvidenceWithScratch(ctx context.Context, l Layout, scratchDir string) error {
+	return validateMatchingEvidence(ctx, l, scratchDir)
+}
+
+func validateMatchingEvidence(ctx context.Context, l Layout, scratchDir string, extraProtectedRoots ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(l.DatabasePath) == "" {
 		return errors.New("database path is required")
+	}
+	protectedRoots := append(layoutProtectedRoots(l), extraProtectedRoots...)
+	scratchBase, err := resolveValidatedScratchBase(scratchDir, protectedRoots...)
+	if err != nil {
+		return err
 	}
 	info, err := os.Lstat(l.DatabasePath)
 	if err != nil {
@@ -349,29 +450,6 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("database is not a regular file")
-	}
-	if info.Size() < 100 {
-		return errors.New("database is too small to be a valid SQLite file")
-	}
-	f, err := os.Open(l.DatabasePath)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	var header [100]byte
-	_, err = io.ReadFull(f, header[:])
-	_ = f.Close()
-	if err != nil {
-		return fmt.Errorf("read database header: %w", err)
-	}
-	if string(header[:16]) != "SQLite format 3\x00" {
-		return errors.New("database is not a valid SQLite database file")
-	}
-	pageSize := uint32(binary.BigEndian.Uint16(header[16:18]))
-	if pageSize == 1 {
-		pageSize = 65536
-	}
-	if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 {
-		return errors.New("database header contains invalid page size")
 	}
 	// A nonempty rollback journal can change the logical DB on its first open.
 	// This slice qualifies offline WAL inputs, not rollback-journal recovery;
@@ -388,19 +466,60 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 	}
 
 	walPath := l.DatabasePath + "-wal"
-	if walInfo, err := os.Lstat(walPath); err == nil {
+	if info.Size() == 0 {
+		walInfo, err := os.Lstat(walPath)
+		if os.IsNotExist(err) {
+			return errors.New("database is too small to be a valid SQLite file")
+		}
+		if err != nil {
+			return fmt.Errorf("inspect database WAL: %w", err)
+		}
 		if !walInfo.Mode().IsRegular() {
 			return errors.New("database WAL is not a regular file")
 		}
-		if walInfo.Size() > 0 {
-			if err := validateWALHeader(walPath, pageSize); err != nil {
-				return fmt.Errorf("database WAL validation failed: %w", err)
-			}
+		if walInfo.Size() <= 0 {
+			return errors.New("database is too small to be a valid SQLite file")
 		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect database WAL: %w", err)
+		if err := validateWALHeader(walPath, 0); err != nil {
+			return fmt.Errorf("database WAL validation failed: %w", err)
+		}
+	} else {
+		if info.Size() < 100 {
+			return errors.New("database is too small to be a valid SQLite file")
+		}
+		f, err := os.Open(l.DatabasePath)
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		var header [100]byte
+		_, err = io.ReadFull(f, header[:])
+		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("read database header: %w", err)
+		}
+		if string(header[:16]) != "SQLite format 3\x00" {
+			return errors.New("database is not a valid SQLite database file")
+		}
+		pageSize := uint32(binary.BigEndian.Uint16(header[16:18]))
+		if pageSize == 1 {
+			pageSize = 65536
+		}
+		if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 {
+			return errors.New("database header contains invalid page size")
+		}
+		if walInfo, err := os.Lstat(walPath); err == nil {
+			if !walInfo.Mode().IsRegular() {
+				return errors.New("database WAL is not a regular file")
+			}
+			if walInfo.Size() > 0 {
+				if err := validateWALHeader(walPath, pageSize); err != nil {
+					return fmt.Errorf("database WAL validation failed: %w", err)
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect database WAL: %w", err)
+		}
 	}
-
 	if strings.TrimSpace(l.DataKeyPath) == "" {
 		return errors.New("data key path is required")
 	}
@@ -438,12 +557,16 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 
 	// Stage SQLite files into a dedicated scratch directory for driver inspection
 	// so opening SQLite driver never touches or mutates the layout paths or WAL.
-	scratch, err := os.MkdirTemp("", "cpamp-matching-staging-")
+	scratch, err := os.MkdirTemp(scratchBase, "cpamp-matching-staging-")
 	if err != nil {
 		return fmt.Errorf("create matching inspection scratch: %w", err)
 	}
 	defer os.RemoveAll(scratch)
-	canonicalScratch, err := filepath.EvalSymlinks(scratch)
+	absScratch, err := filepath.Abs(scratch)
+	if err != nil {
+		return fmt.Errorf("resolve matching inspection scratch: %w", err)
+	}
+	canonicalScratch, err := filepath.EvalSymlinks(absScratch)
 	if err != nil {
 		return fmt.Errorf("resolve matching inspection scratch: %w", err)
 	}
@@ -482,6 +605,11 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect database SHM: %w", err)
 	}
+	if info.Size() == 0 {
+		if err := replayZeroByteScratchWAL(ctx, scratchDB); err != nil {
+			return fmt.Errorf("replay zero-byte database WAL in scratch: %w", err)
+		}
+	}
 
 	dsn := sqliteURI(scratchDB)
 	db, err := sql.Open("sqlite", dsn)
@@ -490,6 +618,14 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+
+	var pageCount int
+	if err := db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+		return fmt.Errorf("SQLite page_count query failed: %w", err)
+	}
+	if pageCount < 1 {
+		return errors.New("database WAL contains no committed database pages")
+	}
 
 	var quickCheck string
 	row := db.QueryRowContext(ctx, "PRAGMA quick_check(1)")
@@ -529,6 +665,130 @@ func ValidateMatchingEvidence(ctx context.Context, l Layout) error {
 		return err
 	}
 	return validateProductionSQLiteOpen(ctx, scratchDB, scratch)
+}
+
+func extractCommittedPage1FromWAL(walPath string) ([]byte, error) {
+	wal, err := os.Open(walPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = wal.Close() }()
+	var header [32]byte
+	if _, err := io.ReadFull(wal, header[:]); err != nil {
+		return nil, err
+	}
+	magic := binary.BigEndian.Uint32(header[:4])
+	if magic != 0x377f0682 && magic != 0x377f0683 {
+		return nil, errors.New("invalid WAL header magic")
+	}
+	if binary.BigEndian.Uint32(header[4:8]) != 3007000 {
+		return nil, errors.New("unsupported WAL file format version")
+	}
+	pageSize := binary.BigEndian.Uint32(header[8:12])
+	if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 {
+		return nil, fmt.Errorf("invalid WAL page size %d", pageSize)
+	}
+	var order binary.ByteOrder = binary.LittleEndian
+	if magic&1 != 0 {
+		order = binary.BigEndian
+	}
+	checksum := func(buf []byte, s1, s2 uint32) (uint32, uint32) {
+		for i := 0; i < len(buf); i += 8 {
+			s1 += order.Uint32(buf[i:i+4]) + s2
+			s2 += order.Uint32(buf[i+4:i+8]) + s1
+		}
+		return s1, s2
+	}
+	s1, s2 := checksum(header[:24], 0, 0)
+	if s1 != binary.BigEndian.Uint32(header[24:28]) || s2 != binary.BigEndian.Uint32(header[28:32]) {
+		return nil, errors.New("invalid WAL header checksum")
+	}
+	salt1 := binary.BigEndian.Uint32(header[16:20])
+	salt2 := binary.BigEndian.Uint32(header[20:24])
+	frame := make([]byte, 24+int(pageSize))
+	var pendingPage1 []byte
+	var committedPage1 []byte
+	for {
+		_, err := io.ReadFull(wal, frame)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if binary.BigEndian.Uint32(frame[8:12]) != salt1 || binary.BigEndian.Uint32(frame[12:16]) != salt2 {
+			break
+		}
+		s1, s2 = checksum(frame[:8], s1, s2)
+		s1, s2 = checksum(frame[24:], s1, s2)
+		if s1 != binary.BigEndian.Uint32(frame[16:20]) || s2 != binary.BigEndian.Uint32(frame[20:24]) {
+			break
+		}
+		pageNumber := binary.BigEndian.Uint32(frame[:4])
+		if pageNumber == 0 {
+			return nil, errors.New("invalid WAL frame page number")
+		}
+		if pageNumber == 1 {
+			if pendingPage1 == nil {
+				pendingPage1 = make([]byte, int(pageSize))
+			}
+			copy(pendingPage1, frame[24:])
+		}
+		if binary.BigEndian.Uint32(frame[4:8]) > 0 && pendingPage1 != nil {
+			if committedPage1 == nil {
+				committedPage1 = make([]byte, int(pageSize))
+			}
+			copy(committedPage1, pendingPage1)
+		}
+	}
+	if committedPage1 == nil {
+		return nil, errors.New("database WAL contains no committed database pages")
+	}
+	if string(committedPage1[:16]) != "SQLite format 3\x00" {
+		return nil, errors.New("database WAL page 1 is not a valid SQLite header")
+	}
+	dbPageSize := uint32(binary.BigEndian.Uint16(committedPage1[16:18]))
+	if dbPageSize == 1 {
+		dbPageSize = 65536
+	}
+	if dbPageSize != pageSize {
+		return nil, fmt.Errorf("WAL page size %d does not match page-1 database page size %d", pageSize, dbPageSize)
+	}
+	return committedPage1, nil
+}
+
+func replayZeroByteScratchWAL(ctx context.Context, scratchDB string) error {
+	page1, err := extractCommittedPage1FromWAL(scratchDB + "-wal")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(scratchDB + "-shm"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(scratchDB, page1, 0o600); err != nil {
+		return err
+	}
+	rawDB, err := sql.Open("sqlite", scratchDB)
+	if err != nil {
+		return err
+	}
+	rawDB.SetMaxOpenConns(1)
+	_, checkpointErr := rawDB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	closeErr := rawDB.Close()
+	if checkpointErr != nil {
+		return checkpointErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	replayedInfo, err := os.Lstat(scratchDB)
+	if err != nil {
+		return err
+	}
+	if replayedInfo.Size() < 100 {
+		return errors.New("database WAL contains no committed database pages")
+	}
+	return nil
 }
 
 func validateProductionSQLiteOpen(ctx context.Context, sourceDB, scratch string) error {
@@ -985,13 +1245,20 @@ type createHooks struct {
 	// Package-private, synchronous checkpoints for controlled subprocess tests.
 	at            func(string)
 	syncDirectory func(string) error
+	scratchDir    string
 }
 
 // Create requires a held lock bound to this database. The fence excludes
 // cooperating Manager writers only. The owner must stop/isolate external
 // writers; matching hashes cannot establish that an external writer is absent.
 func Create(ctx context.Context, layout Layout, bundleDir string, lock *processlock.Lock) (Manifest, error) {
-	return create(ctx, layout, bundleDir, lock, createHooks{})
+	return CreateWithScratch(ctx, layout, bundleDir, lock, "")
+}
+
+// CreateWithScratch is Create using scratchDir as the base directory for
+// transient SQLite matching inspection copies. Empty scratchDir uses os.TempDir.
+func CreateWithScratch(ctx context.Context, layout Layout, bundleDir string, lock *processlock.Lock, scratchDir string) (Manifest, error) {
+	return create(ctx, layout, bundleDir, lock, createHooks{scratchDir: scratchDir})
 }
 
 func create(ctx context.Context, layout Layout, bundleDir string, lock *processlock.Lock, h createHooks) (Manifest, error) {
@@ -1016,13 +1283,17 @@ func createBundle(ctx context.Context, layout Layout, bundleDir string, lock *pr
 	if err != nil {
 		return Manifest{}, err
 	}
+	extraRoots := []string{dest, operationRoot(dest)}
+	if _, err := resolveValidatedScratchBase(h.scratchDir, append(layoutProtectedRoots(l), extraRoots...)...); err != nil {
+		return Manifest{}, err
+	}
 	before, err := inspect(ctx, l)
 	if err != nil {
 		return Manifest{}, err
 	}
 	before.Fence = CooperatingFence
 	if !recoverJournal {
-		if err := ValidateMatchingEvidence(ctx, l); err != nil {
+		if err := validateMatchingEvidence(ctx, l, h.scratchDir, extraRoots...); err != nil {
 			return Manifest{}, fmt.Errorf("source matching evidence invalid: %w", err)
 		}
 	} else if err := requireRollbackJournal(l); err != nil {
@@ -1066,7 +1337,7 @@ func createBundle(ctx context.Context, layout Layout, bundleDir string, lock *pr
 		sealed.Fence = CooperatingFence
 		sealed.Recovery = &RecoveryEvidence{Method: rollbackRecoveryMethod, SourceRevision: before.SourceRevision}
 	}
-	if err := ValidateMatchingEvidence(ctx, BundleLayout(tmp)); err != nil {
+	if err := validateMatchingEvidence(ctx, BundleLayout(tmp), h.scratchDir, append(layoutProtectedRoots(l), extraRoots...)...); err != nil {
 		return Manifest{}, fmt.Errorf("bundle matching evidence invalid: %w", err)
 	}
 	h.checkpoint("matching-validated")
@@ -1198,7 +1469,14 @@ func verify(ctx context.Context, bundleDir string, allowUnpublished bool) (Manif
 // RestoreNew restores the matching file set into a new owner-controlled root.
 // Existing roots are rejected. No running/live Manager file set is replaced.
 func RestoreNew(ctx context.Context, bundleDir, newRoot string) (Layout, error) {
-	return restoreNew(ctx, bundleDir, newRoot, createHooks{})
+	return RestoreNewWithScratch(ctx, bundleDir, newRoot, "")
+}
+
+// RestoreNewWithScratch restores the matching file set into targetDir using
+// scratchDir as the base directory for transient SQLite matching inspection
+// copies. Empty scratchDir uses os.TempDir.
+func RestoreNewWithScratch(ctx context.Context, bundleDir, targetDir, scratchDir string) (Layout, error) {
+	return restoreNew(ctx, bundleDir, targetDir, createHooks{scratchDir: scratchDir})
 }
 
 func restoreNew(ctx context.Context, bundleDir, newRoot string, h createHooks) (result Layout, resultErr error) {
@@ -1222,6 +1500,10 @@ func restoreNew(ctx context.Context, bundleDir, newRoot string, h createHooks) (
 	if overlaps(bundleRoot, dest) || overlaps(dest, bundleRoot) || physical {
 		return Layout{}, errors.New("restore target overlaps source bundle root")
 	}
+	restoreRoots := []string{bundleRoot, dest, operationRoot(dest)}
+	if _, err := resolveValidatedScratchBase(h.scratchDir, restoreRoots...); err != nil {
+		return Layout{}, err
+	}
 	p, err := beginPublication(ctx, dest, l, h)
 	if err != nil {
 		return Layout{}, err
@@ -1242,7 +1524,7 @@ func restoreNew(ctx context.Context, bundleDir, newRoot string, h createHooks) (
 	if err := Revalidate(ctx, BundleLayout(tmp), m); err != nil {
 		return Layout{}, err
 	}
-	if err := ValidateMatchingEvidence(ctx, BundleLayout(tmp)); err != nil {
+	if err := validateMatchingEvidence(ctx, BundleLayout(tmp), h.scratchDir, restoreRoots...); err != nil {
 		return Layout{}, fmt.Errorf("restore matching evidence failed: %w", err)
 	}
 	h.checkpoint("matching-validated")

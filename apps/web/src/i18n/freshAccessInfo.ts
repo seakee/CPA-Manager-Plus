@@ -44,10 +44,20 @@ const en = {
   notReadyGatewayTitle: 'Gateway update pending',
   notReadyGatewayDesc:
     'Gateway startup or reload is still in progress. Retry shortly once the runtime reports ready.',
+  notReadyUpgradeAuthorityTitle: 'Upgrade authority unavailable',
+  notReadyUpgradeAuthorityDesc:
+    'The canonical v2 upgrade authority could not be verified yet. Refresh or check Manager startup status.',
+  notReadyUpgradeOperationInvalidTitle: 'Upgrade operation record invalid',
+  notReadyUpgradeOperationInvalidDesc:
+    'The recorded upgrade operation row is incomplete or contradictory. Inspect Manager logs or restore from backup before connecting clients.',
   notReadyGenericTitle: 'API access endpoints are not ready yet',
   notReadyGenericDesc:
     'Verified inference routing is not active yet. Check deployment and routing status before connecting clients.',
   managementEntry: 'Management entry (Admin / Console)',
+  consoleUrlLabel: 'Management console',
+  managementApiLabel: 'Management API base',
+  copyAccess: 'Copy access details (no keys)',
+  recoverDockerHelp: 'Forgot the prefix later? On the Docker host, replace <container> with your container name and run:',
   inferenceBase: 'Inference API base',
   externalBase: 'External CPA base URL',
   externalDirectNote:
@@ -112,9 +122,19 @@ const zh: typeof en = {
   notReadyExternalDesc: '使用客户端端点前，请先确认或重新绑定外部 CPA 连接。',
   notReadyGatewayTitle: '网关配置正在生效中',
   notReadyGatewayDesc: '网关仍在启动或重载中，请待运行状态就绪后重试。',
+  notReadyUpgradeAuthorityTitle: '升级权限状态暂不可用',
+  notReadyUpgradeAuthorityDesc:
+    '尚无法确认规范 v2 升级路由权限，请刷新或检查 Manager 启动与运行状态。',
+  notReadyUpgradeOperationInvalidTitle: '升级操作记录异常',
+  notReadyUpgradeOperationInvalidDesc:
+    '已记录的升级操作数据不完整或存在冲突。接入客户端前请检查 Manager 日志或从备份恢复。',
   notReadyGenericTitle: 'API 接入地址尚未就绪',
   notReadyGenericDesc: '已验证的推理路由尚未激活，请在接入客户端前检查部署与路由状态。',
   managementEntry: '管理入口（控制台 / Admin API）',
+  consoleUrlLabel: '管理控制台',
+  managementApiLabel: '管理 API 基址',
+  copyAccess: '复制接入信息（不含密钥）',
+  recoverDockerHelp: '忘记前缀时，请在 Docker 宿主机上将 <container> 换成实际容器名后执行：',
   inferenceBase: '模型推理基址',
   externalBase: '外部 CPA 实际地址',
   externalDirectNote: '客户端模型请求会直接连接此外部 CPA 地址，不会经过 CPAMP 转发。',
@@ -177,9 +197,19 @@ const tw: typeof en = {
   notReadyExternalDesc: '使用用戶端端點前，請先確認或重新綁定外部 CPA 連線。',
   notReadyGatewayTitle: '閘道設定正在生效中',
   notReadyGatewayDesc: '閘道仍在啟動或重載中，請待執行狀態就緒後重試。',
+  notReadyUpgradeAuthorityTitle: '升級權限狀態暫時無法使用',
+  notReadyUpgradeAuthorityDesc:
+    '尚無法確認規範 v2 升級路由權限，請重新整理或檢查 Manager 啟動與執行狀態。',
+  notReadyUpgradeOperationInvalidTitle: '升級操作紀錄異常',
+  notReadyUpgradeOperationInvalidDesc:
+    '已記錄的升級操作資料不完整或存在衝突。接入用戶端前請檢查 Manager 日誌或從備份復原。',
   notReadyGenericTitle: 'API 接入位址尚未就緒',
   notReadyGenericDesc: '已驗證的推論路由尚未啟用，請在接入用戶端前檢查部署與路由狀態。',
   managementEntry: '管理入口（主控台 / Admin API）',
+  consoleUrlLabel: '管理主控台',
+  managementApiLabel: '管理 API 基址',
+  copyAccess: '複製接入資訊（不含金鑰）',
+  recoverDockerHelp: '忘記前綴時，請在 Docker 宿主機上將 <container> 換成實際容器名稱後執行：',
   inferenceBase: '模型推論基址',
   externalBase: '外部 CPA 實際位址',
   externalDirectNote: '用戶端模型請求會直接連接此外部 CPA 位址，不會經由 CPAMP 轉發。',
@@ -248,12 +278,22 @@ const ru: typeof en = {
   notReadyGatewayTitle: 'Применение настроек шлюза',
   notReadyGatewayDesc:
     'Запуск или перезагрузка шлюза ещё не завершены. Повторите попытку позже.',
+  notReadyUpgradeAuthorityTitle: 'Полномочия обновления недоступны',
+  notReadyUpgradeAuthorityDesc:
+    'Не удалось подтвердить полномочия канонического маршрута обновления v2. Обновите страницу или проверьте запуск Manager.',
+  notReadyUpgradeOperationInvalidTitle: 'Запись операции обновления некорректна',
+  notReadyUpgradeOperationInvalidDesc:
+    'Запись операции обновления неполна или противоречива. Проверьте журнал Manager или восстановите данные из резервной копии перед подключением клиентов.',
   notReadyGenericTitle: 'Адреса доступа к API ещё не готовы',
   notReadyGenericDesc:
     'Подтверждённая маршрутизация инференса пока не активна. Проверьте состояние установки и маршрутов.',
   managementEntry: 'Точка входа управления (Консоль / Admin API)',
   inferenceBase: 'Базовый путь API инференса',
   externalBase: 'Фактический URL внешнего CPA',
+  consoleUrlLabel: 'Панель управления',
+  managementApiLabel: 'Базовый URL API управления',
+  copyAccess: 'Копировать адреса доступа (без ключей)',
+  recoverDockerHelp: 'Если вы забыли префикс, замените <container> именем контейнера и выполните на хосте Docker:',
   externalDirectNote:
     'Клиентские запросы инференса отправляются напрямую на этот адрес внешнего CPA, минуя CPAMP.',
   plannedPrefixTag: 'План',

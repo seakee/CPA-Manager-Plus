@@ -1279,6 +1279,134 @@
   flex-direction: column;
 }
 
+.upgrade-execution-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-surface);
+}
+
+.upgrade-execution-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upgrade-execution-section h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.upgrade-execution-section > p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.upgrade-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.upgrade-mode-card {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: var(--control-height-md);
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.upgrade-mode-card:hover:not(:disabled) {
+  border-color: var(--focus-border);
+}
+
+.upgrade-mode-card.is-selected {
+  border-color: var(--focus-border);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.upgrade-mode-card:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.upgrade-execution-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upgrade-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upgrade-field > span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.upgrade-field input,
+.upgrade-field select {
+  min-height: var(--control-height-md);
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 13.5px;
+}
+
+.upgrade-field input[type='url'],
+.upgrade-field input[type='password'] {
+  font-family: var(--font-mono);
+}
+
+.upgrade-days {
+  gap: 8px;
+}
+
+.upgrade-promise-card[data-testid='upgrade-activation'] {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px;
+}
+
+.upgrade-promise-card[data-testid='upgrade-activation'] h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.upgrade-promise-card[data-testid='upgrade-activation'] p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+
 @media (max-width: 760px) {
   .upgrade-header {
     min-height: 70px;
@@ -1351,5 +1479,8 @@
   .upgrade-actions .btn {
     flex: 1;
     justify-content: center;
+  }
+  .upgrade-mode-switch {
+    grid-template-columns: 1fr;
   }
 }

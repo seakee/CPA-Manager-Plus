@@ -718,6 +718,12 @@
     "group_resources": "資源管理",
     "group_clients": "用戶端接入",
     "group_observe": "監控分析",
+    "group_pinned": "常用",
+    "manage_pinned": "釘選",
+    "manage_pinned_done": "完成",
+    "manage_pinned_aria": "管理常用釘選選單",
+    "pin_item": "將 {{label}} 釘選到常用",
+    "unpin_item": "取消釘選 {{label}}",
     "model_prices": "模型價格",
     "provider_models": "提供商模型"
   },

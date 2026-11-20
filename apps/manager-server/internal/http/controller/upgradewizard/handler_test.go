@@ -27,6 +27,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgradeworker"
 )
 
 const (
@@ -209,7 +210,7 @@ func TestPreflightReportsThePendingDeclarationShape(t *testing.T) {
 		}
 	})
 
-	t.Run("v114-pending-declaration-with-unknown-wire-sentinel", func(t *testing.T) {
+	t.Run("v114-compatible-profile-passes-with-unknown-wire-sentinel", func(t *testing.T) {
 		dir := legacySourceDir(t)
 		db, err := sql.Open("sqlite", filepath.Join(dir, "usage.sqlite"))
 		if err != nil {
@@ -234,20 +235,23 @@ create table usage_archive_deleted_coverage_daily (utc_day integer primary key, 
 		if err := json.Unmarshal([]byte(body), &report); err != nil {
 			t.Fatalf("decode preflight: %v: %s", err, body)
 		}
-		rowPending := false
+		rowPassed := false
 		for _, check := range report.Checks {
-			if check.Name == "source_version" && check.Status == "pending" {
-				rowPending = true
+			if check.Name == "source_version" {
+				if check.Status != "pass" || check.Code != "" {
+					t.Fatalf("expected source_version pass check, got %+v", check)
+				}
+				rowPassed = true
 			}
 		}
-		if !rowPending || !report.PendingDeclaration {
-			t.Fatalf("expected pendingDeclaration=true and pending source_version row: %s", body)
+		if !rowPassed || report.PendingDeclaration {
+			t.Fatalf("expected pendingDeclaration=false and passing source_version row: %s", body)
 		}
 		if report.SourceVersion != upgradeservice.VersionUnknown {
-			t.Fatalf("pending preflight sourceVersion = %q, want %q: %s", report.SourceVersion, upgradeservice.VersionUnknown, body)
+			t.Fatalf("preflight sourceVersion = %q, want %q: %s", report.SourceVersion, upgradeservice.VersionUnknown, body)
 		}
-		if report.ExpectedVersion == "" || !report.Ready || len(report.Blocked) != 0 {
-			t.Fatalf("a pending declaration is not a usable report: %s", body)
+		if report.ExpectedVersion != "" || !report.Ready || len(report.Blocked) != 0 {
+			t.Fatalf("expected ready compatible preflight with empty expectedVersion: %s", body)
 		}
 	})
 }
@@ -2040,5 +2044,461 @@ func TestStatusKeepsBothCopyInPhasesAwayFromUnpublishedDatabases(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestWorkerUnavailableStatusProjectsDegradedExecutionWithout401(t *testing.T) {
+	targetDir := t.TempDir()
+	dbPath := filepath.Join(targetDir, "usage.sqlite")
+	dataKeyPath := filepath.Join(targetDir, "data.key")
+	if _, _, err := security.LoadOrCreateDataKey("", dataKeyPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqliterepo.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := security.NewAdminCredential(testAdminKey, "legacy")
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := setting.New(db).SaveAdminCredential(context.Background(), cred); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fp := strings.Repeat("b", 64)
+	if err := upgradeoperation.New(db).Put(context.Background(), model.UpgradeOperation{
+		Stage:                   model.UpgradeStageCopyIn,
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "unknown",
+		SourceFingerprintBefore: fp,
+		SourceFingerprintAfter:  fp,
+		BackupManifestSHA256:    strings.Repeat("c", 64),
+		ManualItems:             []string{},
+	}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	missingSocket := filepath.Join(t.TempDir(), "missing.sock")
+	handler := &Handler{
+		Worker:               upgradeworker.NewClient(missingSocket, "http://manager.test"),
+		PublicOrigin:         "http://manager.test",
+		Database:             func() string { return dbPath },
+		DataKey:              func() string { return dataKeyPath },
+		PreserveManagerStore: true,
+	}
+
+	// Wrong credential still gets 401; missing credential gets 401.
+	request(t, handler, http.MethodGet, testPrefix+StatusSuffix, "", http.StatusUnauthorized)
+	request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(foreignKey), http.StatusUnauthorized)
+
+	// Valid credential gets 200 status with execution.available=false and typed
+	// code, never claiming sourceRoot=="available" and never folding into 401.
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var doc statusDocument
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("decode degraded status: %v: %s", err, body)
+	}
+	if !doc.Recorded || doc.Stage != StageCopyIn || doc.NextAction != ActionReconcile {
+		t.Fatalf("unexpected degraded status projection: %+v", doc)
+	}
+	if doc.SourceRoot != upgradeworker.CodeUnavailable {
+		t.Fatalf("sourceRoot = %q, want %q", doc.SourceRoot, upgradeworker.CodeUnavailable)
+	}
+	if doc.Execution == nil || doc.Execution.Available || doc.Execution.Running || doc.Execution.Code != upgradeworker.CodeUnavailable || doc.Execution.ManagedAvailable {
+		t.Fatalf("execution = %+v, want unavailable with %q", doc.Execution, upgradeworker.CodeUnavailable)
+	}
+
+	// Execute while worker is unreachable returns 503 typed unavailable, never 401.
+	_, execBody := request(t, handler, http.MethodPost, testPrefix+ExecuteSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+	if !strings.Contains(execBody, upgradeworker.CodeUnavailable) {
+		t.Fatalf("expected %s in 503 execute body: %s", upgradeworker.CodeUnavailable, execBody)
+	}
+}
+
+func TestStatusTruncates400PendingDaysAndProjectsHasParityGaps(t *testing.T) {
+	if summary, err := reconciliationSummary(`{"mismatchDays":["2026-03-01"]}`); err != nil || summary.HasParityGaps {
+		t.Fatalf("mismatch-only summary = (%+v, %v), want HasParityGaps=false", summary, err)
+	}
+	if summary, err := reconciliationSummary(`{"mismatchDays":["2026-03-01"],"parityGapDays":["2026-03-01"]}`); err != nil || !summary.HasParityGaps {
+		t.Fatalf("overlapping parityGapDays summary = (%+v, %v), want HasParityGaps=true", summary, err)
+	}
+	if summary, err := reconciliationSummary(`{"affectedDates":["2026-02-15"]}`); err != nil || !summary.HasParityGaps {
+		t.Fatalf("affectedDates summary = (%+v, %v), want HasParityGaps=true", summary, err)
+	}
+
+	baseDay := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	days400 := make([]string, 0, 400)
+	for i := range 400 {
+		days400 = append(days400, baseDay.AddDate(0, 0, i).Format("2006-01-02"))
+	}
+
+	t.Run("400_pending_days_without_parity_gaps", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := filepath.Join(t.TempDir(), "usage.sqlite")
+		recordOperation(t, database, model.UpgradeOperation{
+			Stage:       model.UpgradeStageCopyIn,
+			DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		})
+		db, err := sqliterepo.Open(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := upgradeoperation.New(db).RecordPendingReconcileDays(context.Background(), days400); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+
+		handler := newHandler(root, database)
+		_, body := request(t, handler, http.MethodGet, canonical+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		if strings.Contains(body, `"hasParityGaps"`) {
+			t.Fatalf("unexpected hasParityGaps in mismatch-only body: %s", body)
+		}
+		var doc statusDocument
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Reconciliation.MismatchDays) != maxMismatchDays ||
+			doc.Reconciliation.MismatchDays[0] != days400[400-maxMismatchDays] ||
+			doc.Reconciliation.MismatchDays[maxMismatchDays-1] != days400[399] ||
+			doc.Reconciliation.MismatchDaysTotal != 400 ||
+			!doc.Reconciliation.MismatchDaysTruncated ||
+			doc.Reconciliation.HasParityGaps ||
+			doc.NextAction != ActionReconcile {
+			t.Fatalf("400-day mismatch-only projection = %+v (nextAction=%q)", doc.Reconciliation, doc.NextAction)
+		}
+	})
+
+	t.Run("400_pending_days_preserves_stored_and_worker_parity_gaps", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := filepath.Join(t.TempDir(), "usage.sqlite")
+		recordOperation(t, database, model.UpgradeOperation{
+			Stage:          model.UpgradeStageReconcile,
+			DomainsDone:    []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainUsageEvents},
+			Reconciliation: json.RawMessage(`{"parityGapDays":["2024-01-10"]}`),
+		})
+		db, err := sqliterepo.Open(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := upgradeoperation.New(db).RecordPendingReconcileDays(context.Background(), days400); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+
+		handler := newHandler(root, database)
+		_, body := request(t, handler, http.MethodGet, canonical+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		var doc statusDocument
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc.Reconciliation.MismatchDaysTotal != 400 ||
+			!doc.Reconciliation.MismatchDaysTruncated ||
+			!doc.Reconciliation.HasParityGaps ||
+			doc.NextAction != ActionReconcile {
+			t.Fatalf("stored parity-gap overlay projection = %+v (nextAction=%q)", doc.Reconciliation, doc.NextAction)
+		}
+
+		database2 := filepath.Join(t.TempDir(), "usage.sqlite")
+		recordOperation(t, database2, model.UpgradeOperation{
+			Stage:       model.UpgradeStageCopyIn,
+			DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		})
+		workerHandler := newHandler(root, database2)
+		workerHandler.ReconciliationDays = func() []string { return days400 }
+		workerHandler.ReconciliationHasParityGaps = func() bool { return true }
+		_, workerBody := request(t, workerHandler, http.MethodGet, canonical+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		var workerDoc statusDocument
+		if err := json.Unmarshal([]byte(workerBody), &workerDoc); err != nil {
+			t.Fatal(err)
+		}
+		if workerDoc.Reconciliation.MismatchDaysTotal != 400 ||
+			!workerDoc.Reconciliation.MismatchDaysTruncated ||
+			!workerDoc.Reconciliation.HasParityGaps {
+			t.Fatalf("worker parity-gap overlay projection = %+v", workerDoc.Reconciliation)
+		}
+	})
+}
+
+func TestWorkerUnavailableStatusFailsClosedWith503UnderPreparedCredentialVerifierWhenWALUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0000 mode checks on -wal sidecar")
+	}
+
+	targetDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve target dir: %v", err)
+	}
+	database := filepath.Join(targetDir, "usage.sqlite")
+	dataKeyPath := filepath.Join(targetDir, "data.key")
+	if _, _, err := security.LoadOrCreateDataKey("", dataKeyPath); err != nil {
+		t.Fatalf("create data.key: %v", err)
+	}
+
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatalf("open target db: %v", err)
+	}
+	cred, err := security.NewAdminCredential(testAdminKey, "legacy")
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("create admin credential: %v", err)
+	}
+	if err := setting.New(db).SaveAdminCredential(context.Background(), cred); err != nil {
+		_ = db.Close()
+		t.Fatalf("save admin credential: %v", err)
+	}
+	if err := upgradeoperation.New(db).Put(context.Background(), model.UpgradeOperation{
+		Stage:                   model.UpgradeStageCopyIn,
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+		SourceKind:              string(upgradeservice.SourceKindUpgradedLegacy),
+		SourceVersion:           "unknown",
+		SourceFingerprintBefore: strings.Repeat("b", 64),
+		SourceFingerprintAfter:  strings.Repeat("a", 64),
+		BackupManifestSHA256:    strings.Repeat("c", 64),
+		ManualItems:             []string{},
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("put upgrade operation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded target db: %v", err)
+	}
+
+	// Keep an uncheckpointed WAL sidecar open and make -wal unreadable (0000).
+	walDB, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("reopen target db for WAL sidecar: %v", err)
+	}
+	defer func() { _ = walDB.Close() }()
+	if _, err := walDB.Exec(`PRAGMA wal_autocheckpoint = 0; INSERT INTO settings (key, value, updated_at_ms) VALUES ('unreadable_wal_marker', '1', 1);`); err != nil {
+		t.Fatalf("seed active WAL sidecar: %v", err)
+	}
+	walPath := database + "-wal"
+	if err := os.Chmod(walPath, 0o000); err != nil {
+		t.Fatalf("chmod 0000 -wal: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(walPath, 0o600) })
+
+	offlineClient := upgradeworker.NewClient(filepath.Join(t.TempDir(), "down.sock"), "http://manager.test")
+
+	for _, tc := range []struct {
+		name string
+		auth func(context.Context, string) error
+	}{
+		{name: "default_fallback_credential_verifier", auth: nil},
+		{name: "wired_prepared_credential_verifier", auth: upgradeworker.NewPreparedCredentialVerifier(database).Authenticate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{
+				Worker:               offlineClient,
+				PublicOrigin:         "http://manager.test",
+				Database:             func() string { return database },
+				DataKey:              func() string { return dataKeyPath },
+				Authenticate:         tc.auth,
+				PreserveManagerStore: true,
+			}
+			_, body := request(t, h, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+			if !strings.Contains(body, upgradeworker.CodeUnavailable) {
+				t.Fatalf("body = %s, want code %s", body, upgradeworker.CodeUnavailable)
+			}
+			if strings.Contains(body, `"stage"`) || strings.Contains(body, `"accessInfo"`) {
+				t.Fatalf("unreadable -wal status response leaked projected document: %s", body)
+			}
+		})
+	}
+}
+
+func TestStatusUsesAtomicReconciliationStateAndGatesPendingDaysToCanReconcile(t *testing.T) {
+	t.Run("can_reconcile_stage_reads_ReconciliationState_once", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := filepath.Join(t.TempDir(), "usage.sqlite")
+		recordOperation(t, database, model.UpgradeOperation{
+			Stage:       model.UpgradeStageCopyIn,
+			DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		})
+		var calls atomic.Int32
+		h := newHandler(root, database)
+		h.ReconciliationState = func() ([]string, bool) {
+			calls.Add(1)
+			return []string{"2026-02-15"}, true
+		}
+		h.ReconciliationDays = func() []string {
+			t.Fatal("ReconciliationDays must not be called when ReconciliationState is set")
+			return nil
+		}
+		h.ReconciliationHasParityGaps = func() bool {
+			t.Fatal("ReconciliationHasParityGaps must not be called when ReconciliationState is set")
+			return false
+		}
+
+		_, body := request(t, h, http.MethodGet, canonical+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		var doc statusDocument
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("ReconciliationState calls = %d, want 1", calls.Load())
+		}
+		if !reflect.DeepEqual(doc.Reconciliation.MismatchDays, []string{"2026-02-15"}) || !doc.Reconciliation.HasParityGaps {
+			t.Fatalf("unexpected reconciliation projection = %+v", doc.Reconciliation)
+		}
+		if doc.NextAction != ActionReconcile {
+			t.Fatalf("nextAction = %q, want %q", doc.NextAction, ActionReconcile)
+		}
+	})
+
+	t.Run("non_reconcilable_stage_ignores_pending_days", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := filepath.Join(t.TempDir(), "usage.sqlite")
+		recordOperation(t, database, model.UpgradeOperation{
+			Stage:       model.UpgradeStageVerify,
+			DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig},
+		})
+		h := newHandler(root, database)
+		h.ReconciliationState = func() ([]string, bool) {
+			return []string{"2026-02-15"}, true
+		}
+
+		_, body := request(t, h, http.MethodGet, canonical+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		var doc statusDocument
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		if len(doc.Reconciliation.MismatchDays) != 0 {
+			t.Fatalf("expected pending days ignored at %s, got %+v", StageVerify, doc.Reconciliation)
+		}
+		if doc.NextAction != ActionComplete {
+			t.Fatalf("nextAction = %q, want %q", doc.NextAction, ActionComplete)
+		}
+	})
+}
+
+func TestStatusNextActionForStageExternalAndWorkerExternalConnectRefusals(t *testing.T) {
+	for _, code := range []string{"external_management_key_rejected", "external_target_moved"} {
+		t.Run("persisted_stage_external_"+code, func(t *testing.T) {
+			if got := nextActionForRecordedStage(StageExternal, code, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig}); got != ActionExternalConnect {
+				t.Fatalf("nextActionForRecordedStage(%q, %q) = %q, want %q", StageExternal, code, got, ActionExternalConnect)
+			}
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
+				Stage:          model.UpgradeStageExternalConnect,
+				DomainsDone:    []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig},
+				SourceKind:     "upgraded-legacy",
+				ErrorCode:      code,
+				ManualItems:    []string{},
+				Reconciliation: json.RawMessage(`{}`),
+			})
+			h := &Handler{
+				LegacyRoot: func() string { return "" },
+				Database:   func() string { return database },
+			}
+			_, body := request(t, h, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var doc statusDocument
+			if err := json.Unmarshal([]byte(body), &doc); err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if doc.NextAction != ActionExternalConnect {
+				t.Fatalf("status nextAction = %q, want %q (body=%s)", doc.NextAction, ActionExternalConnect, body)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		stage model.UpgradeStage
+		exec  upgradeworker.Execution
+	}{
+		{
+			name:  "worker_stage_external_rejected_key",
+			stage: model.UpgradeStageExternalConnect,
+			exec:  upgradeworker.Execution{Action: "external-connect", Code: "external_management_key_rejected"},
+		},
+		{
+			name:  "worker_stage_reconcile_connection_required",
+			stage: model.UpgradeStageReconcile,
+			exec:  upgradeworker.Execution{Action: "external-connect", Code: "upgrade_external_connection_required"},
+		},
+		{
+			name:  "worker_stage_failed_running_external_connect",
+			stage: model.UpgradeStageFailed,
+			exec:  upgradeworker.Execution{Action: "external-connect", Running: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
+				Stage:          tc.stage,
+				DomainsDone:    []string{model.UpgradeDomainSourceCopy},
+				SourceKind:     "upgraded-legacy",
+				ManualItems:    []string{},
+				Reconciliation: json.RawMessage(`{}`),
+			})
+			h := &Handler{
+				LegacyRoot: func() string { return "" },
+				Database:   func() string { return database },
+				Execution:  func() upgradeworker.Execution { return tc.exec },
+			}
+			_, body := request(t, h, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var doc statusDocument
+			if err := json.Unmarshal([]byte(body), &doc); err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if doc.NextAction != ActionExternalConnect {
+				t.Fatalf("status nextAction = %q, want %q (body=%s)", doc.NextAction, ActionExternalConnect, body)
+			}
+		})
+	}
+}
+
+func TestActionFailureStatusMapsTransientVerifyCodesTo503(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{
+			name: "snapshot_failed",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorSnapshotFailed, "snapshot failed", nil),
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "external_authority_unavailable",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorExternalAuthorityUnavailable, "external cpa unavailable", nil),
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "target_locked",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorTargetLocked, "target locked", nil),
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "source_lock_unavailable",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceLockUnavailable), "source lock unavailable", nil),
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "invalid_access_prefix",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorCode("invalid_access_prefix"), "bad prefix", nil),
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "non_transient_verify_refusal",
+			err:  upgradeservice.CodedError(upgradeservice.UpgradeErrorVerifyConnectionUnproven, "connection unproven", nil),
+			want: http.StatusConflict,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := actionFailureStatus(tc.err); got != tc.want {
+				t.Fatalf("actionFailureStatus(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
 	}
 }

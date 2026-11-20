@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -116,17 +117,26 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	sourceRoot = canonicalPath(sourceRoot)
+	sourceRoot, err = canonicalPathStrict(sourceRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
 	targetRoot, err := resolveTargetRoot(options.TargetRoot)
 	if err != nil {
 		return Result{}, err
 	}
-	targetRoot = canonicalPath(targetRoot)
+	targetRoot, err = canonicalDirectoryCandidate(targetRoot, "the v2 data root")
+	if err != nil {
+		return Result{}, err
+	}
 	bundleDir, err := resolveBundleDir(options.BundleDir)
 	if err != nil {
 		return Result{}, err
 	}
-	bundleDir = canonicalPath(bundleDir)
+	bundleDir, err = canonicalPathStrict(bundleDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve the backup destination: %w", err)
+	}
 	if err := rejectOverlap(sourceRoot, targetRoot, bundleDir); err != nil {
 		return Result{}, err
 	}
@@ -136,6 +146,15 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	layout := sourceBundleLayout(sourceRoot)
 	if err := requireSourceLock(options.Lock, layout.DatabasePath); err != nil {
 		return Result{}, err
+	}
+	if trimmedDeclared := strings.TrimSpace(options.DeclaredVersion); trimmedDeclared != "" {
+		parsed, ok := bootstrap.ParseUpgradeSourceRelease(trimmedDeclared)
+		if !ok || !parsed.InSupportedUpgradeFamily() {
+			return Result{}, newUpgradeError(UpgradeErrorCode(CodeSourceVersionUnsupported),
+				fmt.Sprintf("declared source release %q is outside the supported %s family",
+					trimmedDeclared, bootstrap.SupportedUpgradeSourceFamily), nil)
+		}
+		options.DeclaredVersion = parsed.Canonical
 	}
 	// The v2 data root is written by this run alone. The fence is taken here,
 	// in the service, so the CLI and any future caller cannot bypass it, and it
@@ -188,7 +207,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 			if err := requirePublishedCopyIn(paths); err != nil {
 				return Result{}, err
 			}
-			recorded, found, snapshot, readErr := readCopyInSnapshot(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
+			recorded, found, snapshot, readErr := readCopyInSnapshotWithBackup(ctx, paths.Database, sourceRoot, targetRoot, bundleDir, options.ScratchDir)
 			if snapshot != nil {
 				defer func() { _ = snapshot.Close() }()
 			}
@@ -215,7 +234,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 			return Result{}, err
 		}
 	} else {
-		recorded, found, snapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
+		recorded, found, snapshot, err := readCopyInCandidateWithBackup(ctx, paths.Database, sourceRoot, targetRoot, bundleDir, options.ScratchDir)
 		if snapshot != nil {
 			defer func() { _ = snapshot.Close() }()
 		}
@@ -231,13 +250,20 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		}
 	}
 
+	if err := ValidateScratchDirWithBackup(options.ScratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
+		return Result{}, snapshotReadError(ctx, err)
+	}
 	before, err := fingerprintSource(ctx, sourceRoot)
 	if err != nil {
-		return Result{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
+		return Result{}, sourceFingerprintError(ctx, err,
+			"the 1.x source changed while it was being fingerprinted; nothing was copied and nothing was recorded")
 	}
 	result.SourceFingerprintBefore = before.Digest
+	if err := validateSourceCompatibilitySnapshotWithBackup(ctx, layout.DatabasePath, sourceRoot, targetRoot, bundleDir, options.ScratchDir, options.DeclaredVersion); err != nil {
+		return Result{}, err
+	}
 
-	manifest, digest, err := ensureBackup(ctx, layout, bundleDir, options.Lock)
+	manifest, digest, err := ensureBackup(ctx, layout, bundleDir, options.Lock, options.ScratchDir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -250,7 +276,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 
-	restored, moved, err := materializeTarget(ctx, paths, bundleDir, manifest, digest, result)
+	restored, moved, err := materializeTarget(ctx, paths, bundleDir, manifest, digest, result, options.ScratchDir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -263,12 +289,16 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	// the copy has no provenance and nothing may be recorded as complete.
 	after, err := fingerprintSource(ctx, sourceRoot)
 	if err != nil {
-		return Result{}, fmt.Errorf("fingerprint the 1.x source after the copy: %w", err)
+		if rollbackErr := rollbackMaterialized(context.WithoutCancel(ctx), paths, moved, manifest); rollbackErr != nil {
+			return Result{}, unresumable("the source failed validation and materialized members could not be safely removed; preserve the target, marker and verified bundle for manual recovery", rollbackErr)
+		}
+		return Result{}, sourceFingerprintError(ctx, err,
+			"the 1.x source changed during the copy-in; the members this run moved were rolled back and nothing was recorded")
 	}
 	if after != before {
 		aborted := newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source changed during the copy-in; the members this run moved were rolled back and nothing was recorded", nil)
-		if rollbackErr := rollbackMaterialized(ctx, paths, moved, manifest); rollbackErr != nil {
+		if rollbackErr := rollbackMaterialized(context.WithoutCancel(ctx), paths, moved, manifest); rollbackErr != nil {
 			return Result{}, unresumable("the source changed and materialized members could not be safely removed; preserve the target, marker and verified bundle for manual recovery", rollbackErr)
 		}
 		return Result{}, aborted
@@ -276,6 +306,18 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	result.SourceFingerprintAfter = after.Digest
 
 	stagedDatabase := filepath.Join(paths.Staging, "database")
+	// Verify staged database integrity (regular file, non-symlink, confined inside
+	// staging) before inspecting compatibility so target/work tampering refuses with
+	// ErrTargetConflict and preserves the recovery marker instead of rolling back.
+	if err := validateStagedDatabase(paths, stagedDatabase, false); err != nil {
+		return Result{}, err
+	}
+	if compatErr := validateStagedSourceCompatibilityWithBackup(ctx, stagedDatabase, sourceRoot, targetRoot, bundleDir, options.ScratchDir, options.DeclaredVersion); compatErr != nil {
+		if rollbackErr := rollbackMaterialized(context.WithoutCancel(ctx), paths, moved, manifest); rollbackErr != nil {
+			return Result{}, unresumable("the source failed compatibility validation and materialized members could not be safely removed; preserve the target, marker and verified bundle for manual recovery", rollbackErr)
+		}
+		return Result{}, compatErr
+	}
 	recorded, alreadyRecorded, err := migrateAndRecord(ctx, stagedDatabase, result)
 	if err != nil {
 		return Result{}, err
@@ -321,6 +363,146 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	result.DomainsDone = recorded.DomainsDone
 	result.UpdatedAtMS = recorded.UpdatedAtMS
 	return result, nil
+}
+
+func sourceFingerprintError(ctx context.Context, err error, changedDetail string) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, ErrSourceChanged) {
+		return newUpgradeError(UpgradeErrorSourceChanged, changedDetail, err)
+	}
+	code, detail := fingerprintFailure(err, "")
+	return newUpgradeError(UpgradeErrorCode(code), detail, err)
+}
+
+func isDatabaseFileMissingOrEmpty(databasePath string) bool {
+	for _, suffix := range auditedSidecarSuffixes {
+		sideInfo, sideErr := os.Lstat(databasePath + suffix)
+		if os.IsNotExist(sideErr) {
+			continue
+		}
+		if sideErr != nil || !sideInfo.Mode().IsRegular() {
+			return false
+		}
+		if (suffix == "-wal" || suffix == "-journal") && sideInfo.Size() > 0 {
+			return false
+		}
+	}
+	info, statErr := os.Lstat(databasePath)
+	if os.IsNotExist(statErr) {
+		return true
+	}
+	if statErr != nil || !info.Mode().IsRegular() || info.Size() > 0 {
+		return false
+	}
+	return true
+}
+
+func validateSourceCompatibilitySnapshot(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir, declared string) error {
+	return validateSourceCompatibilitySnapshotWithBackup(ctx, databasePath, sourceRoot, targetRoot, "", scratchDir, declared)
+}
+
+func validateSourceCompatibilitySnapshotWithBackup(ctx context.Context, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir, declared string) error {
+	if err := ValidateScratchDirWithBackup(scratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
+		return snapshotReadError(ctx, err)
+	}
+	if isDatabaseFileMissingOrEmpty(databasePath) {
+		return newUpgradeError(UpgradeErrorCode(CodeSourceMissing), "source database is missing", ErrSourceDatabaseMissing)
+	}
+	snapshot, err := OpenSnapshot(ctx, databasePath, strings.TrimSpace(scratchDir))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, ErrSourceChanged) {
+			return newUpgradeError(UpgradeErrorSourceChanged,
+				"the 1.x source changed while inspecting compatibility before the copy-in; nothing was backed up or recorded", err)
+		}
+		if errors.Is(err, ErrSnapshotFailed) {
+			return snapshotReadError(ctx, err)
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	if err := quickCheckSource(ctx, snapshot.DB()); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	schema, err := readSourceSchema(ctx, snapshot.DB())
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	_, check, err := evaluateSourceCompatibility(schema.sourceKind(), schema, declared)
+	if err != nil {
+		return err
+	}
+	if check.Status != StatusPass {
+		return newUpgradeError(UpgradeErrorCode(check.Code), check.Detail, nil)
+	}
+	return nil
+}
+
+func validateStagedSourceCompatibility(ctx context.Context, stagedDatabase, sourceRoot, targetRoot, scratchDir, declared string) error {
+	return validateStagedSourceCompatibilityWithBackup(ctx, stagedDatabase, sourceRoot, targetRoot, "", scratchDir, declared)
+}
+
+func validateStagedSourceCompatibilityWithBackup(ctx context.Context, stagedDatabase, sourceRoot, targetRoot, bundleDir, scratchDir, declared string) error {
+	if err := ValidateScratchDirWithBackup(scratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
+		return snapshotReadError(ctx, err)
+	}
+	if isDatabaseFileMissingOrEmpty(stagedDatabase) {
+		return newUpgradeError(UpgradeErrorCode(CodeSourceMissing), "source database is missing", ErrSourceDatabaseMissing)
+	}
+	snapshot, err := OpenSnapshot(ctx, stagedDatabase, strings.TrimSpace(scratchDir))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, ErrSnapshotFailed) {
+			return snapshotReadError(ctx, err)
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	if err := quickCheckSource(ctx, snapshot.DB()); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	schema, err := readSourceSchema(ctx, snapshot.DB())
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		code, detail := ownershipFailure(err)
+		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+	}
+	_, check, err := evaluateSourceCompatibility(schema.sourceKind(), schema, declared)
+	if err != nil {
+		return err
+	}
+	if check.Status != StatusPass {
+		return newUpgradeError(UpgradeErrorCode(check.Code), check.Detail, nil)
+	}
+	return nil
 }
 
 // ReadRecord reads the single Upgrade operation through a private snapshot.
@@ -600,8 +782,14 @@ func rejectOverlap(sourceRoot, targetRoot, bundleDir string) error {
 	if within(sourceRoot, bundleDir) {
 		return errors.New("the backup destination must not sit inside the 1.x source root")
 	}
+	if within(bundleDir, sourceRoot) {
+		return errors.New("the 1.x source root must not sit inside the backup destination")
+	}
 	if within(bundleDir, targetRoot) {
 		return errors.New("the v2 data root must not sit inside the backup destination")
+	}
+	if within(targetRoot, bundleDir) && bundleDir != canonicalPath(DefaultBundleDirectory(targetRoot)) {
+		return errors.New("the backup snapshot inside the v2 data root must be the canonical upgrade-backup directory")
 	}
 	return nil
 }
@@ -616,15 +804,148 @@ func RefuseOverlappingRoots(sourceRoot, targetRoot, bundleDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve the 1.x source root: %w", err)
 	}
+	canonSource, err := canonicalPathStrict(absoluteSource)
+	if err != nil {
+		return fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
 	absoluteTarget, err := filepath.Abs(targetRoot)
 	if err != nil {
 		return fmt.Errorf("resolve the v2 data root: %w", err)
+	}
+	canonTarget, err := canonicalDirectoryCandidate(absoluteTarget, "the v2 data root")
+	if err != nil {
+		return err
 	}
 	absoluteBundle, err := filepath.Abs(bundleDir)
 	if err != nil {
 		return fmt.Errorf("resolve the backup destination: %w", err)
 	}
-	return rejectOverlap(canonicalPath(absoluteSource), canonicalPath(absoluteTarget), canonicalPath(absoluteBundle))
+	canonBundle, err := canonicalPathStrict(absoluteBundle)
+	if err != nil {
+		return fmt.Errorf("resolve the backup destination: %w", err)
+	}
+	return rejectOverlap(canonSource, canonTarget, canonBundle)
+}
+
+// ResolveCPAImportRoots returns the effective 1.x CPA directory and explicit
+// credential directory for a Managed CPA import.
+func ResolveCPAImportRoots(legacyRoot, cpaDirectory, cpaAuthDirectory string) (cpaDir, cpaAuthDir string) {
+	cpaDir = strings.TrimSpace(cpaDirectory)
+	if cpaDir == "" {
+		if trimmedLegacy := strings.TrimSpace(legacyRoot); trimmedLegacy != "" {
+			resolvedLegacy := filepath.Clean(trimmedLegacy)
+			if absLegacy, err := filepath.Abs(trimmedLegacy); err == nil {
+				resolvedLegacy = absLegacy
+			}
+			cpaDir = filepath.Join(filepath.Dir(resolvedLegacy), cpaSiblingDirectoryName)
+		}
+	}
+	cpaAuthDir = strings.TrimSpace(cpaAuthDirectory)
+	return cpaDir, cpaAuthDir
+}
+
+// RefuseCPAImportOverlappingRoots refuses overlapping 1.x source, 1.x CPA,
+// 1.x CPA credential, v2 target, and backup roots before any target or source
+// lock or scratch directory is created.
+func RefuseCPAImportOverlappingRoots(legacyRoot, cpaDirectory, cpaAuthDirectory, targetRoot, bundleDir string) error {
+	absTarget, err := filepath.Abs(targetRoot)
+	if err != nil {
+		return fmt.Errorf("resolve the v2 data root: %w", err)
+	}
+	canonTarget, err := canonicalDirectoryCandidate(absTarget, "the v2 data root")
+	if err != nil {
+		return err
+	}
+	effectiveBundle := strings.TrimSpace(bundleDir)
+	if effectiveBundle == "" {
+		effectiveBundle = DefaultBundleDirectory(absTarget)
+	}
+	absBundle, err := filepath.Abs(effectiveBundle)
+	if err != nil {
+		return fmt.Errorf("resolve the backup destination: %w", err)
+	}
+	canonBundle, err := canonicalPathStrict(absBundle)
+	if err != nil {
+		return fmt.Errorf("resolve the backup destination: %w", err)
+	}
+	if strings.TrimSpace(legacyRoot) != "" {
+		if err := RefuseOverlappingRoots(legacyRoot, absTarget, absBundle); err != nil {
+			return err
+		}
+	} else {
+		if within(canonBundle, canonTarget) {
+			return errors.New("the v2 data root must not sit inside the backup destination")
+		}
+		if within(canonTarget, canonBundle) && canonBundle != canonicalPath(DefaultBundleDirectory(canonTarget)) {
+			return errors.New("the backup snapshot inside the v2 data root must be the canonical upgrade-backup directory")
+		}
+	}
+	for _, cfgLegacy := range ConfiguredLegacyRoots() {
+		if err := RefuseOverlappingRoots(cfgLegacy, absTarget, absBundle); err != nil {
+			return err
+		}
+	}
+	cpaDir, cpaAuthDir := ResolveCPAImportRoots(legacyRoot, cpaDirectory, cpaAuthDirectory)
+	if cpaDir != "" {
+		absCPA, err := filepath.Abs(cpaDir)
+		if err != nil {
+			return fmt.Errorf("resolve the 1.x CPA directory: %w", err)
+		}
+		canonCPA, err := canonicalPathStrict(absCPA)
+		if err != nil {
+			return fmt.Errorf("resolve the 1.x CPA directory: %w", err)
+		}
+		if rootsOverlap(canonCPA, canonTarget) {
+			return errors.New("the v2 data root and the 1.x CPA directory must not contain each other")
+		}
+		if within(canonCPA, canonBundle) {
+			return errors.New("the backup destination must not sit inside the 1.x CPA directory")
+		}
+		if within(canonBundle, canonCPA) {
+			return errors.New("the 1.x CPA directory must not sit inside the backup destination")
+		}
+	}
+	if cpaAuthDir != "" {
+		absAuth, err := filepath.Abs(cpaAuthDir)
+		if err != nil {
+			return fmt.Errorf("resolve the 1.x CPA credential directory: %w", err)
+		}
+		canonAuth, err := canonicalPathStrict(absAuth)
+		if err != nil {
+			return fmt.Errorf("resolve the 1.x CPA credential directory: %w", err)
+		}
+		if rootsOverlap(canonAuth, canonTarget) {
+			return errors.New("the v2 data root and the 1.x CPA credential directory must not contain each other")
+		}
+		if within(canonAuth, canonBundle) {
+			return errors.New("the backup destination must not sit inside the 1.x CPA credential directory")
+		}
+		if within(canonBundle, canonAuth) {
+			return errors.New("the 1.x CPA credential directory must not sit inside the backup destination")
+		}
+	}
+	return nil
+}
+
+// ValidateCPAImportScratchDir refuses a scratch directory inside the legacy
+// source root, resolved CPA directory, resolved CPA credential directory,
+// target root, or backup directory.
+func ValidateCPAImportScratchDir(scratchDir, legacyRoot, cpaDirectory, cpaAuthDirectory, targetRoot, bundleDir string) error {
+	cpaDir, cpaAuthDir := ResolveCPAImportRoots(legacyRoot, cpaDirectory, cpaAuthDirectory)
+	roots := []ScratchRoot{
+		{Label: "the legacy source root", Dir: legacyRoot},
+		{Label: "the 1.x CPA directory", Dir: cpaDir},
+		{Label: "the 1.x CPA credential directory", Dir: cpaAuthDir},
+		{Label: "the target root", Dir: targetRoot},
+		{Label: "the backup directory", Dir: bundleDir},
+	}
+	for _, cfgLegacy := range ConfiguredLegacyRoots() {
+		roots = append(roots, ScratchRoot{Label: "the configured legacy source root", Dir: cfgLegacy})
+	}
+	for _, cfgBundle := range ConfiguredBundleRoots() {
+		roots = append(roots, ScratchRoot{Label: "the configured backup directory", Dir: cfgBundle})
+	}
+	return ValidateScratchRoots(scratchDir, roots...)
 }
 
 // sourceBundleLayout describes the 1.x data volume for maintenancebundle. The
@@ -683,6 +1004,17 @@ func acquireTargetFence(targetRoot string) (*processlock.Lock, error) {
 }
 
 func readRecordedCopyIn(ctx context.Context, databasePath string) (model.UpgradeOperation, bool, error) {
+	return readRecordedCopyInWithScratch(ctx, databasePath, "", "", filepath.Dir(databasePath))
+}
+
+func readRecordedCopyInWithScratch(ctx context.Context, databasePath, scratchDir, legacyRoot, targetRoot string) (model.UpgradeOperation, bool, error) {
+	return readRecordedCopyInWithBackup(ctx, databasePath, scratchDir, legacyRoot, targetRoot, "")
+}
+
+func readRecordedCopyInWithBackup(ctx context.Context, databasePath, scratchDir, legacyRoot, targetRoot, bundleDir string) (model.UpgradeOperation, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
@@ -691,11 +1023,14 @@ func readRecordedCopyIn(ctx context.Context, databasePath string) (model.Upgrade
 	} else if err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
-	recorded, found, err := ReadRecord(ctx, databasePath)
-	if err != nil || !found {
-		return model.UpgradeOperation{}, false, err
+	if err := ValidateScratchDirWithBackup(scratchDir, legacyRoot, targetRoot, bundleDir); err != nil {
+		return model.UpgradeOperation{}, false, snapshotReadError(ctx, err)
 	}
-	if !copyInRecorded(recorded) {
+	recorded, found, err := ReadRecordFromSnapshot(ctx, databasePath, strings.TrimSpace(scratchDir))
+	if err != nil {
+		return model.UpgradeOperation{}, false, snapshotReadError(ctx, err)
+	}
+	if !found || !copyInRecorded(recorded) {
 		return model.UpgradeOperation{}, false, nil
 	}
 	return recorded, true, nil
@@ -705,15 +1040,23 @@ func readRecordedCopyIn(ctx context.Context, databasePath string) (model.Upgrade
 // for a sidecar-free candidate. On a recorded copy the caller owns the snapshot
 // and uses that same database for schema verification before closing it.
 func readCopyInCandidate(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
+	return readCopyInCandidateWithBackup(ctx, databasePath, sourceRoot, targetRoot, "", scratchDir)
+}
+
+func readCopyInCandidateWithBackup(ctx context.Context, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return model.UpgradeOperation{}, false, nil, err
 	}
-	return readCopyInSnapshot(ctx, databasePath, sourceRoot, targetRoot, scratchDir)
+	return readCopyInSnapshotWithBackup(ctx, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir)
 }
 
 // CopyIn alone may inspect a surviving committing marker's published database,
 // after its stricter marker binding and sidecar-free publication checks.
 func readCopyInSnapshot(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
+	return readCopyInSnapshotWithBackup(ctx, databasePath, sourceRoot, targetRoot, "", scratchDir)
+}
+
+func readCopyInSnapshotWithBackup(ctx context.Context, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
 	if err := requireCandidateSidecars(databasePath); err != nil {
 		return model.UpgradeOperation{}, false, nil, err
 	}
@@ -727,7 +1070,7 @@ func readCopyInSnapshot(ctx context.Context, databasePath, sourceRoot, targetRoo
 	if !info.Mode().IsRegular() {
 		return model.UpgradeOperation{}, false, nil, unresumable("the target database is not a regular file; preserve it for manual recovery", nil)
 	}
-	if err := ValidateScratchDir(scratchDir, sourceRoot, targetRoot); err != nil {
+	if err := ValidateScratchDirWithBackup(scratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
 		return model.UpgradeOperation{}, false, nil, err
 	}
 	snapshot, err := OpenSnapshot(ctx, databasePath, scratchDir)
@@ -873,7 +1216,7 @@ func runCheckpoint(options Options, phase string) error {
 // ensureBackup reuses a verified bundle, or creates and verifies a new one. The
 // digest is over the published manifest bytes: it names exactly one backup
 // description, so a later step can refuse a different one.
-func ensureBackup(ctx context.Context, layout maintenancebundle.Layout, bundleDir string, lock *processlock.Lock) (maintenancebundle.Manifest, string, error) {
+func ensureBackup(ctx context.Context, layout maintenancebundle.Layout, bundleDir string, lock *processlock.Lock, scratchDir string) (maintenancebundle.Manifest, string, error) {
 	info, err := os.Lstat(bundleDir)
 	if err == nil {
 		if !info.IsDir() {
@@ -892,7 +1235,7 @@ func ensureBackup(ctx context.Context, layout maintenancebundle.Layout, bundleDi
 	if !os.IsNotExist(err) {
 		return maintenancebundle.Manifest{}, "", fmt.Errorf("inspect the backup destination: %w", err)
 	}
-	created, err := maintenancebundle.Create(ctx, layout, bundleDir, lock)
+	created, err := maintenancebundle.CreateWithScratch(ctx, layout, bundleDir, lock, strings.TrimSpace(scratchDir))
 	if err != nil {
 		return maintenancebundle.Manifest{}, "", fmt.Errorf("back up the 1.x volume: %w", err)
 	}
@@ -924,7 +1267,7 @@ func copyInInFlight(paths targetPaths) (bool, error) {
 
 // materializeTarget always restores fresh staging from the verified bundle.
 // Only non-database members move before the database commit point.
-func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string, manifest maintenancebundle.Manifest, digest string, provenance Result) (bool, []string, error) {
+func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string, manifest maintenancebundle.Manifest, digest string, provenance Result, scratchDir string) (bool, []string, error) {
 	if entry, ok := manifest.Entries["config"]; ok && entry.Present {
 		return false, nil, errors.New("the backup carries a source config member the v2 data root does not accept")
 	}
@@ -958,7 +1301,7 @@ func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string,
 	if err := refuseExtraTargetEntries(paths, manifest); err != nil {
 		return false, nil, err
 	}
-	if err := prepareStaging(ctx, paths, bundleDir); err != nil {
+	if err := prepareStaging(ctx, paths, bundleDir, scratchDir); err != nil {
 		return false, nil, err
 	}
 	moved, err := moveMembers(ctx, paths, paths.Staging, manifest)
@@ -1020,14 +1363,14 @@ func refuseMemberConflicts(ctx context.Context, paths targetPaths, manifest main
 }
 
 // prepareStaging never trusts a previous migration's staged bytes or sidecars.
-func prepareStaging(ctx context.Context, paths targetPaths, bundleDir string) error {
+func prepareStaging(ctx context.Context, paths targetPaths, bundleDir string, scratchDir string) error {
 	if err := clearWorkDirectory(paths); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(paths.Work, 0o700); err != nil {
 		return fmt.Errorf("create the copy-in work directory: %w", err)
 	}
-	if _, err := maintenancebundle.RestoreNew(ctx, bundleDir, paths.Staging); err != nil {
+	if _, err := maintenancebundle.RestoreNewWithScratch(ctx, bundleDir, paths.Staging, strings.TrimSpace(scratchDir)); err != nil {
 		return fmt.Errorf("restore the backup into the v2 data root: %w", err)
 	}
 	return nil
@@ -1186,13 +1529,28 @@ func moveMembers(ctx context.Context, paths targetPaths, staging string, manifes
 // rollbackMaterialized validates every moved member before removing any of
 // them. A replaced member or additional archive entry is preserved for recovery.
 func rollbackMaterialized(ctx context.Context, paths targetPaths, moved []string, manifest maintenancebundle.Manifest) error {
-	if len(moved) == 0 {
-		return nil
-	}
 	if err := validateCopyInWork(paths, false); err != nil {
 		return err
 	}
-	for _, path := range moved {
+	toRemove := append([]string(nil), moved...)
+	for _, candidate := range copyInMembers {
+		targetPath := filepath.Join(paths.Root, candidate.target)
+		if _, err := os.Lstat(targetPath); err == nil {
+			alreadyListed := false
+			for _, existing := range toRemove {
+				if existing == targetPath {
+					alreadyListed = true
+					break
+				}
+			}
+			if !alreadyListed {
+				toRemove = append(toRemove, targetPath)
+			}
+		} else if !os.IsNotExist(err) {
+			return unresumable("a materialized member could not be inspected during rollback; preserve the target and marker for manual recovery", err)
+		}
+	}
+	for _, path := range toRemove {
 		member := ""
 		for _, candidate := range copyInMembers {
 			if path == filepath.Join(paths.Root, candidate.target) {
@@ -1214,11 +1572,11 @@ func rollbackMaterialized(ctx context.Context, paths targetPaths, moved []string
 		}
 	}
 	var err error
-	for index := len(moved) - 1; index >= 0; index-- {
-		if !within(paths.Root, moved[index]) {
+	for index := len(toRemove) - 1; index >= 0; index-- {
+		if !within(paths.Root, toRemove[index]) {
 			return unresumable("a materialized member escapes the v2 data root", nil)
 		}
-		if removeErr := os.RemoveAll(moved[index]); removeErr != nil {
+		if removeErr := os.RemoveAll(toRemove[index]); removeErr != nil {
 			err = errors.Join(err, removeErr)
 		}
 	}
@@ -1360,6 +1718,13 @@ func migrateAndRecord(ctx context.Context, databasePath string, result Result) (
 	if err := validateStagedDatabase(paths, databasePath, false); err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
+	if dbInfo, err := os.Lstat(databasePath); err == nil && dbInfo.Size() == 0 {
+		if walInfo, walErr := os.Lstat(databasePath + "-wal"); walErr == nil && walInfo.Size() > 0 {
+			if err := replayZeroByteSnapshotWAL(ctx, databasePath); err != nil {
+				return model.UpgradeOperation{}, false, fmt.Errorf("replay copied zero-byte database WAL: %w", err)
+			}
+		}
+	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, false, fmt.Errorf("open the copied v2 database: %w", err)
@@ -1373,6 +1738,9 @@ func migrateAndRecord(ctx context.Context, databasePath string, result Result) (
 	alreadyRecorded := found && copyInRecorded(recorded)
 	if !found {
 		recorded = model.UpgradeOperation{}
+	}
+	if err := ensureSuggestedPrefixes(&recorded); err != nil {
+		return model.UpgradeOperation{}, false, err
 	}
 	recorded.SourceKind = SourceKindUpgradedLegacy
 	recorded.SourceVersion = result.SourceVersion

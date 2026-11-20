@@ -385,18 +385,11 @@ func cpaStackRelease(cpaDirectory string) (string, cpaStackReleaseStatus) {
 	directory := filepath.Dir(cpaDirectory)
 	for _, name := range strings.Split(cpaStackComposeFiles, ",") {
 		path := filepath.Join(directory, name)
-		info, err := os.Lstat(path)
+		data, _, err := readRegularFileNoFollow(path, cpaStackFileBytes)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return "", cpaStackReleaseUndetermined
-		}
-		if !info.Mode().IsRegular() || info.Size() > cpaStackFileBytes {
-			return "", cpaStackReleaseUndetermined
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
 			return "", cpaStackReleaseUndetermined
 		}
 		var document struct {
@@ -455,18 +448,11 @@ func cpaStackRelease(cpaDirectory string) (string, cpaStackReleaseStatus) {
 // compose variable defaults must not be expanded.
 func cpaStackEnvironment(directory string) (map[string]string, bool) {
 	path := filepath.Join(directory, cpaStackEnvFileName)
-	info, err := os.Lstat(path)
+	data, _, err := readRegularFileNoFollow(path, cpaStackFileBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, true
 		}
-		return nil, false
-	}
-	if !info.Mode().IsRegular() || info.Size() > cpaStackFileBytes {
-		return nil, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
 		return nil, false
 	}
 	environment := map[string]string{}
@@ -654,6 +640,7 @@ type cpaManagedSource struct {
 	// the request the Supervisor already published.
 	credentialsDigest string
 	configuredAuthDir string
+	authDirectory     string
 }
 
 // cpaSourceOptions is the file half of one import run.
@@ -673,18 +660,18 @@ func openManagedCPASource(options cpaSourceOptions) (*cpaManagedSource, error) {
 		return nil, err
 	}
 	configPath := filepath.Join(directory, cpaConfigFileName)
-	info, err := os.Stat(configPath)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, newUpgradeError(UpgradeErrorCPASourceMissing,
-			"the 1.x stack holds no readable managed CPA config.yaml, so there is no CPA state to import", nil)
-	}
-	if info.Size() > cpaMaxConfigBytes {
-		return nil, newUpgradeError(UpgradeErrorCPASourceMissing,
-			"the managed CPA config.yaml is larger than this import accepts, so it was not read", nil)
-	}
-	data, err := os.ReadFile(configPath)
+	data, _, err := readRegularFileNoFollow(configPath, cpaMaxConfigBytes)
 	if err != nil {
-		return nil, newUpgradeError(UpgradeErrorCPASourceMissing, "the managed CPA config.yaml could not be read", err)
+		if errors.Is(err, errRegularFileTooLarge) {
+			return nil, newUpgradeError(UpgradeErrorCPASourceMissing,
+				"the managed CPA config.yaml is larger than this import accepts, so it was not read", nil)
+		}
+		if errors.Is(err, ErrSourceSymlinked) {
+			return nil, newUpgradeError(UpgradeErrorCPASourceMissing,
+				"the managed CPA config.yaml may not be a symbolic link, so it was not read", err)
+		}
+		return nil, newUpgradeError(UpgradeErrorCPASourceMissing,
+			"the 1.x stack holds no readable managed CPA config.yaml, so there is no CPA state to import", err)
 	}
 	document, err := decodeCPAConfigDocument(data)
 	if err != nil {
@@ -728,12 +715,77 @@ func resolveCPADirectory(options cpaSourceOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve the managed CPA directory: %w", err)
 	}
-	info, err := os.Stat(absolute)
-	if err != nil || !info.IsDir() {
+	if _, err := statNoFollowDir(absolute); err != nil {
+		if errors.Is(err, ErrSourceSymlinked) {
+			return "", newUpgradeError(UpgradeErrorCPASourceMissing,
+				"the managed CPA directory may not be a symbolic link, so it was not read", err)
+		}
 		return "", newUpgradeError(UpgradeErrorCPASourceMissing,
 			"the 1.x stack holds no managed CPA directory beside the Manager data directory, so there is no CPA state to import", err)
 	}
 	return absolute, nil
+}
+
+var errRegularFileTooLarge = errors.New("regular file exceeds size limit")
+
+func statNoFollowDir(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s is a symbolic link", ErrSourceSymlinked, filepath.Base(path))
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", filepath.Base(path))
+	}
+	return info, nil
+}
+
+func openRegularFileNoFollow(path string) (*os.File, os.FileInfo, error) {
+	lstatInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if lstatInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("%w: %s is a symbolic link", ErrSourceSymlinked, filepath.Base(path))
+	}
+	if !lstatInfo.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	fstatInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !fstatInfo.Mode().IsRegular() || !os.SameFile(lstatInfo, fstatInfo) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%w: %s changed before open", ErrSourceSymlinked, filepath.Base(path))
+	}
+	return file, fstatInfo, nil
+}
+
+func readRegularFileNoFollow(path string, maxBytes int64) ([]byte, os.FileInfo, error) {
+	file, info, err := openRegularFileNoFollow(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if info.Size() > maxBytes {
+		return nil, info, errRegularFileTooLarge
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, info, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, info, errRegularFileTooLarge
+	}
+	return data, info, nil
 }
 
 // decodeCPAConfigDocument parses one CPA configuration file. Numbers keep their
@@ -1212,7 +1264,10 @@ func (s *cpaManagedSource) addManual(item cpaManualItem) {
 // CPA v8 silently skips gemini credentials, so uploading one would produce a run
 // that claims a copy the destination never lists.
 func (s *cpaManagedSource) readCredentials(override string) error {
-	directory, ok := s.resolveAuthDirectory(override)
+	directory, ok, err := s.resolveAuthDirectory(override)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		// A source with no auth directory still has a credential set — the empty
 		// one — and the digest is what a retry compares, so it is stamped here
@@ -1220,6 +1275,7 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 		s.credentialsDigest = s.credentialSetDigest()
 		return nil
 	}
+	s.authDirectory = directory
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorCPASourceMissing, "the managed CPA auth directory could not be read", err)
@@ -1266,8 +1322,24 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 			})
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, _, err := readRegularFileNoFollow(path, cpaMaxAuthFileBytes)
 		if err != nil {
+			if errors.Is(err, errRegularFileTooLarge) {
+				s.addManual(cpaManualItem{
+					item:        "credential:" + name,
+					reason:      "credential_too_large",
+					instruction: fmt.Sprintf("The credential file %s exceeds the %d-byte upload limit, so it was not uploaded. Copy it into the destination CPA auth directory yourself.", name, cpaMaxAuthFileBytes),
+				})
+				continue
+			}
+			if errors.Is(err, ErrSourceSymlinked) {
+				s.addManual(cpaManualItem{
+					item:        "credential:" + name,
+					reason:      "credential_not_regular",
+					instruction: "The credential file " + name + " is a symbolic link or was replaced during inspection. This import never follows a link out of the auth directory, so it was not uploaded; copy the file it points at into the destination CPA auth directory yourself.",
+				})
+				continue
+			}
 			s.addManual(cpaManualItem{
 				item:        "credential:" + name,
 				reason:      "credential_unreadable",
@@ -1335,35 +1407,99 @@ func (s *cpaManagedSource) sourceCredentialsDigest() string {
 	return s.credentialsDigest
 }
 
-// resolveAuthDirectory resolves the source auth directory inside the CPA tree.
-func (s *cpaManagedSource) resolveAuthDirectory(override string) (string, bool) {
+// resolveAuthDirectory resolves the source auth directory without following
+// symbolic links at the target directory or across relative segments below the
+// CPA root.
+func (s *cpaManagedSource) resolveAuthDirectory(override string) (string, bool, error) {
 	if trimmed := strings.TrimSpace(override); trimmed != "" {
 		absolute, err := filepath.Abs(trimmed)
 		if err != nil {
-			return "", false
+			return "", false, fmt.Errorf("resolve the CPA auth directory: %w", err)
 		}
-		if info, err := os.Stat(absolute); err == nil && info.IsDir() {
-			return absolute, true
+		if _, err := statNoFollowDir(absolute); err != nil {
+			if errors.Is(err, ErrSourceSymlinked) {
+				return "", false, newUpgradeError(UpgradeErrorCPASourceMissing,
+					"the named CPA auth directory may not be a symbolic link, so no credentials were read", err)
+			}
+			return "", false, newUpgradeError(UpgradeErrorCPASourceMissing,
+				"the named CPA auth directory does not exist or is not a directory, so no credentials were read", err)
 		}
-		return "", false
+		return absolute, true, nil
 	}
 	if raw := strings.TrimSpace(s.configuredAuthDir); raw != "" {
-		candidate := raw
-		if !filepath.IsAbs(candidate) {
-			candidate = filepath.Join(s.directory, candidate)
-		}
-		candidate = canonicalPath(candidate)
-		if within(canonicalPath(s.directory), candidate) {
-			if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
-				return candidate, true
-			}
+		if configured, ok := resolveConfiguredAuthSubdir(s.directory, raw); ok {
+			return configured, true, nil
 		}
 	}
 	sibling := filepath.Join(s.directory, cpaAuthDirectoryName)
-	if info, err := os.Stat(sibling); err == nil && info.IsDir() {
-		return sibling, true
+	info, err := os.Lstat(sibling)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, newUpgradeError(UpgradeErrorCPASourceMissing,
+			"the managed CPA auth directory could not be inspected", err)
 	}
-	return "", false
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, newUpgradeError(UpgradeErrorCPASourceMissing,
+			"the managed CPA auths directory may not be a symbolic link, so no credentials were read", ErrSourceSymlinked)
+	}
+	if !info.IsDir() {
+		return "", false, newUpgradeError(UpgradeErrorCPASourceMissing,
+			"the managed CPA auths entry is not a directory, so no credentials were read", nil)
+	}
+	return sibling, true, nil
+}
+
+func resolveConfiguredAuthSubdir(baseDir, raw string) (string, bool) {
+	var rel string
+	if !filepath.IsAbs(raw) {
+		rel = filepath.Clean(raw)
+	} else {
+		cleanedRaw := filepath.Clean(raw)
+		canonBase := canonicalPath(baseDir)
+		matched := false
+		for anc := cleanedRaw; ; {
+			if canonicalPath(anc) == canonBase {
+				if _, err := statNoFollowDir(anc); err == nil {
+					r, relErr := filepath.Rel(anc, cleanedRaw)
+					if relErr == nil {
+						rel = r
+						matched = true
+					}
+				}
+				break
+			}
+			parent := filepath.Dir(anc)
+			if parent == anc {
+				break
+			}
+			anc = parent
+		}
+		if !matched {
+			return "", false
+		}
+	}
+	if rel == "." {
+		return baseDir, true
+	}
+	if rel == "" || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	cur := baseDir
+	for _, segment := range strings.Split(rel, string(filepath.Separator)) {
+		if segment == "" || segment == "." {
+			continue
+		}
+		if segment == ".." {
+			return "", false
+		}
+		cur = filepath.Join(cur, segment)
+		if _, err := statNoFollowDir(cur); err != nil {
+			return "", false
+		}
+	}
+	return cur, true
 }
 
 // credentialType is the two metadata fields this import reads from one

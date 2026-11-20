@@ -5,7 +5,11 @@ import (
 	"net/http"
 	"testing"
 
+	"time"
+
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgradeworker"
 )
 
 // TestNextActionForAnExternalConnectRefusal proves the projection offers the step
@@ -73,6 +77,30 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 			stage:     StageReconcile,
 			errorCode: "external_target_moved",
 			want:      ActionExternalConnect,
+		},
+		{
+			name:      "rejected key on failed stage",
+			stage:     StageFailed,
+			errorCode: "external_management_key_rejected",
+			want:      ActionExternalConnect,
+		},
+		{
+			name:      "v7 cpa on failed stage",
+			stage:     StageFailed,
+			errorCode: "external_cpa_version_unsupported",
+			want:      ActionExternalConnect,
+		},
+		{
+			name:      "moved target on failed stage",
+			stage:     StageFailed,
+			errorCode: "external_target_moved",
+			want:      ActionExternalConnect,
+		},
+		{
+			name:      "non-external refusal on failed stage keeps reconcile",
+			stage:     StageFailed,
+			errorCode: "upgrade_reconcile_blocked",
+			want:      ActionReconcile,
 		},
 		{
 			// A stage the step cannot run from keeps the stage table: the code
@@ -178,6 +206,75 @@ func TestStatusProjectsAStoppedExternalConnectFromEveryEntryStage(t *testing.T) 
 			}
 			if status.ErrorCode != "external_cpa_version_unsupported" {
 				t.Fatalf("error code = %q", status.ErrorCode)
+			}
+		})
+	}
+}
+
+func TestStatusAfterWorkerRestartOnStageFailedExternalRefusal(t *testing.T) {
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
+		Stage:            model.UpgradeStageFailed,
+		LastForwardStage: model.UpgradeStageReconcile,
+		DomainsDone:      []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity},
+		SourceKind:       "upgraded-legacy",
+		ErrorCode:        "external_management_key_rejected",
+		ErrorDetail:      "management key rejected by external CPA",
+		ManualItems:      []string{},
+		Reconciliation:   json.RawMessage(`{}`),
+	})
+
+	// 1. Live worker execution state on StageFailed with external-connect refusal.
+	for _, code := range []string{
+		"external_management_key_rejected",
+		string(upgradeservice.UpgradeErrorExternalAuthorityUnavailable),
+	} {
+		t.Run("live_worker_"+code, func(t *testing.T) {
+			h := &Handler{
+				LegacyRoot: func() string { return "" },
+				Database:   func() string { return database },
+				Execution: func() upgradeworker.Execution {
+					return upgradeworker.Execution{
+						Action: "external-connect",
+						Code:   code,
+					}
+				},
+			}
+			_, body := request(t, h, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var status statusDocument
+			if err := json.Unmarshal([]byte(body), &status); err != nil {
+				t.Fatalf("decode status: %v; body: %s", err, body)
+			}
+			if status.Stage != StageFailed || status.NextAction != ActionExternalConnect {
+				t.Fatalf("live status = %+v, want stage=%q nextAction=%q", status, StageFailed, ActionExternalConnect)
+			}
+		})
+	}
+
+	// 2. Worker restart / DB fallback (nil or idle Execution) must keep nextAction=external_connect.
+	for _, tc := range []struct {
+		name string
+		exec func() upgradeworker.Execution
+	}{
+		{name: "db_fallback_nil_execution", exec: nil},
+		{name: "restarted_worker_idle_execution", exec: func() upgradeworker.Execution { return upgradeworker.Execution{Available: true} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{
+				LegacyRoot: func() string { return "" },
+				Database:   func() string { return database },
+				Execution:  tc.exec,
+				Timeout:    5 * time.Second,
+			}
+			_, body := request(t, h, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var status statusDocument
+			if err := json.Unmarshal([]byte(body), &status); err != nil {
+				t.Fatalf("decode status: %v; body: %s", err, body)
+			}
+			if status.Stage != StageFailed || status.NextAction != ActionExternalConnect {
+				t.Fatalf("%s status = %+v, want stage=%q nextAction=%q", tc.name, status, StageFailed, ActionExternalConnect)
+			}
+			if status.ErrorCode != "external_management_key_rejected" {
+				t.Fatalf("errorCode = %q, want external_management_key_rejected", status.ErrorCode)
 			}
 		})
 	}

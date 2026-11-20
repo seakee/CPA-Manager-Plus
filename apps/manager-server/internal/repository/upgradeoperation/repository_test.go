@@ -1320,7 +1320,7 @@ func readRawOperation(t *testing.T, db *sql.DB) string {
 		'|' || quote(domains_done) || '|' || quote(source_kind) || '|' || quote(source_version) ||
 		'|' || quote(source_fingerprint_before) || '|' || quote(source_fingerprint_after) ||
 		'|' || quote(backup_manifest_sha256) || '|' || quote(reconciliation) ||
-		'|' || quote(verification) ||
+		'|' || quote(pending_reconcile_days) || '|' || quote(verification) ||
 		'|' || quote(manual_items) || '|' || quote(error_code) || '|' || quote(error_detail) ||
 		'|' || quote(created_at_ms) || '|' || quote(updated_at_ms)
 		from upgrade_operations where id = 1`).Scan(&row); err != nil {
@@ -1764,6 +1764,11 @@ func TestEveryWriterKeepsUpdatedAtMonotonic(t *testing.T) {
 				t.Fatalf("advance: %v", err)
 			}
 		}},
+		{name: "RecordPendingReconcileDays", run: func() {
+			if _, err := repository.RecordPendingReconcileDays(ctx, []string{"2026-03-01"}); err != nil {
+				t.Fatalf("record pending reconcile days: %v", err)
+			}
+		}},
 		{name: "RecordReconciliationTx", run: func() {
 			inTransaction(func(tx *sql.Tx) error {
 				return upgradeoperation.RecordReconciliationTx(ctx, tx, json.RawMessage(`{"days":{}}`))
@@ -2024,6 +2029,14 @@ func TestCompletedOperationIsFrozenForEveryColumnWriter(t *testing.T) {
 		{name: "RecordReconciliation", call: func(t *testing.T) error {
 			return repository.RecordReconciliation(ctx, json.RawMessage(`{"replaced":true}`))
 		}},
+		{name: "RecordPendingReconcileDays", call: func(t *testing.T) error {
+			_, err := repository.RecordPendingReconcileDays(ctx, []string{"2026-03-01"})
+			return err
+		}},
+		{name: "RecordPendingReconcileDaysTx", call: func(t *testing.T) error {
+			_, err := upgradeoperation.RecordPendingReconcileDaysTx(ctx, transaction(t), []string{"2026-03-01"})
+			return err
+		}},
 		{name: "RecordError", call: func(t *testing.T) error {
 			return repository.RecordError(ctx, "upgrade_reconcile_blocked", "a refusal after the verdict")
 		}},
@@ -2150,5 +2163,252 @@ func TestStageAndCommitMissingInferenceOnCompletedUpgrade(t *testing.T) {
 	}
 	if _, err := repo.StageMissingInferenceOnCompletedUpgrade(ctx, "/upg-console", true); !errors.Is(err, upgradeoperation.ErrRoutingAlreadyCommitted) {
 		t.Fatalf("different intent after commit = %v, want ErrRoutingAlreadyCommitted", err)
+	}
+}
+
+func TestPendingReconcileDaysPersistPreserveAndClearAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo, db := newRepository(t)
+	copyIn := recordedCopyIn(t, repo)
+
+	recorded, err := repo.RecordPendingReconcileDays(ctx, []string{"2026-03-02", "2026-03-01", "2026-03-02"})
+	if err != nil {
+		t.Fatalf("RecordPendingReconcileDays: %v", err)
+	}
+	if !reflect.DeepEqual(recorded.PendingReconcileDays, []string{"2026-03-01", "2026-03-02"}) {
+		t.Fatalf("PendingReconcileDays = %v, want [2026-03-01 2026-03-02]", recorded.PendingReconcileDays)
+	}
+	if recorded.Stage != copyIn.Stage {
+		t.Fatalf("Stage moved to %q, want %q", recorded.Stage, copyIn.Stage)
+	}
+
+	// Generic Put without PendingReconcileDays preserves persisted pending dates.
+	stored, found, err := repo.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("Get = found %t, err %v", found, err)
+	}
+	stored.PendingReconcileDays = nil
+	stored.ManualItems = []string{"keep-pending-dates"}
+	if err := repo.Put(ctx, stored); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	afterPut, _, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get after Put: %v", err)
+	}
+	if !reflect.DeepEqual(afterPut.PendingReconcileDays, []string{"2026-03-01", "2026-03-02"}) {
+		t.Fatalf("PendingReconcileDays after Put = %v, want preserved [2026-03-01 2026-03-02]", afterPut.PendingReconcileDays)
+	}
+
+	// RecordCompletionTx refuses a row that still carries pending reconciliation dates.
+	if _, err := repo.Advance(ctx, model.UpgradeDomainIdentity, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("Advance to verify: %v", err)
+	}
+	completeTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := upgradeoperation.RecordCompletionTx(ctx, completeTx, model.UpgradeVerification{
+		TargetMode:        model.UpgradeTargetManaged,
+		SourceFingerprint: copyIn.SourceFingerprintAfter,
+		Domains:           []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity},
+		ObservedAtMS:      1_700_000_000_001,
+	}); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+		_ = completeTx.Rollback()
+		t.Fatalf("RecordCompletionTx with pending dates = %v, want ErrInvalidRow", err)
+	}
+	_ = completeTx.Rollback()
+
+	// Rolled-back transaction keeps pending dates intact; committed RecordReconciliationTx clears them atomically.
+	abortedTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx aborted: %v", err)
+	}
+	if err := upgradeoperation.RecordReconciliationTx(ctx, abortedTx, json.RawMessage(`{"sourceFingerprint":"after"}`)); err != nil {
+		_ = abortedTx.Rollback()
+		t.Fatalf("RecordReconciliationTx aborted: %v", err)
+	}
+	if err := abortedTx.Rollback(); err != nil {
+		t.Fatalf("Rollback abortedTx: %v", err)
+	}
+	stillPending, _, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get after rollback: %v", err)
+	}
+	if !reflect.DeepEqual(stillPending.PendingReconcileDays, []string{"2026-03-01", "2026-03-02"}) {
+		t.Fatalf("PendingReconcileDays after aborted tx = %v, want [2026-03-01 2026-03-02]", stillPending.PendingReconcileDays)
+	}
+
+	if err := repo.RecordReconciliation(ctx, json.RawMessage(`{"sourceFingerprint":"after"}`)); err != nil {
+		t.Fatalf("RecordReconciliation: %v", err)
+	}
+	cleared, _, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get after RecordReconciliation: %v", err)
+	}
+	if len(cleared.PendingReconcileDays) != 0 {
+		t.Fatalf("PendingReconcileDays after RecordReconciliation = %v, want empty", cleared.PendingReconcileDays)
+	}
+
+	// Re-record pending dates and confirm RecordRollback clears them atomically with rolled_back.
+	if _, err := repo.RecordPendingReconcileDays(ctx, []string{"2026-03-05"}); err != nil {
+		t.Fatalf("re-record pending dates: %v", err)
+	}
+	rolledBack, err := repo.RecordRollback(ctx, rollbackEvidence())
+	if err != nil {
+		t.Fatalf("RecordRollback: %v", err)
+	}
+	if len(rolledBack.PendingReconcileDays) != 0 {
+		t.Fatalf("PendingReconcileDays after RecordRollback = %v, want empty", rolledBack.PendingReconcileDays)
+	}
+}
+
+func TestInvalidateReconciliation(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := newRepository(t)
+
+	// Missing row refuses with ErrInvalidRow.
+	if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "missing table"); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+		t.Fatalf("InvalidateReconciliation without row = %v, want ErrInvalidRow", err)
+	}
+
+	_ = recordedCopyIn(t, repo)
+	if err := repo.RecordReconciliation(ctx, json.RawMessage(`{"sourceFingerprint":"fp-1","mismatchDays":["2026-03-01"]}`)); err != nil {
+		t.Fatalf("RecordReconciliation: %v", err)
+	}
+	reconciled, err := repo.Advance(ctx, model.UpgradeDomainPricing, model.UpgradeStageReconcile)
+	if err != nil {
+		t.Fatalf("Advance to reconcile: %v", err)
+	}
+	if _, err := repo.RecordPendingReconcileDays(ctx, []string{"2026-03-02"}); err != nil {
+		t.Fatalf("RecordPendingReconcileDays: %v", err)
+	}
+	before, _, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get before invalidation: %v", err)
+	}
+
+	if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "pricing rollup table missing"); err != nil {
+		t.Fatalf("InvalidateReconciliation: %v", err)
+	}
+	after, found, err := repo.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("Get after invalidation: found=%t err=%v", found, err)
+	}
+	if after.Stage != model.UpgradeStageCopyIn || after.LastForwardStage != model.UpgradeStageCopyIn {
+		t.Fatalf("stage/last_forward_stage = %q/%q, want copy_in/copy_in", after.Stage, after.LastForwardStage)
+	}
+	if !reflect.DeepEqual(after.DomainsDone, []string{model.UpgradeDomainSourceCopy}) {
+		t.Fatalf("DomainsDone = %v, want [source_copy]", after.DomainsDone)
+	}
+	if string(after.Reconciliation) != "{}" {
+		t.Fatalf("Reconciliation = %s, want {}", string(after.Reconciliation))
+	}
+	if len(after.PendingReconcileDays) != 0 {
+		t.Fatalf("PendingReconcileDays = %v, want empty", after.PendingReconcileDays)
+	}
+	if after.ErrorCode != "upgrade_reconcile_target_incomplete" || after.ErrorDetail != "pricing rollup table missing" {
+		t.Fatalf("error = %q / %q, want upgrade_reconcile_target_incomplete / pricing rollup table missing", after.ErrorCode, after.ErrorDetail)
+	}
+	if after.Revision != before.Revision+1 || after.UpdatedAtMS < reconciled.UpdatedAtMS {
+		t.Fatalf("revision/updatedAt = %d/%d, want %d and >= %d", after.Revision, after.UpdatedAtMS, before.Revision+1, reconciled.UpdatedAtMS)
+	}
+
+	// Rolled-back row refuses with ErrStageRegression.
+	if _, err := repo.RecordRollback(ctx, rollbackEvidence()); err != nil {
+		t.Fatalf("RecordRollback: %v", err)
+	}
+	if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "late failure"); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("InvalidateReconciliation on rolled_back = %v, want ErrStageRegression", err)
+	}
+}
+
+func TestInvalidateReconciliationRefusesPreflightAndPostReconcileStages(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("preflight row without source_copy", func(t *testing.T) {
+		repo, _ := newRepository(t)
+		if _, err := repo.Advance(ctx, "", model.UpgradeStagePreflight); err != nil {
+			t.Fatalf("Advance preflight: %v", err)
+		}
+		before, _, err := repo.Get(ctx)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "bad stage"); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+			t.Fatalf("InvalidateReconciliation on preflight = %v, want ErrInvalidRow", err)
+		}
+		after, _, err := repo.Get(ctx)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("preflight row mutated: before=%+v after=%+v err=%v", before, after, err)
+		}
+	})
+
+	t.Run("preflight row with source_copy", func(t *testing.T) {
+		repo, _ := newRepository(t)
+		if _, err := repo.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight); err != nil {
+			t.Fatalf("Advance preflight with source_copy: %v", err)
+		}
+		before, _, err := repo.Get(ctx)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "bad stage"); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+			t.Fatalf("InvalidateReconciliation on preflight with source_copy = %v, want ErrInvalidRow", err)
+		}
+		after, _, err := repo.Get(ctx)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("preflight row mutated: before=%+v after=%+v err=%v", before, after, err)
+		}
+	})
+
+	t.Run("copy_in row missing source_copy domain", func(t *testing.T) {
+		repo, _ := newRepository(t)
+		if _, err := repo.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn); err != nil {
+			t.Fatalf("Advance copy_in without source_copy: %v", err)
+		}
+		before, _, err := repo.Get(ctx)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "missing source_copy"); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+			t.Fatalf("InvalidateReconciliation without source_copy = %v, want ErrInvalidRow", err)
+		}
+		after, _, err := repo.Get(ctx)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("row mutated: before=%+v after=%+v err=%v", before, after, err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		stage  model.UpgradeStage
+		domain string
+	}{
+		{name: "cpa_import", stage: model.UpgradeStageCPAImport, domain: model.UpgradeDomainCPAConfig},
+		{name: "external_connect", stage: model.UpgradeStageExternalConnect, domain: model.UpgradeDomainIdentity},
+		{name: "verify", stage: model.UpgradeStageVerify, domain: model.UpgradeDomainIdentity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := newRepository(t)
+			_ = recordedCopyIn(t, repo)
+			if err := repo.RecordReconciliation(ctx, json.RawMessage(`{"sourceFingerprint":"fp-1"}`)); err != nil {
+				t.Fatalf("RecordReconciliation: %v", err)
+			}
+			if _, err := repo.Advance(ctx, tc.domain, tc.stage); err != nil {
+				t.Fatalf("Advance to %s: %v", tc.stage, err)
+			}
+			before, _, err := repo.Get(ctx)
+			if err != nil {
+				t.Fatalf("Get before: %v", err)
+			}
+			if err := repo.InvalidateReconciliation(ctx, "upgrade_reconcile_target_incomplete", "post-reconcile"); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+				t.Fatalf("InvalidateReconciliation on %s = %v, want ErrStageRegression", tc.stage, err)
+			}
+			after, _, err := repo.Get(ctx)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("%s row mutated: before=%+v after=%+v err=%v", tc.stage, before, after, err)
+			}
+		})
 	}
 }

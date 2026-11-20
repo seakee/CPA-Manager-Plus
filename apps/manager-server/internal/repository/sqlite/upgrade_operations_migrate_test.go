@@ -78,7 +78,7 @@ func assertUpgradeOperationColumns(t *testing.T, db *sql.DB) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close columns: %v", err)
 	}
-	for _, column := range []string{"revision", "last_forward_stage"} {
+	for _, column := range []string{"revision", "last_forward_stage", "pending_reconcile_days"} {
 		if !columns[column] {
 			t.Fatalf("upgrade_operations column %q was not added; columns = %v", column, columns)
 		}

@@ -325,7 +325,10 @@ func (f *verifyFixture) recordManagedImport(t *testing.T) {
 	if err := enterCPAImportStage(ctx, f.databasePath()); err != nil {
 		t.Fatalf("enter the CPA import stage: %v", err)
 	}
-	if err := handDestinationConnection(ctx, f.databasePath(), f.paths.DataKey, verifyManagedAddress, verifyManagedSecret); err != nil {
+	recorded := operationRow(t, f.databasePath())
+	if err := handDestinationConnection(ctx, f.databasePath(), f.paths.DataKey, verifyManagedAddress, verifyManagedSecret, sourceConnectionProvenance{
+		recorded: recorded, sourceRoot: recorded.SourceRoot, targetRoot: filepath.Dir(f.databasePath()),
+	}); err != nil {
 		t.Fatalf("hand the destination connection over: %v", err)
 	}
 	destination := managedDestinationRecord(t)
@@ -751,12 +754,11 @@ func TestVerifyRefusesAPositionBeforeTheTargetStep(t *testing.T) {
 // TestVerifyRefusesADomainTheReconciliationEstablished: a comparison that
 // established a domain the row does not hold proves no copy for it.
 func TestVerifyRefusesADomainTheReconciliationEstablished(t *testing.T) {
-	fixture := newVerifyFixture(t)
-	fixture.handManagerConnection(t, verifyExternalAddress, externalTestKey)
-	fixture.connectExternal(t)
-	// The reconciliation is recorded as evidence only: its domains are never
-	// marked on the row, so the row cannot prove the copy it describes.
-	recordReconciliationBody(t, fixture, comparedEvidenceBody(t, fixture))
+	fixture := newExternalVerifyFixture(t)
+	// Keep the recorded comparison evidence intact while omitting pricing from
+	// domains_done, so Verify still proves that comparison evidence cannot
+	// substitute for recorded domain marks.
+	execTarget(t, fixture.databasePath(), `update upgrade_operations set domains_done = '["source_copy","retained_projection","coverage","identity"]' where id = 1`)
 	before := fixture.operation(t)
 	if before.HasDomain(model.UpgradeDomainPricing) {
 		t.Fatal("fixture recorded pricing, which would make the domain check pass")
@@ -1737,7 +1739,10 @@ func newManagedVerifyFixtureAt(t *testing.T, baseURL string) *verifyFixture {
 		t.Fatalf("enter the CPA import stage: %v", err)
 	}
 	normalized := cpa.NormalizeBaseURL(baseURL)
-	if err := handDestinationConnection(ctx, fixture.databasePath(), fixture.paths.DataKey, normalized, verifyManagedSecret); err != nil {
+	recorded := operationRow(t, fixture.databasePath())
+	if err := handDestinationConnection(ctx, fixture.databasePath(), fixture.paths.DataKey, normalized, verifyManagedSecret, sourceConnectionProvenance{
+		recorded: recorded, sourceRoot: recorded.SourceRoot, targetRoot: filepath.Dir(fixture.databasePath()),
+	}); err != nil {
 		t.Fatalf("hand the destination connection over: %v", err)
 	}
 	destination := managedDestinationRecord(t)
@@ -1951,6 +1956,93 @@ func TestManagementReadTransportFailureNeverMentionsPrivateKey(t *testing.T) {
 		_, err = Verify(context.Background(), options)
 		if !errors.Is(err, ErrVerifyConnectionUnproven) || strings.Contains(strings.ToLower(err.Error()), "private key") {
 			t.Fatalf("verify keys 502 err = %v", err)
+		}
+	})
+}
+
+func TestVerifyRefusesPersistedPendingReconcileDays(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	fixture.connectExternal(t)
+	if err := RecordPendingReconcileDays(context.Background(), fixture.databasePath(), []string{"2026-03-01"}); err != nil {
+		t.Fatalf("RecordPendingReconcileDays: %v", err)
+	}
+	before := fixture.operation(t)
+	_, err := fixture.verify(t)
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("Verify with pending dates = %v, want ErrReconcileMismatch", err)
+	}
+	assertVerifyRefusalWroteNothing(t, fixture, before)
+}
+
+func TestVerifyAtReconcileFailsClosedOnSnapshotEvenWithHeldTargetLock(t *testing.T) {
+	t.Run("reconcile stage refuses with ErrVerifyNotApplicable while targetLock is held", func(t *testing.T) {
+		fixture := newVerifyFixture(t)
+		fixture.reconcile(t)
+		fixture.handManagerConnection(t, verifyExternalAddress, externalTestKey)
+		_ = fixture.sourceLock(t)
+		_ = fixture.targetLock(t)
+
+		options := fixture.verifyOptions()
+		_, err := Verify(context.Background(), options)
+		if !errors.Is(err, ErrVerifyNotApplicable) {
+			t.Fatalf("Verify(reconcile + held target lock) = %v, want ErrVerifyNotApplicable", err)
+		}
+	})
+
+	t.Run("reconcile stage with held targetLock still refuses snapshot errors fail-closed without ErrVerifyV2Running", func(t *testing.T) {
+		fixture := newVerifyFixture(t)
+		fixture.reconcile(t)
+		_ = fixture.sourceLock(t)
+		_ = fixture.targetLock(t)
+
+		// TMPDIR inside target root makes the pre-lock snapshot fail closed before
+		// acquiring locks or misclassifying as ErrVerifyV2Running.
+		t.Setenv("TMPDIR", fixture.target)
+		options := fixture.verifyOptions()
+		_, err := Verify(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+			t.Fatalf("Verify(reconcile + held target lock + TMPDIR=target) = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorSnapshotFailed)
+		}
+	})
+}
+
+func TestVerifyRejectsInvalidReconciliationAndMissingDomainsOnSnapshotBeforeAcquiringFences(t *testing.T) {
+	t.Run("corrupt reconciliation fails on snapshot with ErrVerifyReconciliationInvalid while targetLock is held", func(t *testing.T) {
+		fixture := newManagedVerifyFixture(t)
+		recordRawReconciliationBody(t, fixture, json.RawMessage(`{"checked":true}`))
+		_ = fixture.sourceLock(t)
+		_ = fixture.targetLock(t)
+
+		_, err := Verify(context.Background(), fixture.verifyOptions())
+		if !errors.Is(err, ErrVerifyReconciliationInvalid) {
+			t.Fatalf("Verify(corrupt reconciliation + held targetLock) = %v, want ErrVerifyReconciliationInvalid", err)
+		}
+	})
+
+	t.Run("unacknowledged day fails on snapshot with ErrVerifyReconciliationUnacked while targetLock is held", func(t *testing.T) {
+		fixture := newManagedVerifyFixture(t)
+		body := reconcileEvidenceBody(t, fixture, nil)
+		body.MismatchDays = []string{"2026-02-03"}
+		recordReconciliationBody(t, fixture, body)
+		_ = fixture.sourceLock(t)
+		_ = fixture.targetLock(t)
+
+		_, err := Verify(context.Background(), fixture.verifyOptions())
+		if !errors.Is(err, ErrVerifyReconciliationUnacked) {
+			t.Fatalf("Verify(unacknowledged day + held targetLock) = %v, want ErrVerifyReconciliationUnacked", err)
+		}
+	})
+
+	t.Run("missing domains_done fails on snapshot with ErrVerifyDomainsIncomplete while targetLock is held", func(t *testing.T) {
+		fixture := newExternalVerifyFixture(t)
+		execTarget(t, fixture.databasePath(), `update upgrade_operations set domains_done = '["source_copy","retained_projection","coverage","identity"]' where id = 1`)
+		_ = fixture.sourceLock(t)
+		_ = fixture.targetLock(t)
+
+		_, err := Verify(context.Background(), fixture.verifyOptions())
+		if !errors.Is(err, ErrVerifyDomainsIncomplete) {
+			t.Fatalf("Verify(missing domains_done + held targetLock) = %v, want ErrVerifyDomainsIncomplete", err)
 		}
 	})
 }

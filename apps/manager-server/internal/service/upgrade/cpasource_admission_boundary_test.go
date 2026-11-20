@@ -77,11 +77,12 @@ func TestCPASourceConfiguredAuthDirectorySurvivesSymlinkedSource(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	alias := filepath.Join(t.TempDir(), "cpa-alias")
-	if err := os.Symlink(directory, alias); err != nil {
+	parentAlias := filepath.Join(t.TempDir(), "parent-alias")
+	if err := os.Symlink(filepath.Dir(directory), parentAlias); err != nil {
 		t.Fatal(err)
 	}
-	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacy, CPADirectory: alias, CPAVersion: "8.0.55"})
+	aliasedDir := filepath.Join(parentAlias, filepath.Base(directory))
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacy, CPADirectory: aliasedDir, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatal(err)
 	}

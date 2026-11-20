@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -127,9 +128,10 @@ type databaseFileDigest struct {
 // a read-only Manager volume. The copy is opened instead and removed when the
 // snapshot is closed.
 type Snapshot struct {
-	dir  string
-	path string
-	db   *sql.DB
+	dir   string
+	path  string
+	bytes int64
+	db    *sql.DB
 }
 
 // OpenSnapshot copies databasePath plus its -wal/-shm sidecars into a fresh
@@ -175,7 +177,12 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 		return nil, err
 	}
 	if wal, hasWAL := copied["-wal"]; hasWAL && wal.size > 0 {
-		if err := managersqlite.ValidateWALHeader(snapshot.path); err != nil {
+		if mainCopy := copied[""]; mainCopy.size == 0 {
+			if err := validateZeroByteDatabaseWAL(snapshot.path); err != nil {
+				_ = snapshot.Close()
+				return nil, err
+			}
+		} else if err := managersqlite.ValidateWALHeader(snapshot.path); err != nil {
 			_ = snapshot.Close()
 			return nil, err
 		}
@@ -186,6 +193,14 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	if err := os.Remove(snapshot.path + "-shm"); err != nil && !os.IsNotExist(err) {
 		_ = snapshot.Close()
 		return nil, fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
+	}
+	if mainCopy := copied[""]; mainCopy.size == 0 {
+		if wal, hasWAL := copied["-wal"]; hasWAL && wal.size > 0 {
+			if err := replayZeroByteSnapshotWAL(ctx, snapshot.path); err != nil {
+				_ = snapshot.Close()
+				return nil, err
+			}
+		}
 	}
 	db, err := sql.Open("sqlite", snapshotDataSourceName(snapshot.path))
 	if err != nil {
@@ -200,6 +215,13 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 		return nil, err
 	}
 	snapshot.db = db
+	for suffix, file := range copied {
+		if suffix == "-shm" {
+			continue
+		}
+		snapshot.bytes += file.size
+	}
+	snapshot.bytes = snapshot.Bytes()
 	return snapshot, nil
 }
 
@@ -267,10 +289,62 @@ func snapshotReadError(ctx context.Context, err error) error {
 // operation must not write to, and a snapshot abandoned by a killed process —
 // no deferred cleanup runs — would stay on that volume for good.
 func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) error {
-	return validateScratchRoots(scratchDir, []ScratchRoot{
+	return ValidateScratchDirWithBackup(scratchDir, legacyRoot, targetDir, "")
+}
+
+// ValidateScratchDirWithBackup refuses a scratch directory that lies inside the
+// legacy source root, the target root, or a non-empty backup bundle directory.
+func ValidateScratchDirWithBackup(scratchDir string, legacyRoot string, targetDir string, bundleDir string) error {
+	roots := []ScratchRoot{
 		{Label: "the legacy source root", Dir: legacyRoot},
 		{Label: "the target root", Dir: targetDir},
-	})
+		{Label: "the backup directory", Dir: bundleDir},
+	}
+	for _, cfgLegacy := range ConfiguredLegacyRoots() {
+		roots = append(roots, ScratchRoot{Label: "the configured legacy source root", Dir: cfgLegacy})
+	}
+	for _, cfgBundle := range ConfiguredBundleRoots() {
+		roots = append(roots, ScratchRoot{Label: "the configured backup directory", Dir: cfgBundle})
+	}
+	return validateScratchRoots(scratchDir, roots)
+}
+
+// ValidateScratchRoots refuses a scratch directory (or os.TempDir when empty)
+// that lies inside any non-empty ScratchRoot in roots.
+func ValidateScratchRoots(scratchDir string, roots ...ScratchRoot) error {
+	return validateScratchRoots(scratchDir, roots)
+}
+
+// ConfiguredLegacyRoots returns non-empty legacy source roots configured in the
+// process environment (CPAMP_UPGRADE_LEGACY_ROOT, CPAMP_LEGACY_ROOT,
+// CPAMP_UPGRADE_SOURCE_ROOT).
+func ConfiguredLegacyRoots() []string {
+	var roots []string
+	for _, envName := range []string{
+		"CPAMP_UPGRADE_LEGACY_ROOT",
+		"CPAMP_LEGACY_ROOT",
+		"CPAMP_UPGRADE_SOURCE_ROOT",
+	} {
+		if val := strings.TrimSpace(os.Getenv(envName)); val != "" {
+			roots = append(roots, val)
+		}
+	}
+	return roots
+}
+
+// ConfiguredBundleRoots returns non-empty external backup directories
+// configured in the process environment.
+func ConfiguredBundleRoots() []string {
+	var roots []string
+	for _, envName := range []string{
+		"CPAMP_UPGRADE_BUNDLE_DIR",
+		"CPAMP_UPGRADE_BACKUP_DIR",
+	} {
+		if val := strings.TrimSpace(os.Getenv(envName)); val != "" {
+			roots = append(roots, val)
+		}
+	}
+	return roots
 }
 
 // ScratchRoot is one directory a private copy must stay out of, named the way the
@@ -330,13 +404,24 @@ func validateScratchRoots(scratchDir string, roots []ScratchRoot) error {
 	if defaulted {
 		scratch = os.TempDir()
 	}
-	scratchPath := canonicalPath(scratch)
+	scratchPath, err := canonicalPathStrict(scratch)
+	if err != nil {
+		if defaulted {
+			return fmt.Errorf("%w: default scratch directory (the OS temporary directory) cannot be resolved: %v",
+				ErrSnapshotFailed, err)
+		}
+		return fmt.Errorf("%w: scratch directory cannot be resolved: %v", ErrSnapshotFailed, err)
+	}
 	for _, root := range roots {
 		dir := strings.TrimSpace(root.Dir)
 		if dir == "" {
 			continue
 		}
-		if pathWithin(scratchPath, canonicalExclusionRoot(dir)) {
+		exclRoot := canonicalExclusionRoot(dir)
+		if _, err := canonicalPathStrict(dir); err != nil {
+			return fmt.Errorf("%w: %s cannot be resolved: %v", ErrSnapshotFailed, root.Label, err)
+		}
+		if pathWithin(scratchPath, exclRoot) {
 			// The default is named as such: an operator who never passed
 			// --scratch-dir has to learn that the OS temporary directory is the
 			// one that landed inside the root.
@@ -352,6 +437,17 @@ func validateScratchRoots(scratchDir string, roots []ScratchRoot) error {
 			return fmt.Errorf("%w: %s is inside %s; %s",
 				ErrSnapshotFailed, origin, root.Label, hint)
 		}
+	}
+	if !defaulted {
+		info, statErr := os.Stat(scratch)
+		if statErr != nil {
+			return fmt.Errorf("%w: scratch directory is not accessible: %v", ErrSnapshotFailed, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: scratch directory is not a directory", ErrSnapshotFailed)
+		}
+	} else if info, statErr := os.Stat(scratch); statErr == nil && !info.IsDir() {
+		return fmt.Errorf("%w: default scratch directory (the OS temporary directory) is not a directory", ErrSnapshotFailed)
 	}
 	return nil
 }
@@ -383,24 +479,71 @@ func pathWithin(child string, parent string) bool {
 // existing ancestor. A directory that does not exist yet still belongs to a real
 // parent, and on some hosts (macOS /var, for example) comparing unresolved paths
 // with resolved ones reports a false miss.
-func canonicalPath(path string) string {
+func canonicalPathStrict(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return filepath.Clean(path)
+		return "", err
 	}
 	current := absolute
-	missing := []string{}
+	var missing []string
 	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			return filepath.Join(append([]string{resolved}, missing...)...)
+		resolved, evalErr := filepath.EvalSymlinks(current)
+		if evalErr == nil {
+			if len(missing) > 0 {
+				info, statErr := os.Stat(resolved)
+				if statErr != nil {
+					return "", statErr
+				}
+				if !info.IsDir() {
+					return "", fmt.Errorf("%q is not a directory", current)
+				}
+			}
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
+		}
+		if info, lstatErr := os.Lstat(current); lstatErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("dangling or unresolvable symlink %q: %w", current, evalErr)
+			}
+			return "", evalErr
+		} else if !errors.Is(lstatErr, os.ErrNotExist) {
+			return "", lstatErr
+		}
+		if !errors.Is(evalErr, os.ErrNotExist) {
+			return "", evalErr
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return absolute
+			return "", evalErr
 		}
 		missing = append([]string{filepath.Base(current)}, missing...)
 		current = parent
 	}
+}
+
+func canonicalDirectoryCandidate(path, label string) (string, error) {
+	resolved, err := canonicalPathStrict(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", label, err)
+	}
+	if info, statErr := os.Stat(resolved); statErr == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("%s %q is not a directory", label, path)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect %s: %w", label, statErr)
+	}
+	return resolved, nil
+}
+
+func canonicalPath(path string) string {
+	if resolved, err := canonicalPathStrict(path); err == nil {
+		return resolved
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return absolute
 }
 
 // canonicalExclusionRoot resolves one root whose subtree the scratch directory
@@ -417,6 +560,39 @@ func (s *Snapshot) DB() *sql.DB {
 	return s.db
 }
 
+// Dir returns the temporary directory holding this snapshot copy, or empty once
+// the snapshot has been closed.
+func (s *Snapshot) Dir() string {
+	if s == nil {
+		return ""
+	}
+	return s.dir
+}
+
+// Bytes returns the total regular-file bytes currently held inside this
+// snapshot's temporary directory, or zero once closed.
+func (s *Snapshot) Bytes() int64 {
+	if s == nil || s.dir == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return s.bytes
+	}
+	var total int64
+	for _, entry := range entries {
+		info, statErr := entry.Info()
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		total += info.Size()
+	}
+	if total < s.bytes {
+		return s.bytes
+	}
+	return total
+}
+
 // Close releases the copy and deletes the scratch directory.
 func (s *Snapshot) Close() error {
 	if s == nil {
@@ -431,6 +607,7 @@ func (s *Snapshot) Close() error {
 		err = errors.Join(err, os.RemoveAll(s.dir))
 		s.dir = ""
 	}
+	s.bytes = 0
 	return err
 }
 
@@ -457,9 +634,34 @@ var auditedSidecarSuffixes = []string{"-wal", "-shm", "-journal"}
 // AuditSourceSidecars applies the shared source-file policy to every journal
 // member beside databasePath and fails closed when a non-empty rollback journal
 // is present.
+var errInvalidSourceSidecar = errors.New("invalid database sidecar")
+
 func AuditSourceSidecars(databasePath string) error {
 	for _, suffix := range auditedSidecarSuffixes {
-		info, err := inspectSnapshotSourceFile(databasePath + suffix)
+		sidePath := databasePath + suffix
+		info, err := inspectSnapshotSourceFile(sidePath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, processlock.ErrSymlinkedDatabase) {
+				return &symlinkedSourceFile{name: filepath.Base(sidePath)}
+			}
+			if errors.Is(err, processlock.ErrHardLinked) {
+				return err
+			}
+			return errors.Join(errInvalidSourceSidecar, err)
+		}
+		if suffix == "-journal" && info.Size() > 0 {
+			return errors.Join(errInvalidSourceSidecar, errPendingRollbackJournal)
+		}
+	}
+	return nil
+}
+
+func auditSidecarsRegularSingleLink(databasePath string) error {
+	for _, suffix := range auditedSidecarSuffixes {
+		info, err := processlock.InspectRegularSingleLink(databasePath + suffix)
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -469,6 +671,139 @@ func AuditSourceSidecars(databasePath string) error {
 		if suffix == "-journal" && info.Size() > 0 {
 			return errPendingRollbackJournal
 		}
+	}
+	return nil
+}
+
+// validateZeroByteDatabaseWAL validates a populated SQLite WAL paired with an
+// uncheckpointed 0-byte main database file. It checks the 32-byte WAL header,
+// active-cycle frame checksums, and requires at least one committed active
+// frame carrying a valid page-1 SQLite header with matching page size.
+func validateZeroByteDatabaseWAL(databasePath string) error {
+	_, err := extractCommittedPage1FromWAL(databasePath + "-wal")
+	return err
+}
+
+func extractCommittedPage1FromWAL(walPath string) ([]byte, error) {
+	wal, err := os.Open(walPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = wal.Close() }()
+	var header [32]byte
+	if _, err := io.ReadFull(wal, header[:]); err != nil {
+		return nil, err
+	}
+	magic := binary.BigEndian.Uint32(header[:4])
+	if magic != 0x377f0682 && magic != 0x377f0683 {
+		return nil, errors.New("invalid WAL header magic")
+	}
+	if binary.BigEndian.Uint32(header[4:8]) != 3007000 {
+		return nil, errors.New("unsupported WAL file format version")
+	}
+	pageSize := binary.BigEndian.Uint32(header[8:12])
+	if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 {
+		return nil, fmt.Errorf("invalid WAL page size %d", pageSize)
+	}
+	var order binary.ByteOrder = binary.LittleEndian
+	if magic&1 != 0 {
+		order = binary.BigEndian
+	}
+	checksum := func(buf []byte, s1, s2 uint32) (uint32, uint32) {
+		for i := 0; i < len(buf); i += 8 {
+			s1 += order.Uint32(buf[i:i+4]) + s2
+			s2 += order.Uint32(buf[i+4:i+8]) + s1
+		}
+		return s1, s2
+	}
+	s1, s2 := checksum(header[:24], 0, 0)
+	if s1 != binary.BigEndian.Uint32(header[24:28]) || s2 != binary.BigEndian.Uint32(header[28:32]) {
+		return nil, errors.New("invalid WAL header checksum")
+	}
+	salt1 := binary.BigEndian.Uint32(header[16:20])
+	salt2 := binary.BigEndian.Uint32(header[20:24])
+	frame := make([]byte, 24+int(pageSize))
+	var pendingPage1 []byte
+	var committedPage1 []byte
+	for {
+		_, err := io.ReadFull(wal, frame)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if binary.BigEndian.Uint32(frame[8:12]) != salt1 || binary.BigEndian.Uint32(frame[12:16]) != salt2 {
+			break
+		}
+		s1, s2 = checksum(frame[:8], s1, s2)
+		s1, s2 = checksum(frame[24:], s1, s2)
+		if s1 != binary.BigEndian.Uint32(frame[16:20]) || s2 != binary.BigEndian.Uint32(frame[20:24]) {
+			break
+		}
+		pageNumber := binary.BigEndian.Uint32(frame[:4])
+		if pageNumber == 0 {
+			return nil, errors.New("invalid WAL frame page number")
+		}
+		if pageNumber == 1 {
+			if pendingPage1 == nil {
+				pendingPage1 = make([]byte, int(pageSize))
+			}
+			copy(pendingPage1, frame[24:])
+		}
+		if binary.BigEndian.Uint32(frame[4:8]) > 0 && pendingPage1 != nil {
+			if committedPage1 == nil {
+				committedPage1 = make([]byte, int(pageSize))
+			}
+			copy(committedPage1, pendingPage1)
+		}
+	}
+	if committedPage1 == nil {
+		return nil, errors.New("zero-byte database WAL has no committed page 1")
+	}
+	if string(committedPage1[:16]) != "SQLite format 3\x00" {
+		return nil, errors.New("zero-byte database WAL page 1 is not a valid SQLite header")
+	}
+	dbPageSize := uint32(binary.BigEndian.Uint16(committedPage1[16:18]))
+	if dbPageSize == 1 {
+		dbPageSize = 65536
+	}
+	if dbPageSize != pageSize {
+		return nil, fmt.Errorf("WAL page size %d does not match page-1 database page size %d", pageSize, dbPageSize)
+	}
+	return committedPage1, nil
+}
+
+func replayZeroByteSnapshotWAL(ctx context.Context, snapshotDBPath string) error {
+	page1, err := extractCommittedPage1FromWAL(snapshotDBPath + "-wal")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(snapshotDBPath + "-shm"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(snapshotDBPath, page1, 0o600); err != nil {
+		return err
+	}
+	rawDB, err := sql.Open("sqlite", snapshotDBPath)
+	if err != nil {
+		return err
+	}
+	rawDB.SetMaxOpenConns(1)
+	_, checkpointErr := rawDB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	closeErr := rawDB.Close()
+	if checkpointErr != nil {
+		return checkpointErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	info, err := os.Lstat(snapshotDBPath)
+	if err != nil {
+		return err
+	}
+	if info.Size() < 100 {
+		return errors.New("zero-byte database WAL produced no replayed database pages")
 	}
 	return nil
 }

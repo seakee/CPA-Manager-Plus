@@ -103,6 +103,10 @@ type SourceTreeMetadata struct {
 // size over the exact file set covered by SourceFingerprint using only
 // os.Lstat, os.ReadDir, copyinmarker.Identity, and copyinmarker.ChangeStamp
 // (zero file content reads).
+// beforeIdentifySourceTreePass2 is a nil-by-default test hook invoked between
+// Pass 1 (entry enumeration) and Pass 2 (non-following identity/stamp reads).
+var beforeIdentifySourceTreePass2 func()
+
 func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return SourceTreeMetadata{}, err
@@ -140,6 +144,9 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 	entries = append(entries, unexpected...)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].relative < entries[j].relative })
 
+	if beforeIdentifySourceTreePass2 != nil {
+		beforeIdentifySourceTreePass2()
+	}
 	metaHash := sha256.New()
 	var total int64
 	for _, entry := range entries {
@@ -151,16 +158,49 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 		if err != nil {
 			return SourceTreeMetadata{}, err
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return SourceTreeMetadata{}, &symlinkedSourceFile{name: entry.relative}
+		}
+		if entry.directory {
+			if !info.IsDir() {
+				return SourceTreeMetadata{}, fmt.Errorf("source entry %s is not a directory", entry.relative)
+			}
+		} else if !info.Mode().IsRegular() {
+			return SourceTreeMetadata{}, fmt.Errorf("source file %s is not a regular file", entry.relative)
+		}
 		identity, err := copyinmarker.Identity(fullPath)
 		if err != nil {
+			if errors.Is(err, copyinmarker.ErrSymlink) {
+				return SourceTreeMetadata{}, &symlinkedSourceFile{name: entry.relative}
+			}
 			return SourceTreeMetadata{}, err
 		}
 		changeStamp, err := copyinmarker.ChangeStamp(fullPath)
 		if err != nil {
+			if errors.Is(err, copyinmarker.ErrSymlink) {
+				return SourceTreeMetadata{}, &symlinkedSourceFile{name: entry.relative}
+			}
 			if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
 				return SourceTreeMetadata{Uncacheable: true}, nil
 			}
 			return SourceTreeMetadata{}, err
+		}
+		postInfo, err := os.Lstat(fullPath)
+		if err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		if postInfo.Mode()&os.ModeSymlink != 0 {
+			return SourceTreeMetadata{}, &symlinkedSourceFile{name: entry.relative}
+		}
+		if entry.directory {
+			if !postInfo.IsDir() {
+				return SourceTreeMetadata{}, fmt.Errorf("source entry %s is not a directory", entry.relative)
+			}
+		} else if !postInfo.Mode().IsRegular() {
+			return SourceTreeMetadata{}, fmt.Errorf("source file %s is not a regular file", entry.relative)
+		}
+		if !os.SameFile(info, postInfo) {
+			return SourceTreeMetadata{}, ErrSourceChanged
 		}
 		if _, err := fmt.Fprintf(
 			metaHash,
@@ -245,9 +285,25 @@ func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, err
 			return sourceFingerprint{}, err
 		}
 		content := ""
-		if !entry.directory {
+		fullPath := filepath.Join(root, filepath.FromSlash(entry.relative))
+		if entry.directory {
+			dirInfo, err := os.Lstat(fullPath)
+			if err != nil {
+				return sourceFingerprint{}, err
+			}
+			if dirInfo.Mode()&os.ModeSymlink != 0 {
+				return sourceFingerprint{}, &symlinkedSourceFile{name: entry.relative}
+			}
+			if !dirInfo.IsDir() {
+				return sourceFingerprint{}, ErrSourceChanged
+			}
+		} else {
 			var err error
-			if content, err = fileContentDigest(ctx, filepath.Join(root, filepath.FromSlash(entry.relative))); err != nil {
+			if content, err = fileContentDigest(ctx, fullPath); err != nil {
+				var linked *symlinkedSourceFile
+				if errors.As(err, &linked) {
+					return sourceFingerprint{}, &symlinkedSourceFile{name: entry.relative}
+				}
 				return sourceFingerprint{}, err
 			}
 		}
@@ -272,6 +328,9 @@ func collectArchiveEntries(ctx context.Context, root string, archivesRoot string
 	if err != nil {
 		return nil, err
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, &symlinkedSourceFile{name: archivesDirName}
+	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("source archive path %s is not a directory", archivesDirName)
 	}
@@ -283,15 +342,36 @@ func collectArchiveEntries(ctx context.Context, root string, archivesRoot string
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			name := entry.Name()
+			if relative, relErr := filepath.Rel(root, path); relErr == nil {
+				name = filepath.ToSlash(relative)
+			}
+			return &symlinkedSourceFile{name: name}
+		}
 		if entry.IsDir() {
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
-			return fmt.Errorf("source archive entry %s is not a regular file", entry.Name())
+		if !entry.Type().IsRegular() {
+			name := entry.Name()
+			if relative, relErr := filepath.Rel(root, path); relErr == nil {
+				name = filepath.ToSlash(relative)
+			}
+			return fmt.Errorf("source archive entry %s is not a regular file", name)
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			name := entry.Name()
+			if relative, relErr := filepath.Rel(root, path); relErr == nil {
+				name = filepath.ToSlash(relative)
+			}
+			return &symlinkedSourceFile{name: name}
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("source archive entry %s is not a regular file", entry.Name())
 		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
@@ -321,15 +401,21 @@ func collectUnexpectedRootEntries(root string) ([]manifestEntry, error) {
 		if sourceRootReserved[entry.Name()] {
 			continue
 		}
-		if entry.IsDir() {
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, &symlinkedSourceFile{name: name}
+		}
+		if info.IsDir() {
 			// Directories are covered by name only: their content is not copied
 			// and is not the 1.x data layout's to describe.
 			entries = append(entries, manifestEntry{relative: name, directory: true, uncopied: true})
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("source file %s is not a regular file", name)
 		}
 		entries = append(entries, manifestEntry{relative: name, size: info.Size(), uncopied: true})
 	}
@@ -340,11 +426,34 @@ func fileContentDigest(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	linfo, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if linfo.Mode()&os.ModeSymlink != 0 {
+		return "", &symlinkedSourceFile{name: filepath.Base(path)}
+	}
+	if !linfo.Mode().IsRegular() {
+		return "", fmt.Errorf("source file %s is not a regular file", filepath.Base(path))
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = file.Close() }()
+	finfo, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !finfo.Mode().IsRegular() || !os.SameFile(linfo, finfo) {
+		if postInfo, postErr := os.Lstat(path); postErr == nil && postInfo.Mode()&os.ModeSymlink != 0 {
+			return "", &symlinkedSourceFile{name: filepath.Base(path)}
+		}
+		if !finfo.Mode().IsRegular() {
+			return "", fmt.Errorf("source file %s is not a regular file", filepath.Base(path))
+		}
+		return "", ErrSourceChanged
+	}
 	digest := sha256.New()
 	if _, err := copyChunks(ctx, digest, file); err != nil {
 		return "", err

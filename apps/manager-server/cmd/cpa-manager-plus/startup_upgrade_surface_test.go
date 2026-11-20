@@ -52,24 +52,29 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 		preflight        int
 		preflightErr     string
 		sourceRoot       string
+		artifactCode     string
 	}{
 		{
 			name: "legacy mount wins", mountLegacy: true, observable: false,
 			accepted: legacyKey, refused: managerKey,
-			entryStatus: http.StatusOK,
-			preflight:   http.StatusOK,
-			sourceRoot:  "available",
+			entryStatus:  http.StatusOK,
+			preflight:    http.StatusOK,
+			sourceRoot:   "available",
+			artifactCode: "runtime_unavailable",
 		},
 		{
 			// The mount holds no database the shared file policy accepts, so it does
-			// not count as a source: the surface must stay reachable through the
-			// Manager store and name the condition instead of answering 503.
+			// not count as a source: the entry/status/preflight surface stays
+			// reachable through the Manager store and names the condition, while
+			// /runtime/artifact fails closed on the symlinked mount before reaching
+			// Supervisor.
 			name: "symlinked mount database falls back to the manager store", mountLegacy: true, symlinkDatabase: true, observable: true,
 			accepted: managerKey, refused: legacyKey,
 			entryStatus:  http.StatusOK,
 			preflight:    http.StatusOK,
 			preflightErr: "upgrade_source_symlinked",
 			sourceRoot:   "upgrade_source_symlinked",
+			artifactCode: "upgrade_source_symlinked",
 		},
 		{
 			name: "manager store without a mount", mountLegacy: false, observable: true,
@@ -78,6 +83,7 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			preflight:    http.StatusServiceUnavailable,
 			preflightErr: "upgrade_legacy_root_missing",
 			sourceRoot:   "upgrade_legacy_root_missing",
+			artifactCode: "runtime_unavailable",
 		},
 		{
 			// The public observation refuses a WAL store, but the presented key is
@@ -92,6 +98,7 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			preflight:        http.StatusServiceUnavailable,
 			preflightErr:     "upgrade_legacy_root_missing",
 			sourceRoot:       "upgrade_legacy_root_missing",
+			artifactCode:     "runtime_unavailable",
 		},
 	}
 	for _, testCase := range cases {
@@ -191,8 +198,8 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 				t.Fatalf("preflight did not name %s: %s", testCase.preflightErr, body)
 			}
 			status, body = request(http.MethodGet, base+"/runtime/artifact", testCase.accepted, "")
-			if status != http.StatusServiceUnavailable || !strings.Contains(body, `"runtime_unavailable"`) {
-				t.Fatalf("runtime/artifact with the resolved key = %d: %s", status, body)
+			if status != http.StatusServiceUnavailable || !strings.Contains(body, `"`+testCase.artifactCode+`"`) {
+				t.Fatalf("runtime/artifact with the resolved key = %d: %s, want 503 %s", status, body, testCase.artifactCode)
 			}
 
 			// The other file's key is a wrong key on every leaf, never a source

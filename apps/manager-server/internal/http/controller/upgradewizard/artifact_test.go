@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -919,7 +920,7 @@ func TestArtifactIdentifySourceTreeErrorClassification(t *testing.T) {
 		if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		database := recordedArtifactStore(t, v2StoreAdminKey, root)
+		database := recordedArtifactStore(t, testAdminKey, root)
 		handler := newHandler(root, database)
 		handler.Artifact = client
 		// Warm the credential cache so the request reaches IdentifySourceTree.
@@ -1882,4 +1883,555 @@ type upgradeZeroReader struct{}
 func (upgradeZeroReader) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
+}
+
+func TestArtifactRoutesPreserveManagerStoreWithoutCreatingInPlaceSHMSidecar(t *testing.T) {
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+
+	root := legacySourceDir(t)
+	database := recordedArtifactStore(t, v2StoreAdminKey, root)
+
+	// Stage a real WAL-mode database + committed non-empty -wal without -shm.
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable wal: %v", err)
+	}
+	baseBytes, err := os.ReadFile(database)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read base db: %v", err)
+	}
+	if _, err := db.Exec(`update upgrade_operations set updated_at_ms = updated_at_ms + 1 where id = 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("write wal frame: %v", err)
+	}
+	walBytes, err := os.ReadFile(database + "-wal")
+	if err != nil || len(walBytes) == 0 {
+		_ = db.Close()
+		t.Fatalf("read non-empty wal: len=%d err=%v", len(walBytes), err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+	if err := os.WriteFile(database, baseBytes, 0o600); err != nil {
+		t.Fatalf("restore base db: %v", err)
+	}
+	if err := os.WriteFile(database+"-wal", walBytes, 0o600); err != nil {
+		t.Fatalf("restore wal: %v", err)
+	}
+	_ = os.Remove(database + "-shm")
+
+	handler := newHandler(root, database)
+	handler.Artifact = client
+	handler.PreserveManagerStore = true
+
+	for _, spec := range []artifactRouteSpec{
+		{http.MethodGet, ArtifactStatusSuffix, "", "", http.StatusOK},
+		{http.MethodPost, ArtifactProbeSuffix, "application/json", "{}", http.StatusOK},
+	} {
+		rec := doUpgradeArtifactRequest(
+			t,
+			handler,
+			spec.method,
+			testPrefix+spec.suffix,
+			bearer(testAdminKey),
+			spec.contentType,
+			strings.NewReader(spec.body),
+			int64(len(spec.body)),
+		)
+		if rec.Code != spec.wantStatus {
+			t.Fatalf("%s %s = %d: %s", spec.method, spec.suffix, rec.Code, rec.Body.String())
+		}
+		if _, shmErr := os.Lstat(database + "-shm"); !os.IsNotExist(shmErr) {
+			t.Fatalf("%s %s created in-place -shm sidecar despite PreserveManagerStore=true (err=%v)", spec.method, spec.suffix, shmErr)
+		}
+	}
+}
+
+func TestArtifactRoutesFailClosedWithMountTimeoutWhenPreserveManagerStoreAndMountUnresolved(t *testing.T) {
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+
+	root := legacySourceDir(t)
+	database := recordedArtifactStore(t, v2StoreAdminKey, root)
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+
+	t.Run("timeout_before_root_known", func(t *testing.T) {
+		release := make(chan struct{})
+		var once sync.Once
+		stop := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(stop)
+
+		handler := &Handler{
+			LegacyRoot: func() string {
+				<-release
+				return ""
+			},
+			Database:             func() string { return database },
+			DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+			Artifact:             client,
+			PreserveManagerStore: true,
+			MountTimeout:         20 * time.Millisecond,
+			Authenticate: func(_ context.Context, authHeader string) error {
+				if authHeader == bearer(testAdminKey) {
+					return nil
+				}
+				return upgradeservice.ErrAdminUnauthorized
+			},
+		}
+
+		watch := watchSnapshotDirs(t, scratch)
+		for _, spec := range upgradeArtifactRouteSpecs() {
+			rec := doUpgradeArtifactRequest(
+				t,
+				handler,
+				spec.method,
+				testPrefix+spec.suffix,
+				bearer(testAdminKey),
+				spec.contentType,
+				strings.NewReader(spec.body),
+				int64(len(spec.body)),
+			)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s %s = %d, want 503: %s", spec.method, spec.suffix, rec.Code, rec.Body.String())
+			}
+			var errResp artifactproxy.ErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp.Code != CodeMountTimeout {
+				t.Fatalf("%s %s body = %s, want code %q", spec.method, spec.suffix, rec.Body.String(), CodeMountTimeout)
+			}
+		}
+		names := watch()
+		stop()
+		waitForMountFlight(t, handler)
+		if len(names) != 0 {
+			t.Fatalf("timed-out artifact request staged snapshots %v under %s", names, scratch)
+		}
+		if supervisorCalls.Load() != 0 {
+			t.Fatalf("timed-out artifact request contacted Supervisor %d times", supervisorCalls.Load())
+		}
+	})
+
+	t.Run("timeout_after_root_known", func(t *testing.T) {
+		release := make(chan struct{})
+		var once sync.Once
+		stop := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(stop)
+
+		handler := &Handler{
+			LegacyRoot:           func() string { return root },
+			Database:             func() string { return database },
+			DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+			Artifact:             client,
+			PreserveManagerStore: true,
+			MountTimeout:         20 * time.Millisecond,
+			lookupMount: func(string) mountResolution {
+				<-release
+				return mountResolution{root: root, rootKnown: true, code: CodeSourceMissing}
+			},
+			Authenticate: func(_ context.Context, authHeader string) error {
+				if authHeader == bearer(testAdminKey) {
+					return nil
+				}
+				return upgradeservice.ErrAdminUnauthorized
+			},
+		}
+
+		watch := watchSnapshotDirs(t, scratch)
+		for _, spec := range upgradeArtifactRouteSpecs() {
+			rec := doUpgradeArtifactRequest(
+				t,
+				handler,
+				spec.method,
+				testPrefix+spec.suffix,
+				bearer(testAdminKey),
+				spec.contentType,
+				strings.NewReader(spec.body),
+				int64(len(spec.body)),
+			)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s %s = %d, want 503: %s", spec.method, spec.suffix, rec.Code, rec.Body.String())
+			}
+			var errResp artifactproxy.ErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp.Code != CodeMountTimeout {
+				t.Fatalf("%s %s body = %s, want code %q", spec.method, spec.suffix, rec.Body.String(), CodeMountTimeout)
+			}
+		}
+		names := watch()
+		stop()
+		waitForMountFlight(t, handler)
+		if len(names) != 0 {
+			t.Fatalf("timed-out artifact request staged snapshots %v under %s", names, scratch)
+		}
+		if supervisorCalls.Load() != 0 {
+			t.Fatalf("timed-out artifact request contacted Supervisor %d times", supervisorCalls.Load())
+		}
+	})
+}
+
+func TestArtifactRoutesPreserveExactMountErrorCodesAndFallback(t *testing.T) {
+	refusalCodes := []string{
+		CodeLegacyRootUnusable,
+		upgradeservice.CodeSourceLockUnavailable,
+		CodeSourceUnreadable,
+		CodeSourceSymlinked,
+		CodeMountTimeout,
+	}
+	fallbackCodes := []string{
+		"",
+		CodeLegacyRootMissing,
+		CodeSourceMissing,
+	}
+
+	for _, preserve := range []bool{false, true} {
+		preserveName := "preserve_false"
+		if preserve {
+			preserveName = "preserve_true"
+		}
+		t.Run(preserveName, func(t *testing.T) {
+			for _, mountCode := range refusalCodes {
+				codeName := mountCode
+				if codeName == "" {
+					codeName = "empty"
+				}
+				t.Run("refusal_"+codeName, func(t *testing.T) {
+					run := func(t *testing.T, withAuthHook bool) {
+						t.Helper()
+						var supervisorCalls atomic.Int32
+						_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+						root := legacySourceDir(t)
+						database := recordedArtifactStore(t, testAdminKey, root)
+
+						handler := &Handler{
+							LegacyRoot:           func() string { return root },
+							Database:             func() string { return database },
+							DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+							Artifact:             client,
+							PreserveManagerStore: preserve,
+							lookupMount: func(string) mountResolution {
+								return mountResolution{root: root, rootKnown: true, code: mountCode}
+							},
+						}
+						if withAuthHook {
+							handler.Authenticate = func(_ context.Context, authHeader string) error {
+								if authHeader == bearer(testAdminKey) {
+									return nil
+								}
+								return upgradeservice.ErrAdminUnauthorized
+							}
+						}
+
+						for _, spec := range upgradeArtifactRouteSpecs() {
+							rec := doUpgradeArtifactRequest(
+								t,
+								handler,
+								spec.method,
+								testPrefix+spec.suffix,
+								bearer(testAdminKey),
+								spec.contentType,
+								strings.NewReader(spec.body),
+								int64(len(spec.body)),
+							)
+							if rec.Code != http.StatusServiceUnavailable {
+								t.Fatalf("%s %s (code=%s) = %d, want 503: %s", spec.method, spec.suffix, mountCode, rec.Code, rec.Body.String())
+							}
+							var errResp artifactproxy.ErrorResponse
+							if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+								t.Fatalf("decode error response: %v: %s", err, rec.Body.String())
+							}
+							if (withAuthHook || !preserve || mountCode != CodeMountTimeout) && errResp.Code != mountCode {
+								t.Fatalf("%s %s body = %s, want top-level code %q", spec.method, spec.suffix, rec.Body.String(), mountCode)
+							}
+							var raw map[string]any
+							if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+								t.Fatalf("decode error body: %v", err)
+							}
+							nested, _ := raw["error"].(map[string]any)
+							if nested == nil || nested["code"] != mountCode {
+								t.Fatalf("%s %s nested error = %v, want code %q", spec.method, spec.suffix, raw["error"], mountCode)
+							}
+						}
+						if supervisorCalls.Load() != 0 {
+							t.Fatalf("mount refusal %q contacted Supervisor %d times", mountCode, supervisorCalls.Load())
+						}
+					}
+
+					t.Run("default_auth", func(t *testing.T) { run(t, false) })
+					t.Run("worker_auth_hook", func(t *testing.T) { run(t, true) })
+				})
+			}
+
+			for _, mountCode := range fallbackCodes {
+				codeName := mountCode
+				if codeName == "" {
+					codeName = "empty"
+				}
+				t.Run("fallback_"+codeName, func(t *testing.T) {
+					var supervisorCalls atomic.Int32
+					_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+					root := legacySourceDir(t)
+					database := recordedArtifactStore(t, testAdminKey, root)
+
+					handler := &Handler{
+						LegacyRoot:           func() string { return root },
+						Database:             func() string { return database },
+						DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+						Artifact:             client,
+						PreserveManagerStore: preserve,
+						lookupMount: func(string) mountResolution {
+							return mountResolution{root: root, rootKnown: true, code: mountCode}
+						},
+					}
+
+					for _, spec := range upgradeArtifactRouteSpecs() {
+						before := supervisorCalls.Load()
+						rec := doUpgradeArtifactRequest(
+							t,
+							handler,
+							spec.method,
+							testPrefix+spec.suffix,
+							bearer(testAdminKey),
+							spec.contentType,
+							strings.NewReader(spec.body),
+							int64(len(spec.body)),
+						)
+						if rec.Code != spec.wantStatus || supervisorCalls.Load() != before+1 {
+							t.Fatalf("%s %s fallback (code=%q) = %d (calls=%d), want %d and 1: %s",
+								spec.method, spec.suffix, mountCode, rec.Code, supervisorCalls.Load()-before, spec.wantStatus, rec.Body.String())
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestArtifactRoutesPreserveLegacyRootUnusableOnDiskUnderPreserveManagerStoreR9 verifies R9 #3:
+// a real unresolvable LegacyRoot (ELOOP symlink loop or EACCES non-searchable parent)
+// under PreserveManagerStore=true surfaces 503 upgrade_legacy_root_unusable with zero
+// Supervisor calls for both Authenticate==nil and Authenticate!=nil.
+func TestArtifactRoutesPreserveLegacyRootUnusableOnDiskUnderPreserveManagerStoreR9(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) string
+	}{
+		{
+			name: "symlink_loop_eloop",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				base := t.TempDir()
+				a := filepath.Join(base, "loop-a")
+				b := filepath.Join(base, "loop-b")
+				if err := os.Symlink(b, a); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(a, b); err != nil {
+					t.Fatal(err)
+				}
+				return a
+			},
+		},
+		{
+			name: "non_searchable_parent_eacces",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("chmod 0000 parent permission test skipped on Windows or when running as root")
+				}
+				parent := filepath.Join(t.TempDir(), "sealed-parent")
+				child := filepath.Join(parent, "legacy")
+				if err := os.MkdirAll(child, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(parent, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+				return child
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withAuthHook := range []bool{false, true} {
+				mode := "default_auth"
+				if withAuthHook {
+					mode = "worker_auth_hook"
+				}
+				t.Run(mode, func(t *testing.T) {
+					var supervisorCalls atomic.Int32
+					_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+					unusableRoot := tc.setup(t)
+					database := recordedArtifactStore(t, testAdminKey, legacySourceDir(t))
+
+					handler := &Handler{
+						LegacyRoot:           func() string { return unusableRoot },
+						Database:             func() string { return database },
+						DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+						Artifact:             client,
+						PreserveManagerStore: true,
+					}
+					if withAuthHook {
+						handler.Authenticate = func(_ context.Context, authHeader string) error {
+							if authHeader == bearer(testAdminKey) {
+								return nil
+							}
+							return upgradeservice.ErrAdminUnauthorized
+						}
+					}
+
+					for _, spec := range upgradeArtifactRouteSpecs() {
+						rec := doUpgradeArtifactRequest(
+							t,
+							handler,
+							spec.method,
+							testPrefix+spec.suffix,
+							bearer(testAdminKey),
+							spec.contentType,
+							strings.NewReader(spec.body),
+							int64(len(spec.body)),
+						)
+						if rec.Code != http.StatusServiceUnavailable {
+							t.Fatalf("%s %s = %d, want 503: %s", spec.method, spec.suffix, rec.Code, rec.Body.String())
+						}
+						var raw map[string]any
+						if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+							t.Fatalf("decode error body: %v: %s", err, rec.Body.String())
+						}
+						nested, _ := raw["error"].(map[string]any)
+						if nested == nil || nested["code"] != CodeLegacyRootUnusable {
+							t.Fatalf("%s %s nested error = %v, want %q (body=%s)", spec.method, spec.suffix, raw["error"], CodeLegacyRootUnusable, rec.Body.String())
+						}
+						if withAuthHook && raw["code"] != CodeLegacyRootUnusable {
+							t.Fatalf("%s %s top-level code = %v, want %q (body=%s)", spec.method, spec.suffix, raw["code"], CodeLegacyRootUnusable, rec.Body.String())
+						}
+					}
+					statusRec := doUpgradeArtifactRequest(
+						t,
+						handler,
+						http.MethodGet,
+						testPrefix+StatusSuffix,
+						bearer(testAdminKey),
+						"",
+						nil,
+						0,
+					)
+					if statusRec.Code != http.StatusServiceUnavailable {
+						t.Fatalf("GET %s = %d, want 503: %s", StatusSuffix, statusRec.Code, statusRec.Body.String())
+					}
+					var statusRaw map[string]any
+					if err := json.Unmarshal(statusRec.Body.Bytes(), &statusRaw); err != nil {
+						t.Fatalf("decode status error body: %v: %s", err, statusRec.Body.String())
+					}
+					statusNested, _ := statusRaw["error"].(map[string]any)
+					if statusNested == nil || statusNested["code"] != CodeLegacyRootUnusable {
+						t.Fatalf("GET %s nested error = %v, want %q (body=%s)", StatusSuffix, statusRaw["error"], CodeLegacyRootUnusable, statusRec.Body.String())
+					}
+					if supervisorCalls.Load() != 0 {
+						t.Fatalf("unusable legacy root contacted Supervisor %d times", supervisorCalls.Load())
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestArtifactRoutesPreserveMountTimeoutOnPreRootTimeoutDefaultAuthR9 verifies R9 #4:
+// when PreserveManagerStore=true and Authenticate==nil and mount lookup times out
+// before resolving the configured source root (rootKnown=false, code=CodeMountTimeout),
+// /status, /preflight, and all /runtime/artifact* routes return 503 upgrade_mount_timeout
+// with zero snapshots staged and zero Supervisor calls.
+func TestArtifactRoutesPreserveMountTimeoutOnPreRootTimeoutDefaultAuthR9(t *testing.T) {
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+	root := legacySourceDir(t)
+	database := recordedArtifactStore(t, testAdminKey, root)
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	stop := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(stop)
+
+	handler := &Handler{
+		LegacyRoot: func() string {
+			<-release
+			return ""
+		},
+		Database:             func() string { return database },
+		DataKey:              func() string { return filepath.Join(filepath.Dir(database), "data.key") },
+		Artifact:             client,
+		PreserveManagerStore: true,
+		Timeout:              10 * time.Second,
+		MountTimeout:         30 * time.Millisecond,
+	}
+
+	unknown := handler.resolveMount(context.Background())
+	if unknown.rootKnown || unknown.code != CodeMountTimeout {
+		t.Fatalf("pre-root timed mount = %+v, want rootKnown=false and code=%q", unknown, CodeMountTimeout)
+	}
+
+	watch := watchSnapshotDirs(t, scratch)
+	for _, suffix := range []string{StatusSuffix, PreflightSuffix} {
+		rec := doUpgradeArtifactRequest(
+			t,
+			handler,
+			http.MethodGet,
+			testPrefix+suffix,
+			bearer(testAdminKey),
+			"",
+			nil,
+			0,
+		)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET %s = %d, want 503: %s", suffix, rec.Code, rec.Body.String())
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decode error body: %v: %s", err, rec.Body.String())
+		}
+		nested, _ := raw["error"].(map[string]any)
+		if nested == nil || nested["code"] != CodeMountTimeout {
+			t.Fatalf("GET %s nested error = %v, want %q (body=%s)", suffix, raw["error"], CodeMountTimeout, rec.Body.String())
+		}
+	}
+	for _, spec := range upgradeArtifactRouteSpecs() {
+		rec := doUpgradeArtifactRequest(
+			t,
+			handler,
+			spec.method,
+			testPrefix+spec.suffix,
+			bearer(testAdminKey),
+			spec.contentType,
+			strings.NewReader(spec.body),
+			int64(len(spec.body)),
+		)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s = %d, want 503: %s", spec.method, spec.suffix, rec.Code, rec.Body.String())
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decode error body: %v: %s", err, rec.Body.String())
+		}
+		nested, _ := raw["error"].(map[string]any)
+		if nested == nil || nested["code"] != CodeMountTimeout {
+			t.Fatalf("%s %s nested error = %v, want %q (body=%s)", spec.method, spec.suffix, raw["error"], CodeMountTimeout, rec.Body.String())
+		}
+	}
+	names := watch()
+	stop()
+	waitForMountFlight(t, handler)
+	if len(names) != 0 {
+		t.Fatalf("pre-root mount timeout staged snapshots %v under %s", names, scratch)
+	}
+	if supervisorCalls.Load() != 0 {
+		t.Fatalf("pre-root mount timeout contacted Supervisor %d times", supervisorCalls.Load())
+	}
 }

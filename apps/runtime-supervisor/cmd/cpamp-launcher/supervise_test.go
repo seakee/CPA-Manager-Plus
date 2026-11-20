@@ -249,6 +249,8 @@ func fastTimings() TimingConfig {
 		SIGKILLReapWait:                       50 * time.Millisecond,
 		ChildIODrainTimeout:                   80 * time.Millisecond,
 		ReadinessPollInterval:                 15 * time.Millisecond,
+		UpgradeWorkerReadyTimeout:             250 * time.Millisecond,
+		UpgradeWorkerMaxInitialFailures:       3,
 	}
 }
 

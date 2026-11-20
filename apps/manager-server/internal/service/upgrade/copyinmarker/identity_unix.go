@@ -19,9 +19,12 @@ var ErrChangeStampUnavailable = errors.New("file change time is unavailable")
 // migration rewrites the database at the same path, and only a swapped-in file
 // changes its inode.
 func identity(path string) (FileIdentity, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return FileIdentity{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return FileIdentity{}, ErrSymlink
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -37,6 +40,9 @@ func ChangeStamp(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", ErrSymlink
 	}
 	stat := reflect.ValueOf(info.Sys())
 	if stat.Kind() == reflect.Pointer && !stat.IsNil() {

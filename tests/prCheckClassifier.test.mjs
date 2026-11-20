@@ -109,6 +109,20 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/panel-lite-cpa-v8-other.mjs'])).toEqual(noChecks);
   });
 
+  // The Docker upgrade host script, its synthetic `node:test` suite, and the
+  // Upgrade Docker acceptance harness `node:test` suite run in the Frontend job.
+  it('runs the Docker upgrade suites when only an upgrade script or harness file changes', () => {
+    for (const filePath of [
+      'bin/upgrade-cpamp-v2.sh',
+      'bin/upgrade/upgrade-cpamp-v2.test.mjs',
+      'bin/ci/upgrade-docker.mjs',
+      'bin/ci/upgrade-docker.test.mjs',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+    expect(classifyChangedFiles(['bin/ci/upgrade-docker-other.mjs'])).toEqual(noChecks);
+  });
+
   // The design-token checker, its committed ratchet baseline and its runtime
   // property registry run in the Frontend job. A PR that changes only one of
   // them must still schedule that job.

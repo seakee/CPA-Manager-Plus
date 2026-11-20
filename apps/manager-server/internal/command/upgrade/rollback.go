@@ -48,6 +48,8 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	volume := flags.String("volume", "",
 		"1.x data volume name (including the unprefixed cpa-manager-plus-data) or absolute bind source; defaults to <project>"+upgradeservice.LegacyVolumeSuffix)
 	backup := flags.String("backup", "", "recorded backup snapshot; defaults to the v2 backup directory")
+	bundle := flags.String("bundle", "", "alias for --backup: recorded backup snapshot")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
 	statusURL := flags.String("status-url", "",
 		"1.x health endpoint probed by --verify; defaults to "+upgradeservice.LegacyHealthURL())
 	rollbackPort := flags.Int("port", upgradeservice.LegacyRollbackPort,
@@ -94,6 +96,10 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			return fmt.Errorf("%w: the configured HTTP_ADDR %q is not host:port", ErrUsage, managerAddress)
 		}
 	}
+	backupDir, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
@@ -102,7 +108,8 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return runRollbackPrepare(ctx, stdout, stderr, *asJSON, upgradeservice.RollbackOptions{
 			LegacyRoot:               *legacy,
 			TargetRoot:               targetRoot,
-			BackupDir:                *backup,
+			BackupDir:                backupDir,
+			ScratchDir:               *scratchDir,
 			TagOverride:              *legacyImage,
 			Project:                  *project,
 			Volume:                   *volume,
@@ -114,7 +121,8 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	return runRollbackVerify(ctx, stdout, stderr, *asJSON, upgradeservice.RollbackObservation{
 		LegacyRoot:               *legacy,
 		TargetRoot:               targetRoot,
-		BackupDir:                *backup,
+		BackupDir:                backupDir,
+		ScratchDir:               *scratchDir,
 		Image:                    *legacyImage,
 		StatusURL:                *statusURL,
 		ManagerAddress:           managerAddress,

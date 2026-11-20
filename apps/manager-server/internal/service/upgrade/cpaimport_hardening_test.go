@@ -8,12 +8,14 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 // TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry is the Medium finding
@@ -222,45 +225,87 @@ func TestImportCPARefusesARetryAfterTheSourceChanges(t *testing.T) {
 	t.Logf("P-H2-drift error_code=%s attempt=%d terminal=%t submitted_again=%t", UpgradeErrorCPADestinationRequestChanged, record.Attempt, record.TerminalFailure, runtime.stageCall != first)
 }
 
-// TestImportCPARefusesARetryAfterTheSupervisorRestarts is the restart half of the
-// same finding. A Supervisor restart publishes a new generation, so the recorded
-// attempt's generation is no longer the authority the journal validates against.
-// The retry is refused as a changed request before the attempt moves; it is never
-// submitted under an authority that would answer "stale runtime generation".
-func TestImportCPARefusesARetryAfterTheSupervisorRestarts(t *testing.T) {
-	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "")
-	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
-	runtime.staged = destination
-	runtime.failStart = true
-	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
-	if _, err := ImportCPA(context.Background(), options); err == nil {
-		t.Fatal("the first run should have recorded a terminal destination failure")
-	}
-	first := runtime.stageCall
-	runtime.mu.Lock()
-	runtime.failStart = false
-	runtime.mu.Unlock()
-	runtime.restart()
-	_, err := ImportCPA(context.Background(), options)
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
-		t.Fatalf("a retry after a Supervisor restart produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
-	}
-	if !strings.Contains(err.Error(), "Supervisor restarted") {
-		t.Fatalf("the refusal does not state that the Supervisor restarted: %v", err)
-	}
-	if runtime.stageCall != first {
-		t.Fatal("a retry after a restart submitted a second destination request")
-	}
-	paths := newTargetPaths(fixture.targetRoot)
-	record, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
-	if err != nil || !found {
-		t.Fatalf("the recorded attempt could not be read (found %t): %v", found, err)
-	}
-	if record.Attempt != 1 || !record.TerminalFailure {
-		t.Fatalf("the restart refusal changed the attempt: %+v", record)
-	}
-	t.Logf("P-H2-restart error_code=%s attempt=%d submitted_again=%t", UpgradeErrorCPADestinationRequestChanged, record.Attempt, runtime.stageCall != first)
+func TestImportCPARecoversOfflineRetryAfterTheSupervisorRestarts(t *testing.T) {
+	t.Run("start failed before restart", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.failStart = true
+		options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+		if _, err := ImportCPA(context.Background(), options); err == nil {
+			t.Fatal("the first run should have recorded a terminal destination start failure")
+		}
+		first := runtime.stageCall
+		if first == nil {
+			t.Fatal("the first run did not stage the destination")
+		}
+		runtime.mu.Lock()
+		runtime.failStart = false
+		runtime.mu.Unlock()
+		runtime.restart()
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("offline retry after Supervisor restart failed: %v", err)
+		}
+		if runtime.stageCall != first {
+			t.Fatal("cross-generation offline retry after staged destination submitted a second stage request")
+		}
+		if runtime.startCall == nil || runtime.startCall.ExpectedRuntimeGeneration != 5 {
+			t.Fatalf("startCall = %+v, want ExpectedRuntimeGeneration=5", runtime.startCall)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+	})
+
+	t.Run("stage failed before restart", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.failStage = true
+		options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+		if _, err := ImportCPA(context.Background(), options); err == nil {
+			t.Fatal("the first run should have failed StageDestination")
+		}
+		runtime.mu.Lock()
+		runtime.failStage = false
+		runtime.mu.Unlock()
+		runtime.restart()
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("offline retry after StageDestination failure and Supervisor restart failed: %v", err)
+		}
+		if runtime.stageCall == nil || runtime.stageCall.ExpectedRuntimeGeneration != 5 {
+			t.Fatalf("stageCall = %+v, want ExpectedRuntimeGeneration=5", runtime.stageCall)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+	})
+
+	t.Run("different runtime identity across restart still refuses", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+		runtime.staged = destination
+		runtime.failStart = true
+		options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+		if _, err := ImportCPA(context.Background(), options); err == nil {
+			t.Fatal("the first run should have failed Start")
+		}
+		runtime.mu.Lock()
+		runtime.failStart = false
+		runtime.identity = "runtime-identity-other"
+		runtime.mu.Unlock()
+		runtime.restart()
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+			t.Fatalf("different RuntimeIdentity across restart = %v (code=%q/%t), want %s",
+				err, code, ok, UpgradeErrorCPADestinationRequestChanged)
+		}
+	})
 }
 
 // TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts is the recovery
@@ -598,15 +643,25 @@ func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 		t.Fatalf("the refused run left the attempt proved or terminal: %+v", attempt)
 	}
 
-	// The Supervisor no longer reports the destination as ready, so the next run
-	// resumes the recorded attempt through the replay arm instead of proving a ready
-	// destination.
+	// When the same Runtime is confirmed offline after a journalled start, retry
+	// replays StageDestination under the recorded attempt ID and submits a fresh
+	// Start operation ID (:start:2) so the offline child is respawned cleanly.
 	runtime.mu.Lock()
 	runtime.state = model.RuntimeStateOffline
+	runtime.startingPollsBeforeReady = 2
 	runtime.mu.Unlock()
+	stageBefore, startBefore := runtime.callCounts()
 	result, err := ImportCPA(ctx, importOptions(fixture, runtime, staged.url(), boolPointer(true)))
 	if err != nil {
-		t.Fatalf("the replay with the staged destination's URL was refused: %v", err)
+		t.Fatalf("the confirmed-offline retry with the staged destination's URL was refused: %v", err)
+	}
+	stageAfter, startAfter := runtime.callCounts()
+	if stageAfter != stageBefore+1 || startAfter != startBefore+1 {
+		t.Fatalf("confirmed-offline retry submissions = stage %d->%d start %d->%d, want +1/+1",
+			stageBefore, stageAfter, startBefore, startAfter)
+	}
+	if runtime.startCall == nil || runtime.startCall.OperationID != attempt.OperationID+":start:2" {
+		t.Fatalf("confirmed-offline retry startCall = %+v, want %q", runtime.startCall, attempt.OperationID+":start:2")
 	}
 	if result.Stage != model.UpgradeStageCPAImport {
 		t.Fatalf("the replay recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
@@ -621,15 +676,13 @@ func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 	if keptKey != recordedKey {
 		t.Fatal("the replay replaced the secret the destination was staged with")
 	}
+	if gotState := runtime.currentState(); gotState != model.RuntimeStateReady {
+		t.Fatalf("runtime state after replay readiness = %q, want %q", gotState, model.RuntimeStateReady)
+	}
 
 	// The replay recorded the copy, so a later run is a replay and a swapped URL
 	// is refused before that address is contacted; the attempt that proved a URL is
-	// still bound to it once the recorded copy is removed. The replay reads the
-	// Supervisor first and requires it to be ready, so the state the finished step
-	// leaves is restored here.
-	runtime.mu.Lock()
-	runtime.state = model.RuntimeStateReady
-	runtime.mu.Unlock()
+	// still bound to it once the recorded copy is removed.
 	other := newFakeDestinationCPA(t, "")
 	_, err = ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
@@ -1002,4 +1055,745 @@ func TestCPASourceKeepsCodexHeaderDefaultsAsAStatedGap(t *testing.T) {
 		return
 	}
 	t.Fatalf("codex header defaults were dropped; manual items = %+v", source.manual)
+}
+
+func TestImportCPAReplayRestartsOfflineManagedRuntime(t *testing.T) {
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+
+	first, err := ImportCPA(context.Background(), options)
+	if err != nil {
+		t.Fatalf("initial ImportCPA: %v", err)
+	}
+	if first.AlreadyComplete || !slices.Contains(first.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("unexpected initial result: %+v", first)
+	}
+
+	// Simulate Supervisor restart leaving the staged Managed CPA offline.
+	runtime.mu.Lock()
+	runtime.state = model.RuntimeStateOffline
+	runtime.mu.Unlock()
+	runtime.restart()
+
+	replayed, err := ImportCPA(context.Background(), options)
+	if err != nil {
+		t.Fatalf("replay ImportCPA while runtime offline failed: %v", err)
+	}
+	if !replayed.AlreadyComplete {
+		t.Fatalf("expected AlreadyComplete=true on replay, got %+v", replayed)
+	}
+	status, err := runtime.Status(context.Background())
+	if err != nil || status.State != model.RuntimeStateReady {
+		t.Fatalf("runtime status after offline replay = %+v, err=%v, want ready", status, err)
+	}
+	if runtime.startCall == nil || runtime.startCall.ExpectedRuntimeGeneration != status.Generation {
+		t.Fatalf("startCall = %+v, want ExpectedRuntimeGeneration=%d", runtime.startCall, status.Generation)
+	}
+}
+
+func TestCPASourceAndPreflightRefuseSymbolicLinks(t *testing.T) {
+	outsideDir := t.TempDir()
+	outsideConfig := filepath.Join(outsideDir, "config.yaml")
+	if err := os.WriteFile(outsideConfig, []byte(v8FixtureConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideAuthDir := filepath.Join(outsideDir, "auths")
+	if err := os.MkdirAll(outsideAuthDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideAuthDir, "outside.json"), []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("symlinked sibling legacy-cpa directory", func(t *testing.T) {
+		parent := t.TempDir()
+		src := newSourceFixture(t, nil)
+		legacyRoot := filepath.Join(parent, "data")
+		if err := os.Rename(src.root, legacyRoot); err != nil {
+			t.Skipf("rename temp dir unsupported: %v", err)
+		}
+		siblingLink := filepath.Join(parent, "legacy-cpa")
+		if err := os.Symlink(outsideDir, siblingLink); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+
+		report, pfErr := Preflight(context.Background(), Options{LegacyRoot: legacyRoot})
+		if pfErr != nil {
+			t.Fatalf("Preflight error: %v", pfErr)
+		}
+		if report.Ready || !slices.Contains(report.Blocked, CodeSourceSymlinked) {
+			t.Fatalf("Preflight with symlinked ../legacy-cpa ready=%t blocked=%v, want %s",
+				report.Ready, report.Blocked, CodeSourceSymlinked)
+		}
+
+		_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceMissing || !errors.Is(err, ErrSourceSymlinked) {
+			t.Fatalf("openManagedCPASource with symlinked ../legacy-cpa = %v (code=%q/%t), want %s wrapping ErrSourceSymlinked",
+				err, code, ok, UpgradeErrorCPASourceMissing)
+		}
+	})
+
+	t.Run("symlinked config.yaml", func(t *testing.T) {
+		parent := t.TempDir()
+		src := newSourceFixture(t, nil)
+		legacyRoot := filepath.Join(parent, "data")
+		if err := os.Rename(src.root, legacyRoot); err != nil {
+			t.Skipf("rename temp dir unsupported: %v", err)
+		}
+		cpaDir := filepath.Join(parent, "legacy-cpa")
+		if err := os.MkdirAll(cpaDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideConfig, filepath.Join(cpaDir, "config.yaml")); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+
+		report, pfErr := Preflight(context.Background(), Options{LegacyRoot: legacyRoot})
+		if pfErr != nil {
+			t.Fatalf("Preflight error: %v", pfErr)
+		}
+		if report.Ready || !slices.Contains(report.Blocked, CodeSourceSymlinked) {
+			t.Fatalf("Preflight with symlinked config.yaml ready=%t blocked=%v, want %s",
+				report.Ready, report.Blocked, CodeSourceSymlinked)
+		}
+
+		_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceMissing || !errors.Is(err, ErrSourceSymlinked) {
+			t.Fatalf("openManagedCPASource with symlinked config.yaml = %v (code=%q/%t), want %s wrapping ErrSourceSymlinked",
+				err, code, ok, UpgradeErrorCPASourceMissing)
+		}
+	})
+
+	t.Run("symlinked explicit CPAAuthDirectory", func(t *testing.T) {
+		legacyRoot, _ := writeCPAFixture(t, v8FixtureConfig, nil)
+		authLink := filepath.Join(t.TempDir(), "auth-link")
+		if err := os.Symlink(outsideAuthDir, authLink); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+		_, err := openManagedCPASource(cpaSourceOptions{
+			LegacyRoot:       legacyRoot,
+			CPAAuthDirectory: authLink,
+			CPAVersion:       "8.0.55",
+		})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceMissing || !errors.Is(err, ErrSourceSymlinked) {
+			t.Fatalf("openManagedCPASource with symlinked CPAAuthDirectory = %v (code=%q/%t), want %s wrapping ErrSourceSymlinked",
+				err, code, ok, UpgradeErrorCPASourceMissing)
+		}
+	})
+
+	t.Run("symlinked cpaDir auths directory", func(t *testing.T) {
+		legacyRoot, cpaDir := writeCPAFixture(t, v8FixtureConfig, nil)
+		authsPath := filepath.Join(cpaDir, "auths")
+		_ = os.RemoveAll(authsPath)
+		if err := os.Symlink(outsideAuthDir, authsPath); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+		_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceMissing || !errors.Is(err, ErrSourceSymlinked) {
+			t.Fatalf("openManagedCPASource with symlinked auths = %v (code=%q/%t), want %s wrapping ErrSourceSymlinked",
+				err, code, ok, UpgradeErrorCPASourceMissing)
+		}
+	})
+
+	t.Run("symlinked relative configuredAuthDir segment inside cpaDir is rejected", func(t *testing.T) {
+		cfg := "config-version: 8\noauth:\n  auth-dir: nested/linked\naccess:\n  api-keys:\n    - \"legacy-client-key-1\"\n"
+		legacyRoot, cpaDir := writeCPAFixture(t, cfg, map[string]string{"fallback.json": `{"type":"codex"}`})
+		inTreeTarget := filepath.Join(cpaDir, "hidden-target")
+		if err := os.MkdirAll(inTreeTarget, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(inTreeTarget, "linked-cred.json"), []byte(`{"type":"codex"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		nestedDir := filepath.Join(cpaDir, "nested")
+		if err := os.MkdirAll(nestedDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(inTreeTarget, filepath.Join(nestedDir, "linked")); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+		src, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+		if err != nil {
+			t.Fatalf("openManagedCPASource: %v", err)
+		}
+		if _, ok := src.credentialData["linked-cred.json"]; ok {
+			t.Fatal("configuredAuthDir followed an internal symlink segment")
+		}
+	})
+}
+
+// crossGenStageRuntime mirrors the pinned runtime-supervisor lifecycle.Executor
+// destination & requireStagedDestination contract verbatim while allowing tests
+// to interrupt StageDestination or Start before or after reaching the Supervisor.
+type crossGenStageRuntime struct {
+	*fakeImportRuntime
+	failAfterStagePersist     bool
+	failBeforeSupervisor      bool
+	failStartBeforeSupervisor bool
+}
+
+func (r *crossGenStageRuntime) StageDestination(ctx context.Context, request model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
+	r.mu.Lock()
+	if r.failBeforeSupervisor {
+		r.mu.Unlock()
+		return model.RuntimeOperationResult{}, errors.New("transient transport failure before reaching supervisor")
+	}
+	r.mu.Unlock()
+	result, err := r.fakeImportRuntime.StageDestination(ctx, request)
+	if err != nil {
+		return result, err
+	}
+	r.mu.Lock()
+	interrupt := r.failAfterStagePersist
+	r.mu.Unlock()
+	if interrupt {
+		return model.RuntimeOperationResult{}, errors.New("interrupted after stage.json persisted before StartDispatched")
+	}
+	return result, nil
+}
+
+func (r *crossGenStageRuntime) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	r.mu.Lock()
+	if r.failStartBeforeSupervisor {
+		r.mu.Unlock()
+		return model.RuntimeOperationResult{}, errors.New("transient transport failure before Start reached supervisor")
+	}
+	if r.published != nil {
+		stage, ok := r.journal[r.published.OperationID]
+		if !ok || stage.OperationType != model.RuntimeOperationStageDestination || stage.State != model.RuntimeOperationSucceeded {
+			r.mu.Unlock()
+			return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{Code: runtimeservice.ProtocolErrorOperationStateConflict, HTTPStatus: 409}
+		}
+	}
+	r.mu.Unlock()
+	return r.fakeImportRuntime.Start(ctx, request)
+}
+
+func TestImportCPARecoversCrossGenerationAfterStagePersistedBeforeStartDispatched(t *testing.T) {
+	t.Run("stage succeeded on generation G before StartDispatched then Supervisor restarted to G+1", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		rt := &crossGenStageRuntime{
+			fakeImportRuntime:     newFakeImportRuntime(model.RuntimeStateOffline),
+			failAfterStagePersist: true,
+		}
+		rt.staged = destination
+		options := importOptions(fixture, rt, destination.url(), boolPointer(true))
+
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("interrupted initial run = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		if rt.published == nil || rt.published.ExpectedRuntimeGeneration != 4 {
+			t.Fatalf("expected generation-4 stage.json persisted on Supervisor, got %+v", rt.published)
+		}
+		firstPublished := *rt.published
+		paths := newTargetPaths(fixture.targetRoot)
+		record, firstKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found {
+			t.Fatalf("loadCPAImportDestinationRecord: found=%t err=%v", found, err)
+		}
+		if record.Attempt != 1 || record.StartDispatched || record.Intent.ExpectedRuntimeGeneration != 4 || firstKey != firstPublished.ManagementKey {
+			t.Fatalf("recorded attempt after interrupted stage = %+v, want Attempt=1 StartDispatched=false Gen=4", record)
+		}
+
+		rt.mu.Lock()
+		rt.failAfterStagePersist = false
+		rt.mu.Unlock()
+		rt.restart()
+
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("cross-generation retry after persisted stage.json failed: %v", err)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		if rt.startCall == nil || rt.startCall.OperationID != record.OperationID+":start" || rt.startCall.ExpectedRuntimeGeneration != 5 {
+			t.Fatalf("startCall = %+v, want %q on generation 5", rt.startCall, record.OperationID+":start")
+		}
+		afterRecord, afterKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || afterRecord.Attempt != 1 || !afterRecord.StartDispatched || afterRecord.StartAttempt != 1 || afterKey != firstKey {
+			t.Fatalf("final record = %+v (found=%t err=%v), want Attempt=1 StartAttempt=1 StartDispatched=true same key", afterRecord, found, err)
+		}
+	})
+
+	t.Run("transient StageDestination failure on G+1 before reaching Supervisor retries cleanly on G+1", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		rt := &crossGenStageRuntime{
+			fakeImportRuntime:     newFakeImportRuntime(model.RuntimeStateOffline),
+			failAfterStagePersist: true,
+		}
+		rt.staged = destination
+		options := importOptions(fixture, rt, destination.url(), boolPointer(true))
+
+		if _, err := ImportCPA(context.Background(), options); err == nil {
+			t.Fatal("expected initial run to fail after persisting generation-4 stage.json")
+		}
+		paths := newTargetPaths(fixture.targetRoot)
+		initialRecord, firstKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || initialRecord.Attempt != 1 || initialRecord.StartDispatched {
+			t.Fatalf("initial record = %+v (found=%t err=%v)", initialRecord, found, err)
+		}
+
+		rt.mu.Lock()
+		rt.failAfterStagePersist = false
+		rt.failBeforeSupervisor = true
+		rt.mu.Unlock()
+		rt.restart()
+
+		_, err = ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("transient G+1 failure = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		midRecord, midKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || midRecord.Attempt != 1 || midRecord.OperationID != initialRecord.OperationID || midRecord.StartDispatched || midKey != firstKey {
+			t.Fatalf("mid record = %+v, want unchanged Attempt=1 op=%q StartDispatched=false", midRecord, initialRecord.OperationID)
+		}
+
+		rt.mu.Lock()
+		rt.failBeforeSupervisor = false
+		rt.mu.Unlock()
+
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("second retry on generation 5 failed: %v", err)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		finalRecord, finalKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || finalRecord.Attempt != 1 || !finalRecord.StartDispatched || finalKey != firstKey {
+			t.Fatalf("final record = %+v (found=%t err=%v), want Attempt=1 StartDispatched=true", finalRecord, found, err)
+		}
+	})
+}
+
+func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing.T) {
+	t.Run("cross-generation Start leaves child Starting on G+1 and retry replays start:2 to completion", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		rt := &crossGenStageRuntime{
+			fakeImportRuntime: newFakeImportRuntime(model.RuntimeStateOffline),
+		}
+		rt.staged = destination
+		rt.stayStartingForever = true
+		plugins := false
+		options := importOptions(fixture, rt, destination.server.URL, &plugins)
+		paths := newTargetPaths(fixture.targetRoot)
+
+		// Generation 4: StageDestination + initial :start succeed, child stays in
+		// Starting until caller deadline expires.
+		gen4Ctx, gen4Cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer gen4Cancel()
+		_, err := ImportCPA(gen4Ctx, options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("gen 4 initial start timeout = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		recAfterGen4, firstKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || recAfterGen4.Attempt != 1 || recAfterGen4.StartAttempt != 1 ||
+			recAfterGen4.StartRuntimeGeneration != 4 {
+			t.Fatalf("record after gen 4 = %+v (found=%t err=%v), want Attempt=1 StartAttempt=1 StartRuntimeGeneration=4",
+				recAfterGen4, found, err)
+		}
+
+		// Supervisor restarts to Generation 5 with child Offline.
+		rt.mu.Lock()
+		rt.state = model.RuntimeStateOffline
+		rt.mu.Unlock()
+		rt.restart()
+
+		// First retry on Generation 5 mints :start:2, spawns the child into
+		// RuntimeStateStarting, and times out before ready.
+		gen5FirstCtx, gen5FirstCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer gen5FirstCancel()
+		_, err = ImportCPA(gen5FirstCtx, options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("gen 5 first retry timeout = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		if gotState := rt.currentState(); gotState != model.RuntimeStateStarting {
+			t.Fatalf("runtime state after gen 5 first retry = %q, want %q", gotState, model.RuntimeStateStarting)
+		}
+		stageCallsMid, startCallsMid := rt.callCounts()
+		if stageCallsMid != 1 || startCallsMid != 2 {
+			t.Fatalf("mid callCounts = (stage=%d, start=%d), want (stage=1, start=2)", stageCallsMid, startCallsMid)
+		}
+		recMidGen5, midKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || recMidGen5.Attempt != 1 || recMidGen5.StartAttempt != 2 ||
+			recMidGen5.StartRuntimeGeneration != 5 || midKey != firstKey {
+			t.Fatalf("record mid gen 5 = %+v (found=%t err=%v), want Attempt=1 StartAttempt=2 StartRuntimeGeneration=5",
+				recMidGen5, found, err)
+		}
+
+		// Second retry on Generation 5 while child is STILL in RuntimeStateStarting
+		// must NOT fail with destination_request_changed, must NOT call
+		// StageDestination, and must replay :start:2 without minting :start:3.
+		rt.mu.Lock()
+		rt.stayStartingForever = false
+		rt.startingPollsBeforeReady = 1
+		rt.mu.Unlock()
+
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("gen 5 second retry while Starting failed: %v", err)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		stageCallsFinal, startCallsFinal := rt.callCounts()
+		if stageCallsFinal != 1 || startCallsFinal != 3 {
+			t.Fatalf("final callCounts = (stage=%d, start=%d), want (stage=1, start=3)", stageCallsFinal, startCallsFinal)
+		}
+		wantStart2 := recAfterGen4.OperationID + ":start:2"
+		if rt.startCall == nil || rt.startCall.OperationID != wantStart2 {
+			t.Fatalf("last Start call = %+v, want OperationID=%q", rt.startCall, wantStart2)
+		}
+		recFinal, finalKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || recFinal.Attempt != 1 || recFinal.StartAttempt != 2 ||
+			recFinal.StartRuntimeGeneration != 5 || finalKey != firstKey {
+			t.Fatalf("final record = %+v (found=%t err=%v), want Attempt=1 StartAttempt=2 StartRuntimeGeneration=5",
+				recFinal, found, err)
+		}
+	})
+
+	t.Run("unowned Starting process on a newer generation G+2 fails closed", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		rt := &crossGenStageRuntime{
+			fakeImportRuntime: newFakeImportRuntime(model.RuntimeStateOffline),
+		}
+		rt.staged = destination
+		rt.stayStartingForever = true
+		plugins := false
+		options := importOptions(fixture, rt, destination.server.URL, &plugins)
+
+		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		_, _ = ImportCPA(shortCtx, options)
+
+		// Restart to generation 5 in Starting without ImportCPA ever dispatching a
+		// start on generation 5 (StartRuntimeGeneration is still 4).
+		rt.restart()
+		rt.mu.Lock()
+		rt.state = model.RuntimeStateStarting
+		rt.mu.Unlock()
+
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+			t.Fatalf("unowned Starting on G+1 = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationRequestChanged)
+		}
+	})
+
+	t.Run("transport error before Supervisor on cross-generation start:2 replays start:2 without minting start:3", func(t *testing.T) {
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		rt := &crossGenStageRuntime{
+			fakeImportRuntime: newFakeImportRuntime(model.RuntimeStateOffline),
+		}
+		rt.staged = destination
+		rt.stayStartingForever = true
+		plugins := false
+		options := importOptions(fixture, rt, destination.server.URL, &plugins)
+		paths := newTargetPaths(fixture.targetRoot)
+
+		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		_, _ = ImportCPA(shortCtx, options)
+
+		rt.mu.Lock()
+		rt.state = model.RuntimeStateOffline
+		rt.stayStartingForever = false
+		rt.failStartBeforeSupervisor = true
+		rt.mu.Unlock()
+		rt.restart()
+
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("transport failure on cross-gen start:2 = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+
+		rt.mu.Lock()
+		rt.failStartBeforeSupervisor = false
+		rt.mu.Unlock()
+
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("replay of cross-gen start:2 failed: %v", err)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		recFinal, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found || recFinal.Attempt != 1 || recFinal.StartAttempt != 2 || recFinal.StartRuntimeGeneration != 5 {
+			t.Fatalf("final record = %+v (found=%t err=%v), want Attempt=1 StartAttempt=2 StartRuntimeGeneration=5",
+				recFinal, found, err)
+		}
+	})
+}
+
+// r5CrossGenRuntime wraps crossGenStageRuntime so tests can drive exact
+// cross-generation Supervisor responses:
+//   - Gen 4 persistence followed by transport loss -> Gen 5 operation_id_conflict
+//     from StageDestination -> Start -> Starting timeout -> Gen 6 offline retry
+//   - Gen 4 failed stage.json -> Gen 5 Start operation_state_conflict -> pinned
+//     supersede rejection vs mock attempt:2 supersede completion
+type r5CrossGenRuntime struct {
+	*crossGenStageRuntime
+	injectIDConflictOnGen     model.RuntimeGeneration
+	allowCrossGenSupersedeApp bool
+	allStartAttempts          int
+}
+
+func (r *r5CrossGenRuntime) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	r.mu.Lock()
+	r.allStartAttempts++
+	r.mu.Unlock()
+	return r.crossGenStageRuntime.Start(ctx, request)
+}
+
+func (r *r5CrossGenRuntime) StageDestination(ctx context.Context, request model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
+	r.mu.Lock()
+	gen := r.generation
+	shouldConflict := r.injectIDConflictOnGen != 0 && gen == r.injectIDConflictOnGen && request.OperationID == cpaImportDestinationOperationID(request.SourceIdentity, 1)
+	allowSupersede := r.allowCrossGenSupersedeApp && strings.HasSuffix(request.OperationID, ":attempt:2")
+	r.mu.Unlock()
+
+	if shouldConflict {
+		r.mu.Lock()
+		r.stageCalls++
+		r.stageCall = &request
+		r.mu.Unlock()
+		return model.RuntimeOperationResult{}, &runtimeservice.ProtocolError{
+			Code:       runtimeservice.ProtocolErrorOperationIDConflict,
+			HTTPStatus: 409,
+		}
+	}
+	if allowSupersede {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.stageCalls++
+		r.stageCall = &request
+		if err := r.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
+			return model.RuntimeOperationResult{}, err
+		}
+		if r.staged != nil {
+			r.staged.mu.Lock()
+			r.staged.management = request.ManagementKey
+			r.staged.clientKeys = slices.Clone(request.APIKeys)
+			r.staged.mu.Unlock()
+		}
+		res := model.RuntimeOperationResult{
+			OperationID:       request.OperationID,
+			OperationType:     model.RuntimeOperationStageDestination,
+			RuntimeIdentity:   request.ExpectedRuntimeIdentity,
+			RuntimeGeneration: request.ExpectedRuntimeGeneration,
+			State:             model.RuntimeOperationSucceeded,
+		}
+		r.published = &request
+		r.submitted[request.OperationID] = request
+		r.journal[request.OperationID] = res
+		return res, nil
+	}
+	return r.crossGenStageRuntime.StageDestination(ctx, request)
+}
+
+func TestImportCPARecoversCrossGenerationIDConflictStartTimeoutToCompletion(t *testing.T) {
+	fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	base := &crossGenStageRuntime{
+		fakeImportRuntime:     newFakeImportRuntime(model.RuntimeStateOffline),
+		failAfterStagePersist: true,
+	}
+	base.staged = destination
+	rt := &r5CrossGenRuntime{
+		crossGenStageRuntime:  base,
+		injectIDConflictOnGen: 5,
+	}
+	plugins := false
+	options := importOptions(fixture, rt, destination.server.URL, &plugins)
+	paths := newTargetPaths(fixture.targetRoot)
+
+	// Gen 4: StageDestination persists stage.json (Succeeded) on the Supervisor,
+	// then drops the reply before Manager records StartDispatched.
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+		t.Fatalf("gen 4 stage drop = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+	}
+	recAfterGen4, firstKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found || recAfterGen4.Attempt != 1 || recAfterGen4.StartDispatched {
+		t.Fatalf("record after gen 4 = %+v (found=%t err=%v), want Attempt=1 StartDispatched=false", recAfterGen4, found, err)
+	}
+	if _, ok := rt.journal[recAfterGen4.OperationID]; !ok {
+		// Ensure the simulated Supervisor journal holds the persisted succeeded stage from Gen 4.
+		req := model.RuntimeDestinationRequest{
+			OperationID:               recAfterGen4.OperationID,
+			ExpectedRuntimeIdentity:   rt.identity,
+			ExpectedRuntimeGeneration: 4,
+			ExpectedActiveArtifactID:  rt.artifact,
+			SourceIdentity:            recAfterGen4.Intent.SourceIdentity,
+			SourceClass:               managedDestinationSourceClass,
+			APIKeys:                   slices.Clone(recAfterGen4.Intent.APIKeys),
+			PluginsEnabled:            plugins,
+			ManagementKey:             firstKey,
+		}
+		rt.mu.Lock()
+		rt.published = &req
+		rt.submitted[req.OperationID] = req
+		rt.journal[req.OperationID] = model.RuntimeOperationResult{
+			OperationID:       req.OperationID,
+			OperationType:     model.RuntimeOperationStageDestination,
+			RuntimeIdentity:   rt.identity,
+			RuntimeGeneration: 4,
+			State:             model.RuntimeOperationSucceeded,
+		}
+		rt.mu.Unlock()
+	}
+
+	// Restart Supervisor to Gen 5: probe sees operation_id_conflict -> dispatches
+	// Start -> child remains Starting past the deadline.
+	rt.mu.Lock()
+	rt.failAfterStagePersist = false
+	if rt.generation == 4 {
+		rt.generation = 5
+	}
+	rt.stayStartingForever = true
+	rt.state = model.RuntimeStateOffline
+	rt.mu.Unlock()
+
+	gen5Ctx, gen5Cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer gen5Cancel()
+	_, err = ImportCPA(gen5Ctx, options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+		t.Fatalf("gen 5 id-conflict start timeout = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+	}
+	recAfterGen5, keyAfterGen5, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found || recAfterGen5.Attempt != 1 || recAfterGen5.StartAttempt != 1 || !recAfterGen5.StartDispatched || keyAfterGen5 != firstKey {
+		t.Fatalf("record after gen 5 = %+v (found=%t err=%v), want Attempt=1 StartAttempt=1 StartDispatched=true", recAfterGen5, found, err)
+	}
+	stageCallsGen5, startCallsGen5 := rt.callCounts()
+
+	// Restart Supervisor to Gen 6 (G_2) with offline child: retry must skip
+	// StageDestination completely, increment StartAttempt to 2, and succeed.
+	rt.mu.Lock()
+	rt.stayStartingForever = false
+	rt.startingPollsBeforeReady = 1
+	rt.generation = 6
+	rt.state = model.RuntimeStateOffline
+	rt.mu.Unlock()
+
+	result, err := ImportCPA(context.Background(), options)
+	if err != nil {
+		t.Fatalf("gen 6 retry after id-conflict Start timeout failed: %v", err)
+	}
+	if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+	}
+	stageCallsGen6, startCallsGen6 := rt.callCounts()
+	if stageCallsGen6 != stageCallsGen5 {
+		t.Fatalf("gen 6 called StageDestination (%d -> %d), want zero extra StageDestination calls", stageCallsGen5, stageCallsGen6)
+	}
+	if startCallsGen6 <= startCallsGen5 {
+		t.Fatalf("gen 6 did not dispatch Start (%d -> %d)", startCallsGen5, startCallsGen6)
+	}
+	finalRec, finalKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found || finalRec.Attempt != 1 || finalRec.StartAttempt != 2 || !finalRec.StartDispatched || finalKey != firstKey {
+		t.Fatalf("final record = %+v (found=%t err=%v), want Attempt=1 StartAttempt=2 StartDispatched=true", finalRec, found, err)
+	}
+}
+
+func TestImportCPACrossGenerationFailedStageStateConflictHandling(t *testing.T) {
+	setupFailedGen4 := func(t *testing.T, allowSupersede bool) (importFixture, *fakeDestinationCPA, *r5CrossGenRuntime, CPAImportOptions, string) {
+		t.Helper()
+		fixture := newImportFixture(t, v8FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+		destination := newFakeDestinationCPA(t, "")
+		base := &crossGenStageRuntime{
+			fakeImportRuntime:     newFakeImportRuntime(model.RuntimeStateOffline),
+			failAfterStagePersist: true,
+		}
+		base.staged = destination
+		rt := &r5CrossGenRuntime{
+			crossGenStageRuntime:      base,
+			injectIDConflictOnGen:     5,
+			allowCrossGenSupersedeApp: allowSupersede,
+		}
+		plugins := false
+		options := importOptions(fixture, rt, destination.server.URL, &plugins)
+		if _, err := ImportCPA(context.Background(), options); err == nil {
+			t.Fatal("expected gen 4 injected drop to fail")
+		}
+		paths := newTargetPaths(fixture.targetRoot)
+		rec, key, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found {
+			t.Fatalf("load gen 4 record: found=%t err=%v", found, err)
+		}
+		// Simulate Gen 4 stage.json persisted while its journal entry holds StateFailed
+		// on the Supervisor before restart to Gen 5.
+		rt.mu.Lock()
+		rt.failAfterStagePersist = false
+		rt.journal[rec.OperationID] = model.RuntimeOperationResult{
+			OperationID:       rec.OperationID,
+			OperationType:     model.RuntimeOperationStageDestination,
+			RuntimeIdentity:   rt.identity,
+			RuntimeGeneration: 4,
+			State:             model.RuntimeOperationFailed,
+			Failure:           &model.RuntimeOperationFailure{Code: "stage_failed"},
+		}
+		rt.generation = 5
+		rt.state = model.RuntimeStateOffline
+		rt.mu.Unlock()
+		return fixture, destination, rt, options, key
+	}
+
+	t.Run("pinned crossGenStageRuntime restores previousRecord StartDispatched=false after operation_state_conflict", func(t *testing.T) {
+		fixture, _, rt, options, firstKey := setupFailedGen4(t, false)
+		paths := newTargetPaths(fixture.targetRoot)
+
+		_, err := ImportCPA(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+			t.Fatalf("pinned cross-gen failed stage retry = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorCPADestinationUnready)
+		}
+		rt.mu.Lock()
+		allStarts := rt.allStartAttempts
+		rt.mu.Unlock()
+		if allStarts == 0 {
+			t.Fatal("expected probe Start attempt before operation_state_conflict fallback")
+		}
+		recAfter, keyAfter, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found {
+			t.Fatalf("load record after rollback restore: found=%t err=%v", found, err)
+		}
+		if recAfter.Attempt != 1 || recAfter.StartDispatched || keyAfter != firstKey {
+			t.Fatalf("restored record = %+v, want Attempt=1 StartDispatched=false preserving initial secret", recAfter)
+		}
+	})
+
+	t.Run("mock runtime supporting cross-gen supersede succeeds on attempt:2 with same secret", func(t *testing.T) {
+		fixture, _, rt, options, firstKey := setupFailedGen4(t, true)
+		paths := newTargetPaths(fixture.targetRoot)
+
+		result, err := ImportCPA(context.Background(), options)
+		if err != nil {
+			t.Fatalf("cross-gen supersede attempt:2 failed: %v", err)
+		}
+		if !slices.Contains(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+			t.Fatalf("DomainsDone = %v, want %s", result.DomainsDone, model.UpgradeDomainCPAConfig)
+		}
+		recAfter, keyAfter, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+		if err != nil || !found {
+			t.Fatalf("load record after supersede completion: found=%t err=%v", found, err)
+		}
+		if recAfter.Attempt != 2 || !strings.HasSuffix(recAfter.OperationID, ":attempt:2") || keyAfter != firstKey {
+			t.Fatalf("record = %+v (key match=%t), want Attempt=2 with preserved secret", recAfter, keyAfter == firstKey)
+		}
+		rt.mu.Lock()
+		allStarts := rt.allStartAttempts
+		rt.mu.Unlock()
+		if allStarts < 2 {
+			t.Fatalf("allStartAttempts = %d, want >= 2 (rejected start + attempt:2 start)", allStarts)
+		}
+	})
 }

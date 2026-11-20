@@ -212,6 +212,13 @@ var exitCodeContract = []struct {
 }{
 	// A decision the operator has to look at: exit 1 on every subcommand.
 	{name: "source busy", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy), want: 1},
+	{name: "source symlinked", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceSymlinked), want: 1},
+	{name: "source unreadable", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceUnreadable), want: 1},
+	{name: "source missing", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceMissing), want: 1},
+	{name: "source version unsupported", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceVersionUnsupported), want: 1},
+	{name: "source lock unavailable", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceLockUnavailable), want: 1},
+	{name: "source already v2", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceAlreadyV2), want: 1},
+	{name: "source version undeclared", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceVersionUndeclared), want: 1},
 	{name: "v2 root running", code: upgradeservice.UpgradeErrorV2Running, want: 1},
 	{name: "target locked", code: upgradeservice.UpgradeErrorTargetLocked, want: 1},
 	{name: "reconcile mismatch", code: upgradeservice.UpgradeErrorReconcileMismatch, want: 1},
@@ -353,7 +360,7 @@ func copyReadySource(t *testing.T) string {
 		_ = db.Close()
 		t.Fatalf("disable fixture foreign keys: %v", err)
 	}
-	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade\_%`, `usage\_coverage\_incomplete\_days`} {
 		rows, err := conn.QueryContext(context.Background(),
 			`select name from sqlite_master where type = 'table' and name like ? escape '\'`, pattern)
 		if err != nil {
@@ -413,18 +420,94 @@ func copyReadySource(t *testing.T) string {
 	return root
 }
 
-func TestPreflightBlocksWithoutADeclaredSourceVersion(t *testing.T) {
+func TestPreflightQualifiesCompatibleSourceWithoutDeclaredVersionAndBlocksUnsupportedVersion(t *testing.T) {
 	root := readySource(t)
 	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--target-dir", t.TempDir(), "--json")
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
+	if code != 0 {
+		t.Fatalf("undeclared compatible exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	var report upgradeservice.Report
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
 		t.Fatalf("decode report: %v; output: %s", err, stdout)
 	}
-	if len(report.Blocked) != 1 || report.Blocked[0] != upgradeservice.CodeSourceVersionUndeclared {
-		t.Fatalf("blocked = %v, want [%s]", report.Blocked, upgradeservice.CodeSourceVersionUndeclared)
+	if !report.Ready || len(report.Blocked) != 0 {
+		t.Fatalf("ready = %t blocked = %v, want ready with no blockers", report.Ready, report.Blocked)
+	}
+	if report.SourceVersion != upgradeservice.VersionUnknown {
+		t.Fatalf("sourceVersion = %q, want %q", report.SourceVersion, upgradeservice.VersionUnknown)
+	}
+
+	code, stdout, stderr = run(t, "preflight", "--legacy", root, "--source-version", "v1.13.9", "--target-dir", t.TempDir(), "--json")
+	if code != 1 {
+		t.Fatalf("unsupported declared version exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	report = upgradeservice.Report{}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("decode unsupported report: %v; output: %s", err, stdout)
+	}
+	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != upgradeservice.CodeSourceVersionUnsupported {
+		t.Fatalf("ready = %t blocked = %v, want [%s]", report.Ready, report.Blocked, upgradeservice.CodeSourceVersionUnsupported)
+	}
+}
+
+func TestNextReconcileCommandOmitsEmptySourceVersionAndQuotesDeclaredVersion(t *testing.T) {
+	withoutVersion := nextReconcileCommand("/upgrade/source", "/data", "/upgrade/backup/bundle", "", true)
+	if strings.Contains(withoutVersion, "--source-version") {
+		t.Fatalf("empty declaredVersion leaked --source-version flag: %s", withoutVersion)
+	}
+	if !strings.Contains(withoutVersion, "--bundle") {
+		t.Fatalf("expected explicit --bundle in command: %s", withoutVersion)
+	}
+
+	withVersion := nextReconcileCommand("/upgrade/source", "/data", "/upgrade/backup/bundle", "v1.14.10", false)
+	if !strings.Contains(withVersion, "--source-version 'v1.14.10'") && !strings.Contains(withVersion, "--source-version v1.14.10") {
+		t.Fatalf("declaredVersion missing from command: %s", withVersion)
+	}
+}
+
+func TestWorkerCheckReportsIncompleteAndRefusesMissingOrUnverifiedComplete(t *testing.T) {
+	// 1. Fresh/empty target must exit non-zero and never emit {"required":false}.
+	emptyTarget := t.TempDir()
+	t.Setenv("USAGE_DATA_DIR", emptyTarget)
+	t.Setenv("USAGE_DB_PATH", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_FILE", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	code, stdout, _ := run(t, "worker", "--check")
+	if code == 0 || strings.TrimSpace(stdout) != "" {
+		t.Fatalf("empty target: code=%d stdout=%q, want non-zero with empty stdout", code, stdout)
+	}
+
+	// 2. Copied-in unfinished target emits strict {"required":true}.
+	source := copyReadySource(t)
+	copied := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	if runCode, _, stderr := run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", copied, "--bundle", bundle); runCode != 0 {
+		t.Fatalf("copy-in setup exit %d: %s", runCode, stderr)
+	}
+	t.Setenv("USAGE_DATA_DIR", copied)
+	code, stdout, stderr := run(t, "worker", "--check")
+	if code != 0 {
+		t.Fatalf("copied target check exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != `{"required":true}` {
+		t.Fatalf("copied target stdout = %q, want {\"required\":true}", stdout)
+	}
+
+	// 3. Unverified complete stage fails closed with non-zero exit.
+	db, err := sqliterepo.Open(filepath.Join(copied, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open copied db: %v", err)
+	}
+	if _, err := db.Exec(`update upgrade_operations set stage = ?`, string(model.UpgradeStageComplete)); err != nil {
+		_ = db.Close()
+		t.Fatalf("update stage: %v", err)
+	}
+	_ = db.Close()
+	code, stdout, _ = run(t, "worker", "--check")
+	if code == 0 || strings.TrimSpace(stdout) != "" {
+		t.Fatalf("unverified complete target: code=%d stdout=%q, want non-zero with empty stdout", code, stdout)
 	}
 }
 
@@ -878,7 +961,7 @@ func copyReadyRunSource(t *testing.T) string {
 		_ = db.Close()
 		t.Fatalf("disable fixture foreign keys: %v", err)
 	}
-	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade\_%`, `usage\_coverage\_incomplete\_days`} {
 		names, err := fixtureTableNames(conn, pattern)
 		if err != nil {
 			_ = conn.Close()
@@ -1684,5 +1767,275 @@ func TestRunTakesTheSourceFenceReadOnly(t *testing.T) {
 	}
 	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
 		t.Fatalf("the copy-in changed the source volume: %v -> %v", before, after)
+	}
+}
+
+func TestCommandReconcileDiskCheckAfterCopyIn(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	scratch := t.TempDir()
+
+	baseline, err := upgradeservice.Preflight(context.Background(), upgradeservice.Options{
+		LegacyRoot:      source,
+		DeclaredVersion: bootstrap.PlannedDirectRelease,
+		TargetDir:       target,
+		ScratchDir:      scratch,
+	})
+	if err != nil || !baseline.Ready {
+		t.Fatalf("baseline preflight err=%v ready=%t", err, baseline.Ready)
+	}
+	var srcBytes int64
+	for _, chk := range baseline.Checks {
+		if chk.Name == upgradeservice.CheckDisk {
+			if idx := strings.Index(chk.Detail, "sourceBytes="); idx >= 0 {
+				_, _ = fmt.Sscanf(chk.Detail[idx:], "sourceBytes=%d", &srcBytes)
+			}
+		}
+	}
+	if srcBytes <= 0 {
+		t.Fatalf("could not parse sourceBytes from %+v", baseline.Checks)
+	}
+
+	targetFree := srcBytes + srcBytes/2 // 1.5x before CopyIn
+	scratchFree := 4 * srcBytes
+	prevSeam := availableBytesForCLI
+	availableBytesForCLI = func(dir string) (int64, error) {
+		cleanDir, _ := filepath.EvalSymlinks(dir)
+		cleanTarget, _ := filepath.EvalSymlinks(target)
+		if cleanDir != "" && cleanTarget != "" && (cleanDir == cleanTarget || strings.HasPrefix(cleanDir, cleanTarget+string(filepath.Separator))) {
+			return targetFree, nil
+		}
+		return scratchFree, nil
+	}
+	t.Cleanup(func() { availableBytesForCLI = prevSeam })
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code != 0 {
+		t.Fatalf("upgrade run exit=%d, want 0; stderr=%s stdout=%s", code, stderr, stdout)
+	}
+
+	// CopyIn materialized 1.0x sourceBytes on target, leaving 0.5x free.
+	targetFree = srcBytes / 2
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code != 0 {
+		t.Fatalf("upgrade reconcile at 0.5x target free exit=%d, want 0; stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if strings.Contains(stdout, upgradeservice.CodeDiskInsufficient) {
+		t.Fatalf("unexpected %s in reconcile output: %s", upgradeservice.CodeDiskInsufficient, stdout)
+	}
+
+	// Insufficient scratch (< 1.0x sourceBytes) still blocks reconcile.
+	scratchFree = srcBytes - 1
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code != 1 || !strings.Contains(stdout, upgradeservice.CodeDiskInsufficient) {
+		t.Fatalf("upgrade reconcile with insufficient scratch exit=%d, want 1 with %s; stderr=%s stdout=%s",
+			code, upgradeservice.CodeDiskInsufficient, stderr, stdout)
+	}
+}
+
+func TestCommandUsageListsCompleteRollbackFlags(t *testing.T) {
+	var out bytes.Buffer
+	writeUsage(&out)
+	usage := out.String()
+	var prepareLine, verifyLine string
+	for _, line := range strings.Split(usage, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "rollback --prepare ") {
+			prepareLine = trimmed
+		}
+		if strings.HasPrefix(trimmed, "rollback --verify ") {
+			verifyLine = trimmed
+		}
+	}
+	for _, want := range []string{"[--target <dir>]", "[--volume <name-or-dir>]", "[--backup <dir>]"} {
+		if !strings.Contains(prepareLine, want) {
+			t.Fatalf("rollback --prepare usage %q missing %q", prepareLine, want)
+		}
+	}
+	for _, want := range []string{"[--target <dir>]", "[--manager-addr HOST:PORT]"} {
+		if !strings.Contains(verifyLine, want) {
+			t.Fatalf("rollback --verify usage %q missing %q", verifyLine, want)
+		}
+	}
+}
+
+func TestReconcileAgainstUncopiedTargetFailsImmediatelyWithoutPreflightOrCreatingTarget(t *testing.T) {
+	source := copyReadyRunSource(t)
+	scratch := t.TempDir()
+
+	baseline, err := upgradeservice.Preflight(context.Background(), upgradeservice.Options{
+		LegacyRoot:      source,
+		DeclaredVersion: bootstrap.PlannedDirectRelease,
+		TargetDir:       t.TempDir(),
+		ScratchDir:      scratch,
+	})
+	if err != nil || !baseline.Ready {
+		t.Fatalf("baseline preflight err=%v ready=%t", err, baseline.Ready)
+	}
+	var srcBytes int64
+	for _, chk := range baseline.Checks {
+		if chk.Name == upgradeservice.CheckDisk {
+			if idx := strings.Index(chk.Detail, "sourceBytes="); idx >= 0 {
+				_, _ = fmt.Sscanf(chk.Detail[idx:], "sourceBytes=%d", &srcBytes)
+			}
+		}
+	}
+	if srcBytes <= 0 {
+		t.Fatalf("could not parse sourceBytes from %+v", baseline.Checks)
+	}
+
+	prevSeam := availableBytesForCLI
+	availableBytesForCLI = func(dir string) (int64, error) {
+		cleanDir, _ := filepath.EvalSymlinks(dir)
+		cleanScratch, _ := filepath.EvalSymlinks(scratch)
+		if cleanDir != "" && cleanScratch != "" && (cleanDir == cleanScratch || strings.HasPrefix(cleanDir, cleanScratch+string(filepath.Separator))) {
+			return 4 * srcBytes, nil
+		}
+		return srcBytes / 2, nil
+	}
+	t.Cleanup(func() { availableBytesForCLI = prevSeam })
+
+	t.Run("non-existent target root", func(t *testing.T) {
+		missingTarget := filepath.Join(t.TempDir(), "uncopied-target")
+		code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+			"--source-version", bootstrap.PlannedDirectRelease, "--target", missingTarget, "--scratch-dir", scratch)
+		if code != 1 {
+			t.Fatalf("reconcile on non-existent target exit=%d, want 1; stderr=%s stdout=%s", code, stderr, stdout)
+		}
+		var output reconcileOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode reconcile output: %v; stdout=%s", err, stdout)
+		}
+		if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileNotCopiedIn) {
+			t.Fatalf("errorCode = %q, want %q; stdout=%s", output.ErrorCode, upgradeservice.UpgradeErrorReconcileNotCopiedIn, stdout)
+		}
+		if output.Preflight != nil {
+			t.Fatalf("expected no preflight report before stage gate refusal, got %+v", output.Preflight)
+		}
+		if _, statErr := os.Lstat(missingTarget); !os.IsNotExist(statErr) {
+			t.Fatalf("reconcile created non-existent target root %s: statErr=%v", missingTarget, statErr)
+		}
+	})
+
+	t.Run("existing empty target root", func(t *testing.T) {
+		emptyTarget := t.TempDir()
+		code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+			"--source-version", bootstrap.PlannedDirectRelease, "--target", emptyTarget, "--scratch-dir", scratch)
+		if code != 1 {
+			t.Fatalf("reconcile on empty target exit=%d, want 1; stderr=%s stdout=%s", code, stderr, stdout)
+		}
+		var output reconcileOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode reconcile output: %v; stdout=%s", err, stdout)
+		}
+		if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileNotCopiedIn) {
+			t.Fatalf("errorCode = %q, want %q; stdout=%s", output.ErrorCode, upgradeservice.UpgradeErrorReconcileNotCopiedIn, stdout)
+		}
+		if output.Preflight != nil {
+			t.Fatalf("expected no preflight report before stage gate refusal, got %+v", output.Preflight)
+		}
+		entries, readErr := os.ReadDir(emptyTarget)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("reconcile created files (such as .manager.lock) inside empty target root: entries=%v err=%v", entries, readErr)
+		}
+	})
+}
+
+func TestCommandReconcileStageGateHonorsScratchDirAndRefusesInvalidScratch(t *testing.T) {
+	sourceParent := t.TempDir()
+	rawSource := copyReadyRunSource(t)
+	source := filepath.Join(sourceParent, "legacy")
+	if err := os.Rename(rawSource, source); err != nil {
+		source = rawSource
+	}
+	target, bundle := reconcileRoots(t)
+	scratch := t.TempDir()
+
+	prevSeam := availableBytesForCLI
+	availableBytesForCLI = func(string) (int64, error) {
+		return 1 << 30, nil
+	}
+	t.Cleanup(func() { availableBytesForCLI = prevSeam })
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code != 0 {
+		t.Fatalf("upgrade run exit=%d, want 0; stderr=%s stdout=%s", code, stderr, stdout)
+	}
+
+	t.Run("explicit scratch-dir overrides TMPDIR pointing inside target", func(t *testing.T) {
+		t.Setenv("TMPDIR", target)
+		code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+			"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+		if code != 0 {
+			t.Fatalf("reconcile with explicit --scratch-dir and TMPDIR=target exit=%d, want 0; stderr=%s stdout=%s", code, stderr, stdout)
+		}
+	})
+
+	for _, bad := range []struct {
+		name string
+		dir  string
+	}{
+		{name: "inside target", dir: filepath.Join(target, "bad-scratch")},
+		{name: "inside source", dir: filepath.Join(source, "bad-scratch")},
+	} {
+		t.Run(bad.name, func(t *testing.T) {
+			code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+				"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", bad.dir)
+			if code != 2 {
+				t.Fatalf("reconcile with invalid scratch (%s) exit=%d, want 2; stderr=%s stdout=%s", bad.name, code, stderr, stdout)
+			}
+			var output reconcileOutput
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("decode reconcile output: %v; stdout=%s", err, stdout)
+			}
+			if output.ErrorCode != string(upgradeservice.UpgradeErrorSnapshotFailed) {
+				t.Fatalf("errorCode = %q, want %q; stdout=%s", output.ErrorCode, upgradeservice.UpgradeErrorSnapshotFailed, stdout)
+			}
+			if output.Preflight != nil {
+				t.Fatalf("expected stage gate scratch check to refuse before Preflight, got %+v", output.Preflight)
+			}
+		})
+	}
+}
+
+func TestCommandReconcileForwardsDeclaredSourceVersion(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	scratch := t.TempDir()
+
+	prevSeam := availableBytesForCLI
+	availableBytesForCLI = func(string) (int64, error) {
+		return 1 << 30, nil
+	}
+	t.Cleanup(func() { availableBytesForCLI = prevSeam })
+
+	// Copy-in records v1.14.10 as the authoritative source version.
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code != 0 {
+		t.Fatalf("upgrade run exit=%d, want 0; stderr=%s stdout=%s", code, stderr, stdout)
+	}
+
+	// v1.14.9 belongs to the same schema equivalence class so Preflight passes,
+	// proving runReconcile forwards DeclaredVersion into upgradeservice.Reconcile
+	// where mismatch against recorded v1.14.10 is refused.
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", "v1.14.9", "--target", target, "--bundle", bundle, "--scratch-dir", scratch)
+	if code == 0 {
+		t.Fatalf("reconcile with conflicting --source-version v1.14.9 unexpectedly succeeded: stdout=%s", stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stdout=%s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("expected Preflight to pass for v1.14.9 before Reconcile rejected mismatch, got %+v", output.Preflight)
+	}
+	if !strings.Contains(output.Error, "v1.14.10") || !strings.Contains(output.Error, "v1.14.9") {
+		t.Fatalf("output.Error = %q, want recorded v1.14.10 vs declared v1.14.9 mismatch", output.Error)
 	}
 }

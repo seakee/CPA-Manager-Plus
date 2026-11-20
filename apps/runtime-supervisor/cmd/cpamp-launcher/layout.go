@@ -57,17 +57,19 @@ const (
 	SupervisorShortRunWindow              = 10 * time.Second
 	SupervisorMaxConsecutiveShortFailures = 5
 
-	DefaultDrainTimeout          = 90 * time.Second
-	IngressDrainGraceExtra       = 5 * time.Second
-	ManagerShutdownTimeout       = 15 * time.Second
-	SupervisorShutdownTimeout    = 15 * time.Second
-	ProcessGroupKillGrace        = 5 * time.Second
-	SIGKILLReapWait              = 500 * time.Millisecond
-	ChildIODrainTimeout          = 1 * time.Second
-	DefaultReadinessPollInterval = 100 * time.Millisecond
-	ReadinessLogInterval         = 15 * time.Second
-	CPAQuiescenceTimeout         = 5 * time.Second
-	CPAQuiescencePollInterval    = 10 * time.Millisecond
+	DefaultDrainTimeout             = 90 * time.Second
+	IngressDrainGraceExtra          = 5 * time.Second
+	ManagerShutdownTimeout          = 15 * time.Second
+	SupervisorShutdownTimeout       = 15 * time.Second
+	ProcessGroupKillGrace           = 5 * time.Second
+	SIGKILLReapWait                 = 500 * time.Millisecond
+	ChildIODrainTimeout             = 1 * time.Second
+	DefaultReadinessPollInterval    = 100 * time.Millisecond
+	ReadinessLogInterval            = 15 * time.Second
+	UpgradeWorkerReadyTimeout       = 15 * time.Second
+	UpgradeWorkerMaxInitialFailures = 3
+	CPAQuiescenceTimeout            = 5 * time.Second
+	CPAQuiescencePollInterval       = 10 * time.Millisecond
 
 	// ShutdownFixedBudgetLimit bounds every stop-stage budget that is not the
 	// configurable drain window. The container stop grace must be at least

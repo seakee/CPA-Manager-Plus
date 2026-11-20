@@ -29,6 +29,9 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory the operation copied (required; the fingerprint proves it was not written)")
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
+	bundle := flags.String("bundle", "", "optional external backup directory to exclude from scratch staging")
+	backup := flags.String("backup", "", "alias for --bundle")
 	controlBasePath := flags.String("control-base-path", "", "CPAMP control base path prefix (for example /cpamp-admin)")
 	inferenceBasePath := flags.String("inference-base-path", "", "CPAMP managed inference base path prefix (for example /cpamp-api)")
 	sharedEntry := flags.Bool("shared-entry", false, "explicitly confirm sharing a single prefix for both control and inference")
@@ -39,6 +42,10 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if flags.NArg() != 0 {
 		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
 	}
+	bundleDir, err := resolveOptionalBundleFlag(*bundle, *backup)
+	if err != nil {
+		return err
+	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
@@ -47,6 +54,8 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
 		LegacyRoot:        legacyRoot,
 		TargetRoot:        targetRoot,
+		ScratchDir:        *scratchDir,
+		BundleDir:         bundleDir,
 		ControlBasePath:   strings.TrimSpace(*controlBasePath),
 		InferenceBasePath: strings.TrimSpace(*inferenceBasePath),
 		SharedEntry:       *sharedEntry,

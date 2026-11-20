@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ARTIFACT_MAX_UPLOAD_BYTES,
   formatArtifactError,
+  isNonTransientArtifactReadError,
 } from './freshArtifact';
 import { createUpgradeArtifactTransport } from './upgradeArtifactTransport';
 
@@ -286,6 +287,37 @@ describe('upgradeArtifactTransport', () => {
       expect(fetcher.mock.calls.length).toBe(countBeforeGuards);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('maps plain 404 responses on readStatus, probe, acquire, and upload to non-transient upgrade_bootstrap_retired', async () => {
+    const fetcher = vi.fn(async () => new Response('404 page not found', { status: 404 }));
+    const transport = createUpgradeArtifactTransport(
+      () => 'legacy-1x-key',
+      undefined,
+      fetcher as unknown as typeof fetch
+    );
+
+    const ops = [
+      () => transport.readStatus(),
+      () => transport.probe(),
+      () => transport.acquire({ source: 'github' }),
+      () => transport.upload(new Uint8Array([0x1f, 0x8b, 0x08, 0x00])),
+    ];
+    for (const op of ops) {
+      let caught: unknown;
+      try {
+        await op();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toMatchObject({
+        kind: 'http',
+        status: 404,
+        code: 'upgrade_bootstrap_retired',
+      });
+      expect(isNonTransientArtifactReadError(caught)).toBe(true);
+      expect(formatArtifactError(caught, '8.0.55', 'en').code).toBe('upgrade_bootstrap_retired');
     }
   });
 });

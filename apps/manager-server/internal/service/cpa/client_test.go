@@ -117,3 +117,21 @@ func TestObserveManagementAPIReturnsErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeBaseURLCaseInsensitiveScheme(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "HTTP://127.0.0.1:8317", want: "http://127.0.0.1:8317"},
+		{raw: "HTTPS://127.0.0.1:8317/v0/management/", want: "https://127.0.0.1:8317"},
+		{raw: "Http://CPA.Example:8317/v0/", want: "http://CPA.Example:8317"},
+		{raw: "127.0.0.1:8317/v0/management", want: "http://127.0.0.1:8317"},
+		{raw: "   ", want: ""},
+	}
+	for _, tc := range cases {
+		if got := NormalizeBaseURL(tc.raw); got != tc.want {
+			t.Fatalf("NormalizeBaseURL(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}

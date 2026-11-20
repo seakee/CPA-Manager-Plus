@@ -186,6 +186,13 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
       // the legacy endpoint table and every session/auth module stay out of
       // this graph.
       if (file === 'fullweb/freshLanguage.ts') continue;
+      // Upgrade reload recovery keeps non-secret committed routing metadata in
+      // tab-scoped sessionStorage; localStorage and legacy management paths stay
+      // forbidden here and key confinement is enforced behaviorally in upgradeSession.test.ts.
+      if (file === 'fullweb/upgradeSession.ts') {
+        expect(source, file).not.toMatch(/localStorage|\/v0\/management/);
+        continue;
+      }
       expect(source, file).not.toMatch(/localStorage|sessionStorage|\/v0\/management/);
     }
   });

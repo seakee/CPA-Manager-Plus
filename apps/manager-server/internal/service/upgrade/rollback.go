@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -197,6 +198,9 @@ type RollbackOptions struct {
 	// BackupDir is the recorded backup snapshot the plan verifies against.
 	// Empty uses the v2 default backup directory inside TargetRoot.
 	BackupDir string
+	// ScratchDir is the writable base for transient snapshot reads of the
+	// recorded upgrade operation; empty uses the OS temporary directory.
+	ScratchDir string
 	// TagOverride replaces the derived v1 image tag. An empty value derives
 	// v<source_version> from the recorded row.
 	TagOverride string
@@ -312,13 +316,23 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err != nil {
 		return Plan{}, err
 	}
-	sourceRoot = canonicalPath(sourceRoot)
+	sourceRoot, err = canonicalPathStrict(sourceRoot)
+	if err != nil {
+		return Plan{}, fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
 	targetRoot, err := resolveTargetRoot(options.TargetRoot)
 	if err != nil {
 		return Plan{}, err
 	}
-	targetRoot = canonicalPath(targetRoot)
-	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
+	targetRoot, err = canonicalDirectoryCandidate(targetRoot, "the v2 data root")
+	if err != nil {
+		return Plan{}, err
+	}
+	bundleDir, err := rollbackBundleDir(options.BackupDir, targetRoot)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := refuseRootOverlap(sourceRoot, targetRoot, bundleDir); err != nil {
 		return Plan{}, err
 	}
 	// The copy-in marker is decided before the row is read. The marker describes
@@ -329,7 +343,7 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err := refuseUnfinishedCopyIn(targetRoot); err != nil {
 		return Plan{}, err
 	}
-	recorded, found, err := readRollbackRecord(ctx, targetRoot)
+	recorded, found, err := readRollbackRecord(ctx, sourceRoot, targetRoot, bundleDir, options.ScratchDir)
 	if err != nil {
 		return Plan{}, fmt.Errorf("read the recorded upgrade operation: %w", err)
 	}
@@ -379,10 +393,6 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, err
 	}
 	if err := requireV2Stopped(ctx, options.ManagerAddress); err != nil {
-		return Plan{}, err
-	}
-	bundleDir, err := rollbackBundleDir(options.BackupDir, targetRoot)
-	if err != nil {
 		return Plan{}, err
 	}
 	// Every refusal above wrote nothing. The plan is written while holding the
@@ -470,7 +480,13 @@ func refuseUnfinishedCopyIn(targetRoot string) error {
 // hold a database at all. A missing store is "no record", not a failure: the
 // operator has to be told there is nothing to roll back, not that a file is
 // absent.
-func readRollbackRecord(ctx context.Context, targetRoot string) (model.UpgradeOperation, bool, error) {
+func readRollbackRecord(ctx context.Context, sourceRoot, targetRoot, bundleDir, scratchDir string) (model.UpgradeOperation, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	if err := ValidateScratchDirWithBackup(scratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
+		return model.UpgradeOperation{}, false, snapshotReadError(ctx, err)
+	}
 	databasePath := filepath.Join(targetRoot, databaseFileName)
 	if _, err := os.Lstat(databasePath); err != nil {
 		if os.IsNotExist(err) {
@@ -478,7 +494,8 @@ func readRollbackRecord(ctx context.Context, targetRoot string) (model.UpgradeOp
 		}
 		return model.UpgradeOperation{}, false, err
 	}
-	return ReadRecord(ctx, databasePath)
+	recorded, found, err := ReadRecordFromSnapshot(ctx, databasePath, strings.TrimSpace(scratchDir))
+	return recorded, found, snapshotReadError(ctx, err)
 }
 
 // sourceRootRecorded reports whether the row already names the 1.x directory it
@@ -518,7 +535,7 @@ func bindSourceRootLocked(ctx context.Context, recorded model.UpgradeOperation, 
 	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
 		return recorded, err
 	}
-	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	db, err := managersqlite.OpenUpgradeOperations(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
 	}
@@ -560,10 +577,13 @@ func acquireTargetLock(targetRoot string) (*processlock.Lock, error) {
 // volume is a source, never a destination, so a target nested under it (or a
 // source nested under the target) is refused before anything is read or
 // written.
-func refuseRootOverlap(sourceRoot, targetRoot string) error {
-	if rootsOverlap(sourceRoot, targetRoot) {
+func refuseRootOverlap(sourceRoot, targetRoot, bundleDir string) error {
+	if err := rejectOverlap(sourceRoot, targetRoot, bundleDir); err != nil {
+		return newUpgradeError(UpgradeErrorRollbackRootsOverlap, err.Error(), err)
+	}
+	if within(targetRoot, bundleDir) && bundleDir != canonicalPath(DefaultBundleDirectory(targetRoot)) {
 		return newUpgradeError(UpgradeErrorRollbackRootsOverlap,
-			"the v2 data root and the 1.x source root must not contain each other", nil)
+			"the backup snapshot inside the v2 data root must be the canonical upgrade-backup directory", nil)
 	}
 	return nil
 }
@@ -844,15 +864,25 @@ func rollbackImage(recorded model.UpgradeOperation, override string, allowFamily
 			"the 1.x image reference does not name an exact release, so it cannot be pinned", err)
 	}
 	if !allowFamilyMismatch {
-		sourceRelease, err := parseRelease(recorded.SourceVersion)
+		var sourceRelease releaseRank
+		sourceUnlabeled := strings.TrimSpace(recorded.SourceVersion) == VersionUnknown
+		if sourceUnlabeled {
+			sourceRelease, err = parseRelease(pinnedSourceVersion())
+		} else {
+			sourceRelease, err = parseRelease(recorded.SourceVersion)
+		}
 		if err != nil {
 			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 				"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
 		}
 		if releaseFamily(targetRelease) != releaseFamily(sourceRelease) {
+			sourceLabel := releaseFamilyText(sourceRelease)
+			if sourceUnlabeled {
+				sourceLabel = bootstrap.SupportedUpgradeSourceFamily
+			}
 			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageFamily,
 				fmt.Sprintf("the 1.x image names release family %s but the operation copied %s; pass the family override only after confirming the v1 data is readable by that release",
-					releaseFamilyText(targetRelease), releaseFamilyText(sourceRelease)), nil)
+					releaseFamilyText(targetRelease), sourceLabel), nil)
 		}
 	}
 	return rollbackImageReference{Reference: reference, Source: RollbackImageSourceOperator, Form: RollbackImageFormReleaseTag}, nil
@@ -1039,6 +1069,10 @@ type RollbackObservation struct {
 	// AllowImageFamilyMismatch is the explicit override for a 1.x image from
 	// another version family.
 	AllowImageFamilyMismatch bool `json:"allowImageFamilyMismatch,omitempty"`
+	// ScratchDir is the writable base for transient snapshot reads of the
+	// recorded operation, the backup bundle database, and the live 1.x
+	// database; empty uses the OS temporary directory.
+	ScratchDir string `json:"scratchDir,omitempty"`
 }
 
 // RecordRollback records the rolled_back verdict with the evidence that
@@ -1070,13 +1104,23 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	sourceRoot = canonicalPath(sourceRoot)
+	sourceRoot, err = canonicalPathStrict(sourceRoot)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
 	targetRoot, err := resolveTargetRoot(observation.TargetRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	targetRoot = canonicalPath(targetRoot)
-	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
+	targetRoot, err = canonicalDirectoryCandidate(targetRoot, "the v2 data root")
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	bundleDir, err := rollbackBundleDir(observation.BackupDir, targetRoot)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := refuseRootOverlap(sourceRoot, targetRoot, bundleDir); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	// Same rule as --prepare: an unfinished copy-in is resumed, never read in
@@ -1085,7 +1129,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := refuseUnfinishedCopyIn(targetRoot); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	recorded, found, err := readRollbackRecord(ctx, targetRoot)
+	recorded, found, err := readRollbackRecord(ctx, sourceRoot, targetRoot, bundleDir, observation.ScratchDir)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("read the recorded upgrade operation: %w", err)
 	}
@@ -1105,10 +1149,6 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 		return model.UpgradeOperation{}, err
 	}
 	if err := requireRecordedBackup(recorded); err != nil {
-		return model.UpgradeOperation{}, err
-	}
-	bundleDir, err := rollbackBundleDir(observation.BackupDir, targetRoot)
-	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
 
@@ -1135,7 +1175,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := requireV2Stopped(ctx, observation.ManagerAddress); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if err := verifyRollbackInstall(ctx, sourceRoot, targetRoot, bundleDir, recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, sourceRoot, targetRoot, bundleDir, observation.ScratchDir, recorded); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	// The observation time is stamped here, after every proof this service
@@ -1157,7 +1197,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	db, err := managersqlite.OpenUpgradeOperations(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the rollback: %w", err)
 	}
@@ -1228,7 +1268,7 @@ func rollbackBundleDir(override, targetRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return canonicalPath(absolute), nil
+	return canonicalPathStrict(absolute)
 }
 
 // LegacyHealth is what the 1.x manager answered on its health endpoint.
@@ -1492,7 +1532,20 @@ var rollbackRetainedRows = []retainedRowGroup{
 // source is left exactly as v1 left it. Both stores it compares are the same
 // install, so a row that is only committed to the live WAL is an *extra* row it
 // does not count; the retained-row rule is a lower bound, never an equality.
-func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDir string, recorded model.UpgradeOperation) error {
+func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDir, scratchDir string, recorded model.UpgradeOperation) error {
+	// Both the backup bundle database and the live 1.x database are read
+	// through private copies so WAL frames replay cleanly without mutating
+	// either directory. Refuse an overlapping scratch directory before creating
+	// any directory or copying any byte.
+	if err := ValidateScratchDir(scratchDir, sourceRoot, targetRoot); err != nil {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private snapshot of the live 1.x database would be created inside a root this operation never writes, so the retained rows cannot be counted; point TMPDIR at a directory on a separate volume and record the verdict again", err)
+	}
+	if err := ValidateScratchDirWithBackup(scratchDir, "", targetRoot, bundleDir); err != nil {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private snapshot of the backup database would be created inside a root this operation never writes, so the retained rows cannot be counted; point TMPDIR at a directory on a separate volume and record the verdict again", err)
+	}
+
 	manifest, digest, err := verifyRecordedBackup(ctx, bundleDir)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorRollbackUnproven,
@@ -1503,11 +1556,34 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDi
 			"the backup snapshot read here is not the one this operation recorded, so it cannot describe the volume being rolled back", nil)
 	}
 
-	backupDB, _, err := openImmutableSource(ctx, maintenancebundle.BundleLayout(bundleDir).DatabasePath)
-	if backupDB != nil {
-		defer func() { _ = backupDB.Close() }()
+	bundleDatabasePath := maintenancebundle.BundleLayout(bundleDir).DatabasePath
+	bundleInfo, err := os.Stat(bundleDatabasePath)
+	if err != nil || !bundleInfo.Mode().IsRegular() {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the backup snapshot database does not open read-only with a passing quick_check", err)
+	}
+	if bundleInfo.Size() == 0 {
+		if walInfo, walErr := os.Stat(bundleDatabasePath + "-wal"); walErr != nil || !walInfo.Mode().IsRegular() || walInfo.Size() == 0 {
+			return newUpgradeError(UpgradeErrorRollbackUnproven,
+				"the backup snapshot database does not open read-only with a passing quick_check", nil)
+		}
+	}
+
+	scratchBase := strings.TrimSpace(scratchDir)
+	backupSnapshot, err := OpenSnapshot(ctx, bundleDatabasePath, scratchBase)
+	if backupSnapshot != nil {
+		defer func() { _ = backupSnapshot.Close() }()
 	}
 	if err != nil {
+		if errors.Is(err, ErrSnapshotFailed) {
+			return newUpgradeError(UpgradeErrorSnapshotFailed,
+				"the private snapshot of the backup database could not be created, so the retained rows cannot be counted", err)
+		}
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the backup snapshot database does not open read-only with a passing quick_check", err)
+	}
+	backupDB := backupSnapshot.DB()
+	if err := quickCheckSource(ctx, backupDB); err != nil {
 		return newUpgradeError(UpgradeErrorRollbackUnproven,
 			"the backup snapshot database does not open read-only with a passing quick_check", err)
 	}
@@ -1517,17 +1593,7 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDi
 			"the retained rows of the backup snapshot cannot be counted", err)
 	}
 
-	// The live database is read through a private copy, so the copy must land
-	// outside both roots: the 1.x volume v1 still serves, and the v2 data root
-	// this verdict abandons without deleting. A default TMPDIR inside either
-	// would write the whole 1.x database there — and a copy abandoned by a
-	// killed process would stay for good — so it is refused before a directory
-	// is made and before a byte is copied.
-	if err := ValidateScratchDir("", sourceRoot, targetRoot); err != nil {
-		return newUpgradeError(UpgradeErrorSnapshotFailed,
-			"the private snapshot of the live 1.x database would be created inside a root this operation never writes, so the retained rows cannot be counted; point TMPDIR at a directory on a separate volume and record the verdict again", err)
-	}
-	liveSnapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, filepath.Join(sourceRoot, databaseFileName), "")
+	liveSnapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, filepath.Join(sourceRoot, databaseFileName), scratchBase)
 	if liveSnapshot != nil {
 		defer func() { _ = liveSnapshot.Close() }()
 	}

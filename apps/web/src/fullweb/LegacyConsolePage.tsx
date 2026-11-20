@@ -158,6 +158,7 @@ export function LegacyConsolePage({
           <MainLayout
             routeBase={context.basePath}
             navigationBase={context.basePath}
+            enablePinnedNav
             logoutDisabled={freshPending}
             hasUnsavedChanges={freshDirty || systemDirty}
             contentFooter={

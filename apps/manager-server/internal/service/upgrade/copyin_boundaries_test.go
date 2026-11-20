@@ -179,7 +179,7 @@ func TestUpgradeEntriesRequireCopyInRecovery(t *testing.T) {
 					return err
 				}},
 				{"cpa-connection", func() error {
-					return handDestinationConnection(context.Background(), filepath.Join(target, databaseFileName), filepath.Join(target, dataKeyFileName), "", "")
+					return handDestinationConnection(context.Background(), filepath.Join(target, databaseFileName), filepath.Join(target, dataKeyFileName), "", "", sourceConnectionProvenance{})
 				}},
 			}
 			for _, entry := range entries {

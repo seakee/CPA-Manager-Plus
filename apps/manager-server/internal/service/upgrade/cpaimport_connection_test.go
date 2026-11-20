@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,9 +16,9 @@ import (
 )
 
 func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSparseRows(t *testing.T) {
-	openFixtureStore := func(t *testing.T, fixture *verifyFixture) *store.Store {
+	openStoreAt := func(t *testing.T, dbPath, dataKeyPath string) *store.Store {
 		t.Helper()
-		key, _, err := security.LoadOrCreateDataKey("", fixture.paths.DataKey)
+		key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
 		if err != nil {
 			t.Fatalf("load data key: %v", err)
 		}
@@ -25,11 +26,39 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 		if err != nil {
 			t.Fatalf("new protector: %v", err)
 		}
-		st, err := store.Open(fixture.databasePath(), protector)
+		st, err := store.Open(dbPath, protector)
 		if err != nil {
 			t.Fatalf("open store: %v", err)
 		}
 		return st
+	}
+	openFixtureStore := func(t *testing.T, fixture *verifyFixture) *store.Store {
+		t.Helper()
+		return openStoreAt(t, fixture.databasePath(), fixture.paths.DataKey)
+	}
+	seedLegacySetup := func(t *testing.T, fixture *verifyFixture, setup model.Setup) sourceConnectionProvenance {
+		t.Helper()
+		for _, target := range []struct {
+			dbPath      string
+			dataKeyPath string
+		}{
+			{dbPath: fixture.volume.databasePath(), dataKeyPath: filepath.Join(fixture.volume.root, dataKeyFileName)},
+			{dbPath: fixture.databasePath(), dataKeyPath: fixture.paths.DataKey},
+		} {
+			st := openStoreAt(t, target.dbPath, target.dataKeyPath)
+			if err := st.SaveSetup(context.Background(), setup); err != nil {
+				_ = st.Close()
+				t.Fatalf("seed legacy setup (%s): %v", target.dbPath, err)
+			}
+			if err := st.Close(); err != nil {
+				t.Fatalf("close store (%s): %v", target.dbPath, err)
+			}
+		}
+		return sourceConnectionProvenance{
+			recorded:   model.UpgradeOperation{SourceKind: SourceKindUpgradedLegacy},
+			sourceRoot: fixture.volume.root,
+			targetRoot: fixture.target,
+		}
 	}
 
 	readRawManagerConfig := func(t *testing.T, dbPath string) string {
@@ -50,19 +79,12 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 		fixture := newVerifyFixture(t)
 		fixture.reconcile(t)
 
-		st := openFixtureStore(t, fixture)
-		if err := st.SaveSetup(context.Background(), model.Setup{
+		provenance := seedLegacySetup(t, fixture, model.Setup{
 			CPAUpstreamURL: verifyManagedAddress,
 			ManagementKey:  "stale-1x-secret",
 			Queue:          "legacy-queue",
 			PopSide:        "left",
-		}); err != nil {
-			_ = st.Close()
-			t.Fatalf("seed legacy setup: %v", err)
-		}
-		if err := st.Close(); err != nil {
-			t.Fatalf("close store: %v", err)
-		}
+		})
 
 		if err := handDestinationConnection(
 			context.Background(),
@@ -70,6 +92,7 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 			fixture.paths.DataKey,
 			verifyManagedAddress,
 			verifyManagedSecret,
+			provenance,
 		); err != nil {
 			t.Fatalf("handDestinationConnection: %v", err)
 		}
@@ -123,6 +146,7 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 			fixture.paths.DataKey,
 			verifyManagedAddress,
 			verifyManagedSecret,
+			sourceConnectionProvenance{recorded: model.UpgradeOperation{SourceKind: SourceKindUpgradedLegacy}},
 		); err != nil {
 			t.Fatalf("handDestinationConnection: %v", err)
 		}
@@ -167,6 +191,7 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 			fixture.paths.DataKey,
 			verifyManagedAddress,
 			verifyManagedSecret,
+			sourceConnectionProvenance{recorded: model.UpgradeOperation{SourceKind: SourceKindUpgradedLegacy}},
 		); err != nil {
 			t.Fatalf("handDestinationConnection: %v", err)
 		}
@@ -192,19 +217,12 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 		fixture := newVerifyFixture(t)
 		fixture.reconcile(t)
 
-		st := openFixtureStore(t, fixture)
-		if err := st.SaveSetup(context.Background(), model.Setup{
+		provenance := seedLegacySetup(t, fixture, model.Setup{
 			CPAUpstreamURL: verifyManagedAddress,
 			ManagementKey:  "stale-1x-secret",
 			Queue:          "legacy-queue",
 			PopSide:        "",
-		}); err != nil {
-			_ = st.Close()
-			t.Fatalf("seed legacy setup: %v", err)
-		}
-		if err := st.Close(); err != nil {
-			t.Fatalf("close store: %v", err)
-		}
+		})
 
 		if err := handDestinationConnection(
 			context.Background(),
@@ -212,6 +230,7 @@ func TestHandDestinationConnectionPreservesImplicitTLSSkipVerifyOnLegacyAndSpars
 			fixture.paths.DataKey,
 			verifyManagedAddress,
 			verifyManagedSecret,
+			provenance,
 		); err != nil {
 			t.Fatalf("handDestinationConnection: %v", err)
 		}

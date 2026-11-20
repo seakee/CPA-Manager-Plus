@@ -51,28 +51,35 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   created by such a run may survive and must be cleaned from the printed
   `cpampd<runid>` prefix by an operator. This guarantee covers handled signals,
   not unhandled termination.
-* Every source-reading command (`preflight`, `run`, `reconcile`) declares the
-  pinned accepted release with `--source-version`. The value is not a second pin
-  in the harness: the probe preflight reads the fixture it inspects, the
-  product's report names the accepted release, and every later invocation —
-  including the `next` command `upgrade run` prints — carries that exact value.
-  A command that would run without a declaration fails the harness before the
-  product sees it. The report's `expected=` value is **required**: a report that
-  cannot name it stops the run instead of falling back to the tag this run
-  planned, so the harness can never agree with itself while the product accepts
-  something else.
-* The accepted fixture is proved, not assumed. The probe preflight must exit 0
-  with a passing `source_version` check that binds the declaration to the pin;
-  the fixture's own recorded `commit` must equal
-  `bootstrap.PlannedDirectSourceCommit`
-  (`a67ed8834a914ab24c36d2490fa6bb6d4166724c`) whenever the planned tag is the
-  default one, so a moved tag cannot be qualified as the bytes the contract
-  names; and the same seeded source, declared as the release the contract
-  replaced (`v1.14.4`), must be refused with exit 1 and
-  `upgrade_source_version_unsupported` carrying
-  `expected=v1.14.10 declared=v1.14.4`. That last probe is the declared-version
-  rule proved end to end, and its report digest is recorded in
-  `evidence.versionMismatch`.
+* Source-reading commands (`preflight`, `run`, `reconcile`) verify the v1.14.x
+  compatibility contract in both labeled and unlabeled postures. When an
+  observed release tag is supplied via `--source-version`, every invocation —
+  including the exact `next` shell command `upgrade run` prints — carries that
+  observed tag without substituting a second pin in the harness; when no patch
+  label is recoverable (`sourceVersion: null`), the commands run without
+  `--source-version`, preserve `sourceVersion: "unknown"` instead of fabricating
+  a tag, and still verify the exact unlabeled `next` command tokens. The
+  product's `source_version` report must name the `expected=` (`v1.14.x`)
+  explicitly rather than falling back to a harness constant.
+* Source admission is proved across four probes, not assumed:
+  1. **Labeled release (`v1.14.10`)**: preflight exits 0 with `source_version`
+     passing (`expected=v1.14.x declared=v1.14.10; compatible v1.14.x profile verified`), and when the planned
+     tag is the default fixture its recorded `commit` must equal
+     `bootstrap.PlannedDirectSourceCommit`
+     (`a67ed8834a914ab24c36d2490fa6bb6d4166724c`);
+  2. **Unlabeled compatible source**: preflight without `--source-version` exits
+     0 with `sourceVersion: "unknown"` and `expected=v1.14.x
+     declared=none; compatible v1.14.x profile verified`, followed by an end-to-end unlabeled `preflight -> run ->
+     reconcile -> status` chain;
+  3. **Contradictory older patch declaration (`v1.14.4` against `v1.14.10`
+     schema markers)**: preflight exits 1 with
+     `upgrade_source_version_unsupported` naming the later release markers
+     present in the store;
+  4. **Outside-family declaration (`v1.13.9`)**: preflight exits 1 with
+     `upgrade_source_version_unsupported` (`expected=v1.14.x
+     declared=v1.13.9`).
+  All four outcomes and their report digests are recorded in
+  `evidence.sourceCompatibility`.
 * The rollback alias is run-owned: `cpampd<runid>/upgrade:vX.Y.Z`, tagged from
   the fixture bytes, recorded in the resource registry before it is created, and
   removed only at cleanup (the tag, never the image the fixture repository
@@ -142,9 +149,9 @@ for the real-Docker run below.
 | wizard routes | on a real Fresh installation, `GET …/installation/upgrade/{preflight,status}` answer 200 to the 1.x administrator key only, project `ready` and `nextAction`, and contain no credential, path, full digest or data-key material; a write is 405 |
 | fault: source touched after copy-in | a second `run` reports the recorded operation and writes nothing; `rollback --prepare` refuses with `upgrade_source_changed` |
 | fault: copy-in interrupted before the row | the provenance marker is caught and the process killed; `status` shows no row; the resume adopts the materialized store (`restored:false`) and records `copy_in`; over HTTP the same window reads `recorded` with `evidence: copy_in_marker`, stage and `nextAction` `copy_in` (`sourceRoot: available`), never the `preflight` step before any work started. This case is a **successful resume**: the target changes, so `targetRootUnchanged` is `false` and the code is `resumed_copy_in` |
-| fault: cleared derived rollup with retained support | reconcile refuses with `upgrade_reconcile_mismatch` naming the days; after `--acknowledge` it marks them as `derived_rollup_lost` |
-| fault: cleared derived rollup without support | `upgrade_reconcile_target_incomplete`, unwaivable even with `--acknowledge` |
-| fault: dropped table on the target | `upgrade_reconcile_target_incomplete` naming the missing table |
+| fault: cleared derived rollup with retained support | reconcile refuses with `upgrade_reconcile_mismatch` naming the days, records `pending_reconcile_days` in `upgrade_operations` for the browser wizard without advancing `stage` or marking incomplete days (`targetRootUnchanged` is `false` while the 1.x source stays untouched); after `--acknowledge` it clears `pending_reconcile_days` and marks them as `derived_rollup_lost` |
+| fault: cleared derived rollup without support | `upgrade_reconcile_target_incomplete`, unwaivable even with `--acknowledge`; invalidates the prior `reconcile` stage back to `copy_in` with `error_code=upgrade_reconcile_target_incomplete` and zero marked incomplete days while leaving the 1.x source untouched |
+| fault: dropped table on the target | `upgrade_reconcile_target_incomplete` naming the missing table; invalidates the prior `reconcile` stage back to `copy_in` with `error_code=upgrade_reconcile_target_incomplete` and zero marked incomplete days while leaving the 1.x source untouched |
 | fault: natively busy source | `upgrade_source_busy` from `flock` held on `usage.sqlite.manager.lock`; the **write path** (`upgrade run` against a real v2 store) refuses, the store stays byte-identical and the recorded stage does not move — a preflight on a directory the command never receives is not the proof |
 | rollback | plan → the plan's named volume is created as a Docker local volume **bound to the 1.x directory itself**, and a probe write through it is observed on that host directory → real compose apply of the printed document on the plan's port → the restarted 1.x accepts a new row (the actual HTTP status is recorded, not a constant) → probe of the manager's own listener refused with `upgrade_rollback_probe_self` and the recorded row's `stage`/`updated_at_ms` unchanged → `--verify --legacy` points at the **same directory**, and its observed fingerprint differs from the plan's pre-rollback fingerprint and equals a product fingerprint of that live directory taken just before and just after the verdict (a still-serving 1.x may touch its WAL index) → after the stack is released, the persisted `rolled_back` root is restarted and admits only the Upgrade surface, and the written row is counted in that same directory from the host |
 | admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record, and the console (`/management.html`), the key/pricing API (`/v0/management/model-prices`), the gateway/model route (`/v0/management/models`) and `/usage-service/info` all answer 404 |
@@ -210,22 +217,16 @@ recorded separately.
   Docker cannot bind that directory (or the tag cannot be resolved), it fails
   there instead of recording a verdict against a different directory.
 
-* **Source release pin.** The contract pins `v1.14.10`
-  (`internal/domain/bootstrap/contract.go:12`,
-  `a67ed8834a914ab24c36d2490fa6bb6d4166724c`), so the harness runs the entire
-  chain — preflight, copy-in, reconcile, import, External connect, verify,
-  wizard, admission, fault injection and rollback — directly against the
-  `v1.14.10` fixture it builds and seeds. The evidence says so
-  (`mode.sourceFixture: "same"`, `mode.acceptedRelease: "v1.14.10"`); there is
-  no second fixture and no recorded version gap. The accepted release is still
-  read from the product's own preflight report rather than duplicated here, that
-  reading is mandatory (no fallback to the planned tag), the fixture commit is
-  pinned to `PlannedDirectSourceCommit`, and the stale `v1.14.4` declaration is
-  refused against the same source on every run. The gap branch that records a
-  typed `upgrade_source_version_unsupported` refusal stays as the guard for the
-  next re-pin. The historical `v1.14.4`
-  candidate survives only for the Phase 4-00 / Phase 4A fixtures
-  (`bootstrap.ExactV1144Candidate()`), which still read the old pin.
+* **Source family admission.** The upgrade contract admits compatible `v1.14.x`
+  sources structurally while keeping `v1.14.10`
+  (`internal/domain/bootstrap/contract.go`,
+  `a67ed8834a914ab24c36d2490fa6bb6d4166724c`) as the default built fixture.
+  The harness runs the full labeled chain against `v1.14.10`, an end-to-end
+  unlabeled `unknown` compatibility chain against the same schema, a
+  contradictory `v1.14.4` marker-mismatch refusal probe, and an outside-family
+  `v1.13.9` refusal probe, recording all four in
+  `evidence.sourceCompatibility`. The historical `v1.14.4` candidate survives
+  only for the Phase 4-00 / Phase 4A fixtures (`bootstrap.ExactV1144Candidate()`).
 * **Completion transition.** No step in this milestone writes the terminal
   `complete` row, so the completed-admission case writes that stage onto the row
   the real copy-in recorded. The evidence admission demands — the

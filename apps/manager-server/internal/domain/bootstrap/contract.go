@@ -5,15 +5,26 @@ package bootstrap
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 const (
+	// PlannedDirectRelease and PlannedDirectSourceCommit name the verified
+	// reference fixture release (v1.14.10) exercised by the harness; product
+	// upgrade admission accepts the proven v1.14.x family rather than only this
+	// single patch tag.
 	PlannedDirectRelease      = "v1.14.10"
 	PlannedDirectSourceCommit = "a67ed8834a914ab24c36d2490fa6bb6d4166724c"
-	phase400V1144Release      = "v1.14.4"
-	phase400V1144SourceCommit = "166262365d506157b99968105c890f480cc7c07c"
-	CPAManagementGenerationV8 = "v8"
+	// SupportedUpgradeSourceFamily is the Manager 1.x release family eligible for
+	// direct Docker upgrade admission when its schema, format, and semantic
+	// profile are proven.
+	SupportedUpgradeSourceFamily = "v1.14.x"
+	SupportedUpgradeSourceMajor  = 1
+	SupportedUpgradeSourceMinor  = 14
+	phase400V1144Release         = "v1.14.4"
+	phase400V1144SourceCommit    = "166262365d506157b99968105c890f480cc7c07c"
+	CPAManagementGenerationV8    = "v8"
 )
 
 type Mode string
@@ -76,10 +87,11 @@ const (
 type SourceEvidenceStatus string
 
 const (
-	SourceUnverified       SourceEvidenceStatus = "unverified"
-	ExactCandidateVerified SourceEvidenceStatus = "exact_candidate_verified"
-	ForwardHopVerified     SourceEvidenceStatus = "forward_hop_verified"
-	UnknownOrNewerSource   SourceEvidenceStatus = "unknown_or_newer"
+	SourceUnverified         SourceEvidenceStatus = "unverified"
+	ExactCandidateVerified   SourceEvidenceStatus = "exact_candidate_verified"
+	ForwardHopVerified       SourceEvidenceStatus = "forward_hop_verified"
+	CompatibleFamilyVerified SourceEvidenceStatus = "compatible_family_verified"
+	UnknownOrNewerSource     SourceEvidenceStatus = "unknown_or_newer"
 )
 
 type BridgeReadiness string
@@ -129,6 +141,66 @@ func ExactV1144Candidate() PlannedCandidate {
 }
 func (c PlannedCandidate) valid() bool { return c == ExactV1144Candidate() }
 
+// UpgradeSourceRelease is a parsed canonical Manager vX.Y.Z release tag.
+type UpgradeSourceRelease struct {
+	Major     int
+	Minor     int
+	Patch     int
+	Canonical string
+}
+
+// InSupportedUpgradeFamily reports whether the parsed release belongs to the
+// supported v1.14.x Manager upgrade family.
+func (r UpgradeSourceRelease) InSupportedUpgradeFamily() bool {
+	return r.Canonical != "" &&
+		r.Major == SupportedUpgradeSourceMajor &&
+		r.Minor == SupportedUpgradeSourceMinor &&
+		r.Patch >= 0
+}
+
+// ParseUpgradeSourceRelease parses an exact vX.Y.Z or X.Y.Z release tag with
+// no prerelease or build metadata and returns its canonical vX.Y.Z form.
+func ParseUpgradeSourceRelease(raw string) (UpgradeSourceRelease, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.HasPrefix(trimmed, "vv") || strings.ContainsAny(trimmed, "-+") {
+		return UpgradeSourceRelease{}, false
+	}
+	trimmed = strings.TrimPrefix(trimmed, "v")
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 {
+		return UpgradeSourceRelease{}, false
+	}
+	numbers := [3]int{}
+	for index, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return UpgradeSourceRelease{}, false
+		}
+		for i := range len(part) {
+			if part[i] < '0' || part[i] > '9' {
+				return UpgradeSourceRelease{}, false
+			}
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 || value >= 1_000 {
+			return UpgradeSourceRelease{}, false
+		}
+		numbers[index] = value
+	}
+	return UpgradeSourceRelease{
+		Major:     numbers[0],
+		Minor:     numbers[1],
+		Patch:     numbers[2],
+		Canonical: fmt.Sprintf("v%d.%d.%d", numbers[0], numbers[1], numbers[2]),
+	}, true
+}
+
+// IsSupportedUpgradeSourceRelease reports whether raw names an exact patch
+// release in the supported v1.14.x Manager upgrade family.
+func IsSupportedUpgradeSourceRelease(raw string) bool {
+	parsed, ok := ParseUpgradeSourceRelease(raw)
+	return ok && parsed.InSupportedUpgradeFamily()
+}
+
 type EvidenceRef string
 
 func validEvidenceRef(ref EvidenceRef) bool {
@@ -168,7 +240,11 @@ func (a UpgradeAdmission) Validate() error {
 	if !validSourceShape(a.Shape) {
 		return fmt.Errorf("unknown source shape %q", a.Shape)
 	}
-	if !a.PlannedCandidate.valid() {
+	if a.EvidenceStatus == CompatibleFamilyVerified {
+		if a.PlannedCandidate != (PlannedCandidate{}) && !IsSupportedUpgradeSourceRelease(a.PlannedCandidate.Release) {
+			return fmt.Errorf("compatible family candidate must be empty or in %s", SupportedUpgradeSourceFamily)
+		}
+	} else if !a.PlannedCandidate.valid() {
 		return errors.New("planned direct candidate must remain exact v1.14.4")
 	}
 	if !validReadiness(a.Readiness) {
@@ -199,13 +275,26 @@ func (a UpgradeAdmission) Validate() error {
 		if a.ArtifactEvidenceRef == "" || a.SourceProvenanceRef == "" || a.ForwardHopEvidenceRef == "" {
 			return errors.New("forward-hop candidate requires artifact, source provenance and hop evidence")
 		}
+	case CompatibleFamilyVerified:
+		if a.Shape != LegacySchemaC {
+			return errors.New("verified v1.14.x family source must match LegacySchemaC")
+		}
+		if a.SourceProvenanceRef == "" {
+			return errors.New("compatible family source requires source provenance evidence")
+		}
+		if a.ForwardHopEvidenceRef != "" {
+			return errors.New("compatible family source cannot claim forward-hop evidence")
+		}
 	default:
 		return fmt.Errorf("unknown source evidence status %q", a.EvidenceStatus)
 	}
 	return nil
 }
+
 func (a UpgradeAdmission) trustedSource() bool {
-	return a.EvidenceStatus == ExactCandidateVerified || a.EvidenceStatus == ForwardHopVerified
+	return a.EvidenceStatus == ExactCandidateVerified ||
+		a.EvidenceStatus == ForwardHopVerified ||
+		a.EvidenceStatus == CompatibleFamilyVerified
 }
 
 func validRecoveryReason(r RecoveryReason) bool {

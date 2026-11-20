@@ -51,6 +51,8 @@ type TimingConfig struct {
 	SIGKILLReapWait                       time.Duration
 	ChildIODrainTimeout                   time.Duration
 	ReadinessPollInterval                 time.Duration
+	UpgradeWorkerReadyTimeout             time.Duration
+	UpgradeWorkerMaxInitialFailures       int
 }
 
 func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
@@ -93,6 +95,12 @@ func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
 	if t.ReadinessPollInterval <= 0 {
 		t.ReadinessPollInterval = DefaultReadinessPollInterval
 	}
+	if t.UpgradeWorkerReadyTimeout <= 0 {
+		t.UpgradeWorkerReadyTimeout = UpgradeWorkerReadyTimeout
+	}
+	if t.UpgradeWorkerMaxInitialFailures <= 0 {
+		t.UpgradeWorkerMaxInitialFailures = UpgradeWorkerMaxInitialFailures
+	}
 	return t
 }
 
@@ -115,6 +123,8 @@ func parseDrainTimeoutEnv(getenv func(string) string) time.Duration {
 type SupervisorConfig struct {
 	SupervisorSpec        ChildSpec
 	ManagerSpec           ChildSpec
+	UpgradeSpec           *ChildSpec
+	UpgradeSocket         string
 	IngressSpec           ChildSpec
 	SupervisorTCPAddr     string
 	ManagerHealthURL      string
@@ -543,11 +553,39 @@ func copyPrefixedLines(r io.Reader, dst *syncLineWriter, prefix string) {
 }
 
 type managedService struct {
-	spec    ChildSpec
-	mu      sync.Mutex
-	current *runningChild
-	stopped bool
-	doneCh  chan struct{}
+	spec         ChildSpec
+	mu           sync.Mutex
+	current      *runningChild
+	stopped      bool
+	nonZeroExits int
+	exitNotify   chan struct{}
+	doneCh       chan struct{}
+}
+
+func newManagedService(spec ChildSpec) *managedService {
+	return &managedService{
+		spec:       spec,
+		exitNotify: make(chan struct{}, 1),
+		doneCh:     make(chan struct{}),
+	}
+}
+
+func (s *managedService) recordNonZeroExit() {
+	s.mu.Lock()
+	s.nonZeroExits++
+	s.mu.Unlock()
+	if s.exitNotify != nil {
+		select {
+		case s.exitNotify <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *managedService) nonZeroFailureCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nonZeroExits
 }
 
 // RunSupervisor starts Supervisor, Manager, and Ingress in order with readiness
@@ -584,9 +622,30 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	fatalErrCh := make(chan error, 1)
 
-	supSvc := &managedService{spec: cfg.SupervisorSpec, doneCh: make(chan struct{})}
-	mgrSvc := &managedService{spec: cfg.ManagerSpec, doneCh: make(chan struct{})}
-	ingSvc := &managedService{spec: cfg.IngressSpec, doneCh: make(chan struct{})}
+	supSvc := newManagedService(cfg.SupervisorSpec)
+	mgrSvc := newManagedService(cfg.ManagerSpec)
+	ingSvc := newManagedService(cfg.IngressSpec)
+	var upgradeSvc *managedService
+	if cfg.UpgradeSpec != nil {
+		upgradeSvc = newManagedService(*cfg.UpgradeSpec)
+	}
+	shutdownAll := func() {
+		var upgradeStopped chan struct{}
+		if upgradeSvc != nil {
+			upgradeSvc.mu.Lock()
+			upgradeSvc.stopped = true
+			upgradeSvc.mu.Unlock()
+			upgradeStopped = make(chan struct{})
+			go func() {
+				defer close(upgradeStopped)
+				stopSingleService(upgradeSvc, reaper, cfg.Timings.ManagerShutdownTimeout, false, 0, cfg.Timings.SIGKILLReapWait, cfg.Timings.ChildIODrainTimeout, stderrW)
+			}()
+		}
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		if upgradeStopped != nil {
+			<-upgradeStopped
+		}
+	}
 
 	supFirstStart := make(chan struct{})
 	go superviseService(
@@ -609,7 +668,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	shutdownAndReturn := func() error {
 		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		select {
 		case err := <-fatalErrCh:
 			return err
@@ -621,7 +680,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case <-supFirstStart:
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -637,11 +696,38 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	select {
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	default:
+	}
+
+	if upgradeSvc != nil {
+		upgradeFirstStart := make(chan struct{})
+		go superviseService(shutdownCtx, upgradeSvc, reaper, cfg, stdoutW, stderrW, false, upgradeFirstStart, nil)
+		ready, warnReason, fatalErr, canceled := waitUpgradeWorkerStartup(
+			ctx,
+			shutdownCtx,
+			upgradeSvc,
+			upgradeFirstStart,
+			fatalErrCh,
+			cfg.UpgradeSocket,
+			cfg.Timings,
+		)
+		if fatalErr != nil {
+			shutdownAll()
+			return fatalErr
+		}
+		if canceled {
+			return shutdownAndReturn()
+		}
+		if !ready {
+			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
+				"upgrade worker not ready (%s); proceeding to start manager and ingress in degraded recovery mode",
+				warnReason,
+			))
+		}
 	}
 
 	mgrFirstStart := make(chan struct{})
@@ -660,7 +746,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case <-mgrFirstStart:
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -677,7 +763,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	select {
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -700,7 +786,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case err := <-fatalErrCh:
 		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
+		shutdownAll()
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -761,14 +847,23 @@ func superviseService(
 		if err != nil {
 			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("failed to start %s: %v", svc.spec.Name, err))
 			uptime = 0
+			svc.recordNonZeroExit()
 		} else {
 			notifyStarted()
-			<-child.exitCh
+			status, ok := <-child.exitCh
 			uptime = time.Since(child.startedAt)
 			if isSupervisor {
 				terminateAndReapProcessGroup(child.pgid, reaper, cfg.Timings.ProcessGroupKillGrace, cfg.Timings.SIGKILLReapWait)
 			}
 			waitChildIODone(child, svc.spec.Name, cfg.Timings.ChildIODrainTimeout, stderrW)
+			svc.mu.Lock()
+			if svc.current == child {
+				svc.current = nil
+			}
+			svc.mu.Unlock()
+			if !ok || !status.Exited() || status.ExitStatus() != 0 {
+				svc.recordNonZeroExit()
+			}
 		}
 
 		svc.mu.Lock()
@@ -994,6 +1089,93 @@ func waitForReadiness(ctx, shutdownCtx context.Context, label string, stderrW *s
 		if !time.Now().Before(nextLog) {
 			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("%s is not ready after %s; still waiting", label, time.Since(start).Round(time.Second)))
 			nextLog = time.Now().Add(ReadinessLogInterval)
+		}
+	}
+}
+
+func waitUpgradeWorkerStartup(
+	ctx, shutdownCtx context.Context,
+	svc *managedService,
+	firstStart <-chan struct{},
+	fatalErrCh <-chan error,
+	socketPath string,
+	timings TimingConfig,
+) (ready bool, reason string, fatalErr error, canceled bool) {
+	timeout := timings.UpgradeWorkerReadyTimeout
+	if timeout <= 0 {
+		timeout = UpgradeWorkerReadyTimeout
+	}
+	maxFailures := timings.UpgradeWorkerMaxInitialFailures
+	if maxFailures <= 0 {
+		maxFailures = UpgradeWorkerMaxInitialFailures
+	}
+	pollInterval := timings.ReadinessPollInterval
+	if pollInterval <= 0 {
+		pollInterval = DefaultReadinessPollInterval
+	}
+
+	deadlineTimer := time.NewTimer(timeout)
+	defer deadlineTimer.Stop()
+
+	started := false
+	for {
+		if !started {
+			select {
+			case <-firstStart:
+				started = true
+			default:
+			}
+		}
+		if !started {
+			if failures := svc.nonZeroFailureCount(); failures >= maxFailures {
+				return false, fmt.Sprintf("exited non-zero %d times before starting", failures), nil, false
+			}
+			select {
+			case <-firstStart:
+				started = true
+				continue
+			case <-svc.exitNotify:
+				continue
+			case <-deadlineTimer.C:
+				return false, fmt.Sprintf("did not start within %s", timeout), nil, false
+			case err := <-fatalErrCh:
+				return false, "", err, false
+			case <-shutdownCtx.Done():
+				return false, "", nil, true
+			case <-ctx.Done():
+				return false, "", nil, true
+			}
+		}
+
+		if socketPath == "" {
+			return true, "", nil, false
+		}
+		dialer := net.Dialer{Timeout: pollInterval * 2}
+		if conn, err := dialer.DialContext(ctx, "unix", socketPath); err == nil {
+			_ = conn.Close()
+			return true, "", nil, false
+		}
+		if failures := svc.nonZeroFailureCount(); failures >= maxFailures {
+			return false, fmt.Sprintf("exited non-zero %d times before socket readiness", failures), nil, false
+		}
+
+		pollTimer := time.NewTimer(pollInterval)
+		select {
+		case <-pollTimer.C:
+		case <-svc.exitNotify:
+			pollTimer.Stop()
+		case <-deadlineTimer.C:
+			pollTimer.Stop()
+			return false, fmt.Sprintf("socket not ready after %s", timeout), nil, false
+		case err := <-fatalErrCh:
+			pollTimer.Stop()
+			return false, "", err, false
+		case <-shutdownCtx.Done():
+			pollTimer.Stop()
+			return false, "", nil, true
+		case <-ctx.Done():
+			pollTimer.Stop()
+			return false, "", nil, true
 		}
 	}
 }

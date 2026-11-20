@@ -214,6 +214,61 @@ const (
 		target_event_id integer not null default 0,
 		updated_at_ms integer not null default 0
 	)`
+
+	createUpgradeOperationsTable = `create table if not exists upgrade_operations (
+			id integer primary key check(id = 1),
+			stage text not null default '',
+			last_forward_stage text not null default '',
+			revision integer not null default 0,
+			domains_done text not null default '[]',
+			source_kind text,
+			source_version text,
+			source_root text,
+			source_fingerprint_before text,
+			source_fingerprint_after text,
+			backup_manifest_sha256 text,
+			reconciliation text not null default '{}',
+			pending_reconcile_days text not null default '[]',
+			verification text not null default '{}',
+			manual_items text not null default '[]',
+			error_code text,
+			error_detail text,
+			rollback_image text,
+			rollback_image_source text,
+			rollback_image_form text,
+			rollback_status_url text,
+			rollback_source_fingerprint text,
+			rollback_observed_at_ms integer,
+			control_base_path text not null default '',
+			inference_base_path text not null default '',
+			shared_entry integer not null default 0,
+			routing_committed integer not null default 0,
+			inference_committed integer not null default 0,
+			suggested_control_base_path text not null default '',
+			suggested_inference_base_path text not null default '',
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`
+
+	createUpgradeExternalConnectTable = `create table if not exists upgrade_external_connect (
+			id integer primary key check(id = 1),
+			base_url text not null,
+			identity text not null,
+			generation text not null,
+			server_fingerprint text not null default '',
+			cpa_version text not null default '',
+			support text not null default '',
+			client_keys integer not null default 0,
+			management_key text not null default '',
+			observed_at_ms integer not null
+		)`
+
+	createUsageCoverageIncompleteDaysTable = `create table if not exists usage_coverage_incomplete_days (
+			day text primary key,
+			reason text not null,
+			source text not null,
+			recorded_at_ms integer not null
+		)`
 )
 
 func Migrate(db *sql.DB) error {
@@ -1271,66 +1326,18 @@ func Migrate(db *sql.DB) error {
 		// The v2 Upgrade operation is a single durable row of progress and
 		// observations. It lives in the Manager database, never in the legacy
 		// source root, so a read-only preflight never has to write its result.
-		`create table if not exists upgrade_operations (
-			id integer primary key check(id = 1),
-			stage text not null default '',
-			last_forward_stage text not null default '',
-			revision integer not null default 0,
-			domains_done text not null default '[]',
-			source_kind text,
-			source_version text,
-			source_root text,
-			source_fingerprint_before text,
-			source_fingerprint_after text,
-			backup_manifest_sha256 text,
-			reconciliation text not null default '{}',
-			verification text not null default '{}',
-			manual_items text not null default '[]',
-			error_code text,
-			error_detail text,
-			rollback_image text,
-			rollback_image_source text,
-			rollback_image_form text,
-			rollback_status_url text,
-			rollback_source_fingerprint text,
-			rollback_observed_at_ms integer,
-			control_base_path text not null default '',
-			inference_base_path text not null default '',
-			shared_entry integer not null default 0,
-			routing_committed integer not null default 0,
-			inference_committed integer not null default 0,
-			suggested_control_base_path text not null default '',
-			suggested_inference_base_path text not null default '',
-			created_at_ms integer not null,
-			updated_at_ms integer not null
-		)`,
+		createUpgradeOperationsTable,
 		// The External connect step's durable target binding. It lives beside the
 		// operation row and is written in the same transaction as the stage and
 		// the domains it proves, so a row can never claim external_connect
 		// without naming the CPA it connected. The evidence file under the data
 		// root is a projection of this row, never the record a rerun decides on.
-		`create table if not exists upgrade_external_connect (
-			id integer primary key check(id = 1),
-			base_url text not null,
-			identity text not null,
-			generation text not null,
-			server_fingerprint text not null default '',
-			cpa_version text not null default '',
-			support text not null default '',
-			client_keys integer not null default 0,
-			management_key text not null default '',
-			observed_at_ms integer not null
-		)`,
+		createUpgradeExternalConnectTable,
 		// A UTC day the v2 Upgrade reconciliation permanently marked incomplete:
 		// the source can never be read again for it, so its covered numbers stay
 		// a lower bound for the life of this store. The row is evidence, not a
 		// derived table: no revision change or cleanup job may drop or rebuild it.
-		`create table if not exists usage_coverage_incomplete_days (
-			day text primary key,
-			reason text not null,
-			source text not null,
-			recorded_at_ms integer not null
-		)`,
+		createUsageCoverageIncompleteDaysTable,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -1363,6 +1370,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUpgradeOperationRoutingColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationPendingReconcileColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUpgradeExternalConnectColumns(db); err != nil {
@@ -1420,6 +1430,39 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	return ensureModelPriceColumns(db)
+}
+
+// MigrateUpgradeOperations ensures only the upgrade operation state tables and
+// columns exist without inspecting or modifying usage monitoring or pricing
+// tables.
+func MigrateUpgradeOperations(db *sql.DB) error {
+	statements := []string{
+		`pragma journal_mode = WAL`,
+		`pragma synchronous = FULL`,
+		`pragma busy_timeout = 5000`,
+		`pragma foreign_keys = ON`,
+		createUpgradeOperationsTable,
+		createUpgradeExternalConnectTable,
+		createUsageCoverageIncompleteDaysTable,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationRoutingColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationPendingReconcileColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeExternalConnectColumns(db); err != nil {
+		return err
+	}
+	return ensureUpgradeOperationColumns(db)
 }
 
 // ensureUpgradeOperationColumns adds the compare-and-set revision and the
@@ -3307,6 +3350,24 @@ func ensureUpgradeOperationRoutingColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureUpgradeOperationPendingReconcileColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	found, err := tableHasColumn(tx, "upgrade_operations", "pending_reconcile_days")
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := tx.Exec(`alter table upgrade_operations add column pending_reconcile_days text not null default '[]'`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ensureUpgradeExternalConnectColumns adds the encrypted management secret the

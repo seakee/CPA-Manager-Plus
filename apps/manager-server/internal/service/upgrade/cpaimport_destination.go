@@ -80,6 +80,9 @@ type cpaImportDestinationRecord struct {
 	OperationID             string                     `json:"operationId"`
 	Attempt                 int                        `json:"attempt"`
 	TerminalFailure         bool                       `json:"terminalFailure"`
+	StartAttempt            int                        `json:"startAttempt,omitempty"`
+	StartDispatched         bool                       `json:"startDispatched,omitempty"`
+	StartRuntimeGeneration  uint64                     `json:"startRuntimeGeneration,omitempty"`
 	SourceVersion           string                     `json:"sourceVersion,omitempty"`
 	SourceLayout            string                     `json:"sourceLayout,omitempty"`
 	ManualItems             []CPAImportManualItem      `json:"manualItems,omitempty"`
@@ -101,6 +104,20 @@ func (r cpaImportDestinationRecord) urlProved() bool {
 // different URL, so an operator instruction has to distinguish the two.
 func (r cpaImportDestinationRecord) bindsURL(baseURL string) bool {
 	return r.urlProved() && r.BaseURL == baseURL
+}
+
+// startOperationID returns the Runtime Start operation ID for the current start
+// generation of this destination attempt. Attempt 1's initial start preserves
+// the canonical `:start` suffix that Supervisor supersede admission inspects.
+func (r cpaImportDestinationRecord) startOperationID() string {
+	if r.StartAttempt <= 1 {
+		return r.OperationID + ":start"
+	}
+	return fmt.Sprintf("%s:start:%d", r.OperationID, r.StartAttempt)
+}
+
+func (r cpaImportDestinationRecord) hasDispatchedStart() bool {
+	return r.StartDispatched || r.StartAttempt >= 1 || r.urlProved()
 }
 
 // cpaImportDestinationIntent is the Supervisor's destination request without its
@@ -167,7 +184,23 @@ func cpaImportDestinationOperationID(sourceIdentity string, attempt int) string 
 func nextCPAImportDestinationAttempt(record cpaImportDestinationRecord) cpaImportDestinationRecord {
 	record.Attempt++
 	record.OperationID = cpaImportDestinationOperationID(record.Intent.SourceIdentity, record.Attempt)
+	record.StartAttempt = 0
+	record.StartDispatched = false
+	record.StartRuntimeGeneration = 0
 	record.TerminalFailure = false
+	return record
+}
+
+// nextCPAImportDestinationStart mints the next Start operation ID under the
+// same staged destination attempt when the same Runtime has confirmed the
+// destination process is offline after an earlier Start was already dispatched.
+func nextCPAImportDestinationStart(record cpaImportDestinationRecord) cpaImportDestinationRecord {
+	if record.StartAttempt < 1 {
+		record.StartAttempt = 2
+	} else {
+		record.StartAttempt++
+	}
+	record.StartDispatched = false
 	return record
 }
 
