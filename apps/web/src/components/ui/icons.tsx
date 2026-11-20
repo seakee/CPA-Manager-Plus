@@ -27,6 +27,11 @@ const sidebarSvgProps: SVGProps<SVGSVGElement> = {
   strokeMiterlimit: 10,
 };
 
+const sidebarNavSvgProps: SVGProps<SVGSVGElement> = {
+  ...baseSvgProps,
+  strokeWidth: 1.72,
+};
+
 export function IconSlidersHorizontal({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>
@@ -58,6 +63,19 @@ export function IconPin({ size = 20, ...props }: IconProps) {
     <svg {...baseSvgProps} width={size} height={size} {...props}>
       <path d="M12 17v5" />
       <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </svg>
+  );
+}
+
+export function IconPinOff({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <g transform="rotate(45 12 12)">
+        <path d="M12 17v5" />
+        <path d="M15 9.5V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1v2.5" />
+        <path d="M5.5 14.4A2 2 0 0 0 5 15.5V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.5a2 2 0 0 0-.5-1.1" />
+      </g>
+      <path d="m3 3 18 18" />
     </svg>
   );
 }
@@ -622,11 +640,48 @@ export function IconLayoutDashboard({ size = 20, ...props }: IconProps) {
 
 export function IconSidebarDashboard({ size = 20, ...props }: IconProps) {
   return (
-    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
-      <rect x="3" y="3" width="7.5" height="8" rx="1.5" />
-      <rect x="13.5" y="3" width="7.5" height="5" rx="1.5" fill="currentColor" fillOpacity="0.12" />
-      <rect x="3" y="14" width="7.5" height="7" rx="1.5" fill="currentColor" fillOpacity="0.12" />
-      <rect x="13.5" y="11" width="7.5" height="10" rx="1.5" />
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <rect x="4" y="4" width="6.5" height="7.5" rx="1.5" />
+      <rect x="13.5" y="4" width="6.5" height="4.5" rx="1.5" fill="currentColor" fillOpacity="0.12" />
+      <rect x="4" y="14.5" width="6.5" height="5.5" rx="1.5" fill="currentColor" fillOpacity="0.12" />
+      <rect x="13.5" y="11.5" width="6.5" height="8.5" rx="1.5" />
+    </svg>
+  );
+}
+
+export function IconSidebarResources({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <path d="m12 4 8.5 4.25L12 12.5 3.5 8.25Z" fill="currentColor" fillOpacity="0.12" />
+      <path d="m3.5 12.25 8.5 4.25 8.5-4.25" />
+      <path d="m3.5 16 8.5 4.25 8.5-4.25" />
+    </svg>
+  );
+}
+
+export function IconSidebarClients({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <circle cx="8.5" cy="15.5" r="4.3" fill="currentColor" fillOpacity="0.12" />
+      <path d="m11.55 12.45 7.65-7.65" />
+      <path d="m16 8 2.2 2.2" />
+      <path d="m18.6 5.4 1.8 1.8" />
+    </svg>
+  );
+}
+
+export function IconSidebarObserve({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <path
+        d="M7.5 18V14.5l3.2-3.8 2.8 2.3 5-6V18Z"
+        fill="currentColor"
+        fillOpacity="0.1"
+        stroke="none"
+      />
+      <path d="M4 4v14.5A1.5 1.5 0 0 0 5.5 20H20" />
+      <path d="m7.5 14.5 3.2-3.8 2.8 2.3 5-6" />
+      <path d="M15.5 7h3v3" />
     </svg>
   );
 }
@@ -690,13 +745,12 @@ export function IconSidebarQuota({ size = 20, ...props }: IconProps) {
 
 export function IconSidebarPlugins({ size = 20, ...props }: IconProps) {
   return (
-    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
-      <path d="M6 7h12v4a6 6 0 0 1-12 0Z" fill="currentColor" fillOpacity="0.12" />
-      <path d="M8 3v4" />
-      <path d="M16 3v4" />
-      <path d="M6 7h12v4a6 6 0 0 1-12 0Z" />
-      <path d="M12 17v4" />
-      <path d="M9 21h6" />
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <path
+        d="M6 7.5h2.85a2.1 2.1 0 1 1 3.3 0H15a1.5 1.5 0 0 1 1.5 1.5v2.85a2.1 2.1 0 1 1 0 3.3V18a1.5 1.5 0 0 1-1.5 1.5h-2.85a2.1 2.1 0 1 0-3.3 0H6A1.5 1.5 0 0 1 4.5 18V9A1.5 1.5 0 0 1 6 7.5Z"
+        fill="currentColor"
+        fillOpacity="0.12"
+      />
     </svg>
   );
 }
@@ -768,17 +822,30 @@ export function IconSidebarLogs({ size = 20, ...props }: IconProps) {
 
 export function IconSidebarSystem({ size = 20, ...props }: IconProps) {
   return (
-    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
-      <rect x="6" y="6" width="12" height="12" rx="2" />
-      <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" fillOpacity="0.12" />
-      <path d="M6 10H3" />
-      <path d="M6 14H3" />
-      <path d="M21 10h-3" />
-      <path d="M21 14h-3" />
-      <path d="M10 6V3" />
-      <path d="M14 6V3" />
-      <path d="M10 21v-3" />
-      <path d="M14 21v-3" />
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <g transform="translate(12 12) scale(0.86) translate(-12 -12)" strokeWidth="2">
+        <path
+          d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+          fill="currentColor"
+          fillOpacity="0.1"
+        />
+        <circle cx="12" cy="12" r="3" />
+      </g>
+    </svg>
+  );
+}
+
+export function IconSidebarPinned({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarNavSvgProps} width={size} height={size} {...props}>
+      <g transform="translate(12 12) rotate(45) scale(0.86) translate(-12 -11.5)" strokeWidth="2">
+        <path
+          d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+          fill="currentColor"
+          fillOpacity="0.12"
+        />
+        <path d="M12 17v4.5" />
+      </g>
     </svg>
   );
 }

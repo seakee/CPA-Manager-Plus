@@ -1,12 +1,13 @@
+import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
 import en from '@/i18n/locales/en.json';
 import ru from '@/i18n/locales/ru.json';
 import zhCN from '@/i18n/locales/zh-CN.json';
 import zhTW from '@/i18n/locales/zh-TW.json';
 import layoutSource from '@/components/layout/MainLayout.tsx?raw';
+import { buildCanonicalNavModel, type NavSidebarIconSet } from '@/components/layout/navRegistry';
 import routesSource from '@/router/MainRoutes.tsx?raw';
 import pageSource from './UsageAnalyticsPage.tsx?raw';
-
 const getPath = (value: unknown, keyPath: string) =>
   keyPath.split('.').reduce<unknown>((current, key) => {
     if (!current || typeof current !== 'object') return undefined;
@@ -333,29 +334,60 @@ describe('usage analytics app wiring', () => {
   });
 
   it('places Usage Analytics with request monitoring in the monitoring and analytics group', () => {
-    const dashboardIndex = layoutSource.indexOf('const dashboardNavItem: NavItem = {');
-    const usageIndex = layoutSource.indexOf(
-      '...(usageAnalyticsNavItem ? [usageAnalyticsNavItem] : [])'
+    const stubIcons: NavSidebarIconSet = {
+      dashboard: null,
+      resources: null,
+      clients: null,
+      observe: null,
+      aiProviders: null,
+      authFiles: null,
+      oauth: null,
+      usageAnalytics: null,
+      monitoring: null,
+      plugins: null,
+      config: null,
+      logs: null,
+      system: null,
+      pinned: null,
+    };
+    const stubT = ((key: string) => key) as unknown as TFunction;
+
+    const enabled = buildCanonicalNavModel({
+      t: stubT,
+      icons: stubIcons,
+      featureAvailability: { requestMonitoringAvailable: true, modelPricesAvailable: true },
+      hasHostRoutes: true,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => null,
+    });
+    const observe = enabled.canonicalSections.find((section) => section.id === 'observe');
+    expect(observe).toBeDefined();
+    const observePaths = observe!.items.map((item) => item.path);
+    expect(observePaths.indexOf('/monitoring')).toBeGreaterThanOrEqual(0);
+    expect(observePaths.indexOf('/usage-analytics')).toBeGreaterThan(
+      observePaths.indexOf('/monitoring')
     );
-    const monitoringIndex = layoutSource.indexOf(
-      '...(monitoringNavItem ? [monitoringNavItem] : [])'
+    expect(observe!.items.find((item) => item.path === '/usage-analytics')?.label).toBe(
+      'nav.usage_analytics'
     );
 
-    expect(layoutSource).toContain(
-      'const usageAnalyticsNavItem = featureAvailability.requestMonitoringAvailable'
-    );
-    expect(layoutSource).toContain("path: '/usage-analytics'");
-    expect(layoutSource).toContain("label: t('nav.usage_analytics')");
-    expect(dashboardIndex).toBeGreaterThanOrEqual(0);
-    expect(usageIndex).toBeGreaterThan(dashboardIndex);
-    expect(layoutSource).toContain("id: 'observe'");
-    expect(monitoringIndex).toBeLessThan(usageIndex);
+    const disabled = buildCanonicalNavModel({
+      t: stubT,
+      icons: stubIcons,
+      featureAvailability: { requestMonitoringAvailable: false, modelPricesAvailable: false },
+      hasHostRoutes: true,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => null,
+    });
+    expect(disabled.canonicalItems.map((item) => item.path)).not.toContain('/usage-analytics');
   });
 
   it('renders full sidebar labels when the sidebar is expanded', () => {
-    expect(layoutSource).toContain(
-      '(showSidebarLabels || inFlyout)'
-    );
+    expect(layoutSource).toContain('(showSidebarLabels || inFlyout)');
     expect(layoutSource).not.toContain('item.shortLabel ?? item.label');
   });
 

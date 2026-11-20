@@ -718,6 +718,12 @@
     "group_resources": "资源管理",
     "group_clients": "客户端接入",
     "group_observe": "监控分析",
+    "group_pinned": "常用",
+    "manage_pinned": "置顶",
+    "manage_pinned_done": "完成",
+    "manage_pinned_aria": "管理常用置顶菜单",
+    "pin_item": "将 {{label}} 置顶到常用",
+    "unpin_item": "取消置顶 {{label}}",
     "model_prices": "模型价格",
     "provider_models": "提供商模型"
   },

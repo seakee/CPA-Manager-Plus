@@ -722,6 +722,12 @@
     "group_resources": "Ресурсы",
     "group_clients": "Доступ клиентов",
     "group_observe": "Мониторинг и аналитика",
+    "group_pinned": "Закреплённые",
+    "manage_pinned": "Закрепить",
+    "manage_pinned_done": "Готово",
+    "manage_pinned_aria": "Управление закреплённым меню",
+    "pin_item": "Закрепить «{{label}}»",
+    "unpin_item": "Открепить «{{label}}»",
     "model_prices": "Цены моделей",
     "provider_models": "Модели провайдера"
   },
