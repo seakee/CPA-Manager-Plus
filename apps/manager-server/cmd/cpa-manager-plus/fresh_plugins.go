@@ -221,7 +221,14 @@ type pluginCapabilityProbe struct {
 }
 
 func newPluginCapabilityProbe(ttl, timeout time.Duration, probe func(context.Context) bool) *pluginCapabilityProbe {
-	baseCtx, cancel := context.WithCancel(context.Background())
+	return newPluginCapabilityProbeWithContext(context.Background(), ttl, timeout, probe)
+}
+
+func newPluginCapabilityProbeWithContext(parent context.Context, ttl, timeout time.Duration, probe func(context.Context) bool) *pluginCapabilityProbe {
+	if parent == nil {
+		parent = context.Background()
+	}
+	baseCtx, cancel := context.WithCancel(parent)
 	return &pluginCapabilityProbe{
 		ttl:     ttl,
 		timeout: timeout,

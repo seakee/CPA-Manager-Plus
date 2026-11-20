@@ -2894,47 +2894,79 @@ async function faultInterruptedCopyIn(binary, workspace) {
 
 // 3. A derived rollup cleared on a target that still holds the retained events
 // a rebuild would read: waivable, and marked once the operator acknowledges it.
-function faultClearedRollupRecoverable(binary, workspace) {
-  const source = path.join(SCRATCH, 'work', 'rollup-recoverable', 'source');
-  const target = path.join(SCRATCH, 'work', 'rollup-recoverable', 'target');
-  copyTree(workspace.archived, source);
-  fs.mkdirSync(target, { recursive: true });
-  chain(binary, source, target, 'rollup-recoverable');
+function readUpgradeOperationState(targetRoot) {
+  const database = path.join(targetRoot, 'usage.sqlite');
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    const row = db.prepare('select stage, pending_reconcile_days from upgrade_operations where id = 1').get();
+    assertValue(row && typeof row.stage === 'string', 'upgrade_operations row missing');
+    const pendingDays = JSON.parse(row.pending_reconcile_days || '[]');
+    assertValue(Array.isArray(pendingDays), 'upgrade_operations.pending_reconcile_days is not a JSON array');
+    return { stage: row.stage, pendingDays };
+  } finally {
+    db.close();
+  }
+}
 
+// faultClearedRollupRecoverable clears a derived rollup whose source raw rows
+// are still present, proves reconcile refuses without advancing stage or
+// marking incomplete days while recording pending_reconcile_days for the
+// browser wizard, and proves --acknowledge clears pending_reconcile_days and
+// marks the days.
+function faultClearedRollupRecoverable(binary, workspace) {
+  const { source, target } = stageReconcileFaultCopy(binary, workspace, 'rollup-recoverable');
+  const sourceDigest = dirDigest(source);
+  const database = path.join(target, 'usage.sqlite');
   injectClearedRollup(target, TABLES.pricing);
-  const digestAfterInjection = dirDigest(target);
+  assertValue(
+    sqliteCount(database, 'select count(*) as count from usage_coverage_incomplete_days') === 0,
+    'rollup-recoverable: incomplete days table was not empty before reconcile',
+  );
 
   const refused = runCli(binary, ['upgrade', 'reconcile', '--legacy', source, '--target', target, '--json'], 'rollup-recoverable:refused', { expectExit: 1 });
-  const refusedReport = parseJson(refused.stdout, 'rollup-recoverable:refused');
-  const code = refusedReport.errorCode || typedCode(refused);
-  assertValue(code === 'upgrade_reconcile_mismatch', `rollup-recoverable: code=${code}`);
-  const unacknowledged = refusedReport.report?.unacknowledgedDays ?? [];
-  assertValue(unacknowledged.length > 0, 'rollup-recoverable: the refused reconcile named no day to acknowledge');
-  assertValue(dirDigest(target) === digestAfterInjection, 'rollup-recoverable: the refused reconcile wrote the v2 data root');
+  const refusedBody = parseCliJson(refused, 'rollup-recoverable:refused');
+  const code = errorCode(refusedBody);
+  const unacknowledged = unacknowledgedDays(refusedBody);
+  assertValue(code === 'upgrade_reconcile_mismatch', `rollup-recoverable: code = ${code}`);
+  assertValue(unacknowledged.length > 0, 'rollup-recoverable: refusal named no unacknowledged days');
+  assertValue(dirDigest(source) === sourceDigest, 'rollup-recoverable: the refused reconcile modified the 1.x source root');
 
-  const acknowledge = unacknowledged.flatMap((day) => ['--acknowledge', day]);
-  const accepted = runCli(
-    binary,
-    ['upgrade', 'reconcile', '--legacy', source, '--target', target, '--json', ...acknowledge],
-    'rollup-recoverable:acknowledged',
-    { expectExit: 0 },
-  );
-  const acceptedReport = parseJson(accepted.stdout, 'rollup-recoverable:acknowledged');
-  assertValue(acceptedReport.report?.newlyMarkedDays === unacknowledged.length, `rollup-recoverable: newlyMarked=${acceptedReport.report?.newlyMarkedDays}`);
-  const reasons = (acceptedReport.report?.incompleteDays ?? []).map((day) => day.reason);
+  const afterRefusal = readUpgradeOperationState(target);
+  assertValue(afterRefusal.stage === 'copy_in', `rollup-recoverable: refused reconcile advanced stage to ${afterRefusal.stage}`);
   assertValue(
-    reasons.length === unacknowledged.length && reasons.every((reason) => reason === 'derived_rollup_lost'),
-    `rollup-recoverable: marked reasons=${JSON.stringify(reasons)}`,
+    JSON.stringify([...afterRefusal.pendingDays].sort()) === JSON.stringify([...unacknowledged].sort()),
+    `rollup-recoverable: pending_reconcile_days = ${JSON.stringify(afterRefusal.pendingDays)}, want ${JSON.stringify(unacknowledged)}`,
   );
-  recordFault('cleared-derived-rollup-with-retained-support', refused, code, true, {
-    acknowledgedDays: unacknowledged,
-    newlyMarkedDays: acceptedReport.report?.newlyMarkedDays,
-    acknowledgedExit: accepted.code,
+  assertValue(
+    sqliteCount(database, 'select count(*) as count from usage_coverage_incomplete_days') === 0,
+    'rollup-recoverable: refused reconcile marked incomplete days before acknowledgement',
+  );
+  assertValue(
+    sqliteCount(database, `select count(*) as count from ${TABLES.pricing}`) === 0,
+    `rollup-recoverable: refused reconcile mutated ${TABLES.pricing}`,
+  );
+
+  const acked = runCli(binary, ['upgrade', 'reconcile', '--legacy', source, '--target', target, '--acknowledge', unacknowledged.join(','), '--json'], 'rollup-recoverable:acknowledged');
+  const ackBody = parseCliJson(acked, 'rollup-recoverable:acknowledged');
+  assertValue(ackBody.status === 'ok' && ackBody.stage === 'reconcile', `rollup-recoverable: acknowledged reconcile did not advance: ${acked.stdout}`);
+  const marked = markedDays(ackBody);
+  assertValue(marked.length === unacknowledged.length, `rollup-recoverable: marked ${marked.length} days, expected ${unacknowledged.length}`);
+  for (const day of marked) {
+    assertValue(day.reason === 'derived_rollup_lost', `rollup-recoverable: day ${day.day} reason = ${day.reason}`);
+  }
+  const afterAck = readUpgradeOperationState(target);
+  assertValue(afterAck.stage === 'reconcile', `rollup-recoverable: acknowledged stage = ${afterAck.stage}`);
+  assertValue(afterAck.pendingDays.length === 0, `rollup-recoverable: acknowledged reconcile left pending_reconcile_days = ${JSON.stringify(afterAck.pendingDays)}`);
+
+  recordFault('cleared-derived-rollup-with-retained-support', refused, code, false, {
+    unacknowledgedDays: unacknowledged,
+    pendingDaysRecorded: afterRefusal.pendingDays,
+    markedAfterAcknowledge: marked.map((d) => ({ day: d.day, reason: d.reason })),
   });
 }
 
-// 4. The same cleared rollup, but a day the store holds no retained event of:
-// nothing can rebuild it, so no acknowledgement may waive it.
+// 4. A derived rollup cleared on a target whose raw events are gone:
+// unrecoverable, because nothing can rebuild it, so no acknowledgement may waive it.
 function faultClearedRollupUnrecoverable(binary, workspace) {
   const source = path.join(SCRATCH, 'work', 'rollup-unrecoverable', 'source');
   const target = path.join(SCRATCH, 'work', 'rollup-unrecoverable', 'target');

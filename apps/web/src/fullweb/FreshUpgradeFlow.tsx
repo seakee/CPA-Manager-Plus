@@ -3092,51 +3092,45 @@ function UpgradeExecutionActions({
   execute: (input: UpgradeExecutionInput) => Promise<boolean>;
 }) {
   const [acknowledgedDays, setAcknowledgedDays] = useState<string[]>([]);
-  const [acknowledgedAllTruncated, setAcknowledgedAllTruncated] = useState(false);
+  const [acknowledgedTruncatedTotal, setAcknowledgedTruncatedTotal] = useState<number | null>(null);
+  const acknowledgedAllTruncated =
+    Boolean(record.mismatchDaysTruncated) &&
+    acknowledgedTruncatedTotal === record.mismatchDaysTotal;
   const [acknowledgedParity, setAcknowledgedParity] = useState(false);
   const [pluginsChoice, setPluginsChoice] = useState<'' | 'disabled' | 'enabled'>('');
   const [externalOverride, setExternalOverride] = useState(false);
   const [externalBaseUrl, setExternalBaseUrl] = useState('');
-  const [externalHasKey, setExternalHasKey] = useState(false);
-  const externalKeyRef = useRef<HTMLInputElement>(null);
-  const bindExternalKeyRef = useCallback((node: HTMLInputElement | null) => {
-    if (node) {
-      externalKeyRef.current = node;
-    } else if (externalKeyRef.current) {
-      externalKeyRef.current.value = '';
-      externalKeyRef.current = null;
-    }
-  }, []);
+  const externalKeyRef = useRef<HTMLInputElement | null>(null);
   const managedAvailable = Boolean(record.execution?.managedAvailable);
   const activeMode = managedAvailable ? mode : 'external';
+  const externalSecretScope = `${activeMode}:${record.stage}`;
+  const externalSecretEditable =
+    activeMode === 'external' &&
+    record.stage !== 'external_connect' &&
+    record.stage !== 'verify' &&
+    record.stage !== 'complete';
+  const [externalKeyScope, setExternalKeyScope] = useState<string | null>(null);
+  const externalHasKey = externalSecretEditable && externalKeyScope === externalSecretScope;
+  const bindExternalKeyRef = useCallback((node: HTMLInputElement | null) => {
+    if (node === null && externalKeyRef.current) {
+      externalKeyRef.current.value = '';
+    }
+    externalKeyRef.current = node;
+  }, []);
   const clearExternalSecret = useCallback(() => {
     if (externalKeyRef.current) externalKeyRef.current.value = '';
-    setExternalHasKey(false);
+    setExternalKeyScope(null);
   }, []);
   useEffect(() => {
-    if (activeMode === 'managed') {
-      clearExternalSecret();
+    if (!externalSecretEditable && externalKeyRef.current) {
+      externalKeyRef.current.value = '';
     }
-  }, [activeMode, clearExternalSecret]);
-  useEffect(() => {
-    if (
-      record.stage === 'external_connect' ||
-      record.stage === 'verify' ||
-      record.stage === 'complete'
-    ) {
-      clearExternalSecret();
-    }
-  }, [record.stage, clearExternalSecret]);
-  useEffect(() => {
-    if (!record.mismatchDaysTruncated) {
-      setAcknowledgedAllTruncated(false);
-    }
-  }, [record.mismatchDaysTruncated, record.mismatchDaysTotal]);
+  }, [externalSecretEditable]);
   useEffect(
     () => () => {
       if (externalKeyRef.current) externalKeyRef.current.value = '';
     },
-    []
+    [],
   );
   if (record.nextAction === 'reconcile' || (record.stage === 'copy_in' && record.domainsDone.includes('source_copy'))) {
     const days = record.mismatchDays;
@@ -3187,7 +3181,9 @@ function UpgradeExecutionActions({
                   data-testid="upgrade-ack-all-truncated"
                   checked={acknowledgedAllTruncated}
                   disabled={busy}
-                  onChange={(ev) => setAcknowledgedAllTruncated(ev.target.checked)}
+                  onChange={(ev) =>
+                    setAcknowledgedTruncatedTotal(ev.target.checked ? record.mismatchDaysTotal : null)
+                  }
                 />
                 <span className="journey-checkbox-box" aria-hidden="true">
                   <FullWebIcon name="check" size={13} />
@@ -3299,7 +3295,7 @@ function UpgradeExecutionActions({
                   onChange={(ev) => setExternalBaseUrl(ev.target.value)} /></label>
               <label className="upgrade-field"><span>{e('externalKey', language)}</span>
                 <input ref={bindExternalKeyRef} type="password" autoComplete="off" data-testid="upgrade-external-key"
-                  disabled={busy} onChange={(ev) => setExternalHasKey(ev.target.value.trim() !== '')} /></label>
+                  disabled={busy} onChange={(ev) => setExternalKeyScope(ev.target.value.trim() !== '' ? externalSecretScope : null)} /></label>
               {externalPairInvalid && (
                 <p className="upgrade-step-help" data-testid="upgrade-external-pair-hint">
                   {e('externalOverridePairRequired', language)}
