@@ -42,7 +42,7 @@ func keyOperationCode(err error) (int, string) {
 		status, code = http.StatusNotFound, "key_operation_not_found"
 	case errors.Is(err, freshkeyapply.ErrLastKey):
 		status, code = http.StatusConflict, "last_effective_key"
-	case errors.Is(err, freshkeys.ErrConflict):
+	case errors.Is(err, freshkeys.ErrConflict), errors.Is(err, freshkeys.ErrRetired):
 		status, code = http.StatusConflict, "key_operation_conflict"
 	case errors.Is(err, freshkeyapply.ErrGeneration):
 		status, code = http.StatusConflict, "key_operation_generation_mismatch"
@@ -92,6 +92,7 @@ func keyOperationReply(w http.ResponseWriter, result freshkeyapply.OperationResu
 
 func (a *freshApplication) prepareClientKeyOperation(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, target string) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -105,6 +106,10 @@ func (a *freshApplication) prepareClientKeyOperation(w http.ResponseWriter, r *h
 		Mode      string `json:"mode"`
 	}
 	if !decodeKeyOperation(w, r, &body) {
+		return
+	}
+	if body.Mode != "revoke" && body.Mode != "replace" {
+		keyOperationReply(w, freshkeyapply.OperationResult{RuntimeState: "effect_unknown"}, freshkeys.ErrRequest)
 		return
 	}
 	if a.writeExternalSavedCredentialPrecheck(w, r.Context(), func() {
@@ -193,6 +198,16 @@ func (a *freshApplication) clientKeyOperation(w http.ResponseWriter, r *http.Req
 			a.usageProjection.Wake()
 		}
 		keyOperationReply(w, result, err)
+		return
+	}
+	if !strings.Contains(id, "/") && id != "" {
+		w.Header().Set("Allow", "GET")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.HasSuffix(id, "/continue") && strings.Count(id, "/") == 1 {
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	w.WriteHeader(http.StatusMethodNotAllowed)

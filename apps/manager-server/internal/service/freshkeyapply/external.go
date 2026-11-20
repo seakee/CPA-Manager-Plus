@@ -610,7 +610,7 @@ func (s *Service) externalObserve(ctx context.Context, id string, generation uin
 // operation from the live target: the connection identity, the checkpoint
 // generation and the configuration digest observed immediately before the step.
 func (s *Service) externalKeyGrant(ctx context.Context, operationID, step string) (KeyPermit, error) {
-	if operationID == "" || (step != "add" && step != "revoke") {
+	if operationID == "" || (step != "add" && step != "revoke" && step != "rotate") {
 		return KeyPermit{}, ErrExternalUnavailable
 	}
 	install, err := s.externalAuthority(ctx)

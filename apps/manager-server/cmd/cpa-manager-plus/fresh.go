@@ -462,6 +462,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	a.usage = usageapp.New(identityusage.New(opened.DB), a.collectionPhase)
 	a.keyRepo = keyrepo.New(opened.DB)
 	a.keys = freshkeys.New(a.keyRepo, opened.Protector, freshkeys.WithSourceRuntime(a.installedRuntimeIdentity))
+	if err := a.keys.DiscardOrphanedRotate(context.Background(), "", ""); err != nil {
+		log.Printf("Fresh orphaned rotation sweep failed: %v", err)
+	}
 	// Reuse the existing settings authority without opening a Legacy app,
 	// collector, CPA client, or second SQLite connection.
 	a.updates = updatecheck.New(store.New(opened.DB), buildinfo.Version, buildinfo.SourceCommit, os.Getenv("CPAMP_UPDATE_CHECK_ENABLED") != "false")
@@ -1336,7 +1339,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		// the same idempotent startup path as a resumed install runs now: it
 		// backfills keys staged before completion and starts collection,
 		// projection and identity reconciliation exactly once.
-		a.startUsageCollection(next.Operation)
+		a.startUsageCollectionAtCompletion(next.Operation)
 		writeFreshJSON(w, next.Operation)
 	default:
 		http.NotFound(w, r)

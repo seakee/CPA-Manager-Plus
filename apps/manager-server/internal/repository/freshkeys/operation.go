@@ -7,8 +7,10 @@ import (
 	"errors"
 	"math"
 	"time"
+	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
 const latestOperationSetting = "fresh_key_operation_latest_v1"
@@ -102,7 +104,7 @@ func validOperation(o Operation) bool {
 		}
 	}
 	switch o.Mode {
-	case "add":
+	case "add", "rotate":
 		if o.KeeperID != "" {
 			return false
 		}
@@ -143,6 +145,8 @@ func validOperation(o Operation) bool {
 		names = []string{"revoke"}
 	case "replace":
 		names = []string{"add", "revoke"}
+	case "rotate":
+		names = []string{"rotate"}
 	}
 	if len(o.Steps) != len(names) {
 		return false
@@ -329,6 +333,10 @@ func (r *Repository) SaveOperation(ctx context.Context, o Operation) error {
 		if err = commitOperationIdentityTx(ctx, tx, o); err != nil {
 			return err
 		}
+	} else if o.Mode == "rotate" && o.Outcome == OutcomeAborted {
+		if _, err = tx.ExecContext(ctx, "delete from fresh_client_api_key_rotations where request_id = ?", o.ID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -383,6 +391,9 @@ func commitOperationIdentityTx(ctx context.Context, tx *sql.Tx, o Operation) err
 			return err
 		}
 		return nil
+	}
+	if o.Mode == "rotate" {
+		return commitRotateOperationTx(ctx, tx, o, ent, found)
 	}
 	if !found {
 		return ErrConflict
@@ -485,4 +496,205 @@ func commitOperationIdentityTx(ctx context.Context, tx *sql.Tx, o Operation) err
 		}
 	}
 	return nil
+}
+
+func commitRotateOperationTx(ctx context.Context, tx *sql.Tx, o Operation, ent identity.APIKeyIdentity, found bool) error {
+	if !found || (ent.Lifecycle != identity.LifecycleActive && ent.Lifecycle != identity.LifecycleMissing) {
+		return ErrConflict
+	}
+	if ent.Revision >= math.MaxInt64 {
+		return errors.New("canonical identity revision overflow")
+	}
+	cur, err := byID(ctx, tx, identity.APIKeyID(o.TargetID))
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return ErrConflict
+	}
+	rot, err := rotationByRequestID(ctx, tx, o.ID)
+	if err != nil {
+		return err
+	}
+	if rot == nil || string(rot.APIKeyID) != o.TargetID || rot.OldHash != cur.Hash || rot.NewHash == cur.Hash || !security.IsValidProtectedEnvelope(rot.NewCiphertext) {
+		return ErrConflict
+	}
+	completedAtMS, err := nextIdentityUpdatedAt(ent.UpdatedAtMS, o.CompletedAtMS)
+	if err != nil {
+		return err
+	}
+	var prevMaxRetired int64
+	if err := tx.QueryRowContext(ctx, `select coalesce(max(retired_at_ms), 0)
+		from fresh_client_api_key_secret_history where api_key_id = ?`, o.TargetID).Scan(&prevMaxRetired); err != nil {
+		return err
+	}
+	retiredAtMS := completedAtMS
+	if prevMaxRetired >= retiredAtMS {
+		if prevMaxRetired == math.MaxInt64 {
+			return errors.New("secret history timestamp overflow")
+		}
+		retiredAtMS = prevMaxRetired + 1
+	}
+	if _, err := tx.ExecContext(ctx, `insert into fresh_client_api_key_secret_history (
+		secret_hash, api_key_id, secret_ciphertext, masked_preview, origin, retired_at_ms, retired_by_request_id, next_secret_hash
+	) values (?, ?, ?, ?, ?, ?, ?, ?)`,
+		cur.Hash, o.TargetID, cur.Ciphertext, cur.Preview, cur.Origin, retiredAtMS, o.ID, rot.NewHash); err != nil {
+		return err
+	}
+	updateKeyRes, err := tx.ExecContext(ctx, `update fresh_client_api_keys
+		set secret_ciphertext = ?, secret_hash = ?, masked_preview = ?
+		where api_key_id = ? and secret_hash = ?`,
+		rot.NewCiphertext, rot.NewHash, rot.NewPreview, o.TargetID, cur.Hash)
+	if err != nil {
+		return err
+	}
+	if affected, err := updateKeyRes.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrConflict
+	}
+	delRotRes, err := tx.ExecContext(ctx, `delete from fresh_client_api_key_rotations
+		where request_id = ? and api_key_id = ?`, o.ID, o.TargetID)
+	if err != nil {
+		return err
+	}
+	if affected, err := delRotRes.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrConflict
+	}
+	updateEntRes, err := tx.ExecContext(ctx, `update gateway_api_key_identities
+		set lifecycle = ?, revision = ?, updated_at_ms = ?
+		where id = ? and lifecycle = ? and revision = ?`,
+		string(identity.LifecycleActive), int64(ent.Revision)+1, completedAtMS,
+		o.TargetID, string(ent.Lifecycle), int64(ent.Revision))
+	if err != nil {
+		return err
+	}
+	if affected, err := updateEntRes.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrConflict
+	}
+
+	rows, err := tx.QueryContext(ctx, `select binding_id, runtime_identity, observed_runtime_generation, first_seen_at_ms, last_seen_at_ms
+		from gateway_api_key_source_bindings
+		where api_key_id = ? and retired_at_ms is null
+		order by binding_id asc`, o.TargetID)
+	if err != nil {
+		return err
+	}
+	type activeBinding struct {
+		bindingID       int64
+		runtimeIdentity string
+		observedGen     sql.NullString
+		firstSeenAtMS   int64
+		lastSeenAtMS    int64
+	}
+	var bindings []activeBinding
+	for rows.Next() {
+		var b activeBinding
+		if err := rows.Scan(&b.bindingID, &b.runtimeIdentity, &b.observedGen, &b.firstSeenAtMS, &b.lastSeenAtMS); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		bindings = append(bindings, b)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, b := range bindings {
+		if strings.TrimSpace(b.runtimeIdentity) != b.runtimeIdentity || b.runtimeIdentity == "" {
+			continue
+		}
+		if b.firstSeenAtMS <= 0 || b.lastSeenAtMS < b.firstSeenAtMS {
+			return errors.New("invalid client key source binding timestamps")
+		}
+		floor := max(b.firstSeenAtMS, b.lastSeenAtMS)
+		if floor == math.MaxInt64 {
+			return errors.New("source binding handoff timestamp overflow")
+		}
+		handoffMS := max(completedAtMS, floor+1)
+		observedGen := b.observedGen
+		if observedGen.Valid && (observedGen.String == "" || observedGen.String == "0") {
+			observedGen = sql.NullString{}
+		}
+		retireRes, err := tx.ExecContext(ctx, `update gateway_api_key_source_bindings
+			set retired_at_ms = ?
+			where binding_id = ? and retired_at_ms is null`,
+			handoffMS, b.bindingID)
+		if err != nil {
+			return err
+		}
+		if affected, err := retireRes.RowsAffected(); err != nil {
+			return err
+		} else if affected != 1 {
+			return ErrConflict
+		}
+		newFirstSeenMS := handoffMS
+		if o.CreatedAtMS > 0 && o.CreatedAtMS < newFirstSeenMS {
+			newFirstSeenMS = o.CreatedAtMS
+		}
+		newLastSeenMS := max(handoffMS, newFirstSeenMS)
+		if _, err := tx.ExecContext(ctx, `insert into gateway_api_key_source_bindings (
+			api_key_id, runtime_identity, api_key_hash, observed_runtime_generation,
+			first_seen_at_ms, last_seen_at_ms, retired_at_ms
+		) values (?, ?, ?, ?, ?, ?, null)`,
+			o.TargetID, b.runtimeIdentity, rot.NewHash, observedGen, newFirstSeenMS, newLastSeenMS); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DiscardOrphanedRotation removes staged rotation rows for targetID other than
+// keepRequestID only when their request_id has no operation journal entry in
+// settings (e.g. after a crash before BeginOperation). When targetID is empty,
+// all orphaned rotation rows across keys (other than keepRequestID) are swept.
+// Callers must hold the key-operation mutex.
+func (r *Repository) DiscardOrphanedRotation(ctx context.Context, keepRequestID string, targetID identity.APIKeyID) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	if targetID != "" && targetID.Validate() != nil {
+		return nil
+	}
+	if targetID == "" {
+		_, err := r.db.ExecContext(ctx, `delete from fresh_client_api_key_rotations
+			where request_id <> ?
+			  and not exists (
+			      select 1 from settings s
+			      where s.key = ? || fresh_client_api_key_rotations.request_id
+			  )`, keepRequestID, operationPrefix)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `delete from fresh_client_api_key_rotations
+		where api_key_id = ?
+		  and request_id <> ?
+		  and not exists (
+		      select 1 from settings s
+		      where s.key = ? || fresh_client_api_key_rotations.request_id
+		  )`, string(targetID), keepRequestID, operationPrefix)
+	return err
+}
+
+// HasStagedRotation reports whether targetID currently has a staged candidate
+// row in fresh_client_api_key_rotations.
+func (r *Repository) HasStagedRotation(ctx context.Context, targetID identity.APIKeyID) (bool, error) {
+	if r == nil || r.db == nil || targetID.Validate() != nil {
+		return false, nil
+	}
+	var exists int
+	err := r.db.QueryRowContext(ctx, `select 1 from fresh_client_api_key_rotations where api_key_id = ? limit 1`, string(targetID)).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

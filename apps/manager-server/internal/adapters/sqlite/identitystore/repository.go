@@ -715,7 +715,22 @@ func stagedAPIKeyForSource(ctx context.Context, tx *sql.Tx, hash string) (identi
 		join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on i.id = k.api_key_id
 		where k.secret_hash = ?`, hash).Scan(&rawID, &lifecycle)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
+		var histID string
+		histErr := tx.QueryRowContext(ctx, `select h.api_key_id
+			from fresh_client_api_key_secret_history h
+			join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on i.id = h.api_key_id
+			where h.secret_hash = ?
+			limit 1`, hash).Scan(&histID)
+		if errors.Is(histErr, sql.ErrNoRows) {
+			return "", "", false, nil
+		}
+		if histErr != nil {
+			return "", "", false, histErr
+		}
+		if identity.APIKeyID(histID).Validate() != nil {
+			return "", "", false, errors.New("invalid historical client key identity")
+		}
+		return identity.APIKeyID(histID), identity.LifecycleSuperseded, true, nil
 	}
 	if err != nil {
 		return "", "", false, err
@@ -801,6 +816,31 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 	if err != nil {
 		return ports.ReconcileSnapshotResult{}, fmt.Errorf("resolve pending credential delete: %w", err)
 	}
+	if suppressedAPIKeys == nil {
+		suppressedAPIKeys = make(map[string]struct{})
+	}
+	rotRows, err := tx.QueryContext(ctx, `select old_secret_hash, new_secret_hash from fresh_client_api_key_rotations`)
+	if err != nil {
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("query active client key rotations: %w", err)
+	}
+	for rotRows.Next() {
+		var oldHash, newHash string
+		if err := rotRows.Scan(&oldHash, &newHash); err != nil {
+			rotRows.Close()
+			return ports.ReconcileSnapshotResult{}, fmt.Errorf("scan active client key rotation: %w", err)
+		}
+		if oldHash != "" {
+			suppressedAPIKeys[oldHash] = struct{}{}
+		}
+		if newHash != "" {
+			suppressedAPIKeys[newHash] = struct{}{}
+		}
+	}
+	if err := rotRows.Err(); err != nil {
+		rotRows.Close()
+		return ports.ReconcileSnapshotResult{}, fmt.Errorf("iterate active client key rotations: %w", err)
+	}
+	rotRows.Close()
 
 	// --- 1. Reconcile API Keys ---
 	type existingAPIKey struct {

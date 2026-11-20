@@ -16,10 +16,13 @@ type Handler struct {
 }
 
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.App == nil || h.App.APIKeyAliasService == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	if !middleware.AuthorizePanel(w, r, h.App.AdminAuthService) {
 		return
 	}
-
 	path := strings.TrimRight(r.URL.Path, "/")
 	const basePath = "/v0/management/api-key-aliases"
 	switch {

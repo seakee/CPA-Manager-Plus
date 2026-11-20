@@ -185,6 +185,9 @@ func newUpgradeAPIKeysHandler(cfg upgradeAPIKeysConfig) (*upgradeKeyWorkspace, f
 	}
 	w.keys = freshkeys.New(kRepo, cfg.Protector, freshkeys.WithSourceRuntime(w.currentRuntimeIdentity))
 	w.externalAuthority = freshkeyapply.NewExternal(kRepo, w.keys, w.resolveExternalInstall)
+	if err := w.keys.DiscardOrphanedRotate(context.Background(), "", ""); err != nil {
+		log.Printf("Upgrade orphaned rotation sweep failed: %v", err)
+	}
 	w.backfillStartupBindings(context.Background())
 	return w, func() { w.rejection.close() }, nil
 }
@@ -1000,10 +1003,11 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var (
-		authority  *freshkeyapply.Service
-		generation uint64
-		runtimeID  string
-		isExternal = ev.TargetMode == model.UpgradeTargetExternal
+		authority          *freshkeyapply.Service
+		generation         uint64
+		runtimeID          string
+		isExternal         = ev.TargetMode == model.UpgradeTargetExternal
+		managedUnavailable bool
 	)
 	if isExternal {
 		authority = u.externalAuthority
@@ -1011,31 +1015,17 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 		var err error
 		authority, generation, runtimeID, err = u.resolveManagedAuthority(r.Context())
 		if err != nil {
-			if r.Method == http.MethodGet && resource == "api-keys" && errors.Is(err, freshkeyapply.ErrUnavailable) {
-				keys, listErr := u.keys.List(r.Context())
-				if listErr != nil {
-					w.WriteHeader(http.StatusServiceUnavailable)
-					return
-				}
-				for i := range keys {
-					keys[i].RuntimeState = "effect_unknown"
-				}
-				writeFreshJSON(w, struct {
-					Keys                []freshkeys.Key `json:"keys"`
-					GatewayPending      bool            `json:"gatewayPending"`
-					RevocationAvailable bool            `json:"revocationAvailable"`
-					PresenceUnverified  bool            `json:"presenceUnverified"`
-				}{keys, true, false, true})
+			if errors.Is(err, freshkeyapply.ErrUnavailable) {
+				managedUnavailable = true
+			} else {
+				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
 		}
 	} else {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
-
 	switch {
 	case strings.HasPrefix(resource, "api-keys/operations/"):
 		u.serveKeyOperation(w, r, authority, isExternal, generation, resource)
@@ -1090,21 +1080,71 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 		writeFreshJSON(w, detail)
 	case r.Method == http.MethodGet && strings.Count(resource, "/") == 4:
 		if parts := strings.Split(resource, "/"); parts[0] == "api-keys" && parts[2] == "revocation" {
+			if managedUnavailable {
+				keyOperationPreflightReply(w, false, "key_operation_host_proof_required")
+				return
+			}
 			u.servePreflight(w, r, authority, isExternal, generation, parts[1], parts[3], parts[4])
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	case r.Method == http.MethodGet && strings.Count(resource, "/") == 3:
 		if parts := strings.Split(resource, "/"); parts[0] == "api-keys" && parts[2] == "revocation" {
+			if managedUnavailable {
+				keyOperationPreflightReply(w, false, "key_operation_host_proof_required")
+				return
+			}
 			u.servePreflight(w, r, authority, isExternal, generation, parts[1], "", parts[3])
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	case strings.HasSuffix(resource, "/revocation") && strings.Count(resource, "/") == 2:
+		if managedUnavailable {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		u.servePrepare(w, r, authority, isExternal, generation, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/revocation"))
+	case strings.HasSuffix(resource, "/regenerate") && strings.Count(resource, "/") == 2:
+		if managedUnavailable {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", nil, nil)
+			return
+		}
+		u.serveRegenerate(w, r, authority, isExternal, generation, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/regenerate"))
 	case strings.HasSuffix(resource, "/secret") && strings.Count(resource, "/") == 2 && r.Method == http.MethodPost:
-		serveClientKeySecret(w, r, u.keys, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/secret"))
+		targetKeyID := strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/secret")
+		secretCtx := r.Context()
+		if isExternal {
+			secretCtx = u.withExternalGate(secretCtx)
+		}
+		serveClientKeySecret(w, r, u.keys, u.keyRepo, authority, secretCtx, generation, targetKeyID, u.wakeProjection)
 	case resource == "api-keys" && r.Method == http.MethodGet:
+		if managedUnavailable {
+			keys, listErr := u.keys.List(r.Context())
+			if listErr != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			for i := range keys {
+				keys[i].RuntimeState = "effect_unknown"
+			}
+			writeFreshJSON(w, struct {
+				Keys                []freshkeys.Key `json:"keys"`
+				GatewayPending      bool            `json:"gatewayPending"`
+				RevocationAvailable bool            `json:"revocationAvailable"`
+				PresenceUnverified  bool            `json:"presenceUnverified"`
+			}{keys, true, false, true})
+			return
+		}
 		u.serveList(w, r, authority, isExternal, generation)
 	case strings.HasPrefix(resource, "api-keys/requests/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(resource, "api-keys/requests/")
@@ -1118,6 +1158,11 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 			return
 		case err != nil:
 			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if managedUnavailable {
+			key.RuntimeState = "effect_unknown"
+			writeFreshJSON(w, key)
 			return
 		}
 		observed, ok := u.observeKeyForRead(w, r.Context(), authority, isExternal, key, generation)
@@ -1142,16 +1187,24 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		if managedUnavailable {
+			key.RuntimeState = "effect_unknown"
+			writeFreshJSON(w, key)
+			return
+		}
 		observed, ok := u.observeKeyForRead(w, r.Context(), authority, isExternal, key, generation)
 		if !ok {
 			return
 		}
 		writeFreshJSON(w, observed)
 	case resource == "api-keys" && r.Method == http.MethodPost:
+		if managedUnavailable {
+			writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", nil, nil)
+			return
+		}
 		u.serveCreate(w, r, authority, isExternal, generation, runtimeID)
 	default:
-		w.Header().Set("Allow", "GET, POST")
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeAPIKeysMethodNotAllowed(w, resource, false)
 	}
 }
 
@@ -1264,6 +1317,18 @@ func (u *upgradeKeyWorkspace) serveRenameKey(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	if ev.TargetMode == model.UpgradeTargetManaged {
+		obsCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+		if authority, generation, _, regErr := u.resolveManagedAuthority(obsCtx); regErr == nil && authority != nil {
+			committedName, committedRev := key.Name, key.NameRevision
+			observed, obsErr := authority.ObserveKey(obsCtx, key, generation)
+			if obsErr == nil && (observed.RuntimeState == "effective_observed" || observed.RuntimeState == "revoked_observed") {
+				observed.Name, observed.NameRevision = committedName, committedRev
+				key = observed
+			}
+		}
+		cancel()
+	}
 	writeFreshJSON(w, key)
 }
 
@@ -1355,11 +1420,20 @@ func (u *upgradeKeyWorkspace) serveCreate(
 		return
 	}
 	var req struct {
-		RequestID string `json:"requestId"`
+		RequestID string  `json:"requestId"`
+		Name      *string `json:"name"`
 	}
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2048))
 	d.DisallowUnknownFields()
 	if d.Decode(&req) != nil || !freshkeys.ValidRequestID(req.RequestID) || d.Decode(new(any)) != io.EOF {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	rawName := ""
+	if req.Name != nil {
+		rawName = *req.Name
+	}
+	if _, ok := freshkeys.ValidKeyName(rawName); !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -1392,13 +1466,16 @@ func (u *upgradeKeyWorkspace) serveCreate(
 	if runtimeID != "" {
 		createCtx = withUpgradeRuntimeIdentity(createCtx, runtimeID)
 	}
-	result, created, err := u.keys.Create(createCtx, req.RequestID)
+	result, created, err := u.keys.CreateNamed(createCtx, req.RequestID, rawName)
 	if err != nil {
-		if errors.Is(err, freshkeys.ErrRequest) {
+		switch {
+		case errors.Is(err, freshkeys.ErrRequest):
 			w.WriteHeader(http.StatusBadRequest)
-			return
+		case errors.Is(err, freshkeys.ErrConflict), errors.Is(err, freshkeys.ErrRetired):
+			w.WriteHeader(http.StatusConflict)
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 	if created && u.wakeProjection != nil {
@@ -1494,6 +1571,222 @@ func applyCreateErrorKeyState(key *freshkeys.Key, opRes freshkeyapply.OperationR
 	}
 }
 
+func applyRotateErrorKeyState(key *freshkeys.Key, opRes freshkeyapply.OperationResult) {
+	if key == nil {
+		return
+	}
+	if opRes.Operation != nil && opRes.Operation.TargetID == string(key.ID) {
+		if opRes.Operation.IsTerminal() {
+			key.OperationID = ""
+		} else {
+			key.OperationID = opRes.Operation.ID
+		}
+		if opRes.Operation.Outcome == keyrepo.OutcomeCommitted && opRes.RuntimeState != "" {
+			key.RuntimeState = opRes.RuntimeState
+		} else if key.Lifecycle == identity.LifecycleSuperseded && key.OperationID == "" {
+			key.RuntimeState = "revoked_observed"
+		} else {
+			key.RuntimeState = "effect_unknown"
+		}
+		return
+	}
+	if key.OperationID == "" && key.Lifecycle != identity.LifecycleSuperseded {
+		key.RuntimeState = "effect_unknown"
+	}
+}
+
+func (u *upgradeKeyWorkspace) serveRegenerate(
+	w http.ResponseWriter,
+	r *http.Request,
+	authority *freshkeyapply.Service,
+	isExternal bool,
+	generation uint64,
+	targetID string,
+) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.Header.Get("Content-Type") != "application/json" {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return
+	}
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	d.DisallowUnknownFields()
+	if d.Decode(&req) != nil || !freshkeys.ValidRequestID(req.RequestID) || d.Decode(new(any)) != io.EOF || !freshkeys.ValidRequestID(targetID) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	if isExternal {
+		install, preErr := u.precheckExternalInstall(ctx)
+		if preErr != nil {
+			if errors.Is(preErr, errExternalCredentialWaitCancelled) {
+				writeExternalCredentialWaitCancelled(w)
+				return
+			}
+			existing, detailErr := u.keys.Detail(r.Context(), targetID)
+			if errors.Is(detailErr, freshkeys.ErrNotFound) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var keyPtr *freshkeys.Key
+			if detailErr == nil {
+				keyPtr = &existing
+			}
+			switch {
+			case errors.Is(preErr, errExternalRejectionUnavailable):
+				if keyPtr != nil {
+					keyPtr.EffectCode = freshconfig.ReasonUnavailable
+				}
+				writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", keyPtr, nil)
+			case errors.Is(preErr, cpa.ErrExternalTargetMoved):
+				if keyPtr != nil {
+					keyPtr.EffectCode = freshconfig.ReasonTargetMoved
+				}
+				writeCreateKeyError(w, http.StatusConflict, freshconfig.ReasonTargetMoved, "", keyPtr, nil)
+			case errors.Is(preErr, cpa.ErrManagementClientForbidden):
+				if keyPtr != nil {
+					keyPtr.EffectCode = freshconfig.ReasonManagementRejected
+				}
+				writeCreateKeyError(w, http.StatusConflict, freshconfig.ReasonManagementRejected, "client_forbidden", keyPtr, nil)
+			case errors.Is(preErr, cpa.ErrManagementRejected):
+				if keyPtr != nil {
+					keyPtr.EffectCode = freshconfig.ReasonManagementRejected
+				}
+				writeCreateKeyError(w, http.StatusConflict, freshconfig.ReasonManagementRejected, "", keyPtr, nil)
+			default:
+				status, code := keyOperationCode(preErr)
+				if keyPtr != nil {
+					keyPtr.EffectCode = code
+				}
+				writeCreateKeyError(w, status, code, "", keyPtr, nil)
+			}
+			return
+		}
+		generation = install.Checkpoint
+		ctx = u.withExternalGate(ctx)
+	}
+
+	staged, created, opRes, applyErr := authority.ApplyStagedRotate(ctx, req.RequestID, targetID, generation)
+	if opRes.Operation == nil && applyErr != nil {
+		if errors.Is(applyErr, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
+		switch {
+		case errors.Is(applyErr, freshkeys.ErrRequest):
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		case errors.Is(applyErr, freshkeys.ErrNotFound):
+			w.WriteHeader(http.StatusNotFound)
+			return
+		case errors.Is(applyErr, freshkeys.ErrConflict), errors.Is(applyErr, freshkeys.ErrRetired), errors.Is(applyErr, keyrepo.ErrConflict):
+			existing, detailErr := u.keys.Detail(r.Context(), targetID)
+			if errors.Is(detailErr, freshkeys.ErrNotFound) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var keyPtr *freshkeys.Key
+			if detailErr == nil {
+				existing.EffectCode = "key_operation_conflict"
+				keyPtr = &existing
+			}
+			var resPtr *freshkeyapply.OperationResult
+			if u.keyRepo != nil {
+				if latest, latestErr := u.keyRepo.LatestOperation(r.Context()); latestErr == nil && latest != nil && !latest.IsTerminal() {
+					conflictRes := freshkeyapply.OperationResult{Operation: latest, RuntimeState: "effect_unknown"}
+					if keyPtr != nil {
+						applyRotateErrorKeyState(keyPtr, conflictRes)
+						keyPtr.EffectCode = "key_operation_conflict"
+					}
+					resPtr = &conflictRes
+				}
+			}
+			writeCreateKeyError(w, http.StatusConflict, "key_operation_conflict", "", keyPtr, resPtr)
+			return
+		default:
+			existing, detailErr := u.keys.Detail(r.Context(), targetID)
+			if errors.Is(detailErr, freshkeys.ErrNotFound) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var keyPtr *freshkeys.Key
+			if detailErr == nil {
+				keyPtr = &existing
+			}
+			if errors.Is(applyErr, cpa.ErrExternalRejectionUnavailable) {
+				if keyPtr != nil {
+					keyPtr.EffectCode = freshconfig.ReasonUnavailable
+				}
+				writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", keyPtr, nil)
+				return
+			}
+			status, code := keyOperationCode(applyErr)
+			detail := ""
+			if errors.Is(applyErr, cpa.ErrManagementClientForbidden) {
+				detail = "client_forbidden"
+			}
+			if keyPtr != nil {
+				keyPtr.EffectCode = code
+			}
+			writeCreateKeyError(w, status, code, detail, keyPtr, nil)
+			return
+		}
+	}
+
+	key := staged.Key
+	if applyErr == nil && opRes.RuntimeState != "effective_observed" {
+		applyErr = cpa.ErrApplyUnknown
+	}
+	if opRes.Operation != nil && opRes.Operation.Outcome == keyrepo.OutcomeCommitted && u.wakeProjection != nil {
+		u.wakeProjection()
+	}
+	if refreshed, detailErr := u.keys.Detail(r.Context(), targetID); detailErr == nil {
+		key = refreshed
+	}
+	if applyErr != nil {
+		if errors.Is(applyErr, errExternalCredentialWaitCancelled) {
+			writeExternalCredentialWaitCancelled(w)
+			return
+		}
+		applyRotateErrorKeyState(&key, opRes)
+		var resPtr *freshkeyapply.OperationResult
+		if opRes.Operation != nil {
+			resPtr = &opRes
+		}
+		if errors.Is(applyErr, cpa.ErrExternalRejectionUnavailable) {
+			key.EffectCode = freshconfig.ReasonUnavailable
+			writeCreateKeyError(w, http.StatusServiceUnavailable, freshconfig.ReasonUnavailable, "", &key, resPtr)
+			return
+		}
+		status, code := keyOperationCode(applyErr)
+		detail := ""
+		if errors.Is(applyErr, cpa.ErrManagementClientForbidden) {
+			detail = "client_forbidden"
+		}
+		key.EffectCode = code
+		writeCreateKeyError(w, status, code, detail, &key, resPtr)
+		return
+	}
+
+	key.RuntimeState = "effective_observed"
+	key.OperationID = ""
+	key.EffectCode = ""
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	resp := clientKeyRegenerateResponse{Key: key}
+	if created {
+		resp.CreatedSecret = staged.NewSecret
+	}
+	writeFreshJSON(w, resp)
+}
+
 func (u *upgradeKeyWorkspace) servePreflight(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1556,6 +1849,7 @@ func (u *upgradeKeyWorkspace) servePrepare(
 	target string,
 ) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -1565,6 +1859,10 @@ func (u *upgradeKeyWorkspace) servePrepare(
 		Mode      string `json:"mode"`
 	}
 	if !decodeKeyOperation(w, r, &body) {
+		return
+	}
+	if body.Mode != "revoke" && body.Mode != "replace" {
+		keyOperationReply(w, freshkeyapply.OperationResult{RuntimeState: "effect_unknown"}, freshkeys.ErrRequest)
 		return
 	}
 	ctx := r.Context()
@@ -1616,6 +1914,23 @@ func (u *upgradeKeyWorkspace) serveKeyOperation(
 	id := strings.TrimPrefix(resource, "api-keys/operations/")
 	ctx := r.Context()
 	if r.Method == http.MethodGet && !strings.Contains(id, "/") {
+		if authority == nil {
+			if !freshkeys.ValidRequestID(id) {
+				keyOperationReply(w, freshkeyapply.OperationResult{}, freshkeys.ErrRequest)
+				return
+			}
+			op, err := u.keyRepo.Operation(ctx, id)
+			if err != nil {
+				keyOperationReply(w, freshkeyapply.OperationResult{}, err)
+				return
+			}
+			if op == nil {
+				keyOperationReply(w, freshkeyapply.OperationResult{}, freshkeys.ErrNotFound)
+				return
+			}
+			keyOperationReply(w, freshkeyapply.OperationResult{Operation: op, RuntimeState: "effect_unknown"}, nil)
+			return
+		}
 		if isExternal {
 			preGen, preErr := u.precheckExternal(ctx)
 			switch {
@@ -1654,6 +1969,10 @@ func (u *upgradeKeyWorkspace) serveKeyOperation(
 		return
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(id, "/continue") && strings.Count(id, "/") == 1 {
+		if authority == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		var body map[string]any
 		if !decodeKeyOperation(w, r, &body) {
 			return
@@ -1697,6 +2016,16 @@ func (u *upgradeKeyWorkspace) serveKeyOperation(
 			u.wakeProjection()
 		}
 		keyOperationReply(w, res, err)
+		return
+	}
+	if !strings.Contains(id, "/") && id != "" {
+		w.Header().Set("Allow", "GET")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.HasSuffix(id, "/continue") && strings.Count(id, "/") == 1 {
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	w.WriteHeader(http.StatusMethodNotAllowed)

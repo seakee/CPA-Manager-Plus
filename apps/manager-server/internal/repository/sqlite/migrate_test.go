@@ -5149,3 +5149,124 @@ func TestMigrationEarlyRecoverySucceedsWhenArchiveRefsExistWithoutDeletion(t *te
 	_ = reopened.Close()
 
 }
+
+func TestMigrateCreatesClientAPIKeyRotationAndSecretHistoryTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fresh-key-rotation-migrate.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("repeat migrate: %v", err)
+	}
+
+	rotCols := migrationTableColumns(t, db, FreshClientAPIKeyRotationsTable)
+	for _, col := range []string{
+		"request_id",
+		"api_key_id",
+		"old_secret_hash",
+		"new_secret_ciphertext",
+		"new_secret_hash",
+		"new_masked_preview",
+		"created_at_ms",
+	} {
+		if !rotCols[col] {
+			t.Fatalf("rotation columns = %#v, missing %s", rotCols, col)
+		}
+	}
+
+	histCols := migrationTableColumns(t, db, FreshClientAPIKeySecretHistoryTable)
+	for _, col := range []string{
+		"secret_hash",
+		"api_key_id",
+		"secret_ciphertext",
+		"masked_preview",
+		"origin",
+		"retired_at_ms",
+	} {
+		if !histCols[col] {
+			t.Fatalf("secret history columns = %#v, missing %s", histCols, col)
+		}
+	}
+
+	var idxCount int
+	if err := db.QueryRow(`select count(*) from pragma_index_list('fresh_client_api_key_secret_history')
+		where name = 'idx_fresh_client_api_key_secret_history_key_retired'`).Scan(&idxCount); err != nil || idxCount != 1 {
+		t.Fatalf("history index count = %d, err = %v", idxCount, err)
+	}
+
+	// Verify foreign key and unique constraints hold on both tables.
+	keyID := strings.Repeat("a", 32)
+	if _, err := db.Exec(`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
+		values (?, 1, 'active', 1000, 1000)`, keyID); err != nil {
+		t.Fatalf("insert identity: %v", err)
+	}
+	if _, err := db.Exec(`insert into fresh_client_api_key_rotations (
+		request_id, api_key_id, old_secret_hash, new_secret_ciphertext, new_secret_hash, new_masked_preview, created_at_ms
+	) values (?, ?, ?, 'enc1', ?, 'cpamp_sk_…1111', 1001)`,
+		strings.Repeat("1", 32), keyID, strings.Repeat("b", 64), strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("insert rotation candidate: %v", err)
+	}
+	// Duplicate api_key_id in rotations must fail unique constraint.
+	if _, err := db.Exec(`insert into fresh_client_api_key_rotations (
+		request_id, api_key_id, old_secret_hash, new_secret_ciphertext, new_secret_hash, new_masked_preview, created_at_ms
+	) values (?, ?, ?, 'enc2', ?, 'cpamp_sk_…2222', 1002)`,
+		strings.Repeat("2", 32), keyID, strings.Repeat("b", 64), strings.Repeat("d", 64)); err == nil {
+		t.Fatal("duplicate api_key_id in rotations succeeded")
+	}
+	if _, err := db.Exec(`insert into fresh_client_api_key_secret_history (
+		secret_hash, api_key_id, secret_ciphertext, masked_preview, origin, retired_at_ms
+	) values (?, ?, 'enc-old', 'cpamp_sk_…0000', 'workspace', 1005)`,
+		strings.Repeat("b", 64), keyID); err != nil {
+		t.Fatalf("insert secret history: %v", err)
+	}
+}
+
+func TestMigrateUpgradesPreRetiredByRequestIDSecretHistoryTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-retired-by-req-history.sqlite")
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := rawDB.Exec(`
+		create table gateway_api_key_identities (
+			id text primary key,
+			revision integer not null,
+			lifecycle text not null,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		);
+		create table fresh_client_api_key_secret_history (
+			secret_hash text primary key,
+			api_key_id text not null references gateway_api_key_identities(id),
+			secret_ciphertext text not null,
+			masked_preview text not null,
+			origin text not null,
+			retired_at_ms integer not null
+		);
+	`); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("seed legacy history table: %v", err)
+	}
+	_ = rawDB.Close()
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(path) upgrade migrate failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	histCols := migrationTableColumns(t, db, FreshClientAPIKeySecretHistoryTable)
+	for _, col := range []string{"retired_by_request_id", "next_secret_hash"} {
+		if !histCols[col] {
+			t.Fatalf("upgraded secret history columns = %#v, missing %s", histCols, col)
+		}
+	}
+	var idxCount int
+	if err := db.QueryRow(`select count(*) from pragma_index_list('fresh_client_api_key_secret_history')
+		where name = 'idx_fresh_client_api_key_secret_history_req'`).Scan(&idxCount); err != nil || idxCount != 1 {
+		t.Fatalf("idx_fresh_client_api_key_secret_history_req count = %d, err = %v", idxCount, err)
+	}
+}

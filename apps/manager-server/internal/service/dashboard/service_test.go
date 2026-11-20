@@ -658,6 +658,105 @@ func TestSummaryDashboardHourlyRollupCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestSummaryEnrichesRecentFailuresWithUnifiedAPIKeyMetadata(t *testing.T) {
+	db := newDashboardTestStore(t)
+	ctx := context.Background()
+	todayStart := int64(1_778_000_000_000)
+	nowMS := todayStart + 30*60*1000
+	latency := int64(180)
+
+	managedHash := testCanonicalHash("managed-client-key")
+	installerHash := testCanonicalHash("installer-client-key")
+	legacyHash := testCanonicalHash("legacy-client-key")
+
+	rawDB := db.SQLDB()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
+			 values (?, 2, 'active', 1000, 2000)`,
+			[]any{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		{
+			`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview, name, name_revision, origin)
+			 values (?, ?, 'cipher-managed', ?, 'cpamp_sk_…1234', 'Billing Bot', 2, 'workspace')`,
+			[]any{"11111111111111111111111111111111", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", managedHash},
+		},
+		{
+			`insert into gateway_api_key_source_bindings (api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms, retired_at_ms)
+			 values (?, 'runtime-1', ?, 1000, 2000, null)`,
+			[]any{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", managedHash},
+		},
+		{
+			`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
+			 values (?, 1, 'active', 1000, 1500)`,
+			[]any{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		{
+			`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview, name, name_revision, origin)
+			 values (?, ?, 'cipher-installer', ?, 'sk-…9876', 'Initial key', 1, 'installer')`,
+			[]any{"22222222222222222222222222222222", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", installerHash},
+		},
+		{
+			`insert into gateway_api_key_source_bindings (api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms, retired_at_ms)
+			 values (?, 'runtime-1', ?, 1000, 1500, null)`,
+			[]any{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", installerHash},
+		},
+	} {
+		if _, err := rawDB.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("seed managed key tables: %v", err)
+		}
+	}
+	if err := db.UpsertAPIKeyAliases(ctx, []store.APIKeyAlias{
+		{APIKeyHash: legacyHash, Alias: "Legacy Partner"},
+	}); err != nil {
+		t.Fatalf("seed legacy alias: %v", err)
+	}
+
+	evManaged := dashboardEvent("fail-managed", todayStart+3*60*1000, "gpt-5", true, 10, 0, 0, 0, 0, 10, &latency)
+	evManaged.APIKeyHash = managedHash
+	evInstaller := dashboardEvent("fail-installer", todayStart+2*60*1000, "gpt-5", true, 10, 0, 0, 0, 0, 10, &latency)
+	evInstaller.APIKeyHash = installerHash
+	evLegacy := dashboardEvent("fail-legacy", todayStart+1*60*1000, "gpt-5", true, 10, 0, 0, 0, 0, 10, &latency)
+	evLegacy.APIKeyHash = legacyHash
+	if _, err := db.InsertEvents(ctx, []usage.Event{evManaged, evInstaller, evLegacy}); err != nil {
+		t.Fatalf("insert failure events: %v", err)
+	}
+
+	resp, err := New(db).Summary(ctx, SummaryParams{
+		TodayStartMS:   todayStart,
+		NowMS:          nowMS,
+		RecentFailures: 5,
+	})
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if len(resp.RecentFailures) != 3 {
+		t.Fatalf("recent failures len = %d, want 3: %#v", len(resp.RecentFailures), resp.RecentFailures)
+	}
+
+	if got := resp.RecentFailures[0]; got.APIKeyHash != managedHash ||
+		got.APIKeyAlias != "Billing Bot" ||
+		got.APIKeyMasked != "cpamp_sk_…1234" ||
+		got.APIKeyOrigin != "workspace" {
+		t.Fatalf("managed failure enrichment = %#v", got)
+	}
+	if got := resp.RecentFailures[1]; got.APIKeyHash != installerHash ||
+		got.APIKeyAlias != "" ||
+		got.APIKeyMasked != "sk-…9876" ||
+		got.APIKeyOrigin != "installer" {
+		t.Fatalf("installer failure enrichment = %#v", got)
+	}
+	if got := resp.RecentFailures[2]; got.APIKeyHash != legacyHash ||
+		got.APIKeyAlias != "Legacy Partner" ||
+		got.APIKeyMasked != "" ||
+		got.APIKeyOrigin != "" {
+		t.Fatalf("legacy failure enrichment = %#v", got)
+	}
+}
+
 func catchUpDashboardHourlyForTest(t *testing.T, ctx context.Context, db *store.Store) {
 	t.Helper()
 	for {

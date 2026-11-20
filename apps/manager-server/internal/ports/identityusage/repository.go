@@ -35,8 +35,10 @@ var (
 // Binding is the durable attribution window of one Canonical Key. Hashing
 // details stay inside the adapter.
 type Binding struct {
-	APIKeyID      identity.APIKeyID
-	FirstSeenAtMS int64
+	APIKeyID            identity.APIKeyID
+	FirstSeenAtMS       int64
+	Origin              string
+	IdentityCreatedAtMS int64
 }
 
 // ProjectionState is the checkpoint of the canonical identity shadow
@@ -123,6 +125,11 @@ type Repository interface {
 	// RawDeletedIn reports whether archived raw events were deleted inside the
 	// range, which bounds what any window can still prove.
 	RawDeletedIn(ctx context.Context, fromMS, toMS int64) (bool, error)
+
+	// LatestRawDeletedIn returns the latest deleted raw-event timestamp inside
+	// [fromMS, toMS), allowing batched summaries to test each key's own
+	// [keyWindowFromMS, toMS) range in one query.
+	LatestRawDeletedIn(ctx context.Context, fromMS, toMS int64) (latestTimestampMS int64, anyDeleted bool, err error)
 
 	// IncompleteDaysIn returns the UTC days inside the range that a v2 Upgrade
 	// permanently marked incomplete. Their numbers are a lower bound forever, so

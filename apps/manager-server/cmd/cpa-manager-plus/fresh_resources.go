@@ -16,8 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -46,6 +49,41 @@ func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
 // it would be a second, unproven way to change the user's CPA.
 const externalLegacyWriteReplaced = "external_legacy_write_replaced"
 
+// legacyWriteReplaced is the stable code of a legacy client-key write refused
+// on Managed, Adopt, and Upgrade Managed profiles where client keys are owned
+// by the canonical /api/v2/api-keys workspace.
+const legacyWriteReplaced = "legacy_write_replaced"
+
+type cpampBridgeExternalConfigWriteContextKey struct{}
+
+func withCPAMPBridgeExternalConfigWrite(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cpampBridgeExternalConfigWriteContextKey{}, true)
+}
+
+func isCPAMPBridgeExternalConfigWrite(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	flagged, _ := r.Context().Value(cpampBridgeExternalConfigWriteContextKey{}).(bool)
+	return flagged
+}
+
+// cpampLegacyClientKeyWriteReplaced reports whether a Full Web `cpamp/` bridge
+// request attempts to write client keys through legacy CPA routes on a
+// non-External profile.
+func cpampLegacyClientKeyWriteReplaced(path, method string) bool {
+	if method == http.MethodGet || method == http.MethodHead {
+		return false
+	}
+	trimmed := strings.TrimRight(path, "/")
+	switch trimmed {
+	case "/v0/management/api-keys", "/v0/management/api-key-aliases", "/v0/management/config.yaml", "/v0/management/config":
+		return true
+	default:
+		return strings.HasPrefix(trimmed, "/v0/management/api-key-aliases/")
+	}
+}
+
 // writeLegacyRefusal answers one legacy-bridge refusal locally. Nothing is
 // forwarded, so a refused code costs the user's CPA no request.
 func writeLegacyRefusal(w http.ResponseWriter, code string) {
@@ -63,8 +101,9 @@ func externalLegacyReplacedWrite(path, method string) bool {
 	if method == http.MethodGet || method == http.MethodHead {
 		return false
 	}
-	switch strings.TrimRight(path, "/") {
-	case "/v0/management/api-keys", "/v0/management/config.yaml":
+	trimmed := strings.TrimRight(path, "/")
+	switch trimmed {
+	case "/v0/management/api-keys", "/v0/management/api-key-aliases", "/v0/management/config.yaml":
 		return true
 	case "/usage-service/config":
 		// Whole-document PUT rewrites the CPA connection and collector settings
@@ -73,8 +112,9 @@ func externalLegacyReplacedWrite(path, method string) bool {
 		// (`{"enabled": bool}`) owns only Manager's local request-monitoring
 		// switch and never touches the External CPA.
 		return method != http.MethodPatch
+	default:
+		return strings.HasPrefix(trimmed, "/v0/management/api-key-aliases/")
 	}
-	return false
 }
 
 // externalLegacyLogConfigWrite reports whether this legacy request mutates one
@@ -416,6 +456,11 @@ func guardFreshExternalLegacy(next http.Handler, app *freshApplication) http.Han
 		if grant.Refused {
 			gate.release()
 			writeExternalManagementRejected(w)
+			return
+		}
+		if isCPAMPBridgeExternalConfigWrite(r) {
+			gate.release()
+			writeLegacyRefusal(w, externalLegacyWriteReplaced)
 			return
 		}
 		markContext, mark := proxysvc.WithSavedKeyMark(snapshotCtx)
@@ -882,10 +927,27 @@ func (a *freshApplication) legacyResource(w http.ResponseWriter, r *http.Request
 			http.NotFound(w, r)
 			return
 		}
+		if !isCommittedExternalStrategy(op.Strategy) && cpampLegacyClientKeyWriteReplaced(parsed.Path, r.Method) {
+			writeLegacyRefusal(w, legacyWriteReplaced)
+			return
+		}
 		parsed.RawQuery = r.URL.RawQuery
 		clone := r.Clone(r.Context())
 		clone.URL = parsed
 		clone.RequestURI = parsed.RequestURI()
+		if isCommittedExternalStrategy(op.Strategy) &&
+			strings.TrimRight(parsed.Path, "/") == "/v0/management/config" &&
+			r.Method != http.MethodGet && r.Method != http.MethodHead {
+			clone = clone.WithContext(withCPAMPBridgeExternalConfigWrite(clone.Context()))
+		}
+		if sanitizer := bridgedReadSanitizer(parsed.Path, r.Method); sanitizer != nil {
+			clone.Header = clone.Header.Clone()
+			stripBridgeSanitizedRequestHeaders(clone.Header)
+			sanitizingWriter := newBridgeSanitizingWriter(w, sanitizer)
+			a.serveLegacyResource(sanitizingWriter, r, clone, op, bridged)
+			sanitizingWriter.finish(r.Method)
+			return
+		}
 		a.serveLegacyResource(w, r, clone, op, bridged)
 		return
 	}
@@ -1014,6 +1076,568 @@ func (r *legacyStatusRecorder) Unwrap() http.ResponseWriter { return r.ResponseW
 func (r *legacyStatusRecorder) Flush() {
 	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+const maxBridgedSanitizedBodyBytes = 16 << 20
+
+type bridgePayloadSanitizer func([]byte) (sanitized []byte, contentType string, err error)
+
+func bridgedReadSanitizer(path, method string) bridgePayloadSanitizer {
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil
+	}
+	switch strings.TrimRight(path, "/") {
+	case "/v0/management/api-keys":
+		return sanitizeBridgedAPIKeysJSON
+	case "/v0/management/config":
+		return sanitizeBridgedConfigJSON
+	case "/v0/management/config.yaml":
+		return sanitizeBridgedConfigYAML
+	default:
+		return nil
+	}
+}
+
+func maskBridgedClientKey(raw string) string {
+	if masked := model.MaskedClientKey(raw); masked != "" {
+		return masked
+	}
+	return model.MaskedImportedClientKey(raw)
+}
+
+func decodeStrictJSONObject(raw []byte) (map[string]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, errors.New("expected JSON object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var doc map[string]json.RawMessage
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("unexpected trailing JSON data")
+	}
+	if doc == nil {
+		return nil, errors.New("expected non-null JSON object")
+	}
+	return doc, nil
+}
+
+func sanitizeBridgedAPIKeysJSON(raw []byte) ([]byte, string, error) {
+	doc, err := decodeStrictJSONObject(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	matched := false
+	for key, fieldRaw := range doc {
+		if !strings.EqualFold(key, "api-keys") && !strings.EqualFold(key, "apikeys") {
+			continue
+		}
+		if key == "api-keys" {
+			matched = true
+		}
+		if bytes.Equal(bytes.TrimSpace(fieldRaw), []byte("null")) {
+			doc[key] = json.RawMessage("[]")
+			continue
+		}
+		var keys []string
+		if err := json.Unmarshal(fieldRaw, &keys); err != nil {
+			return nil, "", err
+		}
+		masked := make([]string, len(keys))
+		for i, secret := range keys {
+			masked[i] = maskBridgedClientKey(secret)
+		}
+		encoded, err := json.Marshal(masked)
+		if err != nil {
+			return nil, "", err
+		}
+		doc[key] = encoded
+	}
+	if !matched {
+		doc["api-keys"] = json.RawMessage("[]")
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return nil, "", err
+	}
+	return encoded, "application/json", nil
+}
+
+func validateBridgedClientKeyArrayOrNull(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var keys []string
+	return json.Unmarshal(trimmed, &keys)
+}
+
+func sanitizeBridgedConfigJSON(raw []byte) ([]byte, string, error) {
+	doc, err := decodeStrictJSONObject(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	hasAccessObject := false
+	for key, accessRaw := range doc {
+		if !strings.EqualFold(key, "access") {
+			continue
+		}
+		trimmed := bytes.TrimSpace(accessRaw)
+		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+			continue
+		}
+		accessMap, err := decodeStrictJSONObject(trimmed)
+		if err != nil {
+			return nil, "", err
+		}
+		hasAccessObject = true
+		for subKey, subRaw := range accessMap {
+			if strings.EqualFold(subKey, "api-keys") || strings.EqualFold(subKey, "apikeys") {
+				if err := validateBridgedClientKeyArrayOrNull(subRaw); err != nil {
+					return nil, "", err
+				}
+				accessMap[subKey] = json.RawMessage("[]")
+			}
+		}
+		encodedAccess, err := json.Marshal(accessMap)
+		if err != nil {
+			return nil, "", err
+		}
+		doc[key] = encodedAccess
+	}
+	matched := false
+	for key, valRaw := range doc {
+		if strings.EqualFold(key, "api-keys") || strings.EqualFold(key, "apikeys") {
+			trimmed := bytes.TrimSpace(valRaw)
+			if len(trimmed) > 0 && trimmed[0] == '{' {
+				// Preserve CPA v8 top-level provider-group map intact.
+				if _, err := decodeStrictJSONObject(trimmed); err != nil {
+					return nil, "", err
+				}
+				if key == "api-keys" {
+					matched = true
+				}
+				continue
+			}
+			if err := validateBridgedClientKeyArrayOrNull(valRaw); err != nil {
+				return nil, "", err
+			}
+			doc[key] = json.RawMessage("[]")
+			if key == "api-keys" {
+				matched = true
+			}
+		}
+	}
+	if !matched && !hasAccessObject {
+		doc["api-keys"] = json.RawMessage("[]")
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return nil, "", err
+	}
+	return encoded, "application/json", nil
+}
+
+func stripBridgeSanitizedRequestHeaders(h http.Header) {
+	if h == nil {
+		return
+	}
+	h.Del("Accept-Encoding")
+	h.Del("Range")
+	h.Del("If-Range")
+	h.Del("If-None-Match")
+	h.Del("If-Modified-Since")
+}
+
+const maxYAMLNodesForBridgeSanitize = 100000
+
+func countYAMLNodesBounded(node *yaml.Node, budget int) (int, bool) {
+	if node == nil {
+		return 0, true
+	}
+	if budget <= 0 {
+		return 0, false
+	}
+	total := 1
+	for _, child := range node.Content {
+		sub, ok := countYAMLNodesBounded(child, budget-total)
+		if !ok {
+			return 0, false
+		}
+		total += sub
+	}
+	return total, true
+}
+
+func yamlTreeHasAnchorsOrAliases(node *yaml.Node) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.AliasNode || node.Anchor != "" {
+		return true
+	}
+	for _, child := range node.Content {
+		if yamlTreeHasAnchorsOrAliases(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectStringSliceElements(val any, dst map[string]struct{}) bool {
+	if val == nil {
+		return true
+	}
+	items, ok := val.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			return false
+		}
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			dst[s] = struct{}{}
+			dst[trimmed] = struct{}{}
+		}
+	}
+	return true
+}
+func scrubResolvedYAMLSecrets(val any, secrets map[string]struct{}) any {
+	if len(secrets) == 0 || val == nil {
+		return val
+	}
+	switch typed := val.(type) {
+	case string:
+		if _, hit := secrets[typed]; hit {
+			return ""
+		}
+		if _, hit := secrets[strings.TrimSpace(typed)]; hit {
+			return ""
+		}
+		return typed
+	case []any:
+		kept := make([]any, 0, len(typed))
+		for _, elem := range typed {
+			if s, ok := elem.(string); ok {
+				if _, hit := secrets[s]; hit {
+					continue
+				}
+				if _, hit := secrets[strings.TrimSpace(s)]; hit {
+					continue
+				}
+			}
+			kept = append(kept, scrubResolvedYAMLSecrets(elem, secrets))
+		}
+		return kept
+	case map[string]any:
+		for k, v := range typed {
+			typed[k] = scrubResolvedYAMLSecrets(v, secrets)
+		}
+		return typed
+	default:
+		return val
+	}
+}
+
+func sanitizeBridgedConfigYAML(raw []byte) ([]byte, string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return []byte("{}\n"), "application/yaml; charset=utf-8", nil
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(trimmed))
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil {
+		return nil, "", err
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, "", errors.New("unexpected multi-document config.yaml")
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		return nil, "", errors.New("unexpected config.yaml document")
+	}
+	if _, ok := countYAMLNodesBounded(&doc, maxYAMLNodesForBridgeSanitize); !ok {
+		return nil, "", errors.New("config.yaml exceeds maximum YAML node budget")
+	}
+	root := doc.Content[0]
+	if root.Kind == yaml.ScalarNode && (root.Tag == "!!null" || root.Value == "") {
+		return []byte("{}\n"), "application/yaml; charset=utf-8", nil
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil, "", errors.New("expected mapping root in config.yaml")
+	}
+
+	// Decode into map[string]any so YAML anchors (*alias) and merge keys (<<)
+	// are fully resolved before stripping client API keys, and comments are
+	// dropped unconditionally.
+	var resolved map[string]any
+	if err := yaml.Unmarshal(trimmed, &resolved); err != nil {
+		return nil, "", err
+	}
+	if resolved == nil {
+		return []byte("{}\n"), "application/yaml; charset=utf-8", nil
+	}
+
+	secrets := map[string]struct{}{}
+	for key, val := range resolved {
+		switch {
+		case strings.EqualFold(key, "api-keys") || strings.EqualFold(key, "apikeys"):
+			// In v0/v6 config.yaml, top-level api-keys is a sequence of client keys;
+			// in v8 config.yaml, top-level api-keys may be a provider-group map.
+			if _, isProviderMap := val.(map[string]any); !isProviderMap {
+				if !collectStringSliceElements(val, secrets) {
+					return nil, "", errors.New("expected sequence or mapping api-keys in config.yaml")
+				}
+				resolved[key] = []any{}
+			}
+		case strings.EqualFold(key, "access"):
+			if val == nil {
+				continue
+			}
+			accessMap, ok := val.(map[string]any)
+			if !ok {
+				return nil, "", errors.New("expected mapping access node in config.yaml")
+			}
+			for subKey, subVal := range accessMap {
+				if strings.EqualFold(subKey, "api-keys") || strings.EqualFold(subKey, "apikeys") {
+					if !collectStringSliceElements(subVal, secrets) {
+						return nil, "", errors.New("expected sequence access.api-keys in config.yaml")
+					}
+					accessMap[subKey] = []any{}
+				}
+			}
+		}
+	}
+	if len(secrets) > 0 && yamlTreeHasAnchorsOrAliases(&doc) {
+		scrubResolvedYAMLSecrets(resolved, secrets)
+	}
+
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(resolved); err != nil {
+		return nil, "", err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, "", err
+	}
+	return out.Bytes(), "application/yaml; charset=utf-8", nil
+}
+
+type bridgeSanitizingResponseWriter struct {
+	dst       http.ResponseWriter
+	sanitizer bridgePayloadSanitizer
+	header    http.Header
+	status    int
+	overflow  bool
+	buf       bytes.Buffer
+}
+
+func newBridgeSanitizingWriter(dst http.ResponseWriter, sanitizer bridgePayloadSanitizer) *bridgeSanitizingResponseWriter {
+	return &bridgeSanitizingResponseWriter{
+		dst:       dst,
+		sanitizer: sanitizer,
+		header:    make(http.Header),
+	}
+}
+
+func copyHeadersPreservingNoStore(dst, src http.Header) {
+	keepNoStore := dst.Get("Cache-Control") == "no-store"
+	for k, vals := range src {
+		dst.Del(k)
+		for _, v := range vals {
+			dst.Add(k, v)
+		}
+	}
+	if keepNoStore {
+		dst.Set("Cache-Control", "no-store")
+	}
+}
+
+func isAllowedBridgedErrorCode(code string) bool {
+	switch code {
+	case freshconfig.ReasonManagementRejected,
+		freshconfig.ReasonTargetMoved,
+		freshconfig.ReasonUnavailable,
+		freshconfig.ReasonVersionUnsupported,
+		"external_credential_wait_cancelled",
+		"client_key_management_authority_required":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllowedBridgedErrorDetail(detail string) bool {
+	switch detail {
+	case "",
+		"client_forbidden",
+		externalRebindForbiddenDetail,
+		externalRebindRejectedDetail:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllowedBridgedErrorMessage(msg string) bool {
+	switch strings.ToLower(strings.TrimSpace(msg)) {
+	case "unauthorized",
+		"forbidden",
+		"not found",
+		"method not allowed",
+		"bad request",
+		"conflict",
+		"service unavailable",
+		"upstream management error":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeBridgedErrorPayload(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, true
+	}
+	if len(trimmed) > 1024 || trimmed[0] != '{' {
+		return nil, false
+	}
+	doc, err := decodeStrictJSONObject(trimmed)
+	if err != nil {
+		return nil, false
+	}
+	for k, v := range doc {
+		var str string
+		if json.Unmarshal(v, &str) != nil || len(str) > 256 {
+			return nil, false
+		}
+		switch k {
+		case "code":
+			if !isAllowedBridgedErrorCode(str) {
+				return nil, false
+			}
+		case "detail":
+			if !isAllowedBridgedErrorDetail(str) {
+				return nil, false
+			}
+		case "error":
+			if !isAllowedBridgedErrorMessage(str) {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	return trimmed, true
+}
+
+func (w *bridgeSanitizingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *bridgeSanitizingResponseWriter) WriteHeader(code int) {
+	if code < http.StatusOK {
+		copyHeadersPreservingNoStore(w.dst.Header(), w.header)
+		w.header = make(http.Header)
+		w.dst.WriteHeader(code)
+		return
+	}
+	if w.status != 0 {
+		return
+	}
+	w.status = code
+}
+
+func (w *bridgeSanitizingResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.overflow {
+		return len(p), nil
+	}
+	if w.buf.Len()+len(p) > maxBridgedSanitizedBodyBytes {
+		w.overflow = true
+		w.buf.Reset()
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+func (w *bridgeSanitizingResponseWriter) Flush() {}
+
+func (w *bridgeSanitizingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.dst
+}
+
+func (w *bridgeSanitizingResponseWriter) finish(method string) {
+	if strings.TrimSpace(w.header.Get("Content-Encoding")) != "" {
+		response.Error(w.dst, http.StatusBadGateway, errors.New("unexpected encoded upstream management response"))
+		return
+	}
+	status := w.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status != http.StatusOK {
+		if status < http.StatusBadRequest {
+			response.Error(w.dst, http.StatusBadGateway, errors.New("unexpected upstream management response status"))
+			return
+		}
+		copyHeadersPreservingNoStore(w.dst.Header(), w.header)
+		w.dst.Header().Del("Content-Length")
+		w.dst.Header().Del("Content-Encoding")
+		if !w.overflow {
+			if safeBody, ok := safeBridgedErrorPayload(w.buf.Bytes()); ok {
+				if len(safeBody) > 0 && w.dst.Header().Get("Content-Type") == "" {
+					w.dst.Header().Set("Content-Type", "application/json")
+				}
+				w.dst.WriteHeader(status)
+				if method != http.MethodHead && len(safeBody) > 0 {
+					_, _ = w.dst.Write(safeBody)
+				}
+				return
+			}
+		}
+		w.dst.Header().Set("Content-Type", "application/json")
+		w.dst.WriteHeader(status)
+		if method != http.MethodHead {
+			_, _ = w.dst.Write([]byte(`{"error":"upstream management error"}`))
+		}
+		return
+	}
+	if method == http.MethodHead && w.buf.Len() == 0 && !w.overflow {
+		copyHeadersPreservingNoStore(w.dst.Header(), w.header)
+		w.dst.Header().Del("Content-Length")
+		w.dst.Header().Del("Content-Encoding")
+		w.dst.WriteHeader(http.StatusOK)
+		return
+	}
+	if w.overflow {
+		response.Error(w.dst, http.StatusBadGateway, errors.New("upstream management response too large"))
+		return
+	}
+	sanitized, fallbackContentType, err := w.sanitizer(w.buf.Bytes())
+	if err != nil {
+		response.Error(w.dst, http.StatusBadGateway, errors.New("invalid upstream management response"))
+		return
+	}
+	copyHeadersPreservingNoStore(w.dst.Header(), w.header)
+	w.dst.Header().Del("Content-Length")
+	w.dst.Header().Del("Content-Encoding")
+	if fallbackContentType == "application/json" || w.dst.Header().Get("Content-Type") == "" {
+		w.dst.Header().Set("Content-Type", fallbackContentType)
+	}
+	w.dst.WriteHeader(http.StatusOK)
+	if method != http.MethodHead {
+		_, _ = w.dst.Write(sanitized)
 	}
 }
 

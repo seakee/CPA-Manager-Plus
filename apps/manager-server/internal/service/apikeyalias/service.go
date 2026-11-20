@@ -22,7 +22,14 @@ func New(store *store.Store) *Service {
 }
 
 func (s *Service) List(ctx context.Context) ([]store.APIKeyAlias, error) {
-	return s.store.LoadAPIKeyAliases(ctx)
+	aliases, err := s.store.LoadAPIKeyAliases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if aliases == nil {
+		return []store.APIKeyAlias{}, nil
+	}
+	return aliases, nil
 }
 
 func (s *Service) Save(ctx context.Context, items []store.APIKeyAlias, activeHashes []string, allowOrphanCleanup bool) ([]store.APIKeyAlias, error) {

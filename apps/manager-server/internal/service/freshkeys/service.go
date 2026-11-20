@@ -24,6 +24,7 @@ import (
 var ErrRequest = errors.New("invalid creation request")
 var ErrNotFound = errors.New("creation result not found")
 var ErrConflict = repo.ErrConflict
+var ErrRetired = repo.ErrRetired
 
 // ErrAdoptedSecretRetired refuses to register a destination key whose secret is
 // already a superseded record here. The key operation journal committed that
@@ -46,9 +47,19 @@ type Key struct {
 	// single Key the default installation minted so CPA never starts with client
 	// authentication disabled, and "adopted" for a Key an adopted or upgraded
 	// destination already carried. It is display metadata, not authority.
-	Origin      string `json:"origin"`
-	OperationID string `json:"operationId,omitempty"`
-	EffectCode  string `json:"effectCode,omitempty"`
+	Origin          string `json:"origin"`
+	OperationID     string `json:"operationId,omitempty"`
+	EffectCode      string `json:"effectCode,omitempty"`
+	LastRotatedAtMS int64  `json:"lastRotatedAtMs,omitempty"`
+	RevokedAtMS     int64  `json:"revokedAtMs,omitempty"`
+}
+
+type StagedRotation struct {
+	Key        Key
+	OldSecret  string
+	NewSecret  string
+	NewPreview string
+	Committed  bool
 }
 
 // InitialKey is the installation-minted Client Key. The secret is returned only
@@ -261,19 +272,69 @@ const maxAdoptedSecretLength = 4096
 // key carries the source CPA's arbitrary shape and therefore the imported
 // preview. The digest is the same for both, and it is what binds the row.
 func stagedSecretMatches(record repo.Record, secret string) bool {
-	if digest(secret) != record.Hash {
+	if secret == "" || len(secret) > maxAdoptedSecretLength || !utf8.ValidString(secret) || digest(secret) != record.Hash {
 		return false
+	}
+	if model.ValidCanonicalClientKey(secret) && record.Preview == model.MaskedClientKey(secret) {
+		return true
 	}
 	if record.Origin == repo.OriginAdopted {
 		return record.Preview == model.MaskedImportedClientKey(secret)
 	}
-	return model.ValidCanonicalClientKey(secret) && record.Preview == model.MaskedClientKey(secret)
+	if record.Origin == repo.OriginInstaller {
+		if strings.IndexFunc(secret, unicode.IsSpace) >= 0 {
+			return false
+		}
+		return record.Preview == model.MaskedImportedClientKey(secret)
+	}
+	return false
 }
 
 func public(v repo.Record) Key {
-	return Key{ID: v.Identity.ID, RequestID: v.RequestID, MaskedPreview: v.Preview, CreatedAtMS: v.Identity.CreatedAtMS,
-		ManagerState: "persisted", RuntimeState: "not_applied", Name: v.Name, NameRevision: v.NameRevision,
-		Lifecycle: v.Identity.Lifecycle, Origin: v.Origin}
+	revokedAtMS := v.RevokedAtMS
+	if revokedAtMS == 0 && v.Identity.Lifecycle == identity.LifecycleSuperseded {
+		revokedAtMS = v.Identity.UpdatedAtMS
+	}
+	runtimeState := "not_applied"
+	if v.Identity.Lifecycle == identity.LifecycleSuperseded {
+		runtimeState = "revoked_observed"
+	}
+	return Key{
+		ID:              v.Identity.ID,
+		RequestID:       v.RequestID,
+		MaskedPreview:   v.Preview,
+		CreatedAtMS:     v.Identity.CreatedAtMS,
+		ManagerState:    "persisted",
+		RuntimeState:    runtimeState,
+		Name:            v.Name,
+		NameRevision:    v.NameRevision,
+		Lifecycle:       v.Identity.Lifecycle,
+		Origin:          v.Origin,
+		LastRotatedAtMS: v.LastRotatedAtMS,
+		RevokedAtMS:     revokedAtMS,
+	}
+}
+
+func projectStoredKey(v repo.Record, attempt *repo.InitialInstall, operation *repo.Operation) Key {
+	key := public(v)
+	if v.Identity.Lifecycle != identity.LifecycleSuperseded &&
+		(attempt != nil && attempt.KeyID == string(key.ID) ||
+			operation != nil && operation.Outcome != repo.OutcomeAborted && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID))) {
+		key.RuntimeState = "effect_unknown"
+	}
+	if operation != nil && !operation.IsTerminal() && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
+		key.OperationID = operation.ID
+		if operation.Outcome == "pending" && nonRetiredLifecycle(key.Lifecycle) &&
+			((operation.Mode == "add" && operation.TargetID == string(key.ID)) || (operation.Mode == "replace" && operation.KeeperID == string(key.ID))) {
+			key.RuntimeState = "applying"
+		} else {
+			key.RuntimeState = "effect_unknown"
+		}
+	}
+	if v.Identity.Lifecycle == identity.LifecycleSuperseded && key.OperationID == "" {
+		key.RuntimeState = "revoked_observed"
+	}
+	return key
 }
 
 // IdentityIDs lists the Canonical Keys of this workspace without touching any
@@ -307,20 +368,32 @@ func (s *Service) Detail(ctx context.Context, rawID string) (Key, error) {
 	return Key{}, ErrNotFound
 }
 
+// ValidKeyName trims and validates a Client Key display name.
+func ValidKeyName(raw string) (string, bool) {
+	if !utf8.ValidString(raw) {
+		return "", false
+	}
+	name := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(name) > 120 || strings.ContainsFunc(name, unicode.IsControl) {
+		return "", false
+	}
+	return name, true
+}
+
 func (s *Service) Rename(ctx context.Context, rawID, name string, revision int64) (Key, error) {
-	name = strings.TrimSpace(name)
-	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 120 || strings.ContainsFunc(name, unicode.IsControl) || revision < 1 {
+	cleaned, ok := ValidKeyName(name)
+	if !ok || revision < 1 {
 		return Key{}, ErrRequest
 	}
 	key, err := s.Detail(ctx, rawID)
 	if err != nil {
 		return Key{}, err
 	}
-	if err := s.repo.Rename(ctx, key.ID, name, revision); err != nil {
+	if err := s.repo.Rename(ctx, key.ID, cleaned, revision); err != nil {
 		return Key{}, err
 	}
 	// Return the committed operation's metadata, not a later writer's readback.
-	key.Name, key.NameRevision = name, revision+1
+	key.Name, key.NameRevision = cleaned, revision+1
 	return key, nil
 }
 func digest(secret string) string {
@@ -348,11 +421,35 @@ func (s *Service) AllStaged(ctx context.Context, secrets []string) (bool, error)
 	if s == nil || s.repo == nil || len(secrets) == 0 {
 		return false, ErrRequest
 	}
+	var rotationHashes map[string]bool
+	latest, err := s.repo.LatestOperation(ctx)
+	if err != nil {
+		return false, err
+	}
+	if latest != nil && !latest.IsTerminal() && latest.Mode == "rotate" {
+		rot, rotErr := s.repo.RotationByRequestID(ctx, latest.ID)
+		if rotErr != nil {
+			return false, rotErr
+		}
+		if rot != nil && string(rot.APIKeyID) == latest.TargetID {
+			rotationHashes = map[string]bool{rot.NewHash: true}
+		}
+	}
+	if rotationHashes == nil {
+		rotationHashes, err = s.repo.ActiveStagedRotationHashes(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
 	for _, secret := range secrets {
 		if secret == "" {
 			return false, nil
 		}
-		record, err := s.repo.ByHash(ctx, digest(secret))
+		h := digest(secret)
+		if rotationHashes[h] {
+			continue
+		}
+		record, err := s.repo.ByHash(ctx, h)
 		if err != nil {
 			return false, err
 		}
@@ -385,22 +482,7 @@ func (s *Service) List(ctx context.Context) ([]Key, error) {
 		if err != nil || !stagedSecretMatches(v, secret) {
 			return nil, errors.New("staged client secret unavailable")
 		}
-		key := public(v)
-		if v.Identity.Lifecycle == identity.LifecycleSuperseded {
-			key.RuntimeState = "effect_unknown"
-		}
-		if attempt != nil && attempt.KeyID == string(key.ID) || operation != nil && operation.Outcome != repo.OutcomeAborted && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
-			key.RuntimeState = "effect_unknown"
-		}
-		if operation != nil && !operation.IsTerminal() && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
-			key.OperationID = operation.ID
-			if operation.Outcome == "pending" && nonRetiredLifecycle(key.Lifecycle) &&
-				((operation.Mode == "add" && operation.TargetID == string(key.ID)) || (operation.Mode == "replace" && operation.KeeperID == string(key.ID))) {
-				key.RuntimeState = "applying"
-			} else {
-				key.RuntimeState = "effect_unknown"
-			}
-		}
+		key := projectStoredKey(v, attempt, operation)
 		keys = append(keys, key)
 	}
 	return keys, nil
@@ -421,6 +503,14 @@ func (s *Service) Lookup(ctx context.Context, requestID string) (Key, error) {
 	return Key{}, ErrNotFound
 }
 func (s *Service) Create(ctx context.Context, requestID string) (Result, bool, error) {
+	return s.CreateNamed(ctx, requestID, "")
+}
+
+func (s *Service) CreateNamed(ctx context.Context, requestID, name string) (Result, bool, error) {
+	cleanedName, ok := ValidKeyName(name)
+	if !ok || !ValidRequestID(requestID) {
+		return Result{}, false, ErrRequest
+	}
 	key, err := s.Lookup(ctx, requestID)
 	if err == nil {
 		return Result{Key: key}, false, nil
@@ -442,7 +532,22 @@ func (s *Service) Create(ctx context.Context, requestID string) (Result, bool, e
 		return Result{}, false, err
 	}
 	now := s.now()
-	v := repo.Record{RequestID: requestID, Identity: identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now}, Ciphertext: ciphertext, Hash: digest(secret), Preview: model.MaskedClientKey(secret), NameRevision: 1, Origin: repo.OriginWorkspace}
+	v := repo.Record{
+		RequestID: requestID,
+		Identity: identity.APIKeyIdentity{
+			ID:          id,
+			Revision:    identity.InitialRevision,
+			Lifecycle:   identity.LifecycleActive,
+			CreatedAtMS: now,
+			UpdatedAtMS: now,
+		},
+		Ciphertext:   ciphertext,
+		Hash:         digest(secret),
+		Preview:      model.MaskedClientKey(secret),
+		Name:         cleanedName,
+		NameRevision: 1,
+		Origin:       repo.OriginWorkspace,
+	}
 	created, err := s.repo.Create(ctx, v, s.runtimeIdentity(ctx))
 	if err != nil {
 		return Result{}, false, err
@@ -452,6 +557,247 @@ func (s *Service) Create(ctx context.Context, requestID string) (Result, bool, e
 		return Result{Key: key}, false, err
 	}
 	return Result{Key: public(v), CreatedSecret: secret}, true, nil
+}
+
+// StageRotate stages or replays an Option B in-place secret rotation candidate
+// for targetID without modifying the active key until SaveOperation commits.
+func (s *Service) StageRotate(ctx context.Context, requestID, rawTargetID string) (StagedRotation, bool, error) {
+	if !ValidRequestID(requestID) {
+		return StagedRotation{}, false, ErrRequest
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return StagedRotation{}, false, ErrRequest
+	}
+	if s == nil || s.repo == nil || s.protector == nil {
+		return StagedRotation{}, false, errors.New("secret protection unavailable")
+	}
+	raw := make([]byte, 32)
+	if _, err = rand.Read(raw); err != nil {
+		return StagedRotation{}, false, err
+	}
+	generatedSecret := model.WorkspaceClientKeyPrefix + hex.EncodeToString(raw)
+	generatedCiphertext, err := s.protector.ProtectString(generatedSecret)
+	if err != nil {
+		return StagedRotation{}, false, err
+	}
+	now := s.now()
+	candidate := repo.RotationRecord{
+		RequestID:     requestID,
+		APIKeyID:      targetID,
+		NewCiphertext: generatedCiphertext,
+		NewHash:       digest(generatedSecret),
+		NewPreview:    model.MaskedClientKey(generatedSecret),
+		CreatedAtMS:   now,
+	}
+	storedRot, targetRec, created, committed, err := s.repo.StageRotation(ctx, candidate)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return StagedRotation{}, false, ErrNotFound
+		}
+		return StagedRotation{}, false, err
+	}
+	currentSecret, err := s.protector.UnprotectString(targetRec.Ciphertext)
+	if err != nil || !stagedSecretMatches(targetRec, currentSecret) {
+		return StagedRotation{}, false, errors.New("staged client secret unavailable")
+	}
+	key, err := s.Detail(ctx, string(targetID))
+	if err != nil {
+		key = public(targetRec)
+	}
+	if committed {
+		return StagedRotation{
+			Key:       key,
+			Committed: true,
+		}, false, nil
+	}
+	newSecret := generatedSecret
+	if !created {
+		newSecret, err = s.protector.UnprotectString(storedRot.NewCiphertext)
+		if err != nil || !model.ValidCanonicalClientKey(newSecret) || digest(newSecret) != storedRot.NewHash || storedRot.NewPreview != model.MaskedClientKey(newSecret) {
+			return StagedRotation{}, false, errors.New("staged rotation secret unavailable")
+		}
+	}
+	return StagedRotation{
+		Key:        key,
+		OldSecret:  currentSecret,
+		NewSecret:  newSecret,
+		NewPreview: storedRot.NewPreview,
+	}, created, nil
+}
+
+// DiscardUnstartedRotate deletes a staged rotation candidate only when no
+// operation journal row was ever written for requestID.
+func (s *Service) DiscardUnstartedRotate(ctx context.Context, requestID, rawTargetID string) error {
+	if s == nil || s.repo == nil || !ValidRequestID(requestID) {
+		return nil
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return nil
+	}
+	return s.repo.DiscardUnstartedRotation(ctx, requestID, targetID)
+}
+
+// DiscardOrphanedRotate deletes any staged rotation row for rawTargetID (other
+// than keepRequestID) whose request_id never opened an operation journal row.
+// When rawTargetID is empty, all orphaned rotation rows across keys are swept.
+func (s *Service) DiscardOrphanedRotate(ctx context.Context, keepRequestID, rawTargetID string) error {
+	if s == nil || s.repo == nil {
+		return nil
+	}
+	if rawTargetID == "" {
+		return s.repo.DiscardOrphanedRotation(ctx, keepRequestID, "")
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return nil
+	}
+	return s.repo.DiscardOrphanedRotation(ctx, keepRequestID, targetID)
+}
+
+// HasStagedRotate reports whether rawTargetID currently has an active staged
+// rotation candidate in fresh_client_api_key_rotations.
+func (s *Service) HasStagedRotate(ctx context.Context, rawTargetID string) (bool, error) {
+	if s == nil || s.repo == nil {
+		return false, nil
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return false, ErrRequest
+	}
+	return s.repo.HasStagedRotation(ctx, targetID)
+}
+
+// WithRotationSecrets supplies (oldSecret, nextSecret) for one Option B rotation
+// operation. Before commit, oldSecret is the current active secret and nextSecret
+// comes from fresh_client_api_key_rotations; after commit, nextSecret is the
+// current active secret and oldSecret comes from fresh_client_api_key_secret_history.
+func (s *Service) WithRotationSecrets(ctx context.Context, opID, rawTargetID string, committed bool, consume func(oldSecret, nextSecret string) error) error {
+	if !ValidRequestID(opID) {
+		return ErrRequest
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return ErrRequest
+	}
+	if s == nil || s.repo == nil || s.protector == nil {
+		return errors.New("staged client secret unavailable")
+	}
+	record, err := s.repo.ByID(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		return ErrNotFound
+	}
+	activeSecret, err := s.protector.UnprotectString(record.Ciphertext)
+	if err != nil || !stagedSecretMatches(*record, activeSecret) {
+		return errors.New("staged client secret unavailable")
+	}
+	rot, err := s.repo.RotationByRequestID(ctx, opID)
+	if err != nil {
+		return err
+	}
+	if rot != nil {
+		if rot.APIKeyID != targetID || !nonRetiredLifecycle(record.Identity.Lifecycle) || rot.OldHash != record.Hash {
+			return errors.New("staged rotation secret unavailable")
+		}
+		nextSecret, decErr := s.protector.UnprotectString(rot.NewCiphertext)
+		if decErr != nil || !model.ValidCanonicalClientKey(nextSecret) || digest(nextSecret) != rot.NewHash || rot.NewPreview != model.MaskedClientKey(nextSecret) || activeSecret == nextSecret {
+			return errors.New("staged rotation secret unavailable")
+		}
+		return consume(activeSecret, nextSecret)
+	}
+	if !committed {
+		op, opErr := s.repo.Operation(ctx, opID)
+		if opErr != nil {
+			return opErr
+		}
+		if op == nil || op.Mode != "rotate" || op.TargetID != string(targetID) || op.Outcome != repo.OutcomeCommitted {
+			return errors.New("staged rotation secret unavailable")
+		}
+	}
+	hist, err := s.repo.SecretHistoryByRequestID(ctx, opID)
+	if err != nil {
+		return err
+	}
+	if hist == nil {
+		hist, err = s.repo.LatestSecretHistoryByID(ctx, targetID)
+		if err != nil {
+			return err
+		}
+	}
+	if hist == nil || hist.APIKeyID != targetID {
+		return errors.New("retired rotation secret unavailable")
+	}
+	histRecord := repo.Record{
+		Hash:    hist.Hash,
+		Preview: hist.Preview,
+		Origin:  hist.Origin,
+	}
+	oldSecret, err := s.protector.UnprotectString(hist.Ciphertext)
+	if err != nil || !stagedSecretMatches(histRecord, oldSecret) {
+		return errors.New("retired rotation secret unavailable")
+	}
+	nextSecret := activeSecret
+	if hist.NextHash != "" && hist.NextHash != record.Hash {
+		nextHist, nextErr := s.repo.SecretHistoryByHash(ctx, hist.NextHash)
+		if nextErr != nil {
+			return nextErr
+		}
+		if nextHist == nil || nextHist.APIKeyID != targetID {
+			return errors.New("retired rotation secret unavailable")
+		}
+		nextHistRecord := repo.Record{
+			Hash:            nextHist.Hash,
+			Preview:         nextHist.Preview,
+			Origin:          nextHist.Origin,
+			LastRotatedAtMS: nextHist.RetiredAtMS,
+		}
+		nextSecret, err = s.protector.UnprotectString(nextHist.Ciphertext)
+		if err != nil || !stagedSecretMatches(nextHistRecord, nextSecret) {
+			return errors.New("retired rotation secret unavailable")
+		}
+	}
+	if oldSecret == nextSecret {
+		return errors.New("retired rotation secret unavailable")
+	}
+	return consume(oldSecret, nextSecret)
+}
+
+// CommittedRotateSupersededState reports whether a committed rotate operation
+// opID on rawTargetID has already been superseded by a subsequent committed
+// rotation ("effective_observed") or a subsequent revocation ("revoked_observed").
+func (s *Service) CommittedRotateSupersededState(ctx context.Context, opID, rawTargetID string) (string, bool, error) {
+	if s == nil || s.repo == nil {
+		return "", false, nil
+	}
+	targetID, err := identity.ParseAPIKeyID(rawTargetID)
+	if err != nil {
+		return "", false, ErrRequest
+	}
+	record, err := s.repo.ByID(ctx, targetID)
+	if err != nil || record == nil {
+		return "", false, err
+	}
+	if record.Identity.Lifecycle == identity.LifecycleSuperseded {
+		return "revoked_observed", true, nil
+	}
+	hist, err := s.repo.SecretHistoryByRequestID(ctx, opID)
+	if err != nil || hist == nil || hist.APIKeyID != targetID {
+		return "", false, err
+	}
+	if hist.NextHash != "" && hist.NextHash != record.Hash {
+		nextHist, nextErr := s.repo.SecretHistoryByHash(ctx, hist.NextHash)
+		if nextErr != nil {
+			return "", false, nextErr
+		}
+		if nextHist != nil && nextHist.APIKeyID == targetID {
+			return "effective_observed", true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // EnsureInitialKey returns the single Client Key the installation minted, or
@@ -656,22 +1002,7 @@ func (s *Service) ActiveSecretMap(ctx context.Context) (keys []Key, bySecret map
 		if decErr != nil || !stagedSecretMatches(v, secret) {
 			return nil, nil, nil, errors.New("staged client secret unavailable")
 		}
-		key := public(v)
-		if v.Identity.Lifecycle == identity.LifecycleSuperseded {
-			key.RuntimeState = "effect_unknown"
-		}
-		if attempt != nil && attempt.KeyID == string(key.ID) || operation != nil && operation.Outcome != repo.OutcomeAborted && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
-			key.RuntimeState = "effect_unknown"
-		}
-		if operation != nil && !operation.IsTerminal() && (operation.KeeperID == string(key.ID) || operation.TargetID == string(key.ID)) {
-			key.OperationID = operation.ID
-			if operation.Outcome == "pending" && nonRetiredLifecycle(key.Lifecycle) &&
-				((operation.Mode == "add" && operation.TargetID == string(key.ID)) || (operation.Mode == "replace" && operation.KeeperID == string(key.ID))) {
-				key.RuntimeState = "applying"
-			} else {
-				key.RuntimeState = "effect_unknown"
-			}
-		}
+		key := projectStoredKey(v, attempt, operation)
 		keys = append(keys, key)
 		if nonRetiredLifecycle(v.Identity.Lifecycle) {
 			bySecret[secret] = key

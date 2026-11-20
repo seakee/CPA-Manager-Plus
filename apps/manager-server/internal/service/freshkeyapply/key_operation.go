@@ -116,7 +116,7 @@ func validOperationRequestShape(target, keeper, mode string) bool {
 		return false
 	}
 	switch mode {
-	case "add":
+	case "add", "rotate":
 		return keeper == ""
 	case "revoke":
 		if keeper == "" {
@@ -245,6 +245,11 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.prepareLocked(ctx, id, target, keeper, mode, generation)
+}
+
+func (s *Service) prepareLocked(ctx context.Context, id, target, keeper, mode string, generation uint64) (OperationResult, error) {
+	result := OperationResult{RuntimeState: "effect_unknown"}
 	if !s.KeyOperationsEnabled() {
 		return result, ErrUnavailable
 	}
@@ -266,10 +271,15 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	if latest != nil && !latest.IsTerminal() {
 		return OperationResult{Operation: latest, RuntimeState: "effect_unknown"}, repo.ErrConflict
 	}
+	if s.keys != nil {
+		if err := s.keys.DiscardOrphanedRotate(ctx, id, ""); err != nil {
+			return result, err
+		}
+	}
 	if s.profile == ProfileExternal {
 		return s.externalPrepare(ctx, id, target, keeper, mode, generation)
 	}
-	p, snapshot, alreadyHeld, err := s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	p, snapshot, alreadyHeld, err := s.keyOperationPrerequisites(ctx, id, target, keeper, mode, generation)
 	if err != nil {
 		return result, err
 	}
@@ -281,6 +291,12 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 			state = "observed"
 		}
 		steps = []repo.KeyStep{{Name: "add", State: state}}
+	case "rotate":
+		state := "unattempted"
+		if alreadyHeld {
+			state = "observed"
+		}
+		steps = []repo.KeyStep{{Name: "rotate", State: state}}
 	case "revoke":
 		steps = []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
 	case "replace":
@@ -288,7 +304,7 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	}
 	outcome := "pending"
 	var completedAt int64
-	if mode == "add" && alreadyHeld {
+	if (mode == "add" || mode == "rotate") && alreadyHeld {
 		outcome = "committed"
 		completedAt = time.Now().UnixMilli()
 	}
@@ -299,7 +315,7 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 		CreatedAtMS: time.Now().UnixMilli(), CompletedAtMS: completedAt,
 	}
 	if s.h1 != nil {
-		if mode == "add" || keeper == "" {
+		if mode == "add" || mode == "rotate" || keeper == "" {
 			return result, ErrUnavailable
 		}
 		err = s.keyPair(ctx, target, keeper, false, func(old, next string) error {
@@ -339,13 +355,13 @@ func (s *Service) Prepare(ctx context.Context, id, target, keeper, mode string, 
 	return s.checkOperation(ctx, &o, generation)
 }
 
-func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper, mode string, generation uint64) (Permit, []string, bool, error) {
+func (s *Service) keyOperationPrerequisites(ctx context.Context, opID, target, keeper, mode string, generation uint64) (Permit, []string, bool, error) {
 	p, err := s.operationTarget(ctx, generation)
 	if err != nil {
 		return p, nil, false, err
 	}
 	if s.profile == ProfilePrivate {
-		if mode == "add" || keeper == "" {
+		if mode == "add" || mode == "rotate" || keeper == "" {
 			return p, nil, false, repo.ErrConflict
 		}
 		installed, err := s.installedKey(ctx)
@@ -359,7 +375,7 @@ func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper,
 	}
 	var snapshot []string
 	alreadyHeld := false
-	err = s.operationSecrets(ctx, mode, target, keeper, false, func(old, next string) error {
+	err = s.operationSecrets(ctx, opID, mode, target, keeper, false, func(old, next string) error {
 		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 		if e != nil {
 			return e
@@ -404,6 +420,49 @@ func (s *Service) keyOperationPrerequisites(ctx context.Context, target, keeper,
 				return cpa.ErrSourceConflict
 			}
 			if err := s.verifyPreStepManagedAuth(ctx, w, p, snap, snap.Keys[0]); err != nil {
+				return err
+			}
+			snapshot = keyDigests(snap.Keys)
+			return nil
+		}
+		if mode == "rotate" {
+			if old == "" || next == "" || old == next {
+				return cpa.ErrSourceConflict
+			}
+			if !slices.Contains(snap.Keys, old) {
+				if !slices.Contains(snap.Keys, next) || !w.ValidKeySet(snap.Keys) {
+					return cpa.ErrSourceConflict
+				}
+				authOK, authErr := w.SampleKeySet(ctx, []string{next}, []string{old})
+				if authErr != nil {
+					return authErr
+				}
+				if !authOK {
+					return cpa.ErrApplyUnknown
+				}
+				if s.profile == ProfileManaged {
+					if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+						return err
+					}
+				}
+				s.authCache.recordProven(authProofVersion{
+					profile:           s.profile,
+					target:            p.Identity,
+					runID:             p.RunID,
+					runtimeGeneration: p.runtimeGeneration,
+					runtimeArtifact:   p.runtimeArtifact,
+					sourceSHA256:      snap.SourceSHA256,
+					keysSHA256:        orderedKeysDigest(snap.Keys),
+				}, snap.Keys, []string{next})
+				snapshot = keyDigests(snap.Keys)
+				alreadyHeld = true
+				return nil
+			}
+			after := keySetAfter(mode, snap.Keys, "rotate", old, next)
+			if len(after) == 0 || !w.ValidKeySet(after) {
+				return cpa.ErrSourceConflict
+			}
+			if err := s.verifyPreStepManagedAuth(ctx, w, p, snap, old); err != nil {
 				return err
 			}
 			snapshot = keyDigests(snap.Keys)
@@ -498,10 +557,15 @@ func (s *Service) Preflight(ctx context.Context, target, keeper, mode string, ge
 	if latest != nil && !latest.IsTerminal() {
 		return repo.ErrConflict
 	}
+	if s.keys != nil {
+		if sweepErr := s.keys.DiscardOrphanedRotate(ctx, "", ""); sweepErr != nil {
+			return sweepErr
+		}
+	}
 	if s.profile == ProfileExternal {
 		return s.externalPreflight(ctx, target, keeper, mode, generation)
 	}
-	_, _, _, err = s.keyOperationPrerequisites(ctx, target, keeper, mode, generation)
+	_, _, _, err = s.keyOperationPrerequisites(ctx, "", target, keeper, mode, generation)
 	return err
 }
 
@@ -528,10 +592,13 @@ func (s *Service) operationTarget(ctx context.Context, generation uint64) (Permi
 }
 
 func (s *Service) keyPair(ctx context.Context, target, keeper string, retained bool, consume func(string, string) error) error {
-	return s.operationSecrets(ctx, "replace", target, keeper, retained, consume)
+	return s.operationSecrets(ctx, "", "replace", target, keeper, retained, consume)
 }
 
-func (s *Service) operationSecrets(ctx context.Context, mode, target, keeper string, retained bool, consume func(string, string) error) error {
+func (s *Service) operationSecrets(ctx context.Context, opID, mode, target, keeper string, retained bool, consume func(string, string) error) error {
+	if mode == "rotate" {
+		return s.keys.WithRotationSecrets(ctx, opID, target, retained, consume)
+	}
 	readTarget := s.keys.WithStagedSecret
 	if retained && mode != "add" {
 		readTarget = s.keys.WithRetainedSecret
@@ -588,6 +655,11 @@ func keyOperationSets(o *repo.Operation, step, old, next string) (before, after 
 		}
 		return before, insertDigest(before, freshkeys.SecretDigest(added))
 	}
+	if step == "rotate" {
+		target := freshkeys.SecretDigest(old)
+		trimmed := slices.DeleteFunc(slices.Clone(before), func(digest string) bool { return digest == target })
+		return before, insertDigest(trimmed, freshkeys.SecretDigest(next))
+	}
 	if o.Mode == "replace" {
 		before = insertDigest(before, freshkeys.SecretDigest(next))
 	}
@@ -617,6 +689,25 @@ func keySetAfter(mode string, keys []string, step, old, next string) []string {
 			return slices.Clone(keys)
 		}
 		return append(slices.Clone(keys), added)
+	}
+	if step == "rotate" {
+		out := make([]string, 0, len(keys))
+		seen := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			candidate := key
+			if key == old {
+				candidate = next
+			}
+			if candidate == "" {
+				continue
+			}
+			if _, dup := seen[candidate]; dup {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			out = append(out, candidate)
+		}
+		return out
 	}
 	return slices.DeleteFunc(slices.Clone(keys), func(key string) bool { return key == old })
 }
@@ -691,6 +782,12 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 		r.RuntimeState = "not_applied"
 		return r, nil
 	}
+	if o.Outcome == "committed" && o.Mode == "rotate" && s.keys != nil {
+		if state, superseded, supErr := s.keys.CommittedRotateSupersededState(ctx, o.ID, o.TargetID); supErr == nil && superseded {
+			r.RuntimeState = state
+			return r, nil
+		}
+	}
 	if historical {
 		return r, nil
 	}
@@ -717,10 +814,11 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 		if step.State == "unattempted" {
 			// A matching live add can settle without resending a PUT. Standalone
 			// add commits here; replace still requires its revoke step.
-			if s.h1 == nil && s.profile == ProfileManaged && (o.Mode == "replace" || o.Mode == "add") && step.Name == "add" {
-				alreadyAdded := false
-				err := s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
-					_, after := keyOperationSets(o, "add", old, next)
+			if s.h1 == nil && s.profile == ProfileManaged &&
+				(((o.Mode == "replace" || o.Mode == "add") && step.Name == "add") || (o.Mode == "rotate" && step.Name == "rotate")) {
+				alreadySettled := false
+				err := s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
+					_, after := keyOperationSets(o, step.Name, old, next)
 					snap, err := w.KeySnapshot(ctx, p.ManagementKey)
 					if err != nil {
 						return err
@@ -729,10 +827,13 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 						return nil
 					}
 					accepted := next
+					var rejected []string
 					if o.Mode == "add" {
 						accepted = old
+					} else if step.Name == "rotate" {
+						rejected = []string{old}
 					}
-					authOK, err := w.SampleKeySet(ctx, []string{accepted}, nil)
+					authOK, err := w.SampleKeySet(ctx, []string{accepted}, rejected)
 					if err != nil {
 						return err
 					}
@@ -747,16 +848,16 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 						runtimeGeneration: p.runtimeGeneration, runtimeArtifact: p.runtimeArtifact,
 						sourceSHA256: snap.SourceSHA256, keysSHA256: orderedKeysDigest(snap.Keys),
 					}, snap.Keys, []string{accepted})
-					alreadyAdded = true
+					alreadySettled = true
 					return nil
 				})
 				if err != nil {
 					return r, err
 				}
-				if alreadyAdded {
+				if alreadySettled {
 					o.Steps[i].State = "observed"
 					o.Outcome = "pending"
-					if o.Mode == "add" {
+					if o.Mode == "add" || o.Mode == "rotate" {
 						o.Outcome = "committed"
 						o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
 					}
@@ -793,7 +894,7 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 				o.Revision++
 			}
 		}
-		err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
+		err = s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
 			_, after := keyOperationSets(o, step.Name, old, next)
 			var reject []string
 			if step.Name != "add" {
@@ -871,7 +972,7 @@ func (s *Service) checkOperation(ctx context.Context, o *repo.Operation, generat
 		if o.Outcome != "committed" {
 			o.Steps[i].State = "observed"
 			o.Outcome = "pending"
-			if step.Name == "revoke" || o.Mode == "add" {
+			if step.Name == "revoke" || step.Name == "rotate" || o.Mode == "add" {
 				o.Outcome = "committed"
 				o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
 			}
@@ -950,7 +1051,7 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 	step := o.Steps[index].Name
 	grant, err := s.keyPermit(ctx, o.ID, step)
 	if err != nil {
-		return r, ErrUnavailable
+		return r, err
 	}
 	now := time.Now().UnixMilli()
 	if grant.OperationID != o.ID || grant.Step != step || grant.RunID != o.RunID || grant.Generation != o.Generation || grant.IssuedAtMS < s.startedAtMS || grant.IssuedAtMS < o.CreatedAtMS || grant.IssuedAtMS > now || grant.ExpiresAtMS <= now || grant.ExpiresAtMS-grant.IssuedAtMS > 60000 || !identity.IsValidSHA256Hex(grant.SourceSHA256) {
@@ -960,8 +1061,8 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 	if !ok {
 		return r, ErrUnavailable
 	}
-	err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
-		before, _ := keyOperationSets(o, grant.Step, old, next)
+	err = s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
+		before, _ := keyOperationSets(o, step, old, next)
 		snap, e := w.KeySnapshot(ctx, p.ManagementKey)
 		if e != nil {
 			return e
@@ -1011,7 +1112,7 @@ func (s *Service) ContinueOperation(ctx context.Context, id string, generation u
 		if _, e = s.target(ctx, p); e != nil {
 			return e
 		}
-		writeErr := w.WriteKeySet(ctx, p.ManagementKey, keySetAfter(o.Mode, snap.Keys, grant.Step, old, next))
+		writeErr := w.WriteKeySet(ctx, p.ManagementKey, keySetAfter(o.Mode, snap.Keys, step, old, next))
 		o.Steps[index].Returned = true
 		saveCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

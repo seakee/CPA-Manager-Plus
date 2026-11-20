@@ -4870,11 +4870,7 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 
 	if u.targetMode == model.UpgradeTargetExternal {
 		if externalLegacyReplacedWrite(clone.URL.Path, r.Method) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			writeFreshJSON(w, struct {
-				Code string `json:"code"`
-			}{Code: "external_legacy_write_replaced"})
+			writeLegacyRefusal(w, externalLegacyWriteReplaced)
 			return
 		}
 		if externalLegacyLogConfigWrite(clone.URL.Path, r.Method) {
@@ -4899,6 +4895,9 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 				return
 			}
 		}
+	} else if cpampLegacyClientKeyWriteReplaced(clone.URL.Path, r.Method) {
+		writeLegacyRefusal(w, legacyWriteReplaced)
+		return
 	}
 
 	if u.targetMode == model.UpgradeTargetManaged && clone.URL.Path == "/usage-service/config" && r.Method == http.MethodPut {
@@ -4998,6 +4997,11 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 	}
 	reconcileCollectorAfter := clone.URL.Path == "/usage-service/config" &&
 		(r.Method == http.MethodPut || hasCollectorPatch || hasEnabledPatch)
+	sanitizer := bridgedReadSanitizer(clone.URL.Path, r.Method)
+	if sanitizer != nil {
+		clone.Header = clone.Header.Clone()
+		stripBridgeSanitizedRequestHeaders(clone.Header)
+	}
 	if u.targetMode == model.UpgradeTargetExternal {
 		if legacyBridgePresentsSavedKey(clone) {
 			if u.appCtx != nil && u.appCtx.ProxyService != nil {
@@ -5015,11 +5019,25 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 				return
 			}
 			defer hold.finish()
+			if strings.TrimRight(clone.URL.Path, "/") == "/v0/management/config" &&
+				r.Method != http.MethodGet && r.Method != http.MethodHead {
+				writeLegacyRefusal(w, externalLegacyWriteReplaced)
+				return
+			}
 			overrideCtx := proxysvc.WithSavedSetupOverride(holdCtx, install.BaseURL, install.ManagementKey)
 			markedCtx, mark := proxysvc.WithSavedKeyMark(overrideCtx)
-			rec := newUpgradeExternalLegacyRecorder(w, context.WithoutCancel(holdCtx), u, hold, install, credDigest, mark)
+			targetWriter := w
+			var sanitizingWriter *bridgeSanitizingResponseWriter
+			if sanitizer != nil {
+				sanitizingWriter = newBridgeSanitizingWriter(w, sanitizer)
+				targetWriter = sanitizingWriter
+			}
+			rec := newUpgradeExternalLegacyRecorder(targetWriter, context.WithoutCancel(holdCtx), u, hold, install, credDigest, mark)
 			u.inner.ServeHTTP(rec, clone.WithContext(markedCtx))
 			rec.finish()
+			if sanitizingWriter != nil {
+				sanitizingWriter.finish(r.Method)
+			}
 			if reconcileCollectorAfter && rec.statusCode() >= 200 && rec.statusCode() < 300 {
 				reconcileCtx, cancelReconcile := u.detachedReconcileContext(r.Context())
 				u.reconcileCollectorBestEffort(reconcileCtx)
@@ -5069,6 +5087,12 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 		return
 	}
 
+	if sanitizer != nil {
+		sanitizingWriter := newBridgeSanitizingWriter(w, sanitizer)
+		u.inner.ServeHTTP(sanitizingWriter, clone)
+		sanitizingWriter.finish(r.Method)
+		return
+	}
 	u.inner.ServeHTTP(w, clone)
 }
 

@@ -151,7 +151,7 @@ func (a *freshApplication) reconcileUsageMonitoring(ctx context.Context, op boot
 		log.Printf("Fresh usage workers not started: no host lifetime")
 		return
 	}
-	if a.attemptUsageStart(a.runCtx, op) {
+	if a.attemptUsageStart(a.runCtx, op, false) {
 		a.usageStarted = true
 		a.cancelManagedUsageRuntimeWaiterLocked()
 	}
@@ -222,6 +222,14 @@ func (a *freshApplication) privateCollectorDesiredConfig(ctx context.Context) (c
 // Nothing is claimed when the authority is unavailable: coverage then reports
 // that collection was never proven.
 func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
+	a.startUsageCollectionWithMode(op, false)
+}
+
+func (a *freshApplication) startUsageCollectionAtCompletion(op bootstrap.FreshOperation) {
+	a.startUsageCollectionWithMode(op, true)
+}
+
+func (a *freshApplication) startUsageCollectionWithMode(op bootstrap.FreshOperation, initialCompletion bool) {
 	if a == nil || a.usageProjection == nil || a.usage == nil {
 		return
 	}
@@ -245,7 +253,7 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 	if a.usageStarted {
 		return
 	}
-	if a.attemptUsageStart(runCtx, op) {
+	if a.attemptUsageStart(runCtx, op, initialCompletion) {
 		a.usageStarted = true
 		a.cancelManagedUsageRuntimeWaiterLocked()
 	}
@@ -254,7 +262,7 @@ func (a *freshApplication) startUsageCollection(op bootstrap.FreshOperation) {
 // attemptUsageStart performs one startup attempt on the host lifetime. It
 // reports success only when every durable step committed; serialization and the
 // worker flag keep a retry from starting a second Collector or worker.
-func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.FreshOperation) bool {
+func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.FreshOperation, initialCompletion bool) bool {
 	// Bind staged keys before the first event arrives so it is attributable,
 	// and backfill keys that were staged before a committed target existed. No
 	// event may be collected before its key is attributable, so a failed backfill
@@ -380,8 +388,22 @@ func (a *freshApplication) attemptUsageStart(ctx context.Context, op bootstrap.F
 		a.usageCollectorStarted = true
 		a.setUsageStartReason("")
 	}
-	if err := a.usage.MarkCollectionStart(ctx); err != nil {
-		log.Printf("Fresh usage collection start unavailable: %v", err)
+	var startErr error
+	if initialCompletion && op.Strategy.Strategy == bootstrap.NewManaged && a.keys != nil {
+		startAtMS := time.Now().UnixMilli()
+		if stagedKeys, listErr := a.keys.List(ctx); listErr == nil {
+			for _, k := range stagedKeys {
+				if k.Origin == "installer" && k.CreatedAtMS > 0 && k.CreatedAtMS < startAtMS {
+					startAtMS = k.CreatedAtMS
+				}
+			}
+		}
+		startErr = a.usage.MarkCollectionStartAt(ctx, startAtMS)
+	} else {
+		startErr = a.usage.MarkCollectionStart(ctx)
+	}
+	if startErr != nil {
+		log.Printf("Fresh usage collection start unavailable: %v", startErr)
 		return false
 	}
 	return true
