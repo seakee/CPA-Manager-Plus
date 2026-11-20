@@ -2923,6 +2923,7 @@ function faultClearedRollupRecoverable(binary, workspace) {
   const sourceDigest = dirDigest(source);
   const database = path.join(target, 'usage.sqlite');
   injectClearedRollup(target, TABLES.pricing);
+  const beforeRefusal = readUpgradeOperationState(target);
   assertValue(
     sqliteCount(database, 'select count(*) as count from usage_coverage_incomplete_days') === 0,
     'rollup-recoverable: incomplete days table was not empty before reconcile',
@@ -2937,7 +2938,7 @@ function faultClearedRollupRecoverable(binary, workspace) {
   assertValue(dirDigest(source) === sourceDigest, 'rollup-recoverable: the refused reconcile modified the 1.x source root');
 
   const afterRefusal = readUpgradeOperationState(target);
-  assertValue(afterRefusal.stage === 'copy_in', `rollup-recoverable: refused reconcile advanced stage to ${afterRefusal.stage}`);
+  assertValue(afterRefusal.stage === beforeRefusal.stage, `rollup-recoverable: refused reconcile changed stage from ${beforeRefusal.stage} to ${afterRefusal.stage}`);
   assertValue(
     JSON.stringify([...afterRefusal.pendingDays].sort()) === JSON.stringify([...unacknowledged].sort()),
     `rollup-recoverable: pending_reconcile_days=${JSON.stringify(afterRefusal.pendingDays)} want=${JSON.stringify(unacknowledged)}`,
