@@ -1039,3 +1039,89 @@ func TestVerifyManagerCredentialPrioritizesSourceTimeoutOverUnknownRootR9(t *tes
 		t.Fatalf("VerifyManagerCredential returned ErrSnapshotRootUnknown instead of ErrSnapshotRootTimedOut: %v", err)
 	}
 }
+
+// TestReconcileAndRollbackSucceedWhenTargetDerivedTableDroppedWithArchivedRawEvents
+// verifies that dropping a usage monitoring derived table on a v2 target store
+// whose raw historical events were archived and deleted does not cause
+// invalidateRecordedReconciliation or rollback state recording to fail in
+// full-schema Migrate(db) ("cannot rebuild damaged usage monitoring derivations").
+func TestReconcileAndRollbackSucceedWhenTargetDerivedTableDroppedWithArchivedRawEvents(t *testing.T) {
+	ctx := context.Background()
+	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
+		seedSourceRetention(t, volume)
+		seedSourcePricing(t, volume)
+	})
+	if _, err := Reconcile(ctx, copied.reconcileOptions()); err != nil {
+		t.Fatalf("initial clean Reconcile failed: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite", copied.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `INSERT INTO usage_archive_event_refs (
+		event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms
+	) VALUES ('hash-1', 'run-1', 1, 1, 1730000000000, 1730086400000, 1730086400000)`); err != nil {
+		_ = rawDB.Close()
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `DELETE FROM usage_events`); err != nil {
+		_ = rawDB.Close()
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `DROP TABLE usage_monitoring_account_daily_rollups_v1`); err != nil {
+		_ = rawDB.Close()
+		t.Fatal(err)
+	}
+	_ = rawDB.Close()
+
+	_, recErr := Reconcile(ctx, copied.reconcileOptions())
+	_ = copied.targetLock.Close()
+	copied.targetLock = nil
+	if code, ok := UpgradeErrorCodeOf(recErr); !ok || code != UpgradeErrorReconcileTargetIncomplete {
+		t.Fatalf("Reconcile error = %v (code=%q), want %q", recErr, code, UpgradeErrorReconcileTargetIncomplete)
+	}
+
+	opDB, err := managersqlite.OpenUpgradeOperations(copied.databasePath())
+	if err != nil {
+		t.Fatalf("OpenUpgradeOperations after dropped derived table: %v", err)
+	}
+	op, ok, err := upgradeoperation.New(opDB).Get(ctx)
+	if err != nil || !ok {
+		_ = opDB.Close()
+		t.Fatalf("Get upgrade operation: ok=%v err=%v", ok, err)
+	}
+	if op.Stage != model.UpgradeStageCopyIn || op.ErrorCode != string(UpgradeErrorReconcileTargetIncomplete) {
+		_ = opDB.Close()
+		t.Fatalf("operation after invalidation = {stage=%q errorCode=%q}, want {stage=copy_in errorCode=%q}", op.Stage, op.ErrorCode, UpgradeErrorReconcileTargetIncomplete)
+	}
+	var tableCount int
+	if err := opDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'usage_monitoring_account_daily_rollups_v1'`).Scan(&tableCount); err != nil {
+		_ = opDB.Close()
+		t.Fatal(err)
+	}
+	if tableCount != 0 {
+		_ = opDB.Close()
+		t.Fatalf("invalidateRecordedReconciliation unexpectedly recreated dropped derived table")
+	}
+	// Clear source_root so PrepareRollback exercises bindSourceRootLocked ->
+	// OpenUpgradeOperations on the damaged derived-table store as well.
+	if _, err := opDB.ExecContext(ctx, `UPDATE upgrade_operations SET source_root = '' WHERE id = 1`); err != nil {
+		_ = opDB.Close()
+		t.Fatal(err)
+	}
+	_ = opDB.Close()
+
+	if copied.sourceLock != nil {
+		_ = copied.sourceLock.Close()
+	}
+	if _, err := PrepareRollback(ctx, RollbackOptions{
+		LegacyRoot:     copied.volume.root,
+		TargetRoot:     copied.target,
+		BackupDir:      copied.options.BundleDir,
+		Port:           19918,
+		ManagerAddress: "127.0.0.1:19919",
+	}); err != nil {
+		t.Fatalf("PrepareRollback on damaged derived-table store failed: %v", err)
+	}
+}

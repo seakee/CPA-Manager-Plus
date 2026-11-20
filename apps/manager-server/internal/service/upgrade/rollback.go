@@ -535,7 +535,7 @@ func bindSourceRootLocked(ctx context.Context, recorded model.UpgradeOperation, 
 	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
 		return recorded, err
 	}
-	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	db, err := managersqlite.OpenUpgradeOperations(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
 	}
@@ -1197,7 +1197,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	db, err := managersqlite.OpenUpgradeOperations(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the rollback: %w", err)
 	}

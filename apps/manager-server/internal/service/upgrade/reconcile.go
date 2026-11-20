@@ -1535,7 +1535,7 @@ func recordReconciliation(ctx context.Context, databasePath string, evidence Rec
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return model.UpgradeOperation{}, 0, err
 	}
-	db, err := managersqlite.Open(databasePath)
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, 0, fmt.Errorf("open the v2 database to record the reconciliation: %w", err)
 	}
@@ -1593,7 +1593,7 @@ func RecordPendingReconcileDays(ctx context.Context, databasePath string, days [
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return err
 	}
-	db, err := managersqlite.Open(databasePath)
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
 	if err != nil {
 		return fmt.Errorf("open the v2 database to record pending reconciliation dates: %w", err)
 	}
@@ -1616,7 +1616,7 @@ func invalidateRecordedReconciliation(ctx context.Context, databasePath string, 
 	if err := requireRecoveredCopyIn(databasePath); err != nil {
 		return err
 	}
-	db, err := managersqlite.Open(databasePath)
+	db, err := managersqlite.OpenUpgradeOperations(databasePath)
 	if err != nil {
 		return fmt.Errorf("open the v2 database to invalidate stale reconciliation: %w", err)
 	}

@@ -285,6 +285,8 @@ func TestMaintenanceBundleRejectsOverlappingScratchAndTMPDIR(t *testing.T) {
 		}
 
 		t.Setenv("TMPDIR", keyDir)
+		t.Setenv("TMP", keyDir)
+		t.Setenv("TEMP", keyDir)
 		if err := ValidateMatchingEvidence(ctx, l); err == nil {
 			t.Fatalf("ValidateMatchingEvidence accepted TMPDIR inside keyDir")
 		}
