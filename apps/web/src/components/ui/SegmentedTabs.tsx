@@ -40,6 +40,8 @@ type SegmentedTabsProps<Id extends string> = {
   onChange?: (tab: Id) => void;
   idBase?: string;
   className?: string;
+  variant?: 'default' | 'joined';
+  size?: 'md' | 'sm';
   fullWidth?: boolean;
   equalWidth?: boolean;
   responsiveFullWidth?: boolean;
@@ -54,6 +56,8 @@ export function SegmentedTabs<Id extends string>({
   onChange,
   idBase = 'segmented-tabs',
   className = '',
+  variant = 'default',
+  size = 'md',
   fullWidth = false,
   equalWidth = false,
   responsiveFullWidth = true,
@@ -109,6 +113,8 @@ export function SegmentedTabs<Id extends string>({
 
   const rootClassName = [
     styles.root,
+    variant === 'joined' ? styles.variantJoined : '',
+    size === 'sm' ? styles.sizeSm : '',
     fullWidth ? styles.fullWidth : '',
     equalWidth ? styles.equalWidth : '',
     responsiveFullWidth ? styles.responsiveFullWidth : '',
@@ -118,7 +124,13 @@ export function SegmentedTabs<Id extends string>({
     .join(' ');
 
   return (
-    <div className={rootClassName} role="tablist" aria-label={ariaLabel}>
+    <div
+      className={rootClassName}
+      role="tablist"
+      aria-label={ariaLabel}
+      data-variant={variant}
+      data-size={size}
+    >
       {items.map((item) => {
         const isActive = item.id === activeTab;
         const isDisabled = disabled || Boolean(item.disabled);

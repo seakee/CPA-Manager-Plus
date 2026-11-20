@@ -1539,6 +1539,14 @@ input {
 .journey-advanced-summary::-webkit-details-marker {
   display: none;
 }
+.journey-advanced-summary:focus {
+  outline: none;
+}
+
+.journey-advanced-summary:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
 
 .journey-advanced-title {
   display: inline-flex;
@@ -1565,7 +1573,7 @@ input {
 
 .journey-advanced-meta {
   font-size: 12.5px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .journey-advanced-body {
@@ -1691,9 +1699,10 @@ input {
 
 .access-protocol-header-chip {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  background: var(--bg-canvas);
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
   border-radius: var(--app-radius-xs);
   padding: 2px 8px;
   max-width: 100%;
@@ -1721,13 +1730,132 @@ input {
 }
 
 .access-protocol-url-label {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-weight: 500;
   flex-shrink: 0;
 }
 
 .access-client-key-note {
   margin: 0;
+}
+
+/* Narrow modal & drawer containers: stack labels above left-aligned full-width URLs
+   so endpoints stay single-line without ragged right-aligned orphan character wraps. */
+.access-info-section.is-compact {
+  gap: 12px;
+}
+
+.access-info-section.is-compact .access-info-title-row h3 {
+  font-size: 14px;
+}
+
+.access-info-section.is-compact .access-info-subtitle {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.access-info-section.is-compact .prefix-preview-card {
+  padding: 2px 12px;
+}
+
+.access-info-section.is-compact .prefix-preview-card .info-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 9px 0;
+}
+
+.access-info-section.is-compact .prefix-preview-card .info-key,
+.access-info-section.is-compact .prefix-preview-card .info-row-primary .info-key {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.access-info-section.is-compact .prefix-preview-card .info-val-group,
+.access-info-section.is-compact .access-protocol-url-row .info-val-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+
+.access-info-section.is-compact .prefix-preview-card .info-val,
+.access-info-section.is-compact .prefix-preview-card .info-row-primary .info-val,
+.access-info-section.is-compact .access-protocol-url-row .info-val {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.access-info-section.is-compact .access-protocols-card {
+  padding: 2px 12px;
+}
+
+.access-info-section.is-compact .access-protocol-item {
+  padding: 10px 0;
+  gap: 6px;
+}
+
+.access-info-section.is-compact .access-protocol-name {
+  font-size: 12.5px;
+}
+
+.access-info-section.is-compact .access-protocol-url-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.access-info-section.is-compact .access-protocol-url-label {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-subtle);
+  padding: 0;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure > .journey-advanced-summary {
+  padding: 9px 12px;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure .journey-advanced-title {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure .journey-advanced-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure > .access-protocols-body {
+  padding: 0 12px 10px;
+}
+
+.access-info-section.is-compact .access-protocols-disclosure .access-protocols-card {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.access-info-section.is-compact .access-client-key-note {
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .journey-check-block {
@@ -1933,7 +2061,7 @@ input {
   width: 20px;
   height: 20px;
   border-radius: var(--app-radius-xs);
-  border: 1.5px solid color-mix(in srgb, var(--text-tertiary) 55%, var(--app-input-border));
+  border: 1.5px solid var(--data-slate-base);
   background: var(--app-input-bg);
   color: transparent;
   display: inline-flex;

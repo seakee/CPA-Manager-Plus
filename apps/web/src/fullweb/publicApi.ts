@@ -205,13 +205,17 @@ export function createPublicApiClient(
       verifiedEffectiveControlBasePath: context?.basePath,
       revision: context?.revision,
     });
-    // One normalized resource below the canonical namespace. Query/absolute
-    // URLs and URL normalization cannot select another transport destination.
+    // One normalized resource below the canonical namespace, plus the single
+    // bounded usage-window query on GET. Query/absolute URLs and URL
+    // normalization cannot select another transport destination.
+    const usageWindowMatch =
+      method === 'GET' && /^api-keys\/[a-zA-Z0-9_-]+\/usage\?from_ms=\d+&to_ms=\d+$/.test(resource);
+    const [pathPart, queryPart = ''] = usageWindowMatch ? resource.split('?') : [resource, ''];
     if (
       !context ||
       !canonical ||
       context.apiBase !== canonical.apiBase ||
-      !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(resource) ||
+      (!usageWindowMatch && !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(resource)) ||
       !['http:', 'https:'].includes(window.location.protocol)
     ) {
       throw new PublicApiError('routing_unavailable');
@@ -219,8 +223,8 @@ export function createPublicApiClient(
     const target = new URL(`${context.apiBase}/${resource}`, window.location.origin);
     if (
       target.origin !== window.location.origin ||
-      target.pathname !== `${context.apiBase}/${resource}` ||
-      target.search ||
+      target.pathname !== `${context.apiBase}/${pathPart}` ||
+      (usageWindowMatch ? target.search !== `?${queryPart}` : !!target.search) ||
       target.hash
     ) {
       throw new PublicApiError('routing_unavailable');

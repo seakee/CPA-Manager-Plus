@@ -303,7 +303,11 @@ const createAccountRow = (
   ...overrides,
 });
 
-const createApiKeyRow = (apiKeyHash: string, label: string): MonitoringApiKeyRow => ({
+const createApiKeyRow = (
+  apiKeyHash: string,
+  label: string,
+  overrides: Partial<MonitoringApiKeyRow> = {}
+): MonitoringApiKeyRow => ({
   id: apiKeyHash,
   apiKeyHash,
   apiKeyLabel: label,
@@ -326,6 +330,7 @@ const createApiKeyRow = (apiKeyHash: string, label: string): MonitoringApiKeyRow
   averageLatencyMs: null,
   lastSeenAt: 1,
   models: [],
+  ...overrides,
 });
 
 describe('monitoringCenterPageModel filter options', () => {
@@ -448,6 +453,48 @@ describe('monitoringCenterPageModel filter options', () => {
       { value: 'auth:antigravity-auth', label: 'same@example.com / Antigravity' },
       { value: 'auth:codex-auth', label: 'same@example.com / Codex' },
     ]);
+  });
+  it('formats apiKey options with displayName and resolves apiKeyDisplayMap fallback for selected zero-traffic key', () => {
+    const displayMap = new Map([
+      [
+        'hash-selected',
+        {
+          label: 'Production',
+          masked: 'cpamp_sk_…2f85',
+          displayName: 'Production (cpamp_sk_…2f85)',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…2f85',
+        },
+      ],
+    ]);
+    const options = buildApiKeyOptionsFromRows(
+      [
+        createApiKeyRow('hash-revoked', 'Old Key', {
+          apiKeyMasked: 'cpamp_sk_…old1',
+          apiKeyDisplayName: 'Old Key (cpamp_sk_…old1) · Revoked',
+          apiKeyIsRevoked: true,
+        }),
+      ],
+      'hash-selected',
+      t,
+      displayMap
+    );
+    expect(options).toEqual([
+      { value: 'all', label: 'monitoring.filter_all_api_keys' },
+      { value: 'hash-revoked', label: 'Old Key (cpamp_sk_…old1) · Revoked' },
+      { value: 'hash-selected', label: 'Production (cpamp_sk_…2f85)' },
+    ]);
+
+    const initialFromApiKeyId = buildMonitoringInitialStateFromQuery(
+      '?apiKeyId=key_prod',
+      {
+        ...getDefaultMonitoringCenterUiState(),
+        selectedApiKeyHash: 'stale-hash',
+        activeDataTab: 'accounts',
+      }
+    );
+    expect(initialFromApiKeyId.selectedApiKeyHash).toBe('all');
+    expect(initialFromApiKeyId.activeDataTab).toBe('realtime');
   });
 });
 

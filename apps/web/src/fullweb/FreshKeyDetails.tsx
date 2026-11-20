@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useHref, useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
 import { fullWebLanguage, fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
+import { prefixRouteBase } from '../router/routeBase';
+import { readRoutingContext } from './routingContext';
 import { FullWebIcon } from './FullWebIcon';
 import './freshKeys.css';
 import { blockerOf } from './externalState';
@@ -19,13 +22,15 @@ import {
 import { AccessInfoSummary, type AccessInfo } from './FreshAccessInfo';
 import {
   effectBlockerTextKey,
+  isDefaultUnnamedOriginKey,
   isTerminalKeyOperationOutcome,
   keyDisplayName,
-  keyLifecyclePillClass,
-  keyLifecycleTextKey,
-  keyRuntimePillClass,
-  keyRuntimeTextKey,
+  keyOriginTextKey,
+  keyRenameDraftValue,
+  keyUnifiedStatus,
+  mergeRenamedKey,
   validKey,
+  validKeyNameInput,
   validKeyOperationResult,
   validSavedSecret,
   type Key,
@@ -34,6 +39,9 @@ import {
 import { Drawer } from '../components/ui/Drawer';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
+import { Button } from '../components/ui/Button';
+
+type UsageWindow = '24h' | '7d' | '30d';
 
 function detailTime(value: number) {
   const date = new Date(value);
@@ -115,6 +123,428 @@ function isExternalOrSourceCode(code: string): boolean {
   ].includes(code);
 }
 
+function RouterNavLinkInner({
+  to,
+  prefixedHref,
+  basePath,
+  className,
+  testId,
+  onNavigate,
+  children,
+}: {
+  to: string;
+  prefixedHref: string;
+  basePath: string;
+  className: string;
+  testId: string;
+  onNavigate: () => void;
+  children: ReactNode;
+}) {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const routerHref = useHref(to);
+  const pathnameIncludesBase =
+    Boolean(basePath) && (pathname === basePath || pathname.startsWith(`${basePath}/`));
+  const target = pathnameIncludesBase ? prefixedHref : to;
+  const resolvedHref = pathnameIncludesBase ? prefixedHref : routerHref;
+  return (
+    <a
+      href={resolvedHref}
+      className={className}
+      data-testid={testId}
+      onClick={(event) => {
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        onNavigate();
+        navigate(target);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+function CrossPageLink({
+  route,
+  apiKeyId,
+  className,
+  testId,
+  disabled = false,
+  onNavigate,
+  children,
+}: {
+  route: '/monitoring' | '/usage-analytics';
+  apiKeyId: string;
+  className: string;
+  testId: string;
+  disabled?: boolean;
+  onNavigate: () => void;
+  children: ReactNode;
+}) {
+  const inRouter = useInRouterContext();
+  const basePath =
+    typeof document !== 'undefined' ? (readRoutingContext(document)?.basePath ?? '') : '';
+  const query = `apiKeyId=${encodeURIComponent(apiKeyId)}`;
+  const to = `${route}?${query}`;
+  const prefixedHref = `${prefixRouteBase(route, basePath)}?${query}`;
+  if (disabled) {
+    return (
+      <button type="button" className={className} data-testid={testId} disabled>
+        {children}
+      </button>
+    );
+  }
+  if (inRouter) {
+    return (
+      <RouterNavLinkInner
+        to={to}
+        prefixedHref={prefixedHref}
+        basePath={basePath}
+        className={className}
+        testId={testId}
+        onNavigate={onNavigate}
+      >
+        {children}
+      </RouterNavLinkInner>
+    );
+  }
+  return (
+    <a href={prefixedHref} className={className} data-testid={testId}>
+      {children}
+    </a>
+  );
+}
+
+export interface FreshKeyRenameModalProps {
+  open: boolean;
+  visible?: boolean;
+  record: Key | null;
+  client: PublicApiClient;
+  credential: string;
+  onUnauthorized: () => void;
+  onSaved: (updated: Key) => void;
+  onPending?: (pending: boolean) => void;
+  onClose: () => void;
+}
+
+export function FreshKeyRenameModal({
+  open,
+  visible = true,
+  record,
+  client,
+  credential,
+  onUnauthorized,
+  onSaved,
+  onPending,
+  onClose,
+}: FreshKeyRenameModalProps) {
+  const [activeRecord, setActiveRecord] = useState<Key | null>(record);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [errorKind, setErrorKind] = useState<'' | 'conflict' | 'rejected' | 'unknown'>('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const alive = useRef(true);
+  const inFlight = useRef(false);
+  const sessionEpochRef = useRef(0);
+  const prevOpen = useRef(false);
+  const prevId = useRef('');
+  const prevCredential = useRef(credential);
+  const auth = { kind: 'admin' as const, value: credential };
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      sessionEpochRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const nextId = record?.id ?? '';
+    const credentialChanged = credential !== prevCredential.current;
+    const justOpened = open && !prevOpen.current;
+    const switchedRecord = open && nextId !== prevId.current;
+    prevCredential.current = credential;
+    prevOpen.current = open;
+    prevId.current = nextId;
+
+    if (!open) {
+      sessionEpochRef.current += 1;
+      inFlight.current = false;
+      setBusy(false);
+      setErrorKind('');
+      setErrorMessage('');
+      setActiveRecord(null);
+      return;
+    }
+
+    if (justOpened || switchedRecord || credentialChanged) {
+      sessionEpochRef.current += 1;
+      inFlight.current = false;
+      setActiveRecord(record);
+      setDraft(record ? keyRenameDraftValue(record) : '');
+      setBusy(false);
+      setErrorKind('');
+      setErrorMessage('');
+    } else if (record && !errorKind) {
+      setActiveRecord(record);
+    }
+  }, [open, record, errorKind, credential]);
+
+  const activeRecordId = activeRecord?.id;
+  useEffect(() => {
+    if (open && activeRecordId) {
+      inputRef.current?.focus();
+    }
+  }, [open, activeRecordId]);
+
+  const currentRecord = activeRecord ?? record;
+  const trimmed = draft.trim();
+  const isDefaultOrigin = currentRecord ? isDefaultUnnamedOriginKey(currentRecord) : false;
+  const nameValid = validKeyNameInput(trimmed);
+  const canSubmit =
+    Boolean(currentRecord) &&
+    nameValid &&
+    (isDefaultOrigin ? trimmed !== '' : trimmed !== currentRecord!.name);
+  const defaultPlaceholder = currentRecord
+    ? isDefaultOrigin
+      ? keyDisplayName(
+          currentRecord,
+          k('installerOrigin'),
+          k('adoptedOrigin'),
+          t('keysUnnamed')
+        )
+      : k('renamePlaceholder')
+    : '';
+
+  async function submitWithRecord(baseRecord: Key, submittedName: string) {
+    const updated = await client.put<Key>(
+      `api-keys/${baseRecord.id}`,
+      { name: submittedName, nameRevision: baseRecord.nameRevision },
+      auth
+    );
+    if (!validKey(updated) || updated.id !== baseRecord.id) {
+      throw new Error('invalid key response');
+    }
+    if (updated.name !== submittedName || updated.nameRevision !== baseRecord.nameRevision + 1) {
+      throw new Error('invalid key revision');
+    }
+    return updated;
+  }
+
+  async function handleSave(event: FormEvent) {
+    event.preventDefault();
+    if (inFlight.current || !currentRecord || !canSubmit) return;
+    const epoch = sessionEpochRef.current;
+    inFlight.current = true;
+    setBusy(true);
+    setErrorKind('');
+    setErrorMessage('');
+    onPending?.(true);
+    const submitted = trimmed;
+    const baseRecord = currentRecord;
+    try {
+      const updated = await submitWithRecord(baseRecord, submitted);
+      if (!alive.current || sessionEpochRef.current !== epoch) return;
+      const merged = mergeRenamedKey(baseRecord, updated);
+      setActiveRecord(merged);
+      onSaved(merged);
+      onPending?.(false);
+      onClose();
+    } catch (err) {
+      if (!alive.current || sessionEpochRef.current !== epoch) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        onPending?.(false);
+        onUnauthorized();
+        return;
+      }
+      if (err instanceof PublicApiError && err.status === 409) {
+        setErrorKind('conflict');
+        setErrorMessage(t('keysNameConflict'));
+        onPending?.(false);
+      } else if (err instanceof PublicApiError && [400, 404].includes(err.status || 0)) {
+        setErrorKind('rejected');
+        setErrorMessage(t('keysNameRejected'));
+        onPending?.(false);
+      } else {
+        setErrorKind('unknown');
+        setErrorMessage(t('keysNameUnknown'));
+      }
+    } finally {
+      if (sessionEpochRef.current === epoch) {
+        inFlight.current = false;
+        if (alive.current) setBusy(false);
+      }
+    }
+  }
+
+  async function handleRefreshAndRetry() {
+    if (inFlight.current || !currentRecord) return;
+    const epoch = sessionEpochRef.current;
+    const baseRecord = currentRecord;
+    inFlight.current = true;
+    setBusy(true);
+    setErrorMessage('');
+    const submitted = trimmed;
+    try {
+      const latest = await client.get<Key>(`api-keys/${baseRecord.id}`, auth);
+      if (!alive.current || sessionEpochRef.current !== epoch) return;
+      if (!validKey(latest) || latest.id !== baseRecord.id) {
+        throw new Error('invalid key response');
+      }
+      setActiveRecord(latest);
+      onSaved(latest);
+
+      if (
+        errorKind === 'unknown' &&
+        latest.name === submitted &&
+        latest.nameRevision > baseRecord.nameRevision
+      ) {
+        setErrorKind('');
+        onPending?.(false);
+        onClose();
+        return;
+      }
+
+      const defaultLatest = isDefaultUnnamedOriginKey(latest);
+      const canRetryDraft =
+        validKeyNameInput(submitted) &&
+        (defaultLatest ? submitted !== '' : submitted !== latest.name);
+      if (errorKind !== 'rejected' && canRetryDraft) {
+        onPending?.(true);
+        const updated = await submitWithRecord(latest, submitted);
+        if (!alive.current || sessionEpochRef.current !== epoch) return;
+        const merged = mergeRenamedKey(latest, updated);
+        setActiveRecord(merged);
+        onSaved(merged);
+        setErrorKind('');
+        onPending?.(false);
+        onClose();
+        return;
+      }
+
+      setErrorKind('');
+      onPending?.(false);
+    } catch (err) {
+      if (!alive.current || sessionEpochRef.current !== epoch) return;
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        onPending?.(false);
+        onUnauthorized();
+        return;
+      }
+      if (err instanceof PublicApiError && err.status === 409) {
+        setErrorKind('conflict');
+        setErrorMessage(t('keysNameConflict'));
+        onPending?.(false);
+      } else if (err instanceof PublicApiError && [400, 404].includes(err.status || 0)) {
+        setErrorKind('rejected');
+        setErrorMessage(t('keysNameRejected'));
+        onPending?.(false);
+      } else {
+        setErrorKind('unknown');
+        setErrorMessage(t('keysUnavailable'));
+      }
+    } finally {
+      if (sessionEpochRef.current === epoch) {
+        inFlight.current = false;
+        if (alive.current) setBusy(false);
+      }
+    }
+  }
+
+  function handleClose() {
+    if (busy) return;
+    if (errorKind === 'unknown') {
+      onPending?.(false);
+    }
+    onClose();
+  }
+
+  return (
+    <Modal
+      open={open && visible && Boolean(currentRecord)}
+      title={k('renameModalTitle')}
+      closeDisabled={busy}
+      className="key-rename-modal"
+      width={460}
+      onClose={handleClose}
+      footer={
+        <>
+          <button type="button" className="btn btn-secondary" disabled={busy} onClick={handleClose}>
+            {k('cancel')}
+          </button>
+          <button
+            type="submit"
+            form="rename-key-form"
+            className="btn btn-primary"
+            disabled={busy || !canSubmit}
+          >
+            {busy ? k('renameSavingAction') : k('renameSaveAction')}
+          </button>
+        </>
+      }
+    >
+      {currentRecord && (
+        <form id="rename-key-form" className="key-modal-form" onSubmit={handleSave}>
+          <div className="key-operation-target-card">
+            <span className="key-field-label">{k('operationTargetLabel')}</span>
+            <div className="key-operation-target-meta">
+              <code>{currentRecord.maskedPreview}</code>
+            </div>
+          </div>
+          <div className="key-field-group">
+            <label className="key-field-label" htmlFor="key-name">
+              {t('keysName')}
+            </label>
+            <input
+              ref={inputRef}
+              id="key-name"
+              className="key-input"
+              maxLength={120}
+              disabled={busy}
+              placeholder={defaultPlaceholder}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <p className="key-field-help">
+              {isDefaultOrigin ? k('renameDefaultOriginHelp') : k('renameClearHelp')}
+            </p>
+          </div>
+          {errorMessage && (
+            <div className="key-notice key-notice-warning" role="alert" data-testid="rename-error-alert">
+              <FullWebIcon name="alert" />
+              <div>
+                <p>{errorMessage}</p>
+                <div className="key-modal-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    data-testid="rename-refresh-retry"
+                    disabled={busy}
+                    onClick={() => void handleRefreshAndRetry()}
+                  >
+                    {k('renameRefreshRetry')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 export function FreshKeyDetails({
   id,
   client,
@@ -127,9 +557,13 @@ export function FreshKeyDetails({
   onRebind,
   onBlocker,
   open = true,
+  visible = true,
   gatewayPending = true,
+  operationPending = false,
   accessInfo,
   reloadToken = 0,
+  initialTab = 'overview',
+  initialAction,
 }: {
   id: string;
   client: PublicApiClient;
@@ -138,20 +572,27 @@ export function FreshKeyDetails({
   onPending: (value: boolean) => void;
   onSaved: (key: Key) => void;
   onClose: () => void;
-  onRequestOperation?: (mode: 'replace' | 'revoke') => void;
+  onRequestOperation?: (mode: 'replace' | 'revoke' | 'regenerate') => void;
   onRebind?: () => void;
   onBlocker?: (code: string, detail?: string) => void;
   open?: boolean;
+  visible?: boolean;
   gatewayPending?: boolean;
+  operationPending?: boolean;
   accessInfo?: AccessInfo | null;
   reloadToken?: number;
+  initialTab?: 'overview' | 'usage';
+  initialAction?: 'rename';
 }) {
   const [record, setRecord] = useState<Key | null>(null);
   const [usage, setUsage] = useState<KeyUsage | null>(null);
+  const [usage24h, setUsage24h] = useState<KeyUsage | null>(null);
   const [usageFailed, setUsageFailed] = useState(false);
-  const [name, setName] = useState('');
+  const [usageWindowState, setUsageWindowState] = useState<{
+    forId: string;
+    window: UsageWindow;
+  }>({ forId: id, window: '24h' });
   const [busy, setBusy] = useState(false);
-  const [unknown, setUnknown] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
   const [applyUnknown, setApplyUnknown] = useState(false);
   const [applyError, setApplyError] = useState('');
@@ -160,37 +601,56 @@ export function FreshKeyDetails({
   const [applyAborted, setApplyAborted] = useState(false);
   const applyPendingRef = useRef(false);
   const pendingReapplyOpId = useRef('');
-  const [rejectedDraft, setRejectedDraft] = useState(false);
   const [message, setMessage] = useState('');
   const [editing, setEditing] = useState(false);
+  const [detailTab, setDetailTab] = useState<'overview' | 'usage'>(initialTab);
+  const initialActionApplied = useRef(false);
   // The full value is read on demand for the clipboard only. It is never kept in
   // component state, browser storage or the URL.
   const [copying, setCopying] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<'copied' | 'failed' | ''>('');
+  const [idCopyFeedback, setIdCopyFeedback] = useState<'copied' | 'failed' | ''>('');
+  const idCopyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const idCopySeq = useRef(0);
   const copyingRef = useRef(false);
   const inFlight = useRef(false);
   const active = useRef(true);
   const ownerEpoch = useRef(0);
   const usageSeq = useRef(0);
-  const input = useRef<HTMLInputElement>(null);
+  const detailDrawerBodyRef = useRef<HTMLDivElement | null>(null);
   const auth = { kind: 'admin' as const, value: credential };
+  const onPendingRef = useRef(onPending);
+  onPendingRef.current = onPending;
+
+  useEffect(() => {
+    return () => {
+      onPendingRef.current(false);
+      clearTimeout(idCopyTimerRef.current);
+      idCopyTimerRef.current = undefined;
+    };
+  }, []);
   const resource = 'api-keys/' + id;
-  const dirty = rejectedDraft || (record !== null && name.trim() !== record.name);
-  const usageCoverage = usage?.coverage ?? { state: 'unknown' as UsageState, reason: 'usage_read_failed' };
+  const activeUsageWindow: UsageWindow =
+    usageWindowState.forId === id ? usageWindowState.window : '24h';
+  const usageCoverage = usage?.coverage ?? {
+    state: 'unknown' as UsageState,
+    reason: 'usage_read_failed',
+  };
   const usageStateClass = usageCoveragePill(usageCoverage.state);
 
-  // Each mounted record/session owns its replies; ownerEpoch invalidates any
-  // in-flight requests from an earlier credential, key ID, or rebind reload.
   useEffect(() => {
     active.current = true;
     const ownerAtMount = ++ownerEpoch.current;
     inFlight.current = false;
     applyPendingRef.current = false;
     copyingRef.current = false;
+    setBusy(false);
+    setCopying(false);
     setRecord(null);
     setUsage(null);
+    setUsage24h(null);
     setUsageFailed(false);
-    setUnknown(false);
+    setUsageWindowState({ forId: id, window: '24h' });
     setApplyPending(false);
     setApplyUnknown(false);
     setApplyError('');
@@ -198,36 +658,55 @@ export function FreshKeyDetails({
     setApplyErrorDetail('');
     setApplyAborted(false);
     pendingReapplyOpId.current = '';
-    setRejectedDraft(false);
     setMessage('');
+    setEditing(false);
     setCopyFeedback('');
+    setIdCopyFeedback('');
+    idCopySeq.current += 1;
+    clearTimeout(idCopyTimerRef.current);
+    idCopyTimerRef.current = undefined;
+    setDetailTab(initialTab);
+    initialActionApplied.current = false;
     const previous = typeof document !== 'undefined' ? document.activeElement : null;
-    void read(ownerAtMount, false);
-    void readUsage(ownerAtMount);
+    if (open) {
+      void read(ownerAtMount);
+      void readUsage(ownerAtMount, '24h');
+    }
     return () => {
       active.current = false;
       if (
         typeof HTMLElement !== 'undefined' &&
         previous instanceof HTMLElement &&
         previous.isConnected
-      )
+      ) {
         previous.focus();
+      }
     };
-  }, [id, credential, reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [id, credential, reloadToken, open]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
-    if (editing && record) input.current?.focus();
-  }, [editing, record]);
+    setDetailTab(initialTab);
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (initialAction === 'rename' && record && !initialActionApplied.current && !applyPending) {
+      initialActionApplied.current = true;
+      setEditing(true);
+    }
+  }, [initialAction, record, applyPending]);
+
   function validate(value: Key) {
     if (!validKey(value) || value.id !== id) throw new Error();
     return value;
   }
+
   function failure(err: unknown) {
     if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
     else setMessage(t('keysUnavailable'));
   }
-  async function read(ownerAtStart = ownerEpoch.current, checkDraft = true) {
+
+  async function read(ownerAtStart = ownerEpoch.current) {
     if (inFlight.current || applyPendingRef.current) return;
-    if (checkDraft && dirty && !unknown && !window.confirm(t('keysDiscardName'))) return;
     inFlight.current = true;
     setBusy(true);
     setMessage('');
@@ -235,11 +714,7 @@ export function FreshKeyDetails({
       const value = validate(await client.get<Key>(resource, auth));
       if (!active.current || ownerEpoch.current !== ownerAtStart) return;
       setRecord(value);
-      setName(value.name);
-      setRejectedDraft(false);
       onSaved(value);
-      if (unknown) setMessage(t('keysNameChecked'));
-      setUnknown(false);
       if (value.runtimeState === 'effective_observed' || value.runtimeState === 'revoked_observed') {
         setApplyUnknown(false);
         setApplyError('');
@@ -259,11 +734,6 @@ export function FreshKeyDetails({
     }
   }
 
-  // One authenticated read, one clipboard write. The response is not cached and
-  // no part of the secret survives this call. Copying exists for every origin,
-  // including the keys an adopted CPA already carried, so the check validates the
-  // returned secret against this record's own masked preview instead of assuming
-  // one of the two canonical shapes.
   async function copySavedSecret() {
     if (copyingRef.current || !record || record.lifecycle === 'superseded') return;
     const ownerAtStart = ownerEpoch.current;
@@ -273,7 +743,15 @@ export function FreshKeyDetails({
     try {
       const value = await client.post<{ secret: string }>(resource + '/secret', {}, auth);
       if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-      if (!value || !validSavedSecret(record, value.secret)) throw new Error();
+      if (!value || typeof value.secret !== 'string') throw new Error();
+      if (!validSavedSecret(record, value.secret)) {
+        const latest = validate(await client.get<Key>(resource, auth));
+        if (!active.current || ownerEpoch.current !== ownerAtStart) return;
+        setRecord(latest);
+        onSaved(latest);
+        if (latest.lifecycle === 'superseded' || !validSavedSecret(latest, value.secret))
+          throw new Error();
+      }
       await navigator.clipboard.writeText(value.secret);
       if (active.current && ownerEpoch.current === ownerAtStart) setCopyFeedback('copied');
     } catch (err) {
@@ -282,7 +760,7 @@ export function FreshKeyDetails({
       else {
         setCopyFeedback('failed');
         if (err instanceof PublicApiError && err.status === 409) {
-          await read(ownerAtStart, false);
+          await read(ownerAtStart);
         }
       }
     } finally {
@@ -293,25 +771,79 @@ export function FreshKeyDetails({
     }
   }
 
-  async function readUsage(ownerAtStart = ownerEpoch.current) {
-    const seq = ++usageSeq.current;
+  async function copyKeyId() {
+    if (!id) return;
+    const ownerAtStart = ownerEpoch.current;
+    const seq = ++idCopySeq.current;
     try {
-      const parsed = parseKeyUsage(await client.get<unknown>(resource + '/usage', auth), id);
-      if (!parsed) throw new Error('Invalid usage response');
-      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current)
+      if (
+        typeof navigator === 'undefined' ||
+        !navigator.clipboard ||
+        typeof navigator.clipboard.writeText !== 'function'
+      ) {
+        throw new Error('clipboard_unavailable');
+      }
+      await navigator.clipboard.writeText(id);
+      if (!active.current || ownerEpoch.current !== ownerAtStart || idCopySeq.current !== seq) {
         return;
+      }
+      setIdCopyFeedback('copied');
+    } catch {
+      if (!active.current || ownerEpoch.current !== ownerAtStart || idCopySeq.current !== seq) {
+        return;
+      }
+      setIdCopyFeedback('failed');
+    }
+    clearTimeout(idCopyTimerRef.current);
+    idCopyTimerRef.current = setTimeout(() => {
+      if (active.current && ownerEpoch.current === ownerAtStart && idCopySeq.current === seq) {
+        setIdCopyFeedback('');
+      }
+      idCopyTimerRef.current = undefined;
+    }, 1800);
+  }
+
+  async function readUsage(
+    ownerAtStart = ownerEpoch.current,
+    window: UsageWindow = activeUsageWindow
+  ) {
+    const seq = ++usageSeq.current;
+    let usagePath = `${resource}/usage`;
+    if (window === '7d' || window === '30d') {
+      const toMs = Date.now();
+      const spanMs = window === '7d' ? 7 * 86_400_000 : 30 * 86_400_000;
+      const fromMs = Math.max(1, toMs - spanMs);
+      usagePath = `${resource}/usage?from_ms=${fromMs}&to_ms=${toMs}`;
+    }
+    try {
+      const parsed = parseKeyUsage(await client.get<unknown>(usagePath, auth), id);
+      if (!parsed) throw new Error('Invalid usage response');
+      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current) {
+        return;
+      }
       setUsage(parsed);
+      if (window === '24h') setUsage24h(parsed);
       setUsageFailed(false);
     } catch (err) {
-      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current)
+      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current) {
         return;
+      }
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
       }
       setUsage(null);
+      if (window === '24h') setUsage24h(null);
       setUsageFailed(true);
     }
+  }
+
+  function switchUsageWindow(nextWindow: UsageWindow) {
+    if (nextWindow === activeUsageWindow) return;
+    setUsageWindowState({ forId: id, window: nextWindow });
+    setUsage(null);
+    setUsageFailed(false);
+    void readUsage(ownerEpoch.current, nextWindow);
   }
 
   async function executeReapplyAdd(baseKey: Key, ownerAtStart: number) {
@@ -374,7 +906,6 @@ export function FreshKeyDetails({
           refreshed.lifecycle === 'superseded' || refreshed.runtimeState === 'revoked_observed';
         const resolvedCode = retired ? '' : refreshed.effectCode || '';
         setRecord(refreshed);
-        setName(refreshed.name);
         onSaved(refreshed);
         setApplyUnknown(false);
         setApplyAborted(!retired);
@@ -403,7 +934,6 @@ export function FreshKeyDetails({
         if (canonical.requestId !== baseKey.requestId) throw new Error();
         pendingReapplyOpId.current = '';
         setRecord(canonical);
-        setName(canonical.name);
         onSaved(canonical);
         setApplyUnknown(false);
         if (canonical.runtimeState === 'effective_observed') {
@@ -414,23 +944,22 @@ export function FreshKeyDetails({
         } else {
           const code = canonical.effectCode || '';
           setApplyErrorCode(code);
+          setApplyErrorDetail('');
+          setApplyAborted(false);
           setApplyError(code ? k(effectBlockerTextKey(code)) : '');
+          if (code && blockerOf(code)) {
+            onBlocker?.(code);
+          }
         }
         onPending(false);
         return;
       }
 
-      const unsettled: Key = {
-        ...baseKey,
-        runtimeState: 'effect_unknown',
-        operationId: reapplyId,
-      };
-      setRecord(unsettled);
-      setName(unsettled.name);
-      onSaved(unsettled);
       setApplyUnknown(true);
-      setApplyError(k('createApplyUnknownHelp'));
-      onPending(true);
+      setApplyAborted(false);
+      setApplyError('');
+      setApplyErrorCode('');
+      setApplyErrorDetail('');
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart) return;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
@@ -470,18 +999,31 @@ export function FreshKeyDetails({
             }
             if (!active.current || ownerEpoch.current !== ownerAtStart) return;
           }
-          if (!resolvedCode && refreshed.effectCode && refreshed.effectCode !== 'key_operation_unknown') {
+          const retired =
+            refreshed.lifecycle === 'superseded' || refreshed.runtimeState === 'revoked_observed';
+          if (retired) {
+            resolvedCode = '';
+          } else if (
+            !resolvedCode &&
+            refreshed.effectCode &&
+            refreshed.effectCode !== 'key_operation_unknown'
+          ) {
             resolvedCode = refreshed.effectCode;
           }
           pendingReapplyOpId.current = '';
           setRecord(refreshed);
-          setName(refreshed.name);
           onSaved(refreshed);
           setApplyUnknown(false);
-          setApplyAborted(true);
+          setApplyAborted(!retired);
           setApplyErrorCode(resolvedCode);
-          setApplyErrorDetail(resolvedDetail);
-          setApplyError(resolvedCode ? k(effectBlockerTextKey(resolvedCode)) : k('operationAborted'));
+          setApplyErrorDetail(retired ? '' : resolvedDetail);
+          setApplyError(
+            retired
+              ? ''
+              : resolvedCode
+                ? k(effectBlockerTextKey(resolvedCode))
+                : k('operationAborted')
+          );
           if (resolvedCode && blockerOf(resolvedCode)) {
             onBlocker?.(resolvedCode, resolvedDetail || undefined);
           }
@@ -497,7 +1039,6 @@ export function FreshKeyDetails({
         ) {
           pendingReapplyOpId.current = '';
           setRecord(baseKey);
-          setName(baseKey.name);
           onSaved(baseKey);
           setApplyUnknown(false);
           setApplyErrorCode(code);
@@ -515,7 +1056,6 @@ export function FreshKeyDetails({
             effectCode: code || baseKey.effectCode,
           };
           setRecord(nextRecord);
-          setName(nextRecord.name);
           onSaved(nextRecord);
           setApplyUnknown(nextUnknown);
           setApplyErrorCode(code);
@@ -545,7 +1085,6 @@ export function FreshKeyDetails({
                 effectCode: code || baseKey.effectCode,
               };
           setRecord(nextRecord);
-          setName(nextRecord.name);
           onSaved(nextRecord);
           setApplyUnknown(false);
           setApplyErrorCode(code);
@@ -569,7 +1108,6 @@ export function FreshKeyDetails({
       inFlight.current ||
       applyPendingRef.current ||
       !record ||
-      unknown ||
       applyUnknown ||
       record.lifecycle === 'superseded' ||
       (record.runtimeState !== 'not_applied' && record.runtimeState !== 'applying')
@@ -595,7 +1133,6 @@ export function FreshKeyDetails({
       if (updated.requestId !== record.requestId) throw new Error();
       pendingReapplyOpId.current = '';
       setRecord(updated);
-      setName(updated.name);
       onSaved(updated);
       setApplyUnknown(false);
       const code = updated.runtimeState === 'effective_observed' ? '' : updated.effectCode || '';
@@ -635,7 +1172,6 @@ export function FreshKeyDetails({
           const externalOrSourceBlocker = !!errorCode && isExternalOrSourceCode(errorCode);
           const nextUnknown = updated.runtimeState === 'effect_unknown' && !externalOrSourceBlocker;
           setRecord(updated);
-          setName(updated.name);
           onSaved(updated);
           setApplyUnknown(nextUnknown);
           setApplyAborted(aborted);
@@ -678,7 +1214,7 @@ export function FreshKeyDetails({
   }
 
   async function reconcileApply() {
-    if (inFlight.current || applyPendingRef.current || !record || unknown) return;
+    if (inFlight.current || applyPendingRef.current || !record) return;
     const ownerAtStart = ownerEpoch.current;
     applyPendingRef.current = true;
     setApplyPending(true);
@@ -777,7 +1313,6 @@ export function FreshKeyDetails({
       const resolvedDetail =
         resolvedCode === 'external_management_key_rejected' ? operationErrorDetail : '';
       setRecord(nextRecord);
-      setName(nextRecord.name);
       onSaved(nextRecord);
       setApplyUnknown(false);
       setApplyAborted(
@@ -814,120 +1349,257 @@ export function FreshKeyDetails({
     }
   }
 
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (
-      inFlight.current ||
-      applyPendingRef.current ||
-      !record ||
-      unknown ||
-      name.trim() === record.name
-    )
-      return;
-    const ownerAtStart = ownerEpoch.current;
-    inFlight.current = true;
-    setBusy(true);
-    setMessage('');
-    onPending(true);
-    const submitted = name.trim();
-    try {
-      const value = validate(
-        await client.put<Key>(
-          resource,
-          { name: submitted, nameRevision: record.nameRevision },
-          auth
-        )
-      );
-      if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-      if (value.name !== submitted || value.nameRevision !== record.nameRevision + 1)
-        throw new Error();
-      setRecord(value);
-      setName(value.name);
-      onSaved(value);
-      setMessage(t('keysNameSaved'));
-      setEditing(false);
-      onPending(false);
-    } catch (err) {
-      if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-      if (err instanceof PublicApiError && err.kind === 'authentication') {
-        onUnauthorized();
-      } else if (err instanceof PublicApiError && [400, 404, 409].includes(err.status || 0)) {
-        // These local responses prove rejection. A fresh read is required
-        // before another explicit save; preserve the draft until that check.
-        setRejectedDraft(true);
-        setRecord(null);
-        setMessage(t(err.status === 409 ? 'keysNameConflict' : 'keysNameRejected'));
-        onPending(false);
-      } else {
-        setUnknown(true);
-        setMessage(t('keysNameUnknown'));
-      }
-    } finally {
-      if (ownerEpoch.current === ownerAtStart) {
-        inFlight.current = false;
-        if (active.current) setBusy(false);
-      }
-    }
-  }
   function canClose() {
-    if (inFlight.current || applyPendingRef.current || applyUnknown || unknown) return false;
-    return !dirty || window.confirm(t('keysDiscardName'));
+    return !(inFlight.current || applyPendingRef.current || applyUnknown);
   }
+
   function close() {
     if (canClose()) onClose();
   }
+
+  const maxBucketCalls =
+    usage && usage.series.length > 0 ? Math.max(...usage.series.map((p) => p.calls), 0) : 0;
+  const unifiedStatus = record ? keyUnifiedStatus(record) : null;
+  const superseded = !!record && record.lifecycle === 'superseded';
+  const revokedOrSuperseded =
+    !!record && (superseded || record.runtimeState === 'revoked_observed');
+  const displayName = record
+    ? keyDisplayName(record, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))
+    : '';
+  const originLabel = record ? k(keyOriginTextKey(record.origin)) : '';
+  const showOriginInMeta = Boolean(record) && displayName !== originLabel;
+  const createdTime = record ? detailTime(record.createdAtMs) : null;
+  const lastRotatedTime =
+    record && record.lastRotatedAtMs && record.lastRotatedAtMs > 0
+      ? detailTime(record.lastRotatedAtMs)
+      : null;
+  const revokedTime =
+    record && record.revokedAtMs && record.revokedAtMs > 0
+      ? detailTime(record.revokedAtMs)
+      : null;
+  const overviewUsage = usage24h ?? (activeUsageWindow === '24h' ? usage : null);
+  const overviewCoverageState: UsageState = overviewUsage?.coverage.state ?? 'unknown';
+  const overviewLastUsedText =
+    overviewCoverageState === 'unknown' || overviewCoverageState === 'unavailable'
+      ? '—'
+      : (usageTimeText(overviewUsage?.totals?.lastUsedAtMs ?? null) ?? '—');
+  const isZeroSeries =
+    !!usage &&
+    usage.series.length > 0 &&
+    usage.totals?.calls === 0 &&
+    usage.series.every((p) => p.calls === 0);
+
+  function switchDetailTab(nextTab: 'overview' | 'usage') {
+    setDetailTab(nextTab);
+    if (detailDrawerBodyRef.current) {
+      detailDrawerBodyRef.current.scrollTop = 0;
+    }
+  }
+
   return (
     <>
       <Drawer
-        open={open}
-        title={t('keysDetails')}
-        width={680}
+        open={open && visible}
+        width="clamp(540px, 45vw, 720px)"
         className="key-detail-drawer"
+        bodyRef={detailDrawerBodyRef}
+        closeLabel={t('keysCloseDetails')}
+        closeDisabled={busy || applyPending || applyUnknown}
         onBeforeClose={() => !editing && canClose()}
         onClose={onClose}
+        title={
+          record ? (
+            <div className="key-drawer-title-identity">
+              <span className="key-drawer-title-icon" aria-hidden="true">
+                <FullWebIcon name="key" size={22} />
+              </span>
+              <div className="key-drawer-title-stack">
+                <div className="key-drawer-title-row">
+                  <h3 className="key-drawer-title-primary" title={displayName}>
+                    {displayName}
+                  </h3>
+                  {!superseded && (
+                    <button
+                      type="button"
+                      className="key-drawer-title-edit-btn"
+                      data-testid="detail-edit-name"
+                      aria-label={k('rename')}
+                      title={k('rename')}
+                      disabled={busy || applyPending || applyUnknown}
+                      onClick={() => setEditing(true)}
+                    >
+                      <FullWebIcon name="edit" size={14} />
+                    </button>
+                  )}
+                  {unifiedStatus && (
+                    <span
+                      className={'key-state-pill ' + unifiedStatus.pillClass}
+                      data-testid="detail-runtime-state"
+                    >
+                      {k(unifiedStatus.labelKey)}
+                    </span>
+                  )}
+                </div>
+                <div className="key-drawer-title-meta">
+                  <span className="key-drawer-meta-secret">
+                    {!superseded ? (
+                      <button
+                        type="button"
+                        className="key-drawer-meta-secret-copy"
+                        data-testid="copy-saved-client-secret"
+                        aria-label={k('copyKey')}
+                        title={k('copyKey')}
+                        disabled={busy || copying || applyPending || applyUnknown}
+                        onClick={() => void copySavedSecret()}
+                      >
+                        <code>{record.maskedPreview}</code>
+                        <FullWebIcon
+                          name={copyFeedback === 'copied' ? 'check' : 'copy'}
+                          size={12}
+                        />
+                      </button>
+                    ) : (
+                      <code>{record.maskedPreview}</code>
+                    )}
+                    {copyFeedback && (
+                      <span
+                        role="status"
+                        className={`key-copy-inline-status ${
+                          copyFeedback === 'copied' ? 'is-copied' : 'is-failed'
+                        }`}
+                        data-testid="copy-saved-client-secret-feedback"
+                      >
+                        {k(copyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
+                      </span>
+                    )}
+                  </span>
+                  {showOriginInMeta && (
+                    <>
+                      <span className="key-drawer-meta-sep" aria-hidden="true">
+                        ·
+                      </span>
+                      <span>{originLabel}</span>
+                    </>
+                  )}
+                  {createdTime && (
+                    <>
+                      <span className="key-drawer-meta-sep" aria-hidden="true">
+                        ·
+                      </span>
+                      <time dateTime={createdTime.iso}>{createdTime.label}</time>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <span>{t('keysDetails')}</span>
+          )
+        }
         footer={
           <div className="key-drawer-actions">
-            {record && record.lifecycle !== 'superseded' && onRequestOperation && (
-              <div className="key-row-actions" data-testid="key-detail-operation-entry">
+            <div className="key-drawer-footer-left">
+              {record && !superseded && (
                 <button
                   type="button"
-                  className="btn btn-ghost key-danger"
+                  className="btn btn-secondary btn-sm"
+                  data-testid="detail-copy-secret"
+                  disabled={busy || copying || applyPending || applyUnknown}
+                  onClick={() => void copySavedSecret()}
+                >
+                  <FullWebIcon name="copy" size={14} />
+                  <span>{k('copyFullKey')}</span>
+                </button>
+              )}
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-label={t('keysReadDetails')}
+                disabled={busy || applyPending || applyUnknown}
+                onClick={() => {
+                  void read(ownerEpoch.current);
+                  void readUsage(ownerEpoch.current, activeUsageWindow);
+                }}
+              >
+                <FullWebIcon name="refresh" size={14} />
+                {t('keysReadDetails')}
+              </Button>
+            </div>
+            {record && !superseded && onRequestOperation && (
+              <div className="key-drawer-footer-right" data-testid="key-detail-operation-entry">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  data-testid="detail-regenerate-key"
+                  disabled={busy || applyPending || applyUnknown || editing || Boolean(operationPending)}
+                  onClick={() => onRequestOperation('regenerate')}
+                >
+                  {k('regenerateKey')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm key-danger"
                   data-testid="detail-revoke-key"
-                  disabled={busy || unknown || applyPending || applyUnknown || dirty || editing}
+                  disabled={busy || applyPending || applyUnknown || editing || Boolean(operationPending)}
                   onClick={() => onRequestOperation('revoke')}
                 >
                   {k('quickRevoke')}
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  data-testid="detail-replace-key"
-                  disabled={busy || unknown || applyPending || applyUnknown || dirty || editing}
-                  onClick={() => onRequestOperation('replace')}
-                >
-                  {k('quickReplace')}
-                </button>
               </div>
             )}
-            <button
-              className="btn btn-secondary"
-              aria-label={t('keysCloseDetails')}
-              disabled={busy || unknown || applyPending || applyUnknown}
-              onClick={close}
-            >
-              {t('keysCloseDetails')}
-            </button>
           </div>
         }
       >
-        <section className="key-detail-workspace" aria-busy={busy}>
-          <SegmentedTabs
-            items={[{ id: 'overview', label: k('overview') }]}
-            activeTab="overview"
-            ariaLabel={t('keysDetails')}
-            idBase="key-detail-tab"
-            className="key-detail-tabs"
-          />
+        <section className="key-detail-workspace key-drawer-body-shell" aria-busy={busy}>
+          <div
+            className="key-drawer-tabs"
+            role="tablist"
+            aria-label={t('keysDetails')}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const next =
+                event.key === 'Home'
+                  ? 'overview'
+                  : event.key === 'End'
+                    ? 'usage'
+                    : detailTab === 'overview'
+                      ? 'usage'
+                      : 'overview';
+              switchDetailTab(next);
+              event.currentTarget
+                .querySelector<HTMLButtonElement>(`[data-testid="key-detail-tab-${next}"]`)
+                ?.focus();
+            }}
+          >
+            <button
+              type="button"
+              role="tab"
+              id="key-detail-tab-btn-overview"
+              tabIndex={detailTab === 'overview' ? 0 : -1}
+              aria-selected={detailTab === 'overview'}
+              aria-controls="key-detail-panel-overview"
+              className={detailTab === 'overview' ? 'is-active' : ''}
+              data-testid="key-detail-tab-overview"
+              onClick={() => switchDetailTab('overview')}
+            >
+              {k('detailTabOverview')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="key-detail-tab-btn-usage"
+              tabIndex={detailTab === 'usage' ? 0 : -1}
+              aria-selected={detailTab === 'usage'}
+              aria-controls="key-detail-panel-usage"
+              className={detailTab === 'usage' ? 'is-active' : ''}
+              data-testid="key-detail-tab-usage"
+              onClick={() => switchDetailTab('usage')}
+            >
+              {k('detailTabUsage')}
+            </button>
+          </div>
           {busy && (
             <p role="status" className="key-notice">
               {t('keysLoading')}
@@ -941,414 +1613,479 @@ export function FreshKeyDetails({
           )}
           {record && (
             <>
-              <div className="key-detail-hero">
-                <span className="key-resource-icon">
-                  <FullWebIcon name="key" size={24} />
-                </span>
-                <div>
-                  <h3>{keyDisplayName(record, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}</h3>
-                  <p>
-                    <code>{record.maskedPreview}</code>
-                  </p>
-                </div>
-                <div className="key-detail-badges">
-                  <span
-                    className={'key-state-pill ' + keyLifecyclePillClass(record.lifecycle)}
-                    data-testid="detail-lifecycle-state"
-                  >
-                    {k(keyLifecycleTextKey(record.lifecycle))}
-                  </span>
-                  <span
-                    className={'key-state-pill ' + keyRuntimePillClass(record.runtimeState)}
-                    data-testid="detail-runtime-state"
-                  >
-                    {k(keyRuntimeTextKey(record.runtimeState))}
-                  </span>
-                </div>
-              </div>
-              <dl className="key-detail-meta-grid" data-testid="key-detail-metadata">
-                <div>
-                  <dt>{k('created')}</dt>
-                  <dd>
-                    <time dateTime={detailTime(record.createdAtMs).iso}>
-                      {detailTime(record.createdAtMs).label}
-                    </time>
-                  </dd>
-                </div>
-                <div>
-                  <dt>{k('revisionLabel')}</dt>
-                  <dd>v{record.nameRevision}</dd>
-                </div>
-                <div>
-                  <dt>{k('policyScopeLabel')}</dt>
-                  <dd>{k('policyGlobalDefault')}</dd>
-                </div>
-              </dl>
-              <div className="key-detail-columns">
-                <section className="key-detail-section">
-                  <header>
-                    <FullWebIcon name="key" />
-                    <h4>{k('basic')}</h4>
-                  </header>
-                  <div className="key-detail-section-body">
-                    <p className="key-detail-description">{k('detailHelp')}</p>
-                    <div className="key-readonly-field">
-                      <span>{k('credential')}</span>
-                      <code>{record.maskedPreview}</code>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        data-testid="copy-saved-client-secret"
-                        disabled={busy || unknown || copying || record.lifecycle === 'superseded'}
-                        onClick={() => void copySavedSecret()}
-                      >
-                        {k('copyKey')}
-                      </button>
+              <div
+                id="key-detail-panel-overview"
+                role="tabpanel"
+                aria-labelledby="key-detail-tab-btn-overview"
+                className="key-detail-columns key-drawer-tab-panel"
+                data-testid="key-detail-panel-overview"
+                hidden={detailTab !== 'overview'}
+              >
+                <section
+                  className="key-overview-decision-card"
+                  data-overview-tone={
+                    revokedOrSuperseded
+                      ? 'revoked'
+                      : record.runtimeState === 'effective_observed'
+                        ? 'active'
+                        : 'warning'
+                  }
+                >
+                  <div className="key-overview-kpi-strip" data-testid="key-overview-kpi-strip">
+                    <div className="key-overview-kpi-item">
+                      <span>{k('overviewCalls24h')}</span>
+                      <strong>
+                        {usageCountText(overviewUsage?.totals?.calls, overviewCoverageState)}
+                      </strong>
                     </div>
-                    {copyFeedback && (
-                      <p
-                        role="status"
-                        className="key-notice"
-                        data-testid="copy-saved-client-secret-feedback"
-                      >
-                        {k(copyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
-                      </p>
-                    )}
-                    <div className="key-readonly-field">
-                      <span>{t('keysName')}</span>
-                      <strong>{keyDisplayName(record, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))}</strong>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        disabled={busy || unknown || applyPending}
-                        onClick={() => setEditing(true)}
-                      >
-                        {k('rename')}
-                      </button>
+                    <div className="key-overview-kpi-item">
+                      <span>{k('overviewTokens24h')}</span>
+                      <strong>
+                        {usageCountText(overviewUsage?.totals?.totalTokens, overviewCoverageState)}
+                      </strong>
                     </div>
-                    <div className="key-private-note">
-                      <FullWebIcon name="shield" />
-                      <p>{k('privateKeyHelp')}</p>
+                    <div className="key-overview-kpi-item">
+                      <span>{k('usageLastUsed')}</span>
+                      <strong>{overviewLastUsedText}</strong>
                     </div>
                   </div>
-                </section>
-                <section className="key-detail-section">
-                  <header>
-                    <FullWebIcon name="gateway" />
-                    <h4>{k('access')}</h4>
-                  </header>
-                  <div className="key-detail-section-body">
-                    {record.lifecycle === 'superseded' || record.runtimeState === 'revoked_observed' ? (
-                      <>
-                        <p className="key-detail-description">{t('keysRevokedHistory')}</p>
-                        <p className="key-field-help">{k('detailRevokedHelp')}</p>
-                      </>
-                    ) : (
-                      <>
-                        {gatewayPending && record.runtimeState === 'not_applied' ? (
-                          <p className="key-detail-description">{k('connectionPending')}</p>
-                        ) : record.runtimeState === 'effective_observed' ? (
-                          <p className="key-detail-description" data-testid="detail-effective-help">
-                            {k('detailEffectiveHelp')}
-                          </p>
-                        ) : record.runtimeState === 'effect_unknown' || applyUnknown ? (
-                          <div className="key-notice key-notice-warning" data-testid="detail-apply-recovery">
-                            <FullWebIcon name="alert" />
-                            <div>
-                              <p>{k('detailUnknownHelp')}</p>
-                              {applyAborted && applyError !== k('operationAborted') && (
-                                <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
-                              )}
-                              {(applyError || record.effectCode) && (
-                                <p data-testid="detail-apply-blocker-reason">
-                                  {applyError || k(effectBlockerTextKey(record.effectCode))}
-                                </p>
-                              )}
-                              {applyErrorDetail &&
-                                (applyErrorCode || record.effectCode) === 'external_management_key_rejected' && (
-                                  <details
-                                    className="fresh-external-blocker-detail"
-                                    data-testid="detail-apply-blocker-detail"
-                                  >
-                                    <summary>{x('details')}</summary>
-                                    <p>{applyErrorDetail}</p>
-                                  </details>
-                                )}
-                              <div className="key-toolbar-actions">
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary btn-sm"
-                                  data-testid="detail-reconcile-apply"
-                                  disabled={busy || unknown || applyPending || dirty}
-                                  onClick={() => void reconcileApply()}
-                                >
-                                  {k('checkOperationResult')}
-                                </button>
-                                {onRebind &&
-                                  ['external_management_key_rejected', 'external_target_moved'].includes(
-                                    applyErrorCode || record.effectCode || ''
-                                  ) && (
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary btn-sm"
-                                      data-testid="detail-rebind-action"
-                                      disabled={busy || unknown || applyPending || dirty}
-                                      onClick={onRebind}
-                                    >
-                                      {k('rebindConnection')}
-                                    </button>
-                                  )}
-                              </div>
-                            </div>
-                          </div>
+                  <dl className="key-detail-meta-grid" data-testid="key-detail-metadata">
+                    <div>
+                      <dt>{k('created')}</dt>
+                      <dd>
+                        {createdTime ? (
+                          <time dateTime={createdTime.iso}>{createdTime.label}</time>
                         ) : (
-                          <div className="key-notice key-notice-warning" data-testid="detail-apply-recovery">
-                            <FullWebIcon name="alert" />
-                            <div>
-                              <p>{k('detailApplyHelp')}</p>
-                              {applyAborted && applyError !== k('operationAborted') && (
-                                <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
-                              )}
-                              {(applyError || record.effectCode) && (
-                                <p data-testid="detail-apply-blocker-reason">
-                                  {applyError || k(effectBlockerTextKey(record.effectCode))}
-                                </p>
-                              )}
-                              {applyErrorDetail &&
-                                (applyErrorCode || record.effectCode) === 'external_management_key_rejected' && (
-                                  <details
-                                    className="fresh-external-blocker-detail"
-                                    data-testid="detail-apply-blocker-detail"
-                                  >
-                                    <summary>{x('details')}</summary>
-                                    <p>{applyErrorDetail}</p>
-                                  </details>
-                                )}
-                              <div className="key-toolbar-actions">
-                                {![
-                                  'external_management_key_rejected',
-                                  'external_target_moved',
-                                  'external_cpa_version_unsupported',
-                                ].includes(applyErrorCode) && (
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary btn-sm"
-                                    data-testid="detail-retry-apply"
-                                    disabled={busy || unknown || applyPending || dirty}
-                                    onClick={() => void retryApply()}
-                                  >
-                                    {k('retryApplyKey')}
-                                  </button>
-                                )}
-                                {onRebind &&
-                                  ['external_management_key_rejected', 'external_target_moved'].includes(
-                                    applyErrorCode || record.effectCode || ''
-                                  ) && (
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary btn-sm"
-                                      data-testid="detail-rebind-action"
-                                      disabled={busy || unknown || applyPending || dirty}
-                                      onClick={onRebind}
-                                    >
-                                      {k('rebindConnection')}
-                                    </button>
-                                  )}
-                              </div>
-                            </div>
-                          </div>
+                          '—'
                         )}
-                        {record.operationId && (
-                          <p className="key-field-help" data-testid="detail-operation-id">
-                            {k('detailPendingOperationNote')}: <code>{record.operationId}</code>
-                          </p>
-                        )}
-                        <AccessInfoSummary
-                          client={client}
-                          auth={auth}
-                          onUnauthorized={onUnauthorized}
-                          info={accessInfo ?? undefined}
-                          reloadToken={reloadToken}
-                          compact
-                          testIdPrefix="detail-access-info"
-                        />
-                      </>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{k('originLabel')}</dt>
+                      <dd>{k(keyOriginTextKey(record.origin))}</dd>
+                    </div>
+                    {lastRotatedTime && (
+                      <div>
+                        <dt>{k('lastRotatedLabel')}</dt>
+                        <dd data-testid="detail-last-rotated-at">
+                          <time dateTime={lastRotatedTime.iso}>{lastRotatedTime.label}</time>
+                        </dd>
+                      </div>
                     )}
-                  </div>
+                    {revokedTime && (
+                      <div>
+                        <dt>{k('revokedAtLabel')}</dt>
+                        <dd>
+                          <time dateTime={revokedTime.iso}>{revokedTime.label}</time>
+                        </dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>{t('keysIdentity')}</dt>
+                      <dd>
+                        <div className="key-id-copy-row">
+                          <code className="key-id-code" title={id}>
+                            {id}
+                          </code>
+                          <button
+                            type="button"
+                            className="key-inline-copy-btn"
+                            data-testid="detail-copy-key-id"
+                            aria-label={`${k('copyKey')}: ${t('keysIdentity')}`}
+                            title={t('keysCopy')}
+                            onClick={() => void copyKeyId()}
+                          >
+                            <FullWebIcon
+                              name={idCopyFeedback === 'copied' ? 'check' : 'copy'}
+                              size={12}
+                            />
+                          </button>
+                        </div>
+                      </dd>
+                    </div>
+                    {record.operationId && (
+                      <div className="key-detail-op-meta">
+                        <dt>{k('operationIdLabel')}</dt>
+                        <dd>
+                          <code data-testid="detail-operation-id">{record.operationId}</code>
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                  {record.origin === 'adopted' && (
+                    <p className="key-field-help key-adopted-note">{k('adoptedOriginNote')}</p>
+                  )}
                 </section>
+                {revokedOrSuperseded ? (
+                  <div className="key-drawer-status-notice is-revoked" role="status">
+                    <strong>{t('keysRevokedHistory')}</strong>
+                    <p>{k('detailRevokedHelp')}</p>
+                  </div>
+                ) : gatewayPending && record.runtimeState === 'not_applied' ? (
+                  <div className="key-drawer-status-notice is-warning" role="status">
+                    <p>{k('connectionPending')}</p>
+                  </div>
+                ) : record.runtimeState === 'effective_observed' ? null : record.runtimeState ===
+                    'effect_unknown' || applyUnknown ? (
+                  <div
+                    className="key-drawer-status-notice is-warning"
+                    role="alert"
+                    data-testid="detail-apply-recovery"
+                  >
+                    <FullWebIcon name="alert" size={16} />
+                    <div className="key-drawer-status-notice-body">
+                      <p>{k('detailUnknownHelp')}</p>
+                      {applyAborted && applyError !== k('operationAborted') && (
+                        <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
+                      )}
+                      {(applyError || record.effectCode) && (
+                        <p data-testid="detail-apply-blocker-reason">
+                          {applyError || k(effectBlockerTextKey(record.effectCode))}
+                        </p>
+                      )}
+                      {applyErrorDetail &&
+                        (applyErrorCode || record.effectCode) ===
+                          'external_management_key_rejected' && (
+                          <details
+                            className="fresh-external-blocker-detail"
+                            data-testid="detail-apply-blocker-detail"
+                          >
+                            <summary>{x('details')}</summary>
+                            <p>{applyErrorDetail}</p>
+                          </details>
+                        )}
+                      <div className="key-toolbar-actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          data-testid="detail-reconcile-apply"
+                          disabled={busy || applyPending}
+                          onClick={() => void reconcileApply()}
+                        >
+                          {k('checkOperationResult')}
+                        </button>
+                        {onRebind &&
+                          [
+                            'external_management_key_rejected',
+                            'external_target_moved',
+                          ].includes(applyErrorCode || record.effectCode || '') && (
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              data-testid="detail-rebind-action"
+                              disabled={busy || applyPending}
+                              onClick={onRebind}
+                            >
+                              {k('rebindConnection')}
+                            </button>
+                          )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className="key-drawer-status-notice is-warning"
+                    role="alert"
+                    data-testid="detail-apply-recovery"
+                  >
+                    <FullWebIcon name="alert" size={16} />
+                    <div className="key-drawer-status-notice-body">
+                      <p>{k('detailApplyHelp')}</p>
+                      {applyAborted && applyError !== k('operationAborted') && (
+                        <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
+                      )}
+                      {(applyError || record.effectCode) && (
+                        <p data-testid="detail-apply-blocker-reason">
+                          {applyError || k(effectBlockerTextKey(record.effectCode))}
+                        </p>
+                      )}
+                      {applyErrorDetail &&
+                        (applyErrorCode || record.effectCode) ===
+                          'external_management_key_rejected' && (
+                          <details
+                            className="fresh-external-blocker-detail"
+                            data-testid="detail-apply-blocker-detail"
+                          >
+                            <summary>{x('details')}</summary>
+                            <p>{applyErrorDetail}</p>
+                          </details>
+                        )}
+                      <div className="key-toolbar-actions">
+                        {![
+                          'external_management_key_rejected',
+                          'external_target_moved',
+                          'external_cpa_version_unsupported',
+                        ].includes(applyErrorCode) && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            data-testid="detail-retry-apply"
+                            disabled={busy || applyPending}
+                            onClick={() => void retryApply()}
+                          >
+                            {k('retryApplyKey')}
+                          </button>
+                        )}
+                        {onRebind &&
+                          [
+                            'external_management_key_rejected',
+                            'external_target_moved',
+                          ].includes(applyErrorCode || record.effectCode || '') && (
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              data-testid="detail-rebind-action"
+                              disabled={busy || applyPending}
+                              onClick={onRebind}
+                            >
+                              {k('rebindConnection')}
+                            </button>
+                          )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {!revokedOrSuperseded && (
+                  <AccessInfoSummary
+                    client={client}
+                    auth={auth}
+                    onUnauthorized={onUnauthorized}
+                    info={accessInfo ?? undefined}
+                    reloadToken={reloadToken}
+                    compact
+                    clientOnly
+                    defaultProtocolsCollapsed={false}
+                    testIdPrefix="detail-access-info"
+                  />
+                )}
+              </div>
+              <div
+                id="key-detail-panel-usage"
+                role="tabpanel"
+                aria-labelledby="key-detail-tab-btn-usage"
+                className="key-detail-columns key-drawer-tab-panel"
+                data-testid="key-detail-panel-usage"
+                hidden={detailTab !== 'usage'}
+              >
                 <section className="key-detail-section" data-testid="key-detail-usage-policy">
-                  <header>
-                    <FullWebIcon name="dashboard" />
-                    <h4>{k('usageSectionTitle')}</h4>
+                  <header className="key-usage-toolbar-row">
+                    <div data-testid="usage-window-tabs">
+                      <SegmentedTabs
+                        items={[
+                          { id: '24h', label: k('usageWindow24h') },
+                          { id: '7d', label: k('usageWindow7d') },
+                          { id: '30d', label: k('usageWindow30d') },
+                        ]}
+                        activeTab={activeUsageWindow}
+                        onChange={(next) => switchUsageWindow(next as UsageWindow)}
+                        ariaLabel={k('usageWindowLabel')}
+                        idBase="key-usage-window"
+                        className="key-usage-window-tabs"
+                        size="sm"
+                        responsiveFullWidth={false}
+                      />
+                    </div>
+                    <div className="key-usage-links" data-testid="key-usage-links">
+                      <CrossPageLink
+                        route="/monitoring"
+                        apiKeyId={id}
+                        className="btn btn-secondary btn-sm"
+                        testId="detail-link-monitoring"
+                        disabled={!canClose()}
+                        onNavigate={close}
+                      >
+                        {k('usageLinkMonitoring')}
+                      </CrossPageLink>
+                      <CrossPageLink
+                        route="/usage-analytics"
+                        apiKeyId={id}
+                        className="btn btn-secondary btn-sm"
+                        testId="detail-link-analytics"
+                        disabled={!canClose()}
+                        onNavigate={close}
+                      >
+                        {k('usageLinkAnalytics')}
+                      </CrossPageLink>
+                    </div>
                   </header>
                   <div className="key-detail-section-body">
                     {!usage && !usageFailed ? (
-                      <p className="key-detail-description" role="status">{k('usageReading')}</p>
+                      <p className="key-detail-description" role="status">
+                        {k('usageReading')}
+                      </p>
                     ) : (
                       <>
-                        <div className="key-usage-coverage" data-testid="key-usage-state">
-                          <div>
-                            <span className="key-field-label">{k('usageCoverageLabel')}</span>
-                            <span className={'key-state-pill ' + usageStateClass}>{usageStateText(usageCoverage.state)}</span>
+                        {usageCoverage.state !== 'complete' && (
+                          <div className="key-usage-coverage" data-testid="key-usage-state">
+                            <div>
+                              <span className="key-field-label">{k('usageCoverageLabel')}</span>
+                              <span className={'key-state-pill ' + usageStateClass}>
+                                {usageStateText(usageCoverage.state)}
+                              </span>
+                            </div>
+                            <p data-testid="key-usage-reason">
+                              {usageReasonText(usageCoverage.reason)}
+                            </p>
                           </div>
-                          <p data-testid="key-usage-reason">{usageReasonText(usageCoverage.reason)}</p>
-                        </div>
+                        )}
                         {usage && usage.totals && (
                           <>
-                            <p className="key-field-help">
+                            <p className="key-usage-window-meta">
                               <strong>{k('usageWindowLabel')}:</strong>{' '}
                               {detailTime(usage.fromMs).label} — {detailTime(usage.toMs).label}
-                              <br />{k('usageWindowHelp')}
                             </p>
-                            <dl className="key-detail-meta-grid key-usage-totals" data-testid="key-usage-totals">
-                              <div><dt>{k('usageCalls')}</dt><dd>{usageCountText(usage.totals.calls, usage.coverage.state)}</dd></div>
-                              <div><dt>{k('usageSuccess')}</dt><dd>{usageCountText(usage.totals.success, usage.coverage.state)}</dd></div>
-                              <div><dt>{k('usageFailure')}</dt><dd>{usageCountText(usage.totals.failure, usage.coverage.state)}</dd></div>
-                              <div><dt>{k('usageTotalTokens')}</dt><dd>{usageCountText(usage.totals.totalTokens, usage.coverage.state)}</dd></div>
-                              <div><dt>{k('usageInputTokens')}</dt><dd>{usageCountText(usage.totals.inputTokens, usage.coverage.state)}</dd></div>
-                              <div><dt>{k('usageOutputTokens')}</dt><dd>{usageCountText(usage.totals.outputTokens, usage.coverage.state)}</dd></div>
+                            <dl
+                              className="key-usage-stat-grid key-usage-totals"
+                              data-testid="key-usage-totals"
+                            >
+                              <div>
+                                <dt>{k('usageCalls')}</dt>
+                                <dd>{usageCountText(usage.totals.calls, usage.coverage.state)}</dd>
+                              </div>
+                              <div>
+                                <dt>{k('usageSuccess')}</dt>
+                                <dd>
+                                  {usageCountText(usage.totals.success, usage.coverage.state)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{k('usageFailure')}</dt>
+                                <dd>
+                                  {usageCountText(usage.totals.failure, usage.coverage.state)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{k('usageTotalTokens')}</dt>
+                                <dd>
+                                  {usageCountText(usage.totals.totalTokens, usage.coverage.state)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{k('usageInputTokens')}</dt>
+                                <dd>
+                                  {usageCountText(usage.totals.inputTokens, usage.coverage.state)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{k('usageOutputTokens')}</dt>
+                                <dd>
+                                  {usageCountText(usage.totals.outputTokens, usage.coverage.state)}
+                                </dd>
+                              </div>
                               <div>
                                 <dt>{k('usageLastUsed')}</dt>
                                 <dd>{usageTimeText(usage.totals.lastUsedAtMs) ?? '—'}</dd>
                               </div>
                             </dl>
-                            {usage.series.length > 0 ? (
+                            {usage.series.length > 0 && (maxBucketCalls > 0 || isZeroSeries) ? (
                               <div className="key-usage-series" data-testid="key-usage-series">
-                                <span className="key-field-label">{k('usageSeriesTitle')}</span>
-                                <ul>
-                                  {usage.series.map((point) => (
-                                    <li key={point.bucketMs}>
-                                      <time dateTime={detailTime(point.bucketMs).iso}>{detailTime(point.bucketMs).label}</time>
-                                      <span>{usageCountText(point.calls, usage.coverage.state)} {k('usageCalls')}</span>
-                                      <span>{usageCountText(point.totalTokens, usage.coverage.state)} {k('usageTotalTokens')}</span>
-                                    </li>
-                                  ))}
-                                </ul>
+                                <div className="key-usage-series-head">
+                                  <span className="key-field-label">
+                                    {k('usageSeriesTitle')}
+                                    {isZeroSeries ? ` · ${k('usageNoCalls')}` : ''}
+                                  </span>
+                                  <span className="key-usage-legend">
+                                    <span className="key-usage-legend-item is-success">
+                                      {k('usageSuccess')}
+                                    </span>
+                                    <span className="key-usage-legend-item is-failure">
+                                      {k('usageFailure')}
+                                    </span>
+                                  </span>
+                                </div>
+                                <div
+                                  className="key-usage-bars"
+                                  data-testid="key-usage-bars"
+                                  role="list"
+                                  aria-label={k('usageSeriesTitle')}
+                                >
+                                  {usage.series.map((point) => {
+                                    const totalPct =
+                                      maxBucketCalls > 0
+                                        ? Math.max(
+                                            6,
+                                            Math.round((point.calls / maxBucketCalls) * 100)
+                                          )
+                                        : 0;
+                                    const failureCalls = Math.min(point.failure, point.calls);
+                                    const successCalls = Math.max(0, point.calls - failureCalls);
+                                    const failurePct =
+                                      point.calls > 0
+                                        ? Math.round((failureCalls / point.calls) * 100)
+                                        : 0;
+                                    const successPct =
+                                      point.calls > 0 ? Math.max(0, 100 - failurePct) : 0;
+                                    const timeLabel = detailTime(point.bucketMs).label;
+                                    const tooltip = `${timeLabel} · ${usageCountText(point.calls, usage.coverage.state)} ${k('usageCalls')}${failureCalls > 0 ? ` (${usageCountText(failureCalls, usage.coverage.state)} ${k('usageFailure')})` : ''} · ${usageCountText(point.totalTokens, usage.coverage.state)} ${k('usageTotalTokens')}`;
+                                    return (
+                                      <div
+                                        key={point.bucketMs}
+                                        className="key-usage-bar-col"
+                                        role="listitem"
+                                        tabIndex={0}
+                                        title={tooltip}
+                                        aria-label={tooltip}
+                                      >
+                                        {point.calls > 0 ? (
+                                          <div
+                                            className="key-usage-bar-stack"
+                                            style={{ height: `${totalPct}%` }}
+                                          >
+                                            {failureCalls > 0 && (
+                                              <span
+                                                className="key-usage-bar-failure"
+                                                style={{ height: `${failurePct}%` }}
+                                              />
+                                            )}
+                                            {successCalls > 0 && (
+                                              <span
+                                                className="key-usage-bar-success"
+                                                style={{ height: `${successPct}%` }}
+                                              />
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <div className="key-usage-bar-empty" />
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               </div>
-                            ) : usage.coverage.state === 'complete' ? (
-                              <p className="key-detail-description">{k('usageNoCalls')}</p>
+                            ) : usage.coverage.state === 'complete' ||
+                              usage.coverage.state === 'partial' ? (
+                              <p
+                                className="key-usage-empty-state"
+                                data-testid="key-usage-empty"
+                              >
+                                {k('usageNoCalls')}
+                              </p>
                             ) : null}
                           </>
                         )}
                       </>
                     )}
-                    <p className="key-field-help">{k('policyGlobalHelp')}</p>
                   </div>
                 </section>
               </div>
             </>
           )}
-          <footer className="key-detail-footer">
-            <details className="key-record-identifiers">
-              <summary>{k('diagnostics')}</summary>
-              <dl>
-                <dt>{t('keysIdentity')}</dt>
-                <dd>
-                  <code>{id}</code>
-                </dd>
-              </dl>
-            </details>
-            <button
-              className="btn btn-secondary"
-              aria-label={t('keysReadDetails')}
-              disabled={busy || applyPending}
-              onClick={() => {
-                void read();
-                void readUsage();
-              }}
-            >
-              <FullWebIcon name="refresh" />
-              {t('keysReadDetails')}
-            </button>
-          </footer>
         </section>
       </Drawer>
-      <Modal
+      <FreshKeyRenameModal
         open={open && editing}
-        title={k('rename')}
-        className="key-rename-modal"
-        closeDisabled={busy || unknown || applyPending || applyUnknown || dirty}
-        onClose={() => {
-          if (!canClose()) return;
-          setName(record?.name || '');
-          setRejectedDraft(false);
-          setEditing(false);
+        visible={visible}
+        record={record}
+        client={client}
+        credential={credential}
+        onUnauthorized={onUnauthorized}
+        onPending={onPending}
+        onSaved={(updated) => {
+          setRecord(updated);
+          onSaved(updated);
         }}
-      >
-        {message && (
-          <p role="status" className="key-notice key-notice-warning">
-            {message}
-          </p>
-        )}
-        {record && (
-          <form onSubmit={(event) => void save(event)}>
-            <label htmlFor="key-name" className="form-label">
-              {t('keysName')}
-            </label>
-            <input
-              ref={input}
-              id="key-name"
-              className="input"
-              value={name}
-              maxLength={240}
-              autoComplete="off"
-              disabled={busy || unknown || applyPending}
-              onChange={(event) => setName(event.target.value)}
-            />
-            <p className="key-field-help">{t('keysNameHelp')}</p>
-            <div className="key-modal-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={busy || unknown || applyPending}
-                onClick={() => {
-                  if (canClose()) {
-                    setName(record.name);
-                    setEditing(false);
-                  }
-                }}
-              >
-                {k('cancel')}
-              </button>
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={
-                  busy ||
-                  unknown ||
-                  applyPending ||
-                  name.trim() === record.name ||
-                  [...name.trim()].length > 120
-                }
-              >
-                {t('keysSaveName')}
-              </button>
-            </div>
-          </form>
-        )}
-        {(unknown || rejectedDraft) && (
-          <button
-            className="btn btn-secondary"
-            disabled={busy || applyPending}
-            onClick={() => void read()}
-          >
-            {t('keysReadDetails')}
-          </button>
-        )}
-        {rejectedDraft && !record && (
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => {
-              if (canClose()) {
-                setRejectedDraft(false);
-                setName('');
-                setEditing(false);
-              }
-            }}
-          >
-            {k('cancel')}
-          </button>
-        )}
-      </Modal>
+        onClose={() => setEditing(false)}
+      />
     </>
   );
 }

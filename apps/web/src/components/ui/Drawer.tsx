@@ -26,6 +26,8 @@ interface DrawerProps {
   className?: string;
   /** 可选的正文滚动容器引用，供需要在内容切换时归零滚动位置的调用方使用。 */
   bodyRef?: Ref<HTMLDivElement>;
+  closeLabel?: string;
+  closeDisabled?: boolean;
 }
 
 const CLOSE_ANIMATION_DURATION = 280;
@@ -62,10 +64,13 @@ export function Drawer({
   width = 420,
   className,
   bodyRef,
+  closeLabel,
+  closeDisabled = false,
   children,
 }: PropsWithChildren<DrawerProps>) {
   const { t } = useTranslation();
   const titleId = useId();
+  const resolvedCloseLabel = closeLabel || t('common.close');
   const [isVisible, setIsVisible] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -134,7 +139,7 @@ export function Drawer({
   }, []);
 
   const handleClose = useCallback(async () => {
-    if (closeTimerRef.current !== null || closeRequestPendingRef.current) return;
+    if (closeDisabled || closeTimerRef.current !== null || closeRequestPendingRef.current) return;
 
     closeRequestPendingRef.current = true;
     const requestToken = closeRequestTokenRef.current + 1;
@@ -150,7 +155,7 @@ export function Drawer({
         closeRequestPendingRef.current = false;
       }
     }
-  }, [onBeforeClose, startClose]);
+  }, [closeDisabled, onBeforeClose, startClose]);
 
   // 按 pointerId 配对：仅当同一指针在遮罩上按下且在遮罩上释放时才关闭。
   // 避免「面板内拖选到遮罩释放」与多指针交错状态互相覆盖。
@@ -256,9 +261,10 @@ export function Drawer({
           <button
             type="button"
             className={styles.closeButton}
+            disabled={closeDisabled}
             onClick={() => void handleClose()}
-            aria-label={t('common.close')}
-            title={t('common.close')}
+            aria-label={resolvedCloseLabel}
+            title={resolvedCloseLabel}
           >
             <IconX size={18} />
           </button>

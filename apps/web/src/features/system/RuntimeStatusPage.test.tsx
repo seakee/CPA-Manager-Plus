@@ -299,7 +299,7 @@ describe('RuntimeStatusPage artifact origin display', () => {
         await Promise.resolve();
       });
 
-      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(apiKeysSpy).not.toHaveBeenCalled();
       expect(fetchModelsSpy).toHaveBeenCalledWith(
         '/console/api/v2/cpamp',
         undefined,
@@ -420,7 +420,7 @@ describe('RuntimeStatusPage artifact origin display', () => {
         await Promise.resolve();
       });
 
-      expect(apiKeysSpy).toHaveBeenCalledTimes(1);
+      expect(apiKeysSpy).not.toHaveBeenCalled();
       expect(fetchModelsSpy).toHaveBeenCalledWith('/console/api/v2/cpamp', undefined, {
         Authorization: 'Bearer admin-secret',
       });

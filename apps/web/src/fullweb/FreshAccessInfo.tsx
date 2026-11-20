@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fullWebLanguage, subscribeFullWebLanguage } from '../i18n/fullweb';
 import { accessInfoText as a, type FreshAccessInfoTextKey } from '../i18n/freshAccessInfo';
+import { Button } from '../components/ui/Button';
+import { SegmentedTabs } from '../components/ui/SegmentedTabs';
 import { FullWebIcon } from './FullWebIcon';
 import {
   PublicApiError,
@@ -46,6 +48,7 @@ export interface AccessInfoSummaryProps {
   onLoaded?: (info: AccessInfo) => void;
   defaultProtocolsCollapsed?: boolean;
   subtitleNote?: string;
+  clientOnly?: boolean;
 }
 
 const VALID_MODES: Record<AccessMode, true> = {
@@ -371,6 +374,7 @@ export function AccessInfoSummary({
   onLoaded,
   defaultProtocolsCollapsed = false,
   subtitleNote,
+  clientOnly = false,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
   const [fetched, setFetched] = useState<AccessInfo | null>(null);
@@ -382,6 +386,7 @@ export function AccessInfoSummary({
     state: 'copied' | 'failed';
   } | null>(null);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+  const [selectedProtocolId, setSelectedProtocolId] = useState<string>('openai');
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeRef = useRef(true);
@@ -533,7 +538,9 @@ export function AccessInfoSummary({
     }
   }
 
-  const rootClassName = className ? `journey-field ${className}` : 'journey-field';
+  const rootClassName = ['journey-field', compact ? 'is-compact' : '', className || '']
+    .filter(Boolean)
+    .join(' ');
 
   if (info === undefined && !auth.value) {
     return (
@@ -541,7 +548,7 @@ export function AccessInfoSummary({
         <div className="alert alert-info" role="status" data-testid={`${testIdPrefix}-idle`}>
           <FullWebIcon name="info" size={20} />
           <div className="alert-content">
-            <div className="alert-title">{a('title', language)}</div>
+            <div className="alert-title">{a(clientOnly ? 'clientTitle' : 'title', language)}</div>
             <div className="alert-desc">{a('awaitingAuth', language)}</div>
           </div>
         </div>
@@ -559,7 +566,7 @@ export function AccessInfoSummary({
         <div className="alert alert-info" role="status" data-testid={`${testIdPrefix}-loading`}>
           <FullWebIcon name="clock" size={20} />
           <div className="alert-content">
-            <div className="alert-title">{a('title', language)}</div>
+            <div className="alert-title">{a(clientOnly ? 'clientTitle' : 'title', language)}</div>
             <div className="alert-desc">{a('loading', language)}</div>
           </div>
         </div>
@@ -624,21 +631,50 @@ export function AccessInfoSummary({
       )
     : null;
 
+  const showManagementEntry = !clientOnly && Boolean(managementUrl);
   const hasCoreEntry = Boolean(
-    managementUrl ||
+    showManagementEntry ||
       (effective.mode === 'connect_external' && externalUrl) ||
       (effective.mode !== 'connect_external' && inferenceUrl)
   );
+  const baseSubtitle = a(clientOnly ? 'clientSubtitle' : 'subtitle', language);
   const subtitleText = isPendingRestart
     ? a('pendingRestartSubtitle', language)
     : subtitleNote
-      ? `${a('subtitle', language)} ${subtitleNote}`
-      : a('subtitle', language);
+      ? `${baseSubtitle} ${subtitleNote}`
+      : baseSubtitle;
 
-  const protocolsCard =
+  const activeProtocol =
+    clientOnly && effective.protocols.length > 0
+      ? (effective.protocols.find((p) => p.id === selectedProtocolId) ?? effective.protocols[0])
+      : null;
+  const displayedProtocols =
+    clientOnly && activeProtocol ? [activeProtocol] : effective.protocols;
+
+  const protocolTabsElement =
+    clientOnly && effective.protocols.length > 1 && activeProtocol ? (
+      <SegmentedTabs
+        ariaLabel={a('protocolTabsLabel', language)}
+        idBase={`${testIdPrefix}-protocols`}
+        className="key-protocol-tabs"
+        responsiveFullWidth={false}
+        activeTab={activeProtocol.id}
+        onChange={setSelectedProtocolId}
+        items={effective.protocols.map((protocol) => ({
+          id: protocol.id,
+          label: protocol.label,
+          testId: `${testIdPrefix}-protocol-tab-${protocol.id}`,
+        }))}
+      />
+    ) : null;
+
+  const protocolListElement =
     effective.protocols.length > 0 ? (
-      <div className="info-card access-protocols-card" data-testid={`${testIdPrefix}-protocols`}>
-        {effective.protocols.map((protocol) => {
+      <div
+        className={clientOnly ? 'key-access-protocol-panel' : 'info-card access-protocols-card'}
+        data-testid={`${testIdPrefix}-protocols`}
+      >
+        {displayedProtocols.map((protocol) => {
           const baseUrl = formatAccessEndpointUrl(
             protocol.basePath,
             effective.mode,
@@ -653,28 +689,43 @@ export function AccessInfoSummary({
           const meta = protocolHelpAndHeader(protocol.id, language);
           const baseCopied = copiedTarget === `protocol-${protocol.id}`;
           const exampleCopied = copiedTarget === `protocol-example-${protocol.id}`;
+          const showProtocolHead =
+            !clientOnly || effective.protocols.length <= 1 || isPendingRestart;
           return (
             <div
               key={protocol.id}
+              id={clientOnly ? `${testIdPrefix}-protocol-${protocol.id}` : undefined}
+              role={clientOnly ? 'tabpanel' : undefined}
+              aria-labelledby={
+                clientOnly && effective.protocols.length > 1
+                  ? `${testIdPrefix}-protocols-${protocol.id}`
+                  : undefined
+              }
               className="access-protocol-item"
               data-testid={`${testIdPrefix}-protocol-${protocol.id}`}
             >
-              <div className="access-protocol-head">
-                <strong className="access-protocol-name">
-                  {protocol.label}
-                  {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
-                </strong>
-                {!compact && (
-                  <code
-                    className="access-protocol-header-chip"
-                    data-testid={`${testIdPrefix}-protocol-snippet-${protocol.id}`}
-                  >
-                    {meta.header}
-                  </code>
-                )}
-              </div>
+              {showProtocolHead && (
+                <div className="access-protocol-head">
+                  <strong className="access-protocol-name">
+                    {protocol.label}
+                    {isPendingRestart ? ` (${a('plannedPrefixTag', language)})` : ''}
+                  </strong>
+                  {!compact && (
+                    <code
+                      className="access-protocol-header-chip"
+                      data-testid={`${testIdPrefix}-protocol-snippet-${protocol.id}`}
+                    >
+                      {meta.header}
+                    </code>
+                  )}
+                </div>
+              )}
               {!compact && <p className="journey-help access-protocol-hint">{meta.hint}</p>}
-              <div className="access-protocol-urls">
+              <div
+                className={
+                  clientOnly ? 'access-protocol-urls is-client-kv-block' : 'access-protocol-urls'
+                }
+              >
                 <div className="access-protocol-url-row">
                   <span className="access-protocol-url-label">{a('baseUrlLabel', language)}</span>
                   <span className="info-val-group">
@@ -734,64 +785,19 @@ export function AccessInfoSummary({
       </div>
     ) : null;
 
-  return (
-    <section
-      className={`${rootClassName} access-info-section`}
-      data-testid={`${testIdPrefix}-summary`}
-      aria-busy={loading || undefined}
-    >
-      <div className="access-info-header">
-        <div className="access-info-title-row">
-          <h3>{a('title', language)}</h3>
-          <div className="access-info-badges">
-            <span className="badge badge-indigo" data-testid={`${testIdPrefix}-mode`}>
-              {a(modeTextKey(effective.mode), language)}
-            </span>
-            <span
-              className={`badge ${effective.ready ? 'badge-emerald' : 'badge-amber'}`}
-              data-testid={`${testIdPrefix}-status`}
-            >
-              {effective.ready
-                ? a('statusReady', language)
-                : isPendingRestart
-                  ? a('statusPendingRestart', language)
-                  : a('statusNotReady', language)}
-            </span>
-            {isSharedPrefix && (
-              <span className="badge badge-amber" data-testid={`${testIdPrefix}-shared-badge`}>
-                {a('sharedBadge', language)}
-              </span>
-            )}
-            {info === undefined &&
-              (effective.ready ? (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-xs btn-icon-only"
-                  aria-label={a('retry', language)}
-                  title={a('retry', language)}
-                  data-testid={`${testIdPrefix}-retry`}
-                  disabled={loading}
-                  onClick={() => setManualRetry((n) => n + 1)}
-                >
-                  <FullWebIcon name="refresh" size={14} />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  data-testid={`${testIdPrefix}-retry`}
-                  disabled={loading}
-                  onClick={() => setManualRetry((n) => n + 1)}
-                >
-                  <FullWebIcon name="refresh" size={15} />
-                  {a('retry', language)}
-                </button>
-              ))}
+  const protocolsCard = protocolListElement
+    ? clientOnly
+      ? (
+          <div className="key-protocol-switcher">
+            {protocolTabsElement}
+            {protocolListElement}
           </div>
-        </div>
-        <p className="journey-help access-info-subtitle">{subtitleText}</p>
-      </div>
+        )
+      : protocolListElement
+    : null;
 
+  const clientBodyContent = (
+    <>
       {notReadyCopy && (
         <div
           className="alert alert-warn"
@@ -821,8 +827,8 @@ export function AccessInfoSummary({
       )}
 
       {hasCoreEntry && (
-        <div className="info-card prefix-preview-card">
-          {managementUrl && (
+        <div className={clientOnly ? 'key-access-base-block' : 'info-card prefix-preview-card'}>
+          {showManagementEntry && (
             <div className="info-row info-row-primary">
               <span className="info-key">
                 {a('managementEntry', language)}
@@ -947,8 +953,86 @@ export function AccessInfoSummary({
           {a(copyFeedback.state === 'copied' ? 'copied' : 'copyFailed', language)}
         </p>
       )}
+    </>
+  );
 
-      <p className="journey-help access-client-key-note">{a('clientKeyNote', language)}</p>
+  return (
+    <section
+      className={
+        clientOnly
+          ? `${rootClassName} access-info-section key-detail-section is-client-access-card`
+          : `${rootClassName} access-info-section`
+      }
+      data-testid={`${testIdPrefix}-summary`}
+      data-client-only={clientOnly ? 'true' : undefined}
+      aria-busy={loading || undefined}
+    >
+      <div className="access-info-header">
+        <div className="access-info-title-row">
+          <h3>{a(clientOnly ? 'clientTitle' : 'title', language)}</h3>
+          <div className="access-info-badges">
+            {!clientOnly && (
+              <span className="badge badge-indigo" data-testid={`${testIdPrefix}-mode`}>
+                {a(modeTextKey(effective.mode), language)}
+              </span>
+            )}
+            <span
+              className={`badge ${effective.ready ? 'badge-emerald' : 'badge-amber'}`}
+              data-testid={`${testIdPrefix}-status`}
+            >
+              {effective.ready
+                ? a('statusReady', language)
+                : isPendingRestart
+                  ? a('statusPendingRestart', language)
+                  : a('statusNotReady', language)}
+            </span>
+            {isSharedPrefix && (
+              <span className="badge badge-amber" data-testid={`${testIdPrefix}-shared-badge`}>
+                {a('sharedBadge', language)}
+              </span>
+            )}
+            {info === undefined &&
+              (effective.ready ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  iconOnly
+                  aria-label={a('retry', language)}
+                  title={a('retry', language)}
+                  data-testid={`${testIdPrefix}-retry`}
+                  disabled={loading}
+                  onClick={() => setManualRetry((n) => n + 1)}
+                >
+                  <FullWebIcon name="refresh" size={14} />
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  data-testid={`${testIdPrefix}-retry`}
+                  disabled={loading}
+                  onClick={() => setManualRetry((n) => n + 1)}
+                >
+                  <FullWebIcon name="refresh" size={15} />
+                  {a('retry', language)}
+                </Button>
+              ))}
+          </div>
+        </div>
+        <p className="journey-help access-info-subtitle">{subtitleText}</p>
+      </div>
+
+      {clientOnly ? (
+        <div className="key-detail-section-body key-access-client-body">{clientBodyContent}</div>
+      ) : (
+        clientBodyContent
+      )}
+
+      {!clientOnly && (
+        <p className="journey-help access-client-key-note">{a('clientKeyNote', language)}</p>
+      )}
     </section>
   );
 }

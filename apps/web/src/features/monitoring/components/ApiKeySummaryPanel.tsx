@@ -2,6 +2,10 @@ import { Fragment, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import { IconChevronDown, IconChevronUp, IconCopy, IconInfo, IconKey } from '@/components/ui/icons';
 import type { MonitoringApiKeyRow } from '@/features/monitoring/hooks/useMonitoringData';
+import {
+  resolveRevokedBadgeText,
+  resolveRotatedBadgeText,
+} from '@/features/monitoring/model/apiKeys';
 import { useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { formatCompactNumber, formatUsd } from '@/utils/usage';
@@ -68,6 +72,9 @@ const buildApiKeySecondaryText = (row: MonitoringApiKeyRow) => {
   }
   if (row.apiKeyLabel && row.apiKeyMasked && row.apiKeyLabel !== row.apiKeyMasked) {
     return row.apiKeyMasked;
+  }
+  if (row.apiKeyMasked) {
+    return '';
   }
   if (row.apiKeyHash) {
     return `sha256:${row.apiKeyHash.slice(0, 12)}`;
@@ -166,12 +173,14 @@ function ApiKeySummaryPrimary({
   expanded,
   onToggle,
   onCopyText,
+  locale,
   t,
 }: {
   row: MonitoringApiKeyRow;
   expanded: boolean;
   onToggle: () => void;
   onCopyText: (text: string) => void;
+  locale: string;
   t: TFunction;
 }) {
   const secondaryText = buildApiKeySecondaryText(row);
@@ -189,7 +198,7 @@ function ApiKeySummaryPrimary({
           .join(' ')}
         onClick={onToggle}
         aria-expanded={expanded}
-        title={keyLabel}
+        title={row.apiKeyDisplayName || keyLabel}
       >
         <span className={styles.accountExpandGlyph} aria-hidden="true">
           {expanded ? <IconChevronUp size={15} /> : <IconChevronDown size={15} />}
@@ -215,7 +224,13 @@ function ApiKeySummaryPrimary({
           </button>
         ) : null}
         {!row.isUnknown ? (
-          <span className={styles.apiKeyAvailableChip}>{t('monitoring.api_key_available')}</span>
+          row.apiKeyIsRevoked ? (
+            <span className={styles.apiKeyRevokedChip}>{resolveRevokedBadgeText(locale)}</span>
+          ) : row.apiKeyIsRotated ? (
+            <span className={styles.apiKeyRotatedChip}>{resolveRotatedBadgeText(locale)}</span>
+          ) : row.apiKeyLifecycle !== 'missing' ? (
+            <span className={styles.apiKeyAvailableChip}>{t('monitoring.api_key_available')}</span>
+          ) : null
         ) : null}
       </span>
     </div>
@@ -319,6 +334,7 @@ export function ApiKeySummaryPanel({
                         expanded={isExpanded}
                         onToggle={() => onToggleApiKey(row.id)}
                         onCopyText={(text) => void handleCopyText(text)}
+                        locale={locale}
                         t={t}
                       />
                     </td>

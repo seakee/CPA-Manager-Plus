@@ -543,6 +543,81 @@ describe('buildApiKeyDisplayMap', () => {
     expect(map.get(apiKeyHash)?.label).toContain('**');
     expect(map.get(apiKeyHash)?.label).not.toContain('secret-value');
   });
+
+  it('formats v2 manager directory entries with real masked previews, origin defaults, revoked state, and zero copyValue', () => {
+    const map = buildApiKeyDisplayMap(
+      ['cpamp_sk_…ignored', 'sk-****masked'],
+      [
+        {
+          apiKeyHash: 'hash-named',
+          alias: 'Production',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…2f85',
+          origin: 'workspace',
+          lifecycle: 'active',
+        },
+        {
+          apiKeyHash: 'hash-installer',
+          alias: '',
+          apiKeyId: 'key_init',
+          maskedPreview: 'sk-…1234',
+          origin: 'installer',
+          lifecycle: 'active',
+        },
+        {
+          apiKeyHash: 'hash-adopted',
+          alias: '',
+          apiKeyId: 'key_adopt',
+          maskedPreview: '…5678',
+          origin: 'adopted',
+          lifecycle: 'active',
+        },
+        {
+          apiKeyHash: 'hash-unnamed',
+          alias: '',
+          apiKeyId: 'key_anon',
+          maskedPreview: 'cpamp_sk_…9abc',
+          origin: 'workspace',
+          lifecycle: 'active',
+        },
+        {
+          apiKeyHash: 'hash-revoked',
+          alias: 'Production',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…old1',
+          origin: 'workspace',
+          lifecycle: 'superseded',
+        },
+      ],
+      'en'
+    );
+
+    expect(map.has(sha256Hex('cpamp_sk_…ignored'))).toBe(false);
+    expect(map.has(sha256Hex('sk-****masked'))).toBe(false);
+    expect(map.get('hash-named')).toMatchObject({
+      label: 'Production',
+      masked: 'cpamp_sk_…2f85',
+      displayName: 'Production (cpamp_sk_…2f85)',
+      apiKeyId: 'key_prod',
+      maskedPreview: 'cpamp_sk_…2f85',
+    });
+    expect(map.get('hash-named')?.copyValue).toBeUndefined();
+    expect(map.get('hash-installer')?.displayName).toBe('Installation key (sk-…1234)');
+    expect(map.get('hash-adopted')?.displayName).toBe('Adopted key (…5678)');
+    expect(map.get('hash-unnamed')).toMatchObject({
+      label: 'cpamp_sk_…9abc',
+      masked: 'cpamp_sk_…9abc',
+      displayName: 'cpamp_sk_…9abc',
+    });
+    expect(map.get('hash-revoked')).toMatchObject({
+      label: 'Production',
+      masked: 'cpamp_sk_…old1',
+      displayName: 'Production (cpamp_sk_…old1) · Revoked',
+      isRevoked: true,
+      lifecycle: 'superseded',
+    });
+    expect(map.get('hash-revoked')?.copyValue).toBeUndefined();
+  });
 });
 
 describe('buildApiKeyRows', () => {

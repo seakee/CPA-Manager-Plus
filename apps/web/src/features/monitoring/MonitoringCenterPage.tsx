@@ -8,7 +8,7 @@ import {
   useState,
   type ChangeEvent,
 } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import {
@@ -197,6 +197,7 @@ export function MonitoringCenterPage() {
   const { t, i18n } = useTranslation();
   const { status: managerStatus } = useDatabaseMaintenance();
   const location = useLocation();
+  const navigate = useNavigate();
   const config = useConfigStore((state) => state.config);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const apiBase = useAuthStore((state) => state.apiBase);
@@ -456,11 +457,112 @@ export function MonitoringCenterPage() {
     error: usageError,
     modelPrices,
     apiKeyAliases,
+    apiKeyAliasesLoaded,
+    apiKeyAliasesError,
     loadApiKeyAliases,
     exportUsage,
     importUsage,
     cancelUsageImport,
   } = useUsageData({ loadUsageEvents: false });
+
+  const apiKeyIdParam = useMemo(
+    () => new URLSearchParams(location.search).get('apiKeyId')?.trim() || '',
+    [location.search]
+  );
+  const [appliedApiKeyId, setAppliedApiKeyId] = useState('');
+  const [scopedApiKeySelection, setScopedApiKeySelection] = useState<{
+    apiKeyId: string;
+    primaryHash: string;
+    hashes: string[];
+  } | null>(null);
+
+  const stripApiKeyIdQueryParam = useCallback(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('apiKeyId')) return;
+    params.delete('apiKeyId');
+    const nextQuery = params.toString();
+    navigate(
+      { pathname: location.pathname, search: nextQuery ? `?${nextQuery}` : '' },
+      { replace: true }
+    );
+  }, [location.pathname, location.search, navigate]);
+
+  useEffect(() => {
+    if (!apiKeyIdParam) {
+      setAppliedApiKeyId('');
+      setScopedApiKeySelection(null);
+      return;
+    }
+    if (appliedApiKeyId === apiKeyIdParam) return;
+    const aliasList = Array.isArray(apiKeyAliases) ? apiKeyAliases : [];
+    const aliasesReady = apiKeyAliasesLoaded === true || aliasList.length > 0;
+    if (!aliasesReady) return;
+
+    const matchingEntries = aliasList.filter(
+      (entry) => entry.apiKeyId?.trim() === apiKeyIdParam && Boolean(entry.apiKeyHash?.trim())
+    );
+    const matchingHashes = Array.from(
+      new Set(
+        matchingEntries
+          .map((entry) => entry.apiKeyHash?.trim().toLowerCase() || '')
+          .filter((hash) => Boolean(hash) && hash !== 'all' && hash !== '__no_matching_api_key_id__')
+      )
+    );
+    setAppliedApiKeyId(apiKeyIdParam);
+    if (matchingHashes.length === 0) {
+      const unmatchedHash = '__no_matching_api_key_id__';
+      setScopedApiKeySelection({
+        apiKeyId: apiKeyIdParam,
+        primaryHash: unmatchedHash,
+        hashes: [unmatchedHash],
+      });
+      setSelectedApiKeyHash(unmatchedHash);
+      setActiveDataTab('realtime');
+      setRealtimePage(1);
+      return;
+    }
+
+    const lifecycleRank = (lifecycle?: string) =>
+      lifecycle === 'active'
+        ? 0
+        : lifecycle &&
+            lifecycle !== 'rotated' &&
+            lifecycle !== 'superseded' &&
+            lifecycle !== 'missing'
+          ? 1
+          : lifecycle === 'missing'
+            ? 2
+            : lifecycle === 'rotated'
+              ? 3
+              : 4;
+    const preferredEntry = [...matchingEntries].sort(
+      (left, right) =>
+        lifecycleRank(left.lifecycle) - lifecycleRank(right.lifecycle) ||
+        (right.updatedAtMs ?? 0) - (left.updatedAtMs ?? 0)
+    )[0];
+    const preferredCandidate = preferredEntry?.apiKeyHash?.trim().toLowerCase() || '';
+    const targetHash =
+      preferredCandidate &&
+      preferredCandidate !== 'all' &&
+      preferredCandidate !== '__no_matching_api_key_id__'
+        ? preferredCandidate
+        : matchingHashes[0];
+    setScopedApiKeySelection({
+      apiKeyId: apiKeyIdParam,
+      primaryHash: targetHash,
+      hashes: matchingHashes.length > 0 ? matchingHashes : [targetHash],
+    });
+    setSelectedApiKeyHash(targetHash);
+    setActiveDataTab('realtime');
+    setRealtimePage(1);
+  }, [apiKeyAliases, apiKeyAliasesLoaded, apiKeyIdParam, appliedApiKeyId]);
+
+  const awaitingApiKeyIdResolution =
+    Boolean(apiKeyIdParam) && appliedApiKeyId !== apiKeyIdParam;
+  const activeScopedApiKeyHashes =
+    scopedApiKeySelection && selectedApiKeyHash === scopedApiKeySelection.primaryHash
+      ? scopedApiKeySelection.hashes
+      : undefined;
 
   const monitoringScopeFilters = useMemo(
     () => ({
@@ -475,10 +577,12 @@ export function MonitoringCenterPage() {
       model: selectedModel,
       channel: selectedChannel,
       apiKeyHash: selectedApiKeyHash,
+      apiKeyHashes: activeScopedApiKeyHashes,
       headerTraceId: selectedHeaderTraceId,
       status: selectedStatus,
     }),
     [
+      activeScopedApiKeyHashes,
       drilldownAuthFile,
       drilldownAuthIndex,
       drilldownCacheStatus,
@@ -502,6 +606,7 @@ export function MonitoringCenterPage() {
     summary: monitoringSummary,
     accountRows: monitoringAccountRows,
     apiKeyRows: monitoringApiKeyRows,
+    apiKeyDisplayMap: monitoringApiKeyDisplayMap,
     filterOptions: monitoringFilterOptions,
     filteredRows,
     eventsHasMore,
@@ -525,6 +630,8 @@ export function MonitoringCenterPage() {
     searchApiKeyHash: deferredSearchApiKeyHash,
     scopeFilters: monitoringScopeFilters,
     activeDataTab,
+    language: i18n.language,
+    suspendAnalytics: awaitingApiKeyIdResolution,
   });
 
   const loadHeaderSnapshots = useHeaderSnapshotsLoader({
@@ -788,9 +895,17 @@ export function MonitoringCenterPage() {
   }, [requestMonitoringSwitch.failed, showNotification]);
   const overallLoading =
     usageLoading || monitoringBlockingLoading || requestMonitoringAvailability.checking;
+  const apiKeyDeepLinkError =
+    Boolean(apiKeyIdParam) &&
+    appliedApiKeyId !== apiKeyIdParam &&
+    apiKeyAliasesError === true
+      ? t('monitoring.api_key_directory_unavailable', {
+          defaultValue: 'Failed to resolve Client API Key filter. Refresh to retry.',
+        })
+      : '';
   const combinedError = monitoringUnavailable
     ? monitoringError
-    : [usageError, monitoringError].filter(Boolean).join('；');
+    : [apiKeyDeepLinkError, usageError, monitoringError].filter(Boolean).join('；');
   const hasPrices = Object.keys(modelPrices).length > 0;
 
   useEffect(() => {
@@ -816,6 +931,7 @@ export function MonitoringCenterPage() {
   ]);
 
   useEffect(() => {
+    if (awaitingApiKeyIdResolution) return;
     writeMonitoringCenterUiState({
       activeDataTab,
       timeRange,
@@ -827,7 +943,8 @@ export function MonitoringCenterPage() {
       selectedProvider,
       selectedModel,
       selectedChannel,
-      selectedApiKeyHash,
+      selectedApiKeyHash:
+        selectedApiKeyHash === '__no_matching_api_key_id__' ? 'all' : selectedApiKeyHash,
       selectedHeaderTraceId,
       selectedStatus,
       apiKeyPageSize,
@@ -837,6 +954,7 @@ export function MonitoringCenterPage() {
     activeDataTab,
     apiKeyPageSize,
     autoRefreshMs,
+    awaitingApiKeyIdResolution,
     customEndInput,
     customStartInput,
     realtimePageSize,
@@ -878,8 +996,22 @@ export function MonitoringCenterPage() {
   );
 
   const apiKeyOptions = useMemo(
-    () => buildApiKeyOptionsFromRows(monitoringFilterOptions.apiKeyRows, selectedApiKeyHash, t),
-    [monitoringFilterOptions.apiKeyRows, selectedApiKeyHash, t]
+    () =>
+      buildApiKeyOptionsFromRows(
+        monitoringFilterOptions.apiKeyRows,
+        selectedApiKeyHash,
+        t,
+        monitoringApiKeyDisplayMap,
+        scopedApiKeySelection?.apiKeyId || apiKeyIdParam
+      ),
+    [
+      apiKeyIdParam,
+      monitoringApiKeyDisplayMap,
+      monitoringFilterOptions.apiKeyRows,
+      scopedApiKeySelection?.apiKeyId,
+      selectedApiKeyHash,
+      t,
+    ]
   );
 
   const statusOptions = useMemo(() => buildStatusOptions(t), [t]);
@@ -1221,9 +1353,32 @@ export function MonitoringCenterPage() {
     setSelectedStatus(snapshot.selectedStatus);
   }, []);
 
+  const handleApiKeyFilterChange = useCallback(
+    (value: string) => {
+      if (value === '__no_matching_api_key_id__') {
+        if (scopedApiKeySelection?.primaryHash === '__no_matching_api_key_id__') {
+          return;
+        }
+        setScopedApiKeySelection(null);
+        setAppliedApiKeyId(apiKeyIdParam);
+        stripApiKeyIdQueryParam();
+        setSelectedApiKeyHash('all');
+        return;
+      }
+      setScopedApiKeySelection(null);
+      setAppliedApiKeyId(apiKeyIdParam);
+      stripApiKeyIdQueryParam();
+      setSelectedApiKeyHash(value);
+    },
+    [apiKeyIdParam, scopedApiKeySelection?.primaryHash, stripApiKeyIdQueryParam]
+  );
+
   const clearFilters = useCallback(() => {
     focusSnapshotRef.current = null;
     setFocusedAccountId(null);
+    setScopedApiKeySelection(null);
+    setAppliedApiKeyId(apiKeyIdParam);
+    stripApiKeyIdQueryParam();
     setSearchInput('');
     setSelectedAccount('all');
     setSelectedProvider('all');
@@ -1237,7 +1392,7 @@ export function MonitoringCenterPage() {
     setDrilldownRequestType('');
     setDrilldownMinLatencyMs(undefined);
     setDrilldownCacheStatus('');
-  }, []);
+  }, [apiKeyIdParam, stripApiKeyIdQueryParam]);
 
   const renderMonitoringEmptyState = () => (
     <div className={styles.emptyState}>
@@ -2135,7 +2290,7 @@ export function MonitoringCenterPage() {
         onProviderChange={setSelectedProvider}
         onModelChange={setSelectedModel}
         onChannelChange={setSelectedChannel}
-        onApiKeyChange={setSelectedApiKeyHash}
+        onApiKeyChange={handleApiKeyFilterChange}
         onStatusChange={(value) => setSelectedStatus(value as StatusFilter)}
         onSearchChange={setSearchInput}
         onClearFilters={clearFilters}

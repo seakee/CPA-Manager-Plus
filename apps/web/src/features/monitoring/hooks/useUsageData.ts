@@ -51,6 +51,8 @@ export interface UseUsageDataReturn {
   /** Re-reads prices for the current scope without dropping the snapshot. */
   reloadModelPrices: () => Promise<void>;
   apiKeyAliases: ApiKeyAlias[];
+  apiKeyAliasesLoaded?: boolean;
+  apiKeyAliasesError?: boolean;
   usageServiceAvailable: boolean;
   setModelPrices: (prices: Record<string, ModelPrice>) => Promise<void>;
   loadApiKeyAliases: () => Promise<void>;
@@ -88,10 +90,13 @@ export function useUsageData({
   const [modelPrices, setModelPricesState] = useState<Record<string, ModelPrice>>({});
   const [modelPricesLoaded, setModelPricesLoaded] = useState(false);
   const [apiKeyAliases, setApiKeyAliases] = useState<ApiKeyAlias[]>([]);
+  const [apiKeyAliasesLoaded, setApiKeyAliasesLoaded] = useState(false);
+  const [apiKeyAliasesError, setApiKeyAliasesError] = useState(false);
   const [usageServiceAvailable, setUsageServiceAvailable] = useState(false);
   const requestIdRef = useRef(0);
   const aliasRequestIdRef = useRef(0);
   const managerServiceAvailable = featureAvailability.managerServiceAvailable;
+  const availabilityChecking = featureAvailability.checking;
   const modelPriceServiceBase = featureAvailability.modelPricesAvailable
     ? featureAvailability.managerServiceBase
     : '';
@@ -139,10 +144,12 @@ export function useUsageData({
   useLayoutEffect(() => {
     aliasRequestIdRef.current += 1;
     setApiKeyAliases([]);
+    setApiKeyAliasesLoaded(false);
+    setApiKeyAliasesError(false);
     return () => {
       aliasRequestIdRef.current += 1;
     };
-  }, [apiBase, managementKey, modelPriceServiceBase]);
+  }, [apiBase, availabilityChecking, managementKey, modelPriceServiceBase]);
 
   const getModelPricesFromApi = useCallback(async (): Promise<ModelPricesResponse> => {
     if (!modelPriceServiceBase) {
@@ -296,19 +303,26 @@ export function useUsageData({
   }, [loadModelPricesFromStorage]);
 
   const loadApiKeyAliases = useCallback(async () => {
+    if (availabilityChecking) {
+      return;
+    }
     const requestId = aliasRequestIdRef.current + 1;
     aliasRequestIdRef.current = requestId;
     try {
       const response = await getApiKeyAliasesFromApi();
       if (aliasRequestIdRef.current !== requestId) return;
       setApiKeyAliases(Array.isArray(response.items) ? response.items : []);
+      setApiKeyAliasesError(false);
+      setApiKeyAliasesLoaded(true);
     } catch {
       if (aliasRequestIdRef.current !== requestId) return;
+      setApiKeyAliasesError(true);
+      setApiKeyAliasesLoaded(false);
       useNotificationStore
         .getState()
         .showNotification(i18n.t('notification.refresh_failed'), 'error');
     }
-  }, [getApiKeyAliasesFromApi]);
+  }, [availabilityChecking, getApiKeyAliasesFromApi]);
 
   const loadUsage = useCallback(async () => {
     const requestId = requestIdRef.current + 1;
@@ -470,6 +484,8 @@ export function useUsageData({
     modelPricesScopeKey,
     reloadModelPrices,
     apiKeyAliases,
+    apiKeyAliasesLoaded,
+    apiKeyAliasesError,
     usageServiceAvailable: managerServiceAvailable || usageServiceAvailable,
     setModelPrices,
     loadApiKeyAliases,

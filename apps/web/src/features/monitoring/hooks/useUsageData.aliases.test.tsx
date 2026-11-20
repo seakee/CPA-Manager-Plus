@@ -170,4 +170,30 @@ describe('useUsageData api key alias revalidation', () => {
     });
     expect(latest.apiKeyAliases[0]?.alias).toBe('new-scope');
   });
+
+  it('keeps apiKeyAliasesLoaded false while featureAvailability.checking is true on cold load and loads once checking finishes', async () => {
+    mocks.availability = {
+      ...availability(''),
+      checking: true,
+      modelPricesAvailable: false,
+      managerServiceAvailable: false,
+      managerServiceBase: '',
+    };
+    mocks.getApiKeyAliases.mockResolvedValue({
+      items: [{ apiKeyHash: 'hash-cold', alias: 'Cold Load Key', apiKeyId: 'key_prod' }],
+    });
+
+    await mount();
+    expect(latest.apiKeyAliasesLoaded).toBe(false);
+    expect(mocks.getApiKeyAliases).not.toHaveBeenCalled();
+
+    mocks.availability = availability('http://manager.local');
+    await act(async () => {
+      renderer!.update(<Harness />);
+      await Promise.resolve();
+    });
+    expect(mocks.getApiKeyAliases).toHaveBeenCalledTimes(1);
+    expect(latest.apiKeyAliasesLoaded).toBe(true);
+    expect(latest.apiKeyAliases[0]?.alias).toBe('Cold Load Key');
+  });
 });

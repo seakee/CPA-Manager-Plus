@@ -1,6 +1,9 @@
 import type { ComponentType, SVGProps } from 'react';
 import {
+  IconBan,
+  IconChartLine,
   IconCheck,
+  IconChevronLeft,
   IconChevronRight,
   IconCircleHelp,
   IconClock,
@@ -12,12 +15,16 @@ import {
   IconKey,
   IconLayoutDashboard,
   IconMoon,
+  IconMoreVertical,
+  IconPencil,
   IconPlus,
   IconRefreshCw,
+  IconRotateCcw,
   IconSearch,
   IconSettings,
   IconShieldCheck,
   IconSun,
+  IconTrendingUp,
   IconTriangleAlert,
   IconX,
   type IconProps,
@@ -45,6 +52,14 @@ const sharedIconComponents = {
   search: IconSearch,
   chevronRight: IconChevronRight,
   info: IconInfo,
+  edit: IconPencil,
+  pencil: IconPencil,
+  rotate: IconRotateCcw,
+  moreVertical: IconMoreVertical,
+  chart: IconChartLine,
+  trendingUp: IconTrendingUp,
+  chevronLeft: IconChevronLeft,
+  ban: IconBan,
 } as const satisfies Record<string, ComponentType<IconProps>>;
 
 const localPaths = {

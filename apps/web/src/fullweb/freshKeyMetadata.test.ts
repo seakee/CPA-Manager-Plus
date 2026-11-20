@@ -8,6 +8,7 @@ import {
   keyRuntimePillClass,
   keyRuntimeTextKey,
   maskedPreviewFor,
+  mergeRenamedKey,
   validKey,
   validKeyOperationResult,
   validSavedSecret,
@@ -54,6 +55,12 @@ describe('validKey', () => {
     expect(validKey({ ...installerKey, maskedPreview: '…-one' })).toBe(false);
     expect(validKey({ ...adoptedKey, maskedPreview: 'cpamp_sk_…1a2b' })).toBe(false);
     expect(validKey({ ...adoptedKey, maskedPreview: 'source-client-one' })).toBe(false);
+    expect(
+      validKey({ ...adoptedKey, maskedPreview: 'cpamp_sk_…1a2b', lastRotatedAtMs: 1700000009000 })
+    ).toBe(true);
+    expect(
+      validKey({ ...installerKey, maskedPreview: 'cpamp_sk_…1a2b', lastRotatedAtMs: 1700000009000 })
+    ).toBe(true);
   });
 
   it('refuses an origin outside the closed set', () => {
@@ -278,5 +285,86 @@ describe('validKeyOperationResult and status helpers', () => {
     );
     expect(effectBlockerTextKey('last_effective_key')).toBe('effectBlockerLastKey');
     expect(effectBlockerTextKey('unrecognized')).toBe('effectBlockerUnknown');
+  });
+});
+
+describe('mergeRenamedKey', () => {
+  it('preserves effective_observed and revoked_observed when rename returns non-observed runtime without operationId', () => {
+    const prevEffective: Key = {
+      ...workspaceKey,
+      runtimeState: 'effective_observed',
+      operationId: '',
+      effectCode: '',
+    };
+    const renamedUnknown: Key = {
+      ...prevEffective,
+      name: 'Renamed',
+      nameRevision: 2,
+      runtimeState: 'effect_unknown',
+      effectCode: 'stale_code',
+    };
+    expect(mergeRenamedKey(prevEffective, renamedUnknown)).toEqual({
+      ...renamedUnknown,
+      runtimeState: 'effective_observed',
+      operationId: '',
+      effectCode: '',
+    });
+
+    const prevRevoked: Key = {
+      ...workspaceKey,
+      runtimeState: 'revoked_observed',
+      operationId: '',
+      effectCode: '',
+    };
+    const renamedNotApplied: Key = {
+      ...prevRevoked,
+      name: 'Renamed',
+      nameRevision: 2,
+      runtimeState: 'not_applied',
+    };
+    expect(mergeRenamedKey(prevRevoked, renamedNotApplied)).toEqual({
+      ...renamedNotApplied,
+      runtimeState: 'revoked_observed',
+      operationId: '',
+      effectCode: '',
+    });
+  });
+
+  it('returns updated directly when operationId is set, identity/lifecycle changed, or previous was not observed', () => {
+    const prevEffective: Key = {
+      ...workspaceKey,
+      runtimeState: 'effective_observed',
+    };
+    const withOp: Key = {
+      ...prevEffective,
+      runtimeState: 'effect_unknown',
+      operationId: 'c'.repeat(32),
+    };
+    expect(mergeRenamedKey(prevEffective, withOp)).toBe(withOp);
+
+    const lifecycleChanged: Key = {
+      ...prevEffective,
+      lifecycle: 'superseded',
+      runtimeState: 'not_applied',
+    };
+    expect(mergeRenamedKey(prevEffective, lifecycleChanged)).toBe(lifecycleChanged);
+
+    const rotatedSameTail: Key = {
+      ...prevEffective,
+      lastRotatedAtMs: 1795180000000,
+      runtimeState: 'effect_unknown',
+    };
+    expect(mergeRenamedKey(prevEffective, rotatedSameTail)).toBe(rotatedSameTail);
+
+    const prevNotApplied: Key = {
+      ...workspaceKey,
+      runtimeState: 'not_applied',
+    };
+    const updatedUnknown: Key = {
+      ...prevNotApplied,
+      name: 'Renamed',
+      runtimeState: 'effect_unknown',
+    };
+    expect(mergeRenamedKey(prevNotApplied, updatedUnknown)).toBe(updatedUnknown);
   });
 });

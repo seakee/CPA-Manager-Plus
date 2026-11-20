@@ -7,15 +7,26 @@ import {
   type UseMonitoringAnalyticsParams,
   type UseMonitoringAnalyticsReturn,
 } from '@/features/monitoring/hooks/useMonitoringAnalytics';
-import type { MonitoringAnalyticsApiKeyStatRow } from '@/services/api/usageService';
+import type { ApiKeyAlias, MonitoringAnalyticsApiKeyStatRow } from '@/services/api/usageService';
 import { useUsageAnalytics } from './useUsageAnalytics';
 
 vi.mock('@/features/monitoring/hooks/useMonitoringAnalytics', () => ({
   useMonitoringAnalytics: vi.fn(),
 }));
 
+const usageDataMocks = vi.hoisted(() => ({
+  apiKeyAliases: [] as ApiKeyAlias[],
+  apiKeyAliasesLoaded: true as boolean | undefined,
+  apiKeyAliasesError: false,
+}));
+
 vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
-  useUsageData: () => ({ apiKeyAliases: [], loadApiKeyAliases: vi.fn() }),
+  useUsageData: () => ({
+    apiKeyAliases: usageDataMocks.apiKeyAliases,
+    apiKeyAliasesLoaded: usageDataMocks.apiKeyAliasesLoaded,
+    apiKeyAliasesError: usageDataMocks.apiKeyAliasesError,
+    loadApiKeyAliases: vi.fn(),
+  }),
 }));
 
 const monitoringMetaMocks = vi.hoisted(() => ({
@@ -232,6 +243,8 @@ describe('useUsageAnalytics request orchestration', () => {
   beforeEach(() => {
     authMocks.apiBase = 'https://a.test';
     authMocks.managementKey = 'key-a';
+    usageDataMocks.apiKeyAliases = [];
+    usageDataMocks.apiKeyAliasesLoaded = true;
     selectorError = '';
     credentialTimelineError = '';
     credentialTimelineLoading = false;
@@ -255,13 +268,16 @@ describe('useUsageAnalytics request orchestration', () => {
     useMonitoringAnalyticsMock.mockImplementation(resultFor);
   });
 
-  afterEach(() => {
-    renderer?.unmount();
+  afterEach(async () => {
+    await act(async () => {
+      renderer?.unmount();
+    });
     renderer = null;
   });
 
   const renderHook = async (initialEntry = '/usage-analytics') => {
     await act(async () => {
+      renderer?.unmount();
       renderer = create(
         <MemoryRouter initialEntries={[initialEntry]}>
           <Harness />
@@ -771,5 +787,215 @@ describe('useUsageAnalytics request orchestration', () => {
     await act(async () => { latestResult!.setSelectedCredentialId('credential-b.json'); });
     expect(latestResult!.credentialTrendLoaded).toBe(false);
     expect(latestResult!.heatmapDateLoaded).toBe(false);
+  });
+  it('resolves ?apiKeyId=<canonicalId> across active and rotated historical hashes and opens apiKeys tab', async () => {
+    usageDataMocks.apiKeyAliasesLoaded = true;
+    usageDataMocks.apiKeyAliases = [
+      {
+        apiKeyHash: 'hash-active',
+        alias: 'Prod',
+        updatedAtMs: 200,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…new4',
+        origin: 'workspace',
+        lifecycle: 'active',
+      },
+      {
+        apiKeyHash: 'hash-rotated-old',
+        alias: 'Prod',
+        updatedAtMs: 100,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…old1',
+        origin: 'workspace',
+        lifecycle: 'rotated',
+      },
+      {
+        apiKeyHash: 'hash-other',
+        alias: 'Other',
+        updatedAtMs: 150,
+        apiKeyId: 'key_other',
+        maskedPreview: 'cpamp_sk_…othr',
+        origin: 'workspace',
+        lifecycle: 'active',
+      },
+    ];
+    apiKeyStats = [
+      createApiKeyStatRow({ id: 'hash-active', api_key_hash: 'hash-active', cost: 2 }),
+      createApiKeyStatRow({ id: 'hash-rotated-old', api_key_hash: 'hash-rotated-old', cost: 1 }),
+    ];
+
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+
+    expect(latestResult?.activeTab).toBe('apiKeys');
+    expect(latestResult?.filters.apiKeyHash).toBe('hash-active');
+    expect(latestResult?.filters.apiKeyHashes).toEqual(['hash-active', 'hash-rotated-old']);
+    expect(latestResult?.selectedApiKey?.apiKeyHash).toBe('hash-active');
+    expect(
+      lastParams((params) => Boolean(params.include?.summary))?.filters?.api_key_hashes
+    ).toEqual(['hash-active', 'hash-rotated-old']);
+    expect(
+      lastParams((params) => Boolean(params.include?.timeline) && !params.include?.summary)?.filters
+        ?.api_key_hashes
+    ).toEqual(['hash-active', 'hash-rotated-old']);
+  });
+
+  it('fails closed without issuing unfiltered analytics when ?apiKeyId alias resolution errors', async () => {
+    usageDataMocks.apiKeyAliasesLoaded = false;
+    usageDataMocks.apiKeyAliasesError = true;
+    usageDataMocks.apiKeyAliases = [];
+
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+
+    expect(latestResult?.error).toBeTruthy();
+    usageDataMocks.apiKeyAliasesError = false;
+  });
+
+  it('keeps multi-hash timeline scope when active hash has 0 calls and never leaks sentinel for unmatched ?apiKeyId to storage', async () => {
+    const storedEntries: Record<string, string> = {};
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => storedEntries[key] ?? null,
+        setItem: (key: string, value: string) => {
+          storedEntries[key] = value;
+        },
+        removeItem: (key: string) => {
+          delete storedEntries[key];
+        },
+      },
+    });
+    usageDataMocks.apiKeyAliasesLoaded = true;
+    usageDataMocks.apiKeyAliases = [
+      {
+        apiKeyHash: 'hash-active-zero',
+        alias: 'Prod',
+        updatedAtMs: 200,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…new4',
+        origin: 'workspace',
+        lifecycle: 'active',
+      },
+      {
+        apiKeyHash: 'hash-rotated-calls',
+        alias: 'Prod',
+        updatedAtMs: 100,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…old1',
+        origin: 'workspace',
+        lifecycle: 'rotated',
+      },
+    ];
+    // Only rotated hash has stats rows; active hash has 0 calls and is absent from apiKeyStats.
+    apiKeyStats = [
+      createApiKeyStatRow({ id: 'hash-rotated-calls', api_key_hash: 'hash-rotated-calls', cost: 3 }),
+    ];
+
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+
+    expect(
+      lastParams((params) => Boolean(params.include?.timeline) && !params.include?.summary)?.filters
+        ?.api_key_hashes
+    ).toEqual(['hash-active-zero', 'hash-rotated-calls']);
+
+    // Unmatched ?apiKeyId=key_deleted must NOT persist internal sentinel into localStorage.
+    await renderHook('/usage-analytics?apiKeyId=key_deleted');
+    const rawStored = JSON.stringify(storedEntries);
+    expect(rawStored).not.toContain('__no_matching_api_key_id__');
+    vi.unstubAllGlobals();
+  });
+
+  it('gates all analytics requests until appliedApiKeyId commits and allows resetFilters/clearFilter/setFilters to dismiss ?apiKeyId=', async () => {
+    usageDataMocks.apiKeyAliasesLoaded = true;
+    usageDataMocks.apiKeyAliases = [
+      {
+        apiKeyHash: 'hash-active',
+        alias: 'Prod',
+        updatedAtMs: 200,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…new4',
+        origin: 'workspace',
+        lifecycle: 'active',
+      },
+      {
+        apiKeyHash: 'hash-old',
+        alias: 'Prod',
+        updatedAtMs: 100,
+        apiKeyId: 'key_prod',
+        maskedPreview: 'cpamp_sk_…old1',
+        origin: 'workspace',
+        lifecycle: 'rotated',
+      },
+      {
+        apiKeyHash: 'hash-other',
+        alias: 'Staging',
+        updatedAtMs: 150,
+        apiKeyId: 'key_staging',
+        maskedPreview: 'cpamp_sk_…stg9',
+        origin: 'workspace',
+        lifecycle: 'active',
+      },
+    ];
+    apiKeyStats = [createApiKeyStatRow({ id: 'hash-active', api_key_hash: 'hash-active', cost: 2 })];
+    useMonitoringAnalyticsMock.mockClear();
+
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+
+    // Every non-suspended analytics request BEFORE manual reset must be scoped to key_prod (zero unscoped initial leaks).
+    const firstRenderCalls = useMonitoringAnalyticsMock.mock.calls.slice(0, 6).map(([arg]) => arg);
+    expect(firstRenderCalls).toHaveLength(6);
+    for (const firstArg of firstRenderCalls) {
+      expect(firstArg.fromMs).toBeUndefined();
+      expect(firstArg.toMs).toBeUndefined();
+    }
+    const initialActiveDataCalls = useMonitoringAnalyticsMock.mock.calls
+      .map(([arg]) => arg)
+      .filter(
+        (arg) =>
+          arg?.fromMs !== undefined &&
+          arg?.toMs !== undefined &&
+          !arg?.include?.filter_selectors
+      );
+    expect(initialActiveDataCalls.length).toBeGreaterThan(0);
+    for (const callArg of initialActiveDataCalls) {
+      expect(callArg.filters?.api_key_hashes).toEqual(expect.arrayContaining(['hash-active']));
+    }
+
+    // Manual setFilters({ apiKeyHash: 'hash-other' }) must NOT snap back to key_prod!
+    await act(async () => {
+      latestResult?.setFilters({ apiKeyHash: 'hash-other' });
+      await Promise.resolve();
+    });
+    expect(latestResult?.filters.apiKeyHash).toBe('hash-other');
+    expect(latestResult?.filters.apiKeyHashes).toBeUndefined();
+    expect(latestResult?.filters.apiKeyId).toBeUndefined();
+
+    // Re-open deep link and verify resetFilters() dismisses ?apiKeyId= cleanly without snapping back.
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+    expect(latestResult?.filters.apiKeyId).toBe('key_prod');
+    await act(async () => {
+      latestResult?.resetFilters();
+      await Promise.resolve();
+    });
+    expect(latestResult?.filters.apiKeyHash).toBe('all');
+    expect(latestResult?.filters.apiKeyHashes).toBeUndefined();
+    expect(latestResult?.filters.apiKeyId).toBeUndefined();
+
+    // Re-open deep link and verify clearFilter('apiKeyHash') dismisses ?apiKeyId= cleanly.
+    await renderHook('/usage-analytics?apiKeyId=key_prod');
+    await act(async () => {
+      latestResult?.clearFilter('apiKeyHash');
+      await Promise.resolve();
+    });
+    expect(latestResult?.filters.apiKeyHash).toBe('all');
+    expect(latestResult?.filters.apiKeyId).toBeUndefined();
+    // Re-selecting sentinel on unmatched ?apiKeyId= preserves apiKeyId instead of orphaning '__no_matching_api_key_id__'
+    await renderHook('/usage-analytics?apiKeyId=key_unknown');
+    expect(latestResult?.filters.apiKeyId).toBe('key_unknown');
+    await act(async () => {
+      latestResult?.setFilters({ apiKeyHash: '__no_matching_api_key_id__' });
+      await Promise.resolve();
+    });
+    expect(latestResult?.filters.apiKeyId).toBe('key_unknown');
+    expect(latestResult?.filters.apiKeyHash).toBe('__no_matching_api_key_id__');
+    expect(latestResult?.filters.apiKeyHashes).toEqual(['__no_matching_api_key_id__']);
   });
 });

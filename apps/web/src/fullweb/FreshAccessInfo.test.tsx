@@ -316,4 +316,98 @@ describe('FreshAccessInfo', () => {
     expect(JSON.stringify(renderer.toJSON())).toContain('Bookmark the console URL.');
   });
 
+  it('renders client-only inference view hiding management URL, mode badge, and clientKeyNote', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: 'k' },
+      {
+        info: managedInfo,
+        clientOnly: true,
+        compact: true,
+        defaultProtocolsCollapsed: false,
+      }
+    );
+    expect(hasID('access-info-management')).toBe(false);
+    expect(hasID('access-info-mode')).toBe(false);
+    expect(byID('access-info-status').props.children).toBe(accessInfoText('statusReady', 'en'));
+    expect(byID('access-info-inference').props.children).toBe('https://manager.example/my-api');
+    expect(byID('access-info-protocol-base-openai').props.children).toBe(
+      'https://manager.example/my-api/v1'
+    );
+    const renderedText = JSON.stringify(renderer.toJSON());
+    expect(renderedText).toContain(accessInfoText('clientTitle', 'en'));
+    expect(renderedText).toContain(accessInfoText('clientSubtitle', 'en'));
+    expect(renderedText).not.toContain(accessInfoText('clientKeyNote', 'en'));
+    expect(renderedText).not.toContain('https://manager.example/my-admin');
+  });
+
+  it('switches protocol cards via compact tabs in clientOnly mode while keeping full list when clientOnly is false', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: 'k' },
+      {
+        info: managedInfo,
+        clientOnly: true,
+        compact: true,
+      }
+    );
+    expect(byID('access-info-protocol-tab-openai').props['aria-selected']).toBe(true);
+    expect(byID('access-info-protocol-tab-anthropic').props['aria-selected']).toBe(false);
+    expect(hasID('access-info-protocol-openai')).toBe(true);
+    expect(hasID('access-info-protocol-anthropic')).toBe(false);
+    expect(hasID('access-info-protocol-gemini')).toBe(false);
+    expect(byID('access-info-summary').props.className).toContain('is-client-access-card');
+    expect(
+      byID('access-info-protocol-openai').findAllByProps({ className: 'access-protocol-head' })
+    ).toHaveLength(0);
+    expect(
+      byID('access-info-protocols').props.className
+    ).toBe('key-access-protocol-panel');
+
+    await act(async () => {
+      byID('access-info-protocol-tab-anthropic').props.onClick();
+    });
+    expect(byID('access-info-protocol-tab-openai').props['aria-selected']).toBe(false);
+    expect(byID('access-info-protocol-tab-anthropic').props['aria-selected']).toBe(true);
+    expect(hasID('access-info-protocol-openai')).toBe(false);
+    expect(hasID('access-info-protocol-anthropic')).toBe(true);
+    expect(byID('access-info-protocol-base-anthropic').props.children).toBe(
+      'https://manager.example/my-api'
+    );
+    expect(byID('access-info-protocol-example-anthropic').props.children).toBe(
+      'https://manager.example/my-api/v1/messages'
+    );
+
+    // Single-protocol external mode omits the tab strip.
+    await act(async () => renderer.unmount());
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: 'k' },
+      {
+        info: externalInfo,
+        clientOnly: true,
+        compact: true,
+      }
+    );
+    expect(hasID('access-info-protocol-tab-openai')).toBe(false);
+    expect(hasID('access-info-protocol-openai')).toBe(true);
+
+    // Non-clientOnly renders all protocols at once with no protocol switcher tabs.
+    await act(async () => renderer.unmount());
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: 'k' },
+      {
+        info: managedInfo,
+        clientOnly: false,
+      }
+    );
+    expect(hasID('access-info-protocol-tab-openai')).toBe(false);
+    expect(hasID('access-info-protocol-openai')).toBe(true);
+    expect(hasID('access-info-protocol-anthropic')).toBe(true);
+    expect(hasID('access-info-protocol-gemini')).toBe(true);
+  });
+
 });

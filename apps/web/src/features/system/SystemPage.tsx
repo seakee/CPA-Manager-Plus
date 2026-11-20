@@ -149,7 +149,9 @@ function SystemPageContent({
             ? (record['api-key'] ?? record['apiKey'] ?? record.key ?? record.Key)
             : '';
       const trimmed = String(value ?? '').trim();
-      if (!trimmed || seen.has(trimmed)) return;
+      if (!trimmed || trimmed.includes('…') || trimmed.includes('***') || seen.has(trimmed)) {
+        return;
+      }
       seen.add(trimmed);
       keys.push(trimmed);
     });
@@ -199,13 +201,13 @@ function SystemPageContent({
 
     setModelStatus({ type: 'muted', message: { key: 'system_info.models_loading' } });
     try {
-      const apiKeys = await resolveApiKeysForModels();
-      if (requestId !== modelRequestId.current) return;
-      const primaryKey = apiKeys[0];
       const managerCredential =
         auth.sessionMode === 'manager_embedded' && /\/api\/v2\/cpamp$/i.test(auth.apiBase)
           ? auth.managementKey
           : undefined;
+      const apiKeys = managerCredential ? [] : await resolveApiKeysForModels();
+      if (requestId !== modelRequestId.current) return;
+      const primaryKey = apiKeys[0];
       const list = await fetchModelsFromStore(
         auth.apiBase,
         primaryKey,

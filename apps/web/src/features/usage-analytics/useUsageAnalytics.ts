@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import i18n from '@/i18n';
 import { useMonitoringAnalytics } from '@/features/monitoring/hooks/useMonitoringAnalytics';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
 import { buildApiKeyDisplayMap } from '@/features/monitoring/model/apiKeys';
@@ -92,11 +93,14 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debouncedValue;
 }
 
-export function useUsageAnalytics() {
+export function useUsageAnalytics(language?: string) {
   const config = useConfigStore((state) => state.config);
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
-  const { apiKeyAliases, loadApiKeyAliases } = useUsageData({ loadUsageEvents: false });
+  const { apiKeyAliases, apiKeyAliasesLoaded, apiKeyAliasesError, loadApiKeyAliases } =
+    useUsageData({
+      loadUsageEvents: false,
+    });
   // Credential metadata belongs to one connection scope. Mount loads and manual
   // refreshes share a generation so a late response for another scope is dropped,
   // and the snapshot is tagged with its scope so a switch reads as empty without
@@ -156,9 +160,91 @@ export function useUsageAnalytics() {
   );
   const browserTimeZone = useMemo(() => getBrowserTimeZone(), []);
   const apiKeyDisplayMap = useMemo(
-    () => buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || []),
-    [apiKeyAliases, config?.apiKeys]
+    () => buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || [], language),
+    [apiKeyAliases, config?.apiKeys, language]
   );
+  const apiKeyIdParam = searchParams.get('apiKeyId')?.trim() || '';
+  const [appliedApiKeyId, setAppliedApiKeyId] = useState('');
+
+  useEffect(() => {
+    if (!apiKeyIdParam) {
+      setAppliedApiKeyId('');
+      return;
+    }
+    if (appliedApiKeyId === apiKeyIdParam) return;
+    const aliasList = Array.isArray(apiKeyAliases) ? apiKeyAliases : [];
+    const aliasesReady = apiKeyAliasesLoaded === true || aliasList.length > 0;
+    if (!aliasesReady) return;
+
+    const matchingEntries = aliasList.filter(
+      (entry) => readString(entry.apiKeyId) === apiKeyIdParam && Boolean(readString(entry.apiKeyHash))
+    );
+    const matchingHashes = Array.from(
+      new Set(
+        matchingEntries
+          .map((entry) => getSelectableApiKeyHash(entry.apiKeyHash))
+          .filter((hash): hash is string => Boolean(hash))
+      )
+    );
+    setAppliedApiKeyId(apiKeyIdParam);
+    const hasExplicitTab = Boolean(searchParams.get('tab')?.trim());
+    if (matchingHashes.length === 0) {
+      const unmatchedHash = '__no_matching_api_key_id__';
+      setFiltersState((current) => ({
+        ...current,
+        apiKeyHash: unmatchedHash,
+        apiKeyHashes: [unmatchedHash],
+        apiKeyId: apiKeyIdParam,
+      }));
+      if (!hasExplicitTab) {
+        setActiveTabState('apiKeys');
+      }
+      setSelectedApiKeyHash('');
+      setSelectedBucketMs(null);
+      setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
+      setSelectedHeatmapCell(null);
+      return;
+    }
+    const lifecycleRank = (lifecycle?: string) =>
+      lifecycle === 'active'
+        ? 0
+        : lifecycle &&
+            lifecycle !== 'rotated' &&
+            lifecycle !== 'superseded' &&
+            lifecycle !== 'missing'
+          ? 1
+          : lifecycle === 'missing'
+            ? 2
+            : lifecycle === 'rotated'
+              ? 3
+              : 4;
+    const preferredEntry = [...matchingEntries].sort(
+      (left, right) =>
+        lifecycleRank(left.lifecycle) - lifecycleRank(right.lifecycle) ||
+        (right.updatedAtMs ?? 0) - (left.updatedAtMs ?? 0)
+    )[0];
+    const primaryHash =
+      getSelectableApiKeyHash(preferredEntry?.apiKeyHash) || matchingHashes[0] || 'all';
+
+    setFiltersState((current) => {
+      const next: UsageAnalyticsFiltersState = {
+        ...current,
+        apiKeyHash: primaryHash,
+        apiKeyHashes: matchingHashes,
+        apiKeyId: apiKeyIdParam,
+      };
+      writeUsageAnalyticsUiState({ filters: next });
+      return next;
+    });
+    if (!hasExplicitTab) {
+      setActiveTabState('apiKeys');
+      writeUsageAnalyticsUiState({ activeTab: 'apiKeys' });
+    }
+    setSelectedApiKeyHash('');
+    setSelectedBucketMs(null);
+    setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
+    setSelectedHeatmapCell(null);
+  }, [apiKeyAliases, apiKeyAliasesLoaded, apiKeyIdParam, appliedApiKeyId, searchParams]);
   const runMonitoringMetaLoad = useCallback(async () => {
     const requestId = monitoringMetaRequestIdRef.current + 1;
     monitoringMetaRequestIdRef.current = requestId;
@@ -293,13 +379,16 @@ export function useUsageAnalytics() {
   );
 
   useEffect(() => {
+    if (apiKeyIdParam && appliedApiKeyId !== apiKeyIdParam) {
+      return;
+    }
     const nextState = { activeTab: activeTabState, filters };
     writeUsageAnalyticsUiState(nextState);
     const nextParams = buildUsageAnalyticsSearchParams(nextState);
     if (nextParams.toString() !== searchParams.toString()) {
       setSearchParams(nextParams, { replace: true });
     }
-  }, [activeTabState, filters, searchParams, setSearchParams]);
+  }, [activeTabState, apiKeyIdParam, appliedApiKeyId, filters, searchParams, setSearchParams]);
   const drilldownPreview = useMemo(() => {
     if (selectedBucketMs === null) return null;
     return {
@@ -333,9 +422,19 @@ export function useUsageAnalytics() {
     ]
   );
 
+  const apiKeyDeepLinkError =
+    Boolean(apiKeyIdParam) &&
+    appliedApiKeyId !== apiKeyIdParam &&
+    apiKeyAliasesError === true
+      ? i18n.t('monitoring.api_key_directory_unavailable', {
+          defaultValue: 'Failed to resolve Client API Key filter. Refresh to retry.',
+        })
+      : '';
+  const awaitingApiKeyIdResolution =
+    Boolean(apiKeyIdParam) && appliedApiKeyId !== apiKeyIdParam;
   const analytics = useMonitoringAnalytics({
-    fromMs: bounds?.fromMs,
-    toMs: bounds?.toMs,
+    fromMs: awaitingApiKeyIdResolution ? undefined : bounds?.fromMs,
+    toMs: awaitingApiKeyIdResolution ? undefined : bounds?.toMs,
     nowMs,
     dataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -354,8 +453,8 @@ export function useUsageAnalytics() {
     [presentationRangeScopeKey, debouncedSearchQuery]
   );
   const filterSelectorsAnalytics = useMonitoringAnalytics({
-    fromMs: bounds?.fromMs,
-    toMs: bounds?.toMs,
+    fromMs: awaitingApiKeyIdResolution ? undefined : bounds?.fromMs,
+    toMs: awaitingApiKeyIdResolution ? undefined : bounds?.toMs,
     nowMs,
     dataScopeKey: filterSelectorsDataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -386,8 +485,8 @@ export function useUsageAnalytics() {
     [analyticsFilters, debouncedSearchQuery, selectedHeatmapDate]
   );
   const heatmapDateAnalytics = useMonitoringAnalytics({
-    fromMs: selectedHeatmapDate?.fromMs,
-    toMs: selectedHeatmapDate?.toMs,
+    fromMs: awaitingApiKeyIdResolution ? undefined : selectedHeatmapDate?.fromMs,
+    toMs: awaitingApiKeyIdResolution ? undefined : selectedHeatmapDate?.toMs,
     nowMs,
     dataScopeKey: heatmapDateDataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -465,11 +564,15 @@ export function useUsageAnalytics() {
   );
   const apiKeyTrendAnalytics = useMonitoringAnalytics({
     fromMs:
-      (activeTabState === 'overview' || activeTabState === 'trends') && apiKeyTrendHashes.length > 0
+      !awaitingApiKeyIdResolution &&
+      (activeTabState === 'overview' || activeTabState === 'trends') &&
+      apiKeyTrendHashes.length > 0
         ? bounds?.fromMs
         : undefined,
     toMs:
-      (activeTabState === 'overview' || activeTabState === 'trends') && apiKeyTrendHashes.length > 0
+      !awaitingApiKeyIdResolution &&
+      (activeTabState === 'overview' || activeTabState === 'trends') &&
+      apiKeyTrendHashes.length > 0
         ? bounds?.toMs
         : undefined,
     nowMs,
@@ -518,10 +621,14 @@ export function useUsageAnalytics() {
 
   const selectedModel =
     adapted.modelRows.find((row) => row.id === selectedModelId) ?? adapted.modelRows[0] ?? null;
+  const preferredFilterApiKeyHash =
+    !selectedApiKeyHash && filters.apiKeyHash !== '__no_matching_api_key_id__'
+      ? getSelectableApiKeyHash(filters.apiKeyHash)
+      : '';
   const selectedApiKey =
     adapted.apiKeyRows.find((row) => {
       const apiKeyHash = getSelectableApiKeyHash(row.apiKeyHash);
-      return Boolean(apiKeyHash) && apiKeyHash === selectedApiKeyHash;
+      return Boolean(apiKeyHash) && apiKeyHash === (selectedApiKeyHash || preferredFilterApiKeyHash);
     }) ??
     adapted.apiKeyRows.find((row) => Boolean(getSelectableApiKeyHash(row.apiKeyHash))) ??
     adapted.apiKeyRows[0] ??
@@ -561,13 +668,25 @@ export function useUsageAnalytics() {
       trendMetric,
     ]
   );
-  const selectedApiKeyFilterHash = getSelectableApiKeyHash(selectedApiKey?.apiKeyHash);
+  const selectedApiKeyFilterHash =
+    getSelectableApiKeyHash(selectedApiKey?.apiKeyHash) ||
+    (!selectedApiKeyHash && filters.apiKeyHashes?.length ? preferredFilterApiKeyHash : '');
   const selectedApiKeyTimelineFilters = useMemo(
     () =>
       selectedApiKeyFilterHash
-        ? buildUsageAnalyticsFilters({ ...filters, apiKeyHash: selectedApiKeyFilterHash })
+        ? buildUsageAnalyticsFilters({
+            ...filters,
+            apiKeyHash: selectedApiKeyFilterHash,
+            apiKeyHashes:
+              !selectedApiKeyHash &&
+              filters.apiKeyHashes?.length &&
+              (selectedApiKeyFilterHash === filters.apiKeyHash ||
+                filters.apiKeyHashes.includes(selectedApiKeyFilterHash))
+                ? filters.apiKeyHashes
+                : undefined,
+          })
         : {},
-    [filters, selectedApiKeyFilterHash]
+    [filters, selectedApiKeyFilterHash, selectedApiKeyHash]
   );
   const selectedApiKeyTimelineInclude = useMemo(
     () => ({
@@ -596,8 +715,14 @@ export function useUsageAnalytics() {
     ]
   );
   const selectedApiKeyTimelineAnalytics = useMonitoringAnalytics({
-    fromMs: activeTabState === 'apiKeys' && selectedApiKeyFilterHash ? bounds?.fromMs : undefined,
-    toMs: activeTabState === 'apiKeys' && selectedApiKeyFilterHash ? bounds?.toMs : undefined,
+    fromMs:
+      !awaitingApiKeyIdResolution && activeTabState === 'apiKeys' && selectedApiKeyFilterHash
+        ? bounds?.fromMs
+        : undefined,
+    toMs:
+      !awaitingApiKeyIdResolution && activeTabState === 'apiKeys' && selectedApiKeyFilterHash
+        ? bounds?.toMs
+        : undefined,
     nowMs,
     dataScopeKey: selectedApiKeyTimelineDataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -652,8 +777,13 @@ export function useUsageAnalytics() {
   );
   const selectedCredentialTimelineAnalytics = useMonitoringAnalytics({
     fromMs:
-      activeTabState === 'credentials' && selectedCredentialFilterID ? bounds?.fromMs : undefined,
-    toMs: activeTabState === 'credentials' && selectedCredentialFilterID ? bounds?.toMs : undefined,
+      !awaitingApiKeyIdResolution && activeTabState === 'credentials' && selectedCredentialFilterID
+        ? bounds?.fromMs
+        : undefined,
+    toMs:
+      !awaitingApiKeyIdResolution && activeTabState === 'credentials' && selectedCredentialFilterID
+        ? bounds?.toMs
+        : undefined,
     nowMs,
     dataScopeKey: selectedCredentialTimelineDataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -737,44 +867,89 @@ export function useUsageAnalytics() {
       adapted.summary,
     ]
   );
-  const setFilters = useCallback((patch: Partial<UsageAnalyticsFiltersState>) => {
-    setFiltersState((current) => {
-      const next = {
-        ...current,
-        ...patch,
-        ...(patch.apiKeyHash === undefined
-          ? {}
-          : { apiKeyHash: getSelectableApiKeyHash(patch.apiKeyHash) || 'all' }),
-      };
-      writeUsageAnalyticsUiState({ filters: next });
-      return next;
-    });
-    setSelectedBucketMs(null);
-    setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
-    setSelectedHeatmapCell(null);
-  }, []);
+  const setFilters = useCallback(
+    (patch: Partial<UsageAnalyticsFiltersState>) => {
+      const isSentinelReselect =
+        patch.apiKeyHash === '__no_matching_api_key_id__' && patch.apiKeyHashes === undefined;
+      const shouldClearApiKeyGroup =
+        patch.apiKeyHash !== undefined &&
+        patch.apiKeyHashes === undefined &&
+        !isSentinelReselect;
+      if (shouldClearApiKeyGroup) {
+        setAppliedApiKeyId(apiKeyIdParam);
+      }
+      setFiltersState((current) => {
+        if (isSentinelReselect) {
+          if (current.apiKeyId) {
+            const preserved: UsageAnalyticsFiltersState = {
+              ...current,
+              ...patch,
+              apiKeyHash: current.apiKeyHash,
+              apiKeyHashes: current.apiKeyHashes,
+              apiKeyId: current.apiKeyId,
+            };
+            writeUsageAnalyticsUiState({ filters: preserved });
+            return preserved;
+          }
+          const cleared: UsageAnalyticsFiltersState = {
+            ...current,
+            ...patch,
+            apiKeyHash: 'all',
+            apiKeyHashes: undefined,
+            apiKeyId: undefined,
+          };
+          writeUsageAnalyticsUiState({ filters: cleared });
+          return cleared;
+        }
+        const next: UsageAnalyticsFiltersState = {
+          ...current,
+          ...patch,
+          ...(shouldClearApiKeyGroup ? { apiKeyHashes: undefined, apiKeyId: undefined } : {}),
+          ...(patch.apiKeyHash === undefined
+            ? {}
+            : { apiKeyHash: getSelectableApiKeyHash(patch.apiKeyHash) || 'all' }),
+        };
+        writeUsageAnalyticsUiState({ filters: next });
+        return next;
+      });
+      if (!isSentinelReselect) {
+        setSelectedBucketMs(null);
+        setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
+        setSelectedHeatmapCell(null);
+      }
+    },
+    [apiKeyIdParam]
+  );
 
   const resetFilters = useCallback(() => {
+    setAppliedApiKeyId(apiKeyIdParam);
     setFiltersState(USAGE_ANALYTICS_DEFAULT_FILTERS);
     writeUsageAnalyticsUiState({ filters: USAGE_ANALYTICS_DEFAULT_FILTERS });
     setSelectedBucketMs(null);
     setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
     setSelectedHeatmapCell(null);
-  }, []);
+  }, [apiKeyIdParam]);
 
-  const clearFilter = useCallback((key: UsageSelectedFilterKey) => {
-    setFiltersState((current) => {
-      const next = {
-        ...current,
-        [key]: 'all',
-      };
-      writeUsageAnalyticsUiState({ filters: next });
-      return next;
-    });
-    setSelectedBucketMs(null);
-    setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
-    setSelectedHeatmapCell(null);
-  }, []);
+  const clearFilter = useCallback(
+    (key: UsageSelectedFilterKey) => {
+      if (key === 'apiKeyHash') {
+        setAppliedApiKeyId(apiKeyIdParam);
+      }
+      setFiltersState((current) => {
+        const next: UsageAnalyticsFiltersState = {
+          ...current,
+          [key]: 'all',
+          ...(key === 'apiKeyHash' ? { apiKeyHashes: undefined, apiKeyId: undefined } : {}),
+        };
+        writeUsageAnalyticsUiState({ filters: next });
+        return next;
+      });
+      setSelectedBucketMs(null);
+      setSelectedHeatmapDateKey(USAGE_HEATMAP_ALL_DATES_KEY);
+      setSelectedHeatmapCell(null);
+    },
+    [apiKeyIdParam]
+  );
 
   const selectBucket = useCallback((point: UsageTimelinePoint | null) => {
     setSelectedBucketMs(point?.bucketMs ?? null);
@@ -833,7 +1008,7 @@ export function useUsageAnalytics() {
     bounds,
     resolvedGranularity,
     loading: analytics.loading,
-    error: analytics.error || monitoringMetaError,
+    error: apiKeyDeepLinkError || analytics.error || monitoringMetaError,
     enabled: analytics.enabled,
     apiKeyDisplayMap,
     unavailableReason: analytics.unavailableReason,

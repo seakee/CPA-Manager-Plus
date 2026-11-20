@@ -2,6 +2,13 @@ import type { CredentialInfo } from '@/types/sourceInfo';
 import { buildSourceInfoMap, resolveSourceDisplay } from '@/utils/sourceResolver';
 import { normalizeAuthIndex } from '@/utils/usage';
 import { maskEmailLike, readString } from './base';
+import {
+  formatApiKeyDisplayName,
+  isMaskedApiKeyPreview,
+  resolveApiKeyDisplayName,
+  resolveOriginDefaultName,
+  type ApiKeyDisplayInfo,
+} from './apiKeys';
 import type { MonitoringAuthMeta, MonitoringChannelMeta } from './types';
 
 const GENERIC_PROVIDER_LABELS = new Set([
@@ -83,6 +90,8 @@ export type MonitoringSourceDisplayInput = {
   authLabel?: string | null;
   account?: string | null;
   apiKeyAlias?: string | null;
+  apiKeyMasked?: string | null;
+  apiKeyOrigin?: string | null;
 };
 
 export type MonitoringSourceDisplayContext = {
@@ -91,6 +100,8 @@ export type MonitoringSourceDisplayContext = {
   sourceInfoMap?: ReturnType<typeof buildSourceInfoMap>;
   channelByAuthIndex: Map<string, MonitoringChannelMeta>;
   apiKeyAliasMap?: Map<string, string>;
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>;
+  language?: string;
 };
 
 export type MonitoringSourceDisplay = {
@@ -106,6 +117,7 @@ export type MonitoringSourceDisplay = {
   channelHost: string;
   provider: string;
   fallbackId: string;
+  apiKeyLabel: string;
 };
 
 const shortHash = (value: string | null | undefined) => {
@@ -149,8 +161,33 @@ export const buildMonitoringSourceDisplay = (
     snapshotProvider
   );
   const apiKeyHash = readString(input.apiKeyHash).toLowerCase();
+  const apiKeyDisplay = apiKeyHash ? context.apiKeyDisplayMap?.get(apiKeyHash) : undefined;
+  const explicitAlias = readString(input.apiKeyAlias);
+  const explicitMasked = readString(input.apiKeyMasked);
+  const explicitOrigin = readString(input.apiKeyOrigin);
+  const resolvedDirectoryAlias = apiKeyDisplay
+    ? resolveApiKeyDisplayName(apiKeyDisplay, context.language)
+    : '';
+  const effectiveMasked = readString(apiKeyDisplay?.maskedPreview) || explicitMasked;
+  const synthesizedSnapshotAlias =
+    explicitAlias || explicitOrigin || effectiveMasked
+      ? formatApiKeyDisplayName(
+          explicitAlias ||
+            resolveOriginDefaultName(explicitOrigin || apiKeyDisplay?.origin, context.language),
+          effectiveMasked,
+          apiKeyDisplay?.lifecycle === 'superseded',
+          context.language,
+          apiKeyDisplay?.lifecycle === 'rotated'
+        )
+      : '';
   const apiKeyAlias = firstReadable(
-    input.apiKeyAlias,
+    explicitAlias && apiKeyDisplay?.label && explicitAlias === apiKeyDisplay.label
+      ? resolvedDirectoryAlias
+      : explicitAlias && effectiveMasked && !explicitAlias.includes(effectiveMasked)
+        ? `${explicitAlias} (${effectiveMasked})`
+        : explicitAlias,
+    resolvedDirectoryAlias,
+    synthesizedSnapshotAlias,
     apiKeyHash ? context.apiKeyAliasMap?.get(apiKeyHash) : ''
   );
   const snapshotAccount = readString(input.accountSnapshot);
@@ -195,7 +232,16 @@ export const buildMonitoringSourceDisplay = (
   );
   const sourceMasked = maskEmailLike(sourceLabel || sourceMeta.displayName);
   const accountMasked = maskEmailLike(account || sourceLabel);
-  const fallbackId = shortHash(input.sourceHash || input.apiKeyHash || authIndex);
+  const maskedFallbackCandidate = firstReadable(
+    apiKeyDisplay?.maskedPreview,
+    explicitMasked,
+    apiKeyDisplay?.masked
+  );
+  const fallbackId = readString(input.sourceHash)
+    ? shortHash(input.sourceHash)
+    : maskedFallbackCandidate && isMaskedApiKeyPreview(maskedFallbackCandidate)
+      ? maskedFallbackCandidate
+      : shortHash(maskedFallbackCandidate || input.apiKeyHash || authIndex);
   const nonGenericChannel = channel && !isGenericMonitoringProviderLabel(channel) ? channel : '';
   const nonGenericSource =
     sourceMasked && !isGenericMonitoringProviderLabel(sourceMasked) ? sourceMasked : '';
@@ -239,7 +285,8 @@ export const buildMonitoringSourceDisplay = (
         provider,
         authIndex !== '-' ? `#${shortHash(authIndex)}` : '',
         readString(input.sourceHash),
-        readString(input.apiKeyHash),
+        apiKeyAlias ? '' : readString(input.apiKeyHash),
+        apiKeyAlias,
       ].filter(hasReadableValue)
     )
   ).join(' · ');
@@ -257,5 +304,6 @@ export const buildMonitoringSourceDisplay = (
     channelHost: channelHost || '-',
     provider: provider || '-',
     fallbackId,
+    apiKeyLabel: apiKeyAlias,
   };
 };

@@ -288,6 +288,21 @@
     white-space: nowrap;
   }
 
+  .apiKeyRevokedChip,
+  .apiKeyRotatedChip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 0 8px;
+    border-radius: var(--app-radius-xs);
+    border: 1px solid var(--data-badge-neutral-border);
+    background: var(--data-badge-neutral-bg);
+    color: var(--data-badge-neutral-text);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
   .accountStatusDotEnabled {
     color: var(--status-graphic-success);
   }

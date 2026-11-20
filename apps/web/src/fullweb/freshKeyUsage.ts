@@ -115,7 +115,7 @@ export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
     if (!totals || typeof totals !== 'object') return null;
     const calls = field(totals, 'calls');
     const success = field(totals, 'success');
-    const failure = field(totals, 'failure');
+    const failure = field(totals, 'failure') ?? field(totals, 'failedCalls');
     const inputTokens = field(totals, 'inputTokens');
     const outputTokens = field(totals, 'outputTokens');
     const totalTokens = field(totals, 'totalTokens');
@@ -240,6 +240,8 @@ export function usageReasonText(reason: string): string {
       return k('usageReasonWindowPartial');
     case 'window_unobserved':
       return k('usageReasonWindowUnobserved');
+    case 'upgrade_incomplete':
+      return k('usageReasonUpgradeIncomplete');
     case 'usage_read_failed':
       return k('usageReadFailed');
     default:

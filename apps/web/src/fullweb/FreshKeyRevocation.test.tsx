@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshKeyRevocation } from './FreshKeyRevocation';
 import { createPublicApiClient } from './publicApi';
@@ -385,19 +385,21 @@ describe('Canonical revocation recovery UI', () => {
     expect(
       view.root.findAllByProps({ 'data-testid': 'key-replacement-guide' }).length
     ).toBeGreaterThan(0);
-    expect(view.root.findAllByType('select')[0].props.value).toBe(target);
-    expect(view.root.findAllByType('select')[2].props.value).toBe('replace');
+    const targetCard = view.root.findByProps({ 'data-testid': 'key-operation-target-card' });
+    expect(targetCard.findByType('code').props.children).toBe(keys[0].maskedPreview);
   });
 
-  it('completes a preset adopted-key revoke in a single confirmation and renders a clean post-commit state', async () => {
-    const adoptedKeys = [
+  it('completes a pure revoke in mode="modal" with one click using empty keeperId and auto-continue', async () => {
+    const effectiveKeys = [
       {
         ...keys[0],
+        runtimeState: 'effective_observed' as const,
         origin: 'adopted' as const,
         maskedPreview: 'cpamp_sk_…1111',
       },
       {
         ...keys[1],
+        runtimeState: 'effective_observed' as const,
         origin: 'adopted' as const,
         maskedPreview: 'cpamp_sk_…2222',
       },
@@ -405,7 +407,7 @@ describe('Canonical revocation recovery UI', () => {
     const preparedRevoke = {
       id,
       targetId: target,
-      keeperId: keeper,
+      keeperId: '',
       mode: 'revoke' as const,
       outcome: 'pending' as const,
       revision: 1,
@@ -414,29 +416,28 @@ describe('Canonical revocation recovery UI', () => {
     const committedRevoke = {
       ...preparedRevoke,
       outcome: 'committed' as const,
-      revision: 3,
+      revision: 2,
       steps: [{ name: 'revoke' as const, state: 'observed' as const, returned: true }],
     };
-    let targetRevoked = false;
     const fetchMock = vi.fn<typeof fetch>((input, init) => {
       const url = new URL(String(input)).pathname;
       const method = init?.method ?? 'GET';
-      if (method === 'GET' && /\/revocation\/[0-9a-f]{32}\/(revoke|replace)$/.test(url)) {
-        return Promise.resolve(
-          Response.json({ ready: !targetRevoked, reason: targetRevoked ? 'key_operation_not_found' : '' })
-        );
-      }
       if (method === 'GET' && url === '/control/api/v2/api-keys/operations/latest') {
         return Promise.resolve(result(null, ''));
       }
       if (method === 'POST' && url === `/control/api/v2/api-keys/${target}/revocation`) {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          requestId: 'bb'.repeat(16),
+          keeperId: '',
+          mode: 'revoke',
+        });
         return Promise.resolve(result(preparedRevoke, 'revoke'));
       }
       if (
         method === 'POST' &&
         url === `/control/api/v2/api-keys/operations/${preparedRevoke.id}/continue`
       ) {
-        targetRevoked = true;
+        expect(JSON.parse(String(init?.body))).toEqual({});
         return Promise.resolve(result(committedRevoke, ''));
       }
       return Promise.reject(new Error(`unexpected ${method} ${url}`));
@@ -450,7 +451,9 @@ describe('Canonical revocation recovery UI', () => {
     await act(async () => {
       view = create(
         <FreshKeyRevocation
-          keys={adoptedKeys}
+          mode="modal"
+          open={true}
+          keys={effectiveKeys}
           client={apiClient}
           credential="test-admin"
           onUnauthorized={vi.fn()}
@@ -463,48 +466,165 @@ describe('Canonical revocation recovery UI', () => {
       );
     });
 
-    const confirmBtn = view.root
-      .findAllByType('button')
-      .find((b) => b.props.children === k('confirmOperation'))!;
-    expect(confirmBtn.props.disabled).toBe(false);
-
-    await act(async () => confirmBtn.props.onClick());
-    expect(view.root.findByType(Modal).props.closeDisabled).toBe(false);
-    expect(pending).toHaveBeenLastCalledWith(false);
-
-    // Parent refreshes keys: revoked target is now superseded, leaving 1 active key.
-    const refreshedKeys = [
-      { ...adoptedKeys[0], lifecycle: 'superseded' as const },
-      adoptedKeys[1],
-    ];
-    await act(async () => {
-      view.update(
-        <FreshKeyRevocation
-          keys={refreshedKeys}
-          client={apiClient}
-          credential="test-admin"
-          onUnauthorized={vi.fn()}
-          onPending={pending}
-          onChanged={changed}
-          disabled={false}
-          preset={preset}
-          onClose={vi.fn()}
-        />
-      );
-    });
-
-    const statusRegion = view.root.findByProps({ role: 'status' });
-    const statusCodes = statusRegion
-      .findByProps({ className: 'key-record-identifiers' })
-      .findAllByType('code')
-      .map((node) => node.children.join(''));
-    expect(statusCodes).toEqual([preparedRevoke.id, target, keeper]);
-
+    // Pure revoke modal has no keeper/mode select controls or 3-step guide.
+    expect(view.root.findAllByType('select')).toHaveLength(0);
     expect(view.root.findAllByType('fieldset')).toHaveLength(0);
     expect(view.root.findAllByProps({ 'data-testid': 'key-operation-preflight' })).toHaveLength(0);
     expect(view.root.findAllByProps({ 'data-testid': 'last-key-protection-notice' })).toHaveLength(
       0
     );
+
+    const confirmBtn = view.root.findByProps({ 'data-testid': 'confirm-pure-revoke' });
+    expect(confirmBtn.props.disabled).toBe(false);
+
+    await act(async () => confirmBtn.props.onClick());
+    expect(view.root.findByType(Modal).props.closeDisabled).toBe(false);
+    expect(pending).toHaveBeenLastCalledWith(false);
+    expect(changed).toHaveBeenCalled();
+    expect(view.root.findAllByProps({ 'data-testid': 'modal-revoke-done' })).toHaveLength(1);
+  });
+
+  it('protects the last effective key in pure revoke modal and routes CTA to onRegenerate', async () => {
+    const onRegenerate = vi.fn();
+    const mixedKeys = [
+      { ...keys[0], runtimeState: 'effective_observed' as const },
+      { ...keys[1], runtimeState: 'not_applied' as const },
+    ];
+    const fetchMock = vi.fn<typeof fetch>(() => Promise.resolve(result(null, '')));
+    const apiClient = createPublicApiClient(
+      () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+      fetchMock
+    );
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={mixedKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          onRegenerate={onRegenerate}
+          disabled={false}
+          preset={{ targetId: target, mode: 'revoke', seq: 1 }}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    expect(view.root.findAllByProps({ 'data-testid': 'last-key-protection-notice' })).toHaveLength(
+      1
+    );
+    expect(view.root.findAllByProps({ 'data-testid': 'confirm-pure-revoke' })).toHaveLength(0);
+    await act(async () => {
+      view.root.findByProps({ 'data-testid': 'revoke-switch-to-regenerate' }).props.onClick();
+    });
+    expect(onRegenerate).toHaveBeenCalledWith(target);
+  });
+
+  it('does not lock onPending when operations/latest fails transiently and recovers rotate operations with secret copy', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const rotatedSecret = 'cpamp_sk_' + '9'.repeat(60) + 'abcd';
+    const fetchReject = vi.fn<typeof fetch>().mockRejectedValue(new Error('network timeout'));
+    const apiClientFail = createPublicApiClient(
+      () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+      fetchReject
+    );
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={keys}
+          client={apiClientFail}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={{ targetId: target, mode: 'revoke', seq: 1 }}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(pending).not.toHaveBeenCalledWith(true);
+    expect(pending).toHaveBeenLastCalledWith(false);
+    expect(view.root.findByType(Modal).props.closeDisabled).toBe(false);
+    await act(async () => view.unmount());
+
+    const pendingRotate = {
+      id,
+      targetId: target,
+      keeperId: '',
+      mode: 'rotate' as const,
+      outcome: 'pending' as const,
+      revision: 1,
+      steps: [{ name: 'rotate' as const, state: 'unattempted' as const, returned: false }],
+    };
+    const committedRotate = {
+      ...pendingRotate,
+      outcome: 'committed' as const,
+      revision: 2,
+      steps: [{ name: 'rotate' as const, state: 'observed' as const, returned: true }],
+    };
+    const rotateFetch = vi.fn<typeof fetch>((input, init) => {
+      const url = new URL(String(input)).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && url === '/control/api/v2/api-keys/operations/latest') {
+        return Promise.resolve(result(pendingRotate, 'rotate'));
+      }
+      if (method === 'GET' && url === `/control/api/v2/api-keys/operations/${id}`) {
+        return Promise.resolve(result(pendingRotate, 'rotate'));
+      }
+      if (method === 'POST' && url === `/control/api/v2/api-keys/operations/${id}/continue`) {
+        return Promise.resolve(result(committedRotate, ''));
+      }
+      if (method === 'GET' && url === `/control/api/v2/api-keys/${target}`) {
+        return Promise.resolve(Response.json({ ...keys[0], maskedPreview: 'cpamp_sk_…abcd' }));
+      }
+      if (method === 'POST' && url === `/control/api/v2/api-keys/${target}/secret`) {
+        return Promise.resolve(Response.json({ secret: rotatedSecret }));
+      }
+      return Promise.reject(new Error(`unexpected ${method} ${url}`));
+    });
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={keys}
+          client={createPublicApiClient(
+            () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+            rotateFetch
+          )}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={null}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(pending).toHaveBeenLastCalledWith(true);
+    expect(view.root.findAllByProps({ 'data-testid': 'key-operation-recovery' })).toHaveLength(1);
+    await act(async () => {
+      await view.root
+        .findByProps({ 'data-testid': 'continue-recovery-operation' })
+        .props.onClick();
+    });
+    expect(pending).toHaveBeenLastCalledWith(false);
+    expect(view.root.findAllByProps({ 'data-testid': 'modal-rotate-done' })).toHaveLength(1);
+    await act(async () => {
+      await view.root
+        .findByProps({ 'data-testid': 'copy-recovered-rotate-secret' })
+        .props.onClick();
+    });
+    expect(writeText).toHaveBeenCalledWith(rotatedSecret);
   });
 
   it('retains the durable journal for recovery when a preset step fails mid-flight', async () => {
@@ -1066,5 +1186,275 @@ describe('Canonical revocation recovery UI', () => {
       view.root.findByProps({ 'data-testid': 'operation-rebind-action' }).props.onClick()
     );
     expect(rebind).toHaveBeenCalledTimes(1);
+  });
+
+  it('isolates pure modal sessions across close/reopen epochs and renders replace/add recovery completion states', async () => {
+    const settleQueue: Array<(res: Response) => void> = [];
+    const slowFetch = vi.fn<typeof fetch>(() => {
+      return new Promise<Response>((resolve) => {
+        settleQueue.push(resolve);
+      });
+    });
+    const effectiveTwoKeys = keys.map((item) => ({
+      ...item,
+      runtimeState: 'effective_observed' as const,
+    }));
+    const apiClient = createPublicApiClient(
+      () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+      slowFetch
+    );
+
+    // 1. Closed modal starts passive mount probe, then user opens preset modal BEFORE mount probe finishes:
+    // modalSessionEpoch isolates the new session so confirm-pure-revoke stays enabled and stale mount reply is ignored.
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          mode="modal"
+          open={false}
+          keys={effectiveTwoKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={null}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(settleQueue).toHaveLength(1);
+
+    await act(async () => {
+      view.update(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={effectiveTwoKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={{ targetId: target, mode: 'revoke', seq: 1 }}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(view.root.findByProps({ 'data-testid': 'confirm-pure-revoke' }).props.disabled).toBe(
+      false
+    );
+    pending.mockClear();
+    await act(async () => {
+      settleQueue[0](
+        result(
+          {
+            id,
+            targetId: target,
+            keeperId: '',
+            mode: 'revoke',
+            outcome: 'pending',
+            revision: 1,
+            steps: [{ name: 'revoke', state: 'unattempted', returned: false }],
+          },
+          'revoke'
+        )
+      );
+    });
+    expect(pending).not.toHaveBeenCalled();
+
+    // 2. Opening recovery modal (!preset) starts a read; closing before it settles invalidates the stale reply via modalSessionEpoch.
+    await act(async () => {
+      view.update(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={effectiveTwoKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={null}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(settleQueue).toHaveLength(2);
+    await act(async () => {
+      view.update(
+        <FreshKeyRevocation
+          mode="modal"
+          open={false}
+          keys={effectiveTwoKeys}
+          client={apiClient}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={null}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    pending.mockClear();
+    await act(async () => {
+      settleQueue[1](
+        result(
+          {
+            id,
+            targetId: target,
+            keeperId: '',
+            mode: 'revoke',
+            outcome: 'pending',
+            revision: 1,
+            steps: [{ name: 'revoke', state: 'unattempted', returned: false }],
+          },
+          'revoke'
+        )
+      );
+    });
+    expect(pending).not.toHaveBeenCalled();
+    await act(async () => view.unmount());
+
+    // 3. Recovery modal (!preset) renders dedicated replace committed banner when operation already settled.
+    const committedReplaceFetch = vi.fn<typeof fetch>(() =>
+      Promise.resolve(
+        result(
+          {
+            id,
+            targetId: target,
+            keeperId: keeper,
+            mode: 'replace',
+            outcome: 'committed',
+            revision: 3,
+            steps: [
+              { name: 'add', state: 'observed', returned: true },
+              { name: 'revoke', state: 'observed', returned: true },
+            ],
+          },
+          ''
+        )
+      )
+    );
+    await act(async () => {
+      view = create(
+        <FreshKeyRevocation
+          mode="modal"
+          open={true}
+          keys={keys}
+          client={createPublicApiClient(
+            () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+            committedReplaceFetch
+          )}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          onChanged={changed}
+          disabled={false}
+          preset={null}
+          onClose={vi.fn()}
+        />
+      );
+    });
+    expect(view.root.findAllByProps({ 'data-testid': 'modal-replace-done' })).toHaveLength(1);
+    expect(JSON.stringify(view.toJSON())).toContain(k('operationReplaceCommittedTitle'));
+  });
+
+  it('preserves initial mount reads across React StrictMode double-mount and ignores committed rotate on closed modal', async () => {
+    const committedRotate = {
+      id,
+      targetId: target,
+      keeperId: '',
+      mode: 'rotate' as const,
+      outcome: 'committed' as const,
+      revision: 2,
+      steps: [{ name: 'rotate' as const, state: 'observed' as const, returned: true }],
+    };
+    const strictClosedCalls: string[] = [];
+    const strictClosedFetch = vi.fn<typeof fetch>((input) => {
+      strictClosedCalls.push(String(input));
+      return Promise.resolve(result(committedRotate, ''));
+    });
+    changed.mockClear();
+    pending.mockClear();
+
+    // 1. Mounted under <StrictMode> with open={false}: Pass 2 read settles (calling onPending(false)),
+    // does NOT fire GET api-keys/<targetId>, and calls onChanged() strictly once (never duplicated).
+    await act(async () => {
+      view = create(
+        <StrictMode>
+          <FreshKeyRevocation
+            mode="modal"
+            open={false}
+            keys={keys}
+            client={createPublicApiClient(
+              () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+              strictClosedFetch
+            )}
+            credential="test-admin"
+            onUnauthorized={vi.fn()}
+            onPending={pending}
+            onChanged={changed}
+            disabled={false}
+            preset={null}
+            onClose={vi.fn()}
+          />
+        </StrictMode>
+      );
+    });
+    expect(pending).toHaveBeenLastCalledWith(false);
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(strictClosedCalls.every((url) => url.endsWith('/api-keys/operations/latest'))).toBe(
+      true
+    );
+    await act(async () => view.unmount());
+
+    // 2. Mounted under <StrictMode> with open={true} and preset={null}: Pass 2 recovery read succeeds cleanly!
+    const strictOpenFetch = vi.fn<typeof fetch>(() =>
+      Promise.resolve(
+        result(
+          {
+            id,
+            targetId: target,
+            keeperId: keeper,
+            mode: 'replace',
+            outcome: 'committed',
+            revision: 3,
+            steps: [
+              { name: 'add', state: 'observed', returned: true },
+              { name: 'revoke', state: 'observed', returned: true },
+            ],
+          },
+          ''
+        )
+      )
+    );
+    await act(async () => {
+      view = create(
+        <StrictMode>
+          <FreshKeyRevocation
+            mode="modal"
+            open={true}
+            keys={keys}
+            client={createPublicApiClient(
+              () => ({ basePath: '/control', apiBase: '/control/api/v2', revision: 1 }),
+              strictOpenFetch
+            )}
+            credential="test-admin"
+            onUnauthorized={vi.fn()}
+            onPending={pending}
+            onChanged={changed}
+            disabled={false}
+            preset={null}
+            onClose={vi.fn()}
+          />
+        </StrictMode>
+      );
+    });
+    expect(view.root.findAllByProps({ 'data-testid': 'modal-replace-done' })).toHaveLength(1);
   });
 });

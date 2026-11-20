@@ -20,6 +20,8 @@ export interface Key {
   requestId: string;
   maskedPreview: string;
   createdAtMs: number;
+  lastRotatedAtMs?: number;
+  revokedAtMs?: number;
   managerState: 'persisted';
   runtimeState: KeyRuntimeState;
   name: string;
@@ -65,8 +67,11 @@ export function maskedPreviewOf(secret: string): string {
  * shape-owning prefix, and an adopted secret — the source CPA's own printable
  * token — keeps the last four characters only from sixteen characters up.
  */
-export function maskedPreviewFor(origin: KeyOrigin, secret: string): string {
-  if (origin === 'workspace') return workspaceSecret.test(secret) ? 'cpamp_sk_…' + secret.slice(-4) : '';
+export function maskedPreviewFor(origin: KeyOrigin, secret: string, rotated = false): string {
+  if ((origin === 'workspace' || rotated) && workspaceSecret.test(secret)) {
+    return 'cpamp_sk_…' + secret.slice(-4);
+  }
+  if (origin === 'workspace') return '';
   if (origin === 'installer') return installSecret.test(secret) ? 'sk-…' + secret.slice(-4) : '';
   if (!adoptedToken(secret)) return '';
   const characters = Array.from(secret);
@@ -81,16 +86,39 @@ export function maskedPreviewFor(origin: KeyOrigin, secret: string): string {
  */
 export function validSavedSecret(key: Key, secret: string): boolean {
   if (typeof secret !== 'string') return false;
-  const mask = maskedPreviewFor(key.origin, secret);
+  const mask = maskedPreviewFor(key.origin, secret, (key.lastRotatedAtMs ?? 0) > 0);
   return mask !== '' && mask === key.maskedPreview;
 }
 
 /** validMask accepts the mask the origin's secret shape can produce. */
-function validMask(origin: KeyOrigin, maskedPreview: string): boolean {
+function validMask(origin: KeyOrigin, maskedPreview: string, rotated = false): boolean {
   if (typeof maskedPreview !== 'string') return false;
-  if (origin === 'workspace') return /^cpamp_sk_…[a-f0-9]{4}$/.test(maskedPreview);
+  if ((origin === 'workspace' || rotated) && /^cpamp_sk_…[a-f0-9]{4}$/.test(maskedPreview)) {
+    return true;
+  }
+  if (origin === 'workspace') return false;
   if (origin === 'installer') return /^sk-…[A-Za-z0-9]{4}$/.test(maskedPreview);
   return adoptedMask.test(maskedPreview);
+}
+
+export function hasControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) return true;
+  }
+  return false;
+}
+
+export function validKeyNameInput(trimmed: string): boolean {
+  return !hasControlCharacters(trimmed) && [...trimmed].length <= 120;
+}
+
+export function isDefaultUnnamedOriginKey(key: Key): boolean {
+  return (key.origin === 'installer' || key.origin === 'adopted') && key.nameRevision <= 1;
+}
+
+export function keyRenameDraftValue(key: Key): string {
+  return isDefaultUnnamedOriginKey(key) ? '' : key.name;
 }
 
 export function validKey(value: Key): boolean {
@@ -99,9 +127,13 @@ export function validKey(value: Key): boolean {
     /^[a-f0-9]{32}$/.test(value.id) &&
     /^[a-f0-9]{32}$/.test(value.requestId) &&
     (value.origin === 'workspace' || value.origin === 'installer' || value.origin === 'adopted') &&
-    validMask(value.origin, value.maskedPreview) &&
+    validMask(value.origin, value.maskedPreview, (value.lastRotatedAtMs ?? 0) > 0) &&
     Number.isSafeInteger(value.createdAtMs) &&
     value.createdAtMs > 0 &&
+    (value.lastRotatedAtMs === undefined ||
+      (Number.isSafeInteger(value.lastRotatedAtMs) && value.lastRotatedAtMs >= 0)) &&
+    (value.revokedAtMs === undefined ||
+      (Number.isSafeInteger(value.revokedAtMs) && value.revokedAtMs >= 0)) &&
     value.managerState === 'persisted' &&
     ['not_applied', 'applying', 'effective_observed', 'effect_unknown', 'revoked_observed'].includes(
       value.runtimeState
@@ -137,10 +169,10 @@ export function keyDisplayName(
   return key.name || unnamedLabel;
 }
 
-export type KeyOperationMode = 'add' | 'revoke' | 'replace';
+export type KeyOperationMode = 'add' | 'revoke' | 'replace' | 'rotate';
 
 export interface KeyOperationStep {
-  name: 'add' | 'revoke';
+  name: 'add' | 'revoke' | 'rotate';
   state: 'unattempted' | 'attempted' | 'observed';
   returned: boolean;
 }
@@ -159,7 +191,7 @@ export interface KeyOperationResult {
   operation: KeyOperation | null;
   runtimeState: 'effect_unknown' | 'effective_observed' | 'not_applied';
   expiresAtMs: number;
-  nextStep: '' | 'add' | 'revoke';
+  nextStep: '' | 'add' | 'revoke' | 'rotate';
 }
 
 export function validKeyOperationResult(r: KeyOperationResult): boolean {
@@ -168,7 +200,7 @@ export function validKeyOperationResult(r: KeyOperationResult): boolean {
     !r ||
     !['effect_unknown', 'effective_observed', 'not_applied'].includes(r.runtimeState) ||
     !Number.isSafeInteger(r.expiresAtMs) ||
-    !['', 'add', 'revoke'].includes(r.nextStep)
+    !['', 'add', 'revoke', 'rotate'].includes(r.nextStep)
   ) {
     return false;
   }
@@ -177,7 +209,7 @@ export function validKeyOperationResult(r: KeyOperationResult): boolean {
     !o ||
     !/^[a-f0-9]{32}$/.test(o.id) ||
     !/^[a-f0-9]{32}$/.test(o.targetId) ||
-    !['add', 'revoke', 'replace'].includes(o.mode) ||
+    !['add', 'revoke', 'replace', 'rotate'].includes(o.mode) ||
     !['pending', 'unknown', 'committed', 'aborted'].includes(o.outcome) ||
     !Number.isSafeInteger(o.revision) ||
     o.revision <= 0 ||
@@ -197,6 +229,8 @@ export function validKeyOperationResult(r: KeyOperationResult): boolean {
   }
   if (o.mode === 'add') {
     if (o.keeperId !== '' || o.steps.length !== 1 || o.steps[0].name !== 'add') return false;
+  } else if (o.mode === 'rotate') {
+    if (o.keeperId !== '' || o.steps.length !== 1 || o.steps[0].name !== 'rotate') return false;
   } else if (o.mode === 'revoke') {
     if (
       (o.keeperId !== '' && (!/^[a-f0-9]{32}$/.test(o.keeperId) || o.keeperId === o.targetId)) ||
@@ -294,6 +328,50 @@ export function keyLifecyclePillClass(lifecycle?: KeyLifecycle): string {
   }
 }
 
+export type KeyOriginLabelKey = 'installerOrigin' | 'adoptedOrigin' | 'workspaceOrigin';
+
+export function keyOriginTextKey(origin: Key['origin']): KeyOriginLabelKey {
+  switch (origin) {
+    case 'installer':
+      return 'installerOrigin';
+    case 'adopted':
+      return 'adoptedOrigin';
+    case 'workspace':
+    default:
+      return 'workspaceOrigin';
+  }
+}
+
+export type KeyUnifiedStatusKey =
+  | 'statusActive'
+  | 'statusRevoked'
+  | 'statusSyncing'
+  | 'statusPending'
+  | 'statusMissing'
+  | 'statusNotApplied';
+
+export function keyUnifiedStatus(key: Key): {
+  labelKey: KeyUnifiedStatusKey;
+  pillClass: string;
+} {
+  if (key.lifecycle === 'superseded' && !key.operationId) {
+    return { labelKey: 'statusRevoked', pillClass: 'is-muted' };
+  }
+  if (key.operationId || key.runtimeState === 'applying') {
+    return { labelKey: 'statusSyncing', pillClass: 'is-pending' };
+  }
+  if (key.lifecycle === 'missing') {
+    return { labelKey: 'statusMissing', pillClass: 'is-pending' };
+  }
+  if (key.runtimeState === 'effective_observed') {
+    return { labelKey: 'statusActive', pillClass: 'is-effective' };
+  }
+  if (key.runtimeState === 'effect_unknown') {
+    return { labelKey: 'statusPending', pillClass: 'is-pending' };
+  }
+  return { labelKey: 'statusNotApplied', pillClass: 'is-pending' };
+}
+
 export function isTerminalKeyOperationOutcome(outcome: KeyOperation['outcome']): boolean {
   return outcome === 'committed' || outcome === 'aborted';
 }
@@ -333,4 +411,27 @@ export function effectBlockerTextKey(code?: string): EffectBlockerKey {
     default:
       return 'effectBlockerUnknown';
   }
+}
+
+export function mergeRenamedKey(previous: Key, updated: Key): Key {
+  if (
+    previous.id === updated.id &&
+    previous.requestId === updated.requestId &&
+    previous.maskedPreview === updated.maskedPreview &&
+    (previous.lastRotatedAtMs ?? 0) === (updated.lastRotatedAtMs ?? 0) &&
+    previous.lifecycle === updated.lifecycle &&
+    updated.runtimeState !== 'effective_observed' &&
+    updated.runtimeState !== 'revoked_observed' &&
+    !updated.operationId &&
+    (previous.runtimeState === 'effective_observed' ||
+      previous.runtimeState === 'revoked_observed')
+  ) {
+    return {
+      ...updated,
+      runtimeState: previous.runtimeState,
+      operationId: previous.operationId,
+      effectCode: previous.effectCode,
+    };
+  }
+  return updated;
 }

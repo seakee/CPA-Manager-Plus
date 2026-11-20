@@ -21,6 +21,11 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { loadMonitoringMetaPayload } from '@/features/monitoring/services/monitoringMetaService';
 import { buildMonitoringAuthMetaMap } from '@/features/monitoring/model/authMeta';
+import {
+  buildApiKeyDisplayMap,
+  isMaskedApiKeyPreview,
+  resolveApiKeyDisplayName,
+} from '@/features/monitoring/model/apiKeys';
 import { buildAuthFileMapFromMeta } from '@/features/monitoring/model/sourceDisplay';
 import type { MonitoringChannelMeta } from '@/features/monitoring/model/types';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
@@ -175,7 +180,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             ? (record['api-key'] ?? record['apiKey'] ?? record.key ?? record.Key)
             : '';
       const trimmed = String(value ?? '').trim();
-      if (!trimmed || seen.has(trimmed)) return;
+      if (!trimmed || isMaskedApiKeyPreview(trimmed) || seen.has(trimmed)) return;
       seen.add(trimmed);
       keys.push(trimmed);
     });
@@ -213,13 +218,13 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
     }
 
     try {
-      const apiKeys = await resolveApiKeysForModels();
-      if (requestId !== modelRequestId.current) return;
-      const primaryKey = apiKeys[0];
       const managerCredential =
         sessionMode === 'manager_embedded' && /\/api\/v2\/cpamp$/i.test(apiBase)
           ? managementKey
           : undefined;
+      const apiKeys = managerCredential ? [] : await resolveApiKeysForModels();
+      if (requestId !== modelRequestId.current) return;
+      const primaryKey = apiKeys[0];
       await fetchModelsFromStore(apiBase, primaryKey, false, managerCredential);
     } catch {
       // The models store retains its last snapshot and exposes the refresh error below.
@@ -307,17 +312,20 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
     });
     return map;
   }, [displayMeta.channels]);
+  const apiKeyDisplayMap = useMemo(
+    () => buildApiKeyDisplayMap(config?.apiKeys || [], displayMeta.apiKeyAliases, i18n.language),
+    [config?.apiKeys, displayMeta.apiKeyAliases, i18n.language]
+  );
   const apiKeyAliasMap = useMemo(() => {
     const map = new Map<string, string>();
-    displayMeta.apiKeyAliases.forEach((item) => {
-      const hash = item.apiKeyHash?.trim().toLowerCase();
-      const alias = item.alias?.trim();
-      if (hash && alias) {
-        map.set(hash, alias);
+    apiKeyDisplayMap.forEach((info, hash) => {
+      const display = resolveApiKeyDisplayName(info, i18n.language) || info.label || info.masked;
+      if (hash && display) {
+        map.set(hash, display);
       }
     });
     return map;
-  }, [displayMeta.apiKeyAliases]);
+  }, [apiKeyDisplayMap, i18n.language]);
 
   const refreshHealth = useCallback(async () => {
     const requestId = ++healthRequestId.current;
@@ -659,6 +667,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             sourceInfoMap={sourceInfoMap}
             channelByAuthIndex={channelByAuthIndex}
             apiKeyAliasMap={apiKeyAliasMap}
+            apiKeyDisplayMap={apiKeyDisplayMap}
           />
           <CollectorStatusCard
             enabled={usageSummary.enabled}

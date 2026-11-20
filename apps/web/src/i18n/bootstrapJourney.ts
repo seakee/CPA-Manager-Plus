@@ -138,7 +138,7 @@ const en = {
   prefixDraftSaved: 'Prefix draft saved to this operation.',
   prefixDraftFailed: 'Could not save the prefix draft. Retry before leaving this page.',
   prefixErrorInvalid:
-    'Enter a canonical path starting with /, without trailing slash, spaces, encoding, or dot segments.',
+    'Enter a normalized path starting with /, without trailing slash, spaces, encoding, or dot segments.',
   prefixErrorInferenceRequired: 'An inference entry prefix is required for Managed and Adopt installations.',
   prefixErrorExternalInferenceForbidden:
     'External mode does not use a local inference prefix or shared mode.',

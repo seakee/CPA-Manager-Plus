@@ -4,6 +4,7 @@ import type { AuthFileItem } from '@/types/authFile';
 import type { Config } from '@/types/config';
 import type { ModelPrice } from '@/utils/usage';
 import type { MonitoringDataTab } from '../monitoringCenterUiState';
+import type { ApiKeyDisplayInfo } from './apiKeys';
 
 export type MonitoringChannelMeta = {
   key: string;
@@ -181,6 +182,10 @@ export type MonitoringEventRow = {
   apiKeyHash: string;
   apiKeyLabel: string;
   apiKeyMasked: string;
+  apiKeyDisplayName?: string;
+  apiKeyIsRevoked?: boolean;
+  apiKeyIsRotated?: boolean;
+  apiKeyLifecycle?: string;
   provider: string;
   providerIdentity?: string;
   planType: string;
@@ -298,6 +303,10 @@ export type MonitoringApiKeyRow = {
   apiKeyLabel: string;
   apiKeyMasked: string;
   apiKeyCopyValue?: string;
+  apiKeyDisplayName?: string;
+  apiKeyIsRevoked?: boolean;
+  apiKeyIsRotated?: boolean;
+  apiKeyLifecycle?: string;
   isUnknown: boolean;
   authLabels: string[];
   sourceLabels: string[];
@@ -378,6 +387,7 @@ export interface MonitoringScopeFilters {
   model?: string;
   channel?: string;
   apiKeyHash?: string;
+  apiKeyHashes?: string[];
   status?: 'all' | 'success' | 'failed';
   minLatencyMs?: number;
   cacheStatus?: string;
@@ -396,6 +406,8 @@ export interface UseMonitoringDataParams {
   searchApiKeyHash?: string;
   scopeFilters?: MonitoringScopeFilters;
   activeDataTab?: MonitoringDataTab;
+  language?: string;
+  suspendAnalytics?: boolean;
 }
 
 export interface UseMonitoringDataReturn {
@@ -419,6 +431,7 @@ export interface UseMonitoringDataReturn {
   recentFailures: MonitoringFailureRow[];
   accountRows: MonitoringAccountRow[];
   apiKeyRows: MonitoringApiKeyRow[];
+  apiKeyDisplayMap?: Map<string, ApiKeyDisplayInfo>;
   filterOptions: MonitoringFilterOptions;
   filteredRows: MonitoringEventRow[];
   eventsHasMore: boolean;

@@ -6,9 +6,12 @@ import {
   type ModelPrice,
   type UsageDetailWithEndpoint,
 } from '@/utils/usage';
-import { formatApiKeyHashLabel } from './base';
-import { buildSearchText, maskAuthIndex, maskEmailLike, readString } from './base';
-import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
+import { buildSearchText, formatApiKeyHashLabel, maskAuthIndex, maskEmailLike, readString } from './base';
+import {
+  resolveApiKeyDisplayName,
+  sanitizeApiKeyDisplayText,
+  type ApiKeyDisplayInfo,
+} from './apiKeys';
 import { isKeyDisambiguatedLabel, isProviderLikeMonitoringLabel } from './sourceDisplay';
 import { buildHourLabel, buildLocalDayKey } from './range';
 import type { MonitoringAuthMeta, MonitoringChannelMeta, MonitoringEventRow } from './types';
@@ -108,14 +111,24 @@ export const buildEventRows = (
       const accountMasked = maskEmailLike(account);
       const apiKeyHash = readString(detail.api_key_hash ?? detail.apiKeyHash).toLowerCase();
       const apiKeyDisplay = apiKeyDisplayMap.get(apiKeyHash);
+      const fallbackApiKeyLabel = formatApiKeyHashLabel(apiKeyHash);
       const apiKeyLabel = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.label || formatApiKeyHashLabel(apiKeyHash),
-        formatApiKeyHashLabel(apiKeyHash)
+        apiKeyDisplay?.label || apiKeyDisplay?.maskedPreview || fallbackApiKeyLabel,
+        fallbackApiKeyLabel
       );
-      const apiKeyMasked = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.masked || apiKeyLabel,
-        apiKeyLabel
+      const apiKeyMasked =
+        readString(apiKeyDisplay?.maskedPreview) ||
+        sanitizeApiKeyDisplayText(apiKeyDisplay?.masked || apiKeyLabel, apiKeyLabel);
+      const apiKeyDisplayName = apiKeyDisplay
+        ? resolveApiKeyDisplayName(apiKeyDisplay)
+        : apiKeyLabel;
+      const apiKeyIsRevoked = Boolean(
+        apiKeyDisplay?.isRevoked || apiKeyDisplay?.lifecycle === 'superseded'
       );
+      const apiKeyIsRotated =
+        !apiKeyIsRevoked &&
+        Boolean(apiKeyDisplay?.isRotated || apiKeyDisplay?.lifecycle === 'rotated');
+      const apiKeyLifecycle = apiKeyDisplay?.lifecycle;
       const endpoint = readString(detail.__endpoint) || '-';
       const endpointMethod = readString(detail.__endpointMethod) || '-';
       const endpointPath = readString(detail.__endpointPath) || endpoint;
@@ -246,6 +259,10 @@ export const buildEventRows = (
         apiKeyHash,
         apiKeyLabel,
         apiKeyMasked,
+        ...(apiKeyDisplayName ? { apiKeyDisplayName } : {}),
+        ...(apiKeyIsRevoked ? { apiKeyIsRevoked } : {}),
+        ...(apiKeyIsRotated ? { apiKeyIsRotated } : {}),
+        ...(apiKeyLifecycle ? { apiKeyLifecycle } : {}),
         provider: authMeta?.provider || snapshotProvider || eventProvider || sourceMeta.type || '-',
         providerIdentity: effectiveProvider,
         planType: authMeta?.planType || '-',
@@ -289,6 +306,8 @@ export const buildEventRows = (
           apiKeyHash,
           apiKeyLabel,
           apiKeyMasked,
+          apiKeyDisplayName,
+          apiKeyDisplay?.apiKeyId,
           channelLabel,
           channelMeta?.host,
           endpointPath,

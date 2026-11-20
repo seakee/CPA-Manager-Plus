@@ -107,12 +107,29 @@ export const normalizeUsageAnalyticsFilters = (value: unknown): UsageAnalyticsFi
   const record = value as Record<string, unknown>;
   const customRange = normalizeCustomRange(record.customRange);
   const timeRange = normalizeTimeRange(record.timeRange);
+  const apiKeyId = typeof record.apiKeyId === 'string' ? record.apiKeyId.trim() : '';
+  const apiKeyHashes =
+    apiKeyId && Array.isArray(record.apiKeyHashes)
+      ? Array.from(
+          new Set(
+            record.apiKeyHashes
+              .filter((item): item is string => typeof item === 'string')
+              .map((item) => item.trim().toLowerCase())
+              .filter((item) => Boolean(item) && item !== '__no_matching_api_key_id__')
+          )
+        )
+      : [];
   return {
     timeRange: timeRange === 'custom' && !customRange ? defaults.timeRange : timeRange,
     customRange,
     granularity: normalizeGranularity(record.granularity),
     model: normalizeSelectValue(record.model),
-    apiKeyHash: normalizeSelectValue(record.apiKeyHash),
+    apiKeyHash:
+      normalizeSelectValue(record.apiKeyHash) === '__no_matching_api_key_id__' && !apiKeyId
+        ? defaults.apiKeyHash
+        : normalizeSelectValue(record.apiKeyHash),
+    ...(apiKeyHashes.length > 0 ? { apiKeyHashes } : {}),
+    ...(apiKeyId ? { apiKeyId } : {}),
     provider: normalizeSelectValue(record.provider),
     authFile: normalizeSelectValue(record.authFile),
     status: normalizeStatus(record.status),
@@ -163,6 +180,7 @@ const queryHasAnyFilter = (params: URLSearchParams) =>
     'to_ms',
     'granularity',
     'model',
+    'apiKeyId',
     'api_key_hash',
     'provider',
     'auth_file',
@@ -177,7 +195,12 @@ export const buildUsageAnalyticsUiStateFromSearchParams = (
   params: URLSearchParams,
   fallback: UsageAnalyticsUiState = getDefaultUsageAnalyticsUiState()
 ): UsageAnalyticsUiState => {
-  const activeTab = params.has('tab') ? normalizeActiveTab(params.get('tab')) : fallback.activeTab;
+  const apiKeyIdParam = params.get('apiKeyId')?.trim() || '';
+  const activeTab = params.has('tab')
+    ? normalizeActiveTab(params.get('tab'))
+    : apiKeyIdParam
+      ? 'apiKeys'
+      : fallback.activeTab;
   if (!queryHasAnyFilter(params)) {
     return {
       activeTab,
@@ -186,11 +209,17 @@ export const buildUsageAnalyticsUiStateFromSearchParams = (
   }
 
   const record: Record<string, unknown> = { ...fallback.filters };
-  const timeRangeParam = params.get('time_range');
+  if (apiKeyIdParam) {
+    record.apiKeyId = apiKeyIdParam;
+    if (!params.has('api_key_hash')) {
+      record.apiKeyHash = 'all';
+    }
+  }
   const fromMs = parseQueryTimestamp(params, 'from_ms');
   const toMs = parseQueryTimestamp(params, 'to_ms');
   const hasRange = fromMs !== null && toMs !== null && fromMs < toMs;
 
+  const timeRangeParam = params.get('time_range');
   if (params.has('time_range')) {
     record.timeRange = timeRangeParam;
     if (timeRangeParam !== 'custom') {
@@ -248,7 +277,14 @@ export const buildUsageAnalyticsSearchParams = (state: UsageAnalyticsUiState) =>
     params.set('granularity', filters.granularity);
   }
   setNonDefaultParam(params, 'model', filters.model, defaults.model);
-  setNonDefaultParam(params, 'api_key_hash', filters.apiKeyHash, defaults.apiKeyHash);
+  const effectiveApiKeyHash =
+    filters.apiKeyHash === '__no_matching_api_key_id__'
+      ? defaults.apiKeyHash
+      : filters.apiKeyHash;
+  setNonDefaultParam(params, 'api_key_hash', effectiveApiKeyHash, defaults.apiKeyHash);
+  if (filters.apiKeyId) {
+    params.set('apiKeyId', filters.apiKeyId);
+  }
   setNonDefaultParam(params, 'provider', filters.provider, defaults.provider);
   setNonDefaultParam(params, 'auth_file', filters.authFile, defaults.authFile);
   if (filters.status !== defaults.status) params.set('status', filters.status);
@@ -274,9 +310,16 @@ export const writeUsageAnalyticsUiState = (state: UsageAnalyticsUiStatePatch) =>
 
   try {
     const current = readUsageAnalyticsUiState();
+    const mergedFilters = state.filters ? { ...current.filters, ...state.filters } : current.filters;
+    const persistableFilters = { ...mergedFilters };
+    delete persistableFilters.apiKeyId;
+    delete persistableFilters.apiKeyHashes;
+    if (persistableFilters.apiKeyHash === '__no_matching_api_key_id__') {
+      persistableFilters.apiKeyHash = USAGE_ANALYTICS_DEFAULT_FILTERS.apiKeyHash;
+    }
     const next = normalizeUsageAnalyticsUiState({
       activeTab: state.activeTab ?? current.activeTab,
-      filters: state.filters ? { ...current.filters, ...state.filters } : current.filters,
+      filters: persistableFilters,
     });
     window.localStorage.setItem(
       USAGE_ANALYTICS_UI_STATE_STORAGE_KEY,

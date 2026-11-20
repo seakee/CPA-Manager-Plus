@@ -67,6 +67,11 @@ import {
   normalizeAuthIndex,
   type ModelPrice,
 } from '@/utils/usage';
+import {
+  formatApiKeyDisplayName,
+  resolveApiKeyDisplayName,
+  type ApiKeyDisplayInfo,
+} from '@/features/monitoring/model/apiKeys';
 
 export type StatusFilter = 'all' | 'success' | 'failed';
 
@@ -160,6 +165,7 @@ export const buildMonitoringInitialStateFromQuery = (
   const toMs = parseQueryTimestamp(params, 'to_ms');
   const model = params.get('model')?.trim();
   const apiKeyHash = params.get('api_key_hash')?.trim();
+  const apiKeyId = params.get('apiKeyId')?.trim();
   const status = params.get('status')?.trim();
   const provider = params.get('provider')?.trim();
   const authFile = params.get('auth_file')?.trim();
@@ -190,7 +196,7 @@ export const buildMonitoringInitialStateFromQuery = (
     customEndInput: hasRange ? formatDateTimeLocalValue(new Date(toMs)) : state.customEndInput,
     selectedModel: model || state.selectedModel,
     selectedProvider: provider || state.selectedProvider,
-    selectedApiKeyHash: apiKeyHash || state.selectedApiKeyHash,
+    selectedApiKeyHash: apiKeyHash || (apiKeyId ? 'all' : state.selectedApiKeyHash),
     selectedHeaderTraceId: headerTraceId || state.selectedHeaderTraceId,
     selectedStatus:
       status === 'success' || status === 'failed' || status === 'all'
@@ -201,6 +207,7 @@ export const buildMonitoringInitialStateFromQuery = (
       hasRange ||
       model ||
       apiKeyHash ||
+      apiKeyId ||
       status ||
       provider ||
       searchQuery ||
@@ -357,12 +364,29 @@ export const buildChannelOptionsFromValues = (
     selectedChannel
   );
 
+const formatUnmatchedMonitoringApiKeyId = (apiKeyId?: string) => {
+  const trimmed = String(apiKeyId ?? '').trim();
+  if (!trimmed) return '-';
+  return trimmed.length > 18
+    ? `ID: ${trimmed.slice(0, 10)}…${trimmed.slice(-4)}`
+    : `ID: ${trimmed}`;
+};
+
 const buildApiKeyOptionsFromMap = (
   optionMap: Map<string, string>,
   selectedApiKeyHash: string,
-  t: TFunction
-) =>
-  ensureSelectedOption(
+  t: TFunction,
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>,
+  unmatchedApiKeyId?: string
+) => {
+  const selectedDisplay =
+    selectedApiKeyHash === '__no_matching_api_key_id__'
+      ? formatUnmatchedMonitoringApiKeyId(unmatchedApiKeyId)
+      : selectedApiKeyHash && selectedApiKeyHash !== 'all'
+        ? resolveApiKeyDisplayName(apiKeyDisplayMap?.get(selectedApiKeyHash.toLowerCase())) ||
+          selectedApiKeyHash
+        : selectedApiKeyHash;
+  return ensureSelectedOption(
     [
       {
         value: 'all',
@@ -377,35 +401,70 @@ const buildApiKeyOptionsFromMap = (
         .map(([value, label]) => ({ value, label })),
     ],
     selectedApiKeyHash,
-    selectedApiKeyHash
+    selectedDisplay
   );
+};
 
 export const buildApiKeyOptions = (
   rows: MonitoringEventRow[],
   selectedApiKeyHash: string,
-  t: TFunction
+  t: TFunction,
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>,
+  unmatchedApiKeyId?: string
 ) => {
   const optionMap = new Map<string, string>();
   rows.forEach((row) => {
     if (!row.apiKeyHash || optionMap.has(row.apiKeyHash)) return;
-    optionMap.set(row.apiKeyHash, row.apiKeyLabel || row.apiKeyMasked || row.apiKeyHash);
+    const display =
+      row.apiKeyDisplayName ||
+      formatApiKeyDisplayName(
+        row.apiKeyLabel,
+        row.apiKeyMasked,
+        Boolean(row.apiKeyIsRevoked),
+        undefined,
+        Boolean(row.apiKeyIsRotated)
+      );
+    optionMap.set(row.apiKeyHash, display || row.apiKeyLabel || row.apiKeyMasked || row.apiKeyHash);
   });
 
-  return buildApiKeyOptionsFromMap(optionMap, selectedApiKeyHash, t);
+  return buildApiKeyOptionsFromMap(
+    optionMap,
+    selectedApiKeyHash,
+    t,
+    apiKeyDisplayMap,
+    unmatchedApiKeyId
+  );
 };
 
 export const buildApiKeyOptionsFromRows = (
   rows: MonitoringApiKeyRow[],
   selectedApiKeyHash: string,
-  t: TFunction
+  t: TFunction,
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>,
+  unmatchedApiKeyId?: string
 ) => {
   const optionMap = new Map<string, string>();
   rows.forEach((row) => {
     if (!row.apiKeyHash || optionMap.has(row.apiKeyHash)) return;
-    optionMap.set(row.apiKeyHash, row.apiKeyLabel || row.apiKeyMasked || row.apiKeyHash);
+    const display =
+      row.apiKeyDisplayName ||
+      formatApiKeyDisplayName(
+        row.apiKeyLabel,
+        row.apiKeyMasked,
+        Boolean(row.apiKeyIsRevoked),
+        undefined,
+        Boolean(row.apiKeyIsRotated)
+      );
+    optionMap.set(row.apiKeyHash, display || row.apiKeyLabel || row.apiKeyMasked || row.apiKeyHash);
   });
 
-  return buildApiKeyOptionsFromMap(optionMap, selectedApiKeyHash, t);
+  return buildApiKeyOptionsFromMap(
+    optionMap,
+    selectedApiKeyHash,
+    t,
+    apiKeyDisplayMap,
+    unmatchedApiKeyId
+  );
 };
 
 export const buildStatusOptions = (t: TFunction): MonitoringOption[] => [

@@ -81,3 +81,108 @@
   cursor: not-allowed;
   transform: none;
 }
+
+.variantJoined {
+  box-sizing: border-box;
+  height: var(--control-height-sm);
+  padding: 0;
+  gap: 0;
+  border-color: color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
+  box-shadow: none;
+
+  .item {
+    min-width: 0;
+    min-height: 100%;
+    padding: 0 16px;
+    border-radius: 0;
+    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
+
+    & + .item {
+      border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    }
+
+    &:first-child {
+      border-start-start-radius: var(--app-radius-md);
+      border-end-start-radius: var(--app-radius-md);
+    }
+
+    &:last-child {
+      border-start-end-radius: var(--app-radius-md);
+      border-end-end-radius: var(--app-radius-md);
+    }
+
+    &:hover:not(.disabled) {
+      background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+      color: var(--text-primary);
+    }
+
+    &.active,
+    &.active:hover:not(.disabled) {
+      border-left-color: transparent;
+      background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+      box-shadow: none;
+      color: var(--primary-text);
+    }
+
+    &.active + .item {
+      border-left-color: transparent;
+    }
+  }
+
+  @include mobile {
+    .item {
+      padding-inline: 12px;
+      font-size: 12px;
+    }
+  }
+}
+
+.sizeSm {
+  box-sizing: border-box;
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 2px;
+  gap: 2px;
+  border-radius: var(--app-radius-sm);
+
+  .item {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    padding: 0 11px;
+    border-radius: var(--app-radius-xs);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .active,
+  .active:hover:not(.disabled) {
+    font-weight: 700;
+  }
+}
+
+.variantJoined.sizeSm {
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0;
+  gap: 0;
+  border-radius: var(--app-radius-sm);
+
+  .item {
+    padding: 0 11px;
+    border-radius: 0;
+    font-size: 12px;
+
+    &:first-child {
+      border-start-start-radius: var(--app-radius-sm);
+      border-end-start-radius: var(--app-radius-sm);
+    }
+
+    &:last-child {
+      border-start-end-radius: var(--app-radius-sm);
+      border-end-end-radius: var(--app-radius-sm);
+    }
+  }
+}

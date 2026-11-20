@@ -331,4 +331,56 @@ describe('Drawer overlay close guard', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(findOverlay(renderer!).props.className).toContain('overlayEntering');
   });
+  it('uses closeLabel and blocks button, Escape, and overlay closing when closeDisabled is true', async () => {
+    const onClose = vi.fn();
+    const onBeforeClose = vi.fn(() => true);
+    const keydownHandlers: Array<(event: { key: string; preventDefault: () => void }) => void> = [];
+    const addSpy = vi
+      .spyOn(document, 'addEventListener')
+      .mockImplementation((type, listener) => {
+        if (type === 'keydown' && typeof listener === 'function') {
+          keydownHandlers.push(
+            listener as unknown as (event: { key: string; preventDefault: () => void }) => void
+          );
+        }
+      });
+    try {
+      await act(async () => {
+        renderer = create(
+          <Drawer
+            open
+            title="Locked drawer"
+            closeLabel="Close details"
+            closeDisabled
+            onClose={onClose}
+            onBeforeClose={onBeforeClose}
+          >
+            <input aria-label="field" />
+          </Drawer>
+        );
+        await Promise.resolve();
+      });
+
+      const closeButton = renderer!.root.findByProps({ 'aria-label': 'Close details' });
+      expect(closeButton.props.title).toBe('Close details');
+      expect(closeButton.props.disabled).toBe(true);
+
+      const overlay = findOverlay(renderer!);
+      await act(async () => {
+        closeButton.props.onClick();
+        overlay.props.onPointerDown(createPointerEvent(overlay, overlay, { pointerId: 1 }));
+        overlay.props.onPointerUp(createPointerEvent(overlay, overlay, { pointerId: 1 }));
+        for (const handler of keydownHandlers) {
+          handler({ key: 'Escape', preventDefault: vi.fn() });
+        }
+        await Promise.resolve();
+        vi.advanceTimersByTime(CLOSE_ANIMATION_DURATION);
+      });
+
+      expect(onBeforeClose).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      addSpy.mockRestore();
+    }
+  });
 });

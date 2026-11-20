@@ -3,12 +3,15 @@ import { fullWebLanguage } from './fullweb';
 const en = {
   title: 'API access endpoints',
   subtitle: 'Copy verified management and model inference URLs for your client tools.',
+  clientTitle: 'Model inference endpoints',
+  clientSubtitle:
+    'Configure your client tools or SDKs with the following verified model inference URLs:',
   pendingRestartSubtitle:
-    'These saved access paths take effect only after the Manager process restarts.',
+    'These saved access paths take effect only after restarting the service.',
   loading: 'Loading verified API access endpoints…',
   awaitingAuth: 'Sign in with an administrator credential to view API access endpoints.',
   loadErrorTitle: 'Unable to load API access endpoints',
-  loadErrorHelp: 'Check Manager availability and retry loading verified routing endpoints.',
+  loadErrorHelp: 'Check service availability and retry loading verified routing endpoints.',
   retry: 'Retry',
   modeLabel: 'Deployment mode',
   modeManaged: 'New Managed',
@@ -25,13 +28,13 @@ const en = {
     'Both the CPAMP console and model inference use this prefix. Ensure reverse proxies and network policies protect the management routes.',
   pendingRestartTitle: 'Restart required before endpoints go live',
   pendingRestartDesc:
-    'Routing changes were saved, but the running Manager is still serving its previous configuration. Restart Manager before sending client traffic to these planned endpoints.',
+    'Routing changes were saved, but the running service is still serving its previous configuration. Restart CPAMP before sending client traffic to these planned endpoints.',
   notReadyInferencePrefixTitle: 'Inference prefix required',
   notReadyInferencePrefixDesc:
     'Configure an inference path prefix before connecting model clients. CPAMP will not guess or fall back to a root /v1 endpoint.',
   notReadyRoutingTitle: 'Routing authority unavailable',
   notReadyRoutingDesc:
-    'Manager could not verify active routing endpoints yet. Refresh or check runtime status.',
+    'Active routing endpoints could not be verified yet. Refresh or check runtime status.',
   notReadyInstallTitle: 'Installation incomplete',
   notReadyInstallDesc:
     'Complete the deployment journey before client inference endpoints become active.',
@@ -68,16 +71,19 @@ const en = {
   headerAuthBearer: 'Authorization: Bearer <YOUR_CLIENT_KEY>',
   headerAnthropic: 'x-api-key: <YOUR_CLIENT_KEY>',
   headerGemini: 'x-goog-api-key: <YOUR_CLIENT_KEY>',
+  protocolTabsLabel: 'Select client protocol',
 };
 
 const zh: typeof en = {
   title: 'API 接入地址',
   subtitle: '复制已验证的管理入口与模型推理地址供客户端接入。',
-  pendingRestartSubtitle: '以下已保存的接入路径将在 Manager 重启后生效。',
+  clientTitle: '模型推理接入地址',
+  clientSubtitle: '将客户端工具或 SDK 配置为以下已就绪的模型推理地址：',
+  pendingRestartSubtitle: '以下已保存的接入路径将在服务重启后生效。',
   loading: '正在加载已验证的 API 接入地址…',
   awaitingAuth: '请先使用管理员凭据登录后再查看 API 接入地址。',
   loadErrorTitle: '无法加载 API 接入地址',
-  loadErrorHelp: '请检查 Manager 服务可用性并重试加载已验证的路由端点。',
+  loadErrorHelp: '请检查服务连接状态并重试加载接入地址。',
   retry: '重试',
   modeLabel: '部署模式',
   modeManaged: '全新托管',
@@ -92,14 +98,14 @@ const zh: typeof en = {
   sharedWarningTitle: '管理入口与模型 API 共享同一路径前缀',
   sharedWarningDesc:
     'CPAMP 管理控制台与模型推理均使用同一前缀，请确保反向代理与网络访问策略妥善隔离并保护管理路由。',
-  pendingRestartTitle: '需重启 Manager 后新端点才会生效',
+  pendingRestartTitle: '需重启服务后新端点才会生效',
   pendingRestartDesc:
-    '路由前缀配置已保存，但当前运行的 Manager 仍在使用旧配置。请先重启 Manager，再向下方规划端点发送客户端流量。',
+    '路由前缀配置已保存，但当前运行进程仍在使用旧配置。请先重启 CPAMP 服务，再向下方规划端点发送客户端流量。',
   notReadyInferencePrefixTitle: '尚未配置模型推理路径前缀',
   notReadyInferencePrefixDesc:
     '连接客户端前请先配置模型推理前缀；CPAMP 不会擅自猜测或回退到根路径 /v1。',
   notReadyRoutingTitle: '路由状态暂不可用',
-  notReadyRoutingDesc: 'Manager 尚无法确认当前生效的路由端点，请刷新或检查运行状态。',
+  notReadyRoutingDesc: '暂时无法确认当前生效的路由端点，请刷新或检查运行状态。',
   notReadyInstallTitle: '部署初始化尚未完成',
   notReadyInstallDesc: '请先完成部署向导步骤，之后模型推理接入端点才会生效。',
   notReadyExternalTitle: '外部 CPA 目标暂不可用',
@@ -130,16 +136,19 @@ const zh: typeof en = {
   headerAuthBearer: 'Authorization: Bearer <你的客户端_KEY>',
   headerAnthropic: 'x-api-key: <你的客户端_KEY>',
   headerGemini: 'x-goog-api-key: <你的客户端_KEY>',
+  protocolTabsLabel: '选择客户端协议',
 };
 
 const tw: typeof en = {
   title: 'API 接入位址',
   subtitle: '複製已驗證的管理入口與模型推論位址供用戶端接入。',
-  pendingRestartSubtitle: '以下已儲存的接入路徑將於 Manager 重新啟動後生效。',
+  clientTitle: '模型推論接入位址',
+  clientSubtitle: '將用戶端工具或 SDK 設定為以下已就緒的模型推論位址：',
+  pendingRestartSubtitle: '以下已儲存的接入路徑將於服務重新啟動後生效。',
   loading: '正在載入已驗證的 API 接入位址…',
   awaitingAuth: '請先使用管理員憑證登入後再查看 API 接入位址。',
   loadErrorTitle: '無法載入 API 接入位址',
-  loadErrorHelp: '請檢查 Manager 服務可用性並重試載入已驗證的路由端點。',
+  loadErrorHelp: '請檢查服務連線狀態並重試載入接入位址。',
   retry: '重試',
   modeLabel: '部署模式',
   modeManaged: '全新託管',
@@ -154,14 +163,14 @@ const tw: typeof en = {
   sharedWarningTitle: '管理入口與模型 API 共用同一路徑前綴',
   sharedWarningDesc:
     'CPAMP 管理主控台與模型推論皆使用同一前綴，請確保反向代理與網路存取策略妥善保護管理路由。',
-  pendingRestartTitle: '需重啟 Manager 後新端點才會生效',
+  pendingRestartTitle: '需重啟服務後新端點才會生效',
   pendingRestartDesc:
-    '路由前綴設定已儲存，但目前執行的 Manager 仍在使用舊設定。請先重啟 Manager，再向下方規劃端點發送用戶端流量。',
+    '路由前綴設定已儲存，但目前執行的處理程序仍在使用舊設定。請先重啟 CPAMP 服務，再向下方規劃端點發送用戶端流量。',
   notReadyInferencePrefixTitle: '尚未設定模型推論路徑前綴',
   notReadyInferencePrefixDesc:
     '連接用戶端前請先設定模型推論前綴；CPAMP 不會猜測或回退至根路徑 /v1。',
   notReadyRoutingTitle: '路由狀態暫時無法使用',
-  notReadyRoutingDesc: 'Manager 尚無法確認目前生效的路由端點，請重新整理或檢查執行狀態。',
+  notReadyRoutingDesc: '暫時無法確認目前生效的路由端點，請重新整理或檢查執行狀態。',
   notReadyInstallTitle: '部署初始化尚未完成',
   notReadyInstallDesc: '請先完成部署精靈步驟，之後模型推論接入端點才會生效。',
   notReadyExternalTitle: '外部 CPA 目標暫時無法使用',
@@ -192,18 +201,22 @@ const tw: typeof en = {
   headerAuthBearer: 'Authorization: Bearer <你的用戶端_KEY>',
   headerAnthropic: 'x-api-key: <你的用戶端_KEY>',
   headerGemini: 'x-goog-api-key: <你的用戶端_KEY>',
+  protocolTabsLabel: '選擇用戶端協議',
 };
 
 const ru: typeof en = {
   title: 'Адреса доступа к API',
   subtitle:
     'Скопируйте подтверждённые адреса панели управления и API инференса для ваших клиентов.',
+  clientTitle: 'Адреса API инференса моделей',
+  clientSubtitle:
+    'Настройте клиентские инструменты или SDK на следующие проверенные адреса инференса моделей:',
   pendingRestartSubtitle:
-    'Сохранённые пути доступа вступят в силу только после перезапуска Manager.',
+    'Сохранённые пути доступа вступят в силу только после перезапуска службы.',
   loading: 'Загрузка подтверждённых адресов доступа к API…',
   awaitingAuth: 'Войдите с ключом администратора, чтобы просмотреть адреса доступа к API.',
   loadErrorTitle: 'Не удалось загрузить адреса доступа к API',
-  loadErrorHelp: 'Проверьте доступность Manager и повторите загрузку подтверждённых маршрутов.',
+  loadErrorHelp: 'Проверьте доступность службы и повторите загрузку подтверждённых маршрутов.',
   retry: 'Повторить',
   modeLabel: 'Режим развёртывания',
   modeManaged: 'Управляемый',
@@ -218,15 +231,15 @@ const ru: typeof en = {
   sharedWarningTitle: 'Панель управления и API моделей используют один префикс',
   sharedWarningDesc:
     'Консоль CPAMP и запросы инференса используют общий базовый префикс. Убедитесь, что обратный прокси и правила сети защищают маршруты управления.',
-  pendingRestartTitle: 'Для активации маршрутов требуется перезапуск Manager',
+  pendingRestartTitle: 'Для активации маршрутов требуется перезапуск службы',
   pendingRestartDesc:
-    'Настройки префиксов сохранены, но запущенный Manager всё ещё обслуживает прежнюю конфигурацию. Перезапустите Manager перед отправкой клиентского трафика на запланированные адреса.',
+    'Настройки префиксов сохранены, но запущенная служба всё ещё обслуживает прежнюю конфигурацию. Перезапустите CPAMP перед отправкой клиентского трафика на запланированные адреса.',
   notReadyInferencePrefixTitle: 'Требуется префикс пути инференса',
   notReadyInferencePrefixDesc:
     'Настройте префикс API инференса перед подключением клиентов. CPAMP не подставляет корневой /v1 автоматически.',
   notReadyRoutingTitle: 'Сведения о маршрутизации недоступны',
   notReadyRoutingDesc:
-    'Manager не смог подтвердить активные маршруты. Обновите состояние или проверьте статус службы.',
+    'Не удалось подтвердить активные маршруты. Обновите состояние или проверьте статус службы.',
   notReadyInstallTitle: 'Установка не завершена',
   notReadyInstallDesc: 'Завершите мастер настройки перед использованием конечных точек API.',
   notReadyExternalTitle: 'Внешний сервер CPA недоступен',
@@ -262,6 +275,7 @@ const ru: typeof en = {
   headerAuthBearer: 'Authorization: Bearer <ВАШ_КЛИЕНТСКИЙ_КЛЮЧ>',
   headerAnthropic: 'x-api-key: <ВАШ_КЛИЕНТСКИЙ_КЛЮЧ>',
   headerGemini: 'x-goog-api-key: <ВАШ_КЛИЕНТСКИЙ_КЛЮЧ>',
+  protocolTabsLabel: 'Выбор клиентского протокола',
 };
 
 const dictionaries = { en, zh, tw, ru } as const;

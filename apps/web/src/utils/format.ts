@@ -33,7 +33,7 @@ export function maskApiKey(key: string): string {
 }
 
 const API_KEY_MASK_REGEX =
-  /(sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})/g;
+  /(cpamp_sk_[A-Za-z0-9_-]{6,}|cpk_[A-Za-z0-9_-]{6,}|sk-proj-[A-Za-z0-9-_]{6,}|sk-ant-[A-Za-z0-9-_]{6,}|sk-[A-Za-z0-9-_]{6,}|sess-[A-Za-z0-9-_]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z-_]{8,}|hf_[A-Za-z0-9]{6,}|pk_[A-Za-z0-9]{6,}|rk_[A-Za-z0-9]{6,})/g;
 const AUTHORIZATION_MASK_REGEX = /\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,"'{}]+/gi;
 const BEARER_MASK_REGEX = /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const TOKEN_FIELD_MASK_REGEX =

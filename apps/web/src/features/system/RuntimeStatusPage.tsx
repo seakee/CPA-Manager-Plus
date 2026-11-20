@@ -326,8 +326,14 @@ export function RuntimeStatusPage({
       }
       const seq = ++refreshModelsSeqRef.current;
       try {
-        let apiKeys: string[] = JSON.parse(configApiKeysKey) as string[];
-        if (!apiKeys.length) {
+        const modelManagerCredential =
+          auth.sessionMode === 'manager_embedded' && /\/api\/v2\/cpamp$/i.test(auth.apiBase)
+            ? auth.managementKey || credential
+            : undefined;
+        let apiKeys: string[] = (JSON.parse(configApiKeysKey) as string[]).filter(
+          (item) => typeof item === 'string' && !item.includes('…') && !item.includes('***')
+        );
+        if (!apiKeys.length && !modelManagerCredential) {
           try {
             const list = await apiKeysApi.list();
             if (Array.isArray(list)) {
@@ -337,7 +343,9 @@ export function RuntimeStatusPage({
                     ? item.trim()
                     : String((item as Record<string, unknown>)?.['api-key'] ?? '').trim()
                 )
-                .filter(Boolean);
+                .filter(
+                  (item) => Boolean(item) && !item.includes('…') && !item.includes('***')
+                );
             }
           } catch {
             apiKeys = [];
@@ -345,10 +353,6 @@ export function RuntimeStatusPage({
         }
         if (seq !== refreshModelsSeqRef.current) return;
         const firstKey = apiKeys[0];
-        const modelManagerCredential =
-          auth.sessionMode === 'manager_embedded' && /\/api\/v2\/cpamp$/i.test(auth.apiBase)
-            ? auth.managementKey || credential
-            : undefined;
         if (!firstKey && !modelManagerCredential) {
           setModelsErrorState(null);
           return;
