@@ -59,11 +59,6 @@ function MetricCard({ label, value, subValue, icon, color, loading }: MetricCard
         <div className={styles.metricValue}>{loading ? '...' : value}</div>
         {subValue && <div className={styles.metricSubValue}>{subValue}</div>}
       </div>
-      <div className={styles.metricBgChart}>
-        <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-          <path d="M0,25 Q15,5 30,20 T60,10 T100,25" fill="none" stroke={color} strokeWidth="2" opacity="0.2" />
-        </svg>
-      </div>
     </div>
   );
 }

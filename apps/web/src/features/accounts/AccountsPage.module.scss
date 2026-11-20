@@ -68,10 +68,6 @@
       border-radius: var(--app-radius-md);
     }
 
-    [class*='summaryCardChart'] {
-      display: none;
-    }
-
     [class*='summaryMeta'] {
       display: none;
     }
@@ -119,10 +115,6 @@
       height: auto;
       padding: 7px 8px;
       border-radius: var(--app-radius-md);
-    }
-
-    [class*='summaryCardChart'] {
-      display: none;
     }
 
     [class*='summaryMeta'] {

@@ -45,7 +45,12 @@ describe('AccountMetricsGrid', () => {
       '2',
       '1',
     ]);
-    expect(renderer!.root.findAllByType('svg')).toHaveLength(12);
+    expect(renderer!.root.findAllByType('svg')).toHaveLength(6);
+    expect(
+      renderer!.root.findAll(
+        (node) => node.type === 'svg' && node.props.preserveAspectRatio === 'none'
+      )
+    ).toHaveLength(0);
     expect(renderer!.root.findByProps({ 'aria-label': 'accounts.metrics_label' })).toBeTruthy();
   });
 });

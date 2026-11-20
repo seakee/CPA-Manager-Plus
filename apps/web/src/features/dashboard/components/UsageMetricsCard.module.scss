@@ -78,16 +78,6 @@
       color: var(--text-tertiary);
     }
   }
-
-  .metricBgChart {
-    position: absolute;
-    bottom: -5px;
-    left: 0;
-    width: 100%;
-    height: 30px;
-    opacity: 0.5;
-    z-index: 0;
-  }
 }
 
 // Model Rank Card
