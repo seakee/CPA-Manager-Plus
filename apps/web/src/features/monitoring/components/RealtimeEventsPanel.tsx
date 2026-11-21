@@ -13,10 +13,7 @@ import { createPortal } from 'react-dom';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { IconCopy, IconEye, IconEyeOff, IconFilter } from '@/components/ui/icons';
-import {
-  PaginationControls,
-  RecentPattern,
-} from '@/features/monitoring/components/MonitoringShared';
+import { PaginationControls } from '@/features/monitoring/components/MonitoringShared';
 import { MonitoringPanel } from '@/features/monitoring/components/MonitoringPanel';
 import { formatPercent } from '@/features/monitoring/components/accountOverviewPresentation';
 import { buildRealtimeSourceDisplay } from '@/features/monitoring/realtimeSourceDisplay';
@@ -26,15 +23,13 @@ import { useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { maskSensitiveText, truncateText } from '@/utils/format';
 import { getPlanLabel, getPlanPresentation, type PlanDisplayMode } from '@/utils/plans';
-import { formatCompactNumber, formatUsd } from '@/utils/usage';
+import {
+  calculateCacheHitRateFromTotals,
+  formatCompactNumber,
+  formatUsd,
+  getCacheHitTotals,
+} from '@/utils/usage';
 import styles from '../MonitoringCenterPage.module.scss';
-
-type RealtimeLogRow = MonitoringEventRow & {
-  requestCount: number;
-  successRate: number;
-  streamKey: string;
-  recentPattern: boolean[];
-};
 
 type PaginationState<T> = {
   currentPage: number;
@@ -46,8 +41,8 @@ type PaginationState<T> = {
 
 type RealtimeEventsPanelProps = {
   embedded?: boolean;
-  rows: RealtimeLogRow[];
-  pagination: PaginationState<RealtimeLogRow>;
+  rows: MonitoringEventRow[];
+  pagination: PaginationState<MonitoringEventRow>;
   pageSize: number;
   scopedFailureCount: number;
   failedOnlyActive: boolean;
@@ -725,67 +720,35 @@ function RealtimeRequestDiagnosticStatus({
       >
         {t(details.failed ? 'monitoring.result_failed' : 'monitoring.result_success')}
       </span>
+      {details.statusCode ? (
+        <span className={styles.realtimeStatusCode}>{details.statusText}</span>
+      ) : null}
       {!isBrowser ? tooltip : null}
       {isBrowser && open ? createPortal(tooltip, document.body) : null}
     </span>
   );
 }
 
-type RealtimeTokenUsageDetails = {
-  total: string;
-  input: string;
-  output: string;
-  fields: Array<{ label: string; value: string }>;
-  ariaLabel: string;
+type RealtimeTooltipField = {
+  label: string;
+  value: string;
 };
 
-const buildRealtimeTokenUsageDetails = (row: MonitoringEventRow, t: TFunction) => {
-  const fields = [
-    {
-      label: t('monitoring.realtime_usage_total_label'),
-      value: formatCompactNumber(row.totalTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_input_label'),
-      value: formatCompactNumber(row.inputTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_output_label'),
-      value: formatCompactNumber(row.outputTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_reasoning_label'),
-      value: String(row.reasoningTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_cached_label'),
-      value: formatCompactNumber(row.cachedTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_cache_read_label'),
-      value: formatCompactNumber(row.cacheReadTokens),
-    },
-    {
-      label: t('monitoring.realtime_usage_cache_creation_label'),
-      value: formatCompactNumber(row.cacheCreationTokens),
-    },
-  ];
-
-  return {
-    total: fields[0].value,
-    input: fields[1].value,
-    output: fields[2].value,
-    fields,
-    ariaLabel: fields.map((field) => `${field.label}: ${field.value}`).join(', '),
-  } satisfies RealtimeTokenUsageDetails;
-};
-
-type RealtimeTokenUsageProps = {
-  details: RealtimeTokenUsageDetails;
+type RealtimeMetricTooltipCellProps = {
+  className: string;
   tooltipId: string;
+  ariaLabel: string;
+  fields: RealtimeTooltipField[];
+  children: ReactNode;
 };
 
-function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
+function RealtimeMetricTooltipCell({
+  className,
+  tooltipId,
+  ariaLabel,
+  fields,
+  children,
+}: RealtimeMetricTooltipCellProps) {
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
@@ -899,7 +862,7 @@ function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
       onMouseEnter={clearCloseTimer}
       onMouseLeave={requestHideTooltip}
     >
-      {details.fields.map((field) => (
+      {fields.map((field) => (
         <span key={field.label} className={styles.realtimeUsageTooltipLine}>
           <span className={styles.realtimeUsageTooltipLabel}>{field.label}</span>
           <span className={styles.realtimeUsageTooltipValue}>{field.value}</span>
@@ -911,15 +874,84 @@ function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
   return (
     <div
       ref={triggerRef}
-      className={styles.realtimeUsageCell}
+      className={className}
       tabIndex={0}
       aria-describedby={tooltipId}
-      aria-label={details.ariaLabel}
+      aria-label={ariaLabel}
       onMouseEnter={showTooltip}
       onMouseLeave={requestHideTooltip}
       onFocus={showTooltip}
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
+    >
+      {children}
+      {!isBrowser ? tooltip : null}
+      {isBrowser && open ? createPortal(tooltip, document.body) : null}
+    </div>
+  );
+}
+
+type RealtimeTokenUsageDetails = {
+  total: string;
+  input: string;
+  output: string;
+  fields: RealtimeTooltipField[];
+  ariaLabel: string;
+};
+
+const buildRealtimeTokenUsageDetails = (row: MonitoringEventRow, t: TFunction) => {
+  const fields: RealtimeTooltipField[] = [
+    {
+      label: t('monitoring.realtime_usage_total_label'),
+      value: formatCompactNumber(row.totalTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_input_label'),
+      value: formatCompactNumber(row.inputTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_output_label'),
+      value: formatCompactNumber(row.outputTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_reasoning_label'),
+      value: String(row.reasoningTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_cached_label'),
+      value: formatCompactNumber(row.cachedTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_cache_read_label'),
+      value: formatCompactNumber(row.cacheReadTokens),
+    },
+    {
+      label: t('monitoring.realtime_usage_cache_creation_label'),
+      value: formatCompactNumber(row.cacheCreationTokens),
+    },
+  ];
+
+  return {
+    total: fields[0].value,
+    input: fields[1].value,
+    output: fields[2].value,
+    fields,
+    ariaLabel: fields.map((field) => `${field.label}: ${field.value}`).join(', '),
+  } satisfies RealtimeTokenUsageDetails;
+};
+
+type RealtimeTokenUsageProps = {
+  details: RealtimeTokenUsageDetails;
+  tooltipId: string;
+};
+
+function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
+  return (
+    <RealtimeMetricTooltipCell
+      className={styles.realtimeUsageCell}
+      tooltipId={tooltipId}
+      ariaLabel={details.ariaLabel}
+      fields={details.fields}
     >
       <span className={styles.realtimeUsageTotal}>{details.total}</span>
       <span className={styles.realtimeUsageFlow}>
@@ -932,9 +964,100 @@ function RealtimeTokenUsage({ details, tooltipId }: RealtimeTokenUsageProps) {
           {details.output}
         </span>
       </span>
-      {!isBrowser ? tooltip : null}
-      {isBrowser && open ? createPortal(tooltip, document.body) : null}
-    </div>
+    </RealtimeMetricTooltipCell>
+  );
+}
+
+type RealtimeCacheRateTone = 'high' | 'medium' | 'low' | 'empty';
+
+type RealtimeCacheRateDetails = {
+  rateText: string;
+  tone: RealtimeCacheRateTone;
+  writeOnlyText: string | null;
+  hasDetails: boolean;
+  fields: RealtimeTooltipField[];
+  ariaLabel: string;
+};
+
+const buildRealtimeCacheRateDetails = (
+  row: MonitoringEventRow,
+  t: TFunction
+): RealtimeCacheRateDetails => {
+  const { hitTokens, inputTokens } = getCacheHitTotals(row);
+  const writeTokens = Math.max(Number(row.cacheCreationTokens) || 0, 0);
+  const hasInput = inputTokens > 0;
+  const rate = hasInput ? calculateCacheHitRateFromTotals(hitTokens, inputTokens) : null;
+  const rateText = rate === null ? '--' : formatPercent(rate);
+  const tone: RealtimeCacheRateTone =
+    rate === null ? 'empty' : rate >= 0.7 ? 'high' : rate >= 0.3 ? 'medium' : 'low';
+  const hasDetails = hasInput || hitTokens > 0 || writeTokens > 0;
+  const writeOnlyText = hitTokens === 0 && writeTokens > 0 ? formatCompactNumber(writeTokens) : null;
+  const fullLabel = t('monitoring.this_call_cache_rate');
+  const hitLabel = t('monitoring.realtime_cache_hit_label');
+  const writeLabel = t('monitoring.realtime_cache_write_label');
+  const inputLabel = t('monitoring.realtime_usage_input_label');
+  const fields: RealtimeTooltipField[] = hasDetails
+    ? [
+        { label: fullLabel, value: rateText },
+        { label: hitLabel, value: formatCompactNumber(hitTokens) },
+        { label: writeLabel, value: formatCompactNumber(writeTokens) },
+        { label: inputLabel, value: formatCompactNumber(inputTokens) },
+      ]
+    : [];
+  const ariaLabel = hasDetails
+    ? fields.map((field) => `${field.label}: ${field.value}`).join(', ')
+    : `${fullLabel}: --`;
+
+  return {
+    rateText,
+    tone,
+    writeOnlyText,
+    hasDetails,
+    fields,
+    ariaLabel,
+  };
+};
+
+type RealtimeCacheRateProps = {
+  details: RealtimeCacheRateDetails;
+  tooltipId: string;
+  t: TFunction;
+};
+
+function RealtimeCacheRate({ details, tooltipId, t }: RealtimeCacheRateProps) {
+  const valueClassName = [
+    styles.realtimeCacheRateValue,
+    details.tone === 'high'
+      ? styles.goodText
+      : details.tone === 'low' || details.tone === 'empty'
+        ? styles.realtimeCacheRateMuted
+        : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  if (!details.hasDetails) {
+    return (
+      <div className={styles.realtimeCacheRateCell} aria-label={details.ariaLabel}>
+        <span className={valueClassName}>{details.rateText}</span>
+      </div>
+    );
+  }
+
+  return (
+    <RealtimeMetricTooltipCell
+      className={`${styles.realtimeCacheRateCell} ${styles.realtimeCacheRateInteractive}`}
+      tooltipId={tooltipId}
+      ariaLabel={details.ariaLabel}
+      fields={details.fields}
+    >
+      <span className={valueClassName}>{details.rateText}</span>
+      {details.writeOnlyText ? (
+        <span className={styles.realtimeCacheRateWriteNote}>
+          {t('monitoring.realtime_cache_write_label')} {details.writeOnlyText}
+        </span>
+      ) : null}
+    </RealtimeMetricTooltipCell>
   );
 }
 
@@ -1041,31 +1164,20 @@ export function RealtimeEventsPanel({
     'monitoring.column_source_api_key'
   );
   const reasoningServiceLabel = t('monitoring.reasoning_service_short');
-  const recentStatusLabel = shortLabel(
-    t,
-    'monitoring.recent_status_short',
-    'monitoring.recent_status'
-  );
   const requestStatusLabel = shortLabel(
     t,
     'monitoring.request_status_short',
     'monitoring.request_status'
   );
-  const successRateLabel = shortLabel(
-    t,
-    'monitoring.column_success_rate_short',
-    'monitoring.column_success_rate'
-  );
-  const totalCallsLabel = shortLabel(
-    t,
-    'monitoring.total_calls_short',
-    'monitoring.total_calls',
-    'Calls'
-  );
   const usageLabel = shortLabel(
     t,
     'monitoring.this_call_usage_short',
     'monitoring.this_call_usage'
+  );
+  const cacheRateLabel = shortLabel(
+    t,
+    'monitoring.this_call_cache_rate_short',
+    'monitoring.this_call_cache_rate'
   );
   const costLabel = shortLabel(t, 'monitoring.this_call_cost_short', 'monitoring.this_call_cost');
   const handleCopyFailureDetails = async (text: string) => {
@@ -1101,23 +1213,24 @@ export function RealtimeEventsPanel({
             <col />
             <col />
             <col />
-            <col />
-            <col />
           </colgroup>
           <thead>
             <tr>
               <th>{sourceApiKeyLabel}</th>
               <th>{t('monitoring.column_model')}</th>
               <th className={styles.realtimeSettingsColumn}>{reasoningServiceLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{recentStatusLabel}</th>
               <th className={styles.realtimeCenteredColumn}>{requestStatusLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{successRateLabel}</th>
-              <th className={styles.realtimeCenteredColumn}>{totalCallsLabel}</th>
               <th className={styles.realtimeTpsColumn}>{t('monitoring.column_output_tps')}</th>
               <th className={styles.realtimeLatencyColumn}>{t('monitoring.elapsed_short')}</th>
               <th className={styles.realtimeTimeColumn}>{t('monitoring.column_time')}</th>
-              <th>{usageLabel}</th>
-              <th>{costLabel}</th>
+              <th className={styles.realtimeUsageColumn}>{usageLabel}</th>
+              <th
+                className={styles.realtimeCacheRateColumn}
+                title={t('monitoring.this_call_cache_rate')}
+              >
+                {cacheRateLabel}
+              </th>
+              <th className={styles.realtimeCostColumn}>{costLabel}</th>
             </tr>
           </thead>
           <tbody>
@@ -1146,6 +1259,7 @@ export function RealtimeEventsPanel({
               const ttftToneClass = getRealtimeDurationToneClass(row.ttftMs);
               const latencyToneClass = getRealtimeDurationToneClass(row.latencyMs);
               const tokenUsage = buildRealtimeTokenUsageDetails(row, t);
+              const cacheRateDetails = buildRealtimeCacheRateDetails(row, t);
               return (
                 <tr key={row.id} className={row.failed ? styles.logRowFailed : undefined}>
                   <td>
@@ -1213,11 +1327,6 @@ export function RealtimeEventsPanel({
                     </div>
                   </td>
                   <td className={styles.realtimeCenteredColumn}>
-                    <div className={styles.recentStatusCell}>
-                      <RecentPattern pattern={row.recentPattern} variant="plain" />
-                    </div>
-                  </td>
-                  <td className={styles.realtimeCenteredColumn}>
                     <div className={styles.primaryCell}>
                       {requestDiagnosticDetails ? (
                         <RealtimeRequestDiagnosticStatus
@@ -1246,23 +1355,6 @@ export function RealtimeEventsPanel({
                         </span>
                       )}
                     </div>
-                  </td>
-                  <td className={styles.realtimeCenteredColumn}>
-                    <span
-                      className={[
-                        styles.realtimeSuccessRateBadge,
-                        row.successRate >= 0.95
-                          ? styles.goodText
-                          : row.successRate >= 0.85
-                            ? styles.warnText
-                            : styles.badText,
-                      ].join(' ')}
-                    >
-                      {formatPercent(row.successRate)}
-                    </span>
-                  </td>
-                  <td className={styles.realtimeCenteredColumn}>
-                    {formatCompactNumber(row.requestCount)}
                   </td>
                   <td className={styles.realtimeTpsColumn}>
                     <span className={styles.realtimeTpsCell}>
@@ -1303,19 +1395,28 @@ export function RealtimeEventsPanel({
                       <span className={styles.realtimeTimeLine}>{timeParts.time}</span>
                     </div>
                   </td>
-                  <td>
+                  <td className={styles.realtimeUsageColumn}>
                     <RealtimeTokenUsage
                       details={tokenUsage}
                       tooltipId={`${tooltipIdPrefix}-token-usage-tooltip-${row.id}`}
                     />
                   </td>
-                  <td>{hasPrices ? formatUsd(row.totalCost, 3) : '--'}</td>
+                  <td className={styles.realtimeCacheRateColumn}>
+                    <RealtimeCacheRate
+                      details={cacheRateDetails}
+                      tooltipId={`${tooltipIdPrefix}-cache-rate-tooltip-${row.id}`}
+                      t={t}
+                    />
+                  </td>
+                  <td className={styles.realtimeCostColumn}>
+                    {hasPrices ? formatUsd(row.totalCost, 3) : '--'}
+                  </td>
                 </tr>
               );
             })}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={12}>{emptyState}</td>
+                <td colSpan={10}>{emptyState}</td>
               </tr>
             ) : null}
           </tbody>
