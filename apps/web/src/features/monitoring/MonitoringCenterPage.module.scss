@@ -1338,14 +1338,6 @@
 
 @include summaryTable.styles;
 @include accountOverview.styles;
-.realtimeTable {
-  --realtime-col-source: 16%;
-  --realtime-col-model: 16%;
-  --realtime-col-tps: 8%;
-  --realtime-col-latency: 8%;
-  --realtime-col-time: 8%;
-}
-
 .realtimeTable .logTypeCell .primaryCell > span {
   display: inline-block;
   max-width: 100%;
@@ -1369,7 +1361,8 @@
 }
 
 .realtimeUsageCell {
-  display: grid;
+  display: inline-grid;
+  justify-items: center;
   gap: 4px;
   min-width: 0;
   font-variant-numeric: tabular-nums;
@@ -1389,6 +1382,7 @@
 .realtimeUsageFlow {
   display: grid;
   grid-template-columns: max-content max-content;
+  justify-content: center;
   column-gap: 8px;
   color: var(--text-secondary);
   font-size: 11px;
@@ -1522,11 +1516,17 @@
   .realtimeLatencyColumn,
   .realtimeTimeColumn,
   .realtimeTpsColumn,
+  .realtimeUsageColumn,
+  .realtimeCacheRateColumn,
+  .realtimeCostColumn,
   .realtimeCenteredColumn
 ),
 .realtimeLatencyColumn,
 .realtimeTimeColumn,
 .realtimeTpsColumn,
+.realtimeUsageColumn,
+.realtimeCacheRateColumn,
+.realtimeCostColumn,
 .realtimeCenteredColumn {
   text-align: center;
 }
@@ -1539,10 +1539,6 @@
 .realtimeCenteredColumn .primaryCell {
   justify-items: center;
   text-align: center;
-}
-
-.realtimeCenteredColumn .recentStatusCell {
-  justify-content: center;
 }
 
 .realtimeSettingsCell {
@@ -1657,6 +1653,51 @@
 
 .realtimeMetricText.badText {
   color: var(--error-color);
+}
+
+.realtimeCacheRateCell {
+  display: inline-grid;
+  justify-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
+.realtimeCacheRateInteractive {
+  cursor: help;
+
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--data-blue-base) 55%, transparent);
+    outline-offset: 2px;
+    border-radius: var(--app-radius-xs);
+  }
+}
+
+.realtimeCacheRateValue {
+  color: var(--text-primary);
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.realtimeCacheRateValue.goodText {
+  color: var(--success-color);
+}
+
+.realtimeCacheRateMuted {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.realtimeCacheRateWriteNote {
+  color: color-mix(in srgb, var(--warning-text) 76%, var(--text-primary));
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .logTypeCell {

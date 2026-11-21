@@ -92,13 +92,6 @@ export type PriceDraft = {
   cache: string;
 };
 
-export type RealtimeLogRow = MonitoringEventRow & {
-  requestCount: number;
-  successRate: number;
-  streamKey: string;
-  recentPattern: boolean[];
-};
-
 export type AccountOverviewColumn = {
   key: string;
   label: string;
@@ -1705,39 +1698,10 @@ export const buildObservedCodexAccountQuotaEntry = (
     observedFromUsageHeaders: true,
   };
 };
-export const buildRealtimeLogRows = (rows: MonitoringEventRow[]): RealtimeLogRow[] => {
-  const sortedAsc = [...rows].sort(
-    (left, right) => left.timestampMs - right.timestampMs || left.id.localeCompare(right.id)
+export const buildRealtimeLogRows = (rows: MonitoringEventRow[]): MonitoringEventRow[] =>
+  [...rows].sort(
+    (left, right) => right.timestampMs - left.timestampMs || right.id.localeCompare(left.id)
   );
-  const metricsByStream = new Map<string, { total: number; success: number; pattern: boolean[] }>();
-
-  const enriched = sortedAsc.map((row) => {
-    const streamKey = [row.account, row.provider, row.model, row.channel].join('::');
-    const previous = metricsByStream.get(streamKey) ?? { total: 0, success: 0, pattern: [] };
-    const nextPattern = [...previous.pattern, !row.failed].slice(-10);
-    const next = {
-      total: previous.total + (row.statsIncluded ? 1 : 0),
-      success: previous.success + (row.statsIncluded && !row.failed ? 1 : 0),
-      pattern: nextPattern,
-    };
-    metricsByStream.set(streamKey, next);
-
-    return {
-      ...row,
-      streamKey,
-      requestCount: next.total,
-      successRate: next.total > 0 ? next.success / next.total : 1,
-      recentPattern: nextPattern,
-    } satisfies RealtimeLogRow;
-  });
-
-  return enriched.sort(
-    (left, right) =>
-      right.timestampMs - left.timestampMs ||
-      right.requestCount - left.requestCount ||
-      right.id.localeCompare(left.id)
-  );
-};
 
 export const formatAccountOverviewScopeText = (
   bounds: { startMs: number; endMs: number } | null,

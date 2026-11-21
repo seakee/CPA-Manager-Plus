@@ -2,6 +2,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { TFunction } from 'i18next';
 import { describe, expect, it, vi } from 'vitest';
 import type { AccountDisplayMode } from '@/features/monitoring/accountOverviewState';
+import enLocale from '@/i18n/locales/en.json';
+import ruLocale from '@/i18n/locales/ru.json';
+import zhCNLocale from '@/i18n/locales/zh-CN.json';
+import zhTWLocale from '@/i18n/locales/zh-TW.json';
 import type { MonitoringEventRow } from '@/features/monitoring/hooks/useMonitoringData';
 import styles from '../MonitoringCenterPage.module.scss';
 import { RealtimeEventsPanel } from './RealtimeEventsPanel';
@@ -22,8 +26,6 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.column_model': 'Model',
     'monitoring.column_output_tps': 'TPS',
     'monitoring.column_source_api_key': 'Source / API Key',
-    'monitoring.column_success_rate': 'Success',
-    'monitoring.column_success_rate_short': 'Success Rate',
     'monitoring.column_time': 'Time',
     'monitoring.column_type': 'Type',
     'monitoring.elapsed_short': 'Elapsed',
@@ -47,6 +49,8 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.realtime_usage_cached_label': 'Cached',
     'monitoring.realtime_usage_cache_read_label': 'Cache Read',
     'monitoring.realtime_usage_cache_creation_label': 'Cache Creation',
+    'monitoring.realtime_cache_hit_label': 'Hit',
+    'monitoring.realtime_cache_write_label': 'Write',
     'monitoring.load_more_events': 'Load more',
     'monitoring.log_rows': 'Rows',
     'monitoring.no_more_events': 'No more events',
@@ -57,8 +61,6 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.realtime_reasoning_label': 'Reasoning',
     'monitoring.realtime_service_label': 'Service',
     'monitoring.recent_failures': 'Failures',
-    'monitoring.recent_status': 'Recent',
-    'monitoring.recent_status_short': 'Recent Status',
     'monitoring.realtime_api_key_hash': 'API Key hash',
     'monitoring.realtime_api_key_label': 'API Key',
     'monitoring.realtime_api_key_masked': 'Masked key',
@@ -80,6 +82,8 @@ const t = ((key: string, options?: Record<string, unknown>) => {
     'monitoring.response_service_tier_short': 'Reported tier',
     'monitoring.this_call_cost': 'Cost',
     'monitoring.this_call_usage': 'Usage',
+    'monitoring.this_call_cache_rate': 'This Call Cache Rate',
+    'monitoring.this_call_cache_rate_short': 'Cache Rate',
     'monitoring.ttft_short': 'TTFT',
   };
   let message = messages[key] ?? key;
@@ -93,13 +97,6 @@ const t = ((key: string, options?: Record<string, unknown>) => {
 
 const noop = vi.fn();
 
-type PanelRow = MonitoringEventRow & {
-  requestCount: number;
-  successRate: number;
-  streamKey: string;
-  recentPattern: boolean[];
-};
-
 type PanelOverrides = {
   accountDisplayMode?: AccountDisplayMode;
   eventsHasMore?: boolean;
@@ -110,7 +107,7 @@ type PanelOverrides = {
   hasPrices?: boolean;
 };
 
-const baseRow = (overrides: Partial<PanelRow> = {}): PanelRow => ({
+const baseRow = (overrides: Partial<MonitoringEventRow> = {}): MonitoringEventRow => ({
   id: 'row-1',
   timestamp: '2026-04-25T00:00:00Z',
   timestampMs: Date.UTC(2026, 3, 25, 12, 34, 56),
@@ -153,14 +150,10 @@ const baseRow = (overrides: Partial<PanelRow> = {}): PanelRow => ({
   totalCost: 0,
   taskKey: 'task-1',
   searchText: '',
-  requestCount: 1,
-  successRate: 1,
-  streamKey: 'stream-1',
-  recentPattern: [true],
   ...overrides,
 });
 
-const renderPanel = (row: PanelRow, overrides: PanelOverrides = {}) =>
+const renderPanel = (row: MonitoringEventRow, overrides: PanelOverrides = {}) =>
   renderToStaticMarkup(
     <RealtimeEventsPanel
       embedded
@@ -211,7 +204,6 @@ describe('RealtimeEventsPanel', () => {
     const markup = renderPanel(
       baseRow({
         failed: true,
-        successRate: 0,
         executorType: 'codex',
         reasoningEffort: 'medium',
         serviceTier: 'priority',
@@ -231,10 +223,15 @@ describe('RealtimeEventsPanel', () => {
     expect(markup).toContain(styles.realtimeTpsColumn);
     expect(markup).toContain(styles.realtimeLatencyColumn);
     expect(markup).toContain(styles.realtimeTimeColumn);
-    expect(markup.match(new RegExp(styles.realtimeCenteredColumn, 'g'))).toHaveLength(8);
+    expect(markup.match(new RegExp(styles.realtimeCenteredColumn, 'g'))).toHaveLength(2);
+    expect(markup.match(new RegExp(styles.realtimeUsageColumn, 'g'))).toHaveLength(2);
+    expect(markup.match(new RegExp(styles.realtimeCacheRateColumn, 'g'))).toHaveLength(2);
+    expect(markup.match(new RegExp(styles.realtimeCostColumn, 'g'))).toHaveLength(2);
     expect(markup.match(new RegExp(styles.realtimeSettingsColumn, 'g'))).toHaveLength(2);
-    expect(markup).toContain('>Recent Status</th>');
-    expect(markup).toContain('>Success Rate</th>');
+    expect(markup).not.toContain('>Success Rate</th>');
+    expect(markup).not.toContain('>Calls</th>');
+    expect(markup.indexOf('>Usage</th>')).toBeLessThan(markup.indexOf('>Cache Rate</th>'));
+    expect(markup.indexOf('>Cache Rate</th>')).toBeLessThan(markup.indexOf('>Cost</th>'));
     expect(markup).toContain('Source / API Key');
     expect(markup).not.toContain('>Executor: codex<');
     expect(markup).not.toContain('Executor: codex');
@@ -277,6 +274,7 @@ describe('RealtimeEventsPanel', () => {
     expect(markup).toContain('aria-label="HTTP 429 · rate limit exceeded"');
     expect(markup).toContain('aria-label="Copy"');
     expect(markup).toContain('HTTP 429');
+    expect(markup).toContain(`<span class="${styles.realtimeStatusCode}">HTTP 429</span>`);
     expect(markup).toContain('rate limit exceeded');
   });
 
@@ -285,7 +283,6 @@ describe('RealtimeEventsPanel', () => {
       baseRow({
         provider: 'xai',
         failed: true,
-        successRate: 0,
         failStatusCode: 429,
         failSummary: '{"code":"subscription:free-usage-exhausted"}',
         responseMetadata: {
@@ -350,7 +347,7 @@ describe('RealtimeEventsPanel', () => {
     const markup = renderPanel(baseRow({ reasoningTokens: 0 }));
 
     expect(markup).toContain('<colgroup>');
-    expect(markup.match(/<col\b/g)).toHaveLength(12);
+    expect(markup.match(/<col\b/g)).toHaveLength(10);
     expect(
       markup.match(new RegExp(`class="[^"]*${styles.realtimeSettingValue}[^"]*">-</span>`, 'g'))
     ).toHaveLength(2);
@@ -616,5 +613,148 @@ describe('RealtimeEventsPanel', () => {
 
     expect(markup).toContain('Loaded 500 of 500 events');
     expect(markup).toContain('Load more');
+  });
+
+  it('does not render an inline HTTP status code when a failed row has none', () => {
+    const markup = renderPanel(
+      baseRow({
+        failed: true,
+        failStatusCode: null,
+        failSummary: 'upstream connection reset',
+      })
+    );
+
+    expect(markup).toContain('Failed');
+    expect(markup).toContain('upstream connection reset');
+    expect(markup).not.toContain(styles.realtimeStatusCode);
+  });
+
+  it('renders direction-1 cache hit rate with write-only note and structured hover card details', () => {
+    const hitAndWriteMarkup = renderPanel(
+      baseRow({
+        inputTokens: 152_600,
+        cachedTokens: 0,
+        cacheReadTokens: 151_000,
+        cacheCreationTokens: 1_000,
+      })
+    );
+
+    expect(hitAndWriteMarkup).toMatch(
+      new RegExp(`class="[^"]*${styles.realtimeCacheRateValue}[^"]*${styles.goodText}[^"]*">99\\.0%<`)
+    );
+    expect(hitAndWriteMarkup).toContain(styles.realtimeCacheRateInteractive);
+    expect(hitAndWriteMarkup).not.toContain(styles.realtimeCacheRateWriteNote);
+    expect(hitAndWriteMarkup).toContain('cache-rate-tooltip-row-1');
+    expect(hitAndWriteMarkup).toContain(
+      'aria-label="This Call Cache Rate: 99.0%, Hit: 151.0K, Write: 1.0K, Input: 152.6K"'
+    );
+    expect(hitAndWriteMarkup).toContain(
+      `<span class="${styles.realtimeUsageTooltipLabel}">Hit</span><span class="${styles.realtimeUsageTooltipValue}">151.0K</span>`
+    );
+    expect(hitAndWriteMarkup).toContain(
+      `<span class="${styles.realtimeUsageTooltipLabel}">Write</span><span class="${styles.realtimeUsageTooltipValue}">1.0K</span>`
+    );
+
+    const legacyPlusReadMarkup = renderPanel(
+      baseRow({
+        inputTokens: 1_000,
+        cachedTokens: 500,
+        cacheReadTokens: 300,
+        cacheCreationTokens: 0,
+      })
+    );
+    expect(legacyPlusReadMarkup).toMatch(
+      new RegExp(`class="[^"]*${styles.realtimeCacheRateValue}[^"]*${styles.goodText}[^"]*">80\\.0%<`)
+    );
+    expect(legacyPlusReadMarkup).not.toContain(styles.realtimeCacheRateWriteNote);
+    expect(legacyPlusReadMarkup).toContain(
+      `<span class="${styles.realtimeUsageTooltipLabel}">Hit</span><span class="${styles.realtimeUsageTooltipValue}">800</span>`
+    );
+
+    const mediumMarkup = renderPanel(
+      baseRow({
+        inputTokens: 1_000,
+        cachedTokens: 500,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    );
+    expect(mediumMarkup).toContain(`<span class="${styles.realtimeCacheRateValue}">50.0%</span>`);
+    expect(mediumMarkup).not.toContain(styles.realtimeCacheRateWriteNote);
+
+    const writeOnlyMarkup = renderPanel(
+      baseRow({
+        inputTokens: 68_000,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 64_000,
+      })
+    );
+    expect(writeOnlyMarkup).toMatch(
+      new RegExp(
+        `class="[^"]*${styles.realtimeCacheRateValue}[^"]*${styles.realtimeCacheRateMuted}[^"]*">0\\.0%<`
+      )
+    );
+    expect(writeOnlyMarkup).not.toContain(`realtimeCacheRateValue ${styles.badText}`);
+    expect(writeOnlyMarkup).toContain(
+      `<span class="${styles.realtimeCacheRateWriteNote}">Write 64.0K</span>`
+    );
+    expect(writeOnlyMarkup).toContain(
+      'aria-label="This Call Cache Rate: 0.0%, Hit: 0, Write: 64.0K, Input: 68.0K"'
+    );
+
+    const uncachedMarkup = renderPanel(
+      baseRow({
+        inputTokens: 1_200,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    );
+    expect(uncachedMarkup).toMatch(
+      new RegExp(
+        `class="[^"]*${styles.realtimeCacheRateValue}[^"]*${styles.realtimeCacheRateMuted}[^"]*">0\\.0%<`
+      )
+    );
+    expect(uncachedMarkup).not.toContain(styles.realtimeCacheRateWriteNote);
+    expect(uncachedMarkup).toContain(
+      'aria-label="This Call Cache Rate: 0.0%, Hit: 0, Write: 0, Input: 1.2K"'
+    );
+
+    const zeroInputMarkup = renderPanel(
+      baseRow({
+        failed: true,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 0,
+      })
+    );
+    expect(zeroInputMarkup).toMatch(
+      new RegExp(
+        `class="[^"]*${styles.realtimeCacheRateValue}[^"]*${styles.realtimeCacheRateMuted}[^"]*">--<`
+      )
+    );
+    expect(zeroInputMarkup).not.toContain(styles.realtimeCacheRateInteractive);
+    expect(zeroInputMarkup).not.toContain('cache-rate-tooltip-row-1');
+    expect(zeroInputMarkup).toContain('aria-label="This Call Cache Rate: --"');
+  });
+
+  it('defines realtime cache rate and hit/write labels across all four locales', () => {
+    const keys = [
+      'this_call_cache_rate',
+      'this_call_cache_rate_short',
+      'realtime_cache_hit_label',
+      'realtime_cache_write_label',
+    ] as const;
+
+    for (const locale of [enLocale, zhCNLocale, zhTWLocale, ruLocale]) {
+      const monitoring = locale.monitoring as Record<string, string>;
+      for (const key of keys) {
+        expect(monitoring[key]?.trim().length).toBeGreaterThan(0);
+      }
+    }
   });
 });

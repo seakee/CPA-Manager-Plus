@@ -318,35 +318,3 @@ export function StatusBadge({
 }) {
   return <span className={`${styles.statusBadge} ${styles[`tone${tone}`]}`}>{children}</span>;
 }
-
-export function RecentPattern({
-  pattern,
-  variant = 'default',
-}: {
-  pattern: boolean[];
-  variant?: 'default' | 'plain';
-}) {
-  const fallbackLength = variant === 'plain' ? 5 : 10;
-  const normalized = pattern.length > 0 ? pattern : Array.from({ length: fallbackLength }, () => true);
-  const visiblePattern = variant === 'plain' ? normalized.slice(-5) : normalized;
-  const containerClassName = [
-    styles.patternBars,
-    variant === 'plain' ? styles.patternBarsPlain : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const barClassName = [styles.patternBar, variant === 'plain' ? styles.patternBarPlain : '']
-    .filter(Boolean)
-    .join(' ');
-
-  return (
-    <div className={containerClassName} aria-hidden="true">
-      {visiblePattern.map((item, index) => (
-        <span
-          key={`${index}-${item ? 'success' : 'failed'}`}
-          className={`${barClassName} ${item ? styles.patternSuccess : styles.patternFailed}`}
-        />
-      ))}
-    </div>
-  );
-}
