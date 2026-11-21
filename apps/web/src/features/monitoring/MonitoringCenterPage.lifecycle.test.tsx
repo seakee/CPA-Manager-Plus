@@ -46,6 +46,7 @@ const makeCodexFile = (authIndex: string, name: string): AuthFileItem =>
 
 vi.mock('react-router-dom', () => ({
   useLocation: () => ({ pathname: '/monitoring', search: '', hash: '', state: null, key: 'test' }),
+  useNavigate: () => vi.fn(),
 }));
 
 vi.mock('react-i18next', async (importOriginal) => {

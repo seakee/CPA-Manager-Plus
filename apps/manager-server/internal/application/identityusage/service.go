@@ -144,6 +144,16 @@ func (s *Service) MarkCollectionStart(ctx context.Context) error {
 	return s.repo.MarkCollectionStarted(ctx, s.now())
 }
 
+// MarkCollectionStartAt records a proven collection start instant. When
+// startedAtMS is non-positive it falls back to the service clock; the earliest
+// recorded instant always wins.
+func (s *Service) MarkCollectionStartAt(ctx context.Context, startedAtMS int64) error {
+	if startedAtMS <= 0 {
+		startedAtMS = s.now()
+	}
+	return s.repo.MarkCollectionStarted(ctx, startedAtMS)
+}
+
 type evidence struct {
 	phase        CollectionPhase
 	collectingAt int64
@@ -164,15 +174,34 @@ type evidence struct {
 	windowToMS      int64
 }
 
+func isNativeOrigin(origin string) bool {
+	return origin == "workspace" || origin == "installer"
+}
+
 // evaluate returns the coverage of one key's window. Reasons are stable codes;
 // the UI owns their localization.
 func evaluate(in evidence) (ports.State, string) {
+	// Native Manager-minted keys ("workspace" and "installer") did not exist as
+	// externally callable credentials before binding.FirstSeenAtMS, so when
+	// collection was already proven at or before FirstSeenAtMS and strictly
+	// precedes windowToMS, the pre-binding interval inside [requestedFromMS,
+	// windowToMS) is provably zero client calls.
+	nativePreBindingProven := in.bindingErr == nil &&
+		in.collectingAt > 0 &&
+		in.collectingAt < in.windowToMS &&
+		in.windowToMS > in.requestedFromMS &&
+		isNativeOrigin(in.binding.Origin) &&
+		in.binding.IdentityCreatedAtMS > 0 &&
+		in.binding.FirstSeenAtMS <= in.binding.IdentityCreatedAtMS &&
+		in.collectingAt <= in.binding.FirstSeenAtMS
 	switch {
 	case in.collectingAt <= 0:
 		return ports.StateUnknown, "collection_unproven"
 	case errors.Is(in.bindingErr, ports.ErrBindingConflict):
 		return ports.StateUnavailable, "binding_conflict"
 	case errors.Is(in.bindingErr, ports.ErrBindingNotFound):
+		return ports.StateUnavailable, "binding_missing"
+	case in.bindingErr != nil:
 		return ports.StateUnavailable, "binding_missing"
 	case !in.projectionOK:
 		return ports.StateUnavailable, "projection_unavailable"
@@ -193,12 +222,16 @@ func evaluate(in evidence) (ports.State, string) {
 		}
 		return ports.StateUnknown, "projection_catching_up"
 	case in.windowFromMS >= in.windowToMS:
+		if nativePreBindingProven {
+			return ports.StateComplete, "observed"
+		}
 		// Nothing inside the requested range was ever observed. Publishing a
 		// zero here would claim a proven quiet window that does not exist.
 		return ports.StateUnknown, "window_unobserved"
-	case in.windowFromMS > in.requestedFromMS:
-		// Collection or attribution started inside the requested window, so the
-		// numbers are a lower bound for it.
+	case in.windowFromMS > in.requestedFromMS && !nativePreBindingProven:
+		// Collection started inside the requested window, or a non-native key
+		// was bound after the requested window opened, so the numbers are a
+		// lower bound for it.
 		return ports.StatePartial, "window_partial"
 	case in.window.UnmappedEvents > 0:
 		return ports.StatePartial, "identity_unmapped"
@@ -220,7 +253,8 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 		return DetailResponse{}, err
 	}
 	nowMS := s.now()
-	if fromMS <= 0 && toMS <= 0 {
+	explicitWindow := fromMS > 0 || toMS > 0
+	if !explicitWindow {
 		fromMS, toMS = nowMS-DefaultWindowMS, nowMS
 	}
 	if toMS > nowMS {
@@ -285,10 +319,26 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 	// Unknown and unavailable windows publish no totals at all: a zero must never
 	// stand in for "not measured".
 	if state == ports.StateComplete || state == ports.StatePartial {
+		lastUsedAtMS := in.window.Totals.LastUsedAtMS
+		if explicitWindow && lastUsedAtMS != nil && *lastUsedAtMS < in.windowFromMS {
+			lastUsedAtMS = nil
+		} else if !explicitWindow && in.window.Totals.Calls == 0 && lastUsedAtMS != nil && *lastUsedAtMS < in.windowFromMS {
+			if *lastUsedAtMS < in.collectingAt {
+				lastUsedAtMS = nil
+			} else {
+				blindSpot, err := s.priorLastUsedBlindSpot(ctx, *lastUsedAtMS, in.windowFromMS)
+				if err != nil {
+					return DetailResponse{}, err
+				}
+				if blindSpot {
+					lastUsedAtMS = nil
+				}
+			}
+		}
 		totals := Totals{
 			Calls: in.window.Totals.Calls, Failure: in.window.Totals.Failure,
 			InputTokens: in.window.Totals.InputTokens, OutputTokens: in.window.Totals.OutputTokens,
-			TotalTokens: in.window.Totals.TotalTokens, LastUsedAtMS: in.window.Totals.LastUsedAtMS,
+			TotalTokens: in.window.Totals.TotalTokens, LastUsedAtMS: lastUsedAtMS,
 		}
 		totals.Success = totals.Calls - totals.Failure
 		response.Totals = &totals
@@ -361,33 +411,73 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		}
 	}
 	windows := map[identity.APIKeyID]ports.Window{}
-	rawDeleted := false
+	var latestRawDeletedMS int64
+	anyRawDeleted := false
 	var incompleteDays []ports.IncompleteDay
 	if len(ranges) > 0 && collectingAt > 0 {
 		if windows, err = s.repo.Windows(ctx, ranges, toMS); err != nil {
 			return SummaryResponse{}, err
 		}
-		if rawDeleted, err = s.repo.RawDeletedIn(ctx, earliestWindowFromMS, toMS); err != nil {
+		if latestRawDeletedMS, anyRawDeleted, err = s.repo.LatestRawDeletedIn(ctx, earliestWindowFromMS, toMS); err != nil {
 			return SummaryResponse{}, err
 		}
 		if incompleteDays, err = s.repo.IncompleteDaysIn(ctx, earliestWindowFromMS, toMS); err != nil {
 			return SummaryResponse{}, err
 		}
 	}
+	var (
+		minPriorScanMS int64
+		maxPriorScanMS int64
+		hasPriorScan   bool
+	)
+	for _, id := range ids {
+		if bindingErrs[id] != nil {
+			continue
+		}
+		windowFromMS, ok := windowFromByID[id]
+		if !ok {
+			continue
+		}
+		w := windows[id]
+		if w.Totals.Calls == 0 && w.Totals.LastUsedAtMS != nil && *w.Totals.LastUsedAtMS >= collectingAt && *w.Totals.LastUsedAtMS < windowFromMS {
+			scanFrom := *w.Totals.LastUsedAtMS + 1
+			if scanFrom < windowFromMS {
+				if !hasPriorScan || scanFrom < minPriorScanMS {
+					minPriorScanMS = scanFrom
+				}
+				if !hasPriorScan || windowFromMS > maxPriorScanMS {
+					maxPriorScanMS = windowFromMS
+				}
+				hasPriorScan = true
+			}
+		}
+	}
+	anyPriorRawDeleted := false
+	var priorIncompleteDays []ports.IncompleteDay
+	if hasPriorScan && collectingAt > 0 {
+		if _, anyPriorRawDeleted, err = s.repo.LatestRawDeletedIn(ctx, minPriorScanMS, maxPriorScanMS); err != nil {
+			return SummaryResponse{}, err
+		}
+		if priorIncompleteDays, err = s.repo.IncompleteDaysIn(ctx, minPriorScanMS, maxPriorScanMS); err != nil {
+			return SummaryResponse{}, err
+		}
+	}
+
 	items := make([]SummaryItem, 0, len(ids))
 	var publishedFromMS int64
 	hasPublished := false
 	for _, id := range ids {
 		item := SummaryItem{KeyID: string(id)}
-		windowFromMS := windowFromByID[id]
-		if windowFromMS == 0 {
+		windowFromMS, hasWindowFrom := windowFromByID[id]
+		if !hasWindowFrom {
 			windowFromMS = fromMS
 		}
 		window := windows[id]
+		keyRawDeleted := anyRawDeleted && bindingErrs[id] == nil && windowFromMS < toMS && windowFromMS <= latestRawDeletedMS
 		in := evidence{
 			phase: phase, collectingAt: collectingAt,
 			binding: bindings[id], bindingErr: bindingErrs[id],
-			window: window, rawDeleted: rawDeleted,
+			window: window, rawDeleted: keyRawDeleted,
 			// Only the days inside this key's provable window bound it: a mark
 			// before the key existed says nothing about its numbers.
 			incompleteDays:  daysWithin(incompleteDays, windowFromMS, toMS),
@@ -400,8 +490,27 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		state, reason := evaluate(in)
 		item.Coverage = CoverageState{State: string(state), Reason: reason}
 		if state == ports.StateComplete || state == ports.StatePartial {
+			lastUsedAtMS := window.Totals.LastUsedAtMS
+			if window.Totals.Calls == 0 && lastUsedAtMS != nil && *lastUsedAtMS < windowFromMS {
+				if *lastUsedAtMS < collectingAt {
+					lastUsedAtMS = nil
+				} else {
+					scanFrom := *lastUsedAtMS + 1
+					if scanFrom < windowFromMS && len(daysWithin(priorIncompleteDays, scanFrom, windowFromMS)) > 0 {
+						lastUsedAtMS = nil
+					} else if scanFrom < windowFromMS && anyPriorRawDeleted {
+						deletedInGap, err := s.repo.RawDeletedIn(ctx, scanFrom, windowFromMS)
+						if err != nil {
+							return SummaryResponse{}, err
+						}
+						if deletedInGap {
+							lastUsedAtMS = nil
+						}
+					}
+				}
+			}
 			item.Calls = window.Totals.Calls
-			item.LastUsedAtMS = window.Totals.LastUsedAtMS
+			item.LastUsedAtMS = lastUsedAtMS
 			if windowFromMS < toMS && (!hasPublished || windowFromMS < publishedFromMS) {
 				publishedFromMS = windowFromMS
 				hasPublished = true
@@ -488,6 +597,25 @@ func (s *Service) projection(ctx context.Context) (ports.ProjectionState, bool) 
 		return ports.ProjectionState{}, false
 	}
 	return state, true
+}
+
+func (s *Service) priorLastUsedBlindSpot(ctx context.Context, priorTS, windowFromMS int64) (bool, error) {
+	scanFrom := priorTS + 1
+	if scanFrom >= windowFromMS {
+		return false, nil
+	}
+	deleted, err := s.repo.RawDeletedIn(ctx, scanFrom, windowFromMS)
+	if err != nil {
+		return false, err
+	}
+	if deleted {
+		return true, nil
+	}
+	days, err := s.repo.IncompleteDaysIn(ctx, scanFrom, windowFromMS)
+	if err != nil {
+		return false, err
+	}
+	return len(daysWithin(days, scanFrom, windowFromMS)) > 0, nil
 }
 
 // daysWithin keeps the marks whose UTC day overlaps [fromMS, toMS). Stored

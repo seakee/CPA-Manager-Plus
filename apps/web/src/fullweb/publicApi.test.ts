@@ -803,4 +803,91 @@ describe('canonical Full Web Public API transport', () => {
       code: 'operation_not_found',
     });
   });
+
+  it('allows bounded usage window queries only on GET api-keys/{id}/usage and keeps rejecting all other queries', async () => {
+    browserOrigin();
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        keyId: 'key-1',
+        fromMs: 1000,
+        toMs: 2000,
+        bucketMs: 1000,
+        coverage: { state: 'complete', reason: 'observed', collectingSinceMs: 1000, lastProcessedEventId: 1, targetEventId: 1 },
+        totals: null,
+        series: [],
+      })
+    );
+    const client = createPublicApiClient(() => context, transport);
+    await client.get('api-keys/key-1/usage?from_ms=1000&to_ms=2000', credential);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport).toHaveBeenCalledWith(
+      'https://manager.example:18317/phase4-test/api/v2/api-keys/key-1/usage?from_ms=1000&to_ms=2000',
+      expect.objectContaining({ method: 'GET' })
+    );
+
+    transport.mockClear();
+    await expect(
+      client.post('api-keys/key-1/usage?from_ms=1000&to_ms=2000', {}, credential)
+    ).rejects.toMatchObject({ kind: 'routing_unavailable' });
+    for (const invalid of [
+      'api-keys/key-1/usage?from_ms=1000&to_ms=2000&extra=1',
+      'api-keys/key-1/usage?to_ms=2000&from_ms=1000',
+      'api-keys/key-1/usage?from_ms=1000&to_ms=2000#frag',
+      'api-keys/key-1?from_ms=1000&to_ms=2000',
+      'api-keys/../usage?from_ms=1000&to_ms=2000',
+    ]) {
+      await expect(client.get(invalid, credential)).rejects.toMatchObject({
+        kind: 'routing_unavailable',
+      });
+    }
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it('preserves code, detail, key, and operationResult on POST api-keys/{id}/regenerate 409 and 503 responses', async () => {
+    browserOrigin();
+    const keyObj = { id: 'a'.repeat(32), requestId: 'b'.repeat(32), maskedPreview: 'cpamp_sk_…1111' };
+    const opResult = {
+      operation: {
+        id: 'c'.repeat(32),
+        targetId: 'a'.repeat(32),
+        keeperId: '',
+        mode: 'rotate',
+        outcome: 'unknown',
+        revision: 1,
+        steps: [{ name: 'rotate', state: 'attempted', returned: false }],
+      },
+      runtimeState: 'effect_unknown',
+      expiresAtMs: 0,
+      nextStep: '',
+    };
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        {
+          code: 'key_operation_unknown',
+          detail: 'gateway write uncertain',
+          key: keyObj,
+          result: opResult,
+        },
+        { status: 503 }
+      )
+    );
+    const err = (await createPublicApiClient(() => context, transport)
+      .post('api-keys/' + 'a'.repeat(32) + '/regenerate', { requestId: 'd'.repeat(32) }, credential)
+      .catch((value) => value)) as Error & {
+      kind?: string;
+      status?: number;
+      code?: string;
+      detail?: string;
+      key?: unknown;
+      operationResult?: unknown;
+    };
+    expect(err).toMatchObject({
+      kind: 'http',
+      status: 503,
+      code: 'key_operation_unknown',
+      detail: 'gateway write uncertain',
+      key: keyObj,
+      operationResult: opResult,
+    });
+  });
 });

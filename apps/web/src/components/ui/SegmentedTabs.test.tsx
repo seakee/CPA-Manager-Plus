@@ -115,4 +115,30 @@ describe('SegmentedTabs', () => {
     expect(markup).toContain('href="/codex-inspection/server"');
     expect(markup).toContain('aria-selected="true"');
   });
+
+  it('exposes variant and size attributes with joined and sm defaults overridden', () => {
+    const defaultMarkup = renderToStaticMarkup(
+      <SegmentedTabs
+        items={baseItems}
+        activeTab="visual"
+        onChange={() => {}}
+        ariaLabel="Editor tabs"
+      />
+    );
+    expect(defaultMarkup).toContain('data-variant="default"');
+    expect(defaultMarkup).toContain('data-size="md"');
+
+    const joinedSmMarkup = renderToStaticMarkup(
+      <SegmentedTabs
+        items={baseItems}
+        activeTab="visual"
+        onChange={() => {}}
+        ariaLabel="Compact joined tabs"
+        variant="joined"
+        size="sm"
+      />
+    );
+    expect(joinedSmMarkup).toContain('data-variant="joined"');
+    expect(joinedSmMarkup).toContain('data-size="sm"');
+  });
 });

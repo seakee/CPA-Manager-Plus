@@ -75,10 +75,9 @@ func TestExternalLegacyReadsStayOpenBeforeARejection(t *testing.T) {
 	}
 }
 
-// TestExternalLegacyWritesStayOpenOnNewManaged proves the cutover is External's
-// alone: a New Managed installation still reaches CPA through the same bridge,
-// because there the bridge is the Console's existing contract rather than a
-// duplicate of a route Fresh owns.
+// TestExternalLegacyWritesStayOpenOnNewManaged proves Managed uses its own
+// canonical client-key write refusal code (`legacy_write_replaced`) rather than
+// External's cutover or credential-rejection codes.
 func TestExternalLegacyWritesStayOpenOnNewManaged(t *testing.T) {
 	app := newInstallationTestApplication(t)
 	markFreshProductComplete(t, app)
@@ -89,12 +88,30 @@ func TestExternalLegacyWritesStayOpenOnNewManaged(t *testing.T) {
 	if record.Operation.Strategy.Strategy == bootstrap.ConnectExternal {
 		t.Fatalf("the fixture committed External: %q", record.Operation.Strategy.Strategy)
 	}
-	response := gatewayRequest(t, app, http.MethodPut, "cpamp/v0/management/api-keys", `{}`, "application/json")
-	if code := errorCode(t, response); code == externalLegacyWriteReplaced {
-		t.Fatalf("New Managed returned the External cutover code")
-	}
-	if code := errorCode(t, response); code == freshconfig.ReasonManagementRejected {
-		t.Fatalf("New Managed returned the External rejection code")
+	for _, scenario := range []struct {
+		method   string
+		resource string
+	}{
+		{http.MethodPut, "cpamp/v0/management/api-keys"},
+		{http.MethodPatch, "cpamp/v0/management/api-keys"},
+		{http.MethodDelete, "cpamp/v0/management/api-keys"},
+		{http.MethodPut, "cpamp/v0/management/config.yaml"},
+		{http.MethodPut, "cpamp/v0/management/config"},
+	} {
+		response := gatewayRequest(t, app, scenario.method, scenario.resource, `{}`, "application/json")
+		if response.Code != http.StatusConflict {
+			t.Fatalf("%s %s = %d %s, want 409", scenario.method, scenario.resource, response.Code, response.Body.String())
+		}
+		code := errorCode(t, response)
+		if code == externalLegacyWriteReplaced {
+			t.Fatalf("New Managed returned the External cutover code on %s %s", scenario.method, scenario.resource)
+		}
+		if code == freshconfig.ReasonManagementRejected {
+			t.Fatalf("New Managed returned the External rejection code on %s %s", scenario.method, scenario.resource)
+		}
+		if code != legacyWriteReplaced {
+			t.Fatalf("%s %s code = %q, want %q", scenario.method, scenario.resource, code, legacyWriteReplaced)
+		}
 	}
 }
 

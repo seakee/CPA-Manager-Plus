@@ -83,6 +83,8 @@ const (
 	GatewayQuotaPolicyRulesTable             = "gateway_quota_policy_rules"
 	GatewayAPIKeyPolicyBindingsTable         = "gateway_api_key_policy_bindings"
 	GatewayQuotaDecisionEventsTable          = "gateway_quota_decision_events_v1"
+	FreshClientAPIKeyRotationsTable          = "fresh_client_api_key_rotations"
+	FreshClientAPIKeySecretHistoryTable      = "fresh_client_api_key_secret_history"
 
 	createUsageAccountModelRollupsTable = `create table if not exists usage_account_model_rollups (
 		account_key text not null,
@@ -1102,6 +1104,27 @@ func Migrate(db *sql.DB) error {
 			masked_preview text not null,
 			origin text not null default 'workspace' check(origin in ('workspace','installer','adopted'))
 		)`,
+		`create table if not exists fresh_client_api_key_rotations (
+			request_id text primary key,
+			api_key_id text not null unique references gateway_api_key_identities(id),
+			old_secret_hash text not null,
+			new_secret_ciphertext text not null,
+			new_secret_hash text not null unique,
+			new_masked_preview text not null,
+			created_at_ms integer not null
+		)`,
+		`create table if not exists fresh_client_api_key_secret_history (
+			secret_hash text primary key,
+			api_key_id text not null references gateway_api_key_identities(id),
+			secret_ciphertext text not null,
+			masked_preview text not null,
+			origin text not null,
+			retired_at_ms integer not null,
+			retired_by_request_id text not null default '',
+			next_secret_hash text not null default ''
+		)`,
+		`create index if not exists idx_fresh_client_api_key_secret_history_key_retired
+			on fresh_client_api_key_secret_history(api_key_id, retired_at_ms desc)`,
 		`create table if not exists gateway_quota_policies (
 			id text not null primary key check(length(id) = 32 and id not glob '*[^0-9a-f]*'),
 			revision integer not null check(typeof(revision) = 'integer' and revision >= 1),
@@ -1503,6 +1526,24 @@ func ensureFreshKeyColumns(db *sql.DB) error {
 				return err
 			}
 		}
+	}
+	for _, column := range []struct{ name, ddl string }{
+		{"retired_by_request_id", "retired_by_request_id text not null default ''"},
+		{"next_secret_hash", "next_secret_hash text not null default ''"},
+	} {
+		found, err := tableHasColumn(tx, "fresh_client_api_key_secret_history", column.name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			if _, err := tx.Exec("alter table fresh_client_api_key_secret_history add column " + column.ddl); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(`create index if not exists idx_fresh_client_api_key_secret_history_req
+		on fresh_client_api_key_secret_history(retired_by_request_id)`); err != nil {
+		return err
 	}
 	// The installation mints at most one install-origin Client Key. The partial
 	// index is the durable fence a concurrent or replayed install cannot pass.

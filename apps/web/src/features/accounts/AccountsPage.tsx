@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
-  KeyboardEvent,
   MouseEvent as ReactMouseEvent,
   ReactNode,
   SetStateAction,
@@ -17,6 +16,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
 import { Select } from '@/components/ui/Select';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
+import { SortControl } from '@/components/ui/SortControl';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconCheck,
@@ -24,8 +24,6 @@ import {
   IconDollarSign,
   IconSend,
   IconChartLine,
-  IconArrowDownWideNarrow,
-  IconArrowUpNarrowWide,
   IconCopy,
   IconDownload,
   IconEye,
@@ -1424,8 +1422,6 @@ export function AccountsPage() {
     () => initialWorkspaceUrlState.current.accountSort
   );
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
-  const [isAccountSortDropdownOpen, setIsAccountSortDropdownOpen] = useState(false);
-  const [highlightedAccountSortIndex, setHighlightedAccountSortIndex] = useState(-1);
   const [batchPriorityOpen, setBatchPriorityOpen] = useState(false);
   const [batchPriorityValue, setBatchPriorityValue] = useState('');
   const [editingPriorityState, setEditingPriorityState] = useState<{
@@ -1728,11 +1724,6 @@ export function AccountsPage() {
     Map<string, CodexResetCreditRequestEntry>
   >(new Map());
   const identityCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const accountSortDropdownRef = useRef<HTMLDivElement | null>(null);
-  const accountSortTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const accountSortOptionRefs = useRef<Map<AccountSortFieldValue, HTMLButtonElement | null>>(
-    new Map()
-  );
   const detailDrawerBodyRef = useRef<HTMLDivElement | null>(null);
   const detailAnchorRef = useRef<string | null>(null);
   const [detailAnchor, setDetailAnchor] = useState<{ id: string; timestamp: number } | null>(null);
@@ -2421,27 +2412,6 @@ export function AccountsPage() {
     },
     []
   );
-
-  useEffect(() => {
-    if (!isAccountSortDropdownOpen || typeof document === 'undefined') return;
-
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!accountSortDropdownRef.current?.contains(target)) {
-        setIsAccountSortDropdownOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isAccountSortDropdownOpen]);
-
-  useEffect(() => {
-    if (!isAccountSortDropdownOpen || highlightedAccountSortIndex < 0) return;
-    const highlightedOption = ACCOUNT_SORT_FIELD_OPTIONS[highlightedAccountSortIndex];
-    if (!highlightedOption) return;
-    accountSortOptionRefs.current.get(highlightedOption.value)?.focus();
-  }, [highlightedAccountSortIndex, isAccountSortDropdownOpen]);
 
   const handleSavePastedAuthJson = useCallback(
     async (type: AuthJsonInputType, fileName: string, jsonText: string) => {
@@ -7706,9 +7676,6 @@ export function AccountsPage() {
     await Promise.all([loadOauthExcluded(), loadOauthModelAlias()]);
   }, [loadOauthExcluded, loadOauthModelAlias]);
 
-  const selectedAccountSortIndex = ACCOUNT_SORT_FIELD_OPTIONS.findIndex(
-    (option) => option.value === accountSort.key
-  );
   const selectedAccountSortOption = getAccountSortFieldOption(accountSort.key);
   const selectedAccountSortLabel = t(selectedAccountSortOption.labelKey);
   const selectedStatusFilterLabel =
@@ -7744,27 +7711,8 @@ export function AccountsPage() {
           .filter(Boolean)
           .join(' · ');
 
-  const openAccountSortDropdown = () => {
-    setHighlightedAccountSortIndex(selectedAccountSortIndex >= 0 ? selectedAccountSortIndex : 0);
-    setIsAccountSortDropdownOpen(true);
-  };
-
-  const toggleAccountSortDropdown = () => {
-    if (isAccountSortDropdownOpen) {
-      setIsAccountSortDropdownOpen(false);
-      return;
-    }
-    openAccountSortDropdown();
-  };
-
-  const closeAccountSortDropdown = () => {
-    setIsAccountSortDropdownOpen(false);
-    accountSortTriggerRef.current?.focus();
-  };
-
   const closeMobileFilters = () => {
     setIsMobileFiltersOpen(false);
-    setIsAccountSortDropdownOpen(false);
   };
 
   const resetAccountFilters = () => {
@@ -7774,13 +7722,6 @@ export function AccountsPage() {
     setQuotaBandFilter('all');
     setAccountSort({ key: 'default', direction: 'desc' });
     setPage(1);
-    setIsAccountSortDropdownOpen(false);
-  };
-
-  const moveAccountSortHighlight = (nextIndex: number) => {
-    const normalizedIndex =
-      (nextIndex + ACCOUNT_SORT_FIELD_OPTIONS.length) % ACCOUNT_SORT_FIELD_OPTIONS.length;
-    setHighlightedAccountSortIndex(normalizedIndex);
   };
 
   const commitAccountSortField = (value: AccountSortFieldValue) => {
@@ -7794,8 +7735,6 @@ export function AccountsPage() {
       };
     });
     setPage(1);
-    setIsAccountSortDropdownOpen(false);
-    accountSortTriggerRef.current?.focus();
   };
 
   const handleAccountSortDirectionToggle = () => {
@@ -7807,69 +7746,6 @@ export function AccountsPage() {
       };
     });
     setPage(1);
-  };
-
-  const handleAccountSortTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    switch (event.key) {
-      case 'Enter':
-      case ' ':
-        event.preventDefault();
-        toggleAccountSortDropdown();
-        return;
-      case 'ArrowDown':
-        event.preventDefault();
-        if (!isAccountSortDropdownOpen) {
-          openAccountSortDropdown();
-          return;
-        }
-        moveAccountSortHighlight(highlightedAccountSortIndex + 1);
-        return;
-      case 'ArrowUp':
-        event.preventDefault();
-        if (!isAccountSortDropdownOpen) {
-          openAccountSortDropdown();
-          return;
-        }
-        moveAccountSortHighlight(highlightedAccountSortIndex - 1);
-        return;
-      case 'Escape':
-        if (!isAccountSortDropdownOpen) return;
-        event.preventDefault();
-        closeAccountSortDropdown();
-        return;
-      default:
-        return;
-    }
-  };
-
-  const handleAccountSortOptionKeyDown = (
-    event: KeyboardEvent<HTMLButtonElement>,
-    optionIndex: number
-  ) => {
-    switch (event.key) {
-      case 'ArrowDown':
-        event.preventDefault();
-        moveAccountSortHighlight(optionIndex + 1);
-        return;
-      case 'ArrowUp':
-        event.preventDefault();
-        moveAccountSortHighlight(optionIndex - 1);
-        return;
-      case 'Home':
-        event.preventDefault();
-        moveAccountSortHighlight(0);
-        return;
-      case 'End':
-        event.preventDefault();
-        moveAccountSortHighlight(ACCOUNT_SORT_FIELD_OPTIONS.length - 1);
-        return;
-      case 'Escape':
-        event.preventDefault();
-        closeAccountSortDropdown();
-        return;
-      default:
-        return;
-    }
   };
 
   const renderViewTabs = () => {
@@ -7902,77 +7778,34 @@ export function AccountsPage() {
     );
   };
 
-  const renderAccountSortControls = () => {
-    const selectedField: AccountSortFieldValue = accountSort.key;
+  const accountSortOptions = useMemo(
+    () =>
+      ACCOUNT_SORT_FIELD_OPTIONS.map((option) => ({
+        value: option.value,
+        label: t(option.labelKey),
+      })),
+    [t]
+  );
+
+  const renderAccountSortControls = (mobile = false) => {
     const directionLabel =
       accountSort.direction === 'asc'
         ? t('accounts.sort_ascending')
         : t('accounts.sort_descending');
 
     return (
-      <div className={styles.accountSortControls} ref={accountSortDropdownRef}>
-        <button
-          ref={accountSortTriggerRef}
-          type="button"
-          className={styles.accountSortTrigger}
-          onClick={toggleAccountSortDropdown}
-          onKeyDown={handleAccountSortTriggerKeyDown}
-          title={`${t('accounts.sort_label')}: ${selectedAccountSortLabel}`}
-          aria-label={`${t('accounts.sort_label')}: ${selectedAccountSortLabel}`}
-          aria-haspopup="listbox"
-          aria-expanded={isAccountSortDropdownOpen}
-        >
-          <span className={styles.accountSortLabel}>{selectedAccountSortLabel}</span>
-        </button>
-        <button
-          type="button"
-          className={styles.accountSortDirectionButton}
-          onClick={handleAccountSortDirectionToggle}
-          disabled={accountSort.key === 'default'}
-          title={directionLabel}
-          aria-label={directionLabel}
-        >
-          <span className={styles.accountSortDirectionIcon} aria-hidden="true">
-            {accountSort.direction === 'asc' ? (
-              <IconArrowUpNarrowWide size={14} />
-            ) : (
-              <IconArrowDownWideNarrow size={14} />
-            )}
-          </span>
-        </button>
-        {isAccountSortDropdownOpen ? (
-          <div className={styles.accountSortDropdownList} role="listbox">
-            {ACCOUNT_SORT_FIELD_OPTIONS.map((option, optionIndex) => {
-              const isSelected = option.value === selectedField;
-              const isHighlighted = optionIndex === highlightedAccountSortIndex;
-              const optionClassName = [
-                styles.accountSortDropdownItem,
-                isSelected ? styles.accountSortDropdownItemSelected : '',
-                isHighlighted ? styles.accountSortDropdownItemHighlighted : '',
-              ]
-                .filter(Boolean)
-                .join(' ');
-              return (
-                <button
-                  key={option.value}
-                  ref={(node) => {
-                    accountSortOptionRefs.current.set(option.value, node);
-                  }}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  className={optionClassName}
-                  onClick={() => commitAccountSortField(option.value)}
-                  onKeyDown={(event) => handleAccountSortOptionKeyDown(event, optionIndex)}
-                  onMouseEnter={() => setHighlightedAccountSortIndex(optionIndex)}
-                >
-                  {t(option.labelKey)}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-      </div>
+      <SortControl<AccountSortFieldValue>
+        options={accountSortOptions}
+        value={accountSort.key}
+        direction={accountSort.direction}
+        onChangeValue={commitAccountSortField}
+        onToggleDirection={handleAccountSortDirectionToggle}
+        ariaLabel={`${t('accounts.sort_label')}: ${selectedAccountSortLabel}`}
+        directionLabel={directionLabel}
+        directionDisabled={accountSort.key === 'default'}
+        fullWidth={mobile}
+        dropdownDirection={mobile ? 'up' : 'down'}
+      />
     );
   };
 
@@ -8155,7 +7988,6 @@ export function AccountsPage() {
             className={styles.mobileFilterButton}
             onClick={() => {
               setIsMobileFiltersOpen(true);
-              setIsAccountSortDropdownOpen(false);
             }}
             aria-label={t('accounts.mobile_filters_button')}
           >
@@ -8238,7 +8070,7 @@ export function AccountsPage() {
               {renderViewModeSwitcher()}
             </div>
             {renderAccountFilterFields()}
-            <div className={styles.mobileSortField}>{renderAccountSortControls()}</div>
+            <div className={styles.mobileSortField}>{renderAccountSortControls(true)}</div>
           </div>
           <footer className={styles.mobileFilterFooter}>
             <Button variant="secondary" size="sm" onClick={resetAccountFilters}>

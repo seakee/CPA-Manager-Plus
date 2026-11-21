@@ -1060,6 +1060,15 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 		if detail.Totals == nil || detail.Totals.Calls != 2 || detail.Totals.TotalTokens != 45 {
 			t.Fatalf("R1+R2 combined usage totals = %+v, want calls=2 totalTokens=45", detail)
 		}
+		renameOnline := callUpgrade(http.MethodPut, "api-keys/"+preExistingID, `{"name":"Upgraded Active","nameRevision":1}`)
+		if renameOnline.Code != http.StatusOK {
+			t.Fatalf("upgrade online rename = %d %s, want 200", renameOnline.Code, renameOnline.Body.String())
+		}
+		var renameOnlineKey freshkeys.Key
+		if err := json.Unmarshal(renameOnline.Body.Bytes(), &renameOnlineKey); err != nil ||
+			renameOnlineKey.Name != "Upgraded Active" || renameOnlineKey.NameRevision != 2 || renameOnlineKey.RuntimeState != "effective_observed" {
+			t.Fatalf("upgrade online rename body = %+v (%v), want effective_observed", renameOnlineKey, err)
+		}
 
 		// 4. Genuine runtime unavailability degrades read-only GET api-keys to gatewayPending:true,
 		// whereas corrupt marker / SQL failures must still fail closed 503.
@@ -1080,6 +1089,15 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 			!unavailBody.GatewayPending || unavailBody.RevocationAvailable || !unavailBody.PresenceUnverified ||
 			len(unavailBody.Keys) != 1 || string(unavailBody.Keys[0].ID) != preExistingID || unavailBody.Keys[0].RuntimeState != "effect_unknown" {
 			t.Fatalf("runtime-stopped GET api-keys body = %+v (%v)", unavailBody, err)
+		}
+		renameOffline := callUpgrade(http.MethodPut, "api-keys/"+preExistingID, `{"name":"Upgraded Offline","nameRevision":2}`)
+		if renameOffline.Code != http.StatusOK {
+			t.Fatalf("upgrade offline rename = %d %s, want 200", renameOffline.Code, renameOffline.Body.String())
+		}
+		var renameOfflineKey freshkeys.Key
+		if err := json.Unmarshal(renameOffline.Body.Bytes(), &renameOfflineKey); err != nil ||
+			renameOfflineKey.Name != "Upgraded Offline" || renameOfflineKey.NameRevision != 3 {
+			t.Fatalf("upgrade offline rename body = %+v (%v)", renameOfflineKey, err)
 		}
 
 		runtimeStatus.Store(nextStatus)

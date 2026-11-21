@@ -562,6 +562,10 @@ export interface ApiKeyAlias {
   apiKeyHash: string;
   alias: string;
   updatedAtMs?: number;
+  apiKeyId?: string;
+  maskedPreview?: string;
+  origin?: string;
+  lifecycle?: string;
 }
 
 export interface ApiKeyAliasesResponse {
@@ -784,6 +788,8 @@ export interface DashboardRecentFailure {
   account?: string;
   channel?: string;
   api_key_alias?: string;
+  api_key_masked?: string;
+  api_key_origin?: string;
   source?: string;
   account_snapshot?: string;
   auth_label_snapshot?: string;
@@ -1819,6 +1825,46 @@ const authHeaders = (managementKey?: string) =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object';
 
+const readOptionalApiKeyAliasString = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+};
+
+const normalizeApiKeyAlias = (raw: unknown): ApiKeyAlias | null => {
+  if (!isRecord(raw) || Array.isArray(raw)) return null;
+  const apiKeyHash = typeof raw.apiKeyHash === 'string' ? raw.apiKeyHash.trim() : '';
+  if (!apiKeyHash) return null;
+  const alias = typeof raw.alias === 'string' ? raw.alias.trim() : '';
+  const item: ApiKeyAlias = {
+    apiKeyHash,
+    alias,
+  };
+  if (typeof raw.updatedAtMs === 'number' && Number.isFinite(raw.updatedAtMs)) {
+    item.updatedAtMs = raw.updatedAtMs;
+  }
+  const apiKeyId = readOptionalApiKeyAliasString(raw.apiKeyId);
+  if (apiKeyId !== undefined) item.apiKeyId = apiKeyId;
+  const maskedPreview = readOptionalApiKeyAliasString(raw.maskedPreview);
+  if (maskedPreview !== undefined) item.maskedPreview = maskedPreview;
+  const origin = readOptionalApiKeyAliasString(raw.origin);
+  if (origin !== undefined) item.origin = origin;
+  const lifecycle = readOptionalApiKeyAliasString(raw.lifecycle);
+  if (lifecycle !== undefined) item.lifecycle = lifecycle;
+  return item;
+};
+
+const normalizeApiKeyAliasesResponse = (raw: unknown): ApiKeyAliasesResponse => {
+  if (!isRecord(raw) || Array.isArray(raw) || !Array.isArray(raw.items)) {
+    return { items: [] };
+  }
+  return {
+    items: raw.items
+      .map(normalizeApiKeyAlias)
+      .filter((item): item is ApiKeyAlias => item !== null),
+  };
+};
+
 const readUsageServiceErrorCode = (value: unknown): string => {
   if (!isRecord(value) || typeof value.code !== 'string') return '';
   return USAGE_SERVICE_ERROR_CODES.has(value.code) ? value.code : '';
@@ -2433,7 +2479,7 @@ export const usageServiceApi = {
           headers: authHeaders(managementKey),
         }
       );
-      return response.data;
+      return normalizeApiKeyAliasesResponse(response.data);
     });
   },
 
@@ -2464,7 +2510,7 @@ export const usageServiceApi = {
           headers: authHeaders(managementKey),
         }
       );
-      return response.data;
+      return normalizeApiKeyAliasesResponse(response.data);
     });
   },
 

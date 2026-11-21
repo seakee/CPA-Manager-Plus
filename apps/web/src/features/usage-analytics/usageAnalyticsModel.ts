@@ -17,9 +17,11 @@ import type {
   MonitoringAnalyticsTimelinePoint,
 } from '@/services/api/usageService';
 import {
+  formatApiKeyDisplayName,
   sanitizeApiKeyDisplayText,
   type ApiKeyDisplayInfo,
 } from '@/features/monitoring/model/apiKeys';
+import { readString } from '@/features/monitoring/model/base';
 import { buildMonitoringSourceDisplay } from '@/features/monitoring/model/sourceDisplay';
 import type { MonitoringAuthMeta, MonitoringChannelMeta } from '@/features/monitoring/model/types';
 import type { CredentialInfo } from '@/types/sourceInfo';
@@ -76,6 +78,8 @@ export type UsageAnalyticsFiltersState = {
   customRange: UsageAnalyticsCustomRange | null;
   granularity: UsageAnalyticsGranularity;
   model: string;
+  apiKeyHashes?: string[];
+  apiKeyId?: string;
   apiKeyHash: string;
   provider: string;
   authFile: string;
@@ -755,19 +759,37 @@ export const buildUsageAnalyticsFilters = (
   filters: Partial<
     Pick<
       UsageAnalyticsFiltersState,
-      'model' | 'apiKeyHash' | 'provider' | 'authFile' | 'status' | 'minLatencyMs' | 'cacheStatus'
+      | 'model'
+      | 'apiKeyHash'
+      | 'apiKeyHashes'
+      | 'provider'
+      | 'authFile'
+      | 'status'
+      | 'minLatencyMs'
+      | 'cacheStatus'
     >
   >
 ): MonitoringAnalyticsFilters => {
   const payload: MonitoringAnalyticsFilters = {};
   const model = filters.model ?? 'all';
+  const extraApiKeyHashes = Array.isArray(filters.apiKeyHashes)
+    ? Array.from(
+        new Set(
+          filters.apiKeyHashes
+            .map((value) => getSelectableApiKeyHash(value))
+            .filter(Boolean)
+        )
+      )
+    : [];
   const apiKeyHash = getSelectableApiKeyHash(filters.apiKeyHash);
   const provider = filters.provider ?? 'all';
   const authFile = filters.authFile ?? 'all';
   if (isActiveSelectValue(model)) {
     payload.models = [model.trim()];
   }
-  if (apiKeyHash) {
+  if (extraApiKeyHashes.length > 0) {
+    payload.api_key_hashes = extraApiKeyHashes;
+  } else if (apiKeyHash) {
     payload.api_key_hashes = [apiKeyHash];
   }
   if (isActiveSelectValue(provider)) {
@@ -1394,8 +1416,21 @@ export const buildModelRows = (
 
 export const maskApiKeyHash = (hash: string | null | undefined) => {
   const value = String(hash ?? '').trim();
-  if (!value) return '-';
-  return `sk-****${value.slice(-4)}`;
+  if (!value || value.startsWith(UNKNOWN_CLIENT_API_KEY_PREFIX)) return '-';
+  const lower = value.toLowerCase();
+  if (lower === '__no_matching_api_key_id__') {
+    return '-';
+  }
+  if (lower.startsWith('sk-') || lower.startsWith('cpamp_sk_')) {
+    const head = lower.startsWith('sk-') ? value.slice(0, 3) : value.slice(0, 9);
+    const tail = value.length > head.length + 4 ? value.slice(-4) : '';
+    return tail ? `${head}****${tail}` : `${head}****`;
+  }
+  if (lower.startsWith('sha256:')) {
+    const raw = lower.slice('sha256:'.length);
+    return raw ? `sha256:${raw.slice(0, 8)}` : '-';
+  }
+  return `sha256:${lower.slice(0, 8)}`;
 };
 
 export type UsageApiKeyDisplayMap = ReadonlyMap<string, ApiKeyDisplayInfo>;
@@ -1418,7 +1453,8 @@ const isSameApiKeyIdentity = (label: string, hash: string) =>
 export const resolveUsageApiKeyLabel = (
   apiKeyHash: string | null | undefined,
   apiKeyDisplayMap?: UsageApiKeyDisplayMap,
-  fallbackLabel?: string | null
+  fallbackLabel?: string | null,
+  unmatchedApiKeyId?: string | null
 ) => {
   const hash = normalizeApiKeyHash(apiKeyHash);
   const fallback = sanitizeApiKeyDisplayText(String(fallbackLabel ?? ''));
@@ -1426,13 +1462,28 @@ export const resolveUsageApiKeyLabel = (
   if (!hash) {
     return fallback || '-';
   }
+  if (hash === '__no_matching_api_key_id__') {
+    const rawId = String(unmatchedApiKeyId ?? '').trim();
+    if (rawId) {
+      return rawId.length > 18 ? `ID: ${rawId.slice(0, 10)}…${rawId.slice(-4)}` : `ID: ${rawId}`;
+    }
+    return fallback || '-';
+  }
 
   const display = apiKeyDisplayMap?.get(hash);
-  const displayLabel = sanitizeApiKeyDisplayText(display?.label || display?.masked || '');
+  const displayLabel = display
+    ? readString(display.displayName) ||
+      formatApiKeyDisplayName(
+        sanitizeApiKeyDisplayText(display.label),
+        readString(display.maskedPreview) || sanitizeApiKeyDisplayText(display.masked),
+        Boolean(display.isRevoked || display.lifecycle === 'superseded'),
+        undefined,
+        Boolean(display.isRotated || display.lifecycle === 'rotated')
+      )
+    : '';
   if (displayLabel && !isSameApiKeyIdentity(displayLabel, hash)) {
     return displayLabel;
   }
-
   if (fallback && !isSameApiKeyIdentity(fallback, hash)) {
     return fallback;
   }
@@ -1571,9 +1622,20 @@ export const buildApiKeyRows = (
   return rows
     .filter((row) => {
       const hash = normalizeApiKeyHash(row.api_key_hash || row.id || '');
+      const display = apiKeyDisplayMap?.get(hash);
       const label = resolveUsageApiKeyLabel(hash, apiKeyDisplayMap);
       if (!normalizedKeyword) return true;
-      const haystack = [hash, label, row.account_snapshot, row.auth_label_snapshot]
+      const haystack = [
+        hash,
+        label,
+        display?.label,
+        display?.masked,
+        display?.maskedPreview,
+        display?.apiKeyId,
+        row.account_snapshot,
+        row.auth_label_snapshot,
+      ]
+        .filter(Boolean)
         .join(' ')
         .toLowerCase();
       return haystack.includes(normalizedKeyword);
@@ -2764,6 +2826,8 @@ export const buildMonitoringDetailUrl = (
       UsageAnalyticsFiltersState,
       | 'model'
       | 'apiKeyHash'
+      | 'apiKeyHashes'
+      | 'apiKeyId'
       | 'provider'
       | 'authFile'
       | 'status'
@@ -2780,7 +2844,13 @@ export const buildMonitoringDetailUrl = (
   params.set('from_ms', String(point.bucketMs));
   params.set('to_ms', String(point.bucketEndMs));
   const model = filters.model ?? 'all';
-  const apiKeyHash = getSelectableApiKeyHash(filters.apiKeyHash);
+  const rawApiKeyId = String(filters.apiKeyId ?? '').trim();
+  const hasMultiHashScope =
+    Boolean(rawApiKeyId) && Array.isArray(filters.apiKeyHashes) && filters.apiKeyHashes.length > 0;
+  const apiKeyHash =
+    filters.apiKeyHash === '__no_matching_api_key_id__'
+      ? ''
+      : getSelectableApiKeyHash(filters.apiKeyHash);
   const provider = filters.provider ?? 'all';
   const authFile = filters.authFile ?? 'all';
   const searchQuery = filters.searchQuery ?? '';
@@ -2789,7 +2859,9 @@ export const buildMonitoringDetailUrl = (
   if (isActiveSelectValue(model)) {
     params.set('model', model.trim());
   }
-  if (apiKeyHash) {
+  if (hasMultiHashScope) {
+    params.set('apiKeyId', rawApiKeyId);
+  } else if (apiKeyHash) {
     params.set('api_key_hash', apiKeyHash);
   }
   if (isActiveSelectValue(provider)) {

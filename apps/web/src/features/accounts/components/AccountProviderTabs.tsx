@@ -82,6 +82,7 @@ export function AccountProviderTabs({
         onChange={onChange}
         ariaLabel={t('accounts.provider_filter')}
         idBase="accounts-provider-filter"
+        variant="joined"
         className={styles.tabs}
       />
     </div>

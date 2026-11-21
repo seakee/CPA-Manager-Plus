@@ -309,10 +309,11 @@ func TestFreshKeyUsageReportsRealNumbersAndHonestCoverage(t *testing.T) {
 	}
 
 	harness.useCollection(t, usageapp.PhaseRunning)
-	// The default 24h window starts before the key was created, so its numbers
-	// are a lower bound and the reported window opens at the key's own start.
+	// A native Manager-created key did not exist before its creation instant:
+	// when collection was already running at creation, the 24h read opens at
+	// the key's own start and its coverage is complete.
 	detail = decodeUsage[usageapp.DetailResponse](t, harness.call("GET", detailPath, ""))
-	if detail.Coverage.State != "partial" || detail.Coverage.Reason != "window_partial" {
+	if detail.Coverage.State != "complete" || detail.Coverage.Reason != "observed" {
 		t.Fatalf("default window coverage = %+v", detail.Coverage)
 	}
 	if detail.Coverage.CollectingSinceMS != harness.key.CreatedAtMS || detail.FromMS != harness.key.CreatedAtMS {
@@ -337,8 +338,8 @@ func TestFreshKeyUsageReportsRealNumbersAndHonestCoverage(t *testing.T) {
 	}
 
 	summary := decodeUsage[usageapp.SummaryResponse](t, harness.call("GET", summaryPath, ""))
-	if summary.Coverage.State != "partial" || summary.Coverage.Reason != "window_partial" ||
-		summary.Items[0].Calls != 6 || summary.Items[0].Coverage.Reason != "window_partial" ||
+	if summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" ||
+		summary.Items[0].Calls != 6 || summary.Items[0].Coverage.Reason != "observed" ||
 		summary.Items[0].LastUsedAtMS == nil {
 		t.Fatalf("summary = %+v", summary)
 	}
@@ -367,8 +368,8 @@ func TestFreshKeyUsageReportsRealNumbersAndHonestCoverage(t *testing.T) {
 	// re-runs and proves the window again.
 	harness.markProjectionReady(t)
 	summary = decodeUsage[usageapp.SummaryResponse](t, harness.call("GET", summaryPath, ""))
-	if summary.Items[0].Coverage.State != "partial" || summary.Items[0].Calls != 6 ||
-		summary.Coverage.State != "partial" {
+	if summary.Items[0].Coverage.State != "complete" || summary.Items[0].Calls != 6 ||
+		summary.Coverage.State != "complete" {
 		t.Fatalf("backfilled summary = %+v", summary)
 	}
 

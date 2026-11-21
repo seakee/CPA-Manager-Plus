@@ -232,7 +232,7 @@ func (s *Service) TargetsFunc(surface Surface) func(bootstrap.FreshOperation) bo
 // connection (management credential, run and generation) and the destination
 // source digest observed immediately before the step.
 func (s *Service) managedKeyGrant(ctx context.Context, operationID, step string) (KeyPermit, error) {
-	if operationID == "" || (step != "add" && step != "revoke") {
+	if operationID == "" || (step != "add" && step != "revoke" && step != "rotate") {
 		return KeyPermit{}, ErrUnavailable
 	}
 	p, err := s.permit(ctx)

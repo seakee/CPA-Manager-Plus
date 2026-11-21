@@ -384,11 +384,14 @@ func TestRevokedHistoryDoesNotBecomeNeverAppliedAfterLaterOperations(t *testing.
 		t.Fatal(keys, err)
 	}
 	for _, key := range keys {
-		if key.RuntimeState != "effect_unknown" {
-			t.Fatal("past applied key mislabeled", key)
+		if string(key.ID) == keeper {
+			if key.RuntimeState != "effect_unknown" {
+				t.Fatal("active keeper mislabeled", key)
+			}
+			continue
 		}
-		if string(key.ID) != keeper && key.Lifecycle != "superseded" {
-			t.Fatal("revoked history lost", key)
+		if key.Lifecycle != "superseded" || key.RuntimeState != "revoked_observed" || key.RevokedAtMS <= 0 {
+			t.Fatal("revoked history lost or mislabeled", key)
 		}
 	}
 	first := strings.Repeat("3", 32)

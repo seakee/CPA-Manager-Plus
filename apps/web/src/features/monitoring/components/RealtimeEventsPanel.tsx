@@ -230,11 +230,16 @@ const resolveUsageTooltipPosition = (anchor: HTMLElement): UsageTooltipPosition 
 };
 
 const buildRealtimeApiKeyDisplay = (row: MonitoringEventRow, t: TFunction) => {
+  const displayName = formatReadableText(row.apiKeyDisplayName);
   const label = formatReadableText(row.apiKeyLabel);
   const masked = formatReadableText(row.apiKeyMasked);
   const hash = formatReadableText(row.apiKeyHash);
   const shortHash = formatShortHash(hash);
-  const display = label || masked || shortHash;
+  const display =
+    displayName ||
+    (label && masked && label !== masked && !masked.startsWith('sha256:')
+      ? `${label} (${masked})`
+      : label || masked || shortHash);
 
   if (!display) {
     return null;

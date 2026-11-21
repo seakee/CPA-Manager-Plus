@@ -50,7 +50,7 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 			}))
 			defer runtime.Close()
 			var mu sync.Mutex
-			key, credentialPresent, forwards := "bridge-old-key", true, 0
+			key, credentialPresent, forwards := "sk-1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ99", true, 0
 			var dbForJournalCheck *store.Store
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "Bearer bridge-management-key" {
@@ -63,13 +63,19 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 				switch {
 				case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodGet:
 					_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": []string{key}})
+				case r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet:
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"port":           8317,
+						"api-keys":       []string{key},
+						"gemini-api-key": []map[string]any{{"api-key": "provider-gemini-key"}},
+					})
 				case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
 					var pending bool
 					pending, err := dbForJournalCheck.Identities.(ports.MutationRepository).HasPendingAPIKeyMutation(r.Context(), "runtime-01")
 					if err != nil || !pending {
 						t.Error("API-key mutation reached CPA without a durable intent", err)
 					}
-					key = "bridge-new-key"
+					key = "sk-9988776655abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ42"
 					forwards++
 					_, _ = w.Write([]byte(`{"status":"ok"}`))
 				case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
@@ -134,21 +140,52 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rotation := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/api-keys", strings.NewReader(`{"old":"bridge-old-key","new":"bridge-new-key"}`))
+
+			// Full Web `cpamp/` bridge refuses client-key writes (`409 legacy_write_replaced`)
+			// without forwarding anything to CPA, and strips/masks client keys on reads.
+			bridgedRotation := httptest.NewRequest(http.MethodPatch, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/api-keys", strings.NewReader(`{"old":"`+key+`","new":"bridge-new-key"}`))
+			bridgedRotation.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			bridgedRotationResp := httptest.NewRecorder()
+			application.canonicalAPI(bridgedRotationResp, bridgedRotation)
+			if bridgedRotationResp.Code != http.StatusConflict || !strings.Contains(bridgedRotationResp.Body.String(), legacyWriteReplaced) {
+				t.Fatalf("PATCH cpamp/v0/management/api-keys returned %d, want 409 %s: %s", bridgedRotationResp.Code, legacyWriteReplaced, bridgedRotationResp.Body.String())
+			}
+			for _, readResource := range []string{"cpamp/v0/management/api-keys", "cpamp/v0/management/config"} {
+				readReq := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+readResource, nil)
+				readReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+				readResp := httptest.NewRecorder()
+				application.canonicalAPI(readResp, readReq)
+				if readResp.Code != http.StatusOK {
+					t.Fatalf("GET %s returned %d: %s", readResource, readResp.Code, readResp.Body.String())
+				}
+				if strings.Contains(readResp.Body.String(), key) {
+					t.Fatalf("GET %s leaked plaintext client key: %s", readResource, readResp.Body.String())
+				}
+			}
+
+			// Direct legacy router still fences and journals Embedded mutations, and
+			// bridged non-client-key credential deletion still traverses the runtime fence.
+			legacyRotation := httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"old":"`+key+`","new":"sk-9988776655abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ42"}`))
+			legacyRotation.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			legacyRotationResp := httptest.NewRecorder()
+			application.legacy.ServeHTTP(legacyRotationResp, legacyRotation)
+
 			deletion := httptest.NewRequest(http.MethodDelete, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files?name=shared.json", nil)
 			deletion.Header.Set("X-CPAMP-Auth-File-Physical-Name", "shared.json")
 			deletion.Header.Set("X-CPAMP-Auth-File-Delete-Identities", url.QueryEscape(`[{"name":"shared.json","runtimeId":"source-one","authIndex":"idx-one","provider":"codex","accountId":"account-one"}]`))
-			for _, request := range []*http.Request{rotation, deletion} {
-				request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
-				response := httptest.NewRecorder()
-				application.canonicalAPI(response, request)
-				want := http.StatusBadGateway
-				if ready {
-					want = http.StatusOK
-				}
-				if response.Code != want {
-					t.Fatalf("%s %s returned %d, want %d: %s", request.Method, request.URL.Path, response.Code, want, response.Body.String())
-				}
+			deletion.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+			deletionResp := httptest.NewRecorder()
+			application.canonicalAPI(deletionResp, deletion)
+
+			want := http.StatusBadGateway
+			if ready {
+				want = http.StatusOK
+			}
+			if legacyRotationResp.Code != want {
+				t.Fatalf("PATCH /v0/management/api-keys returned %d, want %d: %s", legacyRotationResp.Code, want, legacyRotationResp.Body.String())
+			}
+			if deletionResp.Code != want {
+				t.Fatalf("DELETE cpamp/v0/management/auth-files returned %d, want %d: %s", deletionResp.Code, want, deletionResp.Body.String())
 			}
 			mu.Lock()
 			count := forwards
@@ -157,7 +194,7 @@ func TestFreshEmbeddedLegacyMutationsUseRuntimeFencesAndJournal(t *testing.T) {
 				t.Fatalf("forwarded mutations=%d, ready=%v", count, ready)
 			}
 			if ready {
-				after, _, err := st.Identities.FindActiveAPIKeyBySource(t.Context(), "runtime-01", freshBridgeKeyHash("bridge-new-key"))
+				after, _, err := st.Identities.FindActiveAPIKeyBySource(t.Context(), "runtime-01", freshBridgeKeyHash("sk-9988776655abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ42"))
 				if err != nil || after.ID != before.ID || after.Revision != before.Revision+1 {
 					t.Fatal("rotation lost its stable identity", err)
 				}

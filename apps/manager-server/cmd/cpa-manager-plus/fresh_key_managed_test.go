@@ -491,6 +491,13 @@ func TestCompletedDefaultInstallOwnsKeyInstallAdmissionAndGatewayConfig(t *testi
 	if renamed.Code != http.StatusOK {
 		t.Fatalf("rename = %d %s", renamed.Code, renamed.Body.String())
 	}
+	var renamedInstallKey freshkeys.Key
+	if err = json.Unmarshal(renamed.Body.Bytes(), &renamedInstallKey); err != nil {
+		t.Fatal(err)
+	}
+	if renamedInstallKey.Name != "Primary" || renamedInstallKey.NameRevision != key.NameRevision+1 || renamedInstallKey.RuntimeState != "effective_observed" {
+		t.Fatalf("renamed install key = %+v, want Primary effective_observed", renamedInstallKey)
+	}
 
 	// Replace settles step 0 ("add") read-only when keeper was already activated
 	// by normal POST api-keys, and revokes installKey while preserving installed.
@@ -536,6 +543,17 @@ func TestCompletedDefaultInstallOwnsKeyInstallAdmissionAndGatewayConfig(t *testi
 	contRevoke := harness.call(t, http.MethodPost, "api-keys/operations/"+revokeFirstID+"/continue", `{}`)
 	if contRevoke.Code != http.StatusOK {
 		t.Fatalf("keeperless revoke continue = %d %s", contRevoke.Code, contRevoke.Body.String())
+	}
+	renamedKeeper := harness.call(t, http.MethodPut, "api-keys/"+string(keeper.Key.ID), `{"name":"Surviving Keeper","nameRevision":1}`)
+	if renamedKeeper.Code != http.StatusOK {
+		t.Fatalf("rename surviving keeper = %d %s", renamedKeeper.Code, renamedKeeper.Body.String())
+	}
+	var renamedKeeperBody freshkeys.Key
+	if err = json.Unmarshal(renamedKeeper.Body.Bytes(), &renamedKeeperBody); err != nil {
+		t.Fatal(err)
+	}
+	if renamedKeeperBody.Name != "Surviving Keeper" || renamedKeeperBody.NameRevision != 2 || renamedKeeperBody.RuntimeState != "effective_observed" {
+		t.Fatalf("renamed surviving keeper = %+v, want Surviving Keeper effective_observed", renamedKeeperBody)
 	}
 	if got := harness.destination.installed(); len(got) != 1 || got[0] != keeper.CreatedSecret {
 		t.Fatalf("destination keys after keeperless revoke = %v", got)

@@ -321,6 +321,8 @@ export function useMonitoringData({
   searchApiKeyHash,
   scopeFilters,
   activeDataTab = 'accounts',
+  language,
+  suspendAnalytics = false,
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
   const connectionScopeKeyRef = useRef<string | null>(connectionScopeKey ?? null);
   const authFilesLoadedRef = useRef(false);
@@ -478,8 +480,8 @@ export function useMonitoringData({
   }, [channels]);
 
   const apiKeyDisplayMap = useMemo(() => {
-    return buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || []);
-  }, [apiKeyAliases, config?.apiKeys]);
+    return buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || [], language);
+  }, [apiKeyAliases, config?.apiKeys, language]);
 
   const analyticsFilters = useMemo(
     () => buildAnalyticsFilters(scopeFilters, authMetaMap, channels),
@@ -541,8 +543,8 @@ export function useMonitoringData({
   );
 
   const analytics = useMonitoringAnalytics({
-    fromMs: analyticsBounds?.startMs,
-    toMs: analyticsBounds?.endMs,
+    fromMs: suspendAnalytics ? undefined : analyticsBounds?.startMs,
+    toMs: suspendAnalytics ? undefined : analyticsBounds?.endMs,
     nowMs: analyticsNowMs,
     dataScopeKey: analyticsScopeKey,
     searchQuery,
@@ -563,8 +565,8 @@ export function useMonitoringData({
     [analyticsBounds, searchApiKeyHash, searchQuery, timeRange]
   );
   const filterSelectorsAnalytics = useMonitoringAnalytics({
-    fromMs: analyticsBounds?.startMs,
-    toMs: analyticsBounds?.endMs,
+    fromMs: suspendAnalytics ? undefined : analyticsBounds?.startMs,
+    toMs: suspendAnalytics ? undefined : analyticsBounds?.endMs,
     nowMs: analyticsNowMs,
     dataScopeKey: filterSelectorsScopeKey,
     searchQuery,
@@ -816,10 +818,19 @@ export function useMonitoringData({
             authMetaMap,
             authFileMap,
             sourceInfoMap,
-            channelByAuthIndex
+            channelByAuthIndex,
+            apiKeyDisplayMap
           )
         : buildFailureRows(statsRows),
-    [currentAnalyticsData, authFileMap, authMetaMap, channelByAuthIndex, sourceInfoMap, statsRows]
+    [
+      apiKeyDisplayMap,
+      authFileMap,
+      authMetaMap,
+      channelByAuthIndex,
+      currentAnalyticsData,
+      sourceInfoMap,
+      statsRows,
+    ]
   );
   const accountRows = useMemo(
     () =>
@@ -1082,6 +1093,7 @@ export function useMonitoringData({
     recentFailures: presentationSnapshot.recentFailures,
     accountRows: presentationSnapshot.accountRows,
     apiKeyRows: presentationSnapshot.apiKeyRows,
+    apiKeyDisplayMap,
     filterOptions: presentationSnapshot.filterOptions,
     filteredRows: presentationSnapshot.filteredRows,
     eventsHasMore: presentationSnapshot.eventsHasMore,

@@ -99,4 +99,48 @@ describe('ApiKeySummaryPanel', () => {
       renderer.root.findAllByType('button').some((node) => node.props['aria-label'] === 'Copy')
     ).toBe(false);
   });
+
+  it('shows a revoked badge instead of available badge and omits duplicate sha256 subtitle when maskedPreview equals label', () => {
+    const renderer = renderPanel(
+      createRow({
+        apiKeyLabel: 'cpamp_sk_…old1',
+        apiKeyMasked: 'cpamp_sk_…old1',
+        apiKeyDisplayName: 'cpamp_sk_…old1 · Revoked',
+        apiKeyIsRevoked: true,
+        apiKeyCopyValue: undefined,
+      })
+    );
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain('cpamp_sk_…old1');
+    expect(text).not.toContain('sha256:hash-a');
+    expect(text).not.toContain('monitoring.api_key_available');
+  });
+
+  it('renders rotated badge instead of available badge for rotated historical hashes and suppresses available badge for missing keys', () => {
+    const rotatedRenderer = renderPanel(
+      createRow({
+        apiKeyLabel: 'Production',
+        apiKeyMasked: 'cpamp_sk_…old2',
+        apiKeyDisplayName: 'Production (cpamp_sk_…old2) · Rotated',
+        apiKeyIsRotated: true,
+        apiKeyLifecycle: 'rotated',
+        apiKeyCopyValue: undefined,
+      })
+    );
+    const rotatedJson = JSON.stringify(rotatedRenderer.toJSON());
+    expect(rotatedJson).toContain('Rotated');
+    expect(rotatedJson).not.toContain('monitoring.api_key_available');
+
+    const missingRenderer = renderPanel(
+      createRow({
+        apiKeyLabel: 'Staged Key',
+        apiKeyMasked: 'cpamp_sk_…stgd',
+        apiKeyDisplayName: 'Staged Key (cpamp_sk_…stgd)',
+        apiKeyLifecycle: 'missing',
+        apiKeyCopyValue: undefined,
+      })
+    );
+    const missingJson = JSON.stringify(missingRenderer.toJSON());
+    expect(missingJson).not.toContain('monitoring.api_key_available');
+  });
 });

@@ -32,7 +32,11 @@ import {
   maskEmailLike,
   readString,
 } from './base';
-import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
+import {
+  resolveApiKeyDisplayName,
+  sanitizeApiKeyDisplayText,
+  type ApiKeyDisplayInfo,
+} from './apiKeys';
 import { buildMonitoringAccountRowId, normalizeMonitoringProvider } from './accountIdentity';
 import { buildDayLabel, buildHourLabel, buildLocalDayKey, padNumber } from './range';
 import { buildMonitoringSourceDisplay } from './sourceDisplay';
@@ -326,7 +330,18 @@ export const buildAnalyticsFilters = (
   if (isActiveFilterValue(scopeFilters.model)) {
     filters.models = [scopeFilters.model!.trim()];
   }
-  if (isActiveFilterValue(scopeFilters.apiKeyHash)) {
+  const normalizedApiKeyHashes = Array.isArray(scopeFilters.apiKeyHashes)
+    ? Array.from(
+        new Set(
+          scopeFilters.apiKeyHashes
+            .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+            .filter(Boolean)
+        )
+      )
+    : [];
+  if (normalizedApiKeyHashes.length > 0) {
+    filters.api_key_hashes = normalizedApiKeyHashes;
+  } else if (isActiveFilterValue(scopeFilters.apiKeyHash)) {
     filters.api_key_hashes = [scopeFilters.apiKeyHash!.trim().toLowerCase()];
   }
   if (isActiveFilterValue(scopeFilters.authFile)) {
@@ -746,18 +761,27 @@ export const buildApiKeyRowsFromAnalytics = (
           authProviderSnapshot: row.auth_provider_snapshot,
           channel: channelNames[0],
         },
-        { authMetaMap, authFileMap, sourceInfoMap, channelByAuthIndex }
+        { authMetaMap, authFileMap, sourceInfoMap, channelByAuthIndex, apiKeyDisplayMap }
       );
       const apiKeyDisplay = apiKeyDisplayMap.get(apiKeyHash);
       const fallbackApiKeyLabel = formatApiKeyHashLabel(apiKeyHash);
       const apiKeyLabel = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.label || fallbackApiKeyLabel,
+        apiKeyDisplay?.label || apiKeyDisplay?.maskedPreview || fallbackApiKeyLabel,
         fallbackApiKeyLabel
       );
-      const apiKeyMasked = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.masked || apiKeyLabel,
-        apiKeyLabel
+      const apiKeyMasked =
+        readString(apiKeyDisplay?.maskedPreview) ||
+        sanitizeApiKeyDisplayText(apiKeyDisplay?.masked || apiKeyLabel, apiKeyLabel);
+      const apiKeyDisplayName = apiKeyDisplay
+        ? resolveApiKeyDisplayName(apiKeyDisplay)
+        : apiKeyLabel;
+      const apiKeyIsRevoked = Boolean(
+        apiKeyDisplay?.isRevoked || apiKeyDisplay?.lifecycle === 'superseded'
       );
+      const apiKeyIsRotated =
+        !apiKeyIsRevoked &&
+        Boolean(apiKeyDisplay?.isRotated || apiKeyDisplay?.lifecycle === 'rotated');
+      const apiKeyLifecycle = apiKeyDisplay?.lifecycle;
       const isUnknown = !apiKeyHash;
 
       return {
@@ -765,6 +789,10 @@ export const buildApiKeyRowsFromAnalytics = (
         apiKeyHash,
         apiKeyLabel: isUnknown ? '' : apiKeyLabel,
         apiKeyMasked: isUnknown ? '' : apiKeyMasked,
+        ...(!isUnknown && apiKeyDisplayName ? { apiKeyDisplayName } : {}),
+        ...(!isUnknown && apiKeyIsRevoked ? { apiKeyIsRevoked } : {}),
+        ...(!isUnknown && apiKeyIsRotated ? { apiKeyIsRotated } : {}),
+        ...(!isUnknown && apiKeyLifecycle ? { apiKeyLifecycle } : {}),
         apiKeyCopyValue: isUnknown ? undefined : apiKeyDisplay?.copyValue,
         isUnknown,
         authLabels: uniqueReadableValues([
@@ -874,18 +902,31 @@ export const buildFilterOptionsFromAnalytics = (
       const apiKeyDisplay = apiKeyDisplayMap.get(apiKeyHash);
       const fallbackLabel = formatApiKeyHashLabel(apiKeyHash);
       const apiKeyLabel = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.label || fallbackLabel,
+        apiKeyDisplay?.label || apiKeyDisplay?.maskedPreview || fallbackLabel,
         fallbackLabel
       );
-      const apiKeyMasked = sanitizeApiKeyDisplayText(
-        apiKeyDisplay?.masked || apiKeyLabel,
-        apiKeyLabel
+      const apiKeyMasked =
+        readString(apiKeyDisplay?.maskedPreview) ||
+        sanitizeApiKeyDisplayText(apiKeyDisplay?.masked || apiKeyLabel, apiKeyLabel);
+      const apiKeyDisplayName = apiKeyDisplay
+        ? resolveApiKeyDisplayName(apiKeyDisplay)
+        : apiKeyLabel;
+      const apiKeyIsRevoked = Boolean(
+        apiKeyDisplay?.isRevoked || apiKeyDisplay?.lifecycle === 'superseded'
       );
+      const apiKeyIsRotated =
+        !apiKeyIsRevoked &&
+        Boolean(apiKeyDisplay?.isRotated || apiKeyDisplay?.lifecycle === 'rotated');
+      const apiKeyLifecycle = apiKeyDisplay?.lifecycle;
       return {
         id: apiKeyHash,
         apiKeyHash,
         apiKeyLabel,
         apiKeyMasked,
+        ...(apiKeyDisplayName ? { apiKeyDisplayName } : {}),
+        ...(apiKeyIsRevoked ? { apiKeyIsRevoked } : {}),
+        ...(apiKeyIsRotated ? { apiKeyIsRotated } : {}),
+        ...(apiKeyLifecycle ? { apiKeyLifecycle } : {}),
         apiKeyCopyValue: apiKeyDisplay?.copyValue,
         isUnknown: false,
         authLabels: [],
@@ -981,7 +1022,8 @@ export const buildFailureRowsFromAnalytics = (
   authMetaMap: Map<string, MonitoringAuthMeta>,
   authFileMap: Map<string, CredentialInfo>,
   sourceInfoMap: ReturnType<typeof buildSourceInfoMap>,
-  channelByAuthIndex: Map<string, MonitoringChannelMeta>
+  channelByAuthIndex: Map<string, MonitoringChannelMeta>,
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>
 ): MonitoringFailureRow[] =>
   rows.map((row) => {
     const authIndex = normalizeAuthIndex(row.auth_index) ?? '-';
@@ -995,7 +1037,7 @@ export const buildFailureRowsFromAnalytics = (
         authLabelSnapshot: row.auth_label_snapshot,
         authProviderSnapshot: row.auth_provider_snapshot,
       },
-      { authMetaMap, authFileMap, sourceInfoMap, channelByAuthIndex }
+      { authMetaMap, authFileMap, sourceInfoMap, channelByAuthIndex, apiKeyDisplayMap }
     );
     return {
       id: `${row.timestamp_ms}-${row.source_hash}-${row.api_key_hash}-${row.model}`,

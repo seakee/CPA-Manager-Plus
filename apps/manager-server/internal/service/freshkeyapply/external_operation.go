@@ -37,6 +37,25 @@ func uniqueExternalKeys(keys []string) []string {
 }
 
 func externalKeysAfterStep(keys []string, mode, step, old, next string) []string {
+	if step == "rotate" {
+		out := make([]string, 0, len(keys))
+		seen := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			candidate := key
+			if key == old {
+				candidate = next
+			}
+			if candidate == "" {
+				continue
+			}
+			if _, dup := seen[candidate]; dup {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			out = append(out, candidate)
+		}
+		return out
+	}
 	after := uniqueExternalKeys(keys)
 	if step == "add" {
 		added := next
@@ -55,10 +74,10 @@ func (s *Service) externalPreflight(ctx context.Context, target, keeper, mode st
 	if err != nil {
 		return err
 	}
-	return s.externalPrerequisites(ctx, install, target, keeper, mode)
+	return s.externalPrerequisites(ctx, install, "", target, keeper, mode)
 }
 
-func (s *Service) externalPrerequisites(ctx context.Context, install ExternalInstall, target, keeper, mode string) error {
+func (s *Service) externalPrerequisites(ctx context.Context, install ExternalInstall, opID, target, keeper, mode string) error {
 	w := s.externalKeyWire(install)
 	if w == nil {
 		return ErrExternalUnavailable
@@ -73,13 +92,29 @@ func (s *Service) externalPrerequisites(ctx context.Context, install ExternalIns
 	if err := s.externalWriteGate(ctx, install); err != nil {
 		return err
 	}
-	return s.operationSecrets(ctx, mode, target, keeper, false, func(old, next string) error {
+	return s.operationSecrets(ctx, opID, mode, target, keeper, false, func(old, next string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
 		}
 		if mode == "add" {
 			if len(externalKeysAfterStep(snapshot.Keys, "add", "add", old, "")) == 0 {
+				return cpa.ErrSourceConflict
+			}
+			return nil
+		}
+		if mode == "rotate" {
+			if old == "" || next == "" || old == next {
+				return cpa.ErrSourceConflict
+			}
+			if !slices.Contains(snapshot.Keys, old) {
+				if len(uniqueExternalKeys(snapshot.Keys)) > 0 && slices.Contains(snapshot.Keys, next) {
+					return nil
+				}
+				return cpa.ErrSourceConflict
+			}
+			after := externalKeysAfterStep(snapshot.Keys, "rotate", "rotate", old, next)
+			if len(after) == 0 || !slices.Contains(after, next) || slices.Contains(after, old) {
 				return cpa.ErrSourceConflict
 			}
 			return nil
@@ -192,6 +227,11 @@ func (s *Service) externalPrepareAdd(ctx context.Context, requestID, target stri
 	if latest != nil && !latest.IsTerminal() {
 		return OperationResult{Operation: latest, RuntimeState: "effect_unknown"}, "", repo.ErrConflict
 	}
+	if s.keys != nil {
+		if sweepErr := s.keys.DiscardOrphanedRotate(ctx, requestID, ""); sweepErr != nil {
+			return result, "", sweepErr
+		}
+	}
 
 	opID := requestID
 	if byReq != nil {
@@ -214,13 +254,15 @@ func (s *Service) externalPrepare(ctx context.Context, id, target, keeper, mode 
 	if err != nil {
 		return result, err
 	}
-	if err = s.externalPrerequisites(ctx, install, target, keeper, mode); err != nil {
+	if err = s.externalPrerequisites(ctx, install, id, target, keeper, mode); err != nil {
 		return result, err
 	}
 	var steps []repo.KeyStep
 	switch mode {
 	case "add":
 		steps = []repo.KeyStep{{Name: "add", State: "unattempted"}}
+	case "rotate":
+		steps = []repo.KeyStep{{Name: "rotate", State: "unattempted"}}
 	case "revoke":
 		steps = []repo.KeyStep{{Name: "revoke", State: "unattempted"}}
 	case "replace":
@@ -258,6 +300,12 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 		if latest == nil {
 			return r, repo.ErrConflict
 		}
+		if o.Outcome == repo.OutcomeCommitted && o.Mode == "rotate" && s.keys != nil {
+			if state, superseded, supErr := s.keys.CommittedRotateSupersededState(ctx, o.ID, o.TargetID); supErr == nil && superseded {
+				r.RuntimeState = state
+				return r, nil
+			}
+		}
 		if latest.ID != o.ID {
 			return r, nil
 		}
@@ -279,7 +327,7 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 		}
 		switch {
 		case step.State == "attempted" || step.State == "observed":
-			err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
+			err = s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, o.Outcome == "committed", func(old, next string) error {
 				return s.awaitExternalKeyStep(ctx, w, install, o.Mode, step.Name, old, next)
 			})
 			if err != nil {
@@ -287,7 +335,7 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 			}
 		default:
 			held := false
-			err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
+			err = s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
 				var readErr error
 				held, readErr = s.externalStepHeld(ctx, w, install, o.Mode, step.Name, old, next)
 				return readErr
@@ -303,7 +351,7 @@ func (s *Service) externalCheckOperation(ctx context.Context, o *repo.Operation,
 		if o.Outcome != repo.OutcomeCommitted {
 			o.Steps[i].State = "observed"
 			o.Outcome = repo.OutcomePending
-			if step.Name == "revoke" || o.Mode == "add" {
+			if step.Name == "revoke" || step.Name == "rotate" || o.Mode == "add" {
 				o.Outcome = repo.OutcomeCommitted
 				o.CompletedAtMS = max(time.Now().UnixMilli(), o.CreatedAtMS)
 			}
@@ -385,6 +433,9 @@ func externalStepSettled(keys []string, mode, step, old, next string) bool {
 	if len(uniqueExternalKeys(keys)) == 0 || slices.Contains(keys, old) {
 		return false
 	}
+	if step == "rotate" {
+		return next != "" && slices.Contains(keys, next)
+	}
 	return next == "" || slices.Contains(keys, next)
 }
 
@@ -426,10 +477,7 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 	step := o.Steps[index].Name
 	grant, err := s.keyPermit(ctx, o.ID, step)
 	if err != nil {
-		if errors.Is(err, cpa.ErrManagementRejected) || errors.Is(err, cpa.ErrExternalTargetMoved) || errors.Is(err, cpa.ErrExternalRejectionUnavailable) {
-			return r, err
-		}
-		return r, ErrExternalUnavailable
+		return r, err
 	}
 	now := time.Now().UnixMilli()
 	if grant.OperationID != o.ID || grant.Step != step || grant.RunID != o.RunID || grant.Generation != o.Generation ||
@@ -441,7 +489,7 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 	if w == nil {
 		return r, ErrExternalUnavailable
 	}
-	err = s.operationSecrets(ctx, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
+	err = s.operationSecrets(ctx, o.ID, o.Mode, o.TargetID, o.KeeperID, false, func(old, next string) error {
 		snapshot, err := w.ExternalKeySnapshot(ctx, install.ManagementKey)
 		if err != nil {
 			return err
@@ -476,20 +524,27 @@ func (s *Service) externalContinue(ctx context.Context, o *repo.Operation, index
 					}
 					return cpa.ErrApplyUnknown
 				}
-				if len(uniqueExternalKeys(snapshot.Keys)) == 0 {
+				if step != "rotate" && len(uniqueExternalKeys(snapshot.Keys)) == 0 {
 					return ErrLastKey
 				}
 				return cpa.ErrSourceConflict
 			}
-			if next != "" && (old == next || !slices.Contains(snapshot.Keys, next)) {
+			if step == "rotate" {
+				if next == "" || old == next {
+					return cpa.ErrSourceConflict
+				}
+			} else if next != "" && (old == next || !slices.Contains(snapshot.Keys, next)) {
 				return cpa.ErrSourceConflict
 			}
 		}
 		after := externalKeysAfterStep(snapshot.Keys, o.Mode, step, old, next)
 		if len(after) == 0 {
+			if step == "rotate" {
+				return cpa.ErrSourceConflict
+			}
 			return ErrLastKey
 		}
-		if step == "revoke" && next != "" && !slices.Contains(after, next) {
+		if (step == "revoke" || step == "rotate") && next != "" && !slices.Contains(after, next) {
 			return cpa.ErrSourceConflict
 		}
 		if snapshot.SourceSHA256 != grant.SourceSHA256 {

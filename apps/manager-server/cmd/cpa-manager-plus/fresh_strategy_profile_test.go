@@ -874,7 +874,6 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			body   string
 		}{
 			{http.MethodDelete, currentInstallManagementAPIV2Prefix + "cpamp/v0/management/auth-files?name=codex-a.json", ""},
-			{http.MethodPatch, currentInstallManagementAPIV2Prefix + "cpamp/v0/management/api-keys", `{"old":"k1","new":"k2"}`},
 		} {
 			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 			req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
@@ -886,6 +885,14 @@ func TestProxyMutationFailsClosedOnInnerCheckpointReadError(t *testing.T) {
 			if out.Code != http.StatusServiceUnavailable {
 				t.Fatalf("unfenced Managed %s %s = %d %s, want 503", tc.method, tc.path, out.Code, out.Body.String())
 			}
+		}
+		legacyPatchReq := httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"old":"k1","new":"k2"}`))
+		legacyPatchReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		legacyPatchReq.Header.Set("Content-Type", "application/json")
+		legacyPatchOut := httptest.NewRecorder()
+		app.legacy.ServeHTTP(legacyPatchOut, legacyPatchReq)
+		if legacyPatchOut.Code != http.StatusServiceUnavailable {
+			t.Fatalf("unfenced Managed legacy PATCH /v0/management/api-keys = %d %s, want 503", legacyPatchOut.Code, legacyPatchOut.Body.String())
 		}
 
 		// Inner checkpoint read failure also fails closed with 503 and zero upstream hits.

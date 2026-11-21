@@ -1,4 +1,4 @@
-import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { StrictMode, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshApiKeys } from './FreshApiKeys';
@@ -32,15 +32,44 @@ vi.mock('../components/ui/Modal', () => ({
 vi.mock('../components/ui/Drawer', () => ({
   Drawer: ({
     open,
+    title,
+    closeLabel,
+    closeDisabled,
+    onBeforeClose,
+    onClose,
     children,
     footer,
   }: {
     open: boolean;
+    title?: ReactNode;
+    closeLabel?: string;
+    closeDisabled?: boolean;
+    onBeforeClose?: () => boolean | Promise<boolean>;
+    onClose?: () => void;
     children?: ReactNode;
     footer?: ReactNode;
   }) =>
     open ? (
       <div>
+        <div>
+          <div>{title}</div>
+          <button
+            type="button"
+            aria-label={closeLabel || 'common.close'}
+            disabled={closeDisabled}
+            onClick={() => {
+              if (closeDisabled) return;
+              const allowed = onBeforeClose ? onBeforeClose() : true;
+              if (allowed && typeof allowed === 'object' && 'then' in allowed) {
+                void allowed.then((ok) => {
+                  if (ok !== false) onClose?.();
+                });
+              } else if (allowed !== false) {
+                onClose?.();
+              }
+            }}
+          />
+        </div>
         {children}
         {footer}
       </div>
@@ -97,10 +126,16 @@ describe('Fresh client key persistence UI', () => {
     vi.unstubAllGlobals();
   });
   const view = () => JSON.stringify(renderer.toJSON());
+  const readText = (node: unknown): string => {
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(readText).join('');
+    if (!node || typeof node !== 'object' || !('children' in node)) return '';
+    return readText((node as ReactTestInstance).children);
+  };
   const button = (text: string) =>
     renderer.root
       .findAllByType('button')
-      .find((item) => item.props['aria-label'] === text || item.props.children === text)!;
+      .find((item) => item.props['aria-label'] === text || readText(item.props.children) === text)!;
   async function mount(
     fetchMock: ReturnType<typeof vi.fn<typeof fetch>>,
     onCreationPending = vi.fn(),
@@ -216,9 +251,7 @@ describe('Fresh client key persistence UI', () => {
     );
     await mount(fetchMock);
     await act(async () =>
-      renderer.root
-        .findByProps({ 'aria-label': k('lifecycle') })
-        .props.onChange({ target: { value: 'all' } })
+      renderer.root.findByProps({ 'data-testid': 'key-filter-all' }).props.onClick()
     );
     expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(2);
     const search = renderer.root.findByProps({ 'aria-label': k('search') });
@@ -229,10 +262,12 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(1);
     expect(view()).toContain('Retired client');
     await act(async () => search.props.onChange({ target: { value: 'does-not-exist' } }));
-    expect(view()).toContain(k('noMatches'));
-    await click(k('clear'));
+    expect(view()).toContain(k('noFilteredKeys'));
+    await act(async () =>
+      renderer.root.findByProps({ 'data-testid': 'reset-key-filters' }).props.onClick()
+    );
     expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(1);
-    expect(view()).toContain(k('runtimeNotApplied'));
+    expect(view()).toContain(k('statusNotApplied'));
     expect(view()).toContain(k('scope'));
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -346,7 +381,10 @@ describe('Fresh client key persistence UI', () => {
       .mockResolvedValueOnce(empty())
       .mockResolvedValueOnce(Response.json({ key, createdSecret: secret }, { status: 201 }));
     await mount(fetchMock);
-    expect(view()).toContain(t('keysEmpty'));
+    expect(view()).not.toContain(t('keysEmpty'));
+    expect(renderer.root.findByProps({ 'data-testid': 'empty-create-key' }).props.children).toBe(
+      t('keysCreate')
+    );
     await click(t('keysCreate'));
     expect(view()).toContain(secret);
     expect(view()).toContain(key.id);
@@ -554,185 +592,66 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).not.toContain(k('unavailableHelp'));
   });
 
-  it('creates a named key and recovers from partial name-save failure without re-creating the key', async () => {
+  it('creates a named key atomically via POST api-keys { requestId, name } without a second PUT and validates control chars', async () => {
     const pending = vi.fn();
-    const named = { ...key, name: 'Prod CLI', nameRevision: 2 };
+    const named = { ...key, name: 'Prod CLI', nameRevision: 1, runtimeState: 'effective_observed' as const };
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(empty())
-      .mockResolvedValueOnce(Response.json({ key, createdSecret: secret }, { status: 201 }))
-      .mockResolvedValueOnce(new Response('', { status: 503 }))
-      .mockResolvedValueOnce(Response.json(key))
-      .mockResolvedValueOnce(Response.json(named));
+      .mockResolvedValueOnce(Response.json({ key: named, createdSecret: secret }, { status: 201 }));
     await mount(fetchMock, pending);
     await openCreate();
-    const nameInput = renderer.root.findByProps({ 'data-testid': 'create-key-name-input' });
-    await act(async () => nameInput.props.onChange({ target: { value: 'Prod CLI' } }));
+
+    // Control characters disable confirm-create-key client-side without issuing POST.
+    await setCreateName('Prod\tCLI');
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'confirm-create-key' }).props.disabled
+    ).toBe(true);
+
+    await setCreateName('  Prod CLI  ');
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'confirm-create-key' }).props.disabled
+    ).toBe(false);
     await click(t('keysCreate'));
 
-    // Key and one-time secret are preserved while name PUT failed
-    expect(view()).toContain(secret);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'create-name-partial-failure' }).length
-    ).toBeGreaterThan(0);
-    expect(pending.mock.calls[pending.mock.calls.length - 1]).toEqual([true]);
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
-
-    // Retry only checks + saves the name on the existing key without another POST
-    const retryBtn = renderer.root.findByProps({ 'data-testid': 'retry-create-name' });
-    await act(async () => retryBtn.props.onClick());
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(2);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'create-name-partial-failure' })
-    ).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      requestId: key.requestId,
+      name: 'Prod CLI',
+    });
     expect(view()).toContain('Prod CLI');
     expect(view()).toContain(secret);
-    expect(pending).toHaveBeenLastCalledWith(true);
-    await click(t('keysDismiss'));
-    expect(pending).toHaveBeenLastCalledWith(false);
-  });
-
-  it.each([400, 404, 409])(
-    'allows correcting a rejected creation name after %s without creating another key',
-    async (status) => {
-      const pending = vi.fn();
-      const current = { ...key, name: 'Concurrent name', nameRevision: 3 };
-      const named = { ...current, name: 'Corrected CLI', nameRevision: 4 };
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(empty())
-        .mockResolvedValueOnce(Response.json({ key, createdSecret: secret }, { status: 201 }))
-        .mockResolvedValueOnce(new Response('', { status }))
-        .mockResolvedValueOnce(Response.json(current))
-        .mockResolvedValueOnce(Response.json(named));
-      await mount(fetchMock, pending);
-      await setCreateName('Prod\tCLI');
-      await click(t('keysCreate'));
-      expect(pending).toHaveBeenLastCalledWith(true);
-      expect(
-        renderer.root.findByProps({ 'data-testid': 'create-key-name-input' }).props.disabled
-      ).toBe(false);
-      expect(button(t('keysCreate')).props.disabled).toBe(true);
-
-      await setCreateName('Corrected CLI');
-      await click(k('retrySaveName'));
-      expect(fetchMock.mock.calls[3][1]?.method).toBe('GET');
-      expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toEqual({
-        name: 'Corrected CLI',
-        nameRevision: 3,
-      });
-      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
-      expect(view()).toContain('Corrected CLI');
-      expect(view()).toContain(secret);
-      expect(pending).toHaveBeenLastCalledWith(true);
-      await click(t('keysDismiss'));
-      expect(pending).toHaveBeenLastCalledWith(false);
-      expect(renderer.root.findAllByProps({ 'data-testid': 'create-key-name-input' })).toHaveLength(
-        0
-      );
-    }
-  );
-
-  it('keeps an unknown name write locked until discard can read its saved result', async () => {
-    const pending = vi.fn();
-    const named = { ...key, name: 'Production', nameRevision: 2 };
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(empty())
-      .mockResolvedValueOnce(Response.json({ key, createdSecret: secret }, { status: 201 }))
-      .mockRejectedValueOnce(new Error('name reply lost after commit'))
-      .mockResolvedValueOnce(new Response('', { status: 503 }))
-      .mockResolvedValueOnce(Response.json(named));
-    await mount(fetchMock, pending);
-    await setCreateName('Production');
-    await click(t('keysCreate'));
-    await click(k('discardCreateName'));
-    expect(pending).toHaveBeenLastCalledWith(true);
+    // Single Done button in secret modal footer (no duplicate action inside card).
     expect(
-      renderer.root.findAllByProps({ 'data-testid': 'create-name-partial-failure' })
+      renderer.root
+        .findAllByType('button')
+        .filter((node) => node.props.children === t('keysDismiss'))
     ).toHaveLength(1);
-
-    await click(k('discardCreateName'));
-    expect(pending).toHaveBeenLastCalledWith(true);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'create-name-partial-failure' })
-    ).toHaveLength(0);
-    expect(fetchMock.mock.calls.map(([, init]) => init?.method)).toEqual([
-      'GET',
-      'POST',
-      'PUT',
-      'GET',
-      'GET',
-    ]);
-    expect(view()).toContain('Production');
-    expect(view()).toContain(secret);
     await click(t('keysDismiss'));
     expect(pending).toHaveBeenLastCalledWith(false);
-    expect(button(t('keysCreate')).props.disabled).toBe(false);
-    expect(renderer.root.findAllByProps({ 'data-testid': 'create-key-name-input' })).toHaveLength(
-      0
-    );
   });
 
-  it('reconciles an already-saved creation name without repeating its PUT', async () => {
+  it('reconciles a named creation after lost POST reply using GET /requests/{requestId} without re-sending name PUT', async () => {
     const pending = vi.fn();
-    const named = { ...key, name: 'Production', nameRevision: 2 };
+    const named = { ...key, name: 'Production', nameRevision: 1, runtimeState: 'effective_observed' as const };
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(empty())
-      .mockResolvedValueOnce(Response.json({ key, createdSecret: secret }, { status: 201 }))
-      .mockRejectedValueOnce(new Error('name reply lost after commit'))
+      .mockRejectedValueOnce(new Error('creation reply lost after commit'))
       .mockResolvedValueOnce(Response.json(named));
     await mount(fetchMock, pending);
     await setCreateName('Production');
     await click(t('keysCreate'));
-    await click(k('retrySaveName'));
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
-    expect(view()).toContain(secret);
     expect(pending).toHaveBeenLastCalledWith(true);
-    await click(t('keysDismiss'));
+
+    await click(t('keysCheck'));
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
     expect(pending).toHaveBeenLastCalledWith(false);
+    expect(view()).toContain('Production');
+    expect(view()).toContain(k('createdActiveConfirmed'));
   });
-
-  it.each(['save', 'discard'] as const)(
-    'retains the requested name after lost creation reply and lets the user %s it on the same key',
-    async (action) => {
-      const pending = vi.fn();
-      const named = { ...key, name: 'Production', nameRevision: 2 };
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(empty())
-        .mockRejectedValueOnce(new Error('creation reply lost after commit'))
-        .mockResolvedValueOnce(Response.json(key))
-        .mockResolvedValueOnce(Response.json(key))
-        .mockResolvedValueOnce(Response.json(named));
-      await mount(fetchMock, pending);
-      await setCreateName('Production');
-      await click(t('keysCreate'));
-      await click(t('keysCheck'));
-      expect(view()).toContain(k('createNameNotSaved'));
-      expect(view()).not.toContain(t('keysConfirmed'));
-      expect(pending).toHaveBeenLastCalledWith(true);
-      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
-      expect(
-        renderer.root.findByProps({ 'data-testid': 'create-key-name-input' }).props.value
-      ).toBe('Production');
-
-      await click(k(action === 'save' ? 'retrySaveName' : 'discardCreateName'));
-      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
-      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(
-        action === 'save' ? 1 : 0
-      );
-      if (action === 'save') expect(fetchMock.mock.calls[4][0]).toContain('/api-keys/' + key.id);
-      expect(pending).toHaveBeenLastCalledWith(false);
-      expect(view()).not.toContain(secret);
-      expect(renderer.root.findAllByProps({ 'data-testid': 'create-key-name-input' })).toHaveLength(
-        0
-      );
-    }
-  );
 
   it.each(['not_applied', 'effect_unknown'] as const)(
     'reports unverified Gateway runtime count for %s metadata and verified status for effective_observed',
@@ -764,9 +683,8 @@ describe('Fresh client key persistence UI', () => {
         );
       await mount(withIdleKeyOperation(fetchMock));
       const runtime = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
-      expect(runtime.findByType('strong').findByType('span').children).toEqual([
-        `0/1 ${k('summaryRuntimeVerifiedCount')}`,
-      ]);
+      expect(runtime.findByType('strong').children).toEqual(['—']);
+      expect(runtime.findByType('small').children.join('')).toContain(k('summaryGatewaySetupHelp'));
       expect(
         renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong')
           .children
@@ -774,11 +692,18 @@ describe('Fresh client key persistence UI', () => {
 
       await click(t('refresh'));
       expect(
+        renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong')
+          .children
+      ).toEqual(['1']);
+      expect(
         renderer.root
           .findByProps({ 'data-testid': 'key-summary-runtime' })
-          .findByType('strong')
-          .findByType('span').children
-      ).toEqual([k('summaryRuntimeAllActive')]);
+          .findByType('strong').children
+      ).toEqual(['1']);
+      expect(
+        renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' }).findByType('small')
+          .children.join('')
+      ).toContain(k('summaryGatewayConsistent'));
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'keys-presence-unverified' })
       ).toHaveLength(0);
@@ -790,20 +715,26 @@ describe('Fresh client key persistence UI', () => {
       expect(
         renderer.root
           .findByProps({ 'data-testid': 'key-summary-runtime' })
-          .findByType('strong')
-          .findByType('span').children
-      ).toEqual([`1/1 ${k('summaryRuntimeVerifiedCount')}`]);
+          .findByType('strong').children
+      ).toEqual(['—']);
+      expect(
+        renderer.root
+          .findByProps({ 'data-testid': 'key-summary-runtime' })
+          .findByType('small')
+          .children.join('')
+      ).toContain(k('summaryGatewaySetupHelp'));
     }
   );
 
   it('preserves filter, search, and cards view mode when returning from key details and preselects replacement target', async () => {
-    const activeA = { ...key, id: '1'.repeat(32), name: 'Alpha Gateway' };
+    const activeA = { ...key, id: '1'.repeat(32), name: 'Alpha Gateway', runtimeState: 'effective_observed' as const };
     const activeB = {
       ...key,
       id: '2'.repeat(32),
       requestId: '3'.repeat(32),
       maskedPreview: 'cpamp_sk_…8888',
       name: 'Beta Worker',
+      runtimeState: 'effective_observed' as const,
     };
     const replacedC = {
       ...key,
@@ -849,9 +780,7 @@ describe('Fresh client key persistence UI', () => {
 
     // Switch to Saved filter, search "Alpha", and toggle Cards view
     await act(async () =>
-      renderer.root
-        .findByProps({ 'aria-label': k('lifecycle') })
-        .props.onChange({ target: { value: 'saved' } })
+      renderer.root.findByProps({ 'data-testid': 'key-filter-saved' }).props.onClick()
     );
     const searchInput = renderer.root.findByProps({ type: 'search' });
     await act(async () => searchInput.props.onChange({ target: { value: 'Alpha' } }));
@@ -869,20 +798,16 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findByType('table').props.className).toContain('is-cards-view');
     expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(1);
 
-    // Quick replace preselects target, keeper, and replace mode in FreshKeyRevocation
+    // Quick regenerate opens FreshKeyRegenerate targeted at activeA
     await act(async () =>
       renderer.root
         .findByType(DropdownMenu)
-        .props.items.find((item: { key: string }) => item.key === 'replace')
+        .props.items.find((item: { key: string }) => item.key === 'regenerate')
         .onClick()
     );
-    await click(k('replacementReady'));
-    const selects = renderer.root
-      .findAllByType('select')
-      .filter((item) => item.props['aria-label'] !== k('lifecycle'));
-    expect(selects[0].props.value).toBe(activeA.id);
-    expect(selects[1].props.value).toBe(activeB.id);
-    expect(selects[2].props.value).toBe('replace');
+    const targetCard = renderer.root.findByProps({ 'data-testid': 'key-regenerate-target-card' });
+    expect(targetCard.findByType('code').props.children).toBe(activeA.maskedPreview);
+    expect(renderer.root.findByProps({ 'data-testid': 'confirm-regenerate-key' })).toBeTruthy();
   });
   it('renders the usage column with lower-bound and unknown states instead of fake zeroes', async () => {
     const lastUsedAtMs = Date.UTC(2026, 0, 2, 3, 4);
@@ -967,7 +892,7 @@ describe('Fresh client key persistence UI', () => {
     expect(summaryCard()).not.toContain('≥5');
     expect(summaryCard()).toContain(k('usageStateUnknown'));
   });
-  it('keeps the key list usable when the usage read fails', async () => {
+  it('keeps the key list usable when the usage read fails and avoids duplicate Unavailable pills', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({
       keys: [key],
       gatewayPending: true,
@@ -976,7 +901,11 @@ describe('Fresh client key persistence UI', () => {
     await mount(fetchMock, vi.fn(), new Response('failed', { status: 503 }));
     expect(view()).toContain(key.id);
     expect(view()).toContain(k('summaryUsageValue'));
-    expect(view()).toContain(k('usageStateUnknown'));
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'key-summary-usage' })
+        .findAllByProps({ className: 'key-state-pill is-unavailable' })
+    ).toHaveLength(0);
     expect(view()).not.toContain('≥');
   });
 
@@ -1780,21 +1709,24 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findByProps({ 'aria-busy': false })).toBeDefined();
   });
 
-  it('does not let an overlapping list snapshot overwrite a saved creation name', async () => {
-    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1, runtimeState: 'effective_observed' as const };
-    const named = { ...unnamed, name: 'Prod CLI', nameRevision: 2 };
-    let settleNamePut: (response: Response) => void = () => undefined;
-    let settleRebindRead: (response: Response) => void = () => undefined;
+  function deferredResponse() {
+    let resolve!: (value: Response | PromiseLike<Response>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<Response>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  it('does not let an overlapping list snapshot overwrite an atomically created key name', async () => {
+    const named = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: 'Prod CLI', nameRevision: 1, runtimeState: 'effective_observed' as const };
+    const postDeferred = deferredResponse();
+    const rebindDeferred = deferredResponse();
     let keyReads = 0;
     const fetchMock = vi.fn<typeof fetch>((input, init) => {
       const url = String(input);
       if (url.endsWith('/api-keys') && init?.method === 'POST') {
-        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
-      }
-      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
-        return new Promise<Response>((resolve) => {
-          settleNamePut = resolve;
-        });
+        return postDeferred.promise;
       }
       if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
         keyReads += 1;
@@ -1804,9 +1736,7 @@ describe('Fresh client key persistence UI', () => {
           );
         }
         if (keyReads === 2) {
-          return new Promise<Response>((resolve) => {
-            settleRebindRead = resolve;
-          });
+          return rebindDeferred.promise;
         }
         return Promise.resolve(
           Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
@@ -1838,51 +1768,32 @@ describe('Fresh client key persistence UI', () => {
       renderer = create(page(0));
     });
     await setCreateName('Prod CLI');
-    await act(async () => {
+    act(() => {
       void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
     });
-    // Rebind read starts while name PUT is in flight.
     await act(async () => {
       renderer.update(page(1));
     });
-    // Name PUT resolves first, then the pre-PUT list snapshot arrives.
     await act(async () => {
-      settleNamePut(Response.json(named));
+      postDeferred.resolve(Response.json({ key: named, createdSecret: secret }, { status: 201 }));
     });
     await act(async () => {
-      settleRebindRead(
-        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
+      rebindDeferred.resolve(
+        Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
       );
     });
     expect(view()).toContain('Prod CLI');
   });
 
-  it('does not let an overlapping list snapshot overwrite a key name saved in details', async () => {
+  it('opens standalone rename modal from row menu without opening details drawer and survives overlapping snapshot', async () => {
     const renamed = { ...key, name: 'Renamed Key', nameRevision: 2 };
-    let settleRenamePut: (response: Response) => void = () => undefined;
-    let settleRebindRead: (response: Response) => void = () => undefined;
+    const renameDeferred = deferredResponse();
+    const rebindDeferred = deferredResponse();
     let keyReads = 0;
     const fetchMock = vi.fn<typeof fetch>((input, init) => {
       const url = String(input);
       if (url.endsWith('/api-keys/' + key.id) && init?.method === 'PUT') {
-        return new Promise<Response>((resolve) => {
-          settleRenamePut = resolve;
-        });
-      }
-      if (url.endsWith('/api-keys/' + key.id) && (!init?.method || init.method === 'GET')) {
-        return Promise.resolve(Response.json(key));
-      }
-      if (url.endsWith('/api-keys/' + key.id + '/usage')) {
-        return Promise.resolve(
-          Response.json({
-            keyId: key.id,
-            fromMs: 1,
-            toMs: 2,
-            coverage: { state: 'unknown', reason: 'usage_read_failed' },
-            totals: null,
-            series: [],
-          })
-        );
+        return renameDeferred.promise;
       }
       if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
         keyReads += 1;
@@ -1892,9 +1803,7 @@ describe('Fresh client key persistence UI', () => {
           );
         }
         if (keyReads === 2) {
-          return new Promise<Response>((resolve) => {
-            settleRebindRead = resolve;
-          });
+          return rebindDeferred.promise;
         }
         return Promise.resolve(
           Response.json({ keys: [renamed], gatewayPending: false, revocationAvailable: false })
@@ -1926,35 +1835,46 @@ describe('Fresh client key persistence UI', () => {
       renderer = create(page(0));
     });
     await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+      renderer.root
+        .findByType(DropdownMenu)
+        .props.items.find((item: { key: string }) => item.key === 'rename')
+        .onClick();
     });
-    await click(k('rename'));
+    // Standalone rename modal opens without triggering GET /api-keys/{id} or drawer.
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'key-detail-panel-overview' })
+    ).toHaveLength(0);
     await act(async () => {
       renderer.root
         .findByProps({ id: 'key-name' })
         .props.onChange({ target: { value: 'Renamed Key' } });
     });
     act(() => {
-      void renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+      void renderer.root.findByProps({ id: 'rename-key-form' }).props.onSubmit({ preventDefault: vi.fn() });
     });
     await act(async () => {
       renderer.update(page(1));
     });
     expect(keyReads).toBe(2);
     await act(async () => {
-      settleRenamePut(Response.json(renamed));
+      renameDeferred.resolve(Response.json(renamed));
     });
     await act(async () => {
-      settleRebindRead(
+      rebindDeferred.resolve(
         Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
       );
     });
-    await click(t('keysCloseDetails'));
     expect(view()).toContain('Renamed Key');
   });
 
   it('refreshes the key list when revocation commits while a read is in flight', async () => {
-    const second = { ...key, id: 'd'.repeat(32), requestId: 'e'.repeat(32), name: 'Keeper Key' };
+    const second = {
+      ...key,
+      id: 'd'.repeat(32),
+      requestId: 'e'.repeat(32),
+      name: 'Keeper Key',
+      runtimeState: 'effective_observed' as const,
+    };
     const superseded = { ...key, lifecycle: 'superseded' as const };
     let revokeRequestId = '';
     let settleRevoke: (response: Response) => void = () => undefined;
@@ -2035,7 +1955,7 @@ describe('Fresh client key persistence UI', () => {
         .onClick();
     });
     act(() => {
-      void button(k('confirmOperation')).props.onClick();
+      void renderer.root.findByProps({ 'data-testid': 'confirm-pure-revoke' }).props.onClick();
     });
     // An unforced read opens while the revocation request is in flight.
     act(() => {
@@ -2051,7 +1971,7 @@ describe('Fresh client key persistence UI', () => {
           operation: {
             id: revokeRequestId,
             targetId: key.id,
-            keeperId: second.id,
+            keeperId: '',
             mode: 'revoke',
             outcome: 'committed',
             revision: 1,
@@ -2191,43 +2111,32 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(x('usageCollectorRunning'));
   });
 
-  it('does not let an overlapping list snapshot overwrite a retried creation name', async () => {
-    const unnamed = { ...key, id: 'f'.repeat(32), requestId: 'b'.repeat(32), name: '', nameRevision: 1, runtimeState: 'effective_observed' as const };
-    const named = { ...unnamed, name: 'Retried Name', nameRevision: 2 };
-    let settleRetryPut: (response: Response) => void = () => undefined;
-    let settleRebindRead: (response: Response) => void = () => undefined;
-    let keyReads = 0;
-    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+  it('surfaces prominent pending-operation-banner, hides runtime filter on revoked tab, and exposes table ARIA roles', async () => {
+    const pendingOp = {
+      id: 'd'.repeat(32),
+      targetId: key.id,
+      keeperId: '',
+      mode: 'rotate' as const,
+      outcome: 'pending' as const,
+      revision: 1,
+      steps: [{ name: 'rotate' as const, state: 'unattempted' as const, returned: false }],
+    };
+    const namedKey = { ...key, name: 'Gateway Alpha', runtimeState: 'effective_observed' as const };
+    const fetchMock = vi.fn<typeof fetch>((input) => {
       const url = String(input);
-      if (url.endsWith('/api-keys') && init?.method === 'POST') {
-        return Promise.resolve(Response.json({ key: unnamed, createdSecret: secret }, { status: 201 }));
-      }
-      if (url.endsWith('/api-keys/' + unnamed.id) && init?.method === 'PUT') {
-        const body: unknown = JSON.parse(String(init.body));
-        if (body && typeof body === 'object' && 'name' in body && body.name === 'Initial Fail') {
-          return Promise.resolve(new Response('', { status: 503 }));
-        }
-        return new Promise<Response>((resolve) => {
-          settleRetryPut = resolve;
-        });
-      }
-      if (url.endsWith('/api-keys/' + unnamed.id) && (!init?.method || init.method === 'GET')) {
-        return Promise.resolve(Response.json(unnamed));
-      }
-      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
-        keyReads += 1;
-        if (keyReads === 1) {
-          return Promise.resolve(
-            Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
-          );
-        }
-        if (keyReads === 2) {
-          return new Promise<Response>((resolve) => {
-            settleRebindRead = resolve;
-          });
-        }
+      if (url.endsWith('/api-keys')) {
         return Promise.resolve(
-          Response.json({ keys: [key, named], gatewayPending: false, revocationAvailable: false })
+          Response.json({ keys: [namedKey], gatewayPending: false, revocationAvailable: true })
+        );
+      }
+      if (url.endsWith('/operations/latest')) {
+        return Promise.resolve(
+          Response.json({
+            operation: pendingOp,
+            nextStep: 'rotate',
+            runtimeState: 'effect_unknown',
+            expiresAtMs: 0,
+          })
         );
       }
       if (url.endsWith('/api-keys/usage-summary')) {
@@ -2235,45 +2144,46 @@ describe('Fresh client key persistence UI', () => {
           Response.json({
             fromMs: 1,
             toMs: 2,
-            coverage: { state: 'known', reason: 'observed' },
-            items: [],
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [{ keyId: namedKey.id, calls: 7, lastUsedAtMs: 2000, coverage: { state: 'complete', reason: 'observed' } }],
           })
         );
       }
-      return Promise.reject(new Error('unexpected url: ' + url));
+      return Promise.reject(new Error('unexpected ' + url));
     });
-    const client = createPublicApiClient(() => context, fetchMock);
-    const page = (reloadToken: number) => (
-      <FreshApiKeys
-        client={client}
-        credential="admin-test-only"
-        onUnauthorized={unauthorized}
-        onCreationPending={vi.fn()}
-        reloadToken={reloadToken}
-      />
+    await mount(fetchMock);
+
+    // 1. Prominent pending-operation-banner shows mode + affected key and opens recovery modal.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'pending-operation-banner' })).toHaveLength(1);
+    expect(view()).toContain(k('pendingBannerOpRotate'));
+    expect(view()).toContain('Gateway Alpha');
+    // 2. Complete usage omits redundant coverage pill in key-summary-usage.
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'key-summary-usage' })
+        .findAllByProps({ className: 'key-state-pill is-effective' })
+    ).toHaveLength(0);
+
+    // 3. Table carries explicit ARIA roles for accessibility.
+    expect(renderer.root.findByType('table').props.role).toBe('table');
+    expect(renderer.root.findAllByProps({ role: 'columnheader' }).length).toBe(5);
+
+    // 4. Switching to Revoked tab hides runtime filter select and renders emptyRevokedTab.
+    await act(async () =>
+      renderer.root.findByProps({ 'data-testid': 'key-filter-replaced' }).props.onClick()
     );
-    await act(async () => {
-      renderer = create(page(0));
-    });
-    await setCreateName('Initial Fail');
-    await click(t('keysCreate'));
-    await setCreateName('Retried Name');
-    act(() => {
-      void renderer.root.findByProps({ 'data-testid': 'retry-create-name' }).props.onClick();
-    });
-    // Rebind starts while retryCreateName PUT is in flight.
-    await act(async () => {
-      renderer.update(page(1));
-    });
-    await act(async () => {
-      settleRetryPut(Response.json(named));
-    });
-    await act(async () => {
-      settleRebindRead(
-        Response.json({ keys: [key, unnamed], gatewayPending: false, revocationAvailable: false })
-      );
-    });
-    expect(view()).toContain('Retried Name');
+    expect(renderer.root.findAllByProps({ ariaLabel: k('runtimeFilter') })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-empty-tab-replaced' })).toHaveLength(
+      1
+    );
+
+    // 5. Clicking Continue on banner opens Pure Revoke/Recovery Modal.
+    await act(async () =>
+      renderer.root.findByProps({ 'data-testid': 'pending-operation-continue' }).props.onClick()
+    );
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-operation-recovery' })).toHaveLength(
+      1
+    );
   });
 
   it('retires the discarded StrictMode mount read so its late 401/blocker cannot affect the page', async () => {
@@ -2527,23 +2437,42 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findByProps({ 'data-testid': 'access-info-protocol-base-anthropic' }).props
         .children
     ).toBe('https://manager.example/api');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'access-info-management' })).toHaveLength(
+      1
+    );
+    expect(renderer.root.findAllByProps({ 'data-testid': 'access-info-mode' })).toHaveLength(1);
 
     await click(t('keysCreate'));
     expect(view()).toContain(k('createdActiveTitle'));
     expect(view()).toContain(k('createdActiveHelp'));
     expect(view()).toContain(secret);
-    expect(view()).not.toContain(t('keysCreated'));
+    expect(
+      renderer.root.findAll(
+        (node) => node.type === 'strong' && node.props.children === k('createdActiveTitle')
+      )
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAll(
+        (node) => node.type === 'strong' && node.props.children === t('keysCreated')
+      )
+    ).toHaveLength(0);
     expect(view()).not.toContain(k('unavailableHelp'));
     expect(view()).not.toContain(t('keysInstallOne'));
     expect(
       renderer.root.findByProps({ 'data-testid': 'create-access-info-protocol-base-openai' }).props
         .children
     ).toBe('https://manager.example/api/v1');
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'create-access-info-management' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'create-access-info-mode' })).toHaveLength(
+      0
+    );
 
     await click(t('keysDismiss'));
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-runtime-' + effectiveKey.id }).props.children
-    ).toBe(k('runtimeEffectiveObserved'));
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + effectiveKey.id }).props.children
+    ).toBe(k('statusActive'));
   });
 
   it('supports 200 OK create replay with on-demand copy and access info without secret persistence', async () => {
@@ -2564,6 +2493,12 @@ describe('Fresh client key persistence UI', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'create-access-info-summary' })
     ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'create-access-info-management' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'create-access-info-mode' })).toHaveLength(
+      0
+    );
 
     await act(async () =>
       renderer.root.findByProps({ 'data-testid': 'copy-confirmed-client-secret' }).props.onClick()
@@ -2576,12 +2511,12 @@ describe('Fresh client key persistence UI', () => {
     'recovers a persisted create after %s without creating a duplicate key', async (code) => {
     const persistedUnapplied = {
       ...key,
-      name: '',
+      name: 'Edge Key',
+      nameRevision: 1,
       runtimeState: 'not_applied' as const,
       effectCode: code,
     };
-    const namedPersisted = { ...persistedUnapplied, name: 'Edge Key', nameRevision: 2 };
-    const effectiveKey = { ...namedPersisted, runtimeState: 'effective_observed' as const, effectCode: '' };
+    const effectiveKey = { ...persistedUnapplied, runtimeState: 'effective_observed' as const, effectCode: '' };
     const onCreationPending = vi.fn();
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', { clipboard: { writeText } });
@@ -2590,7 +2525,7 @@ describe('Fresh client key persistence UI', () => {
       vi.fn<typeof fetch>().mockResolvedValue(Response.json({ code, key: persistedUnapplied }, { status: 503 }))
     );
     const errWithKey = await refusedClient.post('api-keys',
-      { requestId: persistedUnapplied.requestId },
+      { requestId: persistedUnapplied.requestId, name: 'Edge Key' },
       { kind: 'admin', value: 'admin-test-only' }
     ).catch((error: unknown) => error);
 
@@ -2632,7 +2567,7 @@ describe('Fresh client key persistence UI', () => {
           return Promise.resolve({ secret });
         return Promise.reject(new Error('unexpected POST ' + resource));
       }),
-      put: vi.fn(() => Promise.resolve(namedPersisted)),
+      put: vi.fn(),
     };
 
     await act(async () => {
@@ -2655,11 +2590,9 @@ describe('Fresh client key persistence UI', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'create-apply-recovery' })
     ).toHaveLength(1);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'create-name-partial-failure' })
-    ).toHaveLength(1);
     expect(onCreationPending).toHaveBeenLastCalledWith(true);
     expect(view()).toContain(persistedUnapplied.id);
+    expect(view()).toContain('Edge Key');
 
     // On-demand copy works for persisted unapplied key
     await act(async () =>
@@ -2667,20 +2600,15 @@ describe('Fresh client key persistence UI', () => {
     );
     expect(writeText).toHaveBeenCalledWith(secret);
 
-    // Save name on persisted key -> still locked until gateway apply succeeds
-    await act(async () =>
-      renderer.root.findByProps({ 'data-testid': 'retry-create-name' }).props.onClick()
-    );
-    expect(onCreationPending).toHaveBeenLastCalledWith(true);
-
-    // Retry gateway apply using the SAME requestId
+    // Retry gateway apply using the SAME requestId & name
     await act(async () =>
       renderer.root.findByProps({ 'data-testid': 'create-retry-apply' }).props.onClick()
     );
     expect(stubClient.post.mock.calls.filter(([r]) => r === 'api-keys')).toEqual([
-      ['api-keys', { requestId: persistedUnapplied.requestId }, expect.anything()],
-      ['api-keys', { requestId: persistedUnapplied.requestId }, expect.anything()],
+      ['api-keys', { requestId: persistedUnapplied.requestId, name: 'Edge Key' }, expect.anything()],
+      ['api-keys', { requestId: persistedUnapplied.requestId, name: 'Edge Key' }, expect.anything()],
     ]);
+    expect(stubClient.put).not.toHaveBeenCalled();
     expect(onCreationPending).toHaveBeenLastCalledWith(false);
     expect(view()).toContain(k('createdActiveConfirmed'));
   });
@@ -2912,16 +2840,11 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findByProps({ 'data-testid': 'close-confirmed-create' }).props.onClick()
     );
     await act(async () =>
-      renderer.root
-        .findByProps({ 'aria-label': k('lifecycle') })
-        .props.onChange({ target: { value: 'all' } })
+      renderer.root.findByProps({ 'data-testid': 'key-filter-all' }).props.onClick()
     );
-    expect(renderer.root.findByProps({ 'data-testid': 'key-lifecycle-' + activeKey.id }).props.children).toBe(
-      k('replaced')
-    );
-    expect(renderer.root.findByProps({ 'data-testid': 'key-runtime-' + activeKey.id }).props.children).toBe(
-      k('runtimeRevokedObserved')
-    );
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + activeKey.id }).props.children
+    ).toBe(k('statusRevoked'));
     await act(async () => renderer.unmount());
 
     // 2. Recovery create modal (persisted not_applied) -> Copy 409 refreshes to superseded and releases lock.
@@ -3018,16 +2941,12 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findByProps({ 'data-testid': 'dismiss-create-recovery' }).props.onClick()
     );
     await act(async () =>
-      renderer.root
-        .findByProps({ 'aria-label': k('lifecycle') })
-        .props.onChange({ target: { value: 'all' } })
+      renderer.root.findByProps({ 'data-testid': 'key-filter-all' }).props.onClick()
     );
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-lifecycle-' + recoveryUnapplied.id }).props.children
-    ).toBe(k('replaced'));
-    expect(
-      renderer.root.findByProps({ 'data-testid': 'key-runtime-' + recoveryUnapplied.id }).props.children
-    ).toBe(k('runtimeRevokedObserved'));
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + recoveryUnapplied.id }).props
+        .children
+    ).toBe(k('statusRevoked'));
   });
 
   it('lets persisted external/source blocker recovery dismiss to rebind/details while keeping unstored pending closed', async () => {
@@ -3254,11 +3173,11 @@ describe('Fresh client key persistence UI', () => {
     await mount(withIdleKeyOperation(fetchMock));
     expect(view()).not.toContain(t('keysUnavailable'));
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-lifecycle-' + activeKey.id }).props.children
-    ).toBe(k('saved'));
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + activeKey.id }).props.children
+    ).toBe(k('statusActive'));
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-lifecycle-' + missingKey.id }).props.children
-    ).toBe(k('missingLifecycle'));
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + missingKey.id }).props.children
+    ).toBe(k('statusMissing'));
     expect(
       renderer.root
         .findByProps({ 'data-testid': 'key-row-' + missingKey.id })
@@ -3267,14 +3186,11 @@ describe('Fresh client key persistence UI', () => {
 
     // Switch to all keys filter to verify superseded stays retired/unusable alongside non-retired missing.
     await act(async () =>
-      renderer.root
-        .findByProps({ 'aria-label': k('lifecycle') })
-        .props.onChange({ target: { value: 'all' } })
+      renderer.root.findByProps({ 'data-testid': 'key-filter-all' }).props.onClick()
     );
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-lifecycle-' + supersededKey.id }).props
-        .children
-    ).toBe(k('replaced'));
+      renderer.root.findByProps({ 'data-testid': 'key-status-' + supersededKey.id }).props.children
+    ).toBe(k('statusRevoked'));
     expect(
       renderer.root
         .findByProps({ 'data-testid': 'key-row-' + supersededKey.id })
@@ -3528,7 +3444,9 @@ describe('Fresh client key persistence UI', () => {
     failRandom = false;
     await click(t('keysCreate'));
     expect(createModal().props.closeDisabled).toBe(true);
-    expect(button(k('cancel')).props.disabled).toBe(true);
+    expect(
+      renderer.root.findAllByType('button').some((item) => item.props.children === k('cancel'))
+    ).toBe(false);
     await act(async () => createModal().props.onClose());
     expect(createModal().props.open).toBe(true);
   });
@@ -3659,5 +3577,678 @@ describe('Fresh client key persistence UI', () => {
     expect(freshOpId).toMatch(/^[0-9a-f]{32}$/);
     expect(freshOpId).not.toBe(createdReqId);
     expect(renderer.root.findAllByProps({ 'data-testid': 'create-apply-recovery' })).toHaveLength(0);
+  });
+
+  it('surfaces the key list ahead of collapsed protocol access info and matches runtime subtitle to verification state', async () => {
+    const verifiedKey = { ...key, runtimeState: 'effective_observed' as const };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          keys: [verifiedKey],
+          gatewayPending: false,
+          revocationAvailable: true,
+          presenceUnverified: false,
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          keys: [{ ...key, runtimeState: 'not_applied' as const }],
+          gatewayPending: false,
+          revocationAvailable: true,
+          presenceUnverified: false,
+        })
+      );
+    await mount(withIdleKeyOperation(fetchMock));
+
+    const heading = renderer.root.findByProps({ id: 'client-key-title' });
+    expect(heading.props.className).toBe('sr-only');
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-filter-saved' }).props['aria-selected']
+    ).toBe(true);
+    const runtimeCard = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
+    expect(JSON.stringify(runtimeCard.findByType('small').children)).toContain(
+      k('summaryGatewayConsistent')
+    );
+    expect(
+      renderer.root.findAllByType('button').some((node) => node.props.children === k('clear'))
+    ).toBe(false);
+    const filterToolbar = renderer.root.findByProps({ 'data-testid': 'key-filter-toolbar' });
+    expect(filterToolbar.findByProps({ 'data-testid': 'key-filter-saved' })).toBeTruthy();
+    expect(filterToolbar.findByProps({ type: 'search' })).toBeTruthy();
+
+    const accessPanel = renderer.root.findByProps({ 'data-testid': 'key-access-panel' });
+    expect(accessPanel.props.hidden).toBe(true);
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-workspace-tab-access' }).props.onClick();
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'key-access-panel' }).props.hidden).toBe(
+      false
+    );
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'access-info-protocol-base-openai' })
+    ).toBeTruthy();
+
+    await click(t('refresh'));
+    const unverifiedCard = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
+    expect(JSON.stringify(unverifiedCard.findByType('small').children)).toContain(
+      `0/1 ${k('summaryRuntimeVerifiedCount')}`
+    );
+  });
+
+  it('copies a saved key secret on demand from the list row, filters by runtime state, sorts by usage, and opens usage tab directly', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const savedSecret = 'cpamp_sk_' + 'a'.repeat(60) + '1234';
+    const verifiedKey = {
+      ...key,
+      id: 'a'.repeat(32),
+      name: 'Alpha Key',
+      maskedPreview: 'cpamp_sk_…1234',
+      runtimeState: 'effective_observed' as const,
+      createdAtMs: 1_700_000_100_000,
+    };
+    const pendingKey = {
+      ...key,
+      id: 'b'.repeat(32),
+      requestId: 'c'.repeat(32),
+      name: 'Beta Pending',
+      maskedPreview: 'cpamp_sk_…5678',
+      runtimeState: 'not_applied' as const,
+      createdAtMs: 1_700_000_200_000,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method || 'GET';
+      if (url.endsWith('/api-keys') && method === 'GET') {
+        return Response.json({
+          keys: [pendingKey, verifiedKey],
+          gatewayPending: false,
+          revocationAvailable: true,
+          presenceUnverified: false,
+        });
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        return Response.json({
+          fromMs: 1_700_000_000_000,
+          toMs: 1_700_086_400_000,
+          coverage: { state: 'complete', reason: 'observed' },
+          items: [
+            {
+              keyId: verifiedKey.id,
+              calls: 42,
+              lastUsedAtMs: 1_700_080_000_000,
+              coverage: { state: 'complete', reason: 'observed' },
+            },
+            {
+              keyId: pendingKey.id,
+              calls: 2,
+              lastUsedAtMs: 1_700_010_000_000,
+              coverage: { state: 'complete', reason: 'observed' },
+            },
+          ],
+        });
+      }
+      if (url.endsWith(`/api-keys/${verifiedKey.id}/secret`) && method === 'POST') {
+        return Response.json({ secret: savedSecret });
+      }
+      if (url.endsWith(`/api-keys/${verifiedKey.id}`) && method === 'GET') {
+        return Response.json(verifiedKey);
+      }
+      if (url.includes(`/api-keys/${verifiedKey.id}/usage`)) {
+        return Response.json({
+          keyId: verifiedKey.id,
+          fromMs: 1_700_000_000_000,
+          toMs: 1_700_086_400_000,
+          bucketMs: 3_600_000,
+          coverage: {
+            state: 'complete',
+            reason: 'observed',
+            collectingSinceMs: 1_700_000_000_000,
+            lastProcessedEventId: 10,
+            targetEventId: 10,
+          },
+          totals: {
+            calls: 42,
+            success: 40,
+            failure: 2,
+            inputTokens: 1000,
+            outputTokens: 500,
+            totalTokens: 1500,
+            lastUsedAtMs: 1_700_080_000_000,
+          },
+          series: [],
+        });
+      }
+      if (url.endsWith('/api-keys/operations/latest')) {
+        return Response.json({ operation: null, runtimeState: 'effect_unknown', expiresAtMs: 0, nextStep: '' });
+      }
+      return Response.json({});
+    });
+    await mount(fetchMock, vi.fn(), {
+      fromMs: 1_700_000_000_000,
+      toMs: 1_700_086_400_000,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: verifiedKey.id,
+          calls: 42,
+          lastUsedAtMs: 1_700_080_000_000,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+        {
+          keyId: pendingKey.id,
+          calls: 2,
+          lastUsedAtMs: 1_700_010_000_000,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+      ],
+    });
+
+    // 1. On-demand row copy uses POST /secret and copies to clipboard.
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': `copy-row-secret-${verifiedKey.id}` })
+        .props.onClick();
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(savedSecret);
+    expect(
+      renderer.root.findByProps({ 'data-testid': `copy-row-secret-feedback-${verifiedKey.id}` })
+        .props.children
+    ).toBe(k('copiedShort'));
+
+    // 2. Sort by 24h calls moves verifiedKey (42 calls) ahead of pendingKey (2 calls).
+    const sortTrigger = renderer.root.findByProps({
+      'aria-label': `${k('sortLabel')}: ${k('sortFieldCreated')}`,
+    });
+    await act(async () => {
+      sortTrigger.props.onClick();
+    });
+    const callsOption = renderer.root
+      .findAllByProps({ role: 'option' })
+      .find((node) => node.props.children === k('sortFieldCalls24h'))!;
+    await act(async () => {
+      callsOption.props.onClick();
+    });
+    const sortedRows = renderer.root
+      .findByType('tbody')
+      .findAllByType('tr')
+      .map((row) => row.props['data-testid']);
+    expect(sortedRows).toEqual([`key-row-${verifiedKey.id}`, `key-row-${pendingKey.id}`]);
+
+    // 3. Filter runtime state to "attention" keeps only pendingKey.
+    const runtimeSelect = renderer.root.findByProps({ ariaLabel: k('runtimeFilter') });
+    await act(async () => {
+      runtimeSelect.props.onChange('attention');
+    });
+    const attentionRows = renderer.root
+      .findByType('tbody')
+      .findAllByType('tr')
+      .map((row) => row.props['data-testid']);
+    expect(attentionRows).toEqual([`key-row-${pendingKey.id}`]);
+
+    // Reset runtime filter to restore both keys and open usage tab directly from the usage cell.
+    await act(async () => {
+      runtimeSelect.props.onChange('all');
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': `open-key-usage-${verifiedKey.id}` })
+        .props.onClick();
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-usage' }).props.hidden
+    ).toBe(false);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-overview' }).props.hidden
+    ).toBe(true);
+  });
+
+  it('aligns tab count to savedCount, auto-hides runtimeFilter when all active keys are effective, hides complete usage pill, and preserves effective_observed on rename', async () => {
+    const activeKey = {
+      ...key,
+      id: '1'.repeat(32),
+      requestId: '2'.repeat(32),
+      name: 'Active One',
+      runtimeState: 'effective_observed' as const,
+    };
+    const revokedKey = {
+      ...key,
+      id: '3'.repeat(32),
+      requestId: '4'.repeat(32),
+      maskedPreview: 'cpamp_sk_…3333',
+      name: 'Old Key',
+      lifecycle: 'superseded' as const,
+      runtimeState: 'revoked_observed' as const,
+    };
+    const renamedUnknown = {
+      ...activeKey,
+      name: 'Renamed One',
+      nameRevision: 2,
+      runtimeState: 'effect_unknown' as const,
+      operationId: '',
+    };
+
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [activeKey, revokedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.endsWith(`/api-keys/${activeKey.id}`) && init?.method === 'PUT') {
+        return Promise.resolve(Response.json(renamedUnknown));
+      }
+      return Promise.reject(new Error('unexpected ' + url));
+    });
+
+    await mount(fetchMock, vi.fn(), {
+      fromMs: 1_700_000_000_000,
+      toMs: 1_700_086_400_000,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: activeKey.id,
+          calls: 15,
+          lastUsedAtMs: 1_700_050_000_000,
+          coverage: {
+            state: 'complete',
+            reason: 'observed',
+            collectingSinceMs: 1_700_000_000_000,
+            lastProcessedEventId: 10,
+            targetEventId: 10,
+          },
+        },
+      ],
+    });
+
+    // 1. Tab count badge shows savedCount (1 active), not total (2).
+    const keysTab = renderer.root.findByProps({ 'data-testid': 'key-workspace-tab-keys' });
+    const tabCount = keysTab.findByProps({ className: 'key-tab-badge' });
+    expect(tabCount.props.children).toBe(1);
+
+    // 2. runtimeFilter dropdown is hidden when all active keys are effective_observed.
+    expect(renderer.root.findAllByProps({ ariaLabel: k('runtimeFilter') })).toHaveLength(0);
+
+    // 3. Complete usage coverage pill is hidden in the list row, and row action uses rowDetails.
+    const usageCellNode = renderer.root.findByProps({ 'data-testid': `key-usage-${activeKey.id}` });
+    expect(
+      usageCellNode.findAll(
+        (node) => typeof node.props?.className === 'string' && node.props.className.includes('key-state-pill')
+      )
+    ).toHaveLength(0);
+    expect(usageCellNode.findByType('strong').props.children).toBe('15');
+    const detailBtn = renderer.root.findByProps({ 'data-testid': `open-key-${activeKey.id}` });
+    expect(readText(detailBtn)).toBe(k('rowDetails'));
+    expect(detailBtn.findAllByType('svg')).toHaveLength(0);
+
+    // 4. Rename via row dropdown preserves effective_observed when PUT returns effect_unknown.
+    await act(async () => {
+      renderer.root
+        .findByType(DropdownMenu)
+        .props.items.find((item: { key: string }) => item.key === 'rename')
+        .onClick();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ id: 'key-name' }).props.onChange({
+        target: { value: 'Renamed One' },
+      });
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ id: 'rename-key-form' })
+        .props.onSubmit({ preventDefault: vi.fn() });
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': `key-status-${activeKey.id}` }).props.children
+    ).toBe(k('statusActive'));
+    expect(view()).toContain('Renamed One');
+  });
+  it('supports whole-row selection, quick row actions without bubbling, pagination bar, and empty filter hiding', async () => {
+    const manyKeys = Array.from({ length: 12 }, (_, idx) => ({
+      ...key,
+      id: idx.toString(16).padStart(32, 'a'),
+      requestId: idx.toString(16).padStart(32, 'b'),
+      maskedPreview: `cpamp_sk_…${String(1000 + idx)}`,
+      name: `Worker ${String(idx + 1).padStart(2, '0')}`,
+      createdAtMs: 1_700_000_000_000 + (12 - idx) * 1000,
+      runtimeState: 'effective_observed' as const,
+    }));
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith(`/api-keys/${manyKeys[0].id}`)) {
+        return Promise.resolve(Response.json(manyKeys[0]));
+      }
+      if (url.endsWith(`/api-keys/${manyKeys[0].id}/usage`)) {
+        return Promise.resolve(
+          Response.json({
+            keyId: manyKeys[0].id,
+            fromMs: 1,
+            toMs: 2,
+            bucketMs: 1,
+            coverage: { state: 'unknown', reason: 'usage_read_failed', collectingSinceMs: 0, lastProcessedEventId: 0, targetEventId: 0 },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: manyKeys,
+            gatewayPending: false,
+            revocationAvailable: true,
+            presenceUnverified: false,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+    await mount(withIdleKeyOperation(fetchMock));
+
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-bar' })).toBeTruthy();
+    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(12);
+
+    // Switch page size to 10 -> 2 pages.
+    const pageSizeSelect = renderer.root.findByProps({ ariaLabel: k('paginationPageSizeLabel') });
+    await act(async () => {
+      pageSizeSelect.props.onChange('10');
+    });
+    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(10);
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-prev' }).props.disabled).toBe(true);
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-next' }).props.disabled).toBe(false);
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-pagination-next' }).props.onClick();
+    });
+    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(2);
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-prev' }).props.disabled).toBe(false);
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-next' }).props.disabled).toBe(true);
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-pagination-prev' }).props.onClick();
+    });
+
+    // Quick rename button does not trigger whole-row detail drawer.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': `row-rename-${manyKeys[0].id}` }).props.onClick();
+    });
+    expect(renderer.root.findAllByProps({ id: 'rename-key-form' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-detail-panel-overview' })).toHaveLength(0);
+    await act(async () => {
+      await click(k('cancel'));
+    });
+
+    // Whole-row click opens details and marks row is-selected; switching to Access tab hides Create button.
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': `key-row-${manyKeys[0].id}` })
+        .props.onClick({ target: null });
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': `key-row-${manyKeys[0].id}` }).props.className
+    ).toContain('is-selected');
+    expect(renderer.root.findByProps({ 'data-testid': 'key-detail-panel-overview' })).toBeTruthy();
+    await act(async () => {
+      await click(t('keysCloseDetails'));
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-workspace-tab-access' }).props.onClick();
+    });
+    expect(button(t('keysCreate'))).toBeUndefined();
+
+    // Switch back to keys tab and verify table topbar + page jump input clamping.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-workspace-tab-keys' }).props.onClick();
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'key-table-topbar' })).toBeTruthy();
+    const jumpInput = renderer.root.findByProps({ 'data-testid': 'key-pagination-jump-input' });
+    await act(async () => {
+      jumpInput.props.onChange({ target: { value: '99' } });
+    });
+    await act(async () => {
+      jumpInput.props.onBlur();
+    });
+    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(2);
+    expect(renderer.root.findByProps({ 'data-testid': 'key-pagination-jump-input' }).props.value).toBe(
+      '2'
+    );
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'key-pagination-jump-input' })
+        .props.onChange({ target: { value: '1' } });
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'key-pagination-jump-input' })
+        .props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() });
+    });
+    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(10);
+  });
+  it('silently refreshes usage-summary after closing created key modal without flashing loading state', async () => {
+    const created = {
+      ...key,
+      id: 'd'.repeat(32),
+      requestId: 'b'.repeat(32),
+      maskedPreview: 'cpamp_sk_…8888',
+      name: 'Fresh Created',
+      runtimeState: 'effective_observed' as const,
+    };
+    let usageCalls = 0;
+    const coverage = {
+      state: 'complete' as const,
+      reason: 'observed',
+      collectingSinceMs: 1_700_000_000_000,
+      lastProcessedEventId: 10,
+      targetEventId: 10,
+    };
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      const method = init?.method || 'GET';
+      if (url.endsWith('/api-keys') && method === 'POST') {
+        return Promise.resolve(
+          Response.json(
+            { key: created, createdSecret: 'cpamp_sk_' + 'b'.repeat(60) + '8888' },
+            { status: 201 }
+          )
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        usageCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage,
+            items:
+              usageCalls === 1
+                ? [
+                    {
+                      keyId: key.id,
+                      calls: 3,
+                      lastUsedAtMs: null,
+                      coverage,
+                    },
+                  ]
+                : [
+                    {
+                      keyId: key.id,
+                      calls: 3,
+                      lastUsedAtMs: null,
+                      coverage,
+                    },
+                    {
+                      keyId: created.id,
+                      calls: 0,
+                      lastUsedAtMs: null,
+                      coverage,
+                    },
+                  ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [key],
+            gatewayPending: false,
+            revocationAvailable: true,
+            presenceUnverified: false,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+    const client = createPublicApiClient(() => context, withIdleKeyOperation(fetchMock));
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={client}
+          credential="admin-memory"
+          onCreationPending={vi.fn()}
+          onUnauthorized={vi.fn()}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(1);
+
+    await act(async () => button(t('keysCreate')).props.onClick());
+    await act(async () => {
+      renderer.root.findByProps({ id: 'create-key-name' }).props.onChange({
+        target: { value: 'Fresh Created' },
+      });
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ id: 'create-key-form' })
+        .props.onSubmit({ preventDefault: vi.fn() });
+    });
+
+    // Before dismiss, newly created key is in list without new usage entry yet.
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${created.id}` }))
+    ).toContain('—');
+
+    // Dismissing created secret modal triggers silent usage-summary refresh without clearing keys.
+    await act(async () => {
+      await button(t('keysDismiss')).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(2);
+    const createdUsageCell = renderer.root.findByProps({
+      'data-testid': `key-usage-${created.id}`,
+    });
+    expect(readText(createdUsageCell)).toContain('0');
+    expect(
+      createdUsageCell.findAll(
+        (node) =>
+          typeof node.props?.className === 'string' && node.props.className.includes('key-state-pill')
+      )
+    ).toHaveLength(0);
+    expect(renderer.root.findByType('section').props['aria-busy']).toBe(false);
+  });
+  it('silently refreshes usage-summary when FreshKeyRegenerate finishes and closes without clearing keys', async () => {
+    const rotated = {
+      ...key,
+      maskedPreview: 'cpamp_sk_…9999',
+      lastRotatedAtMs: 1_700_000_050_000,
+      runtimeState: 'effective_observed' as const,
+    };
+    const coverage = {
+      state: 'complete' as const,
+      reason: 'observed',
+      collectingSinceMs: 1_700_000_000_000,
+      lastProcessedEventId: 10,
+      targetEventId: 10,
+    };
+    let usageCalls = 0;
+    let keysCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      const method = init?.method || 'GET';
+      if (url.endsWith(`/api-keys/${key.id}/regenerate`) && method === 'POST') {
+        return Promise.resolve(
+          Response.json({
+            key: rotated,
+            createdSecret: 'cpamp_sk_' + 'b'.repeat(60) + '9999',
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        usageCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage,
+            items: [
+              {
+                keyId: key.id,
+                calls: usageCalls >= 2 ? 7 : 0,
+                lastUsedAtMs: null,
+                coverage,
+              },
+            ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        keysCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            keys: [keysCalls >= 2 ? rotated : key],
+            gatewayPending: false,
+            revocationAvailable: true,
+            presenceUnverified: false,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+    const client = createPublicApiClient(() => context, withIdleKeyOperation(fetchMock));
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={client}
+          credential="admin-memory"
+          onCreationPending={vi.fn()}
+          onUnauthorized={vi.fn()}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(1);
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': `row-regenerate-${key.id}` }).props.onClick();
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'confirm-regenerate-key' })
+        .props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBeGreaterThanOrEqual(2);
+
+    const callsBeforeClose = usageCalls;
+    await act(async () => {
+      await button(t('keysDismiss')).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(callsBeforeClose + 1);
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${key.id}` }))
+    ).toContain('7');
+    expect(renderer.root.findByType('section').props['aria-busy']).toBe(false);
   });
 });

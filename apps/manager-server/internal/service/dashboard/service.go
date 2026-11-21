@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
-
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usagehourly"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -178,6 +178,9 @@ type RecentFailure struct {
 	TimestampMS            int64                         `json:"timestamp_ms"`
 	Model                  string                        `json:"model"`
 	APIKeyHash             string                        `json:"api_key_hash"`
+	APIKeyAlias            string                        `json:"api_key_alias,omitempty"`
+	APIKeyMasked           string                        `json:"api_key_masked,omitempty"`
+	APIKeyOrigin           string                        `json:"api_key_origin,omitempty"`
 	Source                 string                        `json:"source,omitempty"`
 	SourceHash             string                        `json:"source_hash"`
 	AuthIndex              string                        `json:"auth_index"`
@@ -265,6 +268,7 @@ func (s *Service) summary(ctx context.Context, p SummaryParams) (SummaryResponse
 		timeline             []store.TimelinePoint
 		rollingAgg           store.Aggregate
 		recentFailures       []store.RecentFailure
+		recentFailureAliases map[string]store.APIKeyAlias
 		prices               map[string]store.ModelPrice
 		healthTimelinePoints []store.TimelinePoint
 		channelStats         []store.ChannelModelStat
@@ -299,7 +303,34 @@ func (s *Service) summary(ctx context.Context, p SummaryParams) (SummaryResponse
 	runQuery(func() error {
 		var err error
 		recentFailures, err = s.store.RecentFailuresBetween(queryCtx, p.TodayStartMS, nowMS, recentLimit)
-		return err
+		if err != nil || len(recentFailures) == 0 || s.store == nil || s.store.APIKeyAliases == nil {
+			return err
+		}
+		hasAPIKeyHash := false
+		for _, failure := range recentFailures {
+			if strings.TrimSpace(failure.APIKeyHash) != "" {
+				hasAPIKeyHash = true
+				break
+			}
+		}
+		if !hasAPIKeyHash {
+			return nil
+		}
+		items, aliasErr := s.store.LoadAPIKeyAliases(queryCtx)
+		if aliasErr != nil {
+			if queryCtx.Err() != nil {
+				return aliasErr
+			}
+			return nil
+		}
+		recentFailureAliases = make(map[string]store.APIKeyAlias, len(items))
+		for _, item := range items {
+			hash := strings.ToLower(strings.TrimSpace(item.APIKeyHash))
+			if hash != "" {
+				recentFailureAliases[hash] = item
+			}
+		}
+		return nil
 	})
 	runQuery(func() error {
 		var err error
@@ -341,7 +372,7 @@ func (s *Service) summary(ctx context.Context, p SummaryParams) (SummaryResponse
 		TokenMix:        buildTokenMix(today),
 		ChannelHealth:   buildChannelHealth(channelStats, prices, defaultHealthRows),
 		FailureSources:  buildFailureSources(failureSources, defaultHealthRows),
-		RecentFailures:  buildRecentFailures(recentFailures),
+		RecentFailures:  buildRecentFailures(recentFailures, recentFailureAliases),
 	}, nil
 }
 
@@ -755,13 +786,28 @@ func fillChannelHealthSnapshots(row *ChannelHealth, stat store.ChannelModelStat)
 	}
 }
 
-func buildRecentFailures(failures []store.RecentFailure) []RecentFailure {
+func buildRecentFailures(failures []store.RecentFailure, aliases map[string]store.APIKeyAlias) []RecentFailure {
 	result := make([]RecentFailure, 0, len(failures))
 	for _, failure := range failures {
+		var (
+			apiKeyAlias  string
+			apiKeyMasked string
+			apiKeyOrigin string
+		)
+		if len(aliases) > 0 {
+			if entry, ok := aliases[strings.ToLower(strings.TrimSpace(failure.APIKeyHash))]; ok {
+				apiKeyAlias = entry.Alias
+				apiKeyMasked = entry.MaskedPreview
+				apiKeyOrigin = entry.Origin
+			}
+		}
 		result = append(result, RecentFailure{
 			TimestampMS:            failure.TimestampMS,
 			Model:                  failure.Model,
 			APIKeyHash:             failure.APIKeyHash,
+			APIKeyAlias:            apiKeyAlias,
+			APIKeyMasked:           apiKeyMasked,
+			APIKeyOrigin:           apiKeyOrigin,
 			Source:                 failure.Source,
 			SourceHash:             failure.SourceHash,
 			AuthIndex:              failure.AuthIndex,

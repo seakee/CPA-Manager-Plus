@@ -1158,3 +1158,108 @@ func TestCanonicalIDCollisionDoesNotReturnBindingConflict(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyPassiveSnapshotSuppressesInFlightStagedRotationAndRetiredSecretHistory(t *testing.T) {
+	ctx := context.Background()
+	db, repo := setupTestDB(t)
+
+	keyID, err := identity.NewAPIKeyID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := strings.Repeat("1", 64)
+	newHash := strings.Repeat("2", 64)
+	rtID := "runtime-rot-1"
+
+	if err := repo.CreateAPIKey(ctx, identity.APIKeyIdentity{
+		ID:          keyID,
+		Revision:    1,
+		Lifecycle:   identity.LifecycleActive,
+		CreatedAtMS: 1000,
+		UpdatedAtMS: 1000,
+	}, identity.APIKeySourceBinding{
+		APIKeyID:                  keyID,
+		RuntimeIdentity:           rtID,
+		APIKeyHash:                oldHash,
+		ObservedRuntimeGeneration: 1,
+		FirstSeenAtMS:             1000,
+		LastSeenAtMS:              1000,
+	}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `insert into fresh_client_api_keys (
+		request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview, name, name_revision, origin
+	) values (?, ?, 'enc-old', ?, 'cpamp_sk_…1111', 'Prod', 1, 'workspace')`,
+		strings.Repeat("a", 32), string(keyID), oldHash); err != nil {
+		t.Fatalf("insert fresh_client_api_keys: %v", err)
+	}
+
+	// 1) In-flight staged rotation candidate (oldHash -> newHash) while CPA already returns newHash in a passive snapshot:
+	// neither oldHash nor newHash may mint a rogue second canonical identity or retire oldHash prematurely.
+	if _, err := db.ExecContext(ctx, `insert into fresh_client_api_key_rotations (
+		request_id, api_key_id, old_secret_hash, new_secret_ciphertext, new_secret_hash, new_masked_preview, created_at_ms
+	) values (?, ?, ?, 'enc-new', ?, 'cpamp_sk_…2222', 2000)`,
+		strings.Repeat("b", 32), string(keyID), oldHash, newHash); err != nil {
+		t.Fatalf("insert rotation candidate: %v", err)
+	}
+
+	inFlightRes, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		CaptureStartedAtMS:        2100,
+		ProcessInstanceID:         "proc-1",
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: newHash}},
+		NowMS:                     2200,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileSnapshot(in-flight): %v", err)
+	}
+	if inFlightRes.APIKeysCreated != 0 || inFlightRes.APIKeysMissing != 0 {
+		t.Fatalf("in-flight snapshot result = %+v, want 0 created / 0 missing", inFlightRes)
+	}
+	var totalIdentities int
+	if err := db.QueryRowContext(ctx, `select count(*) from `+sqlite.GatewayAPIKeyIdentitiesTable).Scan(&totalIdentities); err != nil || totalIdentities != 1 {
+		t.Fatalf("identity count during in-flight rotation = %d, err=%v, want 1", totalIdentities, err)
+	}
+
+	// 2) After rotation commits (oldHash archived into fresh_client_api_key_secret_history, newHash active):
+	// if a delayed snapshot transiently observes oldHash, stagedAPIKeyForSource treats oldHash as terminal/superseded.
+	if _, err := db.ExecContext(ctx, `delete from fresh_client_api_key_rotations where api_key_id = ?`, string(keyID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `insert into fresh_client_api_key_secret_history (
+		secret_hash, api_key_id, secret_ciphertext, masked_preview, origin, retired_at_ms, retired_by_request_id, next_secret_hash
+	) values (?, ?, 'enc-old', 'cpamp_sk_…1111', 'workspace', 3000, ?, ?)`,
+		oldHash, string(keyID), strings.Repeat("b", 32), newHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `update fresh_client_api_keys set secret_hash = ?, secret_ciphertext = 'enc-new', masked_preview = 'cpamp_sk_…2222' where api_key_id = ?`,
+		newHash, string(keyID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `update `+sqlite.GatewayAPIKeySourceBindingsTable+` set retired_at_ms = 3000 where api_key_id = ? and api_key_hash = ?`,
+		string(keyID), oldHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `insert into `+sqlite.GatewayAPIKeySourceBindingsTable+` (
+		api_key_id, runtime_identity, api_key_hash, observed_runtime_generation, first_seen_at_ms, last_seen_at_ms, retired_at_ms
+	) values (?, ?, ?, '1', 3000, 3000, null)`,
+		string(keyID), rtID, newHash); err != nil {
+		t.Fatal(err)
+	}
+
+	staleRes, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           rtID,
+		ObservedRuntimeGeneration: 1,
+		CaptureStartedAtMS:        3100,
+		ProcessInstanceID:         "proc-1",
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: oldHash}, {APIKeyHash: newHash}},
+		NowMS:                     3200,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileSnapshot(retired history): %v", err)
+	}
+	if staleRes.APIKeysCreated != 0 || staleRes.APIKeysTerminalSkipped != 1 {
+		t.Fatalf("retired history snapshot = %+v, want 0 created / 1 terminal skipped", staleRes)
+	}
+}

@@ -1023,7 +1023,7 @@ describe('usage analytics adapters', () => {
     const rows = buildApiKeyRows(data.api_key_stats, undefined, 'team-alpha');
 
     expect(rows).toHaveLength(1);
-    expect(rows[0].label).toBe('sk-****7890');
+    expect(rows[0].label).toBe('sha256:abcdef12');
     expect(rows[0].label).not.toContain('abcdef1234567890');
     expect(rows[0].contexts?.[0]).toMatchObject({
       account: 'team-alpha',
@@ -1136,7 +1136,7 @@ describe('usage analytics adapters', () => {
 
     expect(apiKeyRows[0]).toMatchObject({
       apiKeyHash: 'abcdef1234567890',
-      label: 'Team Alpha Key',
+      label: 'Team Alpha Key (sk-****7890)',
       apiKeyCopyValue: 'sk-team-alpha-original',
     });
     expect(
@@ -1146,8 +1146,7 @@ describe('usage analytics adapters', () => {
         dimension: 'apiKeyModel',
         metric: 'requestCount',
       }).rowLabels
-    ).toEqual(['Team Alpha Key']);
-
+    ).toEqual(['Team Alpha Key (sk-****7890)']);
     const heatmapRows = buildUsageHeatmap(
       [
         {
@@ -1176,7 +1175,7 @@ describe('usage analytics adapters', () => {
       ],
       displayMap
     );
-    expect(heatmapRows[0].apiKeyContributors?.[0].label).toBe('Team Alpha Key');
+    expect(heatmapRows[0].apiKeyContributors?.[0].label).toBe('Team Alpha Key (sk-****7890)');
 
     const drilldownRows = buildDrilldownPreview(
       [
@@ -1216,7 +1215,7 @@ describe('usage analytics adapters', () => {
     );
     expect(drilldownRows[0]).toMatchObject({
       apiKeyHash: 'abcdef1234567890',
-      apiKeyLabel: 'Team Alpha Key',
+      apiKeyLabel: 'Team Alpha Key (sk-****7890)',
     });
   });
 
@@ -1270,10 +1269,10 @@ describe('usage analytics adapters', () => {
     });
     const anomalies = buildKeyAnomalies(apiKeyRows);
 
-    expect(matrix.rowLabels).toEqual(['sk-****7890']);
+    expect(matrix.rowLabels).toEqual(['sha256:abcdef12']);
     expect(matrix.columnLabels).toEqual(['gpt-4o']);
     expect(matrix.cells[0]).toMatchObject({
-      rowLabel: 'sk-****7890',
+      rowLabel: 'sha256:abcdef12',
       columnLabel: 'gpt-4o',
       requestCount: 80,
       failureRate: 6 / 80,
@@ -1281,10 +1280,91 @@ describe('usage analytics adapters', () => {
     });
     expect(anomalies[0]).toMatchObject({
       id: 'abcdef1234567890',
-      label: 'sk-****7890',
+      label: 'sha256:abcdef12',
       severity: 'high',
       reasonKey: 'usage_analytics.anomaly_reason_cost_spike',
     });
+  });
+
+  it('displays v2 directory names with real masked previews, revoked indicator, multi-hash filtering, and no copyValue', () => {
+    const displayMap = new Map([
+      [
+        'hash-active',
+        {
+          label: 'Prod',
+          masked: 'cpamp_sk_…2f85',
+          displayName: 'Prod (cpamp_sk_…2f85)',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…2f85',
+          origin: 'workspace',
+          lifecycle: 'active',
+        },
+      ],
+      [
+        'hash-old',
+        {
+          label: 'Prod',
+          masked: 'cpamp_sk_…old1',
+          displayName: 'Prod (cpamp_sk_…old1) · Revoked',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…old1',
+          origin: 'workspace',
+          lifecycle: 'superseded',
+          isRevoked: true,
+        },
+      ],
+    ]);
+    const rows = buildApiKeyRows(
+      [
+        {
+          id: 'hash-active',
+          api_key_hash: 'hash-active',
+          calls: 10,
+          success_calls: 10,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 100,
+          output_tokens: 20,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 120,
+          cost: 2,
+          average_latency_ms: 100,
+          last_seen_ms: NOW_MS,
+        },
+        {
+          id: 'hash-old',
+          api_key_hash: 'hash-old',
+          calls: 4,
+          success_calls: 4,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 40,
+          output_tokens: 10,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 50,
+          cost: 1,
+          average_latency_ms: 100,
+          last_seen_ms: NOW_MS - 1000,
+        },
+      ],
+      undefined,
+      'cpamp_sk_…old1',
+      displayMap
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].label).toBe('Prod (cpamp_sk_…old1) · Revoked');
+    expect(rows[0].apiKeyCopyValue).toBeUndefined();
+
+    expect(
+      buildUsageAnalyticsFilters({
+        apiKeyHash: 'hash-active',
+        apiKeyHashes: ['hash-active', 'hash-old'],
+      }).api_key_hashes
+    ).toEqual(['hash-active', 'hash-old']);
   });
 
   it('does not double-count provider/model matrix rows from API key and credential projections', () => {

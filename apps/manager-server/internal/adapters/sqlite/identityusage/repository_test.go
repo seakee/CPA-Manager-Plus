@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,16 +42,26 @@ func setupTestDB(t *testing.T) (*sql.DB, ports.Repository) {
 
 func insertIdentity(t *testing.T, db *sql.DB, id, lifecycle string) {
 	t.Helper()
+	insertIdentityAt(t, db, id, lifecycle, 100)
+}
+
+func insertIdentityAt(t *testing.T, db *sql.DB, id, lifecycle string, createdAtMS int64) {
+	t.Helper()
 	if _, err := db.Exec(`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms)
-		values (?, 1, ?, 100, 100)`, id, lifecycle); err != nil {
+		values (?, 1, ?, ?, ?)`, id, lifecycle, createdAtMS, createdAtMS); err != nil {
 		t.Fatalf("insert identity: %v", err)
 	}
 }
 
 func insertStagedKey(t *testing.T, db *sql.DB, id, hash string) {
 	t.Helper()
-	if _, err := db.Exec(`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview)
-		values (?, ?, 'cipher', ?, 'cpamp_sk_…0000')`, sha256Hex(id)[:32], id, hash); err != nil {
+	insertStagedKeyWithOrigin(t, db, id, hash, "workspace")
+}
+
+func insertStagedKeyWithOrigin(t *testing.T, db *sql.DB, id, hash, origin string) {
+	t.Helper()
+	if _, err := db.Exec(`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview, origin)
+		values (?, ?, 'cipher', ?, 'cpamp_sk_…0000', ?)`, sha256Hex(id)[:32], id, hash, origin); err != nil {
 		t.Fatalf("insert staged key: %v", err)
 	}
 }
@@ -114,7 +125,7 @@ func TestBindingReportsMissingConflictAndAttributionStart(t *testing.T) {
 	}
 	insertBinding(t, db, testKeyID, hash, 500, nil)
 	binding, err := repo.Binding(ctx, identity.APIKeyID(testKeyID))
-	if err != nil || binding.FirstSeenAtMS != 500 {
+	if err != nil || binding.FirstSeenAtMS != 500 || binding.Origin != "workspace" || binding.IdentityCreatedAtMS != 100 {
 		t.Fatalf("binding = %+v err = %v", binding, err)
 	}
 
@@ -205,6 +216,37 @@ func TestProjectionStateAndRawDeletionEvidence(t *testing.T) {
 	}
 	if deleted, err := repo.RawDeletedIn(ctx, 0, 5000); err != nil || !deleted {
 		t.Fatalf("raw deleted = %v err = %v, want true", deleted, err)
+	}
+	if latest, anyDeleted, err := repo.LatestRawDeletedIn(ctx, 0, 5000); err != nil || !anyDeleted || latest != 1100 {
+		t.Fatalf("latest raw deleted = (%d, %v, %v), want (1100, true, nil)", latest, anyDeleted, err)
+	}
+	if latest, anyDeleted, err := repo.LatestRawDeletedIn(ctx, 1101, 5000); err != nil || anyDeleted || latest != 0 {
+		t.Fatalf("latest raw deleted after deleted day = (%d, %v, %v), want (0, false, nil)", latest, anyDeleted, err)
+	}
+
+	// Event-level raw deletion ref later than the daily rollup advances LatestRawDeletedIn.
+	refHash := sha256Hex("archived-ref-1")
+	if _, err := db.Exec(`insert into usage_event_identity_ledger (event_hash, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+		values (?, 2400, 0, 2400, 2400)`, refHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_runs (id, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+		values ('run-1', 1, 'jsonl.zst', 'completed', 3000, 1, 1, 3000, 3000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_segments (run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms, event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+		values ('run-1', 1, 'verified', 'seg-1.jsonl.zst', 1, 1, 2400, 2400, 1, 10, 10, 'sha', 'digest', 3000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into usage_archive_event_refs (event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+		values (?, 'run-1', 1, 1, 2400, 3000, 3100)`, refHash); err != nil {
+		t.Fatal(err)
+	}
+	if latest, anyDeleted, err := repo.LatestRawDeletedIn(ctx, 1101, 5000); err != nil || !anyDeleted || latest != 2400 {
+		t.Fatalf("latest raw deleted from event ref = (%d, %v, %v), want (2400, true, nil)", latest, anyDeleted, err)
+	}
+	if latest, anyDeleted, err := repo.LatestRawDeletedIn(ctx, 2401, 5000); err != nil || anyDeleted || latest != 0 {
+		t.Fatalf("latest raw deleted after event ref = (%d, %v, %v), want (0, false, nil)", latest, anyDeleted, err)
 	}
 }
 
@@ -341,5 +383,160 @@ func TestWindowsRespectsPerKeyFloorsInSingleBoundedBatch(t *testing.T) {
 	if winB.Totals.Calls != 2 || winB.Totals.Failure != 0 || winB.Totals.TotalTokens != 50 || winB.UnmappedEvents != 0 ||
 		winB.Totals.LastUsedAtMS == nil || *winB.Totals.LastUsedAtMS != 4000 {
 		t.Fatalf("Key B window = %+v, want calls=2 failures=0 tokens=50 unmapped=0 lastUsed=4000", winB)
+	}
+}
+
+func TestBindingPopulatesOriginIdentityCreatedAtAndEarliestRotatedStart(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+
+	const (
+		installerID = "11111111111111111111111111111111"
+		adoptedID   = "22222222222222222222222222222222"
+		rotatedID   = "33333333333333333333333333333333"
+	)
+	hashInstaller := sha256Hex("installer-secret")
+	insertIdentityAt(t, db, installerID, "active", 1200)
+	insertStagedKeyWithOrigin(t, db, installerID, hashInstaller, "installer")
+	insertBinding(t, db, installerID, hashInstaller, 1200, nil)
+
+	hashAdopted := sha256Hex("adopted-secret")
+	insertIdentityAt(t, db, adoptedID, "active", 3400)
+	insertStagedKeyWithOrigin(t, db, adoptedID, hashAdopted, "adopted")
+	insertBinding(t, db, adoptedID, hashAdopted, 3400, nil)
+
+	hashOld := sha256Hex("rotated-secret-old")
+	hashNew := sha256Hex("rotated-secret-new")
+	insertIdentityAt(t, db, rotatedID, "active", 250)
+	insertStagedKeyWithOrigin(t, db, rotatedID, hashNew, "workspace")
+	insertBinding(t, db, rotatedID, hashOld, 250, 800)
+	insertBinding(t, db, rotatedID, hashNew, 800, nil)
+
+	bInstaller, err := repo.Binding(ctx, installerID)
+	if err != nil || bInstaller.Origin != "installer" || bInstaller.IdentityCreatedAtMS != 1200 || bInstaller.FirstSeenAtMS != 1200 {
+		t.Fatalf("installer binding = %+v err = %v", bInstaller, err)
+	}
+	bAdopted, err := repo.Binding(ctx, adoptedID)
+	if err != nil || bAdopted.Origin != "adopted" || bAdopted.IdentityCreatedAtMS != 3400 || bAdopted.FirstSeenAtMS != 3400 {
+		t.Fatalf("adopted binding = %+v err = %v", bAdopted, err)
+	}
+	bRotated, err := repo.Binding(ctx, rotatedID)
+	if err != nil || bRotated.Origin != "workspace" || bRotated.IdentityCreatedAtMS != 250 || bRotated.FirstSeenAtMS != 250 {
+		t.Fatalf("rotated binding = %+v err = %v, want earliest first_seen_at_ms=250", bRotated, err)
+	}
+}
+
+func TestWindowsPreservesLifetimeLastUsedAcross24hFloorAndRotatedBindings(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+
+	const (
+		dayMS = int64(24 * time.Hour / time.Millisecond)
+		toMS  = int64(1_760_000_000_000)
+	)
+	fromMS := toMS - dayMS
+	createdAtMS := toMS - 3*dayMS
+
+	// Key A: single binding, last call was 25h ago (outside the 24h window), 0 calls in [fromMS, toMS).
+	hashA := sha256Hex("idle-secret-a")
+	insertIdentityAt(t, db, testKeyID, "active", createdAtMS)
+	insertStagedKeyWithOrigin(t, db, testKeyID, hashA, "workspace")
+	insertBinding(t, db, testKeyID, hashA, createdAtMS, nil)
+	lastCallA := toMS - 25*3_600_000
+	insertEvent(t, db, 1, hashA, lastCallA, 40, 0)
+	insertProjection(t, db, 1, "mapped", testKeyID, hashA, lastCallA)
+
+	// Key B: rotated binding chain (retired hashOld + active hashNew).
+	hashOld := sha256Hex("rotated-b-old")
+	hashNew := sha256Hex("rotated-b-new")
+	rotatedAtMS := toMS - 26*3_600_000
+	insertIdentityAt(t, db, otherKeyID, "active", createdAtMS)
+	insertStagedKeyWithOrigin(t, db, otherKeyID, hashNew, "workspace")
+	insertBinding(t, db, otherKeyID, hashOld, createdAtMS, rotatedAtMS)
+	insertBinding(t, db, otherKeyID, hashNew, rotatedAtMS, nil)
+
+	oldBindingCall := toMS - 30*3_600_000
+	insertEvent(t, db, 2, hashOld, oldBindingCall, 25, 1)
+	insertProjection(t, db, 2, "mapped", otherKeyID, hashOld, oldBindingCall)
+
+	// 1. Before any call on hashNew: Key B preserves LastUsedAtMS from its retired binding, with 0 calls in 24h.
+	windows, err := repo.Windows(ctx, []ports.KeyRange{
+		{APIKeyID: testKeyID, FromMS: fromMS},
+		{APIKeyID: otherKeyID, FromMS: fromMS},
+	}, toMS)
+	if err != nil {
+		t.Fatalf("Windows(prior rotated): %v", err)
+	}
+	winA := windows[testKeyID]
+	if winA.Totals.Calls != 0 || winA.Totals.Failure != 0 || winA.Totals.InputTokens != 0 ||
+		winA.Totals.OutputTokens != 0 || winA.Totals.TotalTokens != 0 ||
+		winA.Totals.LastUsedAtMS == nil || *winA.Totals.LastUsedAtMS != lastCallA {
+		t.Fatalf("Key A (>24h idle) = %+v, want 0 totals and lastUsed=%d", winA.Totals, lastCallA)
+	}
+	winB := windows[otherKeyID]
+	if winB.Totals.Calls != 0 || winB.Totals.TotalTokens != 0 ||
+		winB.Totals.LastUsedAtMS == nil || *winB.Totals.LastUsedAtMS != oldBindingCall {
+		t.Fatalf("Key B (retired binding >24h) = %+v, want 0 totals and lastUsed=%d", winB.Totals, oldBindingCall)
+	}
+
+	// 2. Call on hashNew 25h ago (still < fromMS) plus an event at toMS (must be excluded by < toMS).
+	newBindingOldCall := toMS - 25*3_600_000
+	insertEvent(t, db, 3, hashNew, newBindingOldCall, 35, 0)
+	insertProjection(t, db, 3, "mapped", otherKeyID, hashNew, newBindingOldCall)
+	insertEvent(t, db, 4, hashNew, toMS, 99, 0)
+	insertProjection(t, db, 4, "mapped", otherKeyID, hashNew, toMS)
+
+	windows, err = repo.Windows(ctx, []ports.KeyRange{{APIKeyID: otherKeyID, FromMS: fromMS}}, toMS)
+	if err != nil {
+		t.Fatalf("Windows(second binding >24h): %v", err)
+	}
+	winB = windows[otherKeyID]
+	if winB.Totals.Calls != 0 || winB.Totals.TotalTokens != 0 ||
+		winB.Totals.LastUsedAtMS == nil || *winB.Totals.LastUsedAtMS != newBindingOldCall {
+		t.Fatalf("Key B (second binding >24h, excluding >=toMS) = %+v, want 0 totals and lastUsed=%d", winB.Totals, newBindingOldCall)
+	}
+
+	// 3. Call inside [fromMS, toMS): Totals count ONLY the in-window call while LastUsedAtMS advances to it.
+	inWindowCall := toMS - 3_600_000
+	insertEvent(t, db, 5, hashNew, inWindowCall, 60, 0)
+	insertProjection(t, db, 5, "mapped", otherKeyID, hashNew, inWindowCall)
+
+	windows, err = repo.Windows(ctx, []ports.KeyRange{{APIKeyID: otherKeyID, FromMS: fromMS}}, toMS)
+	if err != nil {
+		t.Fatalf("Windows(in-window call): %v", err)
+	}
+	winB = windows[otherKeyID]
+	if winB.Totals.Calls != 1 || winB.Totals.TotalTokens != 60 ||
+		winB.Totals.LastUsedAtMS == nil || *winB.Totals.LastUsedAtMS != inWindowCall {
+		t.Fatalf("Key B (in-window call) = %+v, want calls=1 tokens=60 lastUsed=%d", winB.Totals, inWindowCall)
+	}
+}
+
+func TestWindowsSuppressesPriorLastUsedWhenUnmappedProjectionExistsInGap(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	createdAtMS := int64(1_700_000_000_000)
+	toMS := createdAtMS + 48*3_600_000
+	fromMS := toMS - 24*3_600_000
+	hash := strings.Repeat("9", 64)
+
+	insertIdentityAt(t, db, testKeyID, "active", createdAtMS)
+	insertStagedKeyWithOrigin(t, db, testKeyID, hash, "workspace")
+	insertBinding(t, db, testKeyID, hash, createdAtMS, nil)
+
+	priorMappedTS := toMS - 30*3_600_000
+	insertEvent(t, db, 10, hash, priorMappedTS, 20, 0)
+	insertProjection(t, db, 10, "mapped", testKeyID, hash, priorMappedTS)
+
+	gapUnmappedTS := toMS - 26*3_600_000
+	insertEvent(t, db, 11, hash, gapUnmappedTS, 15, 0)
+	insertProjection(t, db, 11, "unknown", "", hash, gapUnmappedTS)
+
+	windows, err := repo.Windows(ctx, []ports.KeyRange{{APIKeyID: testKeyID, FromMS: fromMS}}, toMS)
+	if err != nil {
+		t.Fatalf("Windows(with unmapped gap): %v", err)
+	}
+	if got := windows[testKeyID]; got.Totals.Calls != 0 || got.Totals.LastUsedAtMS != nil {
+		t.Fatalf("Window with unmapped event in (priorMappedTS, fromMS) = %+v, want LastUsedAtMS == nil", got.Totals)
 	}
 }

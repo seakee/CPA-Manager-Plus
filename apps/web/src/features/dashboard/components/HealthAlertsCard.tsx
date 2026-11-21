@@ -3,8 +3,10 @@ import { useTranslation } from 'react-i18next';
 import type { DashboardChannelHealth, DashboardRecentFailure } from '@/services/api/usageService';
 import type { CredentialInfo } from '@/types/sourceInfo';
 import type { MonitoringAuthMeta, MonitoringChannelMeta } from '@/features/monitoring/model/types';
+import type { ApiKeyDisplayInfo } from '@/features/monitoring/model/apiKeys';
 import {
   buildMonitoringSourceDisplay,
+  isRedundantMonitoringLabel,
   type MonitoringSourceDisplay,
 } from '@/features/monitoring/model/sourceDisplay';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
@@ -22,6 +24,7 @@ interface HealthAlertsCardProps {
   sourceInfoMap: ReturnType<typeof buildSourceInfoMap>;
   channelByAuthIndex: Map<string, MonitoringChannelMeta>;
   apiKeyAliasMap: Map<string, string>;
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>;
 }
 
 export function HealthAlertsCard({
@@ -33,6 +36,7 @@ export function HealthAlertsCard({
   sourceInfoMap,
   channelByAuthIndex,
   apiKeyAliasMap,
+  apiKeyDisplayMap,
 }: HealthAlertsCardProps) {
   const { t, i18n } = useTranslation();
 
@@ -51,6 +55,8 @@ export function HealthAlertsCard({
     sourceInfoMap,
     channelByAuthIndex,
     apiKeyAliasMap,
+    apiKeyDisplayMap,
+    language: i18n.language,
   };
 
   const channelRows = channelHealth.slice(0, 5).map((channel, index) => ({
@@ -89,11 +95,17 @@ export function HealthAlertsCard({
         authLabel: failure.auth_label,
         account: failure.account,
         apiKeyAlias: failure.api_key_alias,
+        apiKeyMasked: failure.api_key_masked,
+        apiKeyOrigin: failure.api_key_origin,
       },
       sourceDisplayContext
     );
 
-  const buildFailureTooltip = (failure: DashboardRecentFailure, provider: string) => {
+  const buildFailureTooltip = (
+    failure: DashboardRecentFailure,
+    provider: string,
+    apiKeyLabel?: string
+  ) => {
     const statusCode = failure.fail_status_code;
     const summary = maskSensitiveText(failure.fail_summary || '');
     const quotaPlanLabel = getPlanPresentation({
@@ -102,6 +114,7 @@ export function HealthAlertsCard({
       t,
     })?.fullLabel;
     const diagnostics = [
+      apiKeyLabel ? `API Key: ${apiKeyLabel}` : '',
       failure.header_error_code || failure.header_error_kind
         ? `${t('monitoring.header_error')}: ${[failure.header_error_kind, failure.header_error_code]
             .filter(Boolean)
@@ -139,7 +152,11 @@ export function HealthAlertsCard({
       tabIndex={tooltip ? 0 : undefined}
       title={tooltip ? undefined : display.title}
     >
-      <span className={styles.failureSourceText}>{display.primary}</span>
+      <span className={styles.failureSourceText}>
+        {display.apiKeyLabel && !isRedundantMonitoringLabel(display.apiKeyLabel, display.primary)
+          ? `${display.primary} · ${display.apiKeyLabel}`
+          : display.primary}
+      </span>
       {tooltip ? (
         <span role="tooltip" className={styles.failureTooltip}>
           {tooltip.statusText ? (
@@ -202,9 +219,9 @@ export function HealthAlertsCard({
           <h3>{t('dashboard.recent_failed_requests')}</h3>
         </div>
         <div className={styles.list}>
-          {recentFailures.slice(0, 3).map((failure) => {
+          {recentFailures.slice(0, 5).map((failure) => {
             const display = buildRecentFailureDisplay(failure);
-            const tooltip = buildFailureTooltip(failure, display.provider);
+            const tooltip = buildFailureTooltip(failure, display.provider, display.apiKeyLabel);
             return (
               <div
                 key={`${failure.timestamp_ms}-${failure.source_hash}-${failure.model}`}

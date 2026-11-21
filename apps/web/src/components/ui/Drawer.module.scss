@@ -87,9 +87,14 @@
   color: var(--text-secondary);
   flex-shrink: 0;
 
-  &:hover {
+  &:hover:not(:disabled) {
     background: var(--surface-subtle-hover);
     color: var(--text-primary);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
 }
 

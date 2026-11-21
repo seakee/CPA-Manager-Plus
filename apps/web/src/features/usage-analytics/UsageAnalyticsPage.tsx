@@ -2307,7 +2307,7 @@ function EmptyState({ title, body }: { title: string; body: string }) {
 function UsageAnalyticsPageInner() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const usage = useUsageAnalytics();
+  const usage = useUsageAnalytics(i18n.language);
   const showNotification = useNotificationStore((state) => state.showNotification);
   const chartTheme = useUsageChartTheme();
   const themedUsageMetrics = useMemo(() => getThemedUsageMetrics(chartTheme), [chartTheme]);
@@ -2424,6 +2424,8 @@ function UsageAnalyticsPageInner() {
           {
             ...usage.filters,
             apiKeyHash,
+            apiKeyHashes: undefined,
+            apiKeyId: undefined,
             status: status ?? usage.filters.status,
           }
         )
@@ -2473,12 +2475,20 @@ function UsageAnalyticsPageInner() {
     return [
       { value: 'all', label: allApiKeyOptionLabel },
       ...mergeSelectOptions([
-        ...displayOptionCache.apiKeys,
+        ...displayOptionCache.apiKeys.map((option) => ({
+          value: option.value,
+          label: resolveUsageApiKeyLabel(option.value, usage.apiKeyDisplayMap, option.label),
+        })),
         ...(selectedApiKeyHash
           ? [
               {
                 value: selectedApiKeyHash,
-                label: resolveUsageApiKeyLabel(selectedApiKeyHash, usage.apiKeyDisplayMap),
+                label: resolveUsageApiKeyLabel(
+                  selectedApiKeyHash,
+                  usage.apiKeyDisplayMap,
+                  null,
+                  usage.filters.apiKeyId
+                ),
               },
             ]
           : []),
@@ -2489,6 +2499,7 @@ function UsageAnalyticsPageInner() {
     displayOptionCache.apiKeys,
     usage.apiKeyDisplayMap,
     usage.filters.apiKeyHash,
+    usage.filters.apiKeyId,
   ]);
   const providerOptions = useMemo<SelectOption[]>(
     () =>

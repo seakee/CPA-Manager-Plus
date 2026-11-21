@@ -260,7 +260,7 @@ const en = {
     'Access prefixes are saved to the upgrade record, but routes are pending Manager restart and are not active yet.',
   resultAccessActive: 'Access routes are verified and active.',
   codeInvalidAccessPrefix:
-    'Enter a canonical path starting with /, without trailing slash, spaces, percent encoding, or dot segments.',
+    'Enter a normalized path starting with /, without trailing slash, spaces, percent encoding, or dot segments.',
   codeInferencePrefixRequired: 'An inference entry prefix is required for Managed upgrades.',
   codeExternalInferencePrefixForbidden:
     'External mode does not use a local inference prefix or shared mode.',

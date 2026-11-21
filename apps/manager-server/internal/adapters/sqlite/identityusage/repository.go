@@ -34,22 +34,27 @@ func (r *repository) Binding(ctx context.Context, id identity.APIKeyID) (ports.B
 	if err := id.Validate(); err != nil {
 		return ports.Binding{}, err
 	}
-	// One Canonical Key owns exactly one source hash. The lookup returns that
-	// hash's attribution window; a hash owned by another active identity is a
-	// conflict, never a silent relay to that identity.
+	// One Canonical Key owns its source-hash chain across initial creation and
+	// any in-place rotations. min(b.first_seen_at_ms) returns the earliest
+	// attribution start across historical and current bindings; a current hash
+	// actively owned by another identity is a conflict, never a silent relay.
 	var binding ports.Binding
 	var conflict bool
 	err := r.db.QueryRowContext(ctx, `
 		select coalesce(min(b.first_seen_at_ms), 0),
+		       k.origin,
+		       i.created_at_ms,
 		       exists (
 		         select 1 from `+sqliterepo.GatewayAPIKeySourceBindingsTable+` o
 		         where o.api_key_hash = k.secret_hash and o.retired_at_ms is null
 		           and o.api_key_id <> k.api_key_id
 		       )
 		from fresh_client_api_keys k
+		join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on i.id = k.api_key_id
 		left join `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b on b.api_key_id = k.api_key_id
 		where k.api_key_id = ?
-		group by k.api_key_id`, string(id)).Scan(&binding.FirstSeenAtMS, &conflict)
+		group by k.api_key_id, k.origin, i.created_at_ms, k.secret_hash`, string(id)).Scan(
+		&binding.FirstSeenAtMS, &binding.Origin, &binding.IdentityCreatedAtMS, &conflict)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ports.Binding{}, ports.ErrBindingNotFound
 	}
@@ -116,47 +121,151 @@ func (r *repository) Windows(ctx context.Context, ranges []ports.KeyRange, toMS 
 	return result, nil
 }
 
+type priorLastUsedRange struct {
+	apiKeyID       identity.APIKeyID
+	minFirstSeenMS int64
+	beforeMS       int64
+}
+
 func (r *repository) windowsBatch(ctx context.Context, result map[identity.APIKeyID]ports.Window, ranges []ports.KeyRange, toMS int64) error {
 	rangeArgs, valuesClause, minFromMS := keyRangeArgs(ranges)
 	queryArgs := append(append([]any{}, rangeArgs...), minFromMS, toMS)
 
 	rows, err := r.db.QueryContext(ctx, `
-		with floors(api_key_id, from_ms) as (values `+valuesClause+`)
-		select p.api_key_id, count(*) as calls,
-			coalesce(sum(case when u.failed <> 0 then 1 else 0 end), 0) as failures,
-			coalesce(sum(u.input_tokens), 0) as input_tokens,
-			coalesce(sum(u.output_tokens), 0) as output_tokens,
-			coalesce(sum(u.total_tokens), 0) as total_tokens,
-			max(u.timestamp_ms) as last_used_at_ms
-		from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
-		join floors f on f.api_key_id = p.api_key_id
-		join usage_events u on u.id = p.usage_event_id
-		where p.api_key_state = 'mapped'
-		  and u.timestamp_ms >= ? and u.timestamp_ms < ?
-		  and u.timestamp_ms >= f.from_ms
-		group by p.api_key_id`, queryArgs...)
+		with floors(api_key_id, from_ms) as (values `+valuesClause+`),
+		     bounds as (
+		         select f.api_key_id,
+		                f.from_ms,
+		                coalesce(min(b.first_seen_at_ms), 0) as min_first_seen_ms
+		         from floors f
+		         left join `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b on b.api_key_id = f.api_key_id
+		         group by f.api_key_id, f.from_ms
+		     )
+		select b.api_key_id,
+		       b.from_ms,
+		       b.min_first_seen_ms,
+		       coalesce(w.calls, 0),
+		       coalesce(w.failures, 0),
+		       coalesce(w.input_tokens, 0),
+		       coalesce(w.output_tokens, 0),
+		       coalesce(w.total_tokens, 0),
+		       w.last_used_at_ms
+		from bounds b
+		left join (
+		    select p.api_key_id,
+		           count(*) as calls,
+		           coalesce(sum(case when u.failed <> 0 then 1 else 0 end), 0) as failures,
+		           coalesce(sum(u.input_tokens), 0) as input_tokens,
+		           coalesce(sum(u.output_tokens), 0) as output_tokens,
+		           coalesce(sum(u.total_tokens), 0) as total_tokens,
+		           max(case when u.timestamp_ms >= bd.min_first_seen_ms then u.timestamp_ms end) as last_used_at_ms
+		    from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
+		    join bounds bd on bd.api_key_id = p.api_key_id
+		    join usage_events u on u.id = p.usage_event_id
+		    where p.api_key_state = 'mapped'
+		      and u.timestamp_ms >= ? and u.timestamp_ms < ?
+		      and u.timestamp_ms >= bd.from_ms
+		    group by p.api_key_id
+		) w on w.api_key_id = b.api_key_id`, queryArgs...)
 	if err != nil {
 		return fmt.Errorf("aggregate canonical key usage: %w", err)
 	}
 	defer rows.Close()
+	var priors []priorLastUsedRange
 	for rows.Next() {
 		var rawID string
+		var fromMS, minFirstSeenMS int64
 		var lastUsed sql.NullInt64
 		var window ports.Window
-		if err := rows.Scan(&rawID, &window.Totals.Calls, &window.Totals.Failure,
+		if err := rows.Scan(&rawID, &fromMS, &minFirstSeenMS,
+			&window.Totals.Calls, &window.Totals.Failure,
 			&window.Totals.InputTokens, &window.Totals.OutputTokens, &window.Totals.TotalTokens,
 			&lastUsed); err != nil {
 			return fmt.Errorf("scan canonical key usage: %w", err)
 		}
+		id := identity.APIKeyID(rawID)
 		if lastUsed.Valid && lastUsed.Int64 > 0 {
-			window.Totals.LastUsedAtMS = &lastUsed.Int64
+			ts := lastUsed.Int64
+			window.Totals.LastUsedAtMS = &ts
+		} else if minFirstSeenMS < fromMS {
+			priors = append(priors, priorLastUsedRange{
+				apiKeyID:       id,
+				minFirstSeenMS: minFirstSeenMS,
+				beforeMS:       fromMS,
+			})
 		}
-		result[identity.APIKeyID(rawID)] = window
+		if window.Totals.Calls > 0 || window.Totals.LastUsedAtMS != nil {
+			result[id] = window
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate canonical key usage: %w", err)
 	}
 	rows.Close()
+
+	if len(priors) > 0 {
+		priorArgs := make([]any, 0, len(priors)*3+2)
+		minPriorMS := priors[0].minFirstSeenMS
+		maxPriorBeforeMS := priors[0].beforeMS
+		for _, item := range priors {
+			priorArgs = append(priorArgs, string(item.apiKeyID), item.minFirstSeenMS, item.beforeMS)
+			if item.minFirstSeenMS < minPriorMS {
+				minPriorMS = item.minFirstSeenMS
+			}
+			if item.beforeMS > maxPriorBeforeMS {
+				maxPriorBeforeMS = item.beforeMS
+			}
+		}
+		priorValues := strings.TrimSuffix(strings.Repeat("(?,?,?),", len(priors)), ",")
+		priorArgs = append(priorArgs, minPriorMS, maxPriorBeforeMS)
+
+		priorRows, err := r.db.QueryContext(ctx, `
+			with priors(api_key_id, min_ms, before_ms) as (values `+priorValues+`),
+			candidates as (
+				select p.api_key_id, max(u.timestamp_ms) as last_used_ms, pr.before_ms
+				from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
+				join priors pr on pr.api_key_id = p.api_key_id
+				join usage_events u on u.id = p.usage_event_id
+				where p.api_key_state = 'mapped'
+				  and u.timestamp_ms >= ? and u.timestamp_ms < ?
+				  and u.timestamp_ms >= pr.min_ms and u.timestamp_ms < pr.before_ms
+				group by p.api_key_id, pr.before_ms
+			)
+			select c.api_key_id, c.last_used_ms
+			from candidates c
+			where c.last_used_ms is not null
+			  and not exists (
+				select 1
+				from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p2
+				join `+sqliterepo.GatewayAPIKeySourceBindingsTable+` b on b.api_key_hash = p2.api_key_source_hash
+				where b.api_key_id = c.api_key_id
+				  and p2.api_key_state <> 'mapped'
+				  and p2.evidence_timestamp_ms > c.last_used_ms
+				  and p2.evidence_timestamp_ms < c.before_ms
+			  )`, priorArgs...)
+		if err != nil {
+			return fmt.Errorf("read canonical key lifetime last used: %w", err)
+		}
+		defer priorRows.Close()
+		for priorRows.Next() {
+			var rawID string
+			var lastUsed sql.NullInt64
+			if err := priorRows.Scan(&rawID, &lastUsed); err != nil {
+				return fmt.Errorf("scan canonical key lifetime last used: %w", err)
+			}
+			if lastUsed.Valid && lastUsed.Int64 > 0 {
+				id := identity.APIKeyID(rawID)
+				window := result[id]
+				ts := lastUsed.Int64
+				window.Totals.LastUsedAtMS = &ts
+				result[id] = window
+			}
+		}
+		if err := priorRows.Err(); err != nil {
+			return fmt.Errorf("iterate canonical key lifetime last used: %w", err)
+		}
+		priorRows.Close()
+	}
 
 	// Events whose source hash could not be attributed inside this key's own
 	// provable [from_ms, toMS) range are positive proof that the window is
@@ -240,6 +349,27 @@ func (r *repository) RawDeletedIn(ctx context.Context, fromMS, toMS int64) (bool
 	return deleted, nil
 }
 
+func (r *repository) LatestRawDeletedIn(ctx context.Context, fromMS, toMS int64) (int64, bool, error) {
+	if toMS <= fromMS {
+		return 0, false, nil
+	}
+	var latest sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `select max(ts) from (
+		select max(max_timestamp_ms) as ts from usage_archive_deleted_coverage_daily
+		where deleted_event_count > 0 and max_timestamp_ms >= ? and min_timestamp_ms < ?
+		union all
+		select max(timestamp_ms) as ts from usage_archive_event_refs
+		where raw_deleted_at_ms is not null and timestamp_ms >= ? and timestamp_ms < ?
+	)`, fromMS, toMS, fromMS, toMS).Scan(&latest)
+	if err != nil {
+		return 0, false, fmt.Errorf("inspect latest archived raw usage deletion: %w", err)
+	}
+	if !latest.Valid {
+		return 0, false, nil
+	}
+	return latest.Int64, true, nil
+}
+
 func (r *repository) IncompleteDaysIn(ctx context.Context, fromMS, toMS int64) ([]ports.IncompleteDay, error) {
 	days := []ports.IncompleteDay{}
 	if toMS <= fromMS {
@@ -276,7 +406,11 @@ func (r *repository) MarkCollectionStarted(ctx context.Context, nowMS int64) err
 		return errors.New("invalid usage collection start")
 	}
 	_, err := r.db.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values(?, ?, ?)
-		on conflict(key) do nothing`, collectionStartKey, fmt.Sprintf("%d", nowMS), nowMS)
+		on conflict(key) do update set
+			value = excluded.value,
+			updated_at_ms = excluded.updated_at_ms
+		where cast(settings.value as integer) <= 0 or cast(excluded.value as integer) < cast(settings.value as integer)`,
+		collectionStartKey, fmt.Sprintf("%d", nowMS), nowMS)
 	if err != nil {
 		return fmt.Errorf("record usage collection start: %w", err)
 	}

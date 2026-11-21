@@ -1,6 +1,7 @@
-import { formatApiKeyHashLabel } from './base';
+import { formatApiKeyHashLabel, readString } from './base';
 import { calculateCacheHitRateFromTotals, getCacheHitTotals } from '@/utils/usage';
 import {
+  resolveApiKeyDisplayName,
   sanitizeApiKeyDisplayText,
   shouldPreferApiKeyAlias,
   type ApiKeyDisplayInfo,
@@ -121,6 +122,9 @@ export const buildScopeFilteredRows = (
   const model = normalizeScopeValue(scopeFilters.model);
   const channel = normalizeScopeValue(scopeFilters.channel);
   const apiKeyHash = normalizeScopeValue(scopeFilters.apiKeyHash);
+  const apiKeyHashes = new Set(
+    (scopeFilters.apiKeyHashes ?? []).map(normalizeScopeValue).filter(Boolean)
+  );
   const status = scopeFilters.status;
   const minLatencyMs =
     typeof scopeFilters.minLatencyMs === 'number' && scopeFilters.minLatencyMs > 0
@@ -202,7 +206,11 @@ export const buildScopeFilteredRows = (
       return false;
     }
 
-    if (
+    if (apiKeyHashes.size > 0) {
+      if (!apiKeyHashes.has(normalizeScopeValue(row.apiKeyHash))) {
+        return false;
+      }
+    } else if (
       isActiveScopeFilterValue(scopeFilters.apiKeyHash) &&
       normalizeScopeValue(row.apiKeyHash) !== apiKeyHash
     ) {
@@ -550,6 +558,10 @@ export const buildApiKeyRows = (
       apiKeyHash: string;
       apiKeyLabel: string;
       apiKeyMasked: string;
+      apiKeyDisplayName?: string;
+      apiKeyIsRevoked?: boolean;
+      apiKeyIsRotated?: boolean;
+      apiKeyLifecycle?: string;
       apiKeyCopyValue?: string;
       isUnknown: boolean;
       authLabels: Set<string>;
@@ -594,6 +606,21 @@ export const buildApiKeyRows = (
       (row.apiKeyLabel && row.apiKeyLabel !== '-') ||
       (row.apiKeyMasked && row.apiKeyMasked !== '-')
     );
+    const apiKeyDisplay = row.apiKeyHash
+      ? apiKeyDisplayMap?.get(row.apiKeyHash.toLowerCase())
+      : undefined;
+    const rowDisplayName =
+      row.apiKeyDisplayName ||
+      (apiKeyDisplay ? resolveApiKeyDisplayName(apiKeyDisplay) : undefined);
+    const rowIsRevoked = Boolean(
+      row.apiKeyIsRevoked || apiKeyDisplay?.isRevoked || apiKeyDisplay?.lifecycle === 'superseded'
+    );
+    const rowIsRotated =
+      !rowIsRevoked &&
+      Boolean(
+        row.apiKeyIsRotated || apiKeyDisplay?.isRotated || apiKeyDisplay?.lifecycle === 'rotated'
+      );
+    const rowLifecycle = row.apiKeyLifecycle ?? apiKeyDisplay?.lifecycle;
     const apiKeyGroupKey = hasKnownApiKey
       ? row.apiKeyHash || row.apiKeyLabel || row.apiKeyMasked
       : `${UNKNOWN_API_KEY_GROUP_PREFIX}:${row.sourceKey}:${row.authIndex || row.authLabel || '-'}:${row.channel || '-'}:${row.provider || '-'}`;
@@ -601,10 +628,13 @@ export const buildApiKeyRows = (
       id: apiKeyGroupKey,
       apiKeyHash: row.apiKeyHash,
       apiKeyLabel: sanitizeApiKeyDisplayText(row.apiKeyLabel),
-      apiKeyMasked: sanitizeApiKeyDisplayText(row.apiKeyMasked),
-      apiKeyCopyValue: row.apiKeyHash
-        ? apiKeyDisplayMap?.get(row.apiKeyHash.toLowerCase())?.copyValue
-        : undefined,
+      apiKeyMasked:
+        readString(apiKeyDisplay?.maskedPreview) || sanitizeApiKeyDisplayText(row.apiKeyMasked),
+      apiKeyDisplayName: rowDisplayName,
+      apiKeyIsRevoked: rowIsRevoked,
+      apiKeyIsRotated: rowIsRotated,
+      apiKeyLifecycle: rowLifecycle,
+      apiKeyCopyValue: apiKeyDisplay?.copyValue,
       isUnknown: !hasKnownApiKey,
       authLabels: new Set<string>(),
       sourceLabels: new Set<string>(),
@@ -628,19 +658,33 @@ export const buildApiKeyRows = (
     if (!existing.apiKeyHash && row.apiKeyHash) {
       existing.apiKeyHash = row.apiKeyHash;
     }
-    if (!existing.apiKeyCopyValue && existing.apiKeyHash) {
-      existing.apiKeyCopyValue = apiKeyDisplayMap?.get(
-        existing.apiKeyHash.toLowerCase()
-      )?.copyValue;
+    const resolvedDisplay = existing.apiKeyHash
+      ? apiKeyDisplayMap?.get(existing.apiKeyHash.toLowerCase())
+      : apiKeyDisplay;
+    if (!existing.apiKeyCopyValue && resolvedDisplay?.copyValue) {
+      existing.apiKeyCopyValue = resolvedDisplay.copyValue;
     }
-    if (!existing.apiKeyMasked && row.apiKeyMasked) {
-      existing.apiKeyMasked = sanitizeApiKeyDisplayText(row.apiKeyMasked);
+    if (!existing.apiKeyMasked && (resolvedDisplay?.maskedPreview || row.apiKeyMasked)) {
+      existing.apiKeyMasked =
+        readString(resolvedDisplay?.maskedPreview) || sanitizeApiKeyDisplayText(row.apiKeyMasked);
     }
     if (
       shouldPreferApiKeyAlias(row.apiKeyLabel, row.apiKeyMasked) &&
       !shouldPreferApiKeyAlias(existing.apiKeyLabel, existing.apiKeyMasked)
     ) {
       existing.apiKeyLabel = sanitizeApiKeyDisplayText(row.apiKeyLabel, existing.apiKeyLabel);
+    }
+    if (!existing.apiKeyDisplayName && rowDisplayName) {
+      existing.apiKeyDisplayName = rowDisplayName;
+    }
+    if (!existing.apiKeyIsRevoked && rowIsRevoked) {
+      existing.apiKeyIsRevoked = true;
+    }
+    if (!existing.apiKeyIsRotated && rowIsRotated) {
+      existing.apiKeyIsRotated = true;
+    }
+    if (!existing.apiKeyLifecycle && rowLifecycle) {
+      existing.apiKeyLifecycle = rowLifecycle;
     }
     existing.authLabels.add(row.authLabel);
     existing.sourceLabels.add(row.sourceMasked || row.source);
@@ -700,6 +744,10 @@ export const buildApiKeyRows = (
       apiKeyHash: item.apiKeyHash,
       apiKeyLabel: item.apiKeyLabel || item.apiKeyMasked || formatApiKeyHashLabel(item.apiKeyHash),
       apiKeyMasked: item.apiKeyMasked || item.apiKeyLabel || formatApiKeyHashLabel(item.apiKeyHash),
+      ...(item.apiKeyDisplayName ? { apiKeyDisplayName: item.apiKeyDisplayName } : {}),
+      ...(item.apiKeyIsRevoked ? { apiKeyIsRevoked: item.apiKeyIsRevoked } : {}),
+      ...(item.apiKeyIsRotated ? { apiKeyIsRotated: item.apiKeyIsRotated } : {}),
+      ...(item.apiKeyLifecycle ? { apiKeyLifecycle: item.apiKeyLifecycle } : {}),
       apiKeyCopyValue: item.apiKeyCopyValue,
       isUnknown: item.isUnknown,
       authLabels: Array.from(item.authLabels).filter(Boolean).sort(),

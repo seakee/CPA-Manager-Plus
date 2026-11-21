@@ -6,6 +6,7 @@ import type {
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
 import {
   buildAnalyticsFilters,
+  buildApiKeyRowsFromAnalytics,
   buildMonitoringAccountFilterValue,
   buildChannelRowsFromAnalytics,
   buildFailureRowsFromAnalytics,
@@ -869,5 +870,133 @@ describe('analytics failure source display', () => {
     expect(rows[0].label).toBe('Team Auth');
     expect(rows[0].channel).toBe('Production Relay');
     expect(rows[0].label).not.toBe('source-hash');
+  });
+  it('preserves v2 displayName and revoked state in analytics apiKeyRows without setting copyValue', () => {
+    const displayMap = new Map([
+      [
+        'hash-old',
+        {
+          label: 'Production',
+          masked: 'cpamp_sk_…old1',
+          displayName: 'Production (cpamp_sk_…old1) · Revoked',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…old1',
+          lifecycle: 'superseded',
+          isRevoked: true,
+        },
+      ],
+    ]);
+    const options = buildFilterOptionsFromAnalytics(
+      { api_key_hashes: ['hash-old'] },
+      new Map(),
+      new Map(),
+      buildSourceInfoMap({}),
+      new Map(),
+      displayMap
+    );
+    expect(options.apiKeyRows[0]).toMatchObject({
+      apiKeyHash: 'hash-old',
+      apiKeyLabel: 'Production',
+      apiKeyMasked: 'cpamp_sk_…old1',
+      apiKeyDisplayName: 'Production (cpamp_sk_…old1) · Revoked',
+      apiKeyIsRevoked: true,
+      apiKeyCopyValue: undefined,
+    });
+  });
+
+  it('propagates rotated and missing lifecycles in buildApiKeyRowsFromAnalytics and buildFilterOptionsFromAnalytics', () => {
+    const displayMap = new Map([
+      [
+        'hash-rot',
+        {
+          label: 'Production',
+          masked: 'cpamp_sk_…old2',
+          displayName: 'Production (cpamp_sk_…old2) · Rotated',
+          apiKeyId: 'key_prod',
+          maskedPreview: 'cpamp_sk_…old2',
+          lifecycle: 'rotated',
+          isRotated: true,
+        },
+      ],
+      [
+        'hash-miss',
+        {
+          label: 'Staged Only',
+          masked: 'cpamp_sk_…stgd',
+          displayName: 'Staged Only (cpamp_sk_…stgd)',
+          apiKeyId: 'key_staged',
+          maskedPreview: 'cpamp_sk_…stgd',
+          lifecycle: 'missing',
+        },
+      ],
+    ]);
+    const summaryRows = buildApiKeyRowsFromAnalytics(
+      [
+        {
+          id: 'hash-rot',
+          api_key_hash: 'hash-rot',
+          calls: 5,
+          success_calls: 5,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 10,
+          output_tokens: 10,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 20,
+          cost: 0.1,
+          average_latency_ms: null,
+          last_seen_ms: 200,
+        },
+        {
+          id: 'hash-miss',
+          api_key_hash: 'hash-miss',
+          calls: 1,
+          success_calls: 1,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 2,
+          output_tokens: 2,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 4,
+          cost: 0.01,
+          average_latency_ms: null,
+          last_seen_ms: 100,
+        },
+      ],
+      new Map(),
+      new Map(),
+      buildSourceInfoMap({}),
+      new Map(),
+      displayMap
+    );
+    expect(summaryRows[0]).toMatchObject({
+      apiKeyHash: 'hash-rot',
+      apiKeyIsRotated: true,
+      apiKeyLifecycle: 'rotated',
+    });
+    expect(summaryRows[1]).toMatchObject({
+      apiKeyHash: 'hash-miss',
+      apiKeyLifecycle: 'missing',
+    });
+
+    const filterOptions = buildFilterOptionsFromAnalytics(
+      { api_key_hashes: ['hash-rot', 'hash-miss'] },
+      new Map(),
+      new Map(),
+      buildSourceInfoMap({}),
+      new Map(),
+      displayMap
+    );
+    expect(filterOptions.apiKeyRows.find((r) => r.apiKeyHash === 'hash-rot')).toMatchObject({
+      apiKeyIsRotated: true,
+      apiKeyLifecycle: 'rotated',
+    });
+    expect(filterOptions.apiKeyRows.find((r) => r.apiKeyHash === 'hash-miss')).toMatchObject({
+      apiKeyLifecycle: 'missing',
+    });
   });
 });

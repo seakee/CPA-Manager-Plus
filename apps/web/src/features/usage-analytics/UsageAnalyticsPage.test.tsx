@@ -172,7 +172,7 @@ const createUsageState = (overrides: Record<string, unknown> = {}) => {
   const modelRow = createRankRow();
   const apiKeyRow = createRankRow({
     id: 'abcdef1234567890',
-    label: 'sk-****7890',
+    label: 'sha256:abcdef12',
     apiKeyHash: 'abcdef1234567890',
     apiKeyCopyValue: 'sk-client-key-original',
     model: undefined,
@@ -892,7 +892,7 @@ describe('UsageAnalyticsPage', () => {
     const renderer = renderPage();
     const text = getText(renderer.root);
 
-    expect(text).toContain('sk-****7890');
+    expect(text).toContain('sha256:abcdef12');
     expect(text).not.toContain('abcdef1234567890');
     expect(text).not.toContain('usage_analytics.trend_pending_data');
   });
@@ -915,6 +915,29 @@ describe('UsageAnalyticsPage', () => {
     expect(event.stopPropagation).toHaveBeenCalledTimes(1);
     expect(mocks.copyToClipboard).toHaveBeenCalledWith('sk-client-key-original');
     expect(usageState.setSelectedApiKeyHash).not.toHaveBeenCalled();
+  });
+
+  it('hides the API key copy button when apiKeyCopyValue is absent', () => {
+    const noSecretRow = createRankRow({
+      id: 'hash-v2',
+      label: 'Prod (cpamp_sk_…2f85)',
+      apiKeyHash: 'hash-v2',
+      apiKeyCopyValue: undefined,
+    });
+    mocks.usageState = createUsageState({
+      activeTab: 'apiKeys',
+      apiKeyRows: [noSecretRow],
+      selectedApiKey: noSecretRow,
+    });
+    const renderer = renderPage();
+    const text = getText(renderer.root);
+
+    expect(text).toContain('Prod (cpamp_sk_…2f85)');
+    expect(
+      renderer.root
+        .findAllByType('button')
+        .some((node) => node.props['aria-label'] === 'common.copy')
+    ).toBe(false);
   });
 
   it('keeps fallback API key rows visible without filter or drilldown actions', () => {
@@ -1407,7 +1430,7 @@ describe('UsageAnalyticsPage', () => {
     expect(text).toContain('usage_analytics.heatmap_compare_even');
     expect(text).toContain('usage_analytics.heatmap_contributors_title');
     expect(text).toContain('gpt-4o');
-    expect(text).toContain('sk-****7890');
+    expect(text).toContain('sha256:abcdef12');
     expect(text).toContain('openai');
     expect(text).not.toContain('abcdef1234567890');
 
