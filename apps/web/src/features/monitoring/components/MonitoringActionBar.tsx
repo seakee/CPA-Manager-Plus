@@ -1,6 +1,7 @@
 import type { ChangeEvent, ReactNode, RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { TFunction } from 'i18next';
+import { Button } from '@/components/ui/Button';
 import {
   IconDownload,
   IconExternalLink,
@@ -21,7 +22,7 @@ type MonitoringActionBarProps = {
   onUsageExport: () => void | Promise<void>;
   onUsageImportClick: () => void;
   onUsageImportChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  statusSummary: ReactNode;
+  statusSummary?: ReactNode;
 };
 
 const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
@@ -51,73 +52,68 @@ export function MonitoringActionBar({
   const accountActionsLabel = shortLabel(t, 'nav.account_actions_short', 'nav.account_actions');
 
   return (
-    <section className={styles.actionBar} aria-label={t('common.action')}>
-      <div className={styles.actionGroup}>
-        <button
-          type="button"
-          className={`${styles.actionButton} ${styles.actionButtonPrimary}`}
-          onClick={() => void onUsageExport()}
-          disabled={!usageTransferAvailable || usageExporting || usageImporting}
-          title={
-            usageTransferAvailable
-              ? t('usage_stats.export')
-              : t('usage_stats.import_export_requires_usage_service')
-          }
-        >
-          <IconDownload size={16} />
-          <span>{usageExporting ? t('common.loading') : t('usage_stats.export')}</span>
-        </button>
-        <button
-          type="button"
-          className={`${styles.actionButton} ${styles.actionButtonPrimary}`}
-          onClick={onUsageImportClick}
-          disabled={!usageTransferAvailable || usageExporting || usageImporting}
-          title={
-            usageTransferAvailable
-              ? t('usage_stats.import')
-              : t('usage_stats.import_export_requires_usage_service')
-          }
-        >
-          <IconFileText size={16} />
-          <span>{usageImporting ? t('common.loading') : t('usage_stats.import')}</span>
-        </button>
-        {modelPricesAvailable ? (
-          <Link
-            to="/model-prices"
-            className={styles.actionButton}
-            title={t('usage_stats.model_price_settings')}
-          >
-            <IconSettings size={16} />
-            <span>{modelPriceSettingsLabel}</span>
-          </Link>
-        ) : null}
-        <Link
-          to="/monitoring/account-actions"
-          className={styles.actionButton}
-          title={t('nav.account_actions')}
-        >
-          <IconInbox size={16} />
-          <span>{accountActionsLabel}</span>
+    <div className={styles.actionGroup}>
+      {statusSummary}
+      {loggingToFile ? (
+        <Link to="/logs" className={`btn btn-secondary btn-sm ${styles.quickNavLink}`}>
+          <IconFileText size={15} />
+          <span>{t('monitoring.open_logs')}</span>
+          <IconExternalLink size={13} />
         </Link>
-        <input
-          ref={usageImportInputRef}
-          type="file"
-          accept=".json,.jsonl,.ndjson,.txt,application/json,application/x-ndjson,text/plain"
-          style={{ display: 'none' }}
-          onChange={onUsageImportChange}
-        />
-      </div>
-
-      <div className={styles.actionBarMeta}>
-        {statusSummary}
-        {loggingToFile ? (
-          <Link to="/logs" className={`${styles.actionButton} ${styles.quickNavLink}`}>
-            <IconFileText size={16} />
-            <span>{t('monitoring.open_logs')}</span>
-            <IconExternalLink size={14} />
-          </Link>
-        ) : null}
-      </div>
-    </section>
+      ) : null}
+      {modelPricesAvailable ? (
+        <Link
+          to="/model-prices"
+          className="btn btn-secondary btn-sm"
+          title={t('usage_stats.model_price_settings')}
+        >
+          <IconSettings size={15} />
+          <span>{modelPriceSettingsLabel}</span>
+        </Link>
+      ) : null}
+      <Link
+        to="/monitoring/account-actions"
+        className="btn btn-secondary btn-sm"
+        title={t('nav.account_actions')}
+      >
+        <IconInbox size={15} />
+        <span>{accountActionsLabel}</span>
+      </Link>
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={onUsageImportClick}
+        disabled={!usageTransferAvailable || usageExporting || usageImporting}
+        title={
+          usageTransferAvailable
+            ? t('usage_stats.import')
+            : t('usage_stats.import_export_requires_usage_service')
+        }
+      >
+        <IconFileText size={15} />
+        <span>{usageImporting ? t('common.loading') : t('usage_stats.import')}</span>
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => void onUsageExport()}
+        disabled={!usageTransferAvailable || usageExporting || usageImporting}
+        title={
+          usageTransferAvailable
+            ? t('usage_stats.export')
+            : t('usage_stats.import_export_requires_usage_service')
+        }
+      >
+        <IconDownload size={15} />
+        <span>{usageExporting ? t('common.loading') : t('usage_stats.export')}</span>
+      </Button>
+      <input
+        ref={usageImportInputRef}
+        type="file"
+        accept=".json,.jsonl,.ndjson,.txt,application/json,application/x-ndjson,text/plain"
+        style={{ display: 'none' }}
+        onChange={onUsageImportChange}
+      />
+    </div>
   );
 }

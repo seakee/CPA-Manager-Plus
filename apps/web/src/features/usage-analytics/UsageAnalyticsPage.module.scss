@@ -1,6 +1,6 @@
 .page {
   display: grid;
-  gap: 14px;
+  gap: var(--app-gap);
   min-width: 0;
   color: var(--text-primary);
 }
@@ -14,7 +14,6 @@
   font-weight: 700;
 }
 
-.controlsPanel,
 .chartPanel,
 .panel,
 .tablePanel,
@@ -22,28 +21,11 @@
 .detailPanel,
 .overviewCard,
 .anomalyPanel,
-.alertPanel,
-.emptyState {
+.alertPanel {
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
-}
-
-.controlsPanel {
-  display: grid;
-  overflow: hidden;
-}
-
-.controlsTabsRow {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  min-width: 0;
-  padding: 14px 16px;
-  overflow-x: auto;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  scrollbar-width: thin;
+  box-shadow: var(--app-specular-highlight);
 }
 
 .tabs {
@@ -51,12 +33,10 @@
   width: fit-content;
 }
 
-.controlsFilterSection {
+.controlsToolbar {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   min-width: 0;
-  padding: 14px 16px 16px;
-  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .controlBar {
@@ -66,65 +46,9 @@
   gap: 10px;
 }
 
-.segmentedControl {
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
+.controlSegmented {
   min-width: 0;
   max-width: 100%;
-  overflow-x: auto;
-  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 82%, var(--bg-primary));
-  box-shadow: none;
-}
-
-.segmentButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  height: calc(var(--control-height-sm) - 2px);
-  min-height: calc(var(--control-height-sm) - 2px);
-  padding: 0 14px;
-  border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  border-radius: 0;
-  background: transparent;
-  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.segmentButton:first-child {
-  border-left: 0;
-}
-
-.segmentButton:hover {
-  color: var(--text-primary);
-  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
-  transform: none;
-}
-
-.segmentButtonActive,
-.segmentButtonActive:hover {
-  border-left-color: transparent;
-  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-text);
-  font-weight: 700;
-  box-shadow: none;
-  transform: none;
-}
-
-.segmentButtonActive + .segmentButton {
-  border-left-color: transparent;
 }
 
 .refreshControls {
@@ -145,32 +69,20 @@
 }
 
 .filterMeta {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height-sm);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.filterActionButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--control-height-sm);
-  padding: 0 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--surface-subtle);
-  color: var(--primary-text);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.filterActionButton:hover {
-  border-color: color-mix(in srgb, var(--primary-color) 35%, var(--border-primary));
-  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
-}
 
 .filterBar {
   display: grid;
@@ -178,30 +90,31 @@
   min-width: 0;
 }
 
-.scopeSearchBar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.scopeSearchWrap {
+  width: 100%;
+  max-width: 420px;
   min-width: 0;
-  min-height: var(--control-height-sm);
-  padding: 0 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
-  color: var(--text-secondary);
 
-  input {
-    flex: 1 1 260px;
-    min-width: 0;
-    border: 0;
-    background: transparent;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: 13px;
-    outline: none;
+  :global(.form-group) {
+    margin-bottom: 0;
   }
 }
 
+.scopeSearchInput:global(.input) {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding-top: 0;
+  padding-right: 36px;
+  padding-bottom: 0;
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  font-size: 13px;
+}
+
+.searchIcon {
+  color: var(--text-secondary);
+  pointer-events: none;
+}
 .scopeSearchClear {
   display: inline-flex;
   align-items: center;
@@ -241,8 +154,7 @@
   min-width: 0;
 }
 
-.customRangeRow,
-.apiSearchBar {
+.customRangeRow {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -251,8 +163,7 @@
 }
 
 .customRangeRow input,
-.advancedGrid input,
-.apiSearchBar input {
+.advancedGrid input {
   min-height: var(--control-height-sm);
   min-width: 0;
   padding: 0 12px;
@@ -311,7 +222,7 @@
   border: 1px solid color-mix(in srgb, var(--summary-accent) 18%, var(--border-color));
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--summary-accent) 5%, var(--bg-primary));
-  box-shadow: var(--shadow);
+  box-shadow: var(--app-specular-highlight);
   transition:
     transform 0.18s ease,
     border-color 0.18s ease,
@@ -364,7 +275,7 @@
 .usageSummaryCard:hover {
   z-index: 5;
   border-color: var(--border-primary);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--app-specular-highlight);
   transform: translateY(-1px);
 }
 
@@ -1044,42 +955,6 @@
 
 .trendMetricTabs {
   max-width: 100%;
-
-  .segmentButton {
-    height: calc(var(--control-height-sm) - 2px);
-    min-height: calc(var(--control-height-sm) - 2px);
-    padding: 0 14px;
-    border: 0;
-    border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-    background: transparent;
-    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
-    box-shadow: none;
-    transform: none;
-
-    &:first-child {
-      border-left: 0;
-    }
-
-    &:hover {
-      background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
-      color: var(--text-primary);
-      transform: none;
-    }
-  }
-
-  .segmentButtonActive,
-  .segmentButtonActive:hover {
-    border-left-color: transparent;
-    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-text);
-    font-weight: 700;
-    box-shadow: none;
-    transform: none;
-  }
-
-  .segmentButtonActive + .segmentButton {
-    border-left-color: transparent;
-  }
 }
 
 .trendEntityHeader {
@@ -1108,17 +983,14 @@
   }
 }
 
-.apiSearchBar {
+.apiSearchWrap {
   flex: 0 1 320px;
-  padding: 0 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  width: 100%;
+  max-width: 320px;
+  min-width: 0;
 
-  input {
-    flex: 1 1 120px;
-    border: 0;
-    background: transparent;
+  :global(.form-group) {
+    margin-bottom: 0;
   }
 }
 
@@ -1811,27 +1683,6 @@
 .heatmapSegmented,
 .heatmapDateTabs {
   max-width: 100%;
-  border-radius: var(--app-radius-md);
-  background: var(--surface-subtle);
-
-  .segmentButton {
-    height: calc(var(--control-height-sm) - 2px);
-    min-height: calc(var(--control-height-sm) - 2px);
-    padding: 0 12px;
-    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
-    font-size: 12px;
-  }
-
-  .segmentButton:hover {
-    color: var(--text-primary);
-  }
-
-  .segmentButtonActive,
-  .segmentButtonActive:hover {
-    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-text);
-    font-weight: 700;
-  }
 }
 
 .heatmapWorkspace {
@@ -1964,7 +1815,7 @@
   border: 1px solid color-mix(in srgb, var(--heatmap-detail-accent) 18%, var(--border-color));
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--heatmap-detail-accent) 5%, var(--bg-primary));
-  box-shadow: var(--shadow);
+  box-shadow: var(--app-specular-highlight);
   transition:
     transform 0.18s ease,
     border-color 0.18s ease,
@@ -1975,7 +1826,7 @@
 .heatmapDetailMetricCard:hover {
   border-color: color-mix(in srgb, var(--heatmap-detail-accent) 38%, var(--border-color));
   background: color-mix(in srgb, var(--heatmap-detail-accent) 7%, var(--bg-primary));
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--app-specular-highlight);
   transform: translateY(-1px);
 }
 
@@ -2515,8 +2366,7 @@
   }
 }
 
-.alertPanel,
-.emptyState {
+.alertPanel {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2537,18 +2387,6 @@
   }
 }
 
-.emptyState {
-  justify-content: center;
-  min-height: 180px;
-  color: var(--text-secondary);
-  text-align: center;
-  flex-direction: column;
-
-  strong {
-    color: var(--text-primary);
-    font-size: 16px;
-  }
-}
 
 @media (max-width: 1400px) {
   .usageSummaryGrid {
@@ -2557,10 +2395,6 @@
 
   .entityIdentityGrid,
   .credentialIdentityGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .filterGrid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
@@ -2579,14 +2413,17 @@
     align-items: start;
   }
 
-  .controlBar .segmentedControl:first-child {
+  .controlBar .controlSegmented:first-child {
     grid-column: 1 / -1;
   }
 
-  .controlBar .segmentedControl:nth-child(2) {
+  .controlBar .controlSegmented:nth-child(2) {
     grid-column: 1;
   }
 
+  .filterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .refreshControls {
     grid-column: 2;
     justify-content: flex-end;
@@ -2636,7 +2473,7 @@
     grid-template-columns: 1fr;
   }
 
-  .controlBar .segmentedControl,
+  .controlBar .controlSegmented,
   .refreshControls {
     grid-column: 1;
     width: 100%;
@@ -2646,8 +2483,9 @@
     justify-content: space-between;
   }
 
-  .filterMeta {
-    width: 100%;
+  .scopeSearchWrap,
+  .apiSearchWrap {
+    max-width: none;
   }
 
   .filterGrid,

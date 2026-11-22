@@ -581,14 +581,15 @@ describe('RealtimeEventsPanel', () => {
     expect(markup).not.toContain('Loaded 8000 of 8000');
   });
 
-  it('shows the all-loaded summary without a load-more action once fully loaded', () => {
+  it('renders a single pagination footer without a duplicate all-loaded banner once fully loaded', () => {
     const markup = renderPanel(baseRow(), {
       eventsHasMore: false,
       eventsLoadedCount: 8000,
       eventsTotalCount: 8000,
     });
 
-    expect(markup).toContain('All 8000 events loaded');
+    expect(markup).toContain('monitoring.pagination_info');
+    expect(markup).not.toContain('All 8000 events loaded');
     expect(markup).not.toContain('Load more');
   });
 

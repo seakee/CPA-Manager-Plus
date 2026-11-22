@@ -1,6 +1,11 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
+import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
+import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import type { UsageServiceApiError } from '@/services/api/usageService';
 import { calculateCost, type ModelPrice } from '@/utils/usage';
 import { ModelPricesPage } from './ModelPricesPage';
@@ -15,6 +20,7 @@ const mocks = vi.hoisted(() => {
     notify: vi.fn(),
     availability: { modelPricesAvailable: false } as {
       modelPricesAvailable: boolean;
+      requestMonitoringAvailable?: boolean;
       managerServiceBase?: string;
     },
     usageSummary: vi.fn(),
@@ -1057,5 +1063,105 @@ describe('ModelPricesPage price action scope isolation', () => {
       `usage_stats.model_price_sync_failed: usage_service_errors.${code}`,
       'error'
     );
+  });
+
+  it('omits the legacy back_to_monitoring link and renders a unified PageControlBar', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      requestMonitoringAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+
+    const renderedText = JSON.stringify(renderer.toJSON());
+    expect(renderer.root.findAllByType(PageControlBar)).toHaveLength(1);
+    expect(renderedText).not.toContain('model_prices.back_to_monitoring');
+    expect(
+      renderer.root.findAllByType('a').some((link) => link.props.to === '/monitoring')
+    ).toBe(false);
+    expect(renderedText).toContain('model_prices.sync_model_count');
+    expect(renderedText).toContain('common.refresh');
+  });
+
+  it('wires useHeaderRefresh and toolbar refresh to reload model prices and usage summary', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+    const baselineSummaryCalls = mocks.usageSummary.mock.calls.length;
+
+    await act(async () => {
+      await triggerHeaderRefresh();
+    });
+
+    expect(mocks.reload).toHaveBeenCalledTimes(1);
+    expect(mocks.usageSummary).toHaveBeenCalledTimes(baselineSummaryCalls + 1);
+
+    await clickBySpanLabel('common.refresh');
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocks.reload).toHaveBeenCalledTimes(2);
+    expect(mocks.usageSummary).toHaveBeenCalledTimes(baselineSummaryCalls + 2);
+  });
+
+  it('renders semantic status dot, joined filter tabs, canvas empty state, and permanent inset pagination', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    await mountAndSettle();
+
+    const statusDots = renderer.root
+      .findAllByType('span')
+      .filter((node) => String(node.props.className ?? '').includes('statusDot'));
+    expect(statusDots).toHaveLength(1);
+
+    const filterTabs = renderer.root.findByType(SegmentedTabs);
+    expect(filterTabs.props.variant).toBe('joined');
+    expect(filterTabs.props.responsiveFullWidth).toBe(false);
+
+    const emptyStates = renderer.root.findAllByType(EmptyState);
+    expect(emptyStates).toHaveLength(1);
+    expect(emptyStates[0].props.variant).toBe('canvas');
+    expect(renderer.root.findAllByType(PaginationFooter)).toHaveLength(0);
+
+    const sixtyModels = Object.fromEntries(
+      Array.from({ length: 60 }, (_, index) => [
+        `model-${String(index + 1).padStart(2, '0')}`,
+        tieredPrice(),
+      ])
+    );
+    mocks.prices = sixtyModels;
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+
+    const footer = renderer.root.findByType(PaginationFooter);
+    expect(footer.props.variant).toBe('inset');
+    expect(footer.props.pageSize).toBe(50);
+    expect(footer.props.pageSizeOptions).toEqual([20, 50, 100]);
+    expect(footer.props.currentPage).toBe(1);
+    expect(footer.props.totalPages).toBe(2);
+    expect(renderer.root.findAllByType('tbody')[0].findAllByType('tr')).toHaveLength(50);
+
+    await act(async () => {
+      footer.props.onPageChange?.(2);
+    });
+    expect(renderer.root.findByType(PaginationFooter).props.currentPage).toBe(2);
+    expect(renderer.root.findAllByType('tbody')[0].findAllByType('tr')).toHaveLength(10);
+
+    const searchInput = renderer.root
+      .findAllByType(Input)
+      .find((input) => input.props.placeholder === 'model_prices.search_placeholder');
+    await act(async () => {
+      searchInput?.props.onChange({ target: { value: 'model-0' } });
+    });
+    expect(renderer.root.findByType(PaginationFooter).props.currentPage).toBe(1);
   });
 });

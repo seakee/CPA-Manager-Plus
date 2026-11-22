@@ -74,7 +74,7 @@ describe('MonitoringTabsBar', () => {
     expect(badgeMatches).toHaveLength(1);
   });
 
-  it('applies segmented card classes when variant=cards', () => {
+  it('renders joined SegmentedTabs variant when variant=cards', () => {
     const markup = renderToStaticMarkup(
       <MonitoringTabsBar
         tabs={baseTabs}
@@ -85,9 +85,8 @@ describe('MonitoringTabsBar', () => {
       />
     );
 
-    expect(markup).toContain(styles.tabsBarCards);
-    expect(markup).toContain(styles.tabButtonCard);
-    expect(markup).toContain(styles.tabButtonActiveCard);
+    expect(markup).toContain('data-variant="joined"');
+    expect(markup).toContain('aria-selected="true"');
     expect(markup).toContain(styles.tabIcon);
   });
 

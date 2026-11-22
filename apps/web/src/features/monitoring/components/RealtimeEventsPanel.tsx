@@ -1092,19 +1092,18 @@ export function RealtimeEventsPanelActions({
 
   return (
     <div className={`${styles.inlineMetrics} ${styles.realtimeHeaderActions}`}>
-      <span title={t('monitoring.log_rows')}>{`${logRowsLabel}: ${rowCount}`}</span>
-      <span title={t('monitoring.recent_failures')}>
+      <span className={styles.inlineMetricStatic} title={t('monitoring.log_rows')}>
+        {`${logRowsLabel}: ${rowCount}`}
+      </span>
+      <span className={styles.inlineMetricStatic} title={t('monitoring.recent_failures')}>
         {`${recentFailuresLabel}: ${scopedFailureCount}`}
       </span>
-      <button
-        type="button"
-        className={[
-          styles.accountOverviewToolButton,
-          accountDisplayMode === 'full' ? styles.accountDisplayModeButtonActive : '',
-        ]
-          .filter(Boolean)
-          .join(' ')}
+      <Button
+        variant="secondary"
+        size="sm"
+        className={accountDisplayMode === 'full' ? styles.accountDisplayModeButtonActive : ''}
         onClick={() => onAccountDisplayModeChange(nextAccountDisplayMode)}
+        aria-pressed={accountDisplayMode === 'full'}
         title={accountDisplayHint}
         aria-label={accountDisplayHint}
       >
@@ -1116,18 +1115,18 @@ export function RealtimeEventsPanelActions({
               : 'monitoring.account_overview_account_display_full'
           )}
         </span>
-      </button>
-      <button
-        type="button"
-        className={[styles.filterToggleChip, failedOnlyActive ? styles.filterToggleChipActive : '']
-          .filter(Boolean)
-          .join(' ')}
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className={`${styles.filterToggleButton} ${failedOnlyActive ? styles.filterToggleChipActive : ''}`}
         onClick={onToggleFailedOnly}
+        aria-pressed={failedOnlyActive}
         title={t('monitoring.filter_status_failed')}
       >
         <IconFilter size={14} aria-hidden="true" />
-        {failedOnlyLabel}
-      </button>
+        <span>{failedOnlyLabel}</span>
+      </Button>
     </div>
   );
 }
@@ -1432,24 +1431,21 @@ export function RealtimeEventsPanel({
         pageSizeOptions={REALTIME_PAGE_SIZE_OPTIONS}
         onPageChange={onPageChange}
         onPageSizeChange={onPageSizeChange}
-        t={t}
-      />
-      {rows.length > 0 ? (
-        <div className={styles.loadMoreEventsBar}>
-          <span className={styles.loadMoreEventsSummary}>
-            {eventsRetentionLimited
-              ? t('monitoring.events_retention_limited', {
+        infoSuffix={
+          eventsRetentionLimited
+            ? t('monitoring.events_retention_limited', {
+                loaded: eventsLoadedCount,
+                total: eventsTotalCount,
+              })
+            : eventsHasMore
+              ? t('monitoring.events_loaded_summary', {
                   loaded: eventsLoadedCount,
                   total: eventsTotalCount,
                 })
-              : eventsHasMore
-                ? t('monitoring.events_loaded_summary', {
-                    loaded: eventsLoadedCount,
-                    total: eventsTotalCount,
-                  })
-                : t('monitoring.events_all_loaded', { total: eventsTotalCount })}
-          </span>
-          {eventsHasMore ? (
+              : undefined
+        }
+        extraActions={
+          eventsHasMore ? (
             <Button
               variant="secondary"
               size="sm"
@@ -1458,9 +1454,10 @@ export function RealtimeEventsPanel({
             >
               {eventsLoadingMore ? t('common.loading') : t('monitoring.load_more_events')}
             </Button>
-          ) : null}
-        </div>
-      ) : null}
+          ) : undefined
+        }
+        t={t}
+      />
     </>
   );
 

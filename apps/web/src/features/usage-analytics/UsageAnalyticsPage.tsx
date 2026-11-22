@@ -12,7 +12,11 @@ import type {
 import type { BarSeriesOption, HeatmapSeriesOption, LineSeriesOption } from 'echarts/charts';
 import type { ComposeOption, ECElementEvent } from 'echarts/core';
 import { EChartsView } from '@/components/charts/EChartsView';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import {
@@ -30,6 +34,7 @@ import {
   IconTrendingUp,
   IconX,
 } from '@/components/ui/icons';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useNotificationStore, useThemeStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { getDataPalette, hexToRgba } from '@/utils/dataPalette';
@@ -62,6 +67,7 @@ import {
   USAGE_TIME_RANGES,
   type UsageAnalyticsTab,
   type UsageEntityTrendSeries,
+  type UsageAnalyticsTimeRange,
   type UsageAnalyticsGranularity,
   type UsageAnalyticsCacheStatus,
   type UsageAnalyticsLatencyFilter,
@@ -1327,34 +1333,19 @@ function HeatmapDateTabs({
   const { t } = useTranslation();
   return (
     <div className={styles.heatmapDateTabsRow}>
-      <div
-        className={`${styles.segmentedControl} ${styles.heatmapDateTabs}`}
-        aria-label={t('usage_analytics.heatmap_date_tabs_label')}
-      >
-        <button
-          type="button"
-          aria-pressed={selectedKey === 'all'}
-          className={`${styles.segmentButton} ${
-            selectedKey === 'all' ? styles.segmentButtonActive : ''
-          }`}
-          onClick={() => onSelect('all')}
-        >
-          {t('usage_analytics.heatmap_date_all')}
-        </button>
-        {dateOptions.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            aria-pressed={selectedKey === option.key}
-            className={`${styles.segmentButton} ${
-              selectedKey === option.key ? styles.segmentButtonActive : ''
-            }`}
-            onClick={() => onSelect(option.key)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+      <SegmentedTabs<string>
+        variant="joined"
+        roleMode="group"
+        responsiveFullWidth={false}
+        ariaLabel={t('usage_analytics.heatmap_date_tabs_label')}
+        activeTab={selectedKey}
+        onChange={onSelect}
+        className={styles.heatmapDateTabs}
+        items={[
+          { id: 'all', label: t('usage_analytics.heatmap_date_all') },
+          ...dateOptions.map((option) => ({ id: option.key, label: option.label })),
+        ]}
+      />
     </div>
   );
 }
@@ -2294,20 +2285,16 @@ function ProviderOverviewPanel({
   );
 }
 
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <div className={styles.emptyState}>
-      <IconInbox size={28} />
-      <strong>{title}</strong>
-      <span>{body}</span>
-    </div>
-  );
-}
 
 function UsageAnalyticsPageInner() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const usage = useUsageAnalytics(i18n.language);
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer
+    ? (pageTransitionLayer.isCurrentLayer ?? pageTransitionLayer.status === 'current')
+    : true;
+  useHeaderRefresh(usage.refresh, isCurrentLayer);
   const showNotification = useNotificationStore((state) => state.showNotification);
   const chartTheme = useUsageChartTheme();
   const themedUsageMetrics = useMemo(() => getThemedUsageMetrics(chartTheme), [chartTheme]);
@@ -2461,6 +2448,46 @@ function UsageAnalyticsPageInner() {
       USAGE_ANALYTICS_TABS.map((tab) => ({
         id: tab,
         label: t(`usage_analytics.tab_${tab}`),
+      })),
+    [t]
+  );
+  const timeRangeItems = useMemo<ReadonlyArray<SegmentedTabItem<UsageAnalyticsTimeRange>>>(
+    () =>
+      USAGE_TIME_RANGES.map((range) => ({
+        id: range,
+        label: t(`usage_analytics.range_${range}`),
+      })),
+    [t]
+  );
+  const granularityItems = useMemo<ReadonlyArray<SegmentedTabItem<UsageAnalyticsGranularity>>>(
+    () =>
+      (['auto', 'hour', 'day'] as UsageAnalyticsGranularity[]).map((granularity) => ({
+        id: granularity,
+        label: t(`usage_analytics.granularity_${granularity}`),
+      })),
+    [t]
+  );
+  const trendMetricItems = useMemo<ReadonlyArray<SegmentedTabItem<UsageTrendMetricKey>>>(
+    () =>
+      trendMetricOptions.map((option) => ({
+        id: option.value,
+        label: t(option.labelKey),
+      })),
+    [t]
+  );
+  const heatmapMetricItems = useMemo<ReadonlyArray<SegmentedTabItem<UsageHeatmapMetricKey>>>(
+    () =>
+      heatmapMetricOptions.map((option) => ({
+        id: option.value,
+        label: t(option.labelKey),
+      })),
+    [t]
+  );
+  const heatmapScaleItems = useMemo<ReadonlyArray<SegmentedTabItem<UsageHeatmapScaleMode>>>(
+    () =>
+      heatmapScaleOptions.map((option) => ({
+        id: option.value,
+        label: t(option.labelKey),
       })),
     [t]
   );
@@ -2709,8 +2736,8 @@ function UsageAnalyticsPageInner() {
 
   return (
     <div className={styles.page}>
-      <section className={styles.controlsPanel}>
-        <div className={styles.controlsTabsRow}>
+      <PageControlBar
+        leading={
           <SegmentedTabs
             items={usageTabItems}
             activeTab={usage.activeTab}
@@ -2719,100 +2746,110 @@ function UsageAnalyticsPageInner() {
             idBase="usage-analytics-tab"
             className={styles.tabs}
           />
-        </div>
-
-        <div className={styles.controlsFilterSection}>
-          <div className={styles.controlBar}>
-            <div
-              className={styles.segmentedControl}
-              aria-label={t('usage_analytics.filter_time_range')}
+        }
+        actions={
+          <>
+            <span className={styles.filterMeta}>
+              {t('usage_analytics.resolved_granularity', {
+                granularity: usage.resolvedGranularity,
+              })}
+            </span>
+            <span className={styles.filterMeta}>
+              {usage.lastRefreshedAt
+                ? t('usage_analytics.updated_at', {
+                    time: usage.lastRefreshedAt.toLocaleTimeString(i18n.language),
+                  })
+                : t('usage_analytics.awaiting_refresh')}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={usage.refresh}
+              disabled={usage.loading}
             >
-              {USAGE_TIME_RANGES.map((range) => (
-                <button
-                  key={range}
-                  type="button"
-                  className={`${styles.segmentButton} ${
-                    usage.filters.timeRange === range ? styles.segmentButtonActive : ''
-                  }`}
-                  onClick={() => updateFilters({ timeRange: range })}
-                >
-                  {t(`usage_analytics.range_${range}`)}
-                </button>
-              ))}
-            </div>
-
-            <div
-              className={styles.segmentedControl}
-              aria-label={t('usage_analytics.filter_granularity')}
-            >
-              {(['auto', 'hour', 'day'] as UsageAnalyticsGranularity[]).map((granularity) => (
-                <button
-                  key={granularity}
-                  type="button"
-                  className={`${styles.segmentButton} ${
-                    usage.filters.granularity === granularity ? styles.segmentButtonActive : ''
-                  }`}
-                  onClick={() => updateFilters({ granularity })}
-                >
-                  {t(`usage_analytics.granularity_${granularity}`)}
-                </button>
-              ))}
-            </div>
-
-            <div className={styles.refreshControls}>
-              <span className={styles.filterMeta}>
-                {t('usage_analytics.resolved_granularity', {
-                  granularity: usage.resolvedGranularity,
-                })}
-              </span>
-              <button
-                type="button"
-                className={styles.filterActionButton}
-                onClick={usage.resetFilters}
-              >
-                {t('usage_analytics.clear_all')}
-              </button>
-              <button
-                type="button"
-                className={styles.filterActionButton}
-                onClick={() => setAdvancedOpen((open) => !open)}
-              >
-                {advancedOpen
-                  ? t('usage_analytics.hide_advanced_filters')
-                  : t('usage_analytics.show_advanced_filters')}
-              </button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={usage.refresh}
-                disabled={usage.loading}
-              >
-                <IconRefreshCw size={15} />
-                {t('common.refresh')}
-              </Button>
-            </div>
-          </div>
-
-          <div className={styles.filterBar}>
-            <div className={styles.scopeSearchBar}>
-              <IconSearch size={16} />
-              <input
-                value={usage.filters.searchQuery}
-                onChange={(event) => updateFilters({ searchQuery: event.target.value })}
-                aria-label={t('usage_analytics.filter_search')}
-                placeholder={t('usage_analytics.filter_search_placeholder')}
+              <IconRefreshCw size={15} />
+              {t('common.refresh')}
+            </Button>
+          </>
+        }
+        toolbar={
+          <div className={styles.controlsToolbar}>
+            <div className={styles.controlBar}>
+              <SegmentedTabs<UsageAnalyticsTimeRange>
+                variant="joined"
+                roleMode="group"
+                allowReselect
+                responsiveFullWidth={false}
+                ariaLabel={t('usage_analytics.filter_time_range')}
+                activeTab={usage.filters.timeRange}
+                onChange={(timeRange) => {
+                  updateFilters({ timeRange });
+                  if (timeRange === 'custom') {
+                    customStartInputRef.current?.focus();
+                  }
+                }}
+                className={styles.controlSegmented}
+                items={timeRangeItems}
               />
-              {usage.filters.searchQuery.trim() ? (
-                <button
+
+              <SegmentedTabs<UsageAnalyticsGranularity>
+                variant="joined"
+                roleMode="group"
+                allowReselect
+                responsiveFullWidth={false}
+                ariaLabel={t('usage_analytics.filter_granularity')}
+                activeTab={usage.filters.granularity}
+                onChange={(granularity) => updateFilters({ granularity })}
+                className={styles.controlSegmented}
+                items={granularityItems}
+              />
+
+              <div className={styles.refreshControls}>
+                <Button
                   type="button"
-                  className={styles.scopeSearchClear}
-                  onClick={() => updateFilters({ searchQuery: '' })}
-                  aria-label={t('usage_analytics.filter_search_clear')}
+                  variant="secondary"
+                  size="sm"
+                  onClick={usage.resetFilters}
                 >
-                  <IconX size={14} />
-                </button>
-              ) : null}
+                  {t('usage_analytics.clear_all')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setAdvancedOpen((open) => !open)}
+                >
+                  {advancedOpen
+                    ? t('usage_analytics.hide_advanced_filters')
+                    : t('usage_analytics.show_advanced_filters')}
+                </Button>
+              </div>
             </div>
+
+            <div className={styles.filterBar}>
+              <div className={styles.scopeSearchWrap}>
+                <Input
+                  value={usage.filters.searchQuery}
+                  onChange={(event) => updateFilters({ searchQuery: event.target.value })}
+                  aria-label={t('usage_analytics.filter_search')}
+                  placeholder={t('usage_analytics.filter_search_placeholder')}
+                  className={styles.scopeSearchInput}
+                  rightElement={
+                    usage.filters.searchQuery.trim() ? (
+                      <button
+                        type="button"
+                        className={styles.scopeSearchClear}
+                        onClick={() => updateFilters({ searchQuery: '' })}
+                        aria-label={t('usage_analytics.filter_search_clear')}
+                      >
+                        <IconX size={14} />
+                      </button>
+                    ) : (
+                      <IconSearch size={16} className={styles.searchIcon} />
+                    )
+                  }
+                />
+              </div>
             <div className={styles.filterGrid}>
               <Select
                 value={usage.filters.model}
@@ -2903,8 +2940,9 @@ function UsageAnalyticsPageInner() {
               </div>
             </div>
           ) : null}
-        </div>
-      </section>
+          </div>
+        }
+      />
 
       {usage.error ? (
         <section className={styles.alertPanel}>
@@ -2918,8 +2956,9 @@ function UsageAnalyticsPageInner() {
 
       {noData ? (
         <EmptyState
+          variant="inline"
           title={t('usage_analytics.empty_title')}
-          body={t('usage_analytics.empty_body')}
+          description={t('usage_analytics.empty_body')}
         />
       ) : null}
 
@@ -3082,24 +3121,16 @@ function UsageAnalyticsPageInner() {
           <section className={styles.panel}>
             <div className={`${styles.panelHeader} ${styles.trendEntityHeader}`}>
               <h2>{t('usage_analytics.trend_entity_compare_title')}</h2>
-              <div
-                className={`${styles.segmentedControl} ${styles.trendMetricTabs}`}
-                aria-label={t('usage_analytics.filter_metric')}
-              >
-                {trendMetricOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={`${styles.segmentButton} ${
-                      usage.trendMetric === option.value ? styles.segmentButtonActive : ''
-                    }`}
-                    onClick={() => usage.setTrendMetric(option.value)}
-                    aria-pressed={usage.trendMetric === option.value}
-                  >
-                    {t(option.labelKey)}
-                  </button>
-                ))}
-              </div>
+              <SegmentedTabs<UsageTrendMetricKey>
+                variant="joined"
+                roleMode="group"
+                responsiveFullWidth={false}
+                ariaLabel={t('usage_analytics.filter_metric')}
+                activeTab={usage.trendMetric}
+                onChange={usage.setTrendMetric}
+                className={styles.trendMetricTabs}
+                items={trendMetricItems}
+              />
             </div>
             <div className={styles.trendEntityGrid}>
               <div className={styles.trendEntityChart}>
@@ -3127,15 +3158,16 @@ function UsageAnalyticsPageInner() {
             <div className={styles.panelHeader}>
               <h2>{t('usage_analytics.model_rank_title')}</h2>
               {usage.modelRows.length > rankRowLimit ? (
-                <button
+                <Button
                   type="button"
-                  className={styles.filterActionButton}
+                  variant="secondary"
+                  size="sm"
                   onClick={() => setShowAllModels((open) => !open)}
                 >
                   {showAllModels
                     ? t('usage_analytics.rank_collapse')
                     : t('usage_analytics.rank_show_all', { count: usage.modelRows.length })}
-                </button>
+                </Button>
               ) : null}
             </div>
             <RankTable
@@ -3152,24 +3184,16 @@ function UsageAnalyticsPageInner() {
                   <h2>{t('usage_analytics.model_compare_title')}</h2>
                   <p>{t('usage_analytics.entity_trend_hint')}</p>
                 </div>
-                <div
-                  className={`${styles.segmentedControl} ${styles.trendMetricTabs}`}
-                  aria-label={t('usage_analytics.filter_metric')}
-                >
-                  {trendMetricOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className={`${styles.segmentButton} ${
-                        usage.trendMetric === option.value ? styles.segmentButtonActive : ''
-                      }`}
-                      onClick={() => usage.setTrendMetric(option.value)}
-                      aria-pressed={usage.trendMetric === option.value}
-                    >
-                      {t(option.labelKey)}
-                    </button>
-                  ))}
-                </div>
+                <SegmentedTabs<UsageTrendMetricKey>
+                  variant="joined"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  ariaLabel={t('usage_analytics.filter_metric')}
+                  activeTab={usage.trendMetric}
+                  onChange={usage.setTrendMetric}
+                  className={styles.trendMetricTabs}
+                  items={trendMetricItems}
+                />
               </div>
               <EntityTrendChart
                 series={usage.modelTrendSeries}
@@ -3222,12 +3246,26 @@ function UsageAnalyticsPageInner() {
                   <h2>{t('usage_analytics.api_key_rank_title')}</h2>
                   <p>{apiKeyRankContext}</p>
                 </div>
-                <div className={styles.apiSearchBar}>
-                  <IconSearch size={16} />
-                  <input
+                <div className={styles.apiSearchWrap}>
+                  <Input
                     value={usage.filters.apiKeyKeyword}
                     onChange={(event) => updateFilters({ apiKeyKeyword: event.target.value })}
                     placeholder={t('usage_analytics.api_key_keyword_placeholder')}
+                    className={styles.scopeSearchInput}
+                    rightElement={
+                      usage.filters.apiKeyKeyword.trim() ? (
+                        <button
+                          type="button"
+                          className={styles.scopeSearchClear}
+                          onClick={() => updateFilters({ apiKeyKeyword: '' })}
+                          aria-label={t('usage_analytics.filter_search_clear')}
+                        >
+                          <IconX size={14} />
+                        </button>
+                      ) : (
+                        <IconSearch size={16} className={styles.searchIcon} />
+                      )
+                    }
                   />
                 </div>
               </div>
@@ -3247,24 +3285,16 @@ function UsageAnalyticsPageInner() {
             <div className={styles.panel}>
               <div className={`${styles.panelHeader} ${styles.trendEntityHeader}`}>
                 <h2>{t('usage_analytics.api_key_compare_title')}</h2>
-                <div
-                  className={`${styles.segmentedControl} ${styles.trendMetricTabs}`}
-                  aria-label={t('usage_analytics.filter_metric')}
-                >
-                  {trendMetricOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className={`${styles.segmentButton} ${
-                        usage.trendMetric === option.value ? styles.segmentButtonActive : ''
-                      }`}
-                      onClick={() => usage.setTrendMetric(option.value)}
-                      aria-pressed={usage.trendMetric === option.value}
-                    >
-                      {t(option.labelKey)}
-                    </button>
-                  ))}
-                </div>
+                <SegmentedTabs<UsageTrendMetricKey>
+                  variant="joined"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  ariaLabel={t('usage_analytics.filter_metric')}
+                  activeTab={usage.trendMetric}
+                  onChange={usage.setTrendMetric}
+                  className={styles.trendMetricTabs}
+                  items={trendMetricItems}
+                />
               </div>
               <EntityTrendChart
                 series={usage.selectedApiKeyTrendSeries}
@@ -3347,24 +3377,16 @@ function UsageAnalyticsPageInner() {
             <div className={styles.panel}>
               <div className={`${styles.panelHeader} ${styles.trendEntityHeader}`}>
                 <h2>{t('usage_analytics.selected_credential_trend_title')}</h2>
-                <div
-                  className={`${styles.segmentedControl} ${styles.trendMetricTabs}`}
-                  aria-label={t('usage_analytics.filter_metric')}
-                >
-                  {trendMetricOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className={`${styles.segmentButton} ${
-                        usage.trendMetric === option.value ? styles.segmentButtonActive : ''
-                      }`}
-                      onClick={() => usage.setTrendMetric(option.value)}
-                      aria-pressed={usage.trendMetric === option.value}
-                    >
-                      {t(option.labelKey)}
-                    </button>
-                  ))}
-                </div>
+                <SegmentedTabs<UsageTrendMetricKey>
+                  variant="joined"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  ariaLabel={t('usage_analytics.filter_metric')}
+                  activeTab={usage.trendMetric}
+                  onChange={usage.setTrendMetric}
+                  className={styles.trendMetricTabs}
+                  items={trendMetricItems}
+                />
               </div>
               <EntityTrendChart
                 series={usage.credentialTrendSeries}
@@ -3452,42 +3474,26 @@ function UsageAnalyticsPageInner() {
                 </p>
               </div>
               <div className={styles.heatmapToolbar}>
-                <div
-                  className={`${styles.segmentedControl} ${styles.heatmapSegmented}`}
-                  aria-label={t('usage_analytics.filter_metric')}
-                >
-                  {heatmapMetricOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      aria-pressed={usage.heatmapMetric === option.value}
-                      className={`${styles.segmentButton} ${
-                        usage.heatmapMetric === option.value ? styles.segmentButtonActive : ''
-                      }`}
-                      onClick={() => usage.setHeatmapMetric(option.value)}
-                    >
-                      {t(option.labelKey)}
-                    </button>
-                  ))}
-                </div>
-                <div
-                  className={`${styles.segmentedControl} ${styles.heatmapSegmented}`}
-                  aria-label={t('usage_analytics.heatmap_scale_label')}
-                >
-                  {heatmapScaleOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      aria-pressed={usage.heatmapScaleMode === option.value}
-                      className={`${styles.segmentButton} ${
-                        usage.heatmapScaleMode === option.value ? styles.segmentButtonActive : ''
-                      }`}
-                      onClick={() => usage.setHeatmapScaleMode(option.value)}
-                    >
-                      {t(option.labelKey)}
-                    </button>
-                  ))}
-                </div>
+                <SegmentedTabs<UsageHeatmapMetricKey>
+                  variant="joined"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  ariaLabel={t('usage_analytics.filter_metric')}
+                  activeTab={usage.heatmapMetric}
+                  onChange={usage.setHeatmapMetric}
+                  className={styles.heatmapSegmented}
+                  items={heatmapMetricItems}
+                />
+                <SegmentedTabs<UsageHeatmapScaleMode>
+                  variant="joined"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  ariaLabel={t('usage_analytics.heatmap_scale_label')}
+                  activeTab={usage.heatmapScaleMode}
+                  onChange={usage.setHeatmapScaleMode}
+                  className={styles.heatmapSegmented}
+                  items={heatmapScaleItems}
+                />
               </div>
             </div>
             <UsageHeatmapChart
