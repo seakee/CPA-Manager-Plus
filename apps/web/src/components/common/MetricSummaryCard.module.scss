@@ -1,0 +1,274 @@
+@use '../../styles/mixins.scss' as *;
+
+.card {
+  --summary-accent: var(--data-blue-base);
+
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  height: auto;
+  min-height: 112px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+  box-shadow: var(--app-specular-highlight);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    box-shadow 0.18s ease;
+
+  &:hover {
+    z-index: 5;
+    transform: translateY(-1px);
+    border-color: var(--border-primary);
+  }
+
+  &:focus-within {
+    z-index: 5;
+  }
+}
+
+.cardPrimary,
+.cardSecondary {
+  height: auto;
+  min-height: 112px;
+  padding: 12px;
+}
+
+.header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--summary-accent) 12%, transparent);
+  color: var(--summary-accent);
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-top: auto;
+}
+
+.valueWrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.value {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--kpi-value-color);
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  cursor: default;
+  outline: 0;
+
+  &[tabindex='0'] {
+    cursor: help;
+  }
+
+  &[tabindex='0']:focus-visible {
+    border-radius: var(--app-radius-xs);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--summary-accent) 28%, transparent);
+  }
+}
+
+.tonegood,
+.tonewarn,
+.tonebad {
+  color: var(--kpi-value-color);
+}
+
+.valueTooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 4;
+  display: grid;
+  gap: 3px;
+  width: max-content;
+  min-width: min(160px, 100%);
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--data-blue-base) 42%, var(--border-color));
+  border-top: 3px solid var(--data-blue-base);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-md);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 0.14s ease,
+    transform 0.14s ease;
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 16px;
+    bottom: -5px;
+    width: 9px;
+    height: 9px;
+    border-right: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
+    border-bottom: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
+    background: inherit;
+    transform: rotate(45deg);
+  }
+}
+
+.valueWrap:hover .valueTooltip,
+.valueWrap:focus-within .valueTooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.valueTooltipLabel {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.valueTooltipValue {
+  color: var(--primary-text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.chart {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 0;
+  width: calc(46% - 8px);
+  min-width: 72px;
+  height: 28px;
+  color: var(--summary-accent);
+  opacity: 0.5;
+  pointer-events: none;
+
+  svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    opacity: 0.22;
+  }
+}
+
+.accentBlue {
+  --summary-accent: var(--data-blue-base);
+}
+
+.accentGreen {
+  --summary-accent: var(--data-emerald-base);
+}
+
+.accentRed {
+  --summary-accent: var(--data-red-base);
+}
+
+.accentAmber {
+  --summary-accent: var(--data-amber-base);
+}
+
+.accentIndigo {
+  --summary-accent: var(--data-violet-base);
+}
+
+.accentCyan {
+  --summary-accent: var(--data-cyan-base);
+}
+
+.accentViolet {
+  --summary-accent: var(--data-violet-base);
+}
+
+.accentTeal {
+  --summary-accent: var(--data-teal-base);
+}
+
+.accentNeutral {
+  --summary-accent: var(--data-slate-base);
+}
+
+@include mobile {
+  .card,
+  .cardPrimary,
+  .cardSecondary {
+    min-height: 98px;
+    padding: 12px;
+  }
+
+  .value {
+    font-size: 20px;
+  }
+}

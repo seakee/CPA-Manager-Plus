@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FullWebLoginPage, FullWebUpgradeHeader } from './FullWebLoginPage';
+import { AppFooter } from '../components/common/AppFooter';
 import { FullWebIcon } from './FullWebIcon';
 import {
   createUpgradeActivationRead,
@@ -851,7 +852,7 @@ export function UpgradeAuthenticationEntry() {
           />
         </div>
       </main>
-      <footer className="journey-copyright">{text('footer', language)}</footer>
+      <AppFooter className="journey-copyright" />
     </div>
   );
 }

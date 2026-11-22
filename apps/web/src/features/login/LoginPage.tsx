@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { AppFooter } from '@/components/common/AppFooter';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
@@ -932,6 +933,7 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
           </div>
         )}
       </div>
+      <AppFooter className={styles.footer} />
     </div>
   );
 }

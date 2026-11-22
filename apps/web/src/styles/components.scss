@@ -879,6 +879,37 @@ textarea {
   }
 }
 
+.empty-state-canvas {
+  flex-direction: column;
+  justify-content: center;
+  min-height: 200px;
+  padding: 28px 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: center;
+
+  .empty-content {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .empty-icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  .empty-title {
+    font-size: 15px;
+  }
+
+  .empty-footer {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+  }
+}
+
 .header-input-list {
   display: flex;
   flex-direction: column;

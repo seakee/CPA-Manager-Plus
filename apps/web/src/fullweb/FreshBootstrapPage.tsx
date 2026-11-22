@@ -16,6 +16,7 @@ import type { Language } from '../types';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
 import { FullWebIcon } from './FullWebIcon';
+import { AppFooter } from '../components/common/AppFooter';
 import {
   BootstrapTransportClient,
   BootstrapTransportError,
@@ -676,7 +677,7 @@ docker start <v2_container>`}
           )}
         </div>
       </main>
-      <footer className="journey-copyright">{journey('footer')}</footer>
+      <AppFooter className="journey-copyright" />
     </div>
   );
 }

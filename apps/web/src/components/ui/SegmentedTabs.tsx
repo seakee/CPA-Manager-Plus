@@ -14,6 +14,8 @@ export type SegmentedTabItem<Id extends string = string> = {
   label: ReactNode;
   disabled?: boolean;
   title?: string;
+  ariaLabel?: string;
+  ariaControls?: string;
   to?: string;
   testId?: string;
 };
@@ -42,6 +44,8 @@ type SegmentedTabsProps<Id extends string> = {
   className?: string;
   variant?: 'default' | 'joined';
   size?: 'md' | 'sm';
+  roleMode?: 'tablist' | 'group';
+  allowReselect?: boolean;
   fullWidth?: boolean;
   equalWidth?: boolean;
   responsiveFullWidth?: boolean;
@@ -58,6 +62,8 @@ export function SegmentedTabs<Id extends string>({
   className = '',
   variant = 'default',
   size = 'md',
+  roleMode = 'tablist',
+  allowReselect = false,
   fullWidth = false,
   equalWidth = false,
   responsiveFullWidth = true,
@@ -123,10 +129,12 @@ export function SegmentedTabs<Id extends string>({
     .filter(Boolean)
     .join(' ');
 
+  const isTablist = roleMode === 'tablist';
+
   return (
     <div
       className={rootClassName}
-      role="tablist"
+      role={isTablist ? 'tablist' : 'group'}
       aria-label={ariaLabel}
       data-variant={variant}
       data-size={size}
@@ -150,42 +158,56 @@ export function SegmentedTabs<Id extends string>({
             event.preventDefault();
             return;
           }
-          if (!isActive) {
+          if (!isActive || allowReselect) {
             onChange?.(item.id);
           }
-        };
-        const commonProps = {
-          className: itemClassName,
-          role: 'tab' as const,
-          id: itemId,
-          'data-testid': item.testId,
-          'aria-selected': isActive,
-          tabIndex: isActive && !isDisabled ? 0 : -1,
-          title: item.title,
-          onClick: handleClick,
-          onKeyDown: (event: KeyboardEvent<HTMLElement>) => handleKeyDown(event, item.id),
-          children: item.label,
         };
         if (item.to && !isDisabled && LinkComponent) {
           return (
             <LinkComponent
               key={item.id}
-              {...commonProps}
+              className={itemClassName}
+              role="tab"
+              id={itemId}
+              aria-selected={isActive}
+              tabIndex={isActive && !isDisabled ? 0 : -1}
+              title={item.title}
+              onClick={handleClick}
+              onKeyDown={(event: KeyboardEvent<HTMLElement>) => handleKeyDown(event, item.id)}
               ref={setItemRef}
               to={item.to}
-            />
+            >
+              {item.label}
+            </LinkComponent>
           );
         }
 
         return (
           <button
             key={item.id}
-            {...commonProps}
             ref={setItemRef}
             type="button"
+            className={itemClassName}
+            role={isTablist ? 'tab' : undefined}
+            id={isTablist ? itemId : undefined}
+            data-testid={item.testId}
+            aria-label={item.ariaLabel}
+            aria-selected={isTablist ? isActive : undefined}
+            aria-controls={isTablist ? item.ariaControls : undefined}
+            aria-pressed={!isTablist ? isActive : undefined}
+            tabIndex={isTablist ? (isActive && !isDisabled ? 0 : -1) : undefined}
+            title={item.title}
             disabled={isDisabled}
             aria-disabled={isDisabled || undefined}
-          />
+            onClick={handleClick}
+            onKeyDown={
+              isTablist
+                ? (event: KeyboardEvent<HTMLElement>) => handleKeyDown(event, item.id)
+                : undefined
+            }
+          >
+            {item.label}
+          </button>
         );
       })}
     </div>
