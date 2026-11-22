@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -5,6 +6,7 @@ import { LogsPage } from './LogsPage';
 
 const mocks = vi.hoisted(() => ({
   fetchErrorLogs: vi.fn(),
+  downloadErrorLog: vi.fn(),
   config: { requestLog: true, loggingToFile: true },
 }));
 
@@ -29,7 +31,25 @@ vi.mock('@/stores', () => ({
 }));
 
 vi.mock('@/services/api/logs', () => ({
-  logsApi: { fetchErrorLogs: mocks.fetchErrorLogs, fetchLogs: vi.fn() },
+  logsApi: {
+    fetchErrorLogs: mocks.fetchErrorLogs,
+    downloadErrorLog: mocks.downloadErrorLog,
+    fetchLogs: vi.fn(),
+  },
+}));
+
+vi.mock('@/components/ui/Modal', () => ({
+  Modal: ({
+    open,
+    title,
+    footer,
+    children,
+  }: {
+    open: boolean;
+    title?: ReactNode;
+    footer?: ReactNode;
+    children?: ReactNode;
+  }) => (open ? <div data-testid="mock-modal">{title}{children}{footer}</div> : null),
 }));
 
 vi.mock('@/hooks/useLocalStorage', () => ({
@@ -143,5 +163,45 @@ describe('LogsPage error log listing', () => {
 
     expect(pageText()).not.toContain(bannerText);
     expect(pageText()).toContain('logs.error_logs_load_error');
+  });
+
+  it('previews error log content inline and ignores stale responses when switching files', async () => {
+    mocks.fetchErrorLogs.mockResolvedValue({
+      files: [
+        { name: 'error-first.log', size: 1200, modified: 1763816000 },
+        { name: 'error-second.log', size: 2400, modified: 1763816100 },
+      ],
+    });
+
+    const firstResp = createDeferred<{ data: Blob }>();
+    const secondResp = createDeferred<{ data: Blob }>();
+    mocks.downloadErrorLog
+      .mockReturnValueOnce(firstResp.promise)
+      .mockReturnValueOnce(secondResp.promise);
+
+    const tree = await renderErrorTab();
+    const firstBtn = tree.root.findByProps({ 'data-testid': 'error-log-view-error-first.log' });
+    const secondBtn = tree.root.findByProps({ 'data-testid': 'error-log-view-error-second.log' });
+
+    await act(async () => {
+      firstBtn.props.onClick();
+    });
+    expect(mocks.downloadErrorLog).toHaveBeenCalledWith('error-first.log');
+
+    await act(async () => {
+      secondBtn.props.onClick();
+    });
+    expect(mocks.downloadErrorLog).toHaveBeenCalledWith('error-second.log');
+
+    await act(async () => {
+      secondResp.resolve({ data: new Blob(['second file diagnostic payload'], { type: 'text/plain' }) });
+    });
+    expect(pageText()).toContain('second file diagnostic payload');
+
+    await act(async () => {
+      firstResp.resolve({ data: new Blob(['stale first payload'], { type: 'text/plain' }) });
+    });
+    expect(pageText()).toContain('second file diagnostic payload');
+    expect(pageText()).not.toContain('stale first payload');
   });
 });
