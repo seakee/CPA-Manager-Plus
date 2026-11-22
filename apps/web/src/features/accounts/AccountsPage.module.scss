@@ -9,7 +9,7 @@
   @include accounts-theme-vars;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--app-gap);
   min-width: 0;
 }
 
@@ -5730,52 +5730,25 @@
 .container {
   @include accounts-theme-vars;
   display: grid;
-  gap: 16px;
+  gap: var(--app-gap);
   min-width: 0;
   color: var(--text-primary);
 }
 
-.controlsPanel,
-.controlsFilterPanel,
 .tablePanel,
 .loadingPanel,
 .rulePanel {
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--app-specular-highlight);
 }
-
-.controlsPanel {
-  display: grid;
-  min-width: 0;
-  overflow: visible;
-  border-radius: var(--app-radius-lg);
-}
-
-.controlsTabsRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 14px 16px;
-  overflow: hidden;
-  scrollbar-width: thin;
-}
-
 .tabs {
   flex: 0 1 auto;
   width: fit-content;
   max-width: 100%;
   min-width: 0;
 }
-
-.controlsTabsRow > .headerActions {
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-
 .tabLabel {
   display: inline-flex;
   align-items: center;
@@ -5797,16 +5770,6 @@
   line-height: 1.2;
   white-space: nowrap;
 }
-
-.controlsFilterPanel {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-  overflow: visible;
-  padding: 14px 16px 16px;
-  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
-}
-
 .toolbar {
   grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(132px, 1fr)) minmax(118px, auto);
   gap: 8px;
@@ -5883,70 +5846,6 @@
   min-width: 0;
 }
 
-.viewModeSwitcher {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  justify-content: flex-start;
-  gap: 0;
-  height: var(--control-height-sm);
-  padding: 0;
-  border-radius: var(--app-radius-md);
-  border: 1px solid var(--border-color);
-  background: color-mix(in srgb, var(--bg-primary) 80%, var(--surface-subtle));
-  box-shadow: none;
-  box-sizing: border-box;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.viewModeSwitcher .viewModeButton,
-.viewModeButton {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  padding: 0 13px;
-  border: 0;
-  border-left: 1px solid var(--border-color);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  box-shadow: none;
-  transition:
-    background-color 0.16s ease,
-    color 0.16s ease;
-
-  &:first-child {
-    border-left: 0;
-  }
-
-  &:hover {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--primary-color) 6%, transparent);
-  }
-
-  &.viewModeButtonActive {
-    border-left-color: transparent;
-    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-    color: var(--primary-text);
-    font-weight: 700;
-    box-shadow: none;
-  }
-
-  &.viewModeButtonActive + .viewModeButton {
-    border-left-color: transparent;
-  }
-}
 
 .mobileFilterLayer {
   @include accounts-theme-vars;
@@ -6068,6 +5967,7 @@
 
 .batchBar {
   padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
@@ -6227,10 +6127,6 @@
 }
 
 @include mobile {
-  .container {
-    gap: 14px;
-  }
-
   .rulePanel {
     position: static;
     max-height: none;
@@ -6242,15 +6138,9 @@
     overflow: visible;
   }
 
-  .controlsTabsRow,
-  .controlsFilterPanel {
-    padding-inline: 12px;
-  }
-
-  .controlsTabsRow {
+  .controlsTopRow {
     align-items: stretch;
     flex-direction: column;
-    overflow: visible;
   }
 
   .tabs {
@@ -6283,7 +6173,8 @@
     }
   }
 
-  .controlsTabsRow > .headerActions {
+  .controlsActions {
+    margin-left: 0;
     justify-content: flex-start;
   }
 
@@ -6742,65 +6633,7 @@
     display: none;
   }
 }
-
-.floatingBatchActionContainer {
-  @include accounts-theme-vars;
-  position: fixed;
-  left: var(--content-center-x, 50%);
-  bottom: calc(16px + env(safe-area-inset-bottom));
-  z-index: 1600;
-  width: min(920px, calc(100vw - 24px));
-  max-width: calc(100vw - 24px);
-  box-sizing: border-box;
-  transform: translateX(-50%);
-}
-
-.floatingBatchActionBar {
-  display: grid;
-  grid-template-columns: minmax(112px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-height: 56px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-lg);
-  background: var(--app-surface-strong);
-  /* floating layer: elevation allowed */
-  box-shadow: var(--floating-shadow-lg);
-}
-
-.floatingBatchActionLeft,
-.floatingBatchActionRight {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.floatingBatchActionLeft {
-  flex: 0 0 auto;
-}
-
-.floatingBatchActionRight {
-  justify-content: flex-end;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-
-  > :global(.btn),
-  > :global(.select-trigger),
-  > :global(.dropdown-trigger) {
-    flex: 0 0 auto;
-    height: var(--control-height-sm);
-    min-height: var(--control-height-sm);
-  }
-}
-
-.batchSelectionText {
+.floatingBatchCount {
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
@@ -6848,23 +6681,6 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-@include mobile {
-  .floatingBatchActionContainer {
-    bottom: calc(12px + env(safe-area-inset-bottom));
-    width: calc(100vw - 16px);
-    max-width: calc(100vw - 16px);
-  }
-
-  .floatingBatchActionBar {
-    grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
-  }
-
-  .floatingBatchActionLeft,
-  .floatingBatchActionRight {
-    justify-content: flex-start;
-  }
 }
 
 .drawerUsageStack {

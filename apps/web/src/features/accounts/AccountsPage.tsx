@@ -7,6 +7,9 @@ import type {
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate, type BlockerFunction } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { FloatingActionDock } from '@/components/common/FloatingActionDock';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -80,7 +83,6 @@ import {
 } from '@/features/accounts/hooks/useCredentialInspectionSnapshot';
 import { useAccountsWorkspaceRefresh } from '@/features/accounts/hooks/useAccountsWorkspaceRefresh';
 import { useHeaderSnapshotsLoader } from '@/features/monitoring/hooks/useHeaderSnapshotsLoader';
-import { PaginationControls } from '@/features/monitoring/components/MonitoringShared';
 import { CredentialHealthInspectionWorkspace } from '@/features/monitoring/components/CredentialHealthInspectionWorkspace';
 import { AuthJsonPasteModal } from '@/features/authFiles/components/AuthJsonPasteModal';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
@@ -7923,42 +7925,28 @@ export function AccountsPage() {
       return null;
     }
     return (
-      <div
-        className={styles.viewModeSwitcher}
-        role="group"
-        aria-label={t('accounts.view_mode_switcher', { defaultValue: '视图模式' })}
-      >
-        <button
-          type="button"
-          className={[
-            styles.viewModeButton,
-            effectiveLayoutMode === 'table' ? styles.viewModeButtonActive : '',
-          ]
-            .filter(Boolean)
-            .join(' ')}
-          onClick={() => setLayoutMode('table')}
-          title={t('accounts.view_mode_table')}
-          aria-label={t('accounts.view_mode_table')}
-          aria-pressed={effectiveLayoutMode === 'table'}
-        >
-          {t('accounts.view_mode_table')}
-        </button>
-        <button
-          type="button"
-          className={[
-            styles.viewModeButton,
-            effectiveLayoutMode === 'grid' ? styles.viewModeButtonActive : '',
-          ]
-            .filter(Boolean)
-            .join(' ')}
-          onClick={() => setLayoutMode('grid')}
-          title={t('accounts.view_mode_grid')}
-          aria-label={t('accounts.view_mode_grid')}
-          aria-pressed={effectiveLayoutMode === 'grid'}
-        >
-          {t('accounts.view_mode_grid')}
-        </button>
-      </div>
+      <SegmentedTabs<'table' | 'grid'>
+        variant="joined"
+        roleMode="group"
+        responsiveFullWidth={false}
+        ariaLabel={t('accounts.view_mode_switcher', { defaultValue: '视图模式' })}
+        activeTab={effectiveLayoutMode}
+        onChange={setLayoutMode}
+        items={[
+          {
+            id: 'table',
+            label: t('accounts.view_mode_table'),
+            title: t('accounts.view_mode_table'),
+            ariaLabel: t('accounts.view_mode_table'),
+          },
+          {
+            id: 'grid',
+            label: t('accounts.view_mode_grid'),
+            title: t('accounts.view_mode_grid'),
+            ariaLabel: t('accounts.view_mode_grid'),
+          },
+        ]}
+      />
     );
   };
 
@@ -8232,73 +8220,69 @@ export function AccountsPage() {
       },
     ];
 
-    const content = (
-      <div className={styles.floatingBatchActionContainer}>
-        <div className={styles.floatingBatchActionBar}>
-          <div className={styles.floatingBatchActionLeft}>
-            <span className={styles.batchSelectionText}>
-              {t('accounts.selected_count', {
-                count: selectionCount,
-              })}
-            </span>
-          </div>
-          <div className={styles.floatingBatchActionRight}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => refreshQuotaRows(selectedRows)}
-              disabled={disableControls || quotaRefreshing || selectedRows.length === 0}
-              loading={quotaRefreshing}
-              title={t('accounts.refresh_quota')}
-            >
-              {!quotaRefreshing ? <IconRefreshCw size={15} /> : null}
-              {t('accounts.refresh_quota')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => handleBatchStatus(true)}
-              disabled={disableControls || statusUpdating}
-              title={t('accounts.enable')}
-            >
-              <IconCheck size={15} />
-              {t('accounts.enable')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => handleBatchStatus(false)}
-              disabled={disableControls || statusUpdating}
-              title={t('accounts.disable')}
-            >
-              <IconX size={15} />
-              {t('accounts.disable')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={disableControls || selectedRows.length === 0 || batchFieldsUpdating}
-              onClick={() => {
-                setBatchPriorityValue('');
-                setBatchPriorityOpen(true);
-              }}
-              title={t('accounts.set_priority')}
-            >
-              {t('accounts.set_priority')}
-            </Button>
-            <DropdownMenu
-              items={moreItems}
-              ariaLabel={t('accounts.batch_more')}
-              triggerLabel={t('accounts.batch_more')}
-              triggerIcon={<IconMoreVertical size={16} />}
-              triggerClassName={styles.floatingBatchMore}
-            />
-          </div>
-        </div>
-      </div>
+    return (
+      <FloatingActionDock
+        open={selectionCount > 0}
+        variant="bar"
+        ariaLabel={t('accounts.selected_count', { count: selectionCount })}
+        leading={
+          <span className={styles.floatingBatchCount}>
+            {t('accounts.selected_count', { count: selectionCount })}
+          </span>
+        }
+      >
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => refreshQuotaRows(selectedRows)}
+          disabled={disableControls || quotaRefreshing || selectedRows.length === 0}
+          loading={quotaRefreshing}
+          title={t('accounts.refresh_quota')}
+        >
+          {!quotaRefreshing ? <IconRefreshCw size={15} /> : null}
+          {t('accounts.refresh_quota')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => handleBatchStatus(true)}
+          disabled={disableControls || statusUpdating}
+          title={t('accounts.enable')}
+        >
+          <IconCheck size={15} />
+          {t('accounts.enable')}
+        </Button>
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={() => handleBatchStatus(false)}
+          disabled={disableControls || statusUpdating}
+          title={t('accounts.disable')}
+        >
+          <IconX size={15} />
+          {t('accounts.disable')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={disableControls || selectedRows.length === 0 || batchFieldsUpdating}
+          onClick={() => {
+            setBatchPriorityValue('');
+            setBatchPriorityOpen(true);
+          }}
+          title={t('accounts.set_priority')}
+        >
+          {t('accounts.set_priority')}
+        </Button>
+        <DropdownMenu
+          items={moreItems}
+          ariaLabel={t('accounts.batch_more')}
+          triggerLabel={t('accounts.batch_more')}
+          triggerIcon={<IconMoreVertical size={16} />}
+          triggerClassName={styles.floatingBatchMore}
+        />
+      </FloatingActionDock>
     );
-
-    return typeof document === 'undefined' ? content : createPortal(content, document.body);
   };
 
   const renderRowActions = (
@@ -8461,32 +8445,76 @@ export function AccountsPage() {
     );
   };
 
-  const renderPagination = () => (
-    <div className={styles.accountsPagination}>
-      <PaginationControls
-        count={filteredRows.length}
-        currentPage={currentPage}
-        totalPages={totalPages}
-        startItem={paginationStartItem}
-        endItem={paginationEndItem}
-        pageSize={pageSize}
-        pageSizeOptions={PAGE_SIZE_OPTIONS.map((option) => Number(option.value))}
-        onPageChange={setPage}
-        onPageSizeChange={(nextPageSize) => {
-          setPageSize(nextPageSize);
-          setPage(1);
-        }}
-        t={t}
-      />
-    </div>
-  );
+  const renderPagination = () => {
+    if (filteredRows.length === 0) return null;
+    const pageSizeShort = t('monitoring.page_size_label_short', {
+      defaultValue: t('monitoring.page_size_label'),
+    });
+    const prevShort = t('monitoring.pagination_prev_short', {
+      defaultValue: t('monitoring.pagination_prev'),
+    });
+    const nextShort = t('monitoring.pagination_next_short', {
+      defaultValue: t('monitoring.pagination_next'),
+    });
+    return (
+      <div className={styles.accountsPagination}>
+        <PaginationFooter
+          variant="inset"
+          currentPage={currentPage}
+          totalPages={totalPages}
+          infoText={t('monitoring.pagination_info', {
+            current: currentPage,
+            total: totalPages,
+            start: paginationStartItem,
+            end: paginationEndItem,
+            count: filteredRows.length,
+          })}
+          pageSize={pageSize}
+          pageSizeOptions={PAGE_SIZE_OPTIONS.map((option) => Number(option.value))}
+          pageSizeLabel={
+            pageSizeShort === 'monitoring.page_size_label_short'
+              ? t('monitoring.page_size_label')
+              : pageSizeShort
+          }
+          pageSizeTitle={t('monitoring.page_size_label')}
+          pageSizeAriaLabel={t('monitoring.page_size_label')}
+          formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+          prevLabel={
+            prevShort === 'monitoring.pagination_prev_short'
+              ? t('monitoring.pagination_prev')
+              : prevShort
+          }
+          nextLabel={
+            nextShort === 'monitoring.pagination_next_short'
+              ? t('monitoring.pagination_next')
+              : nextShort
+          }
+          showPageJump
+          jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
+          jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
+          jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+        />
+      </div>
+    );
+  };
 
   const renderAccountEmptyState = () => (
     <EmptyState
+      variant="inline"
       title={t('accounts.empty_title')}
       description={t('accounts.empty_desc')}
       action={
-        <Button variant="secondary" onClick={() => void refreshAccountsWorkspace()}>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => void refreshAccountsWorkspace()}
+        >
+          <IconRefreshCw size={15} />
           {t('common.refresh')}
         </Button>
       }
@@ -10248,15 +10276,13 @@ export function AccountsPage() {
   return (
     <div className={styles.container} lang={i18n.language}>
       {unsavedChangesBlocker}
-      <section className={styles.controlsPanel}>
-        <div className={styles.controlsTabsRow}>
-          {renderViewTabs()}
-          {renderPageActions()}
-        </div>
-      </section>
-      {activeView === 'accounts' ? (
-        <section className={styles.controlsFilterPanel}>{renderToolbar()}</section>
-      ) : null}
+      <PageControlBar
+        topRowClassName={styles.controlsTopRow}
+        actionsClassName={styles.controlsActions}
+        leading={renderViewTabs()}
+        actions={renderPageActions()}
+        toolbar={activeView === 'accounts' ? renderToolbar() : null}
+      />
       {renderActiveView()}
       {renderMobileFilterPanel()}
       {renderFloatingBatchActions()}

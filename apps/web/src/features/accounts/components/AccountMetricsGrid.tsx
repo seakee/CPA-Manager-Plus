@@ -1,10 +1,10 @@
 import { useTranslation } from 'react-i18next';
 import type { AccountMetrics } from '@/features/accounts/model/accountRows';
 import {
-  SummaryCard,
-  type SummaryCardAccent,
-  type SummaryCardIcon,
-} from '@/features/monitoring/components/MonitoringShared';
+  MetricSummaryCard,
+  type MetricSummaryCardAccent,
+  type MetricSummaryCardIcon,
+} from '@/components/common/MetricSummaryCard';
 import styles from '../AccountsPage.module.scss';
 
 interface AccountMetricsGridProps {
@@ -67,15 +67,15 @@ export function AccountMetricsGrid({ metrics }: AccountMetricsGridProps) {
     label: string;
     value: number;
     meta: string;
-    icon: SummaryCardIcon;
-    accent: SummaryCardAccent;
+    icon: MetricSummaryCardIcon;
+    accent: MetricSummaryCardAccent;
   }>;
 
   return (
     <section className={styles.metricsSection} aria-label={t('accounts.metrics_label')}>
       <div className={styles.metricsGrid}>
         {cards.map((card) => (
-          <SummaryCard
+          <MetricSummaryCard
             key={card.key}
             label={card.label}
             value={String(card.value)}

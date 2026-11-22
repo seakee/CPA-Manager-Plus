@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageControlBar } from '@/components/common/PageControlBar';
 import { Button } from '@/components/ui/Button';
 import { DropdownMenu } from '@/components/ui/DropdownMenu';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import {
   IconArrowDownWideNarrow,
@@ -41,12 +43,6 @@ interface ProviderToolbarProps {
   healthCheckDisabled?: boolean;
 }
 
-type ProviderKindTab = {
-  id: ProviderKindFilter;
-  label: string;
-  badge: number;
-};
-
 type ProviderSortItem = {
   value: ProviderSortOption;
   label: string;
@@ -79,7 +75,6 @@ export function ProviderToolbar({
   const sortDropdownRef = useRef<HTMLDivElement>(null);
   const sortTriggerRef = useRef<HTMLButtonElement>(null);
   const sortOptionRefs = useRef<Map<ProviderSortOption, HTMLButtonElement | null>>(new Map());
-  const kindTabRefs = useRef<Map<ProviderKindFilter, HTMLButtonElement | null>>(new Map());
 
   useEffect(() => {
     if ((!isModelDropdownOpen && !isSortDropdownOpen) || typeof document === 'undefined') {
@@ -100,61 +95,46 @@ export function ProviderToolbar({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isModelDropdownOpen, isSortDropdownOpen]);
 
-  const kindTabs = useMemo<ProviderKindTab[]>(
+  const kindTabItems = useMemo<ReadonlyArray<SegmentedTabItem<ProviderKindFilter>>>(
     () => [
       {
         id: 'all',
-        label: t('ai_providers.filter_all'),
-        badge: kindCounts.all,
+        title: t('ai_providers.filter_all'),
+        label: (
+          <span className={styles.kindTabContent}>
+            <span className={styles.kindTabIcon} aria-hidden="true">
+              <IconFilterAll size={18} />
+            </span>
+            <span className={styles.kindTabLabel}>{t('ai_providers.filter_all')}</span>
+            <span className={styles.kindTabBadge}>{kindCounts.all}</span>
+          </span>
+        ),
       },
       ...PROVIDER_KINDS.map((id) => ({
         id: id as ProviderKindFilter,
-        label: PROVIDER_KIND_LABELS[id],
-        badge: kindCounts[id],
+        title: PROVIDER_KIND_LABELS[id],
+        label: (
+          <span className={styles.kindTabContent}>
+            <span className={styles.kindTabIcon} aria-hidden="true">
+              <img
+                src={getProviderKindIcon(id, resolvedTheme)}
+                alt=""
+                className={[
+                  styles.kindTabProviderIcon,
+                  id === 'codex' ? styles.kindTabProviderIconCodex : '',
+                  id === 'openai' ? styles.kindTabProviderIconOpenai : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              />
+            </span>
+            <span className={styles.kindTabLabel}>{PROVIDER_KIND_LABELS[id]}</span>
+            <span className={styles.kindTabBadge}>{kindCounts[id]}</span>
+          </span>
+        ),
       })),
     ],
-    [kindCounts, t]
-  );
-
-  const focusableKindTabs = useMemo(() => kindTabs.map((tab) => tab.id), [kindTabs]);
-
-  const focusKindTab = useCallback((tab: ProviderKindFilter) => {
-    kindTabRefs.current.get(tab)?.focus();
-  }, []);
-
-  const handleKindTabKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLButtonElement>, currentTab: ProviderKindFilter) => {
-      if (disabled || focusableKindTabs.length === 0) return;
-
-      const currentIndex = focusableKindTabs.indexOf(currentTab);
-      if (currentIndex === -1) return;
-
-      let nextIndex = currentIndex;
-      switch (event.key) {
-        case 'ArrowRight':
-        case 'ArrowDown':
-          nextIndex = (currentIndex + 1) % focusableKindTabs.length;
-          break;
-        case 'ArrowLeft':
-        case 'ArrowUp':
-          nextIndex = (currentIndex - 1 + focusableKindTabs.length) % focusableKindTabs.length;
-          break;
-        case 'Home':
-          nextIndex = 0;
-          break;
-        case 'End':
-          nextIndex = focusableKindTabs.length - 1;
-          break;
-        default:
-          return;
-      }
-
-      event.preventDefault();
-      const nextTab = focusableKindTabs[nextIndex];
-      onKindChange(nextTab);
-      focusKindTab(nextTab);
-    },
-    [disabled, focusKindTab, focusableKindTabs, onKindChange]
+    [kindCounts, resolvedTheme, t]
   );
 
   const sortOptions = useMemo<ProviderSortItem[]>(
@@ -308,280 +288,244 @@ export function ProviderToolbar({
   }));
 
   return (
-    <div className={styles.toolbar}>
-      <div
-        className={styles.kindTabs}
-        role="tablist"
-        aria-label={t('ai_providers.filter_kind_aria')}
-      >
-        {kindTabs.map((tab) => {
-          const isActive = tab.id === kind;
-          const tabClassName = [
-            styles.kindTabButton,
-            isActive ? styles.kindTabButtonActive : '',
-          ]
-            .filter(Boolean)
-            .join(' ');
-          return (
-            <button
-              key={tab.id}
-              ref={(node) => {
-                kindTabRefs.current.set(tab.id, node);
-              }}
-              type="button"
-              role="tab"
-              id={`provider-kind-filter-${tab.id}`}
-              aria-selected={isActive}
-              className={tabClassName}
+    <PageControlBar
+      topRowClassName={styles.topRow}
+      actionsClassName={styles.actions}
+      leading={
+        <SegmentedTabs
+          items={kindTabItems}
+          activeTab={kind}
+          onChange={onKindChange}
+          ariaLabel={t('ai_providers.filter_kind_aria')}
+          idBase="provider-kind-filter"
+          variant="joined"
+          disabled={disabled}
+          className={styles.kindTabs}
+        />
+      }
+      actions={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onHealthCheck}
+            disabled={disabled || healthCheckDisabled}
+            className={styles.healthCheckButton}
+          >
+            <IconShield size={14} />
+            {t('ai_providers.health_check_button')}
+          </Button>
+          {kind === 'all' ? (
+            <DropdownMenu
+              ariaLabel={t('ai_providers.add_config_menu_aria')}
+              triggerLabel={t('ai_providers.add_config_button')}
+              triggerClassName={styles.addButton}
               disabled={disabled}
-              tabIndex={isActive && !disabled ? 0 : -1}
-              title={tab.label}
-              onClick={() => {
-                if (!isActive) onKindChange(tab.id);
-              }}
-              onKeyDown={(event) => handleKindTabKeyDown(event, tab.id)}
+              items={addMenuItems}
+            />
+          ) : (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => onAdd(kind)}
+              disabled={disabled}
+              className={styles.addButton}
             >
-              <span className={styles.kindTabIcon} aria-hidden="true">
-                {tab.id === 'all' ? (
-                  <IconFilterAll size={18} />
-                ) : (
-                  <img
-                    src={getProviderKindIcon(tab.id, resolvedTheme)}
-                    alt=""
-                    className={[
-                      styles.kindTabProviderIcon,
-                      tab.id === 'codex' ? styles.kindTabProviderIconCodex : '',
-                      tab.id === 'openai' ? styles.kindTabProviderIconOpenai : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                  />
-                )}
-              </span>
-              <span className={styles.kindTabLabel}>{tab.label}</span>
-              <span className={styles.kindTabBadge}>{tab.badge}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className={styles.controls}>
-        <div className={styles.searchBox}>
-          <span className={styles.searchIcon} aria-hidden="true">
-            <IconSearch size={14} />
-          </span>
-          <input
-            type="search"
-            className={styles.searchInput}
-            value={searchText}
-            placeholder={t('ai_providers.search_placeholder')}
-            aria-label={t('ai_providers.search_placeholder')}
-            disabled={disabled}
-            onChange={(event) => onSearchTextChange(event.target.value)}
-          />
-          {searchText && (
-            <button
-              type="button"
-              className={styles.searchClear}
-              onClick={() => onSearchTextChange('')}
-              aria-label={t('ai_providers.model_search_clear')}
-            >
-              <IconX size={14} />
-            </button>
+              {t('ai_providers.add_kind_button', { name: PROVIDER_KIND_LABELS[kind] })}
+            </Button>
           )}
-        </div>
-
-        <div className={styles.filterGroup}>
-          <div className={styles.modelMultiSelectWrapper} ref={modelDropdownRef}>
-            <div
-              className={[
-                styles.modelFilterControl,
-                modelFilterActive ? styles.modelFilterControlActive : '',
-                disabled ? styles.modelFilterControlDisabled : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
+        </>
+      }
+      toolbar={
+        <div className={styles.controls}>
+          <div className={styles.searchBox}>
+            <input
+              type="search"
+              className={styles.searchInput}
+              value={searchText}
+              placeholder={t('ai_providers.search_placeholder')}
+              aria-label={t('ai_providers.search_placeholder')}
+              disabled={disabled}
+              onChange={(event) => onSearchTextChange(event.target.value)}
+            />
+            {searchText ? (
               <button
                 type="button"
-                className={styles.modelFilterTrigger}
-                onClick={() => setIsModelDropdownOpen((prev) => !prev)}
-                disabled={disabled}
-                title={modelFilterTitle}
-                aria-label={modelFilterTitle}
-                aria-haspopup="true"
-                aria-expanded={isModelDropdownOpen}
+                className={styles.searchClear}
+                onClick={() => onSearchTextChange('')}
+                aria-label={t('ai_providers.model_search_clear')}
               >
-                <span className={styles.modelFilterText}>{modelFilterLabel}</span>
-                {modelFilterActive && (
-                  <span className={styles.modelFilterCount}>{selectedModelNames.length}</span>
-                )}
-                <span className={styles.modelFilterChevron} aria-hidden="true">
-                  <IconChevronDown size={14} />
-                </span>
+                <IconX size={14} />
               </button>
-              {modelFilterActive && (
+            ) : (
+              <span className={styles.searchIcon} aria-hidden="true">
+                <IconSearch size={15} />
+              </span>
+            )}
+          </div>
+
+          <div className={styles.filterGroup}>
+            <div className={styles.modelMultiSelectWrapper} ref={modelDropdownRef}>
+              <div
+                className={[
+                  styles.modelFilterControl,
+                  modelFilterActive ? styles.modelFilterControlActive : '',
+                  disabled ? styles.modelFilterControlDisabled : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
                 <button
                   type="button"
-                  className={styles.modelFilterInlineClear}
-                  onClick={clearAllModels}
+                  className={styles.modelFilterTrigger}
+                  onClick={() => setIsModelDropdownOpen((prev) => !prev)}
                   disabled={disabled}
-                  aria-label={t('ai_providers.model_search_clear')}
-                  title={t('ai_providers.model_search_clear')}
+                  title={modelFilterTitle}
+                  aria-label={modelFilterTitle}
+                  aria-haspopup="true"
+                  aria-expanded={isModelDropdownOpen}
                 >
-                  <IconX size={14} />
+                  <span className={styles.modelFilterText}>{modelFilterLabel}</span>
+                  {modelFilterActive && (
+                    <span className={styles.modelFilterCount}>{selectedModelNames.length}</span>
+                  )}
+                  <span className={styles.modelFilterChevron} aria-hidden="true">
+                    <IconChevronDown size={14} />
+                  </span>
                 </button>
+                {modelFilterActive && (
+                  <button
+                    type="button"
+                    className={styles.modelFilterInlineClear}
+                    onClick={clearAllModels}
+                    disabled={disabled}
+                    aria-label={t('ai_providers.model_search_clear')}
+                    title={t('ai_providers.model_search_clear')}
+                  >
+                    <IconX size={14} />
+                  </button>
+                )}
+              </div>
+
+              {isModelDropdownOpen && (
+                <div className={styles.modelDropdownList}>
+                  <div className={styles.modelDropdownHeader}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onSelectedModelsChange(new Set(allModelNames))}
+                      disabled={disabled || allModelNames.length === 0}
+                    >
+                      {t('ai_providers.model_select_all')}
+                    </Button>
+                    {modelFilterActive && (
+                      <Button variant="ghost" size="sm" onClick={clearAllModels} disabled={disabled}>
+                        {t('ai_providers.model_search_clear')}
+                      </Button>
+                    )}
+                  </div>
+                  <div
+                    className={styles.modelDropdownItems}
+                    role="group"
+                    aria-label={t('ai_providers.model_search_placeholder')}
+                  >
+                    {allModelNames.length === 0 ? (
+                      <div className={styles.modelDropdownEmpty}>
+                        {t('ai_providers.model_filter_empty')}
+                      </div>
+                    ) : (
+                      allModelNames.map((name) => (
+                        <SelectionCheckbox
+                          key={`provider-model-option-${name}`}
+                          checked={selectedModels.has(name)}
+                          onChange={() => toggleModelSelection(name)}
+                          disabled={disabled}
+                          className={styles.modelDropdownItem}
+                          labelClassName={styles.modelDropdownItemLabel}
+                          label={<span title={name}>{name}</span>}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
               )}
             </div>
+          </div>
 
-            {isModelDropdownOpen && (
-              <div className={styles.modelDropdownList}>
-                <div className={styles.modelDropdownHeader}>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onSelectedModelsChange(new Set(allModelNames))}
-                    disabled={disabled || allModelNames.length === 0}
-                  >
-                    {t('ai_providers.model_select_all')}
-                  </Button>
-                  {modelFilterActive && (
-                    <Button variant="ghost" size="sm" onClick={clearAllModels} disabled={disabled}>
-                      {t('ai_providers.model_search_clear')}
-                    </Button>
-                  )}
-                </div>
-                <div
-                  className={styles.modelDropdownItems}
-                  role="group"
-                  aria-label={t('ai_providers.model_search_placeholder')}
-                >
-                  {allModelNames.length === 0 ? (
-                    <div className={styles.modelDropdownEmpty}>
-                      {t('ai_providers.model_filter_empty')}
-                    </div>
-                  ) : (
-                    allModelNames.map((name) => (
-                      <SelectionCheckbox
-                        key={`provider-model-option-${name}`}
-                        checked={selectedModels.has(name)}
-                        onChange={() => toggleModelSelection(name)}
-                        disabled={disabled}
-                        className={styles.modelDropdownItem}
-                        labelClassName={styles.modelDropdownItemLabel}
-                        label={<span title={name}>{name}</span>}
-                      />
-                    ))
-                  )}
-                </div>
+          <div className={styles.sortControls} ref={sortDropdownRef}>
+            <button
+              ref={sortTriggerRef}
+              type="button"
+              className={styles.sortTrigger}
+              onClick={toggleSortDropdown}
+              onKeyDown={handleSortTriggerKeyDown}
+              disabled={disabled}
+              title={`${t('ai_providers.sort_by')}: ${selectedSortLabel}`}
+              aria-label={`${t('ai_providers.sort_by')}: ${selectedSortLabel}`}
+              aria-haspopup="listbox"
+              aria-expanded={isSortDropdownOpen}
+            >
+              <span className={styles.sortLabel}>{selectedSortLabel}</span>
+            </button>
+            <button
+              type="button"
+              className={styles.sortDirectionButton}
+              onClick={toggleSortDirection}
+              disabled={disabled}
+              title={
+                sortDirection === 'asc'
+                  ? t('ai_providers.sort_ascending')
+                  : t('ai_providers.sort_descending')
+              }
+              aria-label={
+                sortDirection === 'asc'
+                  ? t('ai_providers.sort_ascending')
+                  : t('ai_providers.sort_descending')
+              }
+            >
+              <span className={styles.sortDirectionIcon} aria-hidden="true">
+                {sortDirection === 'asc' ? (
+                  <IconArrowUpNarrowWide size={14} />
+                ) : (
+                  <IconArrowDownWideNarrow size={14} />
+                )}
+              </span>
+            </button>
+            {isSortDropdownOpen && (
+              <div className={styles.sortDropdownList} role="listbox">
+                {sortOptions.map((option, optionIndex) => {
+                  const isSelected = option.value === sortOption;
+                  const isHighlighted = optionIndex === highlightedSortIndex;
+                  const optionClassName = [
+                    styles.sortDropdownItem,
+                    isSelected ? styles.sortDropdownItemSelected : '',
+                    isHighlighted ? styles.sortDropdownItemHighlighted : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+                  return (
+                    <button
+                      key={option.value}
+                      ref={(node) => {
+                        sortOptionRefs.current.set(option.value, node);
+                      }}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      className={optionClassName}
+                      onClick={() => commitSortOption(option.value)}
+                      onKeyDown={(event) => handleSortOptionKeyDown(event, optionIndex)}
+                      onMouseEnter={() => setHighlightedSortIndex(optionIndex)}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
         </div>
-
-        <div className={styles.sortControls} ref={sortDropdownRef}>
-          <button
-            ref={sortTriggerRef}
-            type="button"
-            className={styles.sortTrigger}
-            onClick={toggleSortDropdown}
-            onKeyDown={handleSortTriggerKeyDown}
-            disabled={disabled}
-            title={`${t('ai_providers.sort_by')}: ${selectedSortLabel}`}
-            aria-label={`${t('ai_providers.sort_by')}: ${selectedSortLabel}`}
-            aria-haspopup="listbox"
-            aria-expanded={isSortDropdownOpen}
-          >
-            <span className={styles.sortLabel}>{selectedSortLabel}</span>
-          </button>
-          <button
-            type="button"
-            className={styles.sortDirectionButton}
-            onClick={toggleSortDirection}
-            disabled={disabled}
-            title={
-              sortDirection === 'asc'
-                ? t('ai_providers.sort_ascending')
-                : t('ai_providers.sort_descending')
-            }
-            aria-label={
-              sortDirection === 'asc'
-                ? t('ai_providers.sort_ascending')
-                : t('ai_providers.sort_descending')
-            }
-          >
-            <span className={styles.sortDirectionIcon} aria-hidden="true">
-              {sortDirection === 'asc' ? (
-                <IconArrowUpNarrowWide size={14} />
-              ) : (
-                <IconArrowDownWideNarrow size={14} />
-              )}
-            </span>
-          </button>
-          {isSortDropdownOpen && (
-            <div className={styles.sortDropdownList} role="listbox">
-              {sortOptions.map((option, optionIndex) => {
-                const isSelected = option.value === sortOption;
-                const isHighlighted = optionIndex === highlightedSortIndex;
-                const optionClassName = [
-                  styles.sortDropdownItem,
-                  isSelected ? styles.sortDropdownItemSelected : '',
-                  isHighlighted ? styles.sortDropdownItemHighlighted : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
-                return (
-                  <button
-                    key={option.value}
-                    ref={(node) => {
-                      sortOptionRefs.current.set(option.value, node);
-                    }}
-                    type="button"
-                    role="option"
-                    aria-selected={isSelected}
-                    className={optionClassName}
-                    onClick={() => commitSortOption(option.value)}
-                    onKeyDown={(event) => handleSortOptionKeyDown(event, optionIndex)}
-                    onMouseEnter={() => setHighlightedSortIndex(optionIndex)}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={onHealthCheck}
-          disabled={disabled || healthCheckDisabled}
-          className={styles.healthCheckButton}
-        >
-          <IconShield size={14} />
-          {t('ai_providers.health_check_button')}
-        </Button>
-        {kind === 'all' ? (
-          <DropdownMenu
-            ariaLabel={t('ai_providers.add_config_menu_aria')}
-            triggerLabel={t('ai_providers.add_config_button')}
-            triggerClassName={styles.addButton}
-            disabled={disabled}
-            items={addMenuItems}
-          />
-        ) : (
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => onAdd(kind)}
-            disabled={disabled}
-            className={styles.addButton}
-          >
-            {t('ai_providers.add_kind_button', { name: PROVIDER_KIND_LABELS[kind] })}
-          </Button>
-        )}
-      </div>
-    </div>
+      }
+    />
   );
 }

@@ -5068,21 +5068,55 @@ describe('AccountsPage replacement flows', () => {
     expect(cardKeys).toEqual([getAuthFileSelectionKey(codex)]);
   });
 
-  it('keeps credential list filters outside the workspace navigation panel', async () => {
+  it('keeps credential list filters outside the workspace navigation top row and collapses toolbar on other views', async () => {
     const renderer = await renderAccountsPage();
-    const tabs = renderer.root.find((node) => node.props['aria-label'] === 'accounts.tabs_label');
-    const navigationPanel = findAncestorByType(tabs, 'section');
+    const readControlBarState = () => {
+      const tabs = renderer.root.find((node) => node.props['aria-label'] === 'accounts.tabs_label');
+      const controlBar = findAncestorByType(tabs, 'section');
+      const directDivs = controlBar.children.filter(
+        (child): child is ReactTestInstance =>
+          typeof child !== 'string' && child.type === 'div'
+      );
+      return {
+        controlBar,
+        topRow: directDivs.find(
+          (div) => typeof div.props.className === 'string' && div.props.className.includes('topRow')
+        ),
+        toolbarRow: directDivs.find(
+          (div) => typeof div.props.className === 'string' && div.props.className.includes('toolbar')
+        ),
+      };
+    };
+    const countSearchInputs = (node: ReactTestInstance) =>
+      node.findAll(
+        (candidate) =>
+          candidate.type === 'input' && candidate.props['aria-label'] === 'accounts.search_label'
+      ).length;
 
-    expect(
-      navigationPanel.findAll(
-        (node) => node.type === 'input' && node.props['aria-label'] === 'accounts.search_label'
-      )
-    ).toHaveLength(0);
-    expect(
-      renderer.root.findAll(
-        (node) => node.type === 'input' && node.props['aria-label'] === 'accounts.search_label'
-      )
-    ).toHaveLength(1);
+    const accountsState = readControlBarState();
+    expect(accountsState.topRow).toBeDefined();
+    expect(countSearchInputs(accountsState.topRow!)).toBe(0);
+    expect(accountsState.toolbarRow).toBeDefined();
+    expect(countSearchInputs(accountsState.toolbarRow!)).toBe(1);
+    expect(countSearchInputs(accountsState.controlBar)).toBe(1);
+
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.tab_health').props.onClick();
+    });
+    await flushPromises();
+
+    const healthState = readControlBarState();
+    expect(healthState.toolbarRow).toBeUndefined();
+    expect(countSearchInputs(renderer.root)).toBe(0);
+
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.tab_oauth').props.onClick();
+    });
+    await flushPromises();
+
+    const oauthState = readControlBarState();
+    expect(oauthState.toolbarRow).toBeUndefined();
+    expect(countSearchInputs(renderer.root)).toBe(0);
   });
 
   it('keeps the credential health mode in the Accounts URL', async () => {

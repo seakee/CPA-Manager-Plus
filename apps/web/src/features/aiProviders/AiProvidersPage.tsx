@@ -25,11 +25,11 @@ import {
   withDisableAllModelsRule,
   withoutDisableAllModelsRule,
 } from '@/components/providers/utils';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { Select } from '@/components/ui/Select';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { providersApi } from '@/services/api';
 import { getUsageServiceErrorCode } from '@/services/api/usageService';
@@ -1462,13 +1462,6 @@ export function AiProvidersPage() {
     openEditorDrawer(kind, null);
   };
 
-  const handlePageSizeChange = (value: string) => {
-    const nextSize = Number.parseInt(value, 10);
-    if (!Number.isFinite(nextSize) || nextSize <= 0) return;
-    setPageSize(nextSize);
-    setPage(1);
-  };
-
   const emptyState =
     rows.length > 0 && kindFilter !== 'all' && kindCounts[kindFilter] === 0 ? (
       // 当前类型尚无配置：直接给“添加该类型配置”入口，避免“清除筛选”死胡同
@@ -1499,96 +1492,76 @@ export function AiProvidersPage() {
 
   return (
     <div className={styles.container}>
-      <div className={styles.content}>
-        {error && <div className="error-box">{error}</div>}
+      {error && <div className="error-box">{error}</div>}
 
-        <div>
-          <ProviderToolbar
-            kind={kindFilter}
-            kindCounts={kindCounts}
-            onKindChange={setKindFilter}
-            searchText={searchText}
-            onSearchTextChange={setSearchText}
-            allModelNames={allModelNames}
-            selectedModels={selectedModels}
-            onSelectedModelsChange={setSelectedModels}
-            sortOption={sortOption}
-            onSortOptionChange={setSortOption}
-            sortDirection={sortDirection}
-            onSortDirectionChange={setSortDirection}
-            disabled={actionsDisabled}
-            resolvedTheme={resolvedTheme}
-            onAdd={handleAdd}
-            onHealthCheck={() => setHealthCheckOpen(true)}
-            healthCheckDisabled={visibleRows.length === 0}
-          />
+      <ProviderToolbar
+        kind={kindFilter}
+        kindCounts={kindCounts}
+        onKindChange={setKindFilter}
+        searchText={searchText}
+        onSearchTextChange={setSearchText}
+        allModelNames={allModelNames}
+        selectedModels={selectedModels}
+        onSelectedModelsChange={setSelectedModels}
+        sortOption={sortOption}
+        onSortOptionChange={setSortOption}
+        sortDirection={sortDirection}
+        onSortDirectionChange={setSortDirection}
+        disabled={actionsDisabled}
+        resolvedTheme={resolvedTheme}
+        onAdd={handleAdd}
+        onHealthCheck={() => setHealthCheckOpen(true)}
+        healthCheckDisabled={visibleRows.length === 0}
+      />
 
-          <Card>
-            <ProviderTable
-              rows={pagedRows}
-              loading={loading}
-              actionsDisabled={actionsDisabled}
-              toggleDisabled={actionsDisabled}
-              resolvedTheme={resolvedTheme}
-              emptyState={emptyState}
-              onShowDetail={(row) => setDetailRowKey(row.key)}
-              onEdit={handleRowEdit}
-              onDelete={handleRowDelete}
-              onToggle={handleRowToggle}
-              onPriorityChange={handleRowPriorityChange}
+      <Card>
+        <ProviderTable
+          rows={pagedRows}
+          loading={loading}
+          actionsDisabled={actionsDisabled}
+          toggleDisabled={actionsDisabled}
+          resolvedTheme={resolvedTheme}
+          emptyState={emptyState}
+          onShowDetail={(row) => setDetailRowKey(row.key)}
+          onEdit={handleRowEdit}
+          onDelete={handleRowDelete}
+          onToggle={handleRowToggle}
+          onPriorityChange={handleRowPriorityChange}
+        />
+        {visibleRows.length > 0 &&
+          (visibleRows.length > PROVIDER_TABLE_DEFAULT_PAGE_SIZE ||
+            pageSize !== PROVIDER_TABLE_DEFAULT_PAGE_SIZE) && (
+            <PaginationFooter
+              variant="inset"
+              currentPage={currentPage}
+              totalPages={totalPages}
+              infoText={t('monitoring.pagination_info', {
+                current: currentPage,
+                total: totalPages,
+                start: pageStartItem,
+                end: pageEndItem,
+                count: visibleRows.length,
+              })}
+              prevLabel={t('monitoring.pagination_prev')}
+              nextLabel={t('monitoring.pagination_next')}
+              onPageChange={setPage}
+              pageSize={pageSize}
+              pageSizeOptions={PROVIDER_TABLE_PAGE_SIZE_OPTIONS}
+              pageSizeLabel={t('monitoring.page_size_label')}
+              pageSizeAriaLabel={t('monitoring.page_size_label')}
+              formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
+              onPageSizeChange={(nextPageSize) => {
+                setPageSize(nextPageSize);
+                setPage(1);
+              }}
+              showPageJump={totalPages > 1}
+              jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
+              jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
+              jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+              disabled={loading}
             />
-            {visibleRows.length > 0 &&
-              (visibleRows.length > PROVIDER_TABLE_DEFAULT_PAGE_SIZE ||
-                pageSize !== PROVIDER_TABLE_DEFAULT_PAGE_SIZE) && (
-                <div className={styles.paginationBar}>
-                  <div className={styles.paginationInfo}>
-                    {t('monitoring.pagination_info', {
-                      current: currentPage,
-                      total: totalPages,
-                      start: pageStartItem,
-                      end: pageEndItem,
-                      count: visibleRows.length,
-                    })}
-                  </div>
-                  <div className={styles.paginationControls}>
-                    <div className={styles.pageSizeField}>
-                      <span>{t('monitoring.page_size_label')}</span>
-                      <Select
-                        value={String(pageSize)}
-                        options={PROVIDER_TABLE_PAGE_SIZE_OPTIONS.map((size) => ({
-                          value: String(size),
-                          label: t('monitoring.page_size_option', { count: size }),
-                        }))}
-                        onChange={handlePageSizeChange}
-                        disabled={loading}
-                        fullWidth={false}
-                        ariaLabel={t('monitoring.page_size_label')}
-                        className={styles.pageSizeSelect}
-                        triggerClassName={styles.pageSizeSelectTrigger}
-                      />
-                    </div>
-                    <Button
-                      variant="secondary"
-                      size="xs"
-                      onClick={() => setPage(Math.max(1, currentPage - 1))}
-                      disabled={loading || currentPage <= 1}
-                    >
-                      {t('monitoring.pagination_prev')}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="xs"
-                      onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
-                      disabled={loading || currentPage >= totalPages}
-                    >
-                      {t('monitoring.pagination_next')}
-                    </Button>
-                  </div>
-                </div>
-              )}
-          </Card>
-        </div>
-      </div>
+          )}
+      </Card>
 
       <ProviderDetailDrawer
         row={detailRow}

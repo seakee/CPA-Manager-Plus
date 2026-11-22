@@ -163,6 +163,7 @@ vi.mock('@/components/providers', async () => {
 });
 
 import { AiProvidersPage } from './AiProvidersPage';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -456,6 +457,64 @@ describe('AiProvidersPage error presentation', () => {
     expect(renderer.root.findByProps({ className: 'error-box' }).children.join('')).toBe(
       'usage_service_errors.usage_service_not_configured'
     );
+    act(() => renderer.unmount());
+  });
+});
+
+describe('AiProvidersPage pagination footer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.cacheValid = true;
+    mocks.transitionLayer = null;
+    mocks.config = {
+      geminiApiKeys: Array.from({ length: 12 }, (_, index) => ({
+        apiKey: `gemini-key-${index + 1}`,
+      })),
+      interactionsApiKeys: [],
+      codexApiKeys: [],
+      xaiApiKeys: [],
+      claudeApiKeys: [],
+      vertexApiKeys: [],
+      openaiCompatibility: [],
+    };
+    mocks.fetchConfig.mockImplementation(async () => mocks.config);
+    mocks.getVertexConfigs.mockResolvedValue([]);
+    mocks.getOpenAIProviders.mockResolvedValue([]);
+  });
+
+  it('renders PaginationFooter with inset variant, page jump, and page-size reset', async () => {
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AiProvidersPage />);
+    });
+    await flush();
+
+    const footer = renderer.root.findByType(PaginationFooter);
+    expect(footer.props.variant).toBe('inset');
+    expect(footer.props.currentPage).toBe(1);
+    expect(footer.props.totalPages).toBe(2);
+    expect(footer.props.showPageJump).toBe(true);
+    expect(
+      renderer.root.findAll(
+        (node) =>
+          node.type === 'input' && node.props['aria-label'] === 'monitoring.pagination_jump_label'
+      )
+    ).toHaveLength(1);
+
+    await act(async () => {
+      footer.props.onPageChange(2);
+    });
+    expect(renderer.root.findByType(PaginationFooter).props.currentPage).toBe(2);
+
+    await act(async () => {
+      renderer.root.findByType(PaginationFooter).props.onPageSizeChange?.(20);
+    });
+    const updatedFooter = renderer.root.findByType(PaginationFooter);
+    expect(updatedFooter.props.pageSize).toBe(20);
+    expect(updatedFooter.props.currentPage).toBe(1);
+    expect(updatedFooter.props.totalPages).toBe(1);
+    expect(updatedFooter.props.showPageJump).toBe(false);
+
     act(() => renderer.unmount());
   });
 });

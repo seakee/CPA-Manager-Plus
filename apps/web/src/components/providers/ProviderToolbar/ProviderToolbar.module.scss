@@ -3,93 +3,31 @@
 
 $toolbar-control-height: var(--control-height-sm);
 
-.toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  gap: $spacing-md;
-  padding: $spacing-sm $spacing-md;
-  margin: 0 0 $spacing-md;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-lg);
-}
-
-.kindTabs {
-  display: inline-flex;
-  flex-wrap: nowrap;
-  align-self: flex-start;
-  max-width: 100%;
-  padding: 0;
-  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
+.topRow {
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 
-.kindTabButton {
-  @include button-reset;
-  position: relative;
+.actions {
+  @include mobile {
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+}
+
+.kindTabs {
+  max-width: 100%;
+}
+
+.kindTabContent {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 42px;
-  padding: 0 16px;
-  border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  background: transparent;
-  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background-color $transition-fast,
-    color $transition-fast;
-
-  &:first-child {
-    border-left: 0;
-  }
-
-  &:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
-    color: var(--text-primary);
-  }
-
-  /* The tab strip clips on overflow, so the ring is drawn inside the tab. */
-  &:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: -2px;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
+  min-width: 0;
 }
-
-.kindTabButtonActive,
-.kindTabButtonActive:hover:not(:disabled) {
-  border-left-color: transparent;
-  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-text);
-  font-weight: 700;
-}
-
-.kindTabButtonActive + .kindTabButton {
-  border-left-color: transparent;
-}
-
 .kindTabIcon {
   display: inline-flex;
   align-items: center;
@@ -137,7 +75,7 @@ $toolbar-control-height: var(--control-height-sm);
   white-space: nowrap;
 }
 
-.kindTabButtonActive .kindTabBadge {
+.kindTabs :global([role='tab'][aria-selected='true']) .kindTabBadge {
   background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
   color: var(--primary-text);
 }
@@ -154,9 +92,9 @@ $toolbar-control-height: var(--control-height-sm);
   position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 200px;
-  min-width: 160px;
-  max-width: 320px;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 360px;
   height: $toolbar-control-height;
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-sm);
@@ -198,8 +136,8 @@ $toolbar-control-height: var(--control-height-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 0 0 10px;
-  color: var(--text-secondary);
+  padding: 0 10px 0 4px;
+  color: var(--text-tertiary);
   flex-shrink: 0;
 }
 
@@ -207,11 +145,10 @@ $toolbar-control-height: var(--control-height-sm);
   flex: 1;
   min-width: 0;
   height: $toolbar-control-height;
-  padding: 0 8px;
+  padding: 0 4px 0 12px;
   border: 0;
   background: transparent;
   color: var(--text-primary);
-  font-size: 13px;
   outline: none;
 
   &::placeholder {
@@ -632,16 +569,11 @@ $toolbar-control-height: var(--control-height-sm);
 }
 
 .healthCheckButton.healthCheckButton {
-  margin-left: auto;
   height: $toolbar-control-height;
   padding: 0 12px;
   border-radius: var(--app-radius-sm);
   font-size: 13px;
   font-weight: 600;
-
-  @include mobile {
-    margin-left: 0;
-  }
 }
 
 // 双类名提升优先级，覆盖 DropdownMenu 默认触发器样式
@@ -670,9 +602,5 @@ $toolbar-control-height: var(--control-height-sm);
     background: var(--primary-solid);
     color: var(--primary-contrast);
     box-shadow: none;
-  }
-
-  @include mobile {
-    margin-left: 0;
   }
 }
