@@ -1,0 +1,117 @@
+@use '../../styles/mixins' as *;
+
+.root {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.variantFlush {
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--surface-subtle) 32%, var(--bg-primary));
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+
+  @include mobile {
+    padding: 10px 12px;
+  }
+}
+
+.variantInset {
+  margin-top: 14px;
+  padding-top: 12px;
+  background: transparent;
+}
+
+.info {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.pageSizeField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.pageSizeSelect {
+  width: 108px;
+  flex: 0 0 auto;
+}
+
+.pageSizeSelect .pageSizeTrigger,
+.pageSizeTrigger.pageSizeTrigger {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 10px;
+  border-radius: var(--app-radius-sm);
+  font-size: 12.5px;
+}
+
+.pageJumpField {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.pageJumpInput {
+  box-sizing: border-box;
+  width: 58px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 8px;
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-input-bg);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 0;
+    border-color: var(--app-input-border-focus);
+    background: var(--app-input-bg-focus);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+@include mobile {
+  .root {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .controls {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+}

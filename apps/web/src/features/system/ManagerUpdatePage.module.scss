@@ -1,7 +1,7 @@
 .page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--app-gap);
   width: 100%;
   color: var(--text-primary);
   a:focus-visible,

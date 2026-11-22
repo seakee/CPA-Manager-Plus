@@ -8,6 +8,7 @@ import {
   useState,
   type ChangeEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
@@ -62,9 +63,11 @@ import { MonitoringDatabaseMaintenanceHint } from '@/features/monitoring/compone
 import { MonitoringCustomRangeModal } from '@/features/monitoring/components/MonitoringCustomRangeModal';
 import { MonitoringFiltersPanel } from '@/features/monitoring/components/MonitoringFiltersPanel';
 import { UsageImportProgressModal } from '@/features/monitoring/components/UsageImportProgressModal';
+import { PageControlBar } from '@/components/common/PageControlBar';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { useDatabaseMaintenance } from '@/components/common/useDatabaseMaintenance';
-import { IconInbox } from '@/components/ui/icons';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import {
   MonitoringStatusHeader,
   MonitoringStatusSummary,
@@ -224,7 +227,9 @@ export function MonitoringCenterPage() {
     [apiBase, managementKey, requestMonitoringAvailability.serviceBase]
   );
   const pageTransitionLayer = usePageTransitionLayer();
-  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
+  const isCurrentLayer = pageTransitionLayer
+    ? (pageTransitionLayer.isCurrentLayer ?? pageTransitionLayer.status === 'current')
+    : true;
   const initialAccountOverviewUiState = useRef(readAccountOverviewUiState());
   const initialMonitoringCenterUiState = useRef(
     buildMonitoringInitialStateFromQuery(location.search, readMonitoringCenterUiState())
@@ -1395,20 +1400,20 @@ export function MonitoringCenterPage() {
   }, [apiKeyIdParam, stripApiKeyIdQueryParam]);
 
   const renderMonitoringEmptyState = () => (
-    <div className={styles.emptyState}>
-      <IconInbox size={48} className={styles.emptyStateIcon} aria-hidden="true" />
-      <strong className={styles.emptyStateTitle}>
-        {hasActiveDataFilter ? t('monitoring.no_filtered_data') : t('monitoring.no_data')}
-      </strong>
-      {!hasActiveDataFilter ? (
-        <details className={styles.emptyStateDetails}>
-          <summary className={styles.emptyStateSummary}>
-            {t('monitoring.empty_diagnostics_link')}
-          </summary>
-          <span className={styles.emptyStateBody}>{t('monitoring.empty_diagnostics_body')}</span>
-        </details>
-      ) : null}
-    </div>
+    <EmptyState
+      variant="canvas"
+      title={hasActiveDataFilter ? t('monitoring.no_filtered_data') : t('monitoring.no_data')}
+      footer={
+        !hasActiveDataFilter ? (
+          <details className={styles.emptyStateDetails}>
+            <summary className={styles.emptyStateSummary}>
+              {t('monitoring.empty_diagnostics_link')}
+            </summary>
+            <span className={styles.emptyStateBody}>{t('monitoring.empty_diagnostics_body')}</span>
+          </details>
+        ) : null
+      }
+    />
   );
 
   const openCustomRangeModal = useCallback(() => {
@@ -1436,7 +1441,6 @@ export function MonitoringCenterPage() {
   const handleCustomDraftEndChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     setCustomDraftEndInput(event.target.value);
   }, []);
-
   const applyCustomTimeRange = useCallback(() => {
     if (customDraftTimeRangeError) return;
     setCustomStartInput(customDraftStartInput);
@@ -2219,14 +2223,30 @@ export function MonitoringCenterPage() {
     );
   }
 
+  const showLoadingOverlay =
+    isCurrentLayer &&
+    overallLoading &&
+    !hasMonitoringDisplayData &&
+    (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot);
+  const loadingOverlayNode = showLoadingOverlay ? (
+    <div className={styles.loadingOverlay} aria-busy="true">
+      <div className={styles.loadingOverlayContent}>
+        <LoadingSpinner size={28} />
+        <span>{t('common.loading')}</span>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className={styles.page}>
+      {loadingOverlayNode
+        ? typeof document !== 'undefined' && document.body
+          ? createPortal(loadingOverlayNode, document.body)
+          : loadingOverlayNode
+        : null}
+
       <MonitoringStatusHeader
-        showLoadingOverlay={
-          overallLoading &&
-          !hasMonitoringDisplayData &&
-          (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot)
-        }
+        showLoadingOverlay={false}
         monitoringUnavailable={monitoringUnavailable}
         monitoringUnavailableTitle={monitoringUnavailableTitle}
         monitoringUnavailableBody={monitoringUnavailableBody}
@@ -2239,18 +2259,9 @@ export function MonitoringCenterPage() {
         longRange={monitoringMaintenanceLongRange}
       />
 
-      <MonitoringActionBar
-        usageTransferAvailable={usageTransferAvailable}
-        usageExporting={usageExporting}
-        usageImporting={usageImporting}
-        loggingToFile={isFileLogsAvailable(config)}
-        modelPricesAvailable={requestMonitoringAvailability.modelPricesAvailable}
-        usageImportInputRef={usageImportInputRef}
-        t={t}
-        onUsageExport={handleUsageExport}
-        onUsageImportClick={handleUsageImportClick}
-        onUsageImportChange={handleUsageImportChange}
-        statusSummary={
+      <PageControlBar
+        ariaLabel={t('common.action')}
+        leading={
           <MonitoringStatusSummary
             connectionTone={connectionTone}
             connectionLabel={connectionLabel}
@@ -2261,39 +2272,54 @@ export function MonitoringCenterPage() {
             t={t}
           />
         }
-      />
-
-      <MonitoringFiltersPanel
-        timeRange={timeRange}
-        autoRefreshMs={autoRefreshMs}
-        selectedAccount={selectedAccount}
-        selectedProvider={selectedProvider}
-        selectedModel={selectedModel}
-        selectedChannel={selectedChannel}
-        selectedApiKeyHash={selectedApiKeyHash}
-        selectedStatus={selectedStatus}
-        searchInput={searchInput}
-        accountOptions={accountOptions}
-        providerOptions={providerOptions}
-        modelOptions={modelOptions}
-        channelOptions={channelOptions}
-        apiKeyOptions={apiKeyOptions}
-        statusOptions={statusOptions}
-        combinedError={combinedError}
-        usageStatisticsEnabled={Boolean(config?.usageStatisticsEnabled)}
-        overallLoading={overallLoading}
-        t={t}
-        onTimeRangeChange={handleTimeRangeChange}
-        onAutoRefreshChange={setAutoRefreshMs}
-        onRefreshAll={refreshAll}
-        onAccountFilterChange={handleAccountFilterChange}
-        onProviderChange={setSelectedProvider}
-        onModelChange={setSelectedModel}
-        onChannelChange={setSelectedChannel}
-        onApiKeyChange={handleApiKeyFilterChange}
-        onStatusChange={(value) => setSelectedStatus(value as StatusFilter)}
-        onSearchChange={setSearchInput}
-        onClearFilters={clearFilters}
+        actions={
+          <MonitoringActionBar
+            usageTransferAvailable={usageTransferAvailable}
+            usageExporting={usageExporting}
+            usageImporting={usageImporting}
+            loggingToFile={isFileLogsAvailable(config)}
+            modelPricesAvailable={requestMonitoringAvailability.modelPricesAvailable}
+            usageImportInputRef={usageImportInputRef}
+            t={t}
+            onUsageExport={handleUsageExport}
+            onUsageImportClick={handleUsageImportClick}
+            onUsageImportChange={handleUsageImportChange}
+          />
+        }
+        toolbar={
+          <MonitoringFiltersPanel
+            timeRange={timeRange}
+            autoRefreshMs={autoRefreshMs}
+            selectedAccount={selectedAccount}
+            selectedProvider={selectedProvider}
+            selectedModel={selectedModel}
+            selectedChannel={selectedChannel}
+            selectedApiKeyHash={selectedApiKeyHash}
+            selectedStatus={selectedStatus}
+            searchInput={searchInput}
+            accountOptions={accountOptions}
+            providerOptions={providerOptions}
+            modelOptions={modelOptions}
+            channelOptions={channelOptions}
+            apiKeyOptions={apiKeyOptions}
+            statusOptions={statusOptions}
+            combinedError={combinedError}
+            usageStatisticsEnabled={Boolean(config?.usageStatisticsEnabled)}
+            overallLoading={overallLoading}
+            t={t}
+            onTimeRangeChange={handleTimeRangeChange}
+            onAutoRefreshChange={setAutoRefreshMs}
+            onRefreshAll={refreshAll}
+            onAccountFilterChange={handleAccountFilterChange}
+            onProviderChange={setSelectedProvider}
+            onModelChange={setSelectedModel}
+            onChannelChange={setSelectedChannel}
+            onApiKeyChange={handleApiKeyFilterChange}
+            onStatusChange={(value) => setSelectedStatus(value as StatusFilter)}
+            onSearchChange={setSearchInput}
+            onClearFilters={clearFilters}
+          />
+        }
       />
 
       <MonitoringSummarySection

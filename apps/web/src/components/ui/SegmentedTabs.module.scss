@@ -88,14 +88,14 @@
   padding: 0;
   gap: 0;
   border-color: color-mix(in srgb, var(--border-color) 86%, transparent);
-  border-radius: var(--app-radius-md);
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
   box-shadow: none;
 
   .item {
     min-width: 0;
     min-height: 100%;
-    padding: 0 16px;
+    padding: 0 14px;
     border-radius: 0;
     color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
 
@@ -104,15 +104,14 @@
     }
 
     &:first-child {
-      border-start-start-radius: var(--app-radius-md);
-      border-end-start-radius: var(--app-radius-md);
+      border-start-start-radius: calc(var(--app-radius-sm) - 1px);
+      border-end-start-radius: calc(var(--app-radius-sm) - 1px);
     }
 
     &:last-child {
-      border-start-end-radius: var(--app-radius-md);
-      border-end-end-radius: var(--app-radius-md);
+      border-start-end-radius: calc(var(--app-radius-sm) - 1px);
+      border-end-end-radius: calc(var(--app-radius-sm) - 1px);
     }
-
     &:hover:not(.disabled) {
       background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
       color: var(--text-primary);

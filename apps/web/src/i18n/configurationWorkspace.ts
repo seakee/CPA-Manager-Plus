@@ -764,10 +764,10 @@ const messages = {
     'Параметры прослушивания, TLS, обнаружения и доступа к управлению относятся к развёртыванию хоста, блокируются политикой Manager в управляемых установках и не редактируются в консоли.',
   ],
   ownerDetailPlugins: [
-    'Global plugin enablement (plugins.enabled) and per-plugin configurations (plugins.configs.*) are managed on the Plugins page.',
-    '全局插件开关（plugins.enabled）与单插件配置（plugins.configs.*）在插件页面管理。',
-    '全域外掛開關（plugins.enabled）與單一外掛設定（plugins.configs.*）在外掛頁面管理。',
-    'Глобальное включение плагинов (plugins.enabled) и настройки отдельных плагинов (plugins.configs.*) управляются на странице плагинов.',
+    'Global plugin enablement (plugins.enabled) is managed on the CPA Gateway configuration page; per-plugin configurations (plugins.configs.*) are managed on the Plugins page.',
+    '全局插件开关（plugins.enabled）在 CPA 网关配置页管理；单插件配置（plugins.configs.*）在插件页面管理。',
+    '全域外掛開關（plugins.enabled）在 CPA 閘道設定頁管理；單一外掛設定（plugins.configs.*）在外掛頁面管理。',
+    'Глобальное включение плагинов (plugins.enabled) управляется на странице настроек шлюза CPA; настройки отдельных плагинов (plugins.configs.*) — на странице плагинов.',
   ],
   ownerDetailPluginsHost: [
     'Plugin directory, store sources and store authentication settings are fixed by host deployment and Manager posture; they are not editable in the console.',

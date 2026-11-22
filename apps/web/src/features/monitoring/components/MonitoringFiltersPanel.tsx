@@ -1,8 +1,9 @@
 import type { TFunction } from 'i18next';
+import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { IconRefreshCw, IconSearch, IconSlidersHorizontal, IconTimer } from '@/components/ui/icons';
-import { MonitoringPanel } from '@/features/monitoring/components/MonitoringPanel';
 import type { MonitoringTimeRange } from '@/features/monitoring/hooks/useMonitoringData';
 import styles from '../MonitoringCenterPage.module.scss';
 
@@ -108,20 +109,21 @@ export function MonitoringFiltersPanel({
   );
 
   return (
-    <MonitoringPanel className={styles.toolbarPanel}>
+    <div className={styles.filterToolbar}>
       <div className={styles.controlBar}>
-        <div className={styles.segmentedControl}>
-          {TIME_RANGE_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={`${styles.segmentButton} ${timeRange === option.value ? styles.segmentButtonActive : ''}`}
-              onClick={() => onTimeRangeChange(option.value)}
-            >
-              {t(option.labelKey)}
-            </button>
-          ))}
-        </div>
+        <SegmentedTabs<MonitoringTimeRange>
+          variant="joined"
+          roleMode="group"
+          allowReselect
+          responsiveFullWidth={false}
+          ariaLabel={t('monitoring.time_range_label', { defaultValue: '时间范围' })}
+          activeTab={timeRange}
+          onChange={onTimeRangeChange}
+          items={TIME_RANGE_OPTIONS.map((option) => ({
+            id: option.value,
+            label: t(option.labelKey),
+          }))}
+        />
 
         <div className={styles.filterSearchInputWrap}>
           <Input
@@ -137,7 +139,7 @@ export function MonitoringFiltersPanel({
         <div className={styles.refreshControls}>
           <div className={styles.autoRefreshField}>
             <span className={styles.autoRefreshLabel} title={t('monitoring.auto_refresh')}>
-              <IconTimer size={16} />
+              <IconTimer size={15} />
               {autoRefreshLabel}
             </span>
             <Select
@@ -154,32 +156,31 @@ export function MonitoringFiltersPanel({
             />
           </div>
 
-          <button
-            type="button"
-            className={styles.refreshButton}
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => void onRefreshAll()}
             disabled={overallLoading}
           >
             <IconRefreshCw
-              size={16}
+              size={15}
               className={overallLoading ? styles.refreshIconSpinning : styles.refreshIcon}
             />
             <span className={styles.refreshButtonLabel}>{t('usage_stats.refresh')}</span>
-          </button>
+          </Button>
 
-          <button
-            type="button"
-            className={styles.clearButton}
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onClearFilters}
             title={t('monitoring.clear_filters')}
             aria-label={t('monitoring.clear_filters')}
           >
-            <IconSlidersHorizontal size={16} />
+            <IconSlidersHorizontal size={15} />
             <span>{clearFiltersLabel}</span>
-          </button>
+          </Button>
         </div>
       </div>
-
       <div className={styles.filterBar}>
         <div className={styles.filterGrid}>
           <div className={styles.filterAccountStack}>
@@ -236,6 +237,6 @@ export function MonitoringFiltersPanel({
           <span>{t('monitoring.usage_disabled_body')}</span>
         </div>
       ) : null}
-    </MonitoringPanel>
+    </div>
   );
 }

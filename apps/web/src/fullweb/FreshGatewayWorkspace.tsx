@@ -3,6 +3,7 @@ import {
   Suspense,
   lazy,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -11,9 +12,16 @@ import {
   type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import { UNSAFE_LocationContext } from 'react-router-dom';
+import { FloatingActionDock } from '@/components/common/FloatingActionDock';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { SectionActionFooter } from '@/components/common/SectionActionFooter';
+import { PluginRuntimeSwitch } from '@/features/plugins/PluginRuntimeSwitch';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { isRecord } from '../utils/helpers';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs, type SegmentedTabItem } from '../components/ui/SegmentedTabs';
+import { IconRefreshCw, IconSearch } from '../components/ui/icons';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import { referenceText as r } from '../i18n/configurationReference';
 import type { PublicApiClient } from './publicApi';
@@ -265,6 +273,7 @@ export function FreshGatewayWorkspace({
   onRebind,
   reloadToken = 0,
   loadSourceEditor = loadGatewaySourceEditor,
+  visible,
 }: {
   client: PublicApiClient;
   credential: string;
@@ -275,10 +284,17 @@ export function FreshGatewayWorkspace({
   /** Bumped by the shell after a successful rebind to re-read this page. */
   reloadToken?: number;
   loadSourceEditor?: () => Promise<GatewaySourceEditorModule>;
+  visible?: boolean;
 }) {
   // Subscribe to language changes just like the original Console pages.
   const { i18n } = useTranslation();
   const language = i18n.resolvedLanguage;
+  const locationContext = useContext(UNSAFE_LocationContext);
+  const isRouteVisible =
+    visible ??
+    (locationContext
+      ? /(?:^|\/)(?:config|gateway)\/?$/.test(locationContext.location.pathname)
+      : true);
   const [view, setView] = useState<GatewayView | null>(null);
   const [loading, setLoading] = useState(true);
   const [visualLoadFailed, setVisualLoadFailed] = useState(false);
@@ -736,6 +752,29 @@ export function FreshGatewayWorkspace({
   useEffect(() => {
     onDirtyChange?.(dirtyCount > 0 || sourceDirty);
   }, [dirtyCount, onDirtyChange, sourceDirty]);
+
+  const triggerWorkspaceReload = useCallback(() => {
+    void load();
+    if (editorMode === 'source') {
+      if (sourceEditorFailedRef.current) {
+        sourceEditorFailedRef.current = false;
+        setSourceEditorRetryKey((n) => n + 1);
+      }
+      void loadSource();
+    }
+  }, [editorMode, load, loadSource]);
+
+  useHeaderRefresh(
+    triggerWorkspaceReload,
+    isRouteVisible &&
+      !loading &&
+      !sourceLoading &&
+      saving === '' &&
+      !savingAll &&
+      reconciling === '' &&
+      dirtyCount === 0 &&
+      !sourceDirty
+  );
 
   // A journaled unknown is still an unanswered write, so it keeps the exit lock
   // exactly as the per-field editor's own unknown result did: leaving to a
@@ -2034,31 +2073,33 @@ export function FreshGatewayWorkspace({
             <div className={'gateway-fields-list' + (fieldViewsOfGroup.length === 1 ? ' is-single' : '')}>
               {fieldViewsOfGroup.map((field) => renderField(field))}
             </div>
-            <div className="group-footer">
-              <span className="detail">
-                {edits.length ? c('groupDirtyCount', edits.length) : c('noDrafts')}
-              </span>
-              <div className="actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  disabled={!edits.length}
-                  onClick={() => {
-                    setDiscardGroup(group.id);
-                  }}
-                >
-                  {c('discard')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  disabled={blocked || !edits.length || !groupView?.writable || saving !== '' || savingAll || singleEdit !== null}
-                  onClick={() => void saveGroup(group)}
-                >
-                  {saving === group.id ? c('groupSaving') : c('groupSave')}
-                </button>
-              </div>
-            </div>
+            <SectionActionFooter
+              className="group-footer"
+              status={
+                <span className="detail">
+                  {edits.length ? c('groupDirtyCount', edits.length) : c('noDrafts')}
+                </span>
+              }
+            >
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!edits.length}
+                onClick={() => {
+                  setDiscardGroup(group.id);
+                }}
+              >
+                {c('discard')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={blocked || !edits.length || !groupView?.writable || saving !== '' || savingAll || singleEdit !== null}
+                onClick={() => void saveGroup(group)}
+              >
+                {saving === group.id ? c('groupSaving') : c('groupSave')}
+              </button>
+            </SectionActionFooter>
           </>
         )}
         {singleEdit ? (
@@ -2227,86 +2268,280 @@ export function FreshGatewayWorkspace({
   });
 
   const modeSwitchControl = (
-    <div className="gateway-mode-switch" role="group" aria-label={c('modeSwitchAria')}>
-      <button
-        type="button"
-        aria-pressed={editorMode === 'visual'}
-        data-testid="gateway-mode-visual"
-        className={'gateway-mode-btn' + (editorMode === 'visual' ? ' is-active' : '')}
-        onClick={() => switchEditorMode('visual')}
-      >
-        {c('modeVisual')}
-      </button>
-      <button
-        type="button"
-        aria-pressed={editorMode === 'source'}
-        data-testid="gateway-mode-source"
-        className={'gateway-mode-btn' + (editorMode === 'source' ? ' is-active' : '')}
-        onClick={() => switchEditorMode('source')}
-      >
-        {c('modeSource')}
-      </button>
-    </div>
+    <SegmentedTabs
+      variant="joined"
+      roleMode="group"
+      responsiveFullWidth={false}
+      idBase="gateway-mode"
+      activeTab={editorMode}
+      onChange={switchEditorMode}
+      ariaLabel={c('modeSwitchAria')}
+      items={[
+        { id: 'visual', label: c('modeVisual'), testId: 'gateway-mode-visual' },
+        { id: 'source', label: c('modeSource'), testId: 'gateway-mode-source' },
+      ]}
+    />
   );
   const reloadButtonControl = (
     <button
       type="button"
       className="btn btn-secondary btn-sm"
       disabled={loading || sourceLoading}
-      onClick={() => {
-        void load();
-        if (editorMode === 'source') {
-          if (sourceEditorFailedRef.current) {
-            sourceEditorFailedRef.current = false;
-            setSourceEditorRetryKey((n) => n + 1);
-          }
-          void loadSource();
-        }
-      }}
+      onClick={triggerWorkspaceReload}
     >
-      {c('reload')}
+      <IconRefreshCw size={15} aria-hidden="true" />
+      <span>{c('reload')}</span>
     </button>
   );
 
   return (
     <section className="config-workspace fresh-gateway-workspace" data-testid="gateway-config-workspace">
-      <div className="system-tabs-header">
-        {editorMode === 'visual' ? (
-          <SegmentedTabs
-            items={tabItems}
-            activeTab={currentTab}
-            ariaLabel={c('gateway')}
-            idBase="gateway-tab"
-            className="gateway-segmented-tabs"
-            responsiveFullWidth={false}
-            onChange={(tab) => {
-              setCurrentTab(tab);
-              if (query) setSearchText('');
-              if (changedOnly) setChangedOnly(false);
-            }}
-          />
-        ) : (
-          <div className="gateway-source-heading">
-            <code className="gateway-source-filename">gateway.yaml</code>
+      <PageControlBar
+        leading={
+          editorMode === 'visual' ? (
+            <SegmentedTabs
+              items={tabItems}
+              activeTab={currentTab}
+              ariaLabel={c('gateway')}
+              idBase="gateway-tab"
+              className="gateway-segmented-tabs"
+              responsiveFullWidth={false}
+              onChange={(tab) => {
+                setCurrentTab(tab);
+                if (query) setSearchText('');
+                if (changedOnly) setChangedOnly(false);
+              }}
+            />
+          ) : (
+            <span className="gateway-source-file">
+              <code className="gateway-source-filename">gateway.yaml</code>
+            </span>
+          )
+        }
+        actions={
+          <>
+            <span
+              className={
+                'gateway-capability-status ' +
+                (capability?.mode === 'managed'
+                  ? 'is-success'
+                  : capability?.mode === 'external'
+                    ? 'is-info'
+                    : 'is-warning')
+              }
+              data-testid="gateway-capability"
+            >
+              <span className="status-dot" aria-hidden="true" />
+              {c(capabilityKey(capability?.mode))}
+            </span>
+            {modeSwitchControl}
+            {reloadButtonControl}
+          </>
+        }
+        toolbar={
+          <div className="gateway-toolbar-row">
+            {editorMode === 'source' ? (
+              <>
+                <div className="gateway-toolbar-left">
+                  <label className="search" aria-label={c('sourceSearchPlaceholder')}>
+                    <span className="gateway-search-input-wrap">
+                      <input
+                        className="input"
+                        type="search"
+                        data-testid="gateway-source-search"
+                        aria-label={c('sourceSearchPlaceholder')}
+                        value={sourceSearchText}
+                        placeholder={c('sourceSearchPlaceholder')}
+                        onChange={(event) => {
+                          setSourceSearchText(event.target.value);
+                          setSourceSearchStats({ current: 0, total: 0 });
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            runSourceSearch(event.shiftKey ? 'prev' : 'next');
+                          }
+                        }}
+                      />
+                      <IconSearch
+                        size={16}
+                        className="gateway-search-icon"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </label>
+                  {sourceSearchStats.total > 0 ? (
+                    <span className="badge" data-testid="gateway-source-search-count">
+                      {sourceSearchStats.current} / {sourceSearchStats.total}
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!sourceSearchText}
+                    onClick={() => runSourceSearch('prev')}
+                  >
+                    {c('sourceSearchPrev')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!sourceSearchText}
+                    onClick={() => runSourceSearch('next')}
+                  >
+                    {c('sourceSearchNext')}
+                  </button>
+                </div>
+                <div className="gateway-toolbar-right">
+                  <span
+                    className={'badge' + (sourceDirty ? ' gateway-dirty-badge' : '')}
+                    data-testid="gateway-source-status"
+                  >
+                    {sourceDirty ? c('sourceDirtyBadge') : c('sourceCleanBadge')}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!sourceDirty}
+                    data-testid="gateway-source-diff-btn"
+                    onClick={() => setSourceDiffOpen(true)}
+                  >
+                    {c('sourceCompare')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!sourceDirty}
+                    data-testid="gateway-source-discard"
+                    onClick={() => {
+                      clearScopeDrafts('source');
+                      setModeSwitchError('');
+                    }}
+                  >
+                    {c('discard')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={
+                      needsReconcile('source') ||
+                      !sourceDirty ||
+                      !sourceView?.sourceWritable ||
+                      saving !== '' ||
+                      savingAll
+                    }
+                    data-testid="gateway-source-save"
+                    onClick={() => void saveSource()}
+                  >
+                    {saving === 'source' ? c('sourceSaving') : c('sourceSave')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="gateway-toolbar-left">
+                  <label className="search" aria-label={c('search')}>
+                    <span className="gateway-search-input-wrap">
+                      <input
+                        className="input"
+                        type="search"
+                        aria-label={c('search')}
+                        value={searchText}
+                        placeholder={c('search')}
+                        onChange={(event) => setSearchText(event.target.value)}
+                      />
+                      <IconSearch
+                        size={16}
+                        className="gateway-search-icon"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </label>
+                  {query ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSearchText('')}
+                    >
+                      {c('clearSearch')}
+                    </button>
+                  ) : null}
+                  <label className={'gateway-filter-chip' + (changedOnly ? ' is-active' : '')}>
+                    <input
+                      type="checkbox"
+                      checked={changedOnly}
+                      onChange={(event) => setChangedOnly(event.target.checked)}
+                    />
+                    <span>{c('changedOnly')}</span>
+                  </label>
+                </div>
+                <div className="gateway-toolbar-right">
+                  <span
+                    className={'badge' + (dirtyCount > 0 ? ' gateway-dirty-badge' : '')}
+                    data-testid="gateway-dirty-count"
+                  >
+                    {c('dirtyCount', dirtyCount)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!dirtyCount}
+                    onClick={() => setDiffOpen(true)}
+                  >
+                    {c('viewChanges')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={!dirtyCount}
+                    onClick={() => setDiscardAll(true)}
+                  >
+                    {c('discard')}
+                  </button>
+                  {dirtyCount > 0 && view?.profileLimits?.singleEdit !== true ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      data-testid="gateway-save-all"
+                      disabled={
+                        saving !== '' ||
+                        savingAll ||
+                        groups.some(
+                          (group) =>
+                            (dirtyByGroup.get(group.id)?.length ?? 0) > 0 &&
+                            needsReconcile(group.id)
+                        ) ||
+                        families.some(
+                          (family) =>
+                            dirtyFamilies.has(family.family) &&
+                            needsReconcile(familyScope(family.family))
+                        ) ||
+                        !(
+                          groups.some(
+                            (group) =>
+                              (dirtyByGroup.get(group.id)?.length ?? 0) > 0 &&
+                              Boolean(groupViews.get(group.id)?.writable) &&
+                              !needsReconcile(group.id)
+                          ) ||
+                          families.some(
+                            (family) =>
+                              dirtyFamilies.has(family.family) &&
+                              Boolean(familyViews.get(family.family)?.writable) &&
+                              !needsReconcile(familyScope(family.family))
+                          )
+                        )
+                      }
+                      onClick={() => void saveAllDirty()}
+                    >
+                      {savingAll ? c('savingAllGroups') : c('saveAllGroups', dirtyCount)}
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            )}
           </div>
-        )}
-        <div className="gateway-header-actions">
-          <span
-            className={
-              'gateway-capability-status ' +
-              (capability?.mode === 'managed'
-                ? 'is-success'
-                : capability?.mode === 'external'
-                  ? 'is-info'
-                  : 'is-warning')
-            }
-            data-testid="gateway-capability"
-          >
-            <span className="status-dot" aria-hidden="true" />
-            {c(capabilityKey(capability?.mode))}
-          </span>
-        </div>
-      </div>
+        }
+      />
       {modeSwitchError ? (
         <p className="alert alert-warn" role="alert" data-testid="gateway-mode-switch-error">
           {modeSwitchError}
@@ -2402,109 +2637,6 @@ export function FreshGatewayWorkspace({
               </button>
             </p>
           ) : null}
-          <div className="workspace-toolbar">
-            <div className="gateway-toolbar-left">
-              <label className="search" aria-label={c('sourceSearchPlaceholder')}>
-                <span className="gateway-search-input-wrap">
-                  <svg
-                    className="gateway-search-icon"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="m21 21-4.3-4.3" />
-                  </svg>
-                  <input
-                    className="input"
-                    type="search"
-                    data-testid="gateway-source-search"
-                    aria-label={c('sourceSearchPlaceholder')}
-                    value={sourceSearchText}
-                    placeholder={c('sourceSearchPlaceholder')}
-                    onChange={(event) => {
-                      setSourceSearchText(event.target.value);
-                      setSourceSearchStats({ current: 0, total: 0 });
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        runSourceSearch(event.shiftKey ? 'prev' : 'next');
-                      }
-                    }}
-                  />
-                </span>
-              </label>
-              {sourceSearchStats.total > 0 ? (
-                <span className="badge" data-testid="gateway-source-search-count">
-                  {sourceSearchStats.current} / {sourceSearchStats.total}
-                </span>
-              ) : null}
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                disabled={!sourceSearchText}
-                onClick={() => runSourceSearch('prev')}
-              >
-                {c('sourceSearchPrev')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                disabled={!sourceSearchText}
-                onClick={() => runSourceSearch('next')}
-              >
-                {c('sourceSearchNext')}
-              </button>
-            </div>
-            <div className="gateway-toolbar-right">
-              <span
-                className={'badge' + (sourceDirty ? ' gateway-dirty-badge' : '')}
-                data-testid="gateway-source-status"
-              >
-                {sourceDirty ? c('sourceDirtyBadge') : c('sourceCleanBadge')}
-              </span>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                disabled={!sourceDirty}
-                data-testid="gateway-source-diff-btn"
-                onClick={() => setSourceDiffOpen(true)}
-              >
-                {c('sourceCompare')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                disabled={!sourceDirty}
-                data-testid="gateway-source-discard"
-                onClick={() => {
-                  clearScopeDrafts('source');
-                  setModeSwitchError('');
-                }}
-              >
-                {c('discard')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                disabled={needsReconcile('source') || !sourceDirty || !sourceView?.sourceWritable || saving !== '' || savingAll}
-                data-testid="gateway-source-save"
-                onClick={() => void saveSource()}
-              >
-                {saving === 'source' ? c('sourceSaving') : c('sourceSave')}
-              </button>
-              <span className="gateway-toolbar-divider" aria-hidden="true" />
-              {reloadButtonControl}
-              {modeSwitchControl}
-            </div>
-          </div>
           <div className="gateway-source-editor-shell">
             <SourceEditorErrorBoundary
               resetKey={sourceEditorRetryKey}
@@ -2541,120 +2673,57 @@ export function FreshGatewayWorkspace({
               </Suspense>
             </SourceEditorErrorBoundary>
           </div>
-        </div>
-      ) : (
-        <>
-      <div className="workspace-toolbar">
-        <div className="gateway-toolbar-left">
-          <label className="search" aria-label={c('search')}>
-            <span className="gateway-search-input-wrap">
-              <svg
-                className="gateway-search-icon"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.3-4.3" />
-              </svg>
-              <input
-                className="input"
-                type="search"
-                aria-label={c('search')}
-                value={searchText}
-                placeholder={c('search')}
-                onChange={(event) => setSearchText(event.target.value)}
-              />
-            </span>
-          </label>
-          {query ? (
+          <FloatingActionDock
+            open={isRouteVisible && editorMode === 'source' && sourceDirty}
+            variant="compact"
+            ariaLabel={c('sourceDirtyBadge')}
+            testId="gateway-source-dock"
+            leading={
+              <span className="badge gateway-dirty-badge" data-testid="gateway-source-dock-status">
+                {c('sourceDirtyBadge')}
+              </span>
+            }
+          >
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              onClick={() => setSearchText('')}
+              disabled={!sourceDirty}
+              data-testid="gateway-source-dock-diff-btn"
+              onClick={() => setSourceDiffOpen(true)}
             >
-              {c('clearSearch')}
+              {c('sourceCompare')}
             </button>
-          ) : null}
-          <label className={'gateway-filter-chip' + (changedOnly ? ' is-active' : '')}>
-            <input
-              type="checkbox"
-              checked={changedOnly}
-              onChange={(event) => setChangedOnly(event.target.checked)}
-            />
-            <span>{c('changedOnly')}</span>
-          </label>
-        </div>
-        <div className="gateway-toolbar-right">
-          <span
-            className={'badge' + (dirtyCount > 0 ? ' gateway-dirty-badge' : '')}
-            data-testid="gateway-dirty-count"
-          >
-            {c('dirtyCount', dirtyCount)}
-          </span>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            disabled={!dirtyCount}
-            onClick={() => setDiffOpen(true)}
-          >
-            {c('viewChanges')}
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            disabled={!dirtyCount}
-            onClick={() => setDiscardAll(true)}
-          >
-            {c('discard')}
-          </button>
-          {dirtyCount > 0 && view?.profileLimits?.singleEdit !== true ? (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={!sourceDirty}
+              data-testid="gateway-source-dock-discard"
+              onClick={() => {
+                clearScopeDrafts('source');
+                setModeSwitchError('');
+              }}
+            >
+              {c('discard')}
+            </button>
             <button
               type="button"
               className="btn btn-primary btn-sm"
-              data-testid="gateway-save-all"
               disabled={
+                needsReconcile('source') ||
+                !sourceDirty ||
+                !sourceView?.sourceWritable ||
                 saving !== '' ||
-                savingAll ||
-                groups.some(
-                  (group) =>
-                    (dirtyByGroup.get(group.id)?.length ?? 0) > 0 && needsReconcile(group.id)
-                ) ||
-                families.some(
-                  (family) =>
-                    dirtyFamilies.has(family.family) && needsReconcile(familyScope(family.family))
-                ) ||
-                !(
-                  groups.some(
-                    (group) =>
-                      (dirtyByGroup.get(group.id)?.length ?? 0) > 0 &&
-                      Boolean(groupViews.get(group.id)?.writable) &&
-                      !needsReconcile(group.id)
-                  ) ||
-                  families.some(
-                    (family) =>
-                      dirtyFamilies.has(family.family) &&
-                      Boolean(familyViews.get(family.family)?.writable) &&
-                      !needsReconcile(familyScope(family.family))
-                  )
-                )
+                savingAll
               }
-              onClick={() => void saveAllDirty()}
+              data-testid="gateway-source-dock-save"
+              onClick={() => void saveSource()}
             >
-              {savingAll ? c('savingAllGroups') : c('saveAllGroups', dirtyCount)}
+              {saving === 'source' ? c('sourceSaving') : c('sourceSave')}
             </button>
-          ) : null}
-          <span className="gateway-toolbar-divider" aria-hidden="true" />
-          {reloadButtonControl}
-          {modeSwitchControl}
+          </FloatingActionDock>
         </div>
-      </div>
+      ) : (
+        <>
       <div
         id="gateway-tabpanel"
         role="tabpanel"
@@ -2729,6 +2798,12 @@ export function FreshGatewayWorkspace({
             </div>
           </div>
         ) : null}
+        {(currentTab === 'common' && !isFiltering) ||
+        (Boolean(query) &&
+          !changedOnly &&
+          /plugin|插件|外掛|плагин/i.test(query)) ? (
+          <PluginRuntimeSwitch client={client} credential={credential} />
+        ) : null}
         {visibleGroups.map((group) => renderGroupCard(group))}
         {currentTab === 'upstream' && !isFiltering && activeUpstreamProvider === 'codex' ? (
           <div className="gateway-crosslink-bar" data-testid="gateway-codex-media-link">
@@ -2757,7 +2832,15 @@ export function FreshGatewayWorkspace({
             {visibleFamilies.map((family) => renderFamilyCard(family))}
           </div>
         ) : null}
-        {!visibleGroups.length && !visibleFamilies.length ? (
+        {!visibleGroups.length &&
+        !visibleFamilies.length &&
+        !(
+          Boolean(query) &&
+          !changedOnly &&
+          capability?.mode === 'managed' &&
+          capability?.writable &&
+          /plugin|插件|外掛|плагин/i.test(query)
+        ) ? (
           <p className="detail" data-testid="gateway-no-matches">
             {c('noMatches')}
           </p>

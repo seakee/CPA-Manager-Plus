@@ -33,7 +33,7 @@
 .content {
   display: flex;
   flex-direction: column;
-  gap: $spacing-xl;
+  gap: var(--app-gap);
 }
 
 .cardContent {

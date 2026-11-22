@@ -3,9 +3,7 @@ import { Link } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import type { MonitoringStatusTone } from '@/features/monitoring/hooks/useMonitoringData';
-import { formatCompactNumber } from '@/utils/usage';
 import styles from '../MonitoringCenterPage.module.scss';
-
 type MonitoringStatusHeaderProps = {
   showLoadingOverlay: boolean;
   monitoringUnavailable: boolean;
@@ -37,17 +35,9 @@ export function MonitoringStatusSummary({
   connectionLabel,
   lastRefreshedAt,
   locale,
-  scopedFailureCount,
-  totalCalls,
   t,
 }: MonitoringStatusSummaryProps) {
   const lastSyncLabel = shortLabel(t, 'monitoring.last_sync_short', 'monitoring.last_sync');
-  const recentFailuresLabel = shortLabel(
-    t,
-    'monitoring.recent_failures_short',
-    'monitoring.recent_failures'
-  );
-  const totalCallsLabel = shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls');
 
   return (
     <div className={styles.statusBar}>
@@ -59,15 +49,6 @@ export function MonitoringStatusSummary({
         <span title={t('monitoring.last_sync')}>
           {lastSyncLabel}:{' '}
           {lastRefreshedAt ? lastRefreshedAt.toLocaleTimeString(locale) : '--'}
-        </span>
-        <span
-          className={scopedFailureCount > 0 ? styles.statusMetaWarn : undefined}
-          title={t('monitoring.recent_failures')}
-        >
-          {`${recentFailuresLabel}: ${scopedFailureCount}`}
-        </span>
-        <span title={t('monitoring.total_calls')}>
-          {`${totalCallsLabel}: ${formatCompactNumber(totalCalls)}`}
         </span>
       </div>
     </div>

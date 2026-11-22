@@ -82,9 +82,11 @@ describe('accounts workspace wiring', () => {
   });
 
   it('separates credential list filters from the workspace navigation', () => {
+    expect(accountsPageSource).toContain('<PageControlBar');
     expect(accountsPageSource).toContain(
-      '<section className={styles.controlsFilterPanel}>{renderToolbar()}</section>'
+      "toolbar={activeView === 'accounts' ? renderToolbar() : null}"
     );
+    expect(accountsPageSource).not.toContain('controlsFilterPanel');
     expect(accountsPageSource).not.toContain('controlsFilterSection');
   });
 

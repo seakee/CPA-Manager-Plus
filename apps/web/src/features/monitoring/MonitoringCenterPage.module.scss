@@ -12,7 +12,7 @@
 .page {
   container: monitoring-page / inline-size;
   display: grid;
-  gap: 20px;
+  gap: var(--app-gap);
   min-width: 0;
 }
 
@@ -38,9 +38,9 @@
 .statusBar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
@@ -66,8 +66,8 @@
 .statusMeta {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  flex-wrap: nowrap;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
 }
@@ -82,6 +82,7 @@
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -108,10 +109,10 @@
   border-radius: var(--app-radius-lg);
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
 }
 
-.masthead,
 .panel,
 .summaryCard {
   position: relative;
@@ -119,64 +120,8 @@
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--app-specular-highlight);
 }
-
-.masthead {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 24px;
-  padding: 28px;
-}
-
-.mastheadGlow {
-  display: none;
-}
-
-.mastheadCopy {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.eyebrow {
-  display: inline-flex;
-  width: fit-content;
-  align-items: center;
-  min-height: var(--control-height-xs);
-  padding: 0 12px;
-  border-radius: var(--app-radius-pill);
-  border: 1px solid color-mix(in srgb, var(--data-blue-base) 18%, transparent);
-  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
-  color: var(--primary-text);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-.title {
-  margin: 0;
-  font-size: 42px;
-  line-height: 0.98;
-  letter-spacing: 0;
-}
-
-.subtitle {
-  margin: 0;
-  max-width: 760px;
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.mastheadControls {
-  display: grid;
-  gap: 14px;
-  min-width: 420px;
-  justify-items: end;
-}
-
 .segmentedControl {
   display: inline-flex;
   align-items: center;
@@ -219,19 +164,6 @@
     box-shadow 0.18s ease;
 }
 
-.actionBar {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-lg);
-  background: var(--bg-primary);
-  box-shadow: var(--shadow);
-}
-
 .actionGroup {
   display: flex;
   align-items: center;
@@ -239,20 +171,6 @@
   gap: 8px;
   min-width: 0;
 }
-
-.actionBarMeta {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: nowrap;
-  gap: 8px;
-  min-width: 0;
-
-  .statusBar {
-    min-width: 0;
-  }
-}
-
 .actionButton,
 .filterToggleChip {
   display: inline-flex;
@@ -527,30 +445,50 @@
   background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
 }
 
-.tabButtonActiveCard:first-child,
-.tabButtonActiveCard:first-child::after {
-  border-top-left-radius: calc(var(--app-radius-md) - 1px);
-  border-bottom-left-radius: calc(var(--app-radius-md) - 1px);
+.tabItemContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
-.tabButtonActiveCard:last-child,
-.tabButtonActiveCard:last-child::after {
-  border-top-right-radius: calc(var(--app-radius-md) - 1px);
-  border-bottom-right-radius: calc(var(--app-radius-md) - 1px);
+.tabIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.85;
 }
 
-.tabButtonCard:hover + .tabButtonActiveCard::after {
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+.tabLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.tabButtonActiveCard:has(+ .tabButtonCard:hover)::after {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+.tabBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
-.tabButtonActiveCard + .tabButtonCard {
-  border-left-color: transparent;
+.tabBadgeActive {
+  background: color-mix(in srgb, var(--data-blue-base) 16%, transparent);
+  color: var(--primary-text);
+}
+
+.tabBadgeFailure {
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
 }
 
 .tabButtonActiveCard .tabBadge {
@@ -569,7 +507,7 @@
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
-  box-shadow: var(--shadow);
+  box-shadow: var(--app-specular-highlight);
   padding: 0;
 }
 
@@ -578,9 +516,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   min-width: 0;
-  padding: 12px 14px 10px;
-  background: color-mix(in srgb, var(--surface-subtle) 24%, var(--bg-primary));
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .dataPanelTabs {
@@ -607,7 +547,7 @@
 }
 
 .dataPanelBody {
-  padding: 0 14px 14px;
+  padding: 14px 16px 16px;
 }
 
 .dataPanelTabPanel[hidden] {
@@ -1106,31 +1046,28 @@
   flex: 1 1 680px;
 }
 
-.toolbarPanel,
 .pricingPanel,
 .accountPanel,
 .realtimePanel {
   background: var(--bg-primary);
 }
 
-.controlBar,
-.toolbarControls {
-  align-items: center;
+.filterToolbar {
+  display: grid;
   gap: 10px;
-  margin-bottom: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  min-width: 0;
+}
+
+.filterToolbar .errorBox,
+.filterToolbar .callout {
+  margin-top: 0;
 }
 
 .controlBar {
   display: grid;
   grid-template-columns: auto minmax(160px, 1fr) auto;
-}
-
-.toolbarControls {
-  display: flex;
-  justify-content: space-between;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
 }
 
 .filterBar {
@@ -1236,16 +1173,18 @@
   max-width: 100%;
 }
 
-.inlineMetrics > span {
+.inlineMetrics > span,
+.inlineMetricStatic {
   display: inline-flex;
   align-items: center;
   min-height: var(--control-height-sm);
   padding: 0 10px;
   border-radius: var(--app-radius-sm);
-  border: 1px solid var(--border-color);
-  background: var(--monitor-surface-elevated);
+  border: 1px solid transparent;
+  background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1256,32 +1195,25 @@
 }
 
 .inlineMetrics .apiKeyCountPill {
-  border-color: color-mix(in srgb, var(--data-blue-base) 28%, var(--border-color));
+  border-color: color-mix(in srgb, var(--data-blue-base) 22%, transparent);
   background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
   color: var(--primary-text);
-  font-weight: 700;
+  font-weight: 600;
 }
 
+.filterToggleButton,
 .filterToggleChip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  padding: 0 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--monitor-surface-elevated);
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
 }
 
+.filterToggleButton svg,
 .filterToggleChip svg {
   color: var(--status-display-danger);
 }
 
+.paginationInfoSuffix {
+  color: var(--text-tertiary, var(--text-secondary));
+}
 .filterToggleChipActive {
   border-color: var(--data-badge-danger-border);
   background: var(--data-badge-danger-bg);
@@ -1869,26 +1801,8 @@
 @container monitoring-page (max-width: 1240px) {
   .statusBar,
   .statusMeta {
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
-
-  .actionBarMeta {
-    justify-content: flex-end;
-  }
-
-  .masthead {
-    grid-template-columns: 1fr;
-  }
-
-  .mastheadControls {
-    min-width: 0;
-    justify-items: start;
-  }
-
-  .toolbarFoot {
-    grid-template-columns: 1fr;
-  }
-
   .actionGroup,
   .quickLinkRow {
     justify-content: flex-start;
@@ -1909,23 +1823,9 @@
 }
 
 @container monitoring-page (max-width: 960px) {
-  .actionBar {
-    grid-template-columns: 1fr;
-  }
-
-  .actionBarMeta,
   .statusBar,
   .statusMeta {
     justify-content: flex-start;
-  }
-
-  .actionBarMeta {
-    width: 100%;
-  }
-
-  .statusBar,
-  .statusMeta,
-  .actionBarMeta {
     flex-wrap: wrap;
   }
 
@@ -2036,7 +1936,7 @@
 
 @container monitoring-page (max-width: 768px) {
   .page {
-    gap: 16px;
+    gap: var(--app-gap);
   }
 
   .panelSubtitle {
@@ -2044,7 +1944,6 @@
     line-height: 1.55;
   }
 
-  .masthead,
   .panel,
   .summaryCard {
     border-radius: 16px;
@@ -2058,21 +1957,13 @@
     border-radius: var(--app-radius-md);
   }
 
-  .masthead,
   .panel {
     padding: 18px;
   }
 
-  .title {
-    font-size: 34px;
-  }
-
   .segmentedControl,
   .controlBar,
-  .toolbarControls,
-  .actionBar,
   .actionGroup,
-  .actionBarMeta,
   .refreshControls,
   .filterSearchInputWrap,
   .dataPanelTabs,

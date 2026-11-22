@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import '../i18n';
@@ -100,8 +101,33 @@ export function FreshManagedResources({
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [locks.keys, locks.retry]);
 
+  const isPluginResourceRoute = route === '/plugin-pages' || route.startsWith('/plugin-pages/');
+  const bannerNode = !isPluginResourceRoute ? (
+    <>
+      {rebound && (
+        <p className="alert alert-info" role="status" data-testid="rebind-recovered">
+          {rebound}
+        </p>
+      )}
+      {(locks.keys || locks.retry) && (
+        <p className="alert alert-warn" role="status">
+          {t(locks.keys ? 'keysExitBlocked' : 'retryNeedsReconciliation')}
+        </p>
+      )}
+    </>
+  ) : null;
+  const bannerTarget =
+    typeof document !== 'undefined' && typeof document.getElementById === 'function'
+      ? document.getElementById('main-content-banners')
+      : null;
+
   return (
     <>
+      {bannerNode
+        ? bannerTarget
+          ? createPortal(bannerNode, bannerTarget)
+          : bannerNode
+        : null}
       {/* 客户端 API 密钥保留面板 */}
       <RetainedRoutePanel name="keys" active={route === '/api-keys'} language={language}>
         <FreshManagedKeysPage
@@ -133,11 +159,6 @@ export function FreshManagedResources({
         />
       </RetainedRoutePanel>
 
-      {rebound && (
-        <p className="alert alert-info" role="status" data-testid="rebind-recovered">
-          {rebound}
-        </p>
-      )}
       {externalProfile && (
         <FreshRebindDialog
           open={rebindOpen}
@@ -154,12 +175,6 @@ export function FreshManagedResources({
             setReloadToken((token) => token + 1);
           }}
         />
-      )}
-
-      {(locks.keys || locks.retry) && (
-        <p className="alert alert-warn" role="status">
-          {t(locks.keys ? 'keysExitBlocked' : 'retryNeedsReconciliation')}
-        </p>
       )}
     </>
   );

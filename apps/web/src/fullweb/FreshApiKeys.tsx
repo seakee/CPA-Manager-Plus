@@ -6,6 +6,8 @@ import { Input } from '../components/ui/Input';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
 import { Select } from '../components/ui/Select';
+import { PageControlBar } from '../components/common/PageControlBar';
+import { PaginationFooter } from '../components/common/PaginationFooter';
 import { SortControl, type SortDirection } from '../components/ui/SortControl';
 import {
   formatKeyPageSizeOption,
@@ -127,6 +129,8 @@ const KEY_SORT_DEFAULT_DIRECTIONS: Record<KeySortKey, SortDirection> = {
   calls24h: 'desc',
   name: 'asc',
 };
+
+const KEY_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
 
 export function FreshApiKeys({
   client,
@@ -1811,22 +1815,6 @@ export function FreshApiKeys({
   const pagedKeys = visibleKeys.slice(startIndex, startIndex + pageSize);
   const startItem = visibleKeys.length === 0 ? 0 : startIndex + 1;
   const endItem = Math.min(startIndex + pageSize, visibleKeys.length);
-  const [pageDraft, setPageDraft] = useState('1');
-
-  useEffect(() => {
-    setPageDraft(String(currentPage));
-  }, [currentPage]);
-
-  function commitPageDraft() {
-    const parsed = Number.parseInt(pageDraft, 10);
-    const clamped = Number.isFinite(parsed)
-      ? Math.min(Math.max(1, parsed), totalPages)
-      : currentPage;
-    setPageDraft(String(clamped));
-    if (clamped !== currentPage) {
-      setPage(clamped);
-    }
-  }
   const locked =
     busy ||
     createOpen ||
@@ -1893,8 +1881,10 @@ export function FreshApiKeys({
         {t('keysTitle')}
       </h1>
       <p className="sr-only">{pageDescription || k('description')}</p>
-      <section className="card key-controls-panel" data-testid="key-controls-bar">
-        <div className="key-controls-tabs-row">
+      <PageControlBar
+        testId="key-controls-bar"
+        toolbarTestId="key-filter-toolbar"
+        leading={
           <SegmentedTabs<'keys' | 'access'>
             ariaLabel={k('workspaceTabsLabel')}
             idBase="key-workspace-tab-btn"
@@ -1932,7 +1922,9 @@ export function FreshApiKeys({
               },
             ]}
           />
-          <div className="key-header-actions">
+        }
+        actions={
+          <>
             <Button
               type="button"
               variant="secondary"
@@ -1949,6 +1941,7 @@ export function FreshApiKeys({
                 type="button"
                 variant="primary"
                 size="sm"
+                data-testid="key-create-open"
                 aria-label={t('keysCreate')}
                 onClick={() => {
                   setConfirmed(false);
@@ -1969,9 +1962,130 @@ export function FreshApiKeys({
                 {t('keysCreate')}
               </Button>
             )}
-          </div>
-        </div>
-      </section>
+          </>
+        }
+        toolbar={
+          workspaceTab === 'keys' && keys && keys.length > 0 ? (
+            <>
+              <div className="key-filter-tabs-row" data-testid="key-lifecycle-tabs">
+                <SegmentedTabs<'saved' | 'all' | 'replaced'>
+                  ariaLabel={k('lifecycle')}
+                  idBase="key-lifecycle-tab-btn"
+                  className="key-lifecycle-tabs"
+                  variant="joined"
+                  responsiveFullWidth={false}
+                  activeTab={filter}
+                  onChange={(value) => {
+                    setFilter(value);
+                    setPage(1);
+                  }}
+                  items={(['saved', 'all', 'replaced'] as const).map((value) => {
+                    const count =
+                      keys === null
+                        ? '—'
+                        : value === 'all'
+                          ? keys.length
+                          : value === 'saved'
+                            ? savedCount
+                            : replacedCount;
+                    const tabLabel = k(
+                      value === 'saved' ? 'tabActive' : value === 'all' ? 'tabAll' : 'tabRevoked'
+                    );
+                    return {
+                      id: value,
+                      testId: `key-filter-${value}`,
+                      label: (
+                        <span className="key-tab-label">
+                          <span>{tabLabel}</span>
+                          <span className="key-tab-badge">{count}</span>
+                        </span>
+                      ),
+                    };
+                  })}
+                />
+              </div>
+              <div className="key-filter-toolbar">
+                <div className="key-search-field">
+                  <Input
+                    type="search"
+                    className="key-search-input"
+                    data-testid="key-search-input"
+                    aria-label={k('search')}
+                    placeholder={k('search')}
+                    value={search}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setPage(1);
+                    }}
+                    rightElement={<FullWebIcon name="search" size={16} />}
+                  />
+                </div>
+                <div className="key-filter-toolbar-selects">
+                  <SortControl<KeySortKey>
+                    options={keySortOptions}
+                    value={sortBy.key}
+                    direction={sortBy.direction}
+                    onChangeValue={(nextKey) => {
+                      setSortBy((prev) => ({
+                        key: nextKey,
+                        direction:
+                          prev.key === nextKey ? prev.direction : KEY_SORT_DEFAULT_DIRECTIONS[nextKey],
+                      }));
+                      setPage(1);
+                    }}
+                    onToggleDirection={() => {
+                      setSortBy((prev) => ({
+                        key: prev.key,
+                        direction: prev.direction === 'asc' ? 'desc' : 'asc',
+                      }));
+                      setPage(1);
+                    }}
+                    ariaLabel={`${k('sortLabel')}: ${selectedSortLabel}`}
+                    directionLabel={sortDirectionLabel}
+                    dropdownAlign="right"
+                  />
+                  {filter !== 'replaced' &&
+                    (runtimeFilter !== 'all' || effectiveCount < savedCount) && (
+                      <Select
+                        value={runtimeFilter}
+                        onChange={(next) => {
+                          setRuntimeFilter(next as 'all' | 'effective' | 'attention');
+                          setPage(1);
+                        }}
+                        options={[
+                          { value: 'all', label: k('runtimeFilterAll') },
+                          { value: 'effective', label: k('runtimeFilterEffective') },
+                          { value: 'attention', label: k('runtimeFilterAttention') },
+                        ]}
+                        ariaLabel={k('runtimeFilter')}
+                        fullWidth={false}
+                        className="key-filter-select"
+                        triggerClassName="key-filter-select-trigger"
+                      />
+                    )}
+                  {hasActiveFilter && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="key-clear-filter-btn"
+                      onClick={() => {
+                        setSearch('');
+                        setFilter('saved');
+                        setRuntimeFilter('all');
+                        setSortBy({ key: 'created', direction: 'desc' });
+                        setPage(1);
+                      }}
+                    >
+                      {k('clear')}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : null
+        }
+      />
       {(blocker ?? usageBlocker) && (
         <FreshExternalBlocker
           state={(blocker ?? usageBlocker)!}
@@ -2448,124 +2562,6 @@ export function FreshApiKeys({
         className="key-list-workspace"
         hidden={workspaceTab !== 'keys'}
       >
-        {keys && keys.length > 0 && (
-          <section className="card key-controls-filter-panel" data-testid="key-filter-toolbar">
-            <div className="key-filter-tabs-row">
-              <SegmentedTabs<'saved' | 'all' | 'replaced'>
-                ariaLabel={k('lifecycle')}
-                idBase="key-lifecycle-tab-btn"
-                className="key-lifecycle-tabs"
-                variant="joined"
-                responsiveFullWidth={false}
-                activeTab={filter}
-                onChange={(value) => {
-                  setFilter(value);
-                  setPage(1);
-                }}
-                items={(['saved', 'all', 'replaced'] as const).map((value) => {
-                  const count =
-                    keys === null
-                      ? '—'
-                      : value === 'all'
-                        ? keys.length
-                        : value === 'saved'
-                          ? savedCount
-                          : replacedCount;
-                  const tabLabel = k(
-                    value === 'saved' ? 'tabActive' : value === 'all' ? 'tabAll' : 'tabRevoked'
-                  );
-                  return {
-                    id: value,
-                    testId: `key-filter-${value}`,
-                    label: (
-                      <span className="key-tab-label">
-                        <span>{tabLabel}</span>
-                        <span className="key-tab-badge">{count}</span>
-                      </span>
-                    ),
-                  };
-                })}
-              />
-            </div>
-            <div className="key-filter-toolbar">
-              <div className="key-search-field">
-                <Input
-                  type="search"
-                  className="key-search-input"
-                  aria-label={k('search')}
-                  placeholder={k('search')}
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setPage(1);
-                  }}
-                  rightElement={<FullWebIcon name="search" size={16} />}
-                />
-              </div>
-              <div className="key-filter-toolbar-selects">
-                <SortControl<KeySortKey>
-                  options={keySortOptions}
-                  value={sortBy.key}
-                  direction={sortBy.direction}
-                  onChangeValue={(nextKey) => {
-                    setSortBy((prev) => ({
-                      key: nextKey,
-                      direction:
-                        prev.key === nextKey ? prev.direction : KEY_SORT_DEFAULT_DIRECTIONS[nextKey],
-                    }));
-                    setPage(1);
-                  }}
-                  onToggleDirection={() => {
-                    setSortBy((prev) => ({
-                      key: prev.key,
-                      direction: prev.direction === 'asc' ? 'desc' : 'asc',
-                    }));
-                    setPage(1);
-                  }}
-                  ariaLabel={`${k('sortLabel')}: ${selectedSortLabel}`}
-                  directionLabel={sortDirectionLabel}
-                  dropdownAlign="right"
-                />
-                {filter !== 'replaced' &&
-                  (runtimeFilter !== 'all' || effectiveCount < savedCount) && (
-                    <Select
-                      value={runtimeFilter}
-                      onChange={(next) => {
-                        setRuntimeFilter(next as 'all' | 'effective' | 'attention');
-                        setPage(1);
-                      }}
-                      options={[
-                        { value: 'all', label: k('runtimeFilterAll') },
-                        { value: 'effective', label: k('runtimeFilterEffective') },
-                        { value: 'attention', label: k('runtimeFilterAttention') },
-                      ]}
-                      ariaLabel={k('runtimeFilter')}
-                      fullWidth={false}
-                      className="key-filter-select"
-                      triggerClassName="key-filter-select-trigger"
-                    />
-                  )}
-                {hasActiveFilter && (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="key-clear-filter-btn"
-                    onClick={() => {
-                      setSearch('');
-                      setFilter('saved');
-                      setRuntimeFilter('all');
-                      setSortBy({ key: 'created', direction: 'desc' });
-                      setPage(1);
-                    }}
-                  >
-                    {k('clear')}
-                  </Button>
-                )}
-              </div>
-            </div>
-          </section>
-        )}
         <div className="key-summary-grid" data-testid="key-summary-grid">
           {(
             [
@@ -2984,76 +2980,40 @@ export function FreshApiKeys({
             </div>
           )}
           {visibleKeys.length > 0 && (
-            <div className="key-pagination-bar" data-testid="key-pagination-bar">
-              <div className="key-pagination-info">
-                {formatKeyPaginationInfo(
-                  currentPage,
-                  totalPages,
-                  startItem,
-                  endItem,
-                  visibleKeys.length
-                )}
-              </div>
-              <div className="key-pagination-controls">
-                <label className="key-page-size-field">
-                  <span>{k('paginationPageSizeLabel')}</span>
-                  <Select
-                    value={String(pageSize)}
-                    onChange={(val) => {
-                      setPageSize(Number(val));
-                      setPage(1);
-                    }}
-                    options={[10, 20, 50].map((size) => ({
-                      value: String(size),
-                      label: formatKeyPageSizeOption(size),
-                    }))}
-                    ariaLabel={k('paginationPageSizeLabel')}
-                    fullWidth={false}
-                    className="key-page-size-select"
-                    triggerClassName="key-page-size-trigger"
-                  />
-                </label>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  data-testid="key-pagination-prev"
-                  disabled={currentPage <= 1}
-                  onClick={() => setPage((p) => Math.max(1, Math.min(p, totalPages) - 1))}
-                >
-                  {k('paginationPrev')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  data-testid="key-pagination-next"
-                  disabled={currentPage >= totalPages}
-                  onClick={() => setPage((p) => Math.min(totalPages, Math.max(1, p) + 1))}
-                >
-                  {k('paginationNext')}
-                </Button>
-                <label className="key-page-jump-field">
-                  <span>{k('paginationJumpPrefix')}</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={Math.max(totalPages, 1)}
-                    value={pageDraft}
-                    data-testid="key-pagination-jump-input"
-                    aria-label={k('paginationJumpLabel')}
-                    onChange={(event) => setPageDraft(event.target.value)}
-                    onBlur={commitPageDraft}
-                    onKeyDown={(event) => {
-                      if (event.key !== 'Enter') return;
-                      event.preventDefault();
-                      commitPageDraft();
-                    }}
-                  />
-                  <span>{k('paginationJumpSuffix')}</span>
-                </label>
-              </div>
-            </div>
+            <PaginationFooter
+              variant="flush"
+              currentPage={currentPage}
+              totalPages={totalPages}
+              infoText={formatKeyPaginationInfo(
+                currentPage,
+                totalPages,
+                startItem,
+                endItem,
+                visibleKeys.length
+              )}
+              pageSize={pageSize}
+              pageSizeOptions={KEY_PAGE_SIZE_OPTIONS}
+              pageSizeLabel={k('paginationPageSizeLabel')}
+              pageSizeAriaLabel={k('paginationPageSizeLabel')}
+              formatPageSizeOption={formatKeyPageSizeOption}
+              onPageChange={setPage}
+              onPageSizeChange={(next) => {
+                setPageSize(next);
+                setPage(1);
+              }}
+              prevLabel={k('paginationPrev')}
+              nextLabel={k('paginationNext')}
+              showPageJump
+              jumpPrefixLabel={k('paginationJumpPrefix')}
+              jumpSuffixLabel={k('paginationJumpSuffix')}
+              jumpInputAriaLabel={k('paginationJumpLabel')}
+              testIds={{
+                root: 'key-pagination-bar',
+                prev: 'key-pagination-prev',
+                next: 'key-pagination-next',
+                jumpInput: 'key-pagination-jump-input',
+              }}
+            />
           )}
         </div>
         {gatewayPending && (

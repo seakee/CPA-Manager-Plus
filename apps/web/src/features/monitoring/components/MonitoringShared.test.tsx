@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import cardStyles from '@/components/common/MetricSummaryCard.module.scss';
 import { SummaryCard } from './MonitoringShared';
 
 describe('SummaryCard', () => {
@@ -20,9 +21,9 @@ describe('SummaryCard', () => {
       </div>
     );
 
-    expect(html.match(/summaryIcon/g)).toHaveLength(6);
+    expect(html.match(new RegExp(cardStyles.icon, 'g'))).toHaveLength(6);
     icons.forEach((icon) => expect(html).toContain(`data-summary-icon="${icon}"`));
-    expect(html.match(/summaryCard/g)?.length).toBeGreaterThanOrEqual(6);
+    expect(html.match(new RegExp(cardStyles.card, 'g'))?.length).toBeGreaterThanOrEqual(6);
   });
 
   it('renders credential summary icons with status-specific semantics', () => {
@@ -50,6 +51,6 @@ describe('SummaryCard', () => {
     );
 
     icons.forEach((icon) => expect(html).toContain(`data-summary-icon="${icon}"`));
-    expect(html).toContain('--summary-accent:var(--data-slate-base)');
+    expect(html).toContain(cardStyles.accentNeutral);
   });
 });

@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import {
   publishAccountCredentialMutationRevision,
   useAuthStore,
@@ -364,26 +365,24 @@ export function OAuthPage() {
     };
   }, [clearTimers]);
 
-  useEffect(() => {
+  const loadPluginProviders = useCallback(async () => {
     if (!pluginOAuthAvailable) return;
-
-    let cancelled = false;
     const loadConnectionFingerprint = connectionFingerprint;
-    pluginsApi
-      .list(requestScope)
-      .then((response) => {
-        if (cancelled || connectionFingerprintRef.current !== loadConnectionFingerprint) return;
-        setPluginOAuthPlugins(response.plugins.filter((plugin) => plugin.supportsOAuth));
-      })
-      .catch(() => {
-        if (cancelled || connectionFingerprintRef.current !== loadConnectionFingerprint) return;
-        setPluginOAuthPlugins([]);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const response = await pluginsApi.list(requestScope);
+      if (connectionFingerprintRef.current !== loadConnectionFingerprint) return;
+      setPluginOAuthPlugins(response.plugins.filter((plugin) => plugin.supportsOAuth));
+    } catch {
+      if (connectionFingerprintRef.current !== loadConnectionFingerprint) return;
+      setPluginOAuthPlugins([]);
+    }
   }, [connectionFingerprint, pluginOAuthAvailable, requestScope]);
+
+  useEffect(() => {
+    void loadPluginProviders();
+  }, [loadPluginProviders]);
+
+  useHeaderRefresh(loadPluginProviders, pluginOAuthAvailable);
 
   const getProviderDefinition = useCallback(
     (provider: OAuthProvider) => providers.find((item) => item.id === provider),

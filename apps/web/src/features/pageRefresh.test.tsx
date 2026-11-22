@@ -1227,7 +1227,8 @@ describe('page refresh interactions', () => {
     await act(async () => { old.reject(new Error('stale-offline')); await first; });
     expect(text(renderer.root)).not.toContain('stale-offline');
     expect(text(renderer.root)).toContain('current-offline');
-    expect(text(renderer.root)).toContain('plugin_store.global_enabled');
+    expect(text(renderer.root)).toContain('plugin_store.sources');
+    expect(text(renderer.root)).toContain('plugins');
   });
 
   it('releases refresh busy state when plugin mutation reconciliation supersedes a read', async () => {

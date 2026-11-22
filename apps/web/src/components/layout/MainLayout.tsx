@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { configurationText } from '@/i18n/configurationWorkspace';
 import { Button } from '@/components/ui/Button';
+import { AppFooter } from '@/components/common/AppFooter';
 import { PageTransition } from '@/components/common/PageTransition';
 import { DatabaseMaintenanceBanner } from '@/components/common/DatabaseMaintenanceBanner';
 import { DatabaseMaintenanceProvider } from '@/components/common/DatabaseMaintenanceContext';
@@ -366,6 +367,9 @@ function MainLayoutContent({
 
   const fullBrandName = 'CPA Manager Plus';
   const isLogsPage = routePathname.startsWith('/logs');
+  const logsTabParam = isLogsPage ? new URLSearchParams(location.search).get('tab') : null;
+  const isLogsViewportLocked =
+    isLogsPage && logsTabParam !== 'errors' && logsTabParam !== 'settings';
   const isPluginResourcePage = routePathname.startsWith('/plugin-pages');
   const showSidebarLabels = !sidebarCollapsed || sidebarOpen;
   const configPluginsEnabled = config?.pluginsEnabled;
@@ -1534,7 +1538,7 @@ function MainLayoutContent({
         <div
           className={[
             'content',
-            isLogsPage ? 'content-logs' : '',
+            isLogsViewportLocked ? 'content-logs' : '',
             isPluginResourcePage ? 'content-plugin-resource' : '',
           ]
             .filter(Boolean)
@@ -1544,13 +1548,16 @@ function MainLayoutContent({
           <main
             className={[
               'main-content',
-              isLogsPage ? 'main-content-logs' : '',
+              isLogsViewportLocked ? 'main-content-logs' : '',
               isPluginResourcePage ? 'main-content-plugin-resource' : '',
             ]
               .filter(Boolean)
               .join(' ')}
           >
             <DatabaseMaintenanceBanner />
+            {!isPluginResourcePage ? (
+              <div id="main-content-banners" className="main-content-banners" />
+            ) : null}
             <PageTransition
               key={routeBase || 'main'}
               render={(location) => {
@@ -1577,6 +1584,7 @@ function MainLayoutContent({
               scrollContainerRef={contentRef}
             />
             {contentFooter}
+            {!isPluginResourcePage ? <AppFooter compact={isLogsViewportLocked} /> : null}
           </main>
         </div>
       </div>

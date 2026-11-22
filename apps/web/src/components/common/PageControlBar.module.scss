@@ -1,0 +1,78 @@
+@use '../../styles/mixins' as *;
+
+.root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: visible;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
+  box-shadow: var(--app-specular-highlight);
+
+  @include mobile {
+    border-radius: 16px;
+  }
+}
+
+.topRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  min-width: 0;
+  padding: 12px 16px;
+
+  @include mobile {
+    padding: 10px 12px;
+  }
+}
+
+.leading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+
+  :global(svg) {
+    display: block;
+  }
+}
+
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  overflow: visible;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom-left-radius: var(--app-radius-lg);
+  border-bottom-right-radius: var(--app-radius-lg);
+  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--bg-primary));
+
+  @include mobile {
+    padding: 10px 12px;
+    border-bottom-left-radius: 16px;
+    border-bottom-right-radius: 16px;
+  }
+}
+
+.toolbarOnly {
+  border-top: 0;
+  border-radius: inherit;
+}

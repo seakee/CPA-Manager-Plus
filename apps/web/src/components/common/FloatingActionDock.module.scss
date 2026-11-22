@@ -1,0 +1,107 @@
+@use '../../styles/mixins' as *;
+
+.container {
+  position: fixed;
+  left: var(--content-center-x, 50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 1600;
+  box-sizing: border-box;
+  max-width: calc(100vw - 24px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.containerBar {
+  width: min(920px, calc(100vw - 24px));
+}
+
+.containerCompact {
+  width: fit-content;
+}
+
+.surface {
+  pointer-events: auto;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--floating-surface);
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
+}
+
+.surfaceBar {
+  width: 100%;
+}
+
+.surfaceCompact {
+  display: inline-flex;
+}
+
+.leading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  > :global(.btn),
+  > :global(.select-trigger),
+  > :global(.dropdown-trigger) {
+    flex: 0 0 auto;
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
+  }
+}
+
+@media (max-width: 1200px) {
+  .container {
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 16px);
+  }
+
+  .containerBar {
+    width: calc(100vw - 16px);
+  }
+}
+
+@include mobile {
+  .surface {
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border-radius: 16px;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

@@ -1,126 +1,117 @@
 @use '@/styles/variables' as v;
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.headerBar {
   min-width: 0;
-  padding: 12px 24px;
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop-filter);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--app-radius-md);
+}
 
-  .headerLeft,
-  .headerRight {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    gap: 24px;
-  }
+.headerLeading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  min-width: 0;
+}
 
-  .headerLeft {
-    flex: 1 1 auto;
-    flex-wrap: wrap;
-    overflow: hidden;
-  }
+.connectionStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--control-height-sm);
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
+  white-space: nowrap;
 
-  .headerRight {
-    flex: 0 1 auto;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
+  .statusDot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
 
-  .connectionStatus {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-
-    .statusDot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      &.connected {
-        background: var(--status-graphic-success);
-        box-shadow: 0 0 8px color-mix(in srgb, var(--status-graphic-success) 65%, transparent);
-      }
-      &.connecting {
-        background: var(--color-warning);
-        box-shadow: 0 0 8px color-mix(in srgb, var(--data-amber-base) 60%, transparent);
-        animation: pulse 1.5s infinite;
-      }
-      &.disconnected {
-        background: var(--color-danger);
-        box-shadow: 0 0 8px color-mix(in srgb, var(--data-red-base) 60%, transparent);
-      }
+    &.connected {
+      background: var(--status-graphic-success);
     }
 
-    .statusInfo {
-      display: flex;
-      flex-direction: column;
-      .statusLabel { font-size: 11px; color: var(--text-tertiary); line-height: 1; margin-bottom: 2px; }
-      .statusValue {
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--data-badge-success-text);
-      }
+    &.connecting {
+      background: var(--color-warning);
+      animation: pulse 1.5s infinite;
+    }
+
+    &.disconnected {
+      background: var(--color-danger);
     }
   }
 
-  .apiBaseBlock {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    .apiLabel { font-size: 11px; color: var(--text-tertiary); line-height: 1; margin-bottom: 2px; }
-    .apiValue {
-      max-width: min(36vw, 520px);
-      overflow: hidden;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--primary-text);
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+  .statusLabel {
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
-  .timeDisplay {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    .time { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
-    .date { font-size: 12px; color: var(--text-tertiary); }
+  .statusValue {
+    font-size: 12.5px;
+    font-weight: 600;
   }
 
-  .headerActions {
-    display: flex;
-    gap: 8px;
+  .statusValueConnected {
+    color: var(--data-badge-success-text);
+  }
 
-    .actionBtn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      min-height: 36px;
-      padding: 8px 14px;
-      background: var(--app-surface-muted);
-      border: 1px solid var(--app-border);
-      border-radius: var(--app-radius-md);
-      color: var(--text-primary);
-      font-size: 13px;
-      font-weight: 500;
-      transition: all 0.2s;
-      cursor: pointer;
+  .statusValueConnecting {
+    color: var(--data-badge-warning-text);
+  }
 
-      &:hover {
-        background: var(--app-accent-soft);
-        border-color: var(--color-primary);
-        transform: translateY(-1px);
-      }
-    }
+  .statusValueDisconnected {
+    color: var(--data-badge-danger-text);
   }
 }
 
+.apiBaseBlock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  .apiLabel {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  .apiValue {
+    max-width: min(36vw, 480px);
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.refreshedMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-height-sm);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .overviewRow {
   display: grid;
   grid-template-columns: 1fr;
@@ -353,37 +344,15 @@
 }
 
 @media (max-width: 1024px) {
-  .header {
-    flex-wrap: wrap;
-    gap: 12px;
-
-    .headerRight {
-      margin-left: auto;
-    }
-  }
-
   .bottomSummaryRow {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 768px) {
-  .header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 16px;
-
-    .headerLeft,
-    .headerRight {
-      justify-content: space-between;
-      gap: 12px;
-    }
-
-    .apiBaseBlock .apiValue {
-      max-width: 54vw;
-    }
+  .apiBaseBlock .apiValue {
+    max-width: 58vw;
   }
-
   .dataRow {
     grid-template-columns: 1fr;
   }
@@ -399,19 +368,6 @@
 }
 
 @media (max-width: 520px) {
-  .header {
-    padding: 12px;
-
-    .headerLeft,
-    .headerRight {
-      flex-wrap: wrap;
-    }
-
-    .timeDisplay {
-      align-items: flex-start;
-      width: 100%;
-    }
-  }
 
   .bottomSummaryRow .configCard .configGrid {
     grid-template-columns: 1fr;

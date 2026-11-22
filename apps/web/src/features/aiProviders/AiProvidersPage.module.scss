@@ -3,6 +3,10 @@
 
 .container {
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-gap);
+  min-width: 0;
 }
 
 .cardTitle {
@@ -14,65 +18,6 @@
 .cardTitleIcon {
   width: 24px;
   height: 24px;
-}
-
-.content {
-  display: flex;
-  flex-direction: column;
-  gap: $spacing-xl;
-  padding-bottom: calc(env(safe-area-inset-bottom) + #{$spacing-md});
-}
-
-.paginationBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: $spacing-md;
-  padding: $spacing-md;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.paginationInfo {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
-.paginationControls {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: $spacing-sm;
-  flex-wrap: wrap;
-}
-
-.pageSizeField {
-  display: inline-flex;
-  align-items: center;
-  gap: $spacing-xs;
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-
-.pageSizeSelect {
-  width: 116px;
-}
-
-.pageSizeSelectTrigger {
-  height: 30px;
-  border-radius: var(--app-radius-sm);
-  padding: 0 10px;
-  font-size: 12px;
-}
-
-@include mobile {
-  .paginationBar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .paginationControls {
-    justify-content: space-between;
-  }
 }
 
 // 字段行样式：标签 + 值

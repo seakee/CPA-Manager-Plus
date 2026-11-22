@@ -10,18 +10,7 @@
 
 /* Layer 0: Top Status Bar */
 .runtime-status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px 16px;
-  flex-wrap: wrap;
-  padding: 12px 16px;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--app-radius-md);
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  min-width: 0;
 }
 
 .runtime-status-bar-main {
@@ -67,8 +56,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--text-tertiary);
+  height: var(--control-height-sm);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 12px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -347,7 +342,7 @@
 .runtime-card-footer {
   margin-top: auto;
   padding-top: 14px;
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .runtime-status-links {
@@ -372,17 +367,8 @@
   }
 }
 
-.runtime-gateway-footer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.runtime-artifact-slot {
-  min-width: 0;
-  flex: 1 1 auto;
+.runtime-gateway-action-footer {
+  margin-top: auto;
 }
 
 .runtime-artifact-chip {
@@ -423,15 +409,7 @@
   white-space: nowrap;
 }
 
-.runtime-status-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-
-.runtime-status-actions .btn.btn-secondary.runtime-stop-btn {
+.runtime-gateway-action-footer .btn.btn-secondary.runtime-stop-btn {
   border-color: var(--data-badge-danger-border);
   background: var(--data-badge-danger-bg);
   color: var(--data-badge-danger-text);

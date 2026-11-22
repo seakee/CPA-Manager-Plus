@@ -1,31 +1,24 @@
 .key-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-gap);
   min-width: 0;
   color: var(--text-primary);
 }
 .key-workspace [hidden] {
   display: none;
 }
-.key-controls-panel {
-  padding: 12px 16px;
-  margin-bottom: 14px;
+.key-workspace > .key-notice,
+.key-workspace > .fresh-external-usage,
+.key-list-workspace > .key-gateway-note {
+  margin: 0;
 }
-.key-controls-tabs-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.key-header-actions,
 .key-toolbar-actions,
 .key-row-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-}
-.key-header-actions {
-  margin-left: auto;
 }
 .key-attr-badge {
   display: inline-flex;
@@ -89,13 +82,6 @@
 .key-tab-dot.is-pending {
   background: var(--status-graphic-warning);
 }
-.key-controls-filter-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-  padding: 12px 14px;
-}
 .key-filter-tabs-row {
   display: flex;
   align-items: center;
@@ -111,6 +97,7 @@
 }
 .key-search-field {
   flex: 1 1 280px;
+  max-width: 400px;
   min-width: 0;
 }
 .key-search-field .form-group {
@@ -162,7 +149,8 @@
 .key-list-workspace {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--app-gap);
+  min-width: 0;
 }
 .key-table-topbar {
   display: flex;
@@ -227,11 +215,6 @@
 }
 /* Align with MonitoringShared.SummaryCard (_monitoring-summary-table.scss):
    12px radius, 28x28 tinted icon + label header, 24px tabular value middle, meta footer. */
-.key-list-workspace {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
-}
 .key-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -835,70 +818,6 @@
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--app-border);
-}
-.key-pagination-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-subtle) 50%, var(--bg-primary));
-}
-.key-pagination-info {
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-.key-pagination-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.key-page-size-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-.key-page-size-select {
-  min-width: 104px;
-}
-.key-page-size-trigger {
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  font-size: 12.5px;
-}
-.key-page-jump-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-.key-page-jump-field input {
-  width: 58px;
-  height: var(--control-height-sm);
-  padding: 4px 8px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
-}
-.key-page-jump-field input:focus {
-  outline: none;
-  border-color: var(--app-input-border-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-input-border-focus) 16%, transparent);
 }
 .key-empty {
   padding: 40px 20px;
@@ -2425,11 +2344,6 @@
   }
 }
 @media (max-width: 767px) {
-  .key-controls-panel,
-  .key-controls-filter-panel {
-    padding: 10px 12px;
-    gap: 10px;
-  }
   .key-workspace-tabs,
   .key-lifecycle-tabs {
     width: 100%;
@@ -2440,7 +2354,6 @@
     min-width: 0;
     padding: 0 8px;
   }
-  .key-header-actions,
   .key-toolbar-actions {
     width: 100%;
     margin-left: 0;
@@ -2472,13 +2385,6 @@
   .key-table.is-cards-view tbody {
     grid-template-columns: 1fr;
     padding: 12px;
-  }
-  .key-pagination-bar {
-    padding: 12px;
-  }
-  .key-pagination-controls {
-    width: 100%;
-    justify-content: space-between;
   }
   .fresh-keys-access-panel {
     padding: 14px 16px;

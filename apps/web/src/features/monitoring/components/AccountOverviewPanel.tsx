@@ -1,7 +1,9 @@
 import { Fragment, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
+import { Button } from '@/components/ui/Button';
 import { DropdownMenu } from '@/components/ui/DropdownMenu';
 import { Input } from '@/components/ui/Input';
+import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import {
   IconChevronDown,
@@ -175,9 +177,9 @@ export function AccountOverviewPanelActions({
             aria-label={t('monitoring.account_overview_search_placeholder')}
           />
         </div>
-        <button
-          type="button"
-          className={styles.accountOverviewToolButton}
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => void onRefreshAll()}
           disabled={overallLoading}
         >
@@ -186,16 +188,13 @@ export function AccountOverviewPanelActions({
             className={overallLoading ? styles.refreshIconSpinning : styles.refreshIcon}
           />
           <span>{t('common.refresh')}</span>
-        </button>
-        <button
-          type="button"
-          className={[
-            styles.accountOverviewToolButton,
-            accountDisplayMode === 'full' ? styles.accountDisplayModeButtonActive : '',
-          ]
-            .filter(Boolean)
-            .join(' ')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          className={accountDisplayMode === 'full' ? styles.accountDisplayModeButtonActive : ''}
           onClick={() => onAccountDisplayModeChange(nextAccountDisplayMode)}
+          aria-pressed={accountDisplayMode === 'full'}
           title={accountDisplayHint}
           aria-label={accountDisplayHint}
         >
@@ -207,7 +206,7 @@ export function AccountOverviewPanelActions({
                 : 'monitoring.account_overview_account_display_full'
             )}
           </span>
-        </button>
+        </Button>
         <div className={styles.accountOverviewSortBar}>
           <Select
             className={styles.accountOverviewSortSelect}
@@ -220,22 +219,29 @@ export function AccountOverviewPanelActions({
           />
         </div>
 
-        <div className={`${styles.segmentedControl} ${styles.accountOverviewModeToggle}`}>
-          <button
-            type="button"
-            className={`${styles.segmentButton} ${mode === 'table' ? styles.segmentButtonActive : ''}`}
-            onClick={() => onModeChange('table')}
-          >
-            {t('monitoring.account_overview_view_mode_table')}
-          </button>
-          <button
-            type="button"
-            className={`${styles.segmentButton} ${mode === 'card' ? styles.segmentButtonActive : ''}`}
-            onClick={() => onModeChange('card')}
-          >
-            {t('monitoring.account_overview_view_mode_card')}
-          </button>
-        </div>
+        <SegmentedTabs<MonitoringAccountOverviewMode>
+          variant="joined"
+          roleMode="group"
+          responsiveFullWidth={false}
+          className={styles.accountOverviewModeToggle}
+          ariaLabel={t('monitoring.account_overview_view_mode_label', {
+            defaultValue: '视图模式',
+          })}
+          activeTab={mode}
+          onChange={onModeChange}
+          items={[
+            {
+              id: 'table',
+              label: t('monitoring.account_overview_view_mode_table'),
+              ariaLabel: t('monitoring.account_overview_view_mode_table'),
+            },
+            {
+              id: 'card',
+              label: t('monitoring.account_overview_view_mode_card'),
+              ariaLabel: t('monitoring.account_overview_view_mode_card'),
+            },
+          ]}
+        />
       </div>
     </div>
   );

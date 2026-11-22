@@ -5,34 +5,10 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 100%;
   display: flex;
   flex-direction: column;
-  gap: $spacing-md;
+  gap: var(--app-gap);
   box-sizing: border-box;
-  overflow-y: auto;
-  padding-bottom: calc(
-    var(--config-action-bar-height, 0px) + 16px + env(safe-area-inset-bottom) + #{$spacing-md}
-  );
-}
-
-.pageMeta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--bg-primary) 84%, var(--surface-subtle));
-  box-shadow: var(--app-specular-highlight);
-
-  @include mobile {
-    align-items: stretch;
-    padding: 8px;
-  }
 }
 
 .statusBadge {
@@ -68,7 +44,7 @@
 .workspaceShell {
   display: flex;
   flex-direction: column;
-  gap: $spacing-lg;
+  gap: var(--app-gap);
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -494,8 +470,8 @@
   display: flex;
   align-items: center;
   gap: $spacing-sm;
-  padding-bottom: 16px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+  width: 100%;
+  min-width: 0;
 
   @include mobile {
     flex-direction: column;
@@ -504,7 +480,9 @@
 }
 
 .searchInputWrapper {
-  flex: 1;
+  flex: 0 1 380px;
+  width: min(100%, 380px);
+  max-width: 380px;
   min-width: 0;
   position: relative;
   display: flex;
@@ -514,18 +492,32 @@
     margin-bottom: 0;
     width: 100%;
   }
+
+  @include mobile {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: none;
+  }
 }
 
 .searchInput {
   flex: 1;
-  height: 38px;
-  min-height: 38px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
 
   &:global(.input),
   &:global(.input.input-with-right-element) {
     padding-top: 0;
     padding-bottom: 0;
-    border-radius: var(--app-radius-md);
+    border-radius: var(--app-radius-sm);
+    padding-right: 36px;
+    font-size: 13px;
+  }
+}
+
+.searchInputHasQuery {
+  &:global(.input),
+  &:global(.input.input-with-right-element) {
     padding-right: 132px;
   }
 }
@@ -533,22 +525,46 @@
 .searchRight {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .searchCount {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+  min-height: 22px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-xs);
+  background: var(--surface-subtle);
+  border: 1px solid transparent;
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
   pointer-events: none;
   white-space: nowrap;
+}
+
+.searchClearButton {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--app-radius-xs);
+  color: var(--text-secondary);
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 }
 
 .searchButton {
@@ -556,20 +572,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--app-radius-md);
-  background: var(--primary-solid);
-  border: 1px solid var(--primary-solid);
-  color: var(--primary-contrast);
+  width: 24px;
+  height: 24px;
+  border-radius: var(--app-radius-xs);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
   transition:
     background-color $transition-fast,
-    border-color $transition-fast,
+    color $transition-fast,
     opacity $transition-fast;
 
   &:hover:not(:disabled) {
-    background: var(--primary-solid-hover);
-    border-color: var(--primary-solid-hover);
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+    color: var(--text-primary);
   }
 
   &:disabled {
@@ -584,11 +600,11 @@
   flex-shrink: 0;
 
   button:global(.btn) {
-    min-width: 34px;
-    width: 34px;
-    height: 34px;
+    min-width: var(--control-height-sm);
+    width: var(--control-height-sm);
+    height: var(--control-height-sm);
     padding: 0;
-    border-radius: var(--app-radius-md);
+    border-radius: var(--app-radius-sm);
   }
 
   @include mobile {
@@ -604,6 +620,7 @@
 .editorWrapper {
   width: 100%;
   flex: 0 0 auto;
+  min-height: 420px;
   height: clamp(420px, 64vh, 980px);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   border-radius: var(--app-radius-lg);
@@ -693,41 +710,10 @@
   border-color: var(--warning-border);
 }
 
-.floatingActionContainer {
-  position: fixed;
-  left: var(--content-center-x, 50%);
-  bottom: calc(16px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  z-index: 50;
-  pointer-events: auto;
-  width: fit-content;
-  max-width: calc(100vw - 24px);
-}
-
-.floatingActionList {
+.dirtyDockLabel {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  --glass-blur: 12px;
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--app-radius-pill);
-  box-shadow: var(--shadow-lg);
-  max-width: inherit;
-  overflow-x: auto;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-}
-
-.floatingStatus {
-  display: inline-flex;
-  align-items: center;
+  gap: 6px;
   min-width: 0;
   min-height: 28px;
   padding: 0 10px;
@@ -735,95 +721,10 @@
   border: 1px solid transparent;
   background: color-mix(in srgb, var(--text-primary) 6%, transparent);
   color: var(--text-primary);
-  font-size: 11px;
-  font-weight: 700;
-  text-align: center;
-  max-width: min(280px, 46vw);
+  font-size: 12px;
+  font-weight: 600;
+  max-width: min(260px, 44vw);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.floatingStatusCompact {
-  max-width: 112px;
-  padding: 0 8px;
-  font-size: 10px;
-}
-
-.floatingActionButton {
-  @include button-reset;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--app-radius-pill);
-  cursor: pointer;
-  color: var(--text-primary);
-  transition:
-    background-color 0.2s ease,
-    transform 0.15s ease;
-
-  &:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-primary) 10%, transparent);
-    transform: scale(1.08);
-  }
-
-  &:active:not(:disabled) {
-    transform: scale(0.95);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    transform: none;
-  }
-}
-
-.dirtyDot {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--app-radius-pill);
-  background: var(--data-amber-base);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--data-amber-base) 25%, transparent);
-}
-
-@media (max-width: 1200px) {
-  .floatingActionContainer {
-    bottom: calc(12px + env(safe-area-inset-bottom));
-    max-width: calc(100vw - 16px);
-  }
-
-  .floatingActionList {
-    gap: 6px;
-    padding: 8px 10px;
-  }
-
-  .floatingStatus {
-    max-width: min(180px, 40vw);
-    font-size: 10px;
-    padding: 0 8px;
-  }
-
-  .floatingActionButton {
-    width: 38px;
-    height: 38px;
-    flex: 0 0 auto;
-  }
-}
-
-@media (max-width: 480px) {
-  .floatingStatus {
-    max-width: min(132px, 38vw);
-  }
-}
-
-@media (max-width: 380px) {
-  .workspaceShell {
-    padding: 0;
-  }
 }

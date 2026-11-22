@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
-import { IconPencil, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
+import { IconPencil, IconRefreshCw, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
   getUsageServiceErrorCode,
@@ -37,6 +42,8 @@ import { readModelPricesPageUiState, writeModelPricesPageUiState } from './model
 import styles from './ModelPricesPage.module.scss';
 
 const FILTERS: ModelPriceFilter[] = ['all', 'missing', 'candidates', 'saved'];
+const MODEL_PRICE_DEFAULT_PAGE_SIZE = 50;
+const MODEL_PRICE_PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
 
 export function ModelPricesPage() {
   const { t } = useTranslation();
@@ -54,11 +61,18 @@ export function ModelPricesPage() {
     usageServiceAvailable,
   } = useUsageData({ loadUsageEvents: false });
   const [usageSummary, setUsageSummary] = useState<ModelPriceUsageSummaryResponse | null>(null);
+  const [summaryRefreshNonce, setSummaryRefreshNonce] = useState(0);
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer
+    ? (pageTransitionLayer.isCurrentLayer ?? pageTransitionLayer.status === 'current')
+    : true;
   const usageSummaryLoadedRef = useRef(false);
   const initialUiState = useRef(readModelPricesPageUiState());
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
   const [syncing, setSyncing] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(MODEL_PRICE_DEFAULT_PAGE_SIZE);
   const [saving, setSaving] = useState(false);
   const saveInFlightRef = useRef(false);
   const syncInFlightRef = useRef(false);
@@ -102,6 +116,37 @@ export function ModelPricesPage() {
     }),
     [summary]
   );
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginationStartIndex = visibleRows.length === 0 ? 0 : (currentPage - 1) * pageSize;
+  const paginationStartItem = visibleRows.length === 0 ? 0 : paginationStartIndex + 1;
+  const paginationEndItem = Math.min(visibleRows.length, paginationStartIndex + pageSize);
+  const paginatedRows = useMemo(
+    () => visibleRows.slice(paginationStartIndex, paginationStartIndex + pageSize),
+    [pageSize, paginationStartIndex, visibleRows]
+  );
+
+  const filterTabItems = useMemo<ReadonlyArray<SegmentedTabItem<ModelPriceFilter>>>(
+    () =>
+      FILTERS.map((item) => ({
+        id: item,
+        label: (
+          <span className={styles.filterTabLabel}>
+            <span>{t(`model_prices.filter_${item}`)}</span>
+            <strong className={styles.filterCount}>{filterCounts[item]}</strong>
+          </span>
+        ),
+      })),
+    [filterCounts, t]
+  );
+
+  const statusPillToneClass = !usageServiceAvailable
+    ? styles.statusPillWarning
+    : !modelPricesLoaded && modelPricesLoading
+      ? styles.statusPillWarning
+      : !modelPricesLoaded && Boolean(modelPriceServiceBase)
+        ? styles.statusPillDanger
+        : styles.statusPillSuccess;
 
   useEffect(() => {
     writeModelPricesPageUiState({ search, filter });
@@ -139,7 +184,7 @@ export function ModelPricesPage() {
       });
 
     return () => controller.abort();
-  }, [managementKey, modelPriceServiceBase, summaryScopeKey]);
+  }, [managementKey, modelPriceServiceBase, summaryRefreshNonce, summaryScopeKey]);
 
   // A price save built from another connection's draft must never be posted, and
   // an in-flight sync of the previous connection must not report into this one.
@@ -154,6 +199,7 @@ export function ModelPricesPage() {
     setManualEditorOpen(false);
     setSelectedCandidates({});
     setSyncResult(null);
+    setPage(1);
   }, [modelPricesScopeKey]);
 
   const resolveActionErrorMessage = (error: unknown, fallbackMessage: string): string => {
@@ -168,6 +214,14 @@ export function ModelPricesPage() {
     }
     return fallbackMessage;
   };
+
+  const handleRefresh = useCallback(async () => {
+    if (saveInFlightRef.current || syncInFlightRef.current) return;
+    setSummaryRefreshNonce((current) => current + 1);
+    await reloadModelPrices?.();
+  }, [reloadModelPrices]);
+
+  useHeaderRefresh(handleRefresh, isCurrentLayer);
 
   const handleSync = async () => {
     if (!priceBaselineReady || saveInFlightRef.current || syncInFlightRef.current) return;
@@ -319,71 +373,102 @@ export function ModelPricesPage() {
 
   return (
     <div className={styles.page}>
-      <section className={styles.actionBar} aria-label={t('common.action')}>
-        <div className={styles.titleGroup}>
-          {featureAvailability.requestMonitoringAvailable ? (
-            <Link to="/monitoring" className={styles.backLink}>
-              {t('model_prices.back_to_monitoring')}
-            </Link>
-          ) : null}
-        </div>
-        <div className={styles.actionGroup}>
-          <span className={styles.metaPill}>
-            {usageServiceAvailable
-              ? t('model_prices.usage_service_ready')
-              : t('model_prices.usage_service_required')}
-          </span>
-          <span className={styles.metaPill}>
-            {t('model_prices.sync_model_count', { count: syncModels.length })}
-          </span>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={!priceBaselineReady || saving || syncing}
-            onClick={() => openManualEditor()}
-            className={styles.toolbarButton}
-          >
-            {t('model_prices.add_manual')}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => void handleSync()}
-            loading={syncing}
-            disabled={!priceBaselineReady || saving}
-          >
-            {t('usage_stats.model_price_sync')}
-          </Button>
-        </div>
-      </section>
-
-      <section className={styles.pricePanel}>
-        <div className={styles.panelToolbar}>
-          <div className={styles.searchWrap}>
-            <Input
-              className={styles.compactInput}
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder={t('model_prices.search_placeholder')}
-              rightElement={<IconSearch size={15} />}
+      <PageControlBar
+        ariaLabel={t('common.action')}
+        leading={
+          <>
+            <span className={`${styles.statusPill} ${statusPillToneClass}`}>
+              <span className={styles.statusDot} aria-hidden="true" />
+              <span>
+                {usageServiceAvailable
+                  ? t('model_prices.usage_service_ready')
+                  : t('model_prices.usage_service_required')}
+              </span>
+            </span>
+            <span className={styles.metaPill}>
+              {t('model_prices.sync_model_count', { count: syncModels.length })}
+            </span>
+          </>
+        }
+        actions={
+          <>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={modelPricesLoading || saving || syncing}
+              onClick={() => void handleRefresh()}
+            >
+              <IconRefreshCw size={15} />
+              {t('common.refresh')}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!priceBaselineReady || saving || syncing}
+              onClick={() => openManualEditor()}
+              className={styles.toolbarButton}
+            >
+              {t('model_prices.add_manual')}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void handleSync()}
+              loading={syncing}
+              disabled={!priceBaselineReady || saving}
+            >
+              {t('usage_stats.model_price_sync')}
+            </Button>
+          </>
+        }
+        toolbar={
+          <div className={styles.panelToolbar}>
+            <div className={styles.searchWrap}>
+              <Input
+                className={styles.compactInput}
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+                placeholder={t('model_prices.search_placeholder')}
+                rightElement={
+                  search ? (
+                    <button
+                      type="button"
+                      className={styles.searchClear}
+                      onClick={() => {
+                        setSearch('');
+                        setPage(1);
+                      }}
+                      aria-label={t('common.clear', { defaultValue: 'Clear' })}
+                      title={t('common.clear', { defaultValue: 'Clear' })}
+                    >
+                      <IconX size={15} />
+                    </button>
+                  ) : (
+                    <IconSearch size={16} className={styles.searchIcon} />
+                  )
+                }
+              />
+            </div>
+            <SegmentedTabs<ModelPriceFilter>
+              items={filterTabItems}
+              activeTab={filter}
+              onChange={(nextFilter) => {
+                setFilter(nextFilter);
+                setPage(1);
+              }}
+              ariaLabel={t('model_prices.summary')}
+              idBase="model-prices-filter"
+              variant="joined"
+              responsiveFullWidth={false}
+              className={styles.filterTabs}
             />
           </div>
-          <div className={styles.filterGroup}>
-            {FILTERS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={`${styles.filterButton} ${
-                  filter === item ? styles.filterButtonActive : ''
-                }`}
-                onClick={() => setFilter(item)}
-              >
-                <span>{t(`model_prices.filter_${item}`)}</span>
-                <strong>{filterCounts[item]}</strong>
-              </button>
-            ))}
-          </div>
-        </div>
+        }
+      />
 
+      <section className={styles.pricePanel}>
         {syncResult?.sourceResults?.length ? (
           <div className={styles.sourceResults}>
             {syncResult.sourceResults.map((result) => (
@@ -494,7 +579,7 @@ export function ModelPricesPage() {
         ) : null}
 
         {!modelPricesLoaded && modelPricesLoading ? (
-          <div className={styles.emptyState}>{t('common.loading')}</div>
+          <div className={styles.loadingState}>{t('common.loading')}</div>
         ) : (
           <>
             {!modelPricesLoaded && Boolean(modelPriceServiceBase) ? (
@@ -512,10 +597,11 @@ export function ModelPricesPage() {
               </div>
             ) : null}
             {visibleRows.length === 0 ? (
-              <div className={styles.emptyState}>{t('model_prices.empty')}</div>
+              <EmptyState variant="canvas" title={t('model_prices.empty')} />
             ) : (
-          <div className={styles.tableWrap}>
-            <table className={styles.priceTable}>
+              <>
+                <div className={styles.tableWrap}>
+                  <table className={styles.priceTable}>
               <thead>
                 <tr>
                   <th>{t('usage_stats.model_name')}</th>
@@ -531,7 +617,7 @@ export function ModelPricesPage() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRows.map((row) => {
+                {paginatedRows.map((row) => {
                   const candidates =
                     candidateSets.find((candidateSet) => candidateSet.model === row.model)
                       ?.candidates ?? [];
@@ -716,7 +802,37 @@ export function ModelPricesPage() {
                 })}
               </tbody>
             </table>
-          </div>
+                </div>
+                <PaginationFooter
+                  variant="inset"
+                  currentPage={currentPage}
+                  totalPages={totalPages}
+                  infoText={t('monitoring.pagination_info', {
+                    current: currentPage,
+                    total: totalPages,
+                    start: paginationStartItem,
+                    end: paginationEndItem,
+                    count: visibleRows.length,
+                  })}
+                  pageSize={pageSize}
+                  pageSizeOptions={MODEL_PRICE_PAGE_SIZE_OPTIONS}
+                  pageSizeLabel={t('monitoring.page_size_label')}
+                  pageSizeTitle={t('monitoring.page_size_label')}
+                  pageSizeAriaLabel={t('monitoring.page_size_label')}
+                  formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
+                  onPageChange={setPage}
+                  onPageSizeChange={(nextPageSize) => {
+                    setPageSize(nextPageSize);
+                    setPage(1);
+                  }}
+                  prevLabel={t('monitoring.pagination_prev')}
+                  nextLabel={t('monitoring.pagination_next')}
+                  showPageJump
+                  jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
+                  jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
+                  jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+                />
+              </>
             )}
           </>
         )}

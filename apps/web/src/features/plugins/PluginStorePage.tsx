@@ -6,16 +6,18 @@ import {
   useId,
   useMemo,
   useState,
-  type KeyboardEvent,
   type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { Select } from '@/components/ui/Select';
 import {
   IconDownload,
@@ -56,14 +58,36 @@ import styles from './PluginStorePage.module.scss';
 
 type StoreStatusFilter = 'all' | 'installed' | 'notInstalled' | 'updates';
 type InstallVersionMode = 'latest' | 'release' | 'manual';
+const STORE_PAGE_SIZE_OPTIONS = [20, 40, 80] as const;
+const STORE_DEFAULT_PAGE_SIZE = 20;
+const STORE_MAX_VISIBLE_TAGS = 4;
 
-const STORE_STATUS_FILTER_ORDER: StoreStatusFilter[] = [
-  'all',
-  'installed',
-  'notInstalled',
-  'updates',
-];
+const HTML_ENTITY_MAP: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+};
 
+const decodePlainHtmlEntities = (value: string): string => {
+  if (!value || !value.includes('&')) return value;
+  return value.replace(/&(#x?[0-9a-fA-F]+|amp|lt|gt|quot|apos);/g, (match, token: string) => {
+    if (token.startsWith('#x') || token.startsWith('#X')) {
+      const code = Number.parseInt(token.slice(2), 16);
+      return Number.isFinite(code) && code >= 32 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : match;
+    }
+    if (token.startsWith('#')) {
+      const code = Number.parseInt(token.slice(1), 10);
+      return Number.isFinite(code) && code >= 32 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : match;
+    }
+    return HTML_ENTITY_MAP[token] ?? match;
+  });
+};
 interface StoreLoadError {
   kind: 'unsupported' | 'registry' | 'generic';
   message: string;
@@ -500,6 +524,8 @@ export function PluginStorePage({
   const [error, setError] = useState<StoreLoadError | null>(null);
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<StoreStatusFilter>('all');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(STORE_DEFAULT_PAGE_SIZE);
   const [installingID, setInstallingID] = useState('');
   const [restartRequiredIDs, setRestartRequiredIDs] = useState<string[]>([]);
   const [gateEntry, setGateEntry] = useState<PluginStoreEntry | null>(null);
@@ -663,16 +689,56 @@ export function PluginStorePage({
     });
   }, [data?.plugins, filter, statusFilter]);
 
-  const statusFilters: Array<{ key: StoreStatusFilter; label: string; count: number }> = [
-    { key: 'all', label: t('plugin_store.filter_all'), count: stats.total },
-    { key: 'installed', label: t('plugin_store.filter_installed'), count: stats.installed },
-    {
-      key: 'notInstalled',
-      label: t('plugin_store.filter_not_installed'),
-      count: stats.notInstalled,
-    },
-    { key: 'updates', label: t('plugin_store.filter_updates'), count: stats.updates },
-  ];
+  const statusFilterTabs = useMemo<ReadonlyArray<SegmentedTabItem<StoreStatusFilter>>>(
+    () => [
+      {
+        id: 'all',
+        label: (
+          <span className={styles.filterTabLabel}>
+            <span>{t('plugin_store.filter_all')}</span>
+            <span className={styles.filterTabCount}>{stats.total}</span>
+          </span>
+        ),
+      },
+      {
+        id: 'installed',
+        label: (
+          <span className={styles.filterTabLabel}>
+            <span>{t('plugin_store.filter_installed')}</span>
+            <span className={styles.filterTabCount}>{stats.installed}</span>
+          </span>
+        ),
+      },
+      {
+        id: 'notInstalled',
+        label: (
+          <span className={styles.filterTabLabel}>
+            <span>{t('plugin_store.filter_not_installed')}</span>
+            <span className={styles.filterTabCount}>{stats.notInstalled}</span>
+          </span>
+        ),
+      },
+      {
+        id: 'updates',
+        label: (
+          <span className={styles.filterTabLabel}>
+            <span>{t('plugin_store.filter_updates')}</span>
+            <span className={styles.filterTabCount}>{stats.updates}</span>
+          </span>
+        ),
+      },
+    ],
+    [stats.installed, stats.notInstalled, stats.total, stats.updates, t]
+  );
+
+  const totalPages = Math.max(1, Math.ceil(visiblePlugins.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedPlugins = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return visiblePlugins.slice(start, start + pageSize);
+  }, [currentPage, pageSize, visiblePlugins]);
+  const paginationStartItem = visiblePlugins.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const paginationEndItem = Math.min(visiblePlugins.length, currentPage * pageSize);
 
   const restartNames = restartRequiredIDs.map((key) => {
     const entry = data?.plugins.find((plugin) => getStoreEntryKey(plugin) === key);
@@ -681,40 +747,6 @@ export function PluginStorePage({
 
   const hasActiveFilters = Boolean(filter.trim()) || statusFilter !== 'all';
   const initialLoading = loading && !data;
-
-  const focusStatusFilter = useCallback((key: StoreStatusFilter) => {
-    window.requestAnimationFrame(() => {
-      document.getElementById(`plugin-store-filter-${key}`)?.focus();
-    });
-  }, []);
-
-  const handleStatusFilterKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLButtonElement>, currentKey: StoreStatusFilter) => {
-      const currentIndex = STORE_STATUS_FILTER_ORDER.indexOf(currentKey);
-      if (currentIndex === -1) return;
-
-      let nextIndex = currentIndex;
-      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-        nextIndex = (currentIndex + 1) % STORE_STATUS_FILTER_ORDER.length;
-      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-        nextIndex =
-          (currentIndex - 1 + STORE_STATUS_FILTER_ORDER.length) % STORE_STATUS_FILTER_ORDER.length;
-      } else if (event.key === 'Home') {
-        nextIndex = 0;
-      } else if (event.key === 'End') {
-        nextIndex = STORE_STATUS_FILTER_ORDER.length - 1;
-      } else {
-        return;
-      }
-
-      event.preventDefault();
-      const nextKey = STORE_STATUS_FILTER_ORDER[nextIndex];
-      setStatusFilter(nextKey);
-      focusStatusFilter(nextKey);
-    },
-    [focusStatusFilter]
-  );
-
   const runInstall = useCallback(
     async (entry: PluginStoreEntry, isUpdate: boolean, requestedVersion = '') => {
       if (!canContinueOperation()) return;
@@ -1134,16 +1166,30 @@ export function PluginStorePage({
           </div>
         </div>
 
-        {entry.description ? <p className={styles.description}>{entry.description}</p> : null}
+        {entry.description ? (
+          <p
+            className={styles.description}
+            title={decodePlainHtmlEntities(entry.description)}
+          >
+            {decodePlainHtmlEntities(entry.description)}
+          </p>
+        ) : null}
 
         {entry.tags.length > 0 ? (
           <div className={styles.tags}>
-            {entry.tags.map((tag) => (
+            {entry.tags.slice(0, STORE_MAX_VISIBLE_TAGS).map((tag) => (
               <span key={`${entry.id}-tag-${tag}`}>{tag}</span>
             ))}
+            {entry.tags.length > STORE_MAX_VISIBLE_TAGS ? (
+              <span
+                className={styles.tagsOverflow}
+                title={entry.tags.slice(STORE_MAX_VISIBLE_TAGS).join(', ')}
+              >
+                +{entry.tags.length - STORE_MAX_VISIBLE_TAGS}
+              </span>
+            ) : null}
           </div>
         ) : null}
-
         <div className={styles.cardDetails}>
           {metaItems.length > 0 ? (
             <div className={styles.meta}>
@@ -1241,10 +1287,6 @@ export function PluginStorePage({
         </div>
       ) : null}
 
-      {data && !data.pluginsEnabled ? (
-        <div className={styles.warningBox}>{t('plugin_store.global_disabled_hint')}</div>
-      ) : null}
-
       {restartNames.length > 0 ? (
         <div className={styles.warningBox}>
           {t('plugin_store.restart_required_banner', { plugins: restartNames.join(', ') })}
@@ -1266,123 +1308,112 @@ export function PluginStorePage({
         </section>
       ) : null}
 
-      <section className={styles.tabSurface}>
-        <div className={styles.controlPanel}>
-          <div className={styles.controlHeader}>
-            {tabsControl ? <div className={styles.summaryTabs}>{tabsControl}</div> : null}
-            {data ? (
-              <div className={styles.summaryMetrics}>
-                <span
-                  className={styles.summaryMetric}
-                  data-tone={data.pluginsEnabled ? 'enabled' : 'disabled'}
-                >
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_store.global_status')}
-                  </span>
-                  <strong>
-                    {data.pluginsEnabled
-                      ? t('plugin_store.global_enabled')
-                      : t('plugin_store.global_disabled')}
-                  </strong>
-                </span>
-                <span className={styles.summaryMetric}>
-                  <span className={styles.summaryMetricLabel}>{t('plugin_store.plugins_dir')}</span>
-                  <strong>{data.pluginsDir || 'plugins'}</strong>
-                </span>
-                <span className={styles.summaryMetric} data-tone="available">
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_store.stat_available')}
-                  </span>
-                  <strong>{stats.total}</strong>
-                </span>
-                <span className={styles.summaryMetric}>
-                  <span className={styles.summaryMetricLabel}>{t('plugin_store.sources')}</span>
-                  <strong>{data.sources.length}</strong>
-                </span>
-              </div>
+      <PageControlBar
+        leading={tabsControl ? <div className={styles.summaryTabs}>{tabsControl}</div> : null}
+        actions={
+          <>
+            {!tabsControl ? (
+              <Button variant="secondary" size="sm" onClick={handleManageInstalled}>
+                <IconSettings size={15} />
+                {t('plugin_store.manage')}
+              </Button>
             ) : null}
-          </div>
-
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={loadStore}
+              disabled={!connected || !supportsPlugin || loading}
+              loading={loading}
+            >
+              {loading ? null : <IconRefreshCw size={15} />}
+              {t('plugin_store.refresh')}
+            </Button>
+          </>
+        }
+        toolbar={
           <div className={styles.controlToolbar}>
             <Input
               type="search"
               value={filter}
-              onChange={(event) => setFilter(event.target.value)}
+              onChange={(event) => {
+                setFilter(event.target.value);
+                setPage(1);
+              }}
               placeholder={t('plugin_store.search_placeholder')}
               aria-label={t('plugin_store.search_label')}
               rightElement={<IconSearch size={16} />}
             />
-            <div className={styles.toolbarActions}>
-              <Button variant="secondary" size="sm" onClick={handleManageInstalled}>
-                <IconSettings size={16} />
-                {t('plugin_store.manage')}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={loadStore}
-                disabled={!connected || !supportsPlugin || loading}
-                loading={loading}
-              >
-                {loading ? null : <IconRefreshCw size={16} />}
-                {t('plugin_store.refresh')}
-              </Button>
-            </div>
+            {!initialLoading ? (
+              <SegmentedTabs<StoreStatusFilter>
+                variant="joined"
+                responsiveFullWidth={false}
+                idBase="plugin-store-filter"
+                ariaLabel={t('plugin_store.filter_label')}
+                items={statusFilterTabs}
+                activeTab={statusFilter}
+                onChange={(nextFilter) => {
+                  setStatusFilter(nextFilter);
+                  setPage(1);
+                }}
+              />
+            ) : null}
+            {data ? (
+              <div className={styles.toolbarMeta}>
+                <span className={styles.toolbarMetaStat}>
+                  <span>{t('plugin_store.sources')}</span>
+                  <strong>{data.sources.length}</strong>
+                </span>
+                <span className={styles.toolbarMetaDivider} aria-hidden="true">
+                  ·
+                </span>
+                <span
+                  className={styles.toolbarMetaPath}
+                  title={`${t('plugin_store.plugins_dir')}: ${data.pluginsDir || 'plugins'}`}
+                >
+                  <code>{data.pluginsDir || 'plugins'}</code>
+                </span>
+              </div>
+            ) : null}
           </div>
+        }
+      />
+
+      {data && !data.pluginsEnabled ? (
+        <div className={styles.warningBox}>
+          <span>{t('plugin_store.global_disabled_hint')}</span>
+          <Button variant="secondary" size="sm" onClick={() => navigate('/config')}>
+            <IconSettings size={15} />
+            {t('plugin_management.open_gateway_config')}
+          </Button>
         </div>
-      </section>
+      ) : null}
 
-      <section className={styles.storeContentSurface}>
-        {!initialLoading ? (
-          <div
-            className={styles.filters}
-            role="tablist"
-            aria-label={t('plugin_store.filter_label')}
-          >
-            {statusFilters.map((item) => (
-              <button
-                key={item.key}
-                id={`plugin-store-filter-${item.key}`}
-                type="button"
-                role="tab"
-                className={`${styles.filterChip} ${
-                  statusFilter === item.key ? styles.filterChipActive : ''
-                }`}
-                onClick={() => setStatusFilter(item.key)}
-                onKeyDown={(event) => handleStatusFilterKeyDown(event, item.key)}
-                aria-selected={statusFilter === item.key}
-                tabIndex={statusFilter === item.key ? 0 : -1}
-              >
-                {item.label}
-                <span>{item.count}</span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        {initialLoading ? (
-          <section className={styles.loadingPanel} aria-busy="true" aria-live="polite">
-            <LoadingSpinner size={22} className={styles.loadingSpinner} />
-            <div className={styles.loadingText}>
-              <strong>{t('plugin_store.loading_title')}</strong>
-              <span>{t('plugin_store.loading_desc')}</span>
-            </div>
-          </section>
-        ) : visiblePlugins.length === 0 ? (
-          !error ? (
+      {initialLoading || visiblePlugins.length > 0 || !error ? (
+        <section className={styles.storeContentSurface}>
+          {initialLoading ? (
+            <section className={styles.loadingPanel} aria-busy="true" aria-live="polite">
+              <LoadingSpinner size={22} className={styles.loadingSpinner} />
+              <div className={styles.loadingText}>
+                <strong>{t('plugin_store.loading_title')}</strong>
+                <span>{t('plugin_store.loading_desc')}</span>
+              </div>
+            </section>
+          ) : visiblePlugins.length === 0 ? (
             stats.total === 0 ? (
               <EmptyState
+                variant="canvas"
                 title={t('plugin_store.no_plugins')}
                 description={t('plugin_store.no_plugins_desc')}
                 action={
                   <Button variant="secondary" size="sm" onClick={loadStore} disabled={!connected}>
-                    <IconRefreshCw size={16} />
+                    <IconRefreshCw size={15} />
                     {t('plugin_store.refresh')}
                   </Button>
                 }
               />
             ) : (
               <EmptyState
+                variant="canvas"
                 title={t('plugin_store.no_matches')}
                 description={t('plugin_store.no_matches_desc')}
                 action={
@@ -1393,6 +1424,7 @@ export function PluginStorePage({
                       onClick={() => {
                         setFilter('');
                         setStatusFilter('all');
+                        setPage(1);
                       }}
                     >
                       {t('plugin_store.clear_filters')}
@@ -1401,11 +1433,44 @@ export function PluginStorePage({
                 }
               />
             )
-          ) : null
-        ) : (
-          <div className={styles.grid}>{visiblePlugins.map((entry) => renderCard(entry))}</div>
-        )}
-      </section>
+          ) : (
+            <>
+              <div className={styles.grid}>
+                {paginatedPlugins.map((entry) => renderCard(entry))}
+              </div>
+              <PaginationFooter
+                variant="inset"
+                currentPage={currentPage}
+                totalPages={totalPages}
+                infoText={t('monitoring.pagination_info', {
+                  current: currentPage,
+                  total: totalPages,
+                  start: paginationStartItem,
+                  end: paginationEndItem,
+                  count: visiblePlugins.length,
+                })}
+                pageSize={pageSize}
+                pageSizeOptions={STORE_PAGE_SIZE_OPTIONS}
+                pageSizeLabel={t('monitoring.page_size_label')}
+                pageSizeTitle={t('monitoring.page_size_label')}
+                pageSizeAriaLabel={t('monitoring.page_size_label')}
+                formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
+                onPageChange={setPage}
+                onPageSizeChange={(nextPageSize) => {
+                  setPageSize(nextPageSize);
+                  setPage(1);
+                }}
+                prevLabel={t('monitoring.pagination_prev')}
+                nextLabel={t('monitoring.pagination_next')}
+                showPageJump
+                jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
+                jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
+                jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+              />
+            </>
+          )}
+        </section>
+      ) : null}
       <PluginInstallGateModal
         open={Boolean(gateEntry)}
         entry={gateEntry}

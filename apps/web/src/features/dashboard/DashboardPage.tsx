@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { Button } from '@/components/ui/Button';
 import {
+  IconClock,
   IconBot,
   IconFileText,
   IconKey,
@@ -119,7 +122,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
 
   const [loading, setLoading] = useState(true);
 
-  const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(() => new Date());
   const [cardRefreshSignal, setCardRefreshSignal] = useState(0);
   const [collectorStatus, setCollectorStatus] = useState<UsageServiceStatus | null>(null);
   const [collectorLoading, setCollectorLoading] = useState(false);
@@ -155,13 +158,6 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
     apiKeysCache.current = [];
   }, [apiBase, config?.apiKeys]);
 
-  // Update time every 60 seconds
-  useEffect(() => {
-    const id = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 60_000);
-    return () => clearInterval(id);
-  }, []);
 
   const normalizeApiKeyList = (input: unknown): string[] => {
     if (!Array.isArray(input)) return [];
@@ -413,7 +409,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
   }, [config, managementKey, t, usageEnabled, usageServiceBase]);
 
   const refreshDashboard = useCallback(async () => {
-    setCurrentTime(new Date());
+    setLastRefreshedAt(new Date());
     setCardRefreshSignal((value) => value + 1);
     await Promise.all([refreshStats(), fetchModels(), refreshUsageSummary(), refreshHealth()]);
   }, [fetchModels, refreshHealth, refreshStats, refreshUsageSummary]);
@@ -525,14 +521,10 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           ? styles.configBadgeFillFirst
           : styles.configBadgeUnknown;
 
-  const formattedDate = currentTime.toLocaleDateString(i18n.language, {
-    weekday: 'long',
-  });
-
-  const formattedDateTime = currentTime.toLocaleString(i18n.language, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
+  const navigate = useNavigate();
+  const resolvedCpaBase = managerCpaBase || (useApiBaseAsCpaBase ? apiBase : '');
+  const showHeaderApiBase = !useApiBaseAsCpaBase || Boolean(managerCpaBase && managerCpaBase !== apiBase);
+  const formattedRefreshedTime = lastRefreshedAt.toLocaleTimeString(i18n.language, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -541,22 +533,32 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
 
   return (
     <>
-      {/* 1. Header Section */}
-      <header className={styles.header}>
-        <div className={styles.headerLeft}>
-          <div className={styles.connectionStatus}>
-            <span
-              className={`${styles.statusDot} ${
-                connectionStatus === 'connected'
-                  ? styles.connected
-                  : connectionStatus === 'connecting'
-                    ? styles.connecting
-                    : styles.disconnected
-              }`}
-            />
-            <div className={styles.statusInfo}>
+      {/* 1. Header Control Bar */}
+      <PageControlBar
+        as="header"
+        className={styles.headerBar}
+        leading={
+          <div className={styles.headerLeading}>
+            <div className={styles.connectionStatus}>
+              <span
+                className={`${styles.statusDot} ${
+                  connectionStatus === 'connected'
+                    ? styles.connected
+                    : connectionStatus === 'connecting'
+                      ? styles.connecting
+                      : styles.disconnected
+                }`}
+              />
               <span className={styles.statusLabel}>{t('common.connection_status')}</span>
-              <span className={styles.statusValue}>
+              <span
+                className={`${styles.statusValue} ${
+                  connectionStatus === 'connected'
+                    ? styles.statusValueConnected
+                    : connectionStatus === 'connecting'
+                      ? styles.statusValueConnecting
+                      : styles.statusValueDisconnected
+                }`}
+              >
                 {t(
                   connectionStatus === 'connected'
                     ? 'common.connected'
@@ -566,40 +568,49 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
                 )}
               </span>
             </div>
+            {showHeaderApiBase ? (
+              <div className={styles.apiBaseBlock}>
+                <span className={styles.apiLabel}>{t('dashboard.api_base')}</span>
+                <span className={styles.apiValue}>{apiBase || 'http://localhost:3000'}</span>
+              </div>
+            ) : null}
           </div>
-          <div className={styles.apiBaseBlock}>
-            <span className={styles.apiLabel}>{t('dashboard.api_base')}</span>
-            <span className={styles.apiValue}>{apiBase || 'http://localhost:3000'}</span>
-          </div>
-        </div>
-
-        <div className={styles.headerRight}>
-          <div className={styles.timeDisplay}>
-            <span className={styles.time}>{formattedDateTime}</span>
-            <span className={styles.date}>{formattedDate}</span>
-          </div>
+        }
+        actions={
           <div className={styles.headerActions}>
-            <button
-              className={styles.actionBtn}
-              onClick={refreshDashboard}
+            <span className={styles.refreshedMeta} title={t('common.refresh')}>
+              <IconClock size={14} aria-hidden="true" />
+              <span>{formattedRefreshedTime}</span>
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refreshDashboard()}
               title={t('common.refresh')}
             >
-              <IconRefreshCw size={16} />
+              <IconRefreshCw size={15} />
               <span>{t('common.refresh')}</span>
-            </button>
-            <Link to="/config" className={styles.actionBtn} title={t('nav.system_config')}>
-              <IconSettings size={16} />
-            </Link>
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              iconOnly
+              onClick={() => navigate('/config')}
+              title={t('nav.system_config')}
+              aria-label={t('nav.system_config')}
+            >
+              <IconSettings size={15} />
+            </Button>
           </div>
-        </div>
-      </header>
-
+        }
+      />
       {/* 2. Top Overview Row (Version & Health) */}
       <section className={styles.overviewRow}>
         <VersionCard
           appVersion={__APP_VERSION__ || t('dashboard.version_unknown')}
           apiVersion={serverVersion || t('dashboard.version_unknown')}
-          cpaBase={managerCpaBase || (useApiBaseAsCpaBase ? apiBase : '')}
+          cpaBase={resolvedCpaBase}
           serverBuildDate={serverBuildDate || undefined}
           connectionStatus={connectionStatus}
           refreshSignal={cardRefreshSignal}

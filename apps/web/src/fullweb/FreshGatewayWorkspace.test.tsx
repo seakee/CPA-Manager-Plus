@@ -1,4 +1,4 @@
-import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import type { ReactNode, Ref } from 'react';
 import type * as ReactModule from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -16,6 +16,11 @@ import type {
 import { FreshGatewayWorkspace } from './FreshGatewayWorkspace';
 import { createPublicApiClient, PublicApiError, type PublicApiClient } from './publicApi';
 import { formToRule, parseRuleText } from './gatewayRuleForm';
+
+function textOf(node: ReactTestInstance | string | number): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  return node.children.map((child) => textOf(child)).join('');
+}
 
 vi.mock('../components/ui/Modal', () => ({
   Modal: ({ children, footer, open }: { children: ReactNode; footer: ReactNode; open: boolean }) =>
@@ -2178,7 +2183,7 @@ describe('FreshGatewayWorkspace', () => {
 
     fake.state.saveError = null;
     const visualReloadBtn = renderer.root.findAll(
-      (node) => node.type === 'button' && node.props.children === c('reload')
+      (node) => node.type === 'button' && textOf(node) === c('reload')
     )[0];
     await act(async () => visualReloadBtn.props.onClick());
     await settle();
@@ -2202,7 +2207,7 @@ describe('FreshGatewayWorkspace', () => {
 
     fake.state.saveError = null;
     const sourceReloadBtn = renderer.root.findAll(
-      (node) => node.type === 'button' && node.props.children === c('reload')
+      (node) => node.type === 'button' && textOf(node) === c('reload')
     )[0];
     await act(async () => sourceReloadBtn.props.onClick());
     await settle();
@@ -2630,7 +2635,7 @@ describe('FreshGatewayWorkspace', () => {
     };
 
     const reloadBtn = renderer.root.findAll(
-      (node) => node.type === 'button' && node.props.children === c('reload')
+      (node) => node.type === 'button' && textOf(node) === c('reload')
     )[0];
     await act(async () => reloadBtn.props.onClick());
     await act(async () => {
@@ -2951,7 +2956,7 @@ describe('FreshGatewayWorkspace', () => {
       const topReloadBtn = renderer.root.findAll(
         (node) =>
           node.type === 'button' &&
-          node.props.children === c('reload') &&
+          textOf(node) === c('reload') &&
           node.parent?.props['data-testid'] !== 'gateway-source-editor-error'
       )[0];
       await act(async () => topReloadBtn.props.onClick());
