@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { PageControlBar } from '@/components/common/PageControlBar';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -47,7 +48,6 @@ import {
 import { waitForPluginState } from './pluginPolling';
 import { buildPluginDisplay, type PluginStatusTone } from './pluginDisplay';
 import { PluginStorePage } from './PluginStorePage';
-import { PluginRuntimeSwitch } from './PluginRuntimeSwitch';
 import {
   buildPluginConfigPatch,
   createPluginConfigDraft,
@@ -741,53 +741,27 @@ function InstalledPluginsView({
     <div className={styles.page}>
       {error ? <div className={styles.errorBox}>{error}</div> : null}
 
-      {data && !data.pluginsEnabled ? (
-        <div className={styles.warningBox}>{t('plugin_management.global_disabled_hint')}</div>
-      ) : null}
-
-      <PluginRuntimeSwitch onApplied={() => void loadPlugins()} />
-
-      <section className={styles.tabSurface}>
-        <div className={styles.controlPanel}>
-          <div className={styles.controlHeader}>
-            <div className={styles.summaryTabs}>{tabsControl}</div>
-            {data ? (
-              <div className={styles.summaryMetrics}>
-                <span
-                  className={styles.summaryMetric}
-                  data-tone={data.pluginsEnabled ? 'enabled' : 'disabled'}
-                >
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_management.global_status')}
-                  </span>
-                  <strong>
-                    {data.pluginsEnabled
-                      ? t('plugin_management.global_enabled')
-                      : t('plugin_management.global_disabled')}
-                  </strong>
-                </span>
-                <span className={styles.summaryMetric}>
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_management.installed_count')}
-                  </span>
-                  <strong>{pluginStats.installed}</strong>
-                </span>
-                <span className={styles.summaryMetric} data-tone="active">
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_management.effective_count')}
-                  </span>
-                  <strong>{pluginStats.effective}</strong>
-                </span>
-                <span className={styles.summaryMetric}>
-                  <span className={styles.summaryMetricLabel}>
-                    {t('plugin_management.plugins_dir')}
-                  </span>
-                  <strong>{data.pluginsDir || 'plugins'}</strong>
-                </span>
-              </div>
-            ) : null}
-          </div>
-
+      <PageControlBar
+        leading={<div className={styles.summaryTabs}>{tabsControl}</div>}
+        actions={
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={loadPlugins}
+              disabled={!connected || !supportsPlugin || loading || Boolean(mutatingID)}
+              loading={loading}
+            >
+              {loading ? null : <IconRefreshCw size={15} />}
+              {t('plugin_management.refresh')}
+            </Button>
+            <Button variant="primary" size="sm" onClick={onOpenStore}>
+              <IconPlus size={15} />
+              {t('plugin_management.install_plugin')}
+            </Button>
+          </>
+        }
+        toolbar={
           <div className={styles.controlToolbar}>
             <Input
               type="search"
@@ -797,26 +771,43 @@ function InstalledPluginsView({
               aria-label={t('plugin_management.search_label')}
               rightElement={<IconSearch size={16} />}
             />
-            <div className={styles.toolbarActions}>
-              <Button variant="secondary" size="sm" onClick={onOpenStore}>
-                <IconPlus size={16} />
-                {t('plugin_management.install_plugin')}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={loadPlugins}
-                disabled={!connected || !supportsPlugin || loading || Boolean(mutatingID)}
-                loading={loading}
-              >
-                {loading ? null : <IconRefreshCw size={16} />}
-                {t('plugin_management.refresh')}
-              </Button>
-            </div>
+            {data ? (
+              <div className={styles.toolbarMeta}>
+                <span className={styles.toolbarMetaStat}>
+                  <span>{t('plugin_management.installed_count')}</span>
+                  <strong>{pluginStats.installed}</strong>
+                </span>
+                <span className={styles.toolbarMetaDivider} aria-hidden="true">
+                  ·
+                </span>
+                <span className={styles.toolbarMetaStat} data-tone="active">
+                  <span>{t('plugin_management.effective_count')}</span>
+                  <strong>{pluginStats.effective}</strong>
+                </span>
+                <span className={styles.toolbarMetaDivider} aria-hidden="true">
+                  ·
+                </span>
+                <span
+                  className={styles.toolbarMetaPath}
+                  title={`${t('plugin_management.plugins_dir')}: ${data.pluginsDir || 'plugins'}`}
+                >
+                  <code>{data.pluginsDir || 'plugins'}</code>
+                </span>
+              </div>
+            ) : null}
           </div>
-        </div>
-      </section>
+        }
+      />
 
+      {data && !data.pluginsEnabled ? (
+        <div className={styles.warningBox}>
+          <span>{t('plugin_management.global_disabled_hint')}</span>
+          <Button variant="secondary" size="sm" onClick={() => navigate('/config')}>
+            <IconSettings size={15} />
+            {t('plugin_management.open_gateway_config')}
+          </Button>
+        </div>
+      ) : null}
       {loading && !data ? (
         <div className={styles.list} aria-busy="true">
           {Array.from({ length: 4 }, (_, index) => (
@@ -826,18 +817,25 @@ function InstalledPluginsView({
       ) : error && !data ? null : visiblePlugins.length === 0 ? (
         <section className={styles.emptySurface}>
           <EmptyState
+            variant="canvas"
             title={t('plugin_management.no_plugins')}
             description={t('plugin_management.no_plugins_desc')}
             action={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={loadPlugins}
-                disabled={!connected || !supportsPlugin}
-              >
-                <IconRefreshCw size={16} />
-                {t('plugin_management.refresh')}
-              </Button>
+              <div className={styles.emptyActions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={loadPlugins}
+                  disabled={!connected || !supportsPlugin}
+                >
+                  <IconRefreshCw size={15} />
+                  {t('plugin_management.refresh')}
+                </Button>
+                <Button variant="primary" size="sm" onClick={onOpenStore}>
+                  <IconPlus size={15} />
+                  {t('plugin_management.install_plugin')}
+                </Button>
+              </div>
             }
           />
         </section>

@@ -4748,6 +4748,7 @@
     "global_enabled": "已啟用",
     "global_disabled": "已停用",
     "global_disabled_hint": "目前已關閉插件總開關，單個插件即使啟用也不會生效。",
+    "open_gateway_config": "前往閘道設定",
     "plugins_dir": "插件目錄",
     "installed_count": "已安裝",
     "effective_count": "已生效",

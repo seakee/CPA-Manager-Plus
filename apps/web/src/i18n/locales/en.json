@@ -4748,6 +4748,7 @@
     "global_enabled": "Enabled",
     "global_disabled": "Disabled",
     "global_disabled_hint": "The global plugin switch is off, so individual plugins will not run even if enabled.",
+    "open_gateway_config": "Open gateway config",
     "plugins_dir": "Plugin directory",
     "installed_count": "Installed",
     "effective_count": "Effective",

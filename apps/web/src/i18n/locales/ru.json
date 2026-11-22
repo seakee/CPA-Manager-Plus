@@ -4752,6 +4752,7 @@
     "global_enabled": "Включено",
     "global_disabled": "Отключено",
     "global_disabled_hint": "Общий переключатель плагинов выключен, поэтому отдельные включённые плагины не будут работать.",
+    "open_gateway_config": "Открыть настройки шлюза",
     "plugins_dir": "Каталог плагинов",
     "installed_count": "Установлено",
     "effective_count": "Активно",

@@ -5,7 +5,7 @@
 .page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--app-gap);
 }
 
 .errorBox,
@@ -23,12 +23,16 @@
 }
 
 .warningBox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 12px;
   @include warning-status-text;
   border: 1px solid var(--warning-border);
   background: var(--warning-bg);
 }
 
-.tabSurface,
 .list,
 .emptySurface {
   border: 1px solid var(--border-color);
@@ -36,122 +40,23 @@
   box-shadow: none;
 }
 
-.tabSurface,
-.controlPanel {
-  display: flex;
-  flex-direction: column;
-}
-
-.tabSurface {
-  gap: 14px;
-  padding: 12px;
-  border-radius: var(--app-radius-lg);
-}
-
-.controlPanel {
-  gap: 12px;
-}
-
-.controlHeader {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  min-height: var(--control-height-sm);
-}
-
 .summaryTabs {
   min-width: 0;
 }
 
-.summaryMetrics {
+.controlToolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
   flex-wrap: wrap;
-}
-
-.summaryMetric {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
+  gap: 10px 16px;
   min-width: 0;
-  min-height: var(--control-height-sm);
-  max-width: 100%;
-  padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--surface-subtle) 76%, var(--bg-primary));
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1;
-
-  strong {
-    min-width: 0;
-    max-width: min(240px, 42vw);
-    overflow: hidden;
-    color: var(--text-primary);
-    font-size: 13px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &[data-tone='enabled'] {
-    border-color: var(--data-badge-success-border);
-    background: var(--data-badge-success-bg);
-
-    strong {
-      color: var(--data-badge-success-text);
-    }
-  }
-
-  &[data-tone='disabled'] {
-    border-color: var(--data-badge-warning-border);
-    background: var(--data-badge-warning-bg);
-
-    strong {
-      @include warning-status-text;
-    }
-  }
-
-  &[data-tone='active'] strong {
-    color: var(--primary-text);
-  }
-}
-
-.summaryMetricLabel {
-  color: var(--text-secondary);
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.controlToolbar {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-  padding-top: 16px;
-
-  &::before {
-    position: absolute;
-    top: 0;
-    left: 2px;
-    width: min(520px, 62%);
-    height: 1px;
-    border-radius: var(--app-radius-pill);
-    background: color-mix(in srgb, var(--border-color) 72%, transparent);
-    content: '';
-  }
 
   :global(.form-group) {
+    flex: 1 1 260px;
+    max-width: 380px;
+    min-width: 0;
     margin-bottom: 0;
   }
-
   :global(.input) {
     height: var(--control-height-sm);
     min-height: var(--control-height-sm);
@@ -159,21 +64,54 @@
     padding-bottom: 0;
     border-radius: var(--app-radius-sm);
   }
+}
 
-  :global(.btn.btn-sm) {
-    height: var(--control-height-sm);
-    min-height: var(--control-height-sm);
-    border-radius: var(--app-radius-sm);
+.toolbarMeta {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-left: auto;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.toolbarMetaStat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+
+  strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &[data-tone='active'] strong {
+    color: var(--primary-text);
   }
 }
 
-.toolbarActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
+.toolbarMetaDivider {
+  color: var(--border-color);
+  user-select: none;
+}
+
+.toolbarMetaPath {
   min-width: 0;
+  max-width: min(260px, 36vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+  }
 }
 
 $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 1fr)
@@ -188,10 +126,18 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .emptySurface {
-  padding: 18px;
+  padding: 0;
   border-radius: var(--app-radius-lg);
+  overflow: hidden;
 }
 
+.emptyActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .tableHeader,
 .row {
   display: grid;
@@ -672,46 +618,14 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   }
 }
 
-@media (max-width: 1040px) {
-  .controlHeader {
-    grid-template-columns: 1fr;
-  }
-
-  .summaryMetrics {
-    justify-content: flex-start;
-  }
-}
-
-@media (max-width: 900px) {
-  .controlToolbar {
-    grid-template-columns: 1fr;
-  }
-
-  .controlToolbar::before {
-    width: min(260px, 56%);
-  }
-
-  .toolbarActions {
-    justify-content: flex-start;
-  }
-}
-
 @media (max-width: 768px) {
-  .summaryMetric {
-    flex: 1 1 160px;
-  }
-
-  .summaryMetric strong {
-    max-width: 100%;
-  }
-
-  .toolbarActions {
+  .toolbarMeta {
+    margin-left: 0;
     width: 100%;
   }
 
-  .toolbarActions :global(.btn.btn-sm) {
-    flex: 1 1 140px;
-    min-width: 0;
+  .toolbarMetaPath {
+    max-width: 100%;
   }
 
   .drawerFooter {
@@ -725,19 +639,6 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 @media (max-width: 520px) {
-  .tabSurface {
-    padding: 10px;
-  }
-
-  .summaryMetrics {
-    width: 100%;
-  }
-
-  .summaryMetric {
-    flex-basis: 100%;
-    justify-content: space-between;
-  }
-
   .actions {
     width: 100%;
   }
