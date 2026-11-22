@@ -1201,7 +1201,13 @@
   font-weight: 600;
 }
 
-.filterToggleButton svg {
+.filterToggleButton,
+.filterToggleChip {
+  color: var(--text-secondary);
+}
+
+.filterToggleButton svg,
+.filterToggleChip svg {
   color: var(--status-display-danger);
 }
 
