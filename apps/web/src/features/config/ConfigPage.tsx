@@ -3,15 +3,15 @@ import {
   lazy,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
-import { createPortal } from 'react-dom';
 import type { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { parse as parseYaml, parseDocument } from 'yaml';
+import { FloatingActionDock } from '@/components/common/FloatingActionDock';
+import { PageControlBar } from '@/components/common/PageControlBar';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -22,7 +22,9 @@ import {
   IconChevronUp,
   IconRefreshCw,
   IconSearch,
+  IconX,
 } from '@/components/ui/icons';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { VisualConfigEditor } from '@/components/config/VisualConfigEditor';
 import type { ApiKeyMutation } from '@/components/config/ApiKeysCardEditor';
 import { DiffModal } from '@/components/config/DiffModal';
@@ -430,7 +432,6 @@ export function ConfigPage() {
   });
   const [lastSearchedQuery, setLastSearchedQuery] = useState('');
   const editorRef = useRef<ReactCodeMirrorRef | null>(null);
-  const floatingActionsRef = useRef<HTMLDivElement>(null);
   const savingRef = useRef(false);
   const managerSavingRef = useRef(false);
   const apiKeyMutationInFlightRef = useRef(false);
@@ -445,7 +446,6 @@ export function ConfigPage() {
   const showManagerTab = panelHostedByUsageService === true;
   const isManagerTab = activeTab === 'manager' && showManagerTab;
   const sourceDirty = dirty || visualDirty;
-  const shouldRenderFloatingActions = isCurrentLayer;
   const hasVisualModeError = !!visualParseError;
   const hasVisualValidationErrors =
     activeTab === 'visual' &&
@@ -602,6 +602,7 @@ export function ConfigPage() {
   const managerHasPendingSave = managerSaveState.hasPendingSave;
   const managerCanSave = managerSaveState.canSave;
   const isDirty = isManagerTab ? managerHasPendingSave : sourceDirty;
+  const hasUnsavedChanges = isDirty || saving || managerSaving;
 
   const beginApiKeyOperation = useCallback(() => {
     const blockReason = resolveApiKeyOperationBlockReason({
@@ -1454,30 +1455,6 @@ export function ConfigPage() {
     performSearch(lastSearchedQuery, 'next');
   }, [lastSearchedQuery, performSearch]);
 
-  // Keep bottom floating actions from covering page content by syncing its height to a CSS variable.
-  useLayoutEffect(() => {
-    if (typeof window === 'undefined' || !shouldRenderFloatingActions) return;
-
-    const actionsEl = floatingActionsRef.current;
-    if (!actionsEl) return;
-
-    const updatePadding = () => {
-      const height = actionsEl.getBoundingClientRect().height;
-      document.documentElement.style.setProperty('--config-action-bar-height', `${height}px`);
-    };
-
-    updatePadding();
-    window.addEventListener('resize', updatePadding);
-
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updatePadding);
-    ro?.observe(actionsEl);
-
-    return () => {
-      ro?.disconnect();
-      window.removeEventListener('resize', updatePadding);
-      document.documentElement.style.removeProperty('--config-action-bar-height');
-    };
-  }, [shouldRenderFloatingActions]);
 
   // Status text
   const getStatusText = () => {
@@ -1580,55 +1557,14 @@ export function ConfigPage() {
     });
   }, [isManagerTab, isDirty, loadConfig, loadManagerConfig, managerDirty, showConfirmation, t]);
 
-  const floatingActions = (
-    <div className={styles.floatingActionContainer} ref={floatingActionsRef}>
-      <div className={styles.floatingActionList}>
-        <div
-          className={`${styles.floatingStatus} ${
-            isMobile ? styles.floatingStatusCompact : ''
-          } ${getStatusClass()}`}
-        >
-          {getFloatingStatusText()}
-        </div>
-        <button
-          type="button"
-          className={styles.floatingActionButton}
-          onClick={handleReload}
-          disabled={loading || saving || managerSaving || apiKeyMutationInFlight}
-          title={t('config_management.reload')}
-          aria-label={t('config_management.reload')}
-        >
-          <IconRefreshCw size={16} />
-        </button>
-        <button
-          type="button"
-          className={styles.floatingActionButton}
-          onClick={handleSave}
-          disabled={
-            isManagerTab
-              ? disableControls ||
-                managerLoading ||
-                managerSaving ||
-                apiKeyMutationInFlight ||
-                !managerCanSave
-              : disableControls ||
-                loading ||
-                saving ||
-                managerSaving ||
-                apiKeyMutationInFlight ||
-                !isDirty ||
-                diffModalOpen ||
-                hasVisualModeError ||
-                hasVisualValidationErrors
-          }
-          title={t('config_management.save')}
-          aria-label={t('config_management.save')}
-        >
-          <IconCheck size={16} />
-          {isDirty && <span className={styles.dirtyDot} aria-hidden="true" />}
-        </button>
-      </div>
-    </div>
+  useHeaderRefresh(
+    handleReload,
+    isCurrentLayer &&
+      !(isManagerTab ? managerLoading : loading) &&
+      !saving &&
+      !managerSaving &&
+      !apiKeyMutationInFlight &&
+      !diffModalOpen
   );
 
   const canConfigureRequestMonitoring =
@@ -1670,15 +1606,114 @@ export function ConfigPage() {
   return (
     <div className={styles.container}>
       <div className={styles.workspaceShell}>
-        <div className={styles.pageMeta}>
-          <SegmentedTabs
-            items={configEditorTabs}
-            activeTab={activeTab}
-            onChange={handleTabChange}
-            ariaLabel={t('config_management.title')}
-          />
-          <div className={`${styles.statusBadge} ${getStatusClass()}`}>{getStatusText()}</div>
-        </div>
+        <PageControlBar
+          leading={
+            <SegmentedTabs
+              items={configEditorTabs}
+              activeTab={activeTab}
+              onChange={handleTabChange}
+              ariaLabel={t('config_management.title')}
+            />
+          }
+          actions={
+            <>
+              <div className={`${styles.statusBadge} ${getStatusClass()}`}>{getStatusText()}</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleReload}
+                disabled={
+                  (isManagerTab ? managerLoading : loading) ||
+                  saving ||
+                  managerSaving ||
+                  apiKeyMutationInFlight
+                }
+                title={t('config_management.reload')}
+                aria-label={t('config_management.reload')}
+              >
+                <IconRefreshCw size={15} />
+                {t('config_management.reload')}
+              </Button>
+            </>
+          }
+          toolbar={
+            activeTab === 'source' ? (
+              <div className={styles.sourceToolbar}>
+                <div className={styles.searchInputWrapper}>
+                  <Input
+                    value={searchQuery}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    onKeyDown={handleSearchKeyDown}
+                    placeholder={t('config_management.search_placeholder')}
+                    disabled={disableControls || loading}
+                    className={
+                      searchQuery
+                        ? `${styles.searchInput} ${styles.searchInputHasQuery}`
+                        : styles.searchInput
+                    }
+                    rightElement={
+                      <div className={styles.searchRight}>
+                        {searchQuery && lastSearchedQuery === searchQuery && (
+                          <span className={styles.searchCount}>
+                            {searchResults.total > 0
+                              ? `${searchResults.current} / ${searchResults.total}`
+                              : t('config_management.search_no_results')}
+                          </span>
+                        )}
+                        {searchQuery ? (
+                          <button
+                            type="button"
+                            className={styles.searchClearButton}
+                            onClick={() => handleSearchChange('')}
+                            disabled={disableControls || loading}
+                            title={t('common.clear', { defaultValue: 'Clear' })}
+                            aria-label={t('common.clear', { defaultValue: 'Clear' })}
+                          >
+                            <IconX size={14} />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className={styles.searchButton}
+                          onClick={() => executeSearch('next')}
+                          disabled={!searchQuery || disableControls || loading}
+                          title={t('config_management.search_button')}
+                        >
+                          <IconSearch size={16} />
+                        </button>
+                      </div>
+                    }
+                  />
+                </div>
+
+                <div className={styles.searchActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handlePrevMatch}
+                    disabled={
+                      !searchQuery || lastSearchedQuery !== searchQuery || searchResults.total === 0
+                    }
+                    title={t('config_management.search_prev')}
+                  >
+                    <IconChevronUp size={16} />
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleNextMatch}
+                    disabled={
+                      !searchQuery || lastSearchedQuery !== searchQuery || searchResults.total === 0
+                    }
+                    title={t('config_management.search_next')}
+                  >
+                    <IconChevronDown size={16} />
+                  </Button>
+                </div>
+              </div>
+            ) : null
+          }
+        />
 
         <div className={styles.content}>
           {!isManagerTab && error && <div className="error-box">{error}</div>}
@@ -1777,63 +1812,6 @@ export function ConfigPage() {
             />
           ) : (
             <div className={styles.sourceWorkspace}>
-              <div className={styles.sourceToolbar}>
-                <div className={styles.searchInputWrapper}>
-                  <Input
-                    value={searchQuery}
-                    onChange={(e) => handleSearchChange(e.target.value)}
-                    onKeyDown={handleSearchKeyDown}
-                    placeholder={t('config_management.search_placeholder')}
-                    disabled={disableControls || loading}
-                    className={styles.searchInput}
-                    rightElement={
-                      <div className={styles.searchRight}>
-                        {searchQuery && lastSearchedQuery === searchQuery && (
-                          <span className={styles.searchCount}>
-                            {searchResults.total > 0
-                              ? `${searchResults.current} / ${searchResults.total}`
-                              : t('config_management.search_no_results')}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          className={styles.searchButton}
-                          onClick={() => executeSearch('next')}
-                          disabled={!searchQuery || disableControls || loading}
-                          title={t('config_management.search_button')}
-                        >
-                          <IconSearch size={16} />
-                        </button>
-                      </div>
-                    }
-                  />
-                </div>
-
-                <div className={styles.searchActions}>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handlePrevMatch}
-                    disabled={
-                      !searchQuery || lastSearchedQuery !== searchQuery || searchResults.total === 0
-                    }
-                    title={t('config_management.search_prev')}
-                  >
-                    <IconChevronUp size={16} />
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleNextMatch}
-                    disabled={
-                      !searchQuery || lastSearchedQuery !== searchQuery || searchResults.total === 0
-                    }
-                    title={t('config_management.search_next')}
-                  >
-                    <IconChevronDown size={16} />
-                  </Button>
-                </div>
-              </div>
 
               <div className={styles.editorWrapper}>
                 <Suspense fallback={null}>
@@ -1859,9 +1837,82 @@ export function ConfigPage() {
         </div>
       </div>
 
-      {shouldRenderFloatingActions && typeof document !== 'undefined'
-        ? createPortal(floatingActions, document.body)
-        : null}
+      <FloatingActionDock
+        open={hasUnsavedChanges}
+        variant="compact"
+        ariaLabel={t('config_management.unsaved_changes', { defaultValue: 'Unsaved changes' })}
+        leading={
+          <span className={`${styles.dirtyDockLabel} ${getStatusClass()}`}>
+            {getFloatingStatusText()}
+          </span>
+        }
+      >
+        {!isManagerTab ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleSave}
+            disabled={
+              disableControls ||
+              loading ||
+              saving ||
+              managerSaving ||
+              apiKeyMutationInFlight ||
+              !isDirty ||
+              diffModalOpen ||
+              (activeTab === 'visual' && hasVisualModeError)
+            }
+            title={t('config_management.diff.title')}
+            aria-label={t('config_management.diff.title')}
+          >
+            {t('config_management.diff.title')}
+          </Button>
+        ) : null}
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={handleReload}
+          disabled={
+            (isManagerTab ? managerLoading : loading) ||
+            saving ||
+            managerSaving ||
+            apiKeyMutationInFlight ||
+            diffModalOpen
+          }
+          title={t('common.reset')}
+          aria-label={t('common.reset')}
+        >
+          {t('common.reset')}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={handleSave}
+          loading={isManagerTab ? managerSaving : saving}
+          disabled={
+            isManagerTab
+              ? disableControls ||
+                managerLoading ||
+                managerSaving ||
+                apiKeyMutationInFlight ||
+                !managerCanSave
+              : disableControls ||
+                loading ||
+                saving ||
+                managerSaving ||
+                apiKeyMutationInFlight ||
+                !isDirty ||
+                diffModalOpen ||
+                hasVisualModeError ||
+                hasVisualValidationErrors
+          }
+          title={t('config_management.save')}
+          aria-label={t('config_management.save')}
+        >
+          <IconCheck size={14} />
+          {t('config_management.save')}
+        </Button>
+      </FloatingActionDock>
       <DiffModal
         open={diffModalOpen}
         original={serverYaml}

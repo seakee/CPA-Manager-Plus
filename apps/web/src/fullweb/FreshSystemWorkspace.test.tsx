@@ -397,6 +397,16 @@ describe('FreshSystemWorkspace component', () => {
       await Promise.resolve();
     });
 
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(true);
+    const pollInput = renderer.root.findByProps({ label: c('collectorPollInterval') });
+    await act(async () => {
+      pollInput.props.onChange({ target: { value: '600' } });
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(false);
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-collector-save-btn' })
@@ -482,7 +492,7 @@ describe('FreshSystemWorkspace component', () => {
 
     expect(toggle.props.disabled).toBe(true);
     expect(daysInput.props.disabled).toBe(false);
-    expect(saveBtn.props.disabled).toBe(false);
+    expect(saveBtn.props.disabled).toBe(true);
     expect(
       renderer.root.findByProps({ 'data-testid': 'system-retention-env-lock-hint' }).props.children
     ).toBe(c('retentionEnabledEnvLockedHint'));
@@ -490,6 +500,9 @@ describe('FreshSystemWorkspace component', () => {
     await act(async () => {
       daysInput.props.onChange({ target: { value: '60' } });
     });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-retention-save-btn' }).props.disabled
+    ).toBe(false);
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-retention-save-btn' })
@@ -546,7 +559,7 @@ describe('FreshSystemWorkspace component', () => {
 
     expect(toggle2.props.disabled).toBe(false);
     expect(daysInput2.props.disabled).toBe(true);
-    expect(saveBtn2.props.disabled).toBe(false);
+    expect(saveBtn2.props.disabled).toBe(true);
     expect(
       renderer.root.findByProps({ 'data-testid': 'system-retention-env-lock-hint' }).props.children
     ).toBe(c('retentionDaysEnvLockedHint'));
@@ -554,6 +567,9 @@ describe('FreshSystemWorkspace component', () => {
     await act(async () => {
       toggle2.props.onChange({ target: { checked: true } });
     });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-retention-save-btn' }).props.disabled
+    ).toBe(false);
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-retention-save-btn' })
@@ -565,6 +581,11 @@ describe('FreshSystemWorkspace component', () => {
       'admin-secret'
     );
 
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': c('retentionToggle') })
+        .props.onChange({ target: { checked: true } });
+    });
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-retention-save-btn' })
@@ -675,6 +696,17 @@ describe('FreshSystemWorkspace component', () => {
       respSubcard.findByProps({ 'aria-label': c('collectorTlsSkipVerify') }).props.checked
     ).toBe(true);
 
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(true);
+    await act(async () => {
+      renderer.root
+        .findByProps({ label: c('collectorPollInterval') })
+        .props.onChange({ target: { value: '600' } });
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(false);
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-collector-save-btn' })
@@ -685,7 +717,7 @@ describe('FreshSystemWorkspace component', () => {
       {
         collector: {
           collectorMode: 'subscribe',
-          pollIntervalMs: 500,
+          pollIntervalMs: 600,
           batchSize: 100,
           queryLimit: 50000,
           queue: 'usage-events',
@@ -714,6 +746,17 @@ describe('FreshSystemWorkspace component', () => {
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'system-collector-resp-fields' })
     ).toHaveLength(0);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(true);
+    await act(async () => {
+      renderer.root
+        .findByProps({ label: c('collectorPollInterval') })
+        .props.onChange({ target: { value: '600' } });
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'system-collector-save-btn' }).props.disabled
+    ).toBe(false);
     await act(async () => {
       await renderer.root
         .findByProps({ 'data-testid': 'system-collector-save-btn' })
@@ -724,7 +767,7 @@ describe('FreshSystemWorkspace component', () => {
       {
         collector: {
           collectorMode: 'http',
-          pollIntervalMs: 500,
+          pollIntervalMs: 600,
           batchSize: 100,
           queryLimit: 50000,
         },
@@ -936,6 +979,12 @@ describe('FreshSystemWorkspace component', () => {
       retentionDays: 60,
       envLocked: false,
     };
+    const collectorSavedConfig2 = buildManagerConfigResponse({ pollIntervalMs: 950, batchSize: 100 });
+    collectorSavedConfig2.config.retention = {
+      enabled: true,
+      retentionDays: 60,
+      envLocked: false,
+    };
 
     vi.spyOn(usageServiceApi, 'getManagerConfig').mockResolvedValue(initialConfig);
     vi.spyOn(usageServiceApi, 'getMaintenanceStatus').mockRejectedValue(
@@ -945,8 +994,8 @@ describe('FreshSystemWorkspace component', () => {
     const patchSpy = vi
       .spyOn(usageServiceApi, 'patchSettings')
       .mockResolvedValueOnce(retentionSavedConfig)
-      .mockResolvedValueOnce(collectorSavedConfig);
-
+      .mockResolvedValueOnce(collectorSavedConfig)
+      .mockResolvedValueOnce(collectorSavedConfig2);
     const onDirtyChange = vi.fn();
     await act(async () => {
       renderer = create(
@@ -1015,6 +1064,11 @@ describe('FreshSystemWorkspace component', () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
     await act(async () => {
       renderer.root.findByProps({ id: 'system-config-tabs-monitoring' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ label: c('collectorPollInterval') })
+        .props.onChange({ target: { value: '950' } });
     });
     await act(async () => {
       await renderer.root

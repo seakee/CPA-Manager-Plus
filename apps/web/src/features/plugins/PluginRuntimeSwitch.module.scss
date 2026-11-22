@@ -1,19 +1,32 @@
 .switchSurface {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
+  gap: 12px 16px;
   align-items: center;
-  padding: 14px 16px;
+  padding: 12px 16px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
   box-shadow: none;
+
+  @include mobile {
+    padding: 10px 12px;
+    border-radius: var(--app-radius-lg);
+  }
 }
 
 .switchCopy {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
+  min-width: 0;
+}
+
+.switchHeader {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   min-width: 0;
 }
 
@@ -30,24 +43,43 @@
   color: var(--text-secondary);
 }
 
-.switchReadout {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  margin-top: 2px;
-}
-
 .readoutItem {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
   font-size: 12px;
+  line-height: 1;
   color: var(--text-primary);
+
+  strong {
+    font-weight: 700;
+  }
+
+  &[data-tone='on'] {
+    background: var(--data-badge-success-bg);
+
+    strong {
+      color: var(--data-badge-success-text);
+    }
+  }
+
+  &[data-tone='off'] {
+    background: var(--data-badge-warning-bg);
+
+    strong {
+      color: var(--data-badge-warning-text);
+    }
+  }
 }
 
 .readoutLabel {
   color: var(--text-secondary);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .switchNotice {

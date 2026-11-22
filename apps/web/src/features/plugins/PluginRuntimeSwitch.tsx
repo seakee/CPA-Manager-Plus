@@ -180,10 +180,12 @@ export function PluginRuntimeSwitch({
   return (
     <section className={styles.switchSurface} data-testid="plugin-runtime-switch">
       <div className={styles.switchCopy}>
-        <div className={styles.switchTitle}>{t('plugin_management.runtime_title')}</div>
-        <p className={styles.switchDescription}>{t('plugin_management.runtime_description')}</p>
-        <div className={styles.switchReadout}>
-          <span className={styles.readoutItem}>
+        <div className={styles.switchHeader}>
+          <div className={styles.switchTitle}>{t('plugin_management.runtime_title')}</div>
+          <span
+            className={styles.readoutItem}
+            data-tone={state.configured ? (state.enabled ? 'on' : 'off') : 'unset'}
+          >
             <span className={styles.readoutLabel}>{t('plugin_management.runtime_persisted')}</span>
             <strong data-testid="plugin-runtime-persisted">
               {state.configured
@@ -194,6 +196,7 @@ export function PluginRuntimeSwitch({
             </strong>
           </span>
         </div>
+        <p className={styles.switchDescription}>{t('plugin_management.runtime_description')}</p>
         {notice ? (
           <p className={styles.switchNotice} data-testid="plugin-runtime-notice">
             {notice}

@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { SectionActionFooter } from '@/components/common/SectionActionFooter';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import {
   IconChartLine,
   IconCheck,
@@ -516,6 +519,12 @@ export function RuntimeStatusPage({
     void refreshModels(false);
   }, [refreshModels]);
 
+  const handleHeaderRefresh = useCallback(async () => {
+    await Promise.all([refresh(), refreshModels(true)]);
+  }, [refresh, refreshModels]);
+
+  useHeaderRefresh(handleHeaderRefresh, !busy);
+
   const queryOperation = useCallback(
     async (requestId: string) => {
       try {
@@ -841,57 +850,63 @@ export function RuntimeStatusPage({
 
   return (
     <section className="runtime-status-page" data-testid="runtime-status-page">
-      <header className="runtime-status-bar" aria-live="polite">
-        <div className="runtime-status-bar-main">
-          <span className={`status-pill ${pillToneForState(status?.status)}`}>
-            <span className="status-dot" aria-hidden="true" />
-            <strong data-testid="runtime-status-state">
-              {stateLabel(
-                status?.status,
-                t('runtime_status.loading', { defaultValue: 'Loading' })
-              )}
-            </strong>
-          </span>
-          {status && <span className="runtime-mode-chip">{modeBadgeLabel}</span>}
-          <p className="runtime-status-subtitle">
-            {status?.mode === 'external'
-              ? t('runtime_status.external_subtitle', {
-                  defaultValue: 'External CPA connection · read-only',
-                })
-              : t('runtime_status.subtitle', {
-                  defaultValue: 'Observe the Manager and CPA gateway lifecycle separately.',
-                })}
-          </p>
-        </div>
-        <div className="runtime-status-bar-actions">
-          <span
-            className="runtime-observed-meta"
-            title={t('runtime_status.auto_refresh_hint', { defaultValue: 'Auto-refresh 30s' })}
-          >
-            <IconClock size={13} aria-hidden="true" />
-            <span>{observedLabel}</span>
-          </span>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void refresh()}
-            disabled={loading || busy}
-          >
-            <span className="runtime-btn-content">
-              <IconRefreshCw
-                size={14}
-                className={loading ? 'runtime-spin' : undefined}
-                aria-hidden="true"
-              />
-              <span>
-                {loading
-                  ? t('common.loading', { defaultValue: 'Loading…' })
-                  : t('common.refresh', { defaultValue: 'Refresh' })}
-              </span>
+      <PageControlBar
+        as="header"
+        className="runtime-status-bar"
+        leading={
+          <div className="runtime-status-bar-main" aria-live="polite">
+            <span className={`status-pill ${pillToneForState(status?.status)}`}>
+              <span className="status-dot" aria-hidden="true" />
+              <strong data-testid="runtime-status-state">
+                {stateLabel(
+                  status?.status,
+                  t('runtime_status.loading', { defaultValue: 'Loading' })
+                )}
+              </strong>
             </span>
-          </Button>
-        </div>
-      </header>
+            {status && <span className="runtime-mode-chip">{modeBadgeLabel}</span>}
+            <p className="runtime-status-subtitle">
+              {status?.mode === 'external'
+                ? t('runtime_status.external_subtitle', {
+                    defaultValue: 'External CPA connection · read-only',
+                  })
+                : t('runtime_status.subtitle', {
+                    defaultValue: 'Observe the Manager and CPA gateway lifecycle separately.',
+                  })}
+            </p>
+          </div>
+        }
+        actions={
+          <div className="runtime-status-bar-actions">
+            <span
+              className="runtime-observed-meta"
+              title={t('runtime_status.auto_refresh_hint', { defaultValue: 'Auto-refresh 30s' })}
+            >
+              <IconClock size={13} aria-hidden="true" />
+              <span>{observedLabel}</span>
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refresh()}
+              disabled={loading || busy}
+            >
+              <span className="runtime-btn-content">
+                <IconRefreshCw
+                  size={15}
+                  className={loading ? 'runtime-spin' : undefined}
+                  aria-hidden="true"
+                />
+                <span>
+                  {loading
+                    ? t('common.loading', { defaultValue: 'Loading…' })
+                    : t('common.refresh', { defaultValue: 'Refresh' })}
+                </span>
+              </span>
+            </Button>
+          </div>
+        }
+      />
 
       {anomaly && (
         <div
@@ -1180,8 +1195,8 @@ export function RuntimeStatusPage({
             </dl>
           )}
 
-          <footer className="runtime-card-footer">
-            {status?.mode === 'external' ? (
+          {status?.mode === 'external' ? (
+            <footer className="runtime-card-footer">
               <nav
                 className="runtime-status-links"
                 aria-label={t('runtime_status.external_links', {
@@ -1199,75 +1214,77 @@ export function RuntimeStatusPage({
                   <IconChevronRight size={14} aria-hidden="true" />
                 </Link>
               </nav>
-            ) : (
-              <div className="runtime-gateway-footer-row">
-                <div className="runtime-artifact-slot">
-                  {gateway?.artifactId && (
-                    <button
-                      type="button"
-                      className={`runtime-artifact-chip ${copiedArtifact ? 'is-copied' : ''}`}
-                      onClick={() => void handleCopyArtifact()}
-                      title={
-                        copiedArtifact
-                          ? t('runtime_status.copied_artifact', {
-                              defaultValue: 'Artifact ID copied',
-                            })
-                          : `${t('runtime_status.copy_artifact', {
-                              defaultValue: 'Click to copy full artifact ID',
-                            })}: ${gateway.artifactId}`
-                      }
-                      data-testid="runtime-artifact-digest-btn"
-                    >
-                      <span className="runtime-artifact-value">{gatewayArtifactShort}</span>
-                      {copiedArtifact ? (
-                        <IconCheck size={12} aria-hidden="true" />
-                      ) : (
-                        <IconCopy size={12} aria-hidden="true" />
-                      )}
-                    </button>
-                  )}
-                </div>
-                {status?.mode === 'embedded' && gateway && (
-                  <div className="runtime-status-actions">
-                    {gateway.state === 'offline' ? (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() => requestAction('start')}
-                        disabled={busy || !gateway.capabilities?.includes('start')}
-                        data-testid="runtime-status-start"
-                      >
-                        {t('runtime_status.start', { defaultValue: 'Start' })}
-                      </Button>
+            </footer>
+          ) : (
+            <SectionActionFooter
+              className="runtime-gateway-action-footer"
+              status={
+                gateway?.artifactId ? (
+                  <button
+                    type="button"
+                    className={`runtime-artifact-chip ${copiedArtifact ? 'is-copied' : ''}`}
+                    onClick={() => void handleCopyArtifact()}
+                    title={
+                      copiedArtifact
+                        ? t('runtime_status.copied_artifact', {
+                            defaultValue: 'Artifact ID copied',
+                          })
+                        : `${t('runtime_status.copy_artifact', {
+                            defaultValue: 'Click to copy full artifact ID',
+                          })}: ${gateway.artifactId}`
+                    }
+                    data-testid="runtime-artifact-digest-btn"
+                  >
+                    <span className="runtime-artifact-value">{gatewayArtifactShort}</span>
+                    {copiedArtifact ? (
+                      <IconCheck size={12} aria-hidden="true" />
                     ) : (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => requestAction('restart')}
-                        disabled={busy || !gateway.capabilities?.includes('restart')}
-                        data-testid="runtime-status-restart"
-                      >
-                        <span className="runtime-btn-content">
-                          <IconRotateCcw size={13} aria-hidden="true" />
-                          <span>{t('runtime_status.restart', { defaultValue: 'Restart' })}</span>
-                        </span>
-                      </Button>
+                      <IconCopy size={12} aria-hidden="true" />
                     )}
+                  </button>
+                ) : null
+              }
+            >
+              {status?.mode === 'embedded' && gateway ? (
+                <>
+                  {gateway.state === 'offline' ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => requestAction('start')}
+                      disabled={busy || !gateway.capabilities?.includes('start')}
+                      data-testid="runtime-status-start"
+                    >
+                      {t('runtime_status.start', { defaultValue: 'Start' })}
+                    </Button>
+                  ) : (
                     <Button
                       variant="secondary"
                       size="sm"
-                      className="runtime-stop-btn"
-                      onClick={() => requestAction('stop')}
-                      disabled={busy || !gateway.capabilities?.includes('stop')}
-                      data-testid="runtime-status-stop"
+                      onClick={() => requestAction('restart')}
+                      disabled={busy || !gateway.capabilities?.includes('restart')}
+                      data-testid="runtime-status-restart"
                     >
-                      {t('runtime_status.stop', { defaultValue: 'Stop' })}
+                      <span className="runtime-btn-content">
+                        <IconRotateCcw size={13} aria-hidden="true" />
+                        <span>{t('runtime_status.restart', { defaultValue: 'Restart' })}</span>
+                      </span>
                     </Button>
-                  </div>
-                )}
-              </div>
-            )}
-          </footer>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="runtime-stop-btn"
+                    onClick={() => requestAction('stop')}
+                    disabled={busy || !gateway.capabilities?.includes('stop')}
+                    data-testid="runtime-status-stop"
+                  >
+                    {t('runtime_status.stop', { defaultValue: 'Stop' })}
+                  </Button>
+                </>
+              ) : null}
+            </SectionActionFooter>
+          )}
         </Card>
       </section>
 

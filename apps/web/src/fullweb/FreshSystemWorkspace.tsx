@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { SectionActionFooter } from '@/components/common/SectionActionFooter';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs, type SegmentedTabItem } from '../components/ui/SegmentedTabs';
+import { IconRefreshCw } from '../components/ui/icons';
 import { Select } from '../components/ui/Select';
 import { ToggleSwitch } from '../components/ui/ToggleSwitch';
 import { AccountProcessingPolicySection } from '../features/config/components/AccountProcessingPolicySection';
 import { usePanelFeatureAvailability } from '../hooks/usePanelFeatureAvailability';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useRequestMonitoringSwitch } from '../hooks/useRequestMonitoringSwitch';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import {
@@ -127,6 +131,8 @@ export function FreshSystemWorkspace({
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [archiveBusyId, setArchiveBusyId] = useState('');
 
+  const [reloading, setReloading] = useState(false);
+  const reloadingRef = useRef(false);
   const docsLanguage = i18n.resolvedLanguage?.startsWith('zh') ? '' : 'en/';
   const effectiveKey = authManagementKey || credential || '';
   const managerEditable = Boolean(managerServiceBase && effectiveKey);
@@ -283,6 +289,70 @@ export function FreshSystemWorkspace({
       managerConfigSeqRef.current += 1;
     };
   }, [loadManagerConfig, refreshArchiveData]);
+
+  const isBusy =
+    reloading || collectorSaving || retentionSaving || archiveBusy || requestMonitoring.saving;
+
+  const handleReload = useCallback(async () => {
+    if (
+      reloadingRef.current ||
+      collectorSaving ||
+      retentionSaving ||
+      archiveBusy ||
+      requestMonitoring.saving
+    ) {
+      return;
+    }
+    if (!managerServiceBase || !effectiveKey) {
+      return;
+    }
+    reloadingRef.current = true;
+    setReloading(true);
+    setCollectorMessage(null);
+    setRetentionMessage(null);
+    try {
+      await Promise.all([loadManagerConfig(), refreshArchiveData()]);
+    } finally {
+      reloadingRef.current = false;
+      if (mountedRef.current) {
+        setReloading(false);
+      }
+    }
+  }, [
+    archiveBusy,
+    collectorSaving,
+    effectiveKey,
+    loadManagerConfig,
+    managerServiceBase,
+    refreshArchiveData,
+    requestMonitoring.saving,
+    retentionSaving,
+  ]);
+
+  useHeaderRefresh(handleReload, !isBusy);
+
+  const handleResetCollector = useCallback(() => {
+    if (!savedBaseline) return;
+    setCollectorMode(savedBaseline.collectorMode);
+    setPollIntervalMs(savedBaseline.pollIntervalMs);
+    setBatchSize(savedBaseline.batchSize);
+    setQueryLimit(savedBaseline.queryLimit);
+    setQueue(savedBaseline.queue);
+    setPopSide(savedBaseline.popSide);
+    setTlsSkipVerify(savedBaseline.tlsSkipVerify);
+    setCollectorMessage(null);
+  }, [savedBaseline]);
+
+  const handleResetRetention = useCallback(() => {
+    if (!savedBaseline) return;
+    if (!retentionEnabledDisabled) {
+      setRetentionEnabled(savedBaseline.retentionEnabled);
+    }
+    if (!retentionDaysDisabled) {
+      setRetentionDays(savedBaseline.retentionDays);
+    }
+    setRetentionMessage(null);
+  }, [retentionDaysDisabled, retentionEnabledDisabled, savedBaseline]);
 
   const handleCopyEntryPath = async () => {
     if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
@@ -590,18 +660,35 @@ export function FreshSystemWorkspace({
 
   return (
     <div className="fresh-system-workspace" data-testid="fresh-system-workspace">
-      <div className="system-tabs-header">
-        <SegmentedTabs
-          items={tabItems}
-          activeTab={activeTab}
-          ariaLabel={c('systemTabsLabel')}
-          onChange={setActiveTab}
-          idBase="system-config-tabs"
-        />
-        <span className="badge" data-testid="system-strategy-badge">
-          {strategyLabel}
-        </span>
-      </div>
+      <PageControlBar
+        leading={
+          <SegmentedTabs
+            items={tabItems}
+            activeTab={activeTab}
+            ariaLabel={c('systemTabsLabel')}
+            onChange={setActiveTab}
+            idBase="system-config-tabs"
+          />
+        }
+        actions={
+          <>
+            <span className="badge" data-testid="system-strategy-badge">
+              {strategyLabel}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleReload()}
+              loading={reloading}
+              disabled={isBusy}
+              data-testid="system-reload-btn"
+            >
+              <IconRefreshCw size={15} />
+              {c('reload')}
+            </Button>
+          </>
+        }
+      />
 
       <div
         role="tabpanel"
@@ -652,33 +739,9 @@ export function FreshSystemWorkspace({
                     <h3>{c('collectorParamsTitle')}</h3>
                     <p className="muted">{c('collectorParamsHelp')}</p>
                   </div>
-                  <div className="system-subpanel-actions">
-                    {collectorEnvLocked ? (
-                      <span className="badge badge-amber">{c('retentionEnvLocked')}</span>
-                    ) : null}
-                    {collectorMessage ? (
-                      <span
-                        className={
-                          collectorMessage.tone === 'warn'
-                            ? 'system-feedback warn'
-                            : 'system-feedback ok'
-                        }
-                        role="status"
-                      >
-                        {collectorMessage.text}
-                      </span>
-                    ) : null}
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => void handleSaveCollector()}
-                      loading={collectorSaving}
-                      disabled={collectorInputsDisabled}
-                      data-testid="system-collector-save-btn"
-                    >
-                      {collectorSaving ? c('collectorSaving') : c('collectorSave')}
-                    </Button>
-                  </div>
+                  {collectorEnvLocked ? (
+                    <span className="badge badge-amber">{c('retentionEnvLocked')}</span>
+                  ) : null}
                 </div>
 
                 {collectorEnvLocked ? (
@@ -757,6 +820,47 @@ export function FreshSystemWorkspace({
                     />
                   </div>
                 ) : null}
+
+                <SectionActionFooter
+                  status={
+                    collectorMessage ? (
+                      <span
+                        className={
+                          collectorMessage.tone === 'warn'
+                            ? 'system-feedback warn'
+                            : 'system-feedback ok'
+                        }
+                        role="status"
+                      >
+                        {collectorMessage.text}
+                      </span>
+                    ) : collectorDirty ? (
+                      c('dirty')
+                    ) : (
+                      c('noDrafts')
+                    )
+                  }
+                >
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleResetCollector}
+                    disabled={!collectorDirty || collectorInputsDisabled}
+                    data-testid="system-collector-reset-btn"
+                  >
+                    {c('discard')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => void handleSaveCollector()}
+                    loading={collectorSaving}
+                    disabled={collectorInputsDisabled || !collectorDirty}
+                    data-testid="system-collector-save-btn"
+                  >
+                    {collectorSaving ? c('collectorSaving') : c('collectorSave')}
+                  </Button>
+                </SectionActionFooter>
 
               </div>
             ) : null}
@@ -884,7 +988,7 @@ export function FreshSystemWorkspace({
               </div>
             ) : null}
 
-            <div className="system-retention-bar">
+            <div className="system-retention-field">
               <div className="system-retention-inline">
                 <label htmlFor="system-retention-days-input" className="system-field-label">
                   {c('retentionDaysLabel')}
@@ -905,8 +1009,11 @@ export function FreshSystemWorkspace({
                 </div>
                 <span className="system-inline-unit">{c('archiveDaysSuffix')}</span>
               </div>
-              <div className="system-retention-actions">
-                {retentionMessage ? (
+            </div>
+
+            <SectionActionFooter
+              status={
+                retentionMessage ? (
                   <span
                     className={
                       retentionMessage.tone === 'warn'
@@ -917,21 +1024,45 @@ export function FreshSystemWorkspace({
                   >
                     {retentionMessage.text}
                   </span>
-                ) : null}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => void handleSaveRetention()}
-                  loading={retentionSaving}
-                  disabled={
-                    !managerEditable || !configLoaded || retentionSaveLocked || retentionSaving
-                  }
-                  data-testid="system-retention-save-btn"
-                >
-                  {c('retentionSave')}
-                </Button>
-              </div>
-            </div>
+                ) : retentionDirty ? (
+                  c('dirty')
+                ) : (
+                  c('noDrafts')
+                )
+              }
+            >
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleResetRetention}
+                disabled={
+                  !retentionDirty ||
+                  !managerEditable ||
+                  !configLoaded ||
+                  retentionSaveLocked ||
+                  retentionSaving
+                }
+                data-testid="system-retention-reset-btn"
+              >
+                {c('discard')}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void handleSaveRetention()}
+                loading={retentionSaving}
+                disabled={
+                  !retentionDirty ||
+                  !managerEditable ||
+                  !configLoaded ||
+                  retentionSaveLocked ||
+                  retentionSaving
+                }
+                data-testid="system-retention-save-btn"
+              >
+                {c('retentionSave')}
+              </Button>
+            </SectionActionFooter>
           </section>
 
           {managerEditable ? (
