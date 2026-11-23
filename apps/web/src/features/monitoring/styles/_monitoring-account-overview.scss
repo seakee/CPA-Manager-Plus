@@ -1191,6 +1191,7 @@
     align-content: start;
     gap: 10px;
     min-width: 0;
+    overflow-x: auto;
     padding: 14px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     border-radius: var(--app-radius-md);
@@ -1370,6 +1371,7 @@
 
   .accountModelTable {
     width: 100%;
+    min-width: 620px;
     table-layout: fixed;
     border-collapse: collapse;
   }
@@ -1408,12 +1410,12 @@
 
   .accountModelTable th:nth-child(2),
   .accountModelTable td:nth-child(2) {
-    width: 7%;
+    width: 7.5%;
   }
 
   .accountModelTable th:nth-child(3),
   .accountModelTable td:nth-child(3) {
-    width: 9%;
+    width: 8%;
   }
 
   .accountModelTable th:nth-child(4),
@@ -1429,7 +1431,7 @@
 
   .accountModelTable th:nth-child(8),
   .accountModelTable td:nth-child(8) {
-    width: 9%;
+    width: 9.5%;
   }
 
   .accountModelTable th:nth-child(9),

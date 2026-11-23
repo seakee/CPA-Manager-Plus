@@ -91,12 +91,12 @@ describe('accounts workspace wiring', () => {
   });
 
   it.each([
-    [en, 'Credential Management', 'Credential List'],
-    [ru, 'Управление учётными данными', 'Список учётных данных'],
-    [zhCN, '凭证管理', '凭证列表'],
-    [zhTW, '憑證管理', '憑證清單'],
-  ])('uses credential terminology and omits removed workspace copy', (locale, title, list) => {
-    expect(locale.nav.accounts).toBe(title);
+    [en, 'Credentials', 'Credential Management', 'Credentials'],
+    [ru, 'Управление учётными данными', 'Управление учётными данными', 'Список учётных данных'],
+    [zhCN, '凭证管理', '凭证管理', '凭证列表'],
+    [zhTW, '憑證管理', '憑證管理', '憑證清單'],
+  ])('uses credential terminology and omits removed workspace copy', (locale, navLabel, title, list) => {
+    expect(locale.nav.accounts).toBe(navLabel);
     expect(locale.accounts.title).toBe(title);
     expect(locale.accounts.tab_accounts).toBe(list);
     expect(locale.accounts.tab_health).toBeTypeOf('string');
@@ -122,7 +122,7 @@ describe('accounts workspace wiring', () => {
   });
 
   it.each([
-    [en, 'Health Inspection'],
+    [en, 'Health Check'],
     [ru, 'Проверка состояния'],
     [zhCN, '健康巡检'],
     [zhTW, '健康巡檢'],
@@ -160,7 +160,7 @@ describe('accounts workspace wiring', () => {
   });
 
   it.each([
-    [en, 'OAuth Configuration'],
+    [en, 'OAuth Rules'],
     [ru, 'Настройки OAuth'],
     [zhCN, 'OAuth 配置'],
     [zhTW, 'OAuth 設定'],
@@ -191,8 +191,8 @@ describe('accounts workspace wiring', () => {
       [
         'Credential',
         'Plan',
-        'Availability',
-        'Recent Requests',
+        'Status',
+        'Recent',
         'Quota',
         'Actions',
       ],

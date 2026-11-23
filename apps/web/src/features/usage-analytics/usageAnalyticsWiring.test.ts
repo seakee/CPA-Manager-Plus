@@ -392,9 +392,9 @@ describe('usage analytics app wiring', () => {
   });
 
   it('keeps long English sidebar labels concise', () => {
-    expect(en.nav.monitoring_center).toBe('Request Monitor');
+    expect(en.nav.monitoring_center).toBe('Live Monitor');
     expect(en.nav.plugins).toBe('Plugins');
-    expect(en.nav.accounts).toBe('Credential Management');
+    expect(en.nav.accounts).toBe('Credentials');
     expect(en.nav).not.toHaveProperty('codex_inspection');
   });
 

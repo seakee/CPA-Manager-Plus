@@ -86,7 +86,7 @@ describe('HealthAlertsCard', () => {
 
     const json = JSON.stringify(renderer.toJSON());
     expect(json).toContain('Production (cpamp_sk_…2f85)');
-    expect(json).toContain('Installation key (sk-…1234) · Revoked');
+    expect(json).toContain('Installer (sk-…1234) · Revoked');
     expect(json).not.toContain('01234567');
     expect(json).not.toContain('fedcba98');
 
@@ -127,7 +127,7 @@ describe('HealthAlertsCard', () => {
     });
 
     const json = JSON.stringify(renderer.toJSON());
-    expect(json).toContain('anthropic · Adopted key (cpk_abcd****ef12)');
+    expect(json).toContain('anthropic · Adopted (cpk_abcd****ef12)');
     await act(async () => {
       renderer.unmount();
     });

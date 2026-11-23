@@ -1,8 +1,8 @@
 import { fullWebLanguage } from './fullweb';
 
 const en = {
-  installerOrigin: 'Installation key',
-  adoptedOrigin: 'Adopted key',
+  installerOrigin: 'Installer',
+  adoptedOrigin: 'Adopted',
   adoptedOriginNote:
     'Keys marked as adopted were already in use on the source CPA when this installation took it over and have not been re-verified yet.',
   copyKey: 'Copy key',
@@ -52,7 +52,7 @@ const en = {
   tabKeys: 'API Keys',
   tabAccess: 'Endpoints',
   originAndCreated: 'Origin / Created',
-  workspaceOrigin: 'Created in console',
+  workspaceOrigin: 'Console',
   listed: 'shown',
   total: 'total',
   scope: 'Saved key metadata with usage attributed from recorded gateway events.',
@@ -309,9 +309,9 @@ const en = {
   statusRevoked: 'Revoked',
   statusRotated: 'Rotated',
   statusSyncing: 'Syncing',
-  statusPending: 'Pending check',
-  statusMissing: 'Missing on gateway',
-  statusNotApplied: 'Not active yet',
+  statusPending: 'Pending',
+  statusMissing: 'Missing',
+  statusNotApplied: 'Not Active',
   revokedAtPrefix: 'Revoked',
   renameModalTitle: 'Rename key',
   renamePlaceholder: 'e.g. Production service, Local CLI',

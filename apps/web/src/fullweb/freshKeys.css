@@ -382,6 +382,7 @@
   font-size: 12px;
   font-weight: 700;
   text-align: left;
+  white-space: nowrap;
 }
 .key-table th:last-child {
   text-align: right;

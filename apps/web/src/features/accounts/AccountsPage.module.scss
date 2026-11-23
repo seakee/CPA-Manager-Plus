@@ -353,8 +353,8 @@
   display: grid;
   grid-template-columns:
     minmax(140px, 1.1fr)
-    76px
-    96px
+    82px
+    114px
     minmax(124px, 0.3fr)
     minmax(160px, 0.35fr)
     minmax(280px, 3fr)
@@ -378,6 +378,7 @@
     min-width: 0;
     padding: 0;
     line-height: 1.25;
+    white-space: nowrap;
   }
 
   > span:nth-child(2),
@@ -1226,8 +1227,8 @@
   .accountCard {
     grid-template-columns:
       minmax(150px, 1.1fr)
-      70px
-      96px
+      82px
+      114px
       minmax(112px, 0.3fr)
       minmax(178px, 0.35fr)
       minmax(300px, 3fr)
@@ -1251,8 +1252,8 @@
   .accountCard {
     grid-template-columns:
       minmax(180px, 1.3fr)
-      80px
-      96px
+      86px
+      114px
       minmax(124px, 0.3fr)
       minmax(186px, 0.35fr)
       minmax(380px, 3fr)
@@ -2527,6 +2528,8 @@
   font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .statusBadgeButton {
