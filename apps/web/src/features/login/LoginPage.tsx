@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AppFooter } from '@/components/common/AppFooter';
+import { SplashScreen } from '@/components/common/SplashScreen';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
@@ -41,10 +42,6 @@ import {
   CPAMP_HORIZONTAL_LOGO_ON_DARK_PNG_URL,
   CPAMP_HORIZONTAL_LOGO_PNG_SRC_SET,
   CPAMP_HORIZONTAL_LOGO_PNG_URL,
-  CPAMP_VERTICAL_LOGO_ON_DARK_URL,
-  CPAMP_VERTICAL_LOGO_ON_DARK_SRC_SET,
-  CPAMP_VERTICAL_LOGO_SRC_SET,
-  CPAMP_VERTICAL_LOGO_URL,
 } from '@/assets/brand';
 import { resolveUsageServiceLoginMode } from './loginMode';
 import { formatLoginError, formatLoginFailure, toLoginError, type LoginError } from './loginError';
@@ -495,6 +492,9 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
   }
 
   const showSplash = autoLoading || autoLoginSuccess;
+  if (showSplash) {
+    return <SplashScreen />;
+  }
 
   const renderKeyToggle = (visible: boolean, toggle: () => void) => (
     <button
@@ -558,25 +558,6 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
       </div>
 
       <div className={styles.formPanel}>
-        {showSplash ? (
-          <div className={styles.splashContent}>
-            <img
-              src={CPAMP_VERTICAL_LOGO_URL}
-              srcSet={CPAMP_VERTICAL_LOGO_SRC_SET}
-              alt="CPA Manager Plus"
-              className={[styles.splashLogo, styles.splashLogoLight].join(' ')}
-            />
-            <img
-              src={CPAMP_VERTICAL_LOGO_ON_DARK_URL}
-              srcSet={CPAMP_VERTICAL_LOGO_ON_DARK_SRC_SET}
-              alt="CPA Manager Plus"
-              className={[styles.splashLogo, styles.splashLogoDark].join(' ')}
-            />
-            <div className={styles.splashLoader}>
-              <div className={styles.splashLoaderBar} />
-            </div>
-          </div>
-        ) : (
           <div
             className={`${styles.formContent} ${
               usageServiceNeedsSetup ? styles.setupFormContent : ''
@@ -931,7 +912,6 @@ export function LoginPage({ consoleAuth }: { consoleAuth?: ConsoleLoginAdapter }
               )}
             </div>
           </div>
-        )}
       </div>
       <AppFooter className={styles.footer} />
     </div>

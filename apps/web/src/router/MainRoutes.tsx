@@ -31,7 +31,7 @@ import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
 import { RuntimeStatusPage } from '@/pages/RuntimeStatusPage';
 import { ManagerUpdatePage } from '@/pages/ManagerUpdatePage';
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { SplashScreen } from '@/components/common/SplashScreen';
 import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { ensureRouteBasePathname } from '@/router/routeBase';
@@ -153,7 +153,7 @@ export function PluginGate({ children }: { children: ReactElement }) {
     return children;
   }
   if (!apiBase) {
-    return <LoadingSpinner />;
+    return <SplashScreen variant="content" />;
   }
   const status = samePluginProbeTarget(probe, apiBase, managementKey) ? probe.status : 'unknown';
   if (status === 'supported') {
@@ -184,7 +184,7 @@ export function PluginGate({ children }: { children: ReactElement }) {
       </div>
     );
   }
-  return <LoadingSpinner />;
+  return <SplashScreen variant="content" />;
 }
 
 function FeatureGate({
@@ -203,7 +203,7 @@ function FeatureGate({
       : availability.modelPricesAvailable;
 
   if (availability.checking) {
-    return fallback ?? <LoadingSpinner />;
+    return fallback ?? <SplashScreen variant="content" />;
   }
 
   if (!enabled) {
@@ -232,7 +232,7 @@ export function MonitoringGate({
   const availability = usePanelFeatureAvailability();
 
   if (availability.checking) {
-    return <LoadingSpinner />;
+    return <SplashScreen variant="content" />;
   }
 
   if (availability.requestMonitoringAvailable) {
@@ -259,7 +259,7 @@ function LogsGate({ children }: { children: ReactElement }) {
   }, [config, fetchConfig]);
 
   if (!config && !failed) {
-    return <LoadingSpinner />;
+    return <SplashScreen variant="content" />;
   }
 
   return children;

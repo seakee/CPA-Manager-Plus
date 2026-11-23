@@ -103,6 +103,33 @@ afterEach(async () => {
 });
 
 describe('PluginGate', () => {
+  it('shows the content splash screen instead of a bare spinner while probing', async () => {
+    let resolveProbe!: (value: { items: unknown[] }) => void;
+    state.list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveProbe = resolve;
+      })
+    );
+    await render();
+
+    expect(
+      renderer!.root.findAll(
+        (node) => typeof node.props.className === 'string' && node.props.className.includes('splash-screen-content')
+      )
+    ).toHaveLength(1);
+    expect(
+      renderer!.root.findAll(
+        (node) => typeof node.props.className === 'string' && node.props.className.includes('loading-spinner')
+      )
+    ).toHaveLength(0);
+
+    await act(async () => {
+      resolveProbe({ items: [] });
+      await Promise.resolve();
+    });
+    expect(page()).toHaveLength(1);
+  });
+
   it('offers a retry instead of redirecting when the probe fails for reasons other than a missing namespace', async () => {
     state.list.mockRejectedValueOnce(failure(401));
     await render();

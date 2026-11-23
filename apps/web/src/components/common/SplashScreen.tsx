@@ -5,18 +5,24 @@ import {
   CPAMP_VERTICAL_LOGO_SRC_SET,
   CPAMP_VERTICAL_LOGO_URL,
 } from '@/assets/brand';
+import { AppBackground } from './AppBackground';
 import './SplashScreen.scss';
 
 interface SplashScreenProps {
-  onFinish: () => void;
+  onFinish?: () => void;
   fadeOut?: boolean;
+  variant?: 'fullscreen' | 'content';
 }
 
 const FADE_OUT_DURATION = 400;
 
-export function SplashScreen({ onFinish, fadeOut = false }: SplashScreenProps) {
+export function SplashScreen({
+  onFinish,
+  fadeOut = false,
+  variant = 'fullscreen',
+}: SplashScreenProps = {}) {
   useEffect(() => {
-    if (!fadeOut) return;
+    if (!fadeOut || !onFinish) return;
     const finishTimer = setTimeout(() => {
       onFinish();
     }, FADE_OUT_DURATION);
@@ -27,7 +33,20 @@ export function SplashScreen({ onFinish, fadeOut = false }: SplashScreenProps) {
   }, [fadeOut, onFinish]);
 
   return (
-    <div className={`splash-screen ${fadeOut ? 'fade-out' : ''}`}>
+    <div
+      className={[
+        'splash-screen',
+        variant === 'content' ? 'splash-screen-content' : '',
+        fadeOut ? 'fade-out' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="CPA Manager Plus"
+    >
+      {variant === 'fullscreen' ? <AppBackground /> : null}
       <div className="splash-content">
         <img
           src={CPAMP_VERTICAL_LOGO_URL}

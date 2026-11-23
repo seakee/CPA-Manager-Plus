@@ -7,6 +7,30 @@
     <title>CPAMP · 初始化向导</title>
     <link rel="icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        min-height: 100%;
+      }
+      body {
+        background-color: #eff2f7;
+        background-image:
+          radial-gradient(600px circle at 90% 10%, rgba(122, 162, 255, 0.34), transparent 70%),
+          radial-gradient(500px circle at 10% 90%, rgba(107, 197, 255, 0.34), transparent 70%),
+          linear-gradient(120deg, #f0f7ff 0%, #e7f2ff 50%, #edf7ff 100%);
+        background-attachment: fixed;
+      }
+      html[data-theme='dark'] body {
+        background-color: #0a0a0a;
+        background-image:
+          radial-gradient(600px circle at 90% 10%, rgba(39, 50, 92, 0.42), transparent 70%),
+          radial-gradient(500px circle at 10% 90%, rgba(15, 61, 89, 0.38), transparent 70%),
+          linear-gradient(120deg, #0b1324 0%, #0a1426 50%, #091521 100%);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
@@ -18,6 +42,45 @@
     -->
     <script id="cpamp-routing-context" type="application/json" nonce="__CPAMP_CSP_NONCE__">
       __CPAMP_ROUTING_CONTEXT__
+    </script>
+    <script nonce="__CPAMP_CSP_NONCE__">
+      (function () {
+        try {
+          var isBootstrap = window.location.pathname === '/.well-known/cpamp-bootstrap/ui';
+          if (!isBootstrap) {
+            var carrier = document.getElementById('cpamp-routing-context');
+            var raw = carrier ? (carrier.textContent || '').trim() : '';
+            if (raw && raw !== '__CPAMP_ROUTING_CONTEXT__') {
+              var ctx = JSON.parse(raw);
+              if (ctx && (ctx.bootstrap || (ctx.state && ctx.state !== 'verified_effective'))) {
+                isBootstrap = true;
+              }
+            }
+          }
+          var pref = 'auto';
+          if (!isBootstrap) {
+            var stored = window.localStorage && window.localStorage.getItem('cli-proxy-theme');
+            if (stored) {
+              if (stored.charAt(0) === '{') {
+                var parsed = JSON.parse(stored);
+                if (parsed && parsed.state && typeof parsed.state.theme === 'string') {
+                  pref = parsed.state.theme;
+                }
+              } else {
+                pref = stored;
+              }
+            }
+          }
+          var dark =
+            pref === 'dark' ||
+            (pref !== 'white' &&
+              pref !== 'light' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('light', !dark);
+          document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'white');
+        } catch (_e) {}
+      })();
     </script>
     <script type="module" src="../src/fullweb/main.tsx" nonce="__CPAMP_CSP_NONCE__"></script>
   </body>

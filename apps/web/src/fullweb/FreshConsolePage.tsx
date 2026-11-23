@@ -8,6 +8,7 @@ import { FreshManagedRuntime } from './FreshManagedRuntime';
 import { FreshExternalConnection } from './FreshExternalConnection';
 import { FreshInferencePrefixCompletion } from './FreshInferencePrefixCompletion';
 import { FullWebIcon } from './FullWebIcon';
+import { SplashScreen } from '../components/common/SplashScreen';
 import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
 import './consoleWorkspace.css';
@@ -144,7 +145,11 @@ export function FreshConsolePage({
   // Kept as a key: the login form and its language menu must retranslate a
   // failure that is already on screen.
   const [error, setError] = useState<Parameters<typeof t>[0] | null>(null);
-  const [light, setLight] = useState(true);
+  const [light, setLight] = useState(() =>
+    typeof document === 'undefined'
+      ? true
+      : document.documentElement?.getAttribute?.('data-theme') !== 'dark'
+  );
   const installationPendingRef = useRef(false);
   const requestId = useRef(0);
   const operationRef = useRef<FreshOperation | null>(null);
@@ -245,7 +250,7 @@ export function FreshConsolePage({
   };
   if (!operation) {
     return (
-      <Suspense fallback={<div role="status">{t('loggingIn')}</div>}>
+      <Suspense fallback={<SplashScreen />}>
         <FullWebLoginPage
           adapter={{
             address: new URL(context.basePath, window.location.origin).toString(),
@@ -334,13 +339,7 @@ export function FreshConsolePage({
     );
   if (operation.productComplete) {
     return (
-      <Suspense
-        fallback={
-          <div className="main-content" role="status">
-            <span className="loading-spinner" aria-label={t('unavailable')} />
-          </div>
-        }
-      >
+      <Suspense fallback={<SplashScreen />}>
         <LegacyConsolePage
           context={context}
           credential={credential}
