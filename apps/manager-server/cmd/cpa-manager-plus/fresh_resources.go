@@ -1714,8 +1714,10 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet, http.MethodPost)
 	case "v0/management/usage/archives/preview":
 		return allowed(http.MethodPost)
-	case "v0/management/usage/import", "v0/management/usage/import-sessions":
+	case "v0/management/usage/import":
 		return allowed(http.MethodPost)
+	case "v0/management/usage/import-sessions":
+		return allowed(http.MethodGet, http.MethodPost)
 	case "v0/management/model-prices":
 		return allowed(http.MethodGet, http.MethodPut)
 	case "v0/management/model-prices/sync":
@@ -1782,7 +1784,7 @@ func legacyBridgeDynamicPathAllowed(resource, method string, allowed func(...str
 		return allowed(http.MethodPost)
 	}
 	if len(parts) == 2 && parts[0] == "usage" && parts[1] == "import-sessions" {
-		return allowed(http.MethodPost)
+		return allowed(http.MethodGet, http.MethodPost)
 	}
 	if len(parts) == 3 && parts[0] == "usage" && parts[1] == "archives" {
 		return allowed(http.MethodGet)

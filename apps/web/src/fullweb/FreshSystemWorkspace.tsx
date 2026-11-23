@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { PageControlBar } from '@/components/common/PageControlBar';
 import { SectionActionFooter } from '@/components/common/SectionActionFooter';
@@ -19,13 +20,10 @@ import {
   usageServiceApi,
   type ManagerConfigResponse,
   type ManagerRetentionConfig,
-  type UsageArchivePreview,
-  type UsageArchiveRunSummary,
   type UsageMaintenanceStatus,
 } from '../services/api/usageService';
 import { useAuthStore, useNotificationStore } from '../stores';
 import { STORAGE_KEY_AUTH, STORAGE_KEY_QUOTA_CACHE } from '../utils/constants';
-import { formatFileSize } from '../utils/format';
 import { FreshRebindDialog } from './FreshRebindDialog';
 import { FreshExternalBlocker } from './FreshExternalBlocker';
 import { FreshExternalUsage } from './FreshExternalUsage';
@@ -34,7 +32,6 @@ import type { PublicApiClient } from './publicApi';
 
 type SystemConfigTab = 'monitoring' | 'storage';
 
-const ARCHIVE_PRESET_DAYS = [30, 90, 180, 365] as const;
 
 function isUsageServiceAuthError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
@@ -130,12 +127,6 @@ export function FreshSystemWorkspace({
 
   // Archive maintenance & runs
   const [maintenanceStatus, setMaintenanceStatus] = useState<UsageMaintenanceStatus | null>(null);
-  const [archiveRuns, setArchiveRuns] = useState<UsageArchiveRunSummary[]>([]);
-  const [archiveWindowDays, setArchiveWindowDays] = useState('90');
-  const [archivePreview, setArchivePreview] = useState<UsageArchivePreview | null>(null);
-  const [archiveBusy, setArchiveBusy] = useState(false);
-  const [archiveBusyId, setArchiveBusyId] = useState('');
-
   const [reloading, setReloading] = useState(false);
   const reloadingRef = useRef(false);
   const docsLanguage = i18n.resolvedLanguage?.startsWith('zh') ? '' : 'en/';
@@ -275,13 +266,9 @@ export function FreshSystemWorkspace({
   const refreshArchiveData = useCallback(async () => {
     if (!managerServiceBase || !effectiveKey) return;
     try {
-      const [maint, list] = await Promise.all([
-        usageServiceApi.getMaintenanceStatus(managerServiceBase, effectiveKey),
-        usageServiceApi.listArchives(managerServiceBase, effectiveKey, { limit: 10 }),
-      ]);
+      const maint = await usageServiceApi.getMaintenanceStatus(managerServiceBase, effectiveKey);
       if (!mountedRef.current) return;
       setMaintenanceStatus(maint);
-      setArchiveRuns(list.runs ?? []);
     } catch (error) {
       if (!mountedRef.current) return;
       if (handleUsageAuthError(error)) return;
@@ -297,15 +284,13 @@ export function FreshSystemWorkspace({
     };
   }, [loadManagerConfig, refreshArchiveData]);
 
-  const isBusy =
-    reloading || collectorSaving || retentionSaving || archiveBusy || requestMonitoring.saving;
+  const isBusy = reloading || collectorSaving || retentionSaving || requestMonitoring.saving;
 
   const handleReload = useCallback(async () => {
     if (
       reloadingRef.current ||
       collectorSaving ||
       retentionSaving ||
-      archiveBusy ||
       requestMonitoring.saving
     ) {
       return;
@@ -329,7 +314,6 @@ export function FreshSystemWorkspace({
       }
     }
   }, [
-    archiveBusy,
     collectorSaving,
     effectiveKey,
     loadManagerConfig,
@@ -509,105 +493,6 @@ export function FreshSystemWorkspace({
     } finally {
       if (mountedRef.current) setRetentionSaving(false);
     }
-  };
-
-  const resolveArchiveErrorText = (error: unknown) => {
-    const code = getUsageServiceErrorCode(error);
-    if (code) {
-      return t(`usage_service_errors.${code}`, {
-        defaultValue: t('usage_service_errors.request_failed'),
-      });
-    }
-    return t('usage_service_errors.request_failed');
-  };
-
-  const resolveArchiveCutoffMs = () => {
-    const days = Number(archiveWindowDays);
-    if (!Number.isInteger(days) || days < 1 || days > 3650) {
-      showNotification(c('retentionDaysInvalid'), 'warning');
-      return null;
-    }
-    return Date.now() - days * 86_400_000;
-  };
-
-  const handlePreviewArchive = async () => {
-    if (!managerServiceBase || !effectiveKey || archiveBusy) return;
-    const cutoff = resolveArchiveCutoffMs();
-    if (!cutoff) return;
-    setArchiveBusy(true);
-    try {
-      const preview = await usageServiceApi.previewArchive(managerServiceBase, effectiveKey, cutoff);
-      if (!mountedRef.current) return;
-      setArchivePreview(preview);
-    } catch (error) {
-      if (!mountedRef.current) return;
-      if (handleUsageAuthError(error)) return;
-      showNotification(resolveArchiveErrorText(error), 'error');
-    } finally {
-      if (mountedRef.current) setArchiveBusy(false);
-    }
-  };
-
-  const handleCreateArchive = async () => {
-    if (!managerServiceBase || !effectiveKey || archiveBusy) return;
-    const cutoff = resolveArchiveCutoffMs();
-    if (!cutoff) return;
-    setArchiveBusy(true);
-    try {
-      await usageServiceApi.createArchive(managerServiceBase, effectiveKey, cutoff);
-      if (!mountedRef.current) return;
-      setArchivePreview(null);
-      await refreshArchiveData();
-      if (!mountedRef.current) return;
-      showNotification(c('archiveCreateBtn'), 'success');
-    } catch (error) {
-      if (!mountedRef.current) return;
-      if (handleUsageAuthError(error)) return;
-      showNotification(resolveArchiveErrorText(error), 'error');
-    } finally {
-      if (mountedRef.current) setArchiveBusy(false);
-    }
-  };
-
-  const runArchiveAction = async (
-    id: string,
-    action: 'verify' | 'delete' | 'resume' | 'cancel'
-  ) => {
-    if (!managerServiceBase || !effectiveKey || archiveBusy) return;
-    setArchiveBusy(true);
-    setArchiveBusyId(id);
-    try {
-      if (action === 'verify') {
-        await usageServiceApi.verifyArchive(managerServiceBase, effectiveKey, id, true);
-      } else if (action === 'delete') {
-        await usageServiceApi.deleteArchive(managerServiceBase, effectiveKey, id, true);
-      } else if (action === 'resume') {
-        await usageServiceApi.resumeArchive(managerServiceBase, effectiveKey, id, true);
-      } else {
-        await usageServiceApi.cancelArchive(managerServiceBase, effectiveKey, id);
-      }
-      if (!mountedRef.current) return;
-      await refreshArchiveData();
-    } catch (error) {
-      if (!mountedRef.current) return;
-      if (handleUsageAuthError(error)) return;
-      showNotification(resolveArchiveErrorText(error), 'error');
-    } finally {
-      if (mountedRef.current) {
-        setArchiveBusy(false);
-        setArchiveBusyId('');
-      }
-    }
-  };
-
-  const handleDeleteArchiveRun = (id: string) => {
-    showConfirmation({
-      title: c('archiveDeleteConfirmTitle'),
-      message: c('archiveDeleteConfirmBody'),
-      confirmText: c('archiveDeleteBtn'),
-      variant: 'danger',
-      onConfirm: () => runArchiveAction(id, 'delete'),
-    });
   };
 
   const handleClearLoginStorage = () => {
@@ -1129,8 +1014,15 @@ export function FreshSystemWorkspace({
               <div className="card-head">
                 <div>
                   <h2>{c('archiveCleanupTitle')}</h2>
-                  <p className="muted">{c('archiveCleanupHelp')}</p>
+                  <p className="muted">{c('archiveWorkspaceSummaryHint')}</p>
                 </div>
+                <Link
+                  to="/usage-maintenance"
+                  className="btn btn-primary btn-sm"
+                  data-testid="system-open-usage-maintenance-btn"
+                >
+                  {c('archiveOpenWorkspaceBtn')}
+                </Link>
               </div>
 
               {maintenanceStatus ? (
@@ -1153,158 +1045,6 @@ export function FreshSystemWorkspace({
               {maintenanceStatus && !maintenanceStatus.readiness.archive_delete_enabled ? (
                 <div className="notice warn">{c('archiveDeleteUnavailable')}</div>
               ) : null}
-
-              <div className="system-archive-bar">
-                <span className="system-field-label">{c('archiveWindowLabel')}</span>
-                <div className="system-preset-chips">
-                  {ARCHIVE_PRESET_DAYS.map((days) => (
-                    <button
-                      key={days}
-                      type="button"
-                      className={`toggle-chip ${archiveWindowDays === String(days) ? 'is-active-primary' : ''}`}
-                      onClick={() => {
-                        setArchiveWindowDays(String(days));
-                        setArchivePreview(null);
-                      }}
-                    >
-                      {`${days} ${c('archiveDaysSuffix')}`}
-                    </button>
-                  ))}
-                </div>
-                <div className="system-archive-custom-wrap">
-                  <div className="system-archive-custom-input">
-                    <Input
-                      aria-label={c('archiveWindowLabel')}
-                      placeholder={c('archiveCustomDaysPlaceholder')}
-                      type="number"
-                      min="1"
-                      max="3650"
-                      value={archiveWindowDays}
-                      onChange={(event) => {
-                        setArchiveWindowDays(event.target.value);
-                        setArchivePreview(null);
-                      }}
-                    />
-                  </div>
-                  <span className="system-inline-unit">{c('archiveDaysSuffix')}</span>
-                </div>
-                <div className="system-archive-bar-actions">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => void handlePreviewArchive()}
-                    disabled={archiveBusy}
-                    data-testid="system-archive-preview-btn"
-                  >
-                    {c('archivePreviewBtn')}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => void handleCreateArchive()}
-                    disabled={archiveBusy}
-                    data-testid="system-archive-create-btn"
-                  >
-                    {c('archiveCreateBtn')}
-                  </Button>
-                </div>
-              </div>
-
-              {archivePreview ? (
-                <div className="notice" data-testid="system-archive-preview-result">
-                  {archivePreview.event_count > 0
-                    ? `${c('archivePreviewSummary', archivePreview.event_count)} (${formatFileSize(archivePreview.estimated_bytes)})`
-                    : c('archivePreviewEmpty')}
-                </div>
-              ) : null}
-
-              <div className="system-archive-runs">
-                {archiveRuns.length === 0 ? (
-                  <div className="system-archive-runs-empty">
-                    <h3>{c('archiveRunsTitle')}</h3>
-                    <span className="muted">{c('archiveNoRuns')}</span>
-                  </div>
-                ) : (
-                  <>
-                    <h3>{c('archiveRunsTitle')}</h3>
-                    <div className="system-archive-run-list">
-                    {archiveRuns.map((run) => {
-                      const rowBusy = archiveBusy && archiveBusyId === run.id;
-                      const canVerify = run.status === 'archived' || run.status === 'verify_failed';
-                      const canDelete =
-                        (run.status === 'verified' || run.status === 'delete_failed') &&
-                        Boolean(maintenanceStatus?.readiness.archive_delete_enabled);
-                      const canResume =
-                        run.status === 'paused' ||
-                        run.status === 'failed' ||
-                        run.status === 'archiving';
-                      const canCancel =
-                        run.status !== 'completed' &&
-                        run.status !== 'cancelled' &&
-                        run.status !== 'deleting';
-
-                      return (
-                        <div className="system-archive-run-row" key={run.id}>
-                          <div className="system-archive-run-meta">
-                            <code>{run.id}</code>
-                            <span className="status-pill is-neutral">{run.status}</span>
-                            <span className="muted">
-                              {`${run.archived_event_count.toLocaleString()} / ${run.event_count.toLocaleString()}`}
-                            </span>
-                          </div>
-                          <div className="system-archive-run-actions">
-                            {canVerify ? (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={archiveBusy}
-                                loading={rowBusy}
-                                onClick={() => void runArchiveAction(run.id, 'verify')}
-                              >
-                                {c('archiveVerifyBtn')}
-                              </Button>
-                            ) : null}
-                            {canDelete ? (
-                              <Button
-                                variant="danger"
-                                size="sm"
-                                disabled={archiveBusy}
-                                loading={rowBusy}
-                                onClick={() => handleDeleteArchiveRun(run.id)}
-                              >
-                                {c('archiveDeleteBtn')}
-                              </Button>
-                            ) : null}
-                            {canResume ? (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={archiveBusy}
-                                loading={rowBusy}
-                                onClick={() => void runArchiveAction(run.id, 'resume')}
-                              >
-                                {c('archiveResumeBtn')}
-                              </Button>
-                            ) : null}
-                            {canCancel ? (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={archiveBusy}
-                                loading={rowBusy}
-                                onClick={() => void runArchiveAction(run.id, 'cancel')}
-                              >
-                                {c('archiveCancelBtn')}
-                              </Button>
-                            ) : null}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    </div>
-                  </>
-                )}
-              </div>
             </section>
           ) : null}
 

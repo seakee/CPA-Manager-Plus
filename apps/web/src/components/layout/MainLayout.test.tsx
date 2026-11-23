@@ -266,6 +266,7 @@ describe('original MainLayout console navigation', () => {
       '/',
       '/system',
       '/system/runtime',
+      '/usage-maintenance',
       '/config',
       '/system/updates',
       '/logs',

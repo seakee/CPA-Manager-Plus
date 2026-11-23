@@ -58,6 +58,7 @@ export interface UploadUsageImportFileOptions {
   base: string;
   managementKey?: string;
   file: File;
+  sessionId?: string;
   signal?: AbortSignal;
   onProgress?: (progress: UsageImportProgress) => void;
   pollIntervalMs?: number;
@@ -317,11 +318,12 @@ async function resolveOrCreateSession(
 ): Promise<UsageImportSession> {
   const stored = readStoredSession(options.storage, options.base, options.file);
   let resumeKey = stored?.resumeKey ?? '';
-  if (stored?.sessionId) {
+  const requestedSessionId = options.sessionId?.trim() || stored?.sessionId || '';
+  if (requestedSessionId) {
     try {
       const storedSession = await options.client.getUsageImportSession(
         options.base,
-        stored.sessionId,
+        requestedSessionId,
         options.managementKey,
         options.signal
       );
@@ -330,19 +332,32 @@ async function resolveOrCreateSession(
           storedSession.status !== 'cancelled' &&
           !(storedSession.status === 'failed' && !storedSession.retryable)
         ) {
+          storeSession(options.storage, options.base, options.file, storedSession.id, resumeKey);
           return storedSession;
         }
+      }
+      if (options.sessionId) {
+        const conflictError = new Error('Selected file does not match the resumable import session') as Error & {
+          code?: string;
+        };
+        conflictError.code = 'usage_import_session_conflict';
+        throw conflictError;
       }
       clearStoredSession(options.storage, options.base, options.file, storedSession.id);
       resumeKey = '';
     } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'usage_import_session_conflict') {
+        throw error;
+      }
       if (getUsageServiceErrorCode(error) !== 'usage_import_session_not_found') {
         throw error;
       }
-      clearStoredSession(options.storage, options.base, options.file, stored.sessionId);
+      clearStoredSession(options.storage, options.base, options.file, requestedSessionId);
+      if (options.sessionId) {
+        throw error;
+      }
     }
   }
-
   if (!RESUME_KEY_PATTERN.test(resumeKey)) {
     resumeKey = createResumeKey();
   }

@@ -131,7 +131,7 @@ import {
   isUsageImportCancelledError,
   isUsageImportPausedError,
   type UsageImportProgress,
-} from '@/features/monitoring/services/usageImportSession';
+} from '@/services/usageImportSession';
 import {
   readMonitoringCenterUiState,
   writeMonitoringCenterUiState,

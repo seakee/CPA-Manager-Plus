@@ -1,4 +1,3 @@
-import axios, { AxiosError, type AxiosResponse } from 'axios';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -9,7 +8,6 @@ import { createPublicApiClient } from './publicApi';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import {
-  getUsageServiceErrorCode,
   usageServiceApi,
   type ManagerConfigResponse,
 } from '../services/api/usageService';
@@ -1081,7 +1079,7 @@ describe('FreshSystemWorkspace component', () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
   });
 
-  it('localizes archive operation errors via usage_service_errors, skips unmount state updates, and clears copy timer on unmount', async () => {
+  it('renders a compact archive summary card with jump link to /usage-maintenance and clears copy timer on unmount', async () => {
     await i18n.changeLanguage('en');
     availability.managerServiceAvailable = true;
     availability.managerServiceBase = 'https://manager.test';
@@ -1090,47 +1088,15 @@ describe('FreshSystemWorkspace component', () => {
       raw_event_count: 100,
       raw_min_timestamp_ms: 1,
       raw_max_timestamp_ms: 2,
-      raw_archived_event_count: 0,
-      raw_deleted_event_count: 0,
+      raw_archived_event_count: 40,
+      raw_deleted_event_count: 10,
       readiness: {
         migration_ready: true,
         hourly_aggregate_ready: true,
-        archive_delete_enabled: true,
+        archive_delete_enabled: false,
       },
-      compact_requires_stopped_server: false,
+      compact_requires_stopped_server: true,
     });
-    vi.spyOn(usageServiceApi, 'listArchives').mockResolvedValue({
-      runs: [
-        {
-          id: 'run-1',
-          mode: 'archive',
-          status: 'archived',
-          cutoff_timestamp_ms: 2,
-          target_event_id: 10,
-          event_count: 10,
-          estimated_bytes: 100,
-          last_archived_event_id: 10,
-          archived_event_count: 10,
-          archived_uncompressed_bytes: 100,
-          archived_compressed_bytes: 50,
-          last_deleted_event_id: 0,
-          deleted_event_count: 0,
-          created_at_ms: 1,
-          updated_at_ms: 2,
-          has_error: false,
-        },
-      ],
-      total: 1,
-    });
-    vi.spyOn(usageServiceApi, 'previewArchive').mockRejectedValueOnce({
-      code: 'external_cpa_authority_unavailable',
-    });
-    vi.spyOn(usageServiceApi, 'createArchive').mockRejectedValueOnce(new Error('boom'));
-    let rejectVerify!: (reason?: unknown) => void;
-    const verifyPromise = new Promise<never>((_resolve, reject) => {
-      rejectVerify = reject;
-    });
-    vi.spyOn(usageServiceApi, 'verifyArchive').mockReturnValueOnce(verifyPromise);
 
     const writeText = vi.fn().mockResolvedValue(undefined);
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
@@ -1154,175 +1120,31 @@ describe('FreshSystemWorkspace component', () => {
         renderer.root.findByProps({ id: 'system-config-tabs-storage' }).props.onClick();
       });
 
-      // Known error code maps via usage_service_errors.*
-      await act(async () => {
-        await renderer.root
-          .findByProps({ 'data-testid': 'system-archive-preview-btn' })
-          .props.onClick();
+      const summaryCard = renderer.root.findByProps({
+        'data-testid': 'system-archive-cleanup-card',
       });
-      const previewNotifications = useNotificationStore.getState().notifications;
-      const lastPreviewNotification = previewNotifications[previewNotifications.length - 1];
-      expect(lastPreviewNotification?.message).toBe(
-        enLocale.usage_service_errors.external_cpa_authority_unavailable
-      );
-      expect(lastPreviewNotification?.message).not.toBe(c('collectorSaveFailed'));
+      expect(summaryCard).toBeDefined();
+      const jumpLink = renderer.root.findByProps({
+        'data-testid': 'system-open-usage-maintenance-btn',
+      });
+      expect(jumpLink.props.to).toBe('/usage-maintenance');
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'system-archive-preview-btn' })
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'system-archive-create-btn' })
+      ).toHaveLength(0);
 
-      // Unknown error falls back to usage_service_errors.request_failed
-      await act(async () => {
-        await renderer.root
-          .findByProps({ 'data-testid': 'system-archive-create-btn' })
-          .props.onClick();
-      });
-      const createNotifications = useNotificationStore.getState().notifications;
-      expect(createNotifications[createNotifications.length - 1]?.message).toBe(
-        enLocale.usage_service_errors.request_failed
-      );
-      // Copy entry path schedules timer, then unmount clears it and ignores late archive rejection.
       await act(async () => {
         await renderer.root
           .findByProps({ 'data-testid': 'system-copy-entry-btn' })
           .props.onClick();
       });
-      const verifyBtn = renderer.root
-        .findAllByType('button')
-        .find((node) =>
-          node.findAll((child) => child.props?.children === c('archiveVerifyBtn')).length > 0
-        )!;
-      await act(async () => {
-        verifyBtn.props.onClick();
-      });
-      const notificationsBeforeUnmount = useNotificationStore.getState().notifications.length;
       await act(async () => renderer.unmount());
       expect(clearTimeoutSpy).toHaveBeenCalled();
-      await act(async () => {
-        rejectVerify({ code: 'external_cpa_authority_unavailable' });
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(useNotificationStore.getState().notifications).toHaveLength(
-        notificationsBeforeUnmount
-      );
     } finally {
       vi.unstubAllGlobals();
     }
-  });
-
-  it('maps real Axios usage_archive_* HTTP errors to usage_service_errors without falling back to usage_service_not_configured', async () => {
-    await i18n.changeLanguage('en');
-    availability.managerServiceAvailable = true;
-    availability.managerServiceBase = 'https://manager.test';
-    vi.spyOn(usageServiceApi, 'getManagerConfig').mockResolvedValue(buildManagerConfigResponse());
-    vi.spyOn(usageServiceApi, 'getMaintenanceStatus').mockResolvedValue({
-      raw_event_count: 100,
-      raw_min_timestamp_ms: 1,
-      raw_max_timestamp_ms: 2,
-      raw_archived_event_count: 0,
-      raw_deleted_event_count: 0,
-      readiness: {
-        migration_ready: true,
-        hourly_aggregate_ready: true,
-        archive_delete_enabled: true,
-      },
-      compact_requires_stopped_server: false,
-    });
-    vi.spyOn(usageServiceApi, 'listArchives').mockResolvedValue({
-      runs: [
-        {
-          id: 'run-1',
-          mode: 'archive',
-          status: 'archived',
-          cutoff_timestamp_ms: 2,
-          target_event_id: 10,
-          event_count: 10,
-          estimated_bytes: 100,
-          last_archived_event_id: 10,
-          archived_event_count: 10,
-          archived_uncompressed_bytes: 100,
-          archived_compressed_bytes: 50,
-          last_deleted_event_id: 0,
-          deleted_event_count: 0,
-          created_at_ms: 1,
-          updated_at_ms: 2,
-          has_error: false,
-        },
-      ],
-      total: 1,
-    });
-
-    const makeArchiveAxiosError = (status: number, code: string) =>
-      new AxiosError(`Request failed with status code ${status}`, 'ERR_BAD_REQUEST', undefined, undefined, {
-        status,
-        data: { code, error: `backend ${code}` },
-      } as AxiosResponse);
-
-    const noEventsErr = makeArchiveAxiosError(422, 'usage_archive_no_events');
-    const lockedErr = makeArchiveAxiosError(409, 'usage_archive_maintenance_locked');
-    const notFoundErr = makeArchiveAxiosError(404, 'usage_archive_not_found');
-
-    expect(getUsageServiceErrorCode(noEventsErr)).toBe('usage_archive_no_events');
-    expect(getUsageServiceErrorCode(lockedErr)).toBe('usage_archive_maintenance_locked');
-    expect(getUsageServiceErrorCode(notFoundErr)).toBe('usage_archive_not_found');
-    expect(getUsageServiceErrorCode(notFoundErr)).not.toBe('usage_service_not_configured');
-
-    const postSpy = vi
-      .spyOn(axios, 'post')
-      .mockRejectedValueOnce(noEventsErr)
-      .mockRejectedValueOnce(lockedErr)
-      .mockRejectedValueOnce(notFoundErr);
-
-    await act(async () => {
-      renderer = create(
-        <MemoryRouter initialEntries={['/console/system']}>
-          <FreshSystemWorkspace
-            basePath="/console"
-            credential="admin-secret"
-            onUnauthorized={vi.fn()}
-          />
-        </MemoryRouter>
-      );
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      renderer.root.findByProps({ id: 'system-config-tabs-storage' }).props.onClick();
-    });
-
-    await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'system-archive-preview-btn' }).props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    let notifications = useNotificationStore.getState().notifications;
-    expect(notifications[notifications.length - 1]?.message).toBe(
-      enLocale.usage_service_errors.usage_archive_no_events
-    );
-
-    await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'system-archive-create-btn' }).props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    notifications = useNotificationStore.getState().notifications;
-    expect(notifications[notifications.length - 1]?.message).toBe(
-      enLocale.usage_service_errors.usage_archive_maintenance_locked
-    );
-
-    const verifyBtn = renderer.root
-      .findAllByType('button')
-      .find((node) =>
-        node.findAll((child) => child.props?.children === c('archiveVerifyBtn')).length > 0
-      )!;
-    await act(async () => {
-      verifyBtn.props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    notifications = useNotificationStore.getState().notifications;
-    const notFoundMessage = notifications[notifications.length - 1]?.message;
-    expect(notFoundMessage).toBe(enLocale.usage_service_errors.usage_archive_not_found);
-    expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.usage_service_not_configured);
-    expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.request_failed);
-    expect(postSpy).toHaveBeenCalledTimes(3);
   });
 
   it('hosts External CPA usage collection inside the monitoring tab and clears usage blockers after retry', async () => {

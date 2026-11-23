@@ -25,7 +25,7 @@ import {
   cancelUsageImportFile,
   uploadUsageImportFile,
   type UsageImportProgress,
-} from '@/features/monitoring/services/usageImportSession';
+} from '@/services/usageImportSession';
 
 export interface UsagePayload {
   total_requests?: number;

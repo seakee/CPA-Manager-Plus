@@ -1048,6 +1048,18 @@ const messages = {
   ],
   archiveRunsTitle: ['Recent archive runs', '近期归档记录', '近期歸檔記錄', 'Недавние задачи архивации'],
   archiveCustomDaysPlaceholder: ['Custom days', '自定义天数', '自訂天數', 'Свой срок (дн.)'],
+  archiveOpenWorkspaceBtn: [
+    'Open Usage Maintenance',
+    '前往用量维护',
+    '前往用量維護',
+    'Открыть обслуживание',
+  ],
+  archiveWorkspaceSummaryHint: [
+    'Archive creation, verification, raw-row cleanup, import/export, and offline compaction live in the dedicated Usage Maintenance workspace.',
+    '归档任务创建、校验、原始记录清理、导入导出与离线收缩已集中至独立的「用量维护」工作区。',
+    '歸檔任務建立、驗證、原始記錄清理、匯入匯出與離線壓縮已集中至獨立的「用量維護」工作區。',
+    'Создание архивов, проверка, очистка сырых строк, импорт/экспорт и офлайн-сжатие вынесены в раздел «Обслуживание использования».',
+  ],
   connectionOverview: ['Console & Connection', '管理入口与连接', '管理入口與連線', 'Вход и подключение'],
   boundariesAndOwnership: [
     'Host & Configuration Scope',

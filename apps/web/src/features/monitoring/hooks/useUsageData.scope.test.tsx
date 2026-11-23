@@ -48,7 +48,7 @@ vi.mock('@/utils/usage', () => ({
   saveModelPriceFallback: mocks.saveScopedPrices,
   clearModelPriceFallback: mocks.clearScopedPrices,
 }));
-vi.mock('@/features/monitoring/services/usageImportSession', () => ({
+vi.mock('@/services/usageImportSession', () => ({
   cancelUsageImportFile: vi.fn(),
   uploadUsageImportFile: vi.fn(),
 }));

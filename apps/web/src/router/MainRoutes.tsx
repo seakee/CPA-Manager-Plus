@@ -21,6 +21,7 @@ import { AiProvidersOpenAIModelsPage } from '@/pages/AiProvidersOpenAIModelsPage
 import { AiProvidersVertexEditPage } from '@/pages/AiProvidersVertexEditPage';
 import { OAuthPage } from '@/pages/OAuthPage';
 import { UsageAnalyticsPage } from '@/pages/UsageAnalyticsPage';
+import { UsageMaintenancePage } from '@/pages/UsageMaintenancePage';
 import { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';
 import { AccountActionCandidatesPage } from '@/pages/AccountActionCandidatesPage';
 import { ModelPricesPage } from '@/pages/ModelPricesPage';
@@ -407,6 +408,7 @@ const mainRoutes: RouteObject[] = [
   },
   { path: '/system', element: <SystemPage /> },
   { path: '/system/runtime', element: <RuntimeStatusPage /> },
+  { path: '/usage-maintenance', element: <UsageMaintenancePage /> },
   { path: '/system/updates', element: <ManagerUpdatePage /> },
   { path: '*', element: <Navigate to="/" replace /> },
 ];
