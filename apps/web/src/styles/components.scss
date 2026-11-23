@@ -330,13 +330,29 @@ textarea {
 
 .notification-container {
   position: fixed;
-  top: calc(var(--header-height, 50px) + 12px);
-  right: $spacing-lg;
+  top: 7px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10050;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.notification-stack {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: $spacing-sm;
-  z-index: 10050;
-  max-width: 360px;
+  align-items: center;
+  width: 100%;
+  pointer-events: auto;
+}
+
+@media (max-width: 1200px) {
+  .notification-container {
+    top: calc(var(--header-height, 50px) + 8px);
+    max-width: calc(100vw - 24px);
+  }
 }
 
 @keyframes notification-enter {
@@ -361,6 +377,28 @@ textarea {
   }
 }
 
+@keyframes notification-pill-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes notification-pill-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.96);
+  }
+}
+
 .notification {
   padding: $spacing-md;
   border-radius: var(--app-radius-md);
@@ -375,23 +413,13 @@ textarea {
   align-items: center;
   gap: $spacing-sm;
 
-  // Animation states
+  // Animation states (kept for header popovers carrying `.notification`)
   &.entering {
     animation: notification-enter 0.3s ease-out forwards;
   }
 
   &.exiting {
     animation: notification-exit 0.3s ease-in forwards;
-  }
-
-  &.success {
-    border-color: var(--color-success-light-5);
-  }
-  &.warning {
-    border-color: var(--color-warning-light-5);
-  }
-  &.error {
-    border-color: var(--color-danger-light-5);
   }
 
   .message {
@@ -411,6 +439,7 @@ textarea {
     color: var(--text-secondary);
     border-radius: var(--app-radius-sm);
     cursor: pointer;
+    flex-shrink: 0;
     transition:
       color 0.15s ease,
       background-color 0.15s ease;
@@ -423,6 +452,182 @@ textarea {
       color: var(--text-primary);
       background: var(--surface-subtle-hover);
     }
+  }
+}
+
+.notification-container .notification {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px 6px 12px;
+  gap: 8px;
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
+  border: 1px solid var(--border-color);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease;
+
+  &.entering {
+    animation: notification-pill-enter 0.22s ease-out forwards;
+  }
+
+  &.exiting {
+    animation: notification-pill-exit 0.22s ease-in forwards;
+  }
+
+  &.success {
+    border-color: color-mix(in srgb, var(--status-graphic-success) 34%, var(--border-color));
+
+    .notification-icon {
+      color: var(--status-display-success);
+    }
+  }
+
+  &.warning {
+    border-color: color-mix(in srgb, var(--status-graphic-warning) 38%, var(--border-color));
+
+    .notification-icon {
+      color: var(--status-display-warning);
+    }
+  }
+
+  &.error {
+    border-color: color-mix(in srgb, var(--status-graphic-danger) 38%, var(--border-color));
+
+    .notification-icon {
+      color: var(--status-display-danger);
+    }
+  }
+
+  &.info .notification-icon {
+    color: var(--primary-text);
+  }
+
+  .notification-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .message {
+    font-size: 13px;
+    line-height: 1.4;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+
+  .close-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--app-radius-xs);
+    color: var(--text-tertiary);
+  }
+
+  &.is-peek-1 {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    transform-origin: bottom center;
+    transform: translateY(5px) scale(0.96);
+    opacity: 0.92;
+  }
+
+  &.is-peek-2 {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    transform-origin: bottom center;
+    transform: translateY(10px) scale(0.92);
+    opacity: 0.78;
+  }
+
+  &.is-hidden-layer {
+    display: none;
+  }
+}
+
+.notification-container.is-expanded .notification-stack {
+  gap: 8px;
+}
+
+.notification-container.is-expanded .notification {
+  position: relative;
+  pointer-events: auto;
+  transform: none;
+  opacity: 1;
+}
+
+.notification-repeat-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.notification-stack-more {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--app-radius-pill);
+  border: 1px solid var(--border-subtle);
+  background: var(--primary-subtle);
+  color: var(--primary-text);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background: var(--surface-subtle-strong);
+  }
+}
+
+.notification-stack-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  padding-top: 2px;
+}
+
+.notification-clear-all {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: var(--app-radius-pill);
+  border: 1px solid var(--border-color);
+  background: var(--app-surface-strong);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+
+  &:hover {
+    color: var(--text-primary);
+    background: var(--surface-subtle);
   }
 }
 

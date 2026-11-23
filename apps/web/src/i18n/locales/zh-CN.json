@@ -5120,7 +5120,8 @@
     "claude_api_key": "Claude API密钥",
     "commercial_mode_restart_required": "商业模式开关已变更，请重启服务后生效",
     "copy_failed": "复制失败",
-    "link_copied": "已复制"
+    "link_copied": "已复制",
+    "clear_all": "清空全部"
   },
   "language": {
     "switch": "语言",

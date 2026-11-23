@@ -12,6 +12,9 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     notifications: [] as Notification[],
     removeNotification: vi.fn(),
+    clearAll: vi.fn(),
+    pauseTimers: vi.fn(),
+    resumeTimers: vi.fn(),
     portalTarget: null as unknown,
   },
 }));
@@ -32,17 +35,26 @@ vi.mock('@/stores', () => ({
     selector?: (state: {
       notifications: Notification[];
       removeNotification: typeof mocks.removeNotification;
+      clearAll: typeof mocks.clearAll;
+      pauseTimers: typeof mocks.pauseTimers;
+      resumeTimers: typeof mocks.resumeTimers;
     }) => unknown
   ) => {
     const state = {
       notifications: mocks.notifications,
       removeNotification: mocks.removeNotification,
+      clearAll: mocks.clearAll,
+      pauseTimers: mocks.pauseTimers,
+      resumeTimers: mocks.resumeTimers,
     };
     return selector ? selector(state) : state;
   },
 }));
 
 vi.mock('@/components/ui/icons', () => ({
+  IconCheck: () => null,
+  IconInfo: () => null,
+  IconTriangleAlert: () => null,
   IconX: () => null,
 }));
 
@@ -89,8 +101,10 @@ describe('NotificationContainer', () => {
     vi.useFakeTimers();
     mocks.notifications = [];
     mocks.removeNotification.mockReset();
+    mocks.clearAll.mockReset();
+    mocks.pauseTimers.mockReset();
+    mocks.resumeTimers.mockReset();
     mocks.portalTarget = null;
-
     const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
     body = {};
     Object.defineProperty(globalThis, 'document', {
@@ -203,5 +217,52 @@ describe('NotificationContainer', () => {
     });
 
     expect(mocks.removeNotification).toHaveBeenCalledWith('notification-1');
+  });
+
+  it('collapses multiple notifications by default, shows repeat badge, and expands on hover', async () => {
+    const i18n = createI18n('zh-CN');
+    mocks.notifications = [
+      { id: 'n-1', message: '已保存', type: 'success', count: 2 },
+      { id: 'n-2', message: '请求超时', type: 'error', count: 1 },
+    ];
+    await render(i18n);
+
+    const container = renderer!.root.findByProps({ 'data-testid': 'notification-container' });
+    expect(container.props.className).toContain('is-stacked');
+    expect(container.props.className).not.toContain('is-expanded');
+
+    const items = renderer!.root.findAll(
+      (node) =>
+        typeof node.props['data-testid'] === 'string' &&
+        node.props['data-testid'].startsWith('notification-item-')
+    );
+    expect(items[0].props['data-testid']).toBe('notification-item-n-2');
+    expect(items[0].props.className).toContain('is-front');
+    expect(items[1].props['data-testid']).toBe('notification-item-n-1');
+    expect(items[1].props.className).toContain('is-peek-1');
+
+    expect(renderer!.root.findByProps({ 'data-testid': 'notification-stack-more' }).props.children).toEqual([
+      '+',
+      1,
+    ]);
+    expect(renderer!.root.findByProps({ 'data-testid': 'notification-repeat-badge' }).props.children).toEqual([
+      '×',
+      2,
+    ]);
+
+    const stack = renderer!.root.findByProps({ className: 'notification-stack' });
+    await act(async () => {
+      stack.props.onMouseEnter();
+    });
+    expect(mocks.pauseTimers).toHaveBeenCalledTimes(1);
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'notification-container' }).props.className
+    ).toContain('is-expanded');
+
+    const clearBtn = renderer!.root.findByProps({ 'data-testid': 'notification-clear-all' });
+    await act(async () => {
+      clearBtn.props.onClick();
+    });
+    expect(mocks.clearAll).toHaveBeenCalledTimes(1);
   });
 });
