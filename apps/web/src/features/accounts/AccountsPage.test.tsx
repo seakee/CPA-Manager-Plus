@@ -18109,6 +18109,103 @@ describe('AccountsPage replacement flows', () => {
       ).toBe(0);
     });
 
+    it.each([
+      { field: 'note', drafts: ['生', '生产', '生产主'], patch: { note: '生产主' } },
+      { field: 'priority', drafts: ['-', '-1', '-12'], patch: { priority: -12 } },
+    ])(
+      'only focuses and selects the inline $field input when editing starts',
+      async ({ field, drafts, patch }) => {
+        const targetFile = {
+          ...makeCodexFile('keystroke.json', 'auth-keystroke', 'keystroke@example.com'),
+          note: '生产备用账号',
+        };
+        mocks.files = [targetFile];
+
+        const selectSpy = vi.fn();
+        const focusSpy = vi.fn();
+
+        let renderer: ReactTestRenderer | null = null;
+        await act(async () => {
+          renderer = create(<AccountsPage />, {
+            createNodeMock: (element) => {
+              if (element.type !== 'input') return null;
+              const props = element.props as Record<string, unknown> | null;
+              const isInlineEditor =
+                typeof props?.['data-account-note-input'] === 'string' ||
+                typeof props?.['data-account-priority-input'] === 'string';
+              if (!isInlineEditor) return null;
+              return { focus: focusSpy, select: selectSpy, setSelectionRange: vi.fn() };
+            },
+          });
+          await Promise.resolve();
+        });
+        mountedAccountsRenderers.add(renderer!);
+        await flushPromises();
+
+        const gridButton = renderer!.root.find(
+          (node) => node.type === 'button' && node.props['aria-label'] === 'accounts.view_mode_grid'
+        );
+        await act(async () => {
+          gridButton.props.onClick();
+          await Promise.resolve();
+        });
+        await flushPromises();
+
+        const targetKey = getAuthFileSelectionKey(targetFile);
+        const triggerProps = { [`data-account-${field}-trigger`]: targetKey };
+        const inputProps = { [`data-account-${field}-input`]: targetKey };
+        await act(async () => {
+          renderer!.root.findByProps(triggerProps).props.onClick({ stopPropagation: vi.fn() });
+        });
+
+        // Opening the editor focuses and selects the existing value exactly once.
+        expect(focusSpy).toHaveBeenCalledTimes(1);
+        expect(selectSpy).toHaveBeenCalledTimes(1);
+
+        for (const value of drafts) {
+          await act(async () => {
+            renderer!.root.findByProps(inputProps).props.onChange({ target: { value } });
+          });
+          expect(renderer!.root.findByProps(inputProps).props.value).toBe(value);
+        }
+
+        // Typing must not re-run the focus/select effect: a second select() would select
+        // the whole field again and the next keystroke would replace it entirely.
+        expect(selectSpy).toHaveBeenCalledTimes(1);
+        expect(focusSpy).toHaveBeenCalledTimes(1);
+
+        mocks.batchPatchFields.mockClear();
+        await act(async () => {
+          await renderer!.root.findByProps(inputProps).props.onBlur({
+            currentTarget: { value: drafts[drafts.length - 1] },
+          });
+        });
+        expect(mocks.batchPatchFields).toHaveBeenCalledWith(
+          [getAuthFilePatchTarget(targetFile)],
+          patch
+        );
+        expect(renderer!.root.findAllByProps(inputProps)).toHaveLength(0);
+
+        // Reopening the same row must still focus/select, even though its rowKey is unchanged.
+        await act(async () => {
+          renderer!.root.findByProps(triggerProps).props.onClick({ stopPropagation: vi.fn() });
+        });
+        expect(focusSpy).toHaveBeenCalledTimes(2);
+        expect(selectSpy).toHaveBeenCalledTimes(2);
+
+        mocks.batchPatchFields.mockClear();
+        await act(async () => {
+          renderer!.root.findByProps(inputProps).props.onKeyDown({
+            key: 'Escape',
+            stopPropagation: vi.fn(),
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(renderer!.root.findAllByProps(inputProps)).toHaveLength(0);
+        expect(mocks.batchPatchFields).not.toHaveBeenCalled();
+      }
+    );
+
     it('renders note in read-only mode without button affordance for runtime-only credentials', async () => {
       const runtimeFile = {
         ...makeCodexFile('runtime-note.json', 'auth-runtime', 'runtime@example.com'),
