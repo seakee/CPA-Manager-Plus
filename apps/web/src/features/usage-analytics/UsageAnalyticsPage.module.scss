@@ -142,6 +142,61 @@
   gap: 8px;
 }
 
+.mobileFilterActions {
+  display: none;
+}
+
+.mobileFilterButton:global(.btn.btn-sm) {
+  gap: 6px;
+  flex: 0 0 auto;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
+}
+
+.mobileFilterCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--app-radius-pill);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.mobileFilterSummary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobileFilterSheetStack {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mobileFilterSheetMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 .filterGrid .filterSelectTrigger,
 .filterSelectTrigger.filterSelectTrigger {
   height: var(--control-height-sm);
@@ -2180,14 +2235,24 @@
     grid-template-columns: 1fr;
   }
 
-  .controlBar .controlSegmented,
-  .refreshControls {
+  .filterMeta,
+  .controlBar > .controlSegmented:nth-child(2),
+  .controlBar > .refreshControls,
+  .filterBar > .filterGrid,
+  .advancedPanel {
+    display: none;
+  }
+
+  .controlBar .controlSegmented {
     grid-column: 1;
     width: 100%;
   }
 
-  .refreshControls {
-    justify-content: space-between;
+  .mobileFilterActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
 
   .scopeSearchWrap,
@@ -2195,9 +2260,6 @@
     max-width: none;
   }
 
-  .filterGrid,
-  .advancedGrid,
-  .advancedPanel,
   .detailMetrics,
   .entityIdentityGrid,
   .credentialIdentityGrid,

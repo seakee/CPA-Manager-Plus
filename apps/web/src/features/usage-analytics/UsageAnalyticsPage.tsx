@@ -12,6 +12,7 @@ import type {
 import type { BarSeriesOption, HeatmapSeriesOption, LineSeriesOption } from 'echarts/charts';
 import type { ComposeOption, ECElementEvent } from 'echarts/core';
 import { EChartsView } from '@/components/charts/EChartsView';
+import { MobileFilterSheet } from '@/components/common/MobileFilterSheet';
 import { PageControlBar } from '@/components/common/PageControlBar';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
@@ -31,6 +32,7 @@ import {
   IconRefreshCw,
   IconSearch,
   IconShield,
+  IconSlidersHorizontal,
   IconTrendingUp,
   IconX,
 } from '@/components/ui/icons';
@@ -2562,6 +2564,104 @@ function UsageAnalyticsPageInner() {
     { value: 'hit', label: t('usage_analytics.cache_status_hit') },
     { value: 'miss', label: t('usage_analytics.cache_status_miss') },
   ];
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const filtersButtonLabel = t('common.filters', { defaultValue: 'Filters' });
+  const findOptionLabel = (options: SelectOption[], value: string) =>
+    options.find((option) => option.value === value)?.label ?? value;
+  const activeFilterChips: string[] = [];
+  if (usage.filters.granularity !== 'auto') {
+    activeFilterChips.push(findOptionLabel(granularityItems.map((i) => ({ value: i.id, label: String(i.label) })), usage.filters.granularity));
+  }
+  if (usage.filters.model !== 'all') activeFilterChips.push(findOptionLabel(modelOptions, usage.filters.model));
+  if (usage.filters.apiKeyHash !== 'all') {
+    activeFilterChips.push(findOptionLabel(apiKeyOptions, usage.filters.apiKeyHash));
+  }
+  if (usage.filters.provider !== 'all') {
+    activeFilterChips.push(findOptionLabel(providerOptions, usage.filters.provider));
+  }
+  if (usage.filters.status !== 'all') {
+    activeFilterChips.push(findOptionLabel(statusOptions, usage.filters.status));
+  }
+  if (usage.filters.authFile !== 'all') {
+    activeFilterChips.push(findOptionLabel(authFileOptions, usage.filters.authFile));
+  }
+  if (usage.filters.minLatencyMs !== 'all') {
+    activeFilterChips.push(findOptionLabel(latencyOptions, usage.filters.minLatencyMs));
+  }
+  if (usage.filters.cacheStatus !== 'all') {
+    activeFilterChips.push(findOptionLabel(cacheStatusOptions, usage.filters.cacheStatus));
+  }
+  const activeMobileFilterCount = activeFilterChips.length;
+  const mobileFilterSummary =
+    activeFilterChips.length > 0
+      ? activeFilterChips.join(' · ')
+      : `${usage.resolvedGranularity} · ${t('common.all_filters', { defaultValue: 'All filters' })}`;
+  const renderPrimaryFilterSelects = () => (
+    <>
+      <Select
+        value={usage.filters.model}
+        options={modelOptions}
+        onChange={(model) => updateFilters({ model })}
+        ariaLabel={t('usage_analytics.filter_model')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={usage.filters.apiKeyHash}
+        options={apiKeyOptions}
+        onChange={(apiKeyHash) => updateFilters({ apiKeyHash })}
+        ariaLabel={t('usage_analytics.filter_api_key')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={usage.filters.provider}
+        options={providerOptions}
+        onChange={(provider) => updateFilters({ provider })}
+        ariaLabel={t('usage_analytics.filter_provider')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={usage.filters.status}
+        options={statusOptions}
+        onChange={(status) => updateFilters({ status: status as UsageAnalyticsStatus })}
+        ariaLabel={t('usage_analytics.filter_status')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+    </>
+  );
+  const renderAdvancedFilterSelects = () => (
+    <>
+      <label className={styles.filterGroup}>
+        <Select
+          value={usage.filters.authFile}
+          options={authFileOptions}
+          onChange={(authFile) => updateFilters({ authFile })}
+          ariaLabel={t('usage_analytics.filter_auth_file')}
+        />
+      </label>
+      <label className={styles.filterGroup}>
+        <Select
+          value={usage.filters.minLatencyMs}
+          options={latencyOptions}
+          onChange={(minLatencyMs) =>
+            updateFilters({
+              minLatencyMs: minLatencyMs as UsageAnalyticsLatencyFilter,
+            })
+          }
+          ariaLabel={t('usage_analytics.filter_latency')}
+        />
+      </label>
+      <label className={styles.filterGroup}>
+        <Select
+          value={usage.filters.cacheStatus}
+          options={cacheStatusOptions}
+          onChange={(cacheStatus) =>
+            updateFilters({ cacheStatus: cacheStatus as UsageAnalyticsCacheStatus })
+          }
+          ariaLabel={t('usage_analytics.filter_cache_status')}
+        />
+      </label>
+    </>
+  );
   const noData = !usage.loading && !usage.error && !hasUsageData(usage.summary, usage.timeline);
   const rankRowLimit = 8;
   const credentialRankRowLimit = 10;
@@ -2773,6 +2873,7 @@ function UsageAnalyticsPageInner() {
           </>
         }
         toolbar={
+          <>
           <div className={styles.controlsToolbar}>
             <div className={styles.controlBar}>
               <SegmentedTabs<UsageAnalyticsTimeRange>
@@ -2850,37 +2951,27 @@ function UsageAnalyticsPageInner() {
                   }
                 />
               </div>
-            <div className={styles.filterGrid}>
-              <Select
-                value={usage.filters.model}
-                options={modelOptions}
-                onChange={(model) => updateFilters({ model })}
-                ariaLabel={t('usage_analytics.filter_model')}
-                triggerClassName={styles.filterSelectTrigger}
-              />
-              <Select
-                value={usage.filters.apiKeyHash}
-                options={apiKeyOptions}
-                onChange={(apiKeyHash) => updateFilters({ apiKeyHash })}
-                ariaLabel={t('usage_analytics.filter_api_key')}
-                triggerClassName={styles.filterSelectTrigger}
-              />
-              <Select
-                value={usage.filters.provider}
-                options={providerOptions}
-                onChange={(provider) => updateFilters({ provider })}
-                ariaLabel={t('usage_analytics.filter_provider')}
-                triggerClassName={styles.filterSelectTrigger}
-              />
-              <Select
-                value={usage.filters.status}
-                options={statusOptions}
-                onChange={(status) => updateFilters({ status: status as UsageAnalyticsStatus })}
-                ariaLabel={t('usage_analytics.filter_status')}
-                triggerClassName={styles.filterSelectTrigger}
-              />
+              <div className={styles.mobileFilterActions}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className={styles.mobileFilterButton}
+                  onClick={() => setMobileFiltersOpen(true)}
+                  aria-label={filtersButtonLabel}
+                >
+                  <IconSlidersHorizontal size={15} />
+                  <span>{filtersButtonLabel}</span>
+                  {activeMobileFilterCount > 0 ? (
+                    <span className={styles.mobileFilterCount}>{activeMobileFilterCount}</span>
+                  ) : null}
+                </Button>
+                <span className={styles.mobileFilterSummary} title={mobileFilterSummary}>
+                  {mobileFilterSummary}
+                </span>
+              </div>
+              <div className={styles.filterGrid}>{renderPrimaryFilterSelects()}</div>
             </div>
-          </div>
 
           {usage.filters.timeRange === 'custom' ? (
             <div className={styles.customRangeRow}>
@@ -2906,41 +2997,56 @@ function UsageAnalyticsPageInner() {
 
           {advancedOpen ? (
             <div className={styles.advancedPanel}>
-              <div className={styles.advancedGrid}>
-                <label className={styles.filterGroup}>
-                  <Select
-                    value={usage.filters.authFile}
-                    options={authFileOptions}
-                    onChange={(authFile) => updateFilters({ authFile })}
-                    ariaLabel={t('usage_analytics.filter_auth_file')}
-                  />
-                </label>
-                <label className={styles.filterGroup}>
-                  <Select
-                    value={usage.filters.minLatencyMs}
-                    options={latencyOptions}
-                    onChange={(minLatencyMs) =>
-                      updateFilters({
-                        minLatencyMs: minLatencyMs as UsageAnalyticsLatencyFilter,
-                      })
-                    }
-                    ariaLabel={t('usage_analytics.filter_latency')}
-                  />
-                </label>
-                <label className={styles.filterGroup}>
-                  <Select
-                    value={usage.filters.cacheStatus}
-                    options={cacheStatusOptions}
-                    onChange={(cacheStatus) =>
-                      updateFilters({ cacheStatus: cacheStatus as UsageAnalyticsCacheStatus })
-                    }
-                    ariaLabel={t('usage_analytics.filter_cache_status')}
-                  />
-                </label>
-              </div>
+              <div className={styles.advancedGrid}>{renderAdvancedFilterSelects()}</div>
             </div>
           ) : null}
           </div>
+          <MobileFilterSheet
+            open={mobileFiltersOpen}
+            title={filtersButtonLabel}
+            summary={mobileFilterSummary}
+            resetLabel={t('common.reset')}
+            confirmLabel={t('common.confirm')}
+            closeLabel={t('common.close')}
+            titleId="usage-analytics-mobile-filter-title"
+            onClose={() => setMobileFiltersOpen(false)}
+            onReset={() => {
+              usage.resetFilters();
+              setMobileFiltersOpen(false);
+            }}
+            resetDisabled={activeMobileFilterCount === 0 && !usage.filters.searchQuery.trim()}
+          >
+            <div className={styles.mobileFilterSheetStack}>
+              <SegmentedTabs<UsageAnalyticsGranularity>
+                variant="joined"
+                roleMode="group"
+                allowReselect
+                fullWidth
+                equalWidth
+                ariaLabel={t('usage_analytics.filter_granularity')}
+                activeTab={usage.filters.granularity}
+                onChange={(granularity) => updateFilters({ granularity })}
+                items={granularityItems}
+              />
+              {renderPrimaryFilterSelects()}
+              {renderAdvancedFilterSelects()}
+              <div className={styles.mobileFilterSheetMeta}>
+                <span>
+                  {t('usage_analytics.resolved_granularity', {
+                    granularity: usage.resolvedGranularity,
+                  })}
+                </span>
+                <span>
+                  {usage.lastRefreshedAt
+                    ? t('usage_analytics.updated_at', {
+                        time: usage.lastRefreshedAt.toLocaleTimeString(i18n.language),
+                      })
+                    : t('usage_analytics.awaiting_refresh')}
+                </span>
+              </div>
+            </div>
+          </MobileFilterSheet>
+          </>
         }
       />
 

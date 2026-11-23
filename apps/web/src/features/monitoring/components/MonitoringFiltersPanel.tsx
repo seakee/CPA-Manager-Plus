@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { TFunction } from 'i18next';
+import { MobileFilterSheet } from '@/components/common/MobileFilterSheet';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
@@ -97,6 +99,7 @@ export function MonitoringFiltersPanel({
   onSearchChange,
   onClearFilters,
 }: MonitoringFiltersPanelProps) {
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const autoRefreshLabel = shortLabel(
     t,
     'monitoring.auto_refresh_short',
@@ -107,7 +110,98 @@ export function MonitoringFiltersPanel({
     'monitoring.clear_filters_short',
     'monitoring.clear_filters'
   );
+  const filtersButtonLabel = t('common.filters', { defaultValue: 'Filters' });
 
+  const findOptionLabel = (options: readonly SelectOption[], value: string) =>
+    options.find((option) => option.value === value)?.label ?? value;
+
+  const activeFilterChips: string[] = [];
+  if (selectedAccount !== 'all') activeFilterChips.push(findOptionLabel(accountOptions, selectedAccount));
+  if (selectedProvider !== 'all') {
+    activeFilterChips.push(findOptionLabel(providerOptions, selectedProvider));
+  }
+  if (selectedModel !== 'all') activeFilterChips.push(findOptionLabel(modelOptions, selectedModel));
+  if (selectedChannel !== 'all') activeFilterChips.push(findOptionLabel(channelOptions, selectedChannel));
+  if (selectedApiKeyHash !== 'all') {
+    activeFilterChips.push(findOptionLabel(apiKeyOptions, selectedApiKeyHash));
+  }
+  if (selectedStatus !== 'all') activeFilterChips.push(findOptionLabel(statusOptions, selectedStatus));
+
+  const activeMobileFilterCount = activeFilterChips.length;
+  const mobileFilterSummary =
+    activeFilterChips.length > 0
+      ? activeFilterChips.join(' · ')
+      : t('common.all_filters', { defaultValue: 'All filters' });
+
+  const renderAutoRefreshField = () => (
+    <div className={styles.autoRefreshField}>
+      <span className={styles.autoRefreshLabel} title={t('monitoring.auto_refresh')}>
+        <IconTimer size={15} />
+        {autoRefreshLabel}
+      </span>
+      <Select
+        className={styles.autoRefreshSelect}
+        triggerClassName={styles.autoRefreshSelectTrigger}
+        value={autoRefreshMs}
+        options={AUTO_REFRESH_OPTIONS.map((option) => ({
+          value: option.value,
+          label: t(option.labelKey),
+        }))}
+        onChange={onAutoRefreshChange}
+        ariaLabel={t('monitoring.auto_refresh')}
+        fullWidth={false}
+      />
+    </div>
+  );
+
+  const renderScopeSelects = () => (
+    <>
+      <div className={styles.filterAccountStack}>
+        <Select
+          value={selectedAccount}
+          options={accountOptions}
+          onChange={onAccountFilterChange}
+          ariaLabel={t('monitoring.filter_account')}
+          triggerClassName={styles.filterSelectTrigger}
+        />
+      </div>
+      <Select
+        value={selectedProvider}
+        options={providerOptions}
+        onChange={onProviderChange}
+        ariaLabel={t('monitoring.filter_provider')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={selectedModel}
+        options={modelOptions}
+        onChange={onModelChange}
+        ariaLabel={t('monitoring.filter_model')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={selectedChannel}
+        options={channelOptions}
+        onChange={onChannelChange}
+        ariaLabel={t('monitoring.filter_channel')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={selectedApiKeyHash}
+        options={apiKeyOptions}
+        onChange={onApiKeyChange}
+        ariaLabel={t('monitoring.filter_api_key')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+      <Select
+        value={selectedStatus}
+        options={statusOptions}
+        onChange={onStatusChange}
+        ariaLabel={t('monitoring.filter_status')}
+        triggerClassName={styles.filterSelectTrigger}
+      />
+    </>
+  );
   return (
     <div className={styles.filterToolbar}>
       <div className={styles.controlBar}>
@@ -137,24 +231,7 @@ export function MonitoringFiltersPanel({
         </div>
 
         <div className={styles.refreshControls}>
-          <div className={styles.autoRefreshField}>
-            <span className={styles.autoRefreshLabel} title={t('monitoring.auto_refresh')}>
-              <IconTimer size={15} />
-              {autoRefreshLabel}
-            </span>
-            <Select
-              className={styles.autoRefreshSelect}
-              triggerClassName={styles.autoRefreshSelectTrigger}
-              value={autoRefreshMs}
-              options={AUTO_REFRESH_OPTIONS.map((option) => ({
-                value: option.value,
-                label: t(option.labelKey),
-              }))}
-              onChange={onAutoRefreshChange}
-              ariaLabel={t('monitoring.auto_refresh')}
-              fullWidth={false}
-            />
-          </div>
+          {renderAutoRefreshField()}
 
           <Button
             variant="secondary"
@@ -180,55 +257,64 @@ export function MonitoringFiltersPanel({
             <span>{clearFiltersLabel}</span>
           </Button>
         </div>
-      </div>
-      <div className={styles.filterBar}>
-        <div className={styles.filterGrid}>
-          <div className={styles.filterAccountStack}>
-            <Select
-              value={selectedAccount}
-              options={accountOptions}
-              onChange={onAccountFilterChange}
-              ariaLabel={t('monitoring.filter_account')}
-              triggerClassName={styles.filterSelectTrigger}
+
+        <div className={styles.mobileFilterActions}>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className={styles.mobileFilterButton}
+            onClick={() => setMobileFiltersOpen(true)}
+            aria-label={filtersButtonLabel}
+          >
+            <IconSlidersHorizontal size={15} />
+            <span>{filtersButtonLabel}</span>
+            {activeMobileFilterCount > 0 ? (
+              <span className={styles.mobileFilterCount}>{activeMobileFilterCount}</span>
+            ) : null}
+          </Button>
+          <span className={styles.mobileFilterSummary} title={mobileFilterSummary}>
+            {mobileFilterSummary}
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className={styles.mobileRefreshButton}
+            onClick={() => void onRefreshAll()}
+            disabled={overallLoading}
+          >
+            <IconRefreshCw
+              size={15}
+              className={overallLoading ? styles.refreshIconSpinning : styles.refreshIcon}
             />
-          </div>
-          <Select
-            value={selectedProvider}
-            options={providerOptions}
-            onChange={onProviderChange}
-            ariaLabel={t('monitoring.filter_provider')}
-            triggerClassName={styles.filterSelectTrigger}
-          />
-          <Select
-            value={selectedModel}
-            options={modelOptions}
-            onChange={onModelChange}
-            ariaLabel={t('monitoring.filter_model')}
-            triggerClassName={styles.filterSelectTrigger}
-          />
-          <Select
-            value={selectedChannel}
-            options={channelOptions}
-            onChange={onChannelChange}
-            ariaLabel={t('monitoring.filter_channel')}
-            triggerClassName={styles.filterSelectTrigger}
-          />
-          <Select
-            value={selectedApiKeyHash}
-            options={apiKeyOptions}
-            onChange={onApiKeyChange}
-            ariaLabel={t('monitoring.filter_api_key')}
-            triggerClassName={styles.filterSelectTrigger}
-          />
-          <Select
-            value={selectedStatus}
-            options={statusOptions}
-            onChange={onStatusChange}
-            ariaLabel={t('monitoring.filter_status')}
-            triggerClassName={styles.filterSelectTrigger}
-          />
+            <span className={styles.refreshButtonLabel}>{t('usage_stats.refresh')}</span>
+          </Button>
         </div>
       </div>
+      <div className={styles.filterBar}>
+        <div className={styles.filterGrid}>{renderScopeSelects()}</div>
+      </div>
+      <MobileFilterSheet
+        open={mobileFiltersOpen}
+        title={filtersButtonLabel}
+        summary={mobileFilterSummary}
+        resetLabel={t('common.reset')}
+        confirmLabel={t('common.confirm')}
+        closeLabel={t('common.close')}
+        titleId="monitoring-mobile-filter-title"
+        onClose={() => setMobileFiltersOpen(false)}
+        onReset={() => {
+          onClearFilters();
+          setMobileFiltersOpen(false);
+        }}
+        resetDisabled={activeMobileFilterCount === 0 && !searchInput.trim()}
+      >
+        <div className={styles.mobileFilterSheetStack}>
+          {renderScopeSelects()}
+          {renderAutoRefreshField()}
+        </div>
+      </MobileFilterSheet>
 
       {combinedError ? <div className={styles.errorBox}>{combinedError}</div> : null}
       {!usageStatisticsEnabled ? (

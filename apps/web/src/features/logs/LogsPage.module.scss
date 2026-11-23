@@ -1103,8 +1103,37 @@ $logs-header-offset: calc(var(--header-height, 64px) + #{$spacing-lg} * 2);
   }
 
   .filterStats {
-    margin-left: 0;
+    margin-left: auto;
+    width: auto;
+  }
+
+  .inlineToggleGroup {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
+    gap: 6px;
+  }
+
+  .toggleFrame {
+    width: 100%;
+    height: auto;
+    min-height: var(--control-height-sm);
+    padding: 4px 8px;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .switchLabel {
+    gap: 4px;
+    min-width: 0;
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+
+    svg {
+      flex-shrink: 0;
+    }
   }
 
   .filterChipGroup {

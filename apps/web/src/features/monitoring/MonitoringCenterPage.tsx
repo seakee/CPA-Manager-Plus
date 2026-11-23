@@ -2261,6 +2261,10 @@ export function MonitoringCenterPage() {
 
       <PageControlBar
         ariaLabel={t('common.action')}
+        topRowClassName={styles.controlBarTopRow}
+        leadingClassName={styles.controlBarLeading}
+        actionsClassName={styles.controlBarActions}
+        toolbarClassName={styles.controlBarToolbar}
         leading={
           <MonitoringStatusSummary
             connectionTone={connectionTone}
