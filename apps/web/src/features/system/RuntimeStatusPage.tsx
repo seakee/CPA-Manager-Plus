@@ -34,6 +34,7 @@ import {
 } from '@/services/api/usageService';
 import { useAuthStore, useConfigStore, useModelsStore, useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
+import { resolveCollectorErrorHintKey } from '@/utils/collectorErrorHint';
 import { formatFileSize } from '@/utils/format';
 import { classifyModels } from '@/utils/models';
 import { createPublicApiClient, PublicApiError } from '@/fullweb/publicApi';
@@ -1362,7 +1363,20 @@ export function RuntimeStatusPage({
             </div>
 
             {collector?.lastError ? (
-              <div className="runtime-error-note">{collector.lastError}</div>
+              <div className="runtime-error-note">
+                {(() => {
+                  const hintKey = resolveCollectorErrorHintKey(collector.lastError);
+                  if (!hintKey) {
+                    return collector.lastError;
+                  }
+                  return (
+                    <>
+                      <span className="runtime-error-note-hint">{t(hintKey)}</span>
+                      <code className="runtime-error-note-raw">{collector.lastError}</code>
+                    </>
+                  );
+                })()}
+              </div>
             ) : null}
 
             <footer className="runtime-card-footer">

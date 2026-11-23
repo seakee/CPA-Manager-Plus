@@ -309,7 +309,10 @@
     "detail_identity": "Identity",
     "detail_protocol": "Protocol",
     "detail_generation": "Generation",
-    "detail_capabilities": "Capabilities"
+    "detail_capabilities": "Capabilities",
+    "collector_hint_resp_http_mismatch": "Upstream returned a non-RESP response (common behind an HTTP reverse proxy or when RESP multiplexing is disabled). Connect directly to the CPA port or switch collector mode to Auto or HTTP polling in System Configuration.",
+    "collector_hint_resp_disabled": "Upstream CPA has disabled local Redis RESP usage output. Enable RESP usage output in CPA or switch collector mode to Auto or HTTP polling in System Configuration.",
+    "collector_hint_auth_refused": "Upstream CPA rejected the management key and the collector stopped retrying. Rebind the management key in System Configuration -> Connection, Storage & Security."
   },
   "cpa_updates": {
     "title": "CPA Engine",

@@ -94,4 +94,12 @@
     font-weight: 600;
     overflow-wrap: anywhere;
   }
+
+  .errorRaw {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--data-badge-warning-text);
+    opacity: 0.85;
+    overflow-wrap: anywhere;
+  }
 }

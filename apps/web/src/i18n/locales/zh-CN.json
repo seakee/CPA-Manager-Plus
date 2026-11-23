@@ -309,7 +309,10 @@
     "detail_identity": "标识",
     "detail_protocol": "协议",
     "detail_generation": "代次",
-    "detail_capabilities": "能力"
+    "detail_capabilities": "能力",
+    "collector_hint_resp_http_mismatch": "上游端口返回了非 RESP 响应（常见于经过 HTTP 反向代理或上游未开启 RESP 多路复用）。请直连 CPA 原始端口，或在系统配置中改回「自动」或「仅 HTTP 轮询」。",
+    "collector_hint_resp_disabled": "上游 CPA 已禁用本地 Redis RESP 用量输出。请在 CPA 配置中开启 RESP 用量输出，或在系统配置中改用「自动」或「仅 HTTP 轮询」。",
+    "collector_hint_auth_refused": "上游 CPA 拒绝了当前管理密钥，采集器已停止重试以避免触发封禁。请前往「系统配置 → 连接、存储与安全」重新绑定管理密钥。"
   },
   "cpa_updates": {
     "title": "CPA 引擎",

@@ -309,7 +309,10 @@
     "detail_identity": "Идентификатор",
     "detail_protocol": "Протокол",
     "detail_generation": "Поколение",
-    "detail_capabilities": "Функции"
+    "detail_capabilities": "Функции",
+    "collector_hint_resp_http_mismatch": "Источник вернул ответ не по протоколу RESP (часто за HTTP-прокси или при отключённом RESP). Подключитесь напрямую к порту CPA или переключите режим сборщика на Авто / HTTP-опрос в настройках системы.",
+    "collector_hint_resp_disabled": "На стороне CPA отключён локальный вывод статистики Redis RESP. Включите его в конфигурации CPA или переключите режим на Авто / HTTP-опрос.",
+    "collector_hint_auth_refused": "CPA отклонил ключ управления, и сборщик остановил повторы. Перепривяжите ключ в «Настройки системы → Подключение, хранение и безопасность»."
   },
   "cpa_updates": {
     "title": "CPA Engine",

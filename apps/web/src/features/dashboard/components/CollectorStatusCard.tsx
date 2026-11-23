@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { UsageServiceStatus } from '@/services/api/usageService';
+import { resolveCollectorErrorHintKey } from '@/utils/collectorErrorHint';
 import styles from './CollectorStatusCard.module.scss';
 
 interface CollectorStatusCardProps {
@@ -33,6 +34,7 @@ export function CollectorStatusCard({
   const { t, i18n } = useTranslation();
   const collector = status?.collector;
   const lastError = collector?.lastError || error;
+  const lastErrorHintKey = resolveCollectorErrorHintKey(lastError);
   const queueStatus = !enabled
     ? t('dashboard.health_status_disabled')
     : error
@@ -81,7 +83,14 @@ export function CollectorStatusCard({
       {lastError ? (
         <div className={styles.errorLine}>
           <span>{t('dashboard.collector_last_error')}</span>
-          <strong>{lastError}</strong>
+          {lastErrorHintKey ? (
+            <>
+              <strong>{t(lastErrorHintKey)}</strong>
+              <code className={styles.errorRaw}>{lastError}</code>
+            </>
+          ) : (
+            <strong>{lastError}</strong>
+          )}
         </div>
       ) : null}
     </section>
