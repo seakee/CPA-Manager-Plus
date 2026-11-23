@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 const (
@@ -566,7 +567,22 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		boundary_accuracy, cycle_start_ms, cycle_end_ms, duration_seconds,
 		used_percent, remaining_percent, used_value, limit_value,
 		coalesce(quota_unit, ''), reset_credits_available,
-		coalesce(reset_credits_json, ''), coalesce(plan_type, ''), created_at_ms
+		coalesce(reset_credits_json, ''), coalesce(plan_type, ''), created_at_ms,
+		case when provider = 'codex' and provider_window_id = 'window-1d-0'
+			and model_scope_kind = 'family' and model_scope_key = 'codex_main'
+			and source = 'response_header' and coalesce(source_observation_id, '') <> ''
+		then exists (
+			select 1 from usage_events e
+			where e.timestamp_ms = ranked.observed_at_ms
+			  and `+usageidentity.SQLAccountKeyExpression("e")+` = ranked.account_key
+			  and lower(trim(json_extract(case when json_valid(e.response_metadata_json)
+				then e.response_metadata_json else '{}' end, '$.quota.active_limit'))) = 'imagegen_premium'
+			  and ranked.source_observation_id in (
+				e.event_hash,
+				coalesce(nullif(trim(e.request_id), ''), json_extract(case when json_valid(e.response_metadata_json)
+					then e.response_metadata_json else '{}' end, '$.trace.primary_trace_id'))
+			  )
+		) else 0 end
 	from ranked
 	where source_rank <= ?
 	order by case window_availability when 'active' then 0 when 'pending_absent' then 1 else 2 end,
@@ -615,6 +631,7 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 			&item.ResetCreditsJSON,
 			&item.PlanType,
 			&item.CreatedAtMS,
+			&item.LegacyImageEvidence,
 		); err != nil {
 			return nil, err
 		}

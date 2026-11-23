@@ -3027,6 +3027,59 @@ func TestAccountWindowUsageIsolatesCodexMainSparkAndUnknownFeatureScopes(t *test
 	}
 }
 
+func TestAccountWindowUsageSeparatesCodexImagePoolEvenForTheSameModel(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_780_000_000_000)
+	makeEvent := func(id string, offset int64, model, path, limit string, failed bool, tokens int64) usage.Event {
+		event := monitoringEvent(id, baseMS+offset, model, "auth-1", "source-a", failed, tokens, 0, 0, 0, tokens, nil)
+		event.AccountSnapshot = "quota@example.com"
+		event.AuthFileSnapshot = "codex.json"
+		event.AuthProviderSnapshot = "codex"
+		event.Path = path
+		if limit != "" {
+			event.ResponseMetadata = &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{ActiveLimit: limit}}
+		}
+		return event
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		makeEvent("shared-image-history", 500, "gpt-image-2", "/v1/images/edits", "premium", false, 20),
+		makeEvent("text", 1000, "gpt-6-sol", "/v1/responses", "premium", false, 100),
+		makeEvent("image-through-responses", 2000, "gpt-6-sol", "/v1/responses", "imagegen_premium", false, 400),
+		makeEvent("image-without-header", 3000, "image-alias", "/v1/images/edits", "", false, 500),
+		makeEvent("image-429", 4000, "gpt-6-sol", "/v1/responses", "imagegen_premium", true, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	target := func(key, kind, scope string) AccountWindowUsageTarget {
+		return AccountWindowUsageTarget{
+			RequestKey: key, RowKey: "row-1", ProviderWindowID: key, Period: "current",
+			FromMS: baseMS, ToMS: baseMS + 5_000, ModelScope: AccountWindowModelScope{Kind: kind, Key: scope, Complete: true},
+			AccountSnapshot: "quota@example.com", AuthFileSnapshot: "codex.json", AuthProviderSnapshot: "codex",
+			AuthIndex: "auth-1", Source: "source-a",
+		}
+	}
+	response, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{Windows: []AccountWindowUsageTarget{
+		target("main", "family", codexquota.MainScopeKey),
+		target("image", "family", codexquota.ImageScopeKey),
+		target("all", "all", ""),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []struct{ requests, tokens, failures, last int64 }{
+		{2, 120, 0, baseMS + 1000}, {3, 900, 1, baseMS + 4000}, {5, 1020, 1, baseMS + 4000},
+	} {
+		item := response.Items[i]
+		if item.TotalRequests != want.requests || item.TotalTokens != want.tokens ||
+			item.FailureCalls != want.failures || item.LastSeenMS == nil || *item.LastSeenMS != want.last ||
+			item.ScopeMatchStatus != "complete" {
+			t.Fatalf("scope %s = %#v, want %+v", item.RequestKey, item, want)
+		}
+	}
+}
+
 func TestAccountWindowUsagePrefersResolvedBillingIdentityOverSparkShapedRequestAlias(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

@@ -184,6 +184,40 @@ describe('buildObservedCodexQuotaFromHeaderSnapshot', () => {
     ]);
   });
 
+  it('labels the Codex image pool by the active limit, even on a text-model alias', () => {
+    const snapshot: UsageHeaderSnapshot = {
+      event_hash: 'image-quota',
+      timestamp_ms: 1_700_000_000_000,
+      model: 'gpt-6-sol',
+      response_metadata: {
+        quota: {
+          active_limit: 'imagegen_premium',
+          primary: {
+            used_percent: 99,
+            reset_at_ms: 1_700_086_400_000,
+            window_minutes: 1440,
+          },
+        },
+      },
+    };
+
+    const observed = buildObservedCodexQuotaFromHeaderSnapshot(snapshot);
+    expect(
+      buildCodexQuotaWindowInfos(observed?.payload ?? {}, {
+        observedAtMs: snapshot.timestamp_ms,
+        source: 'response_header',
+        rateLimitScope: observed?.quotaScope,
+      })
+    ).toMatchObject([
+      {
+        id: 'imagegen-premium-0-window-1d-0',
+        labelKey: 'codex_quota.image_daily_window',
+        usedPercent: 99,
+        modelScope: { kind: 'family', key: 'imagegen_premium', complete: true },
+      },
+    ]);
+  });
+
   it('reads used percent for the reached quota window', () => {
     const snapshot: UsageHeaderSnapshot = {
       event_hash: 'event-reached-window-percent',

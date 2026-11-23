@@ -368,10 +368,12 @@ import {
   buildUsageHeaderSnapshotLookup,
   getHeaderSnapshotErrorCode,
   getHeaderSnapshotErrorKind,
+  getHeaderSnapshotQuotaMetadata,
   getHighConfidenceUsageHeaderSnapshotForAuthFile,
   hasUsageHeaderQuotaSignal,
   isUsageHeaderQuotaSnapshotExpired,
 } from '@/utils/usageHeaderSnapshots';
+import { isCodexImageQuotaLimit } from '@/utils/quota/codexQuota';
 import {
   buildQuotaCredentialIdentity,
   getCredentialScopedQuotaState,
@@ -1269,7 +1271,11 @@ const resolveAccountQuotaSnapshotLabel = (
     return t('accounts.detail_snapshot_window_rolling_24h');
   }
   if (kind === 'five_hour') return t('accounts.detail_snapshot_window_five_hour');
-  if (kind === 'daily') return t('accounts.detail_snapshot_window_daily');
+  if (kind === 'daily') {
+    return provider === 'codex' && isCodexImageQuotaLimit(snapshot.model_scope_key)
+      ? t('codex_quota.image_daily_window')
+      : t('accounts.detail_snapshot_window_daily');
+  }
   if (kind === 'weekly') return t('accounts.detail_snapshot_window_weekly');
   if (kind === 'monthly') return t('accounts.detail_snapshot_window_monthly');
   return snapshot.provider_window_id;
@@ -4046,7 +4052,11 @@ export function AccountsPage() {
       ) {
         return undefined;
       }
+      const imageQuota = isCodexImageQuotaLimit(
+        getHeaderSnapshotQuotaMetadata(headerSnapshot)?.active_limit
+      );
       if (
+        !imageQuota &&
         activeQuota?.status === 'success' &&
         activeQuota.quotaInventoryObserved === true &&
         typeof activeQuota.fetchedAtMs === 'number' &&
@@ -4059,7 +4069,7 @@ export function AccountsPage() {
         source: 'response_header',
         source_observation_id: headerSnapshot.event_hash,
         observed_at_ms: Math.trunc(headerSnapshot.timestamp_ms),
-        inventory_scope_key: 'codex:rate-limits',
+        inventory_scope_key: imageQuota ? 'codex:imagegen' : 'codex:rate-limits',
         inventory_mode: 'partial',
       };
     },

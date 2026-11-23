@@ -213,6 +213,15 @@ func quotaSnapshotEntryFromUsageEvent(event usage.Event) (WriteEntry, bool) {
 			event.RequestedModel,
 			event.ResolvedModel,
 		)
+		inventoryScope := "codex:rate-limits"
+		if codexquota.IsImageLimit(quota.ActiveLimit) {
+			quotaScope = codexquota.UsageScopeResolution{
+				Scope: codexquota.ImageScope(), ProviderWindowPrefix: codexquota.ImageProviderWindowPrefix,
+			}
+			// A complete text-quota poll does not report this header-only pool
+			// and must not age it out as a missing main quota window.
+			inventoryScope = "codex:imagegen"
+		}
 		windows := make([]WindowInput, 0, 2)
 		for index, item := range []*usage.HeaderQuotaWindow{quota.Primary, quota.Secondary} {
 			if window, ok := codexHeaderWindowInput(item, index, event.TimestampMS, quota.PlanType, observationID, quotaScope); ok {
@@ -227,7 +236,7 @@ func quotaSnapshotEntryFromUsageEvent(event usage.Event) (WriteEntry, bool) {
 			Provider: provider, Account: account,
 			Observation: &ObservationInput{
 				Source: "response_header", SourceObservationID: observationID,
-				ObservedAtMS: event.TimestampMS, InventoryScopeKey: "codex:rate-limits",
+				ObservedAtMS: event.TimestampMS, InventoryScopeKey: inventoryScope,
 				InventoryMode: "partial",
 			},
 			Windows: windows,

@@ -2046,16 +2046,40 @@ func (s *Service) accountWindowUsage(ctx context.Context, req AccountWindowUsage
 			AuthProjectIDSnapshot: window.AuthProjectIDSnapshot,
 			Source:                window.Source,
 			AuthIndex:             window.AuthIndex,
+			IncludeQuotaAttribution: codexquota.IsMainScope(window.ModelScope.Kind, window.ModelScope.Key) ||
+				codexquota.IsImageScope(window.ModelScope.Kind, window.ModelScope.Key),
 		})
 	}
 
-	stats, available := s.monitoringReader.AccountWindowStats(ctx, queries)
-	if !available {
-		var err error
-		stats, err = s.store.AccountWindowModelStats(ctx, queries)
+	// Daily rollups do not carry event-level pool attribution. Keep their
+	// fast path for other scopes, and read the bounded account/time ranges
+	// from usage_events for Codex main/image windows.
+	var regular, poolScoped []store.AccountWindowUsageQuery
+	for _, query := range queries {
+		if query.IncludeQuotaAttribution {
+			poolScoped = append(poolScoped, query)
+		} else {
+			regular = append(regular, query)
+		}
+	}
+	var stats []store.AccountWindowModelStat
+	if len(regular) > 0 {
+		var available bool
+		stats, available = s.monitoringReader.AccountWindowStats(ctx, regular)
+		if !available {
+			var err error
+			stats, err = s.store.AccountWindowModelStats(ctx, regular)
+			if err != nil {
+				return AccountWindowUsageResponse{}, err
+			}
+		}
+	}
+	if len(poolScoped) > 0 {
+		scopedStats, err := s.store.AccountWindowModelStats(ctx, poolScoped)
 		if err != nil {
 			return AccountWindowUsageResponse{}, err
 		}
+		stats = append(stats, scopedStats...)
 	}
 	prices, err := s.store.LoadModelPrices(ctx)
 	if err != nil {
@@ -4464,7 +4488,13 @@ func accountWindowStatMatchesScope(row store.AccountWindowModelStat, scope Accou
 		return true, false
 	}
 	if codexquota.IsMainScope(scope.Kind, scope.Key) {
+		if codexquota.IsImageUsage(row.QuotaActiveLimit, row.QuotaPath, row.Model, row.BillingModel) {
+			return false, false
+		}
 		return codexquota.MatchMainUsage(row.Model, row.BillingModel)
+	}
+	if codexquota.IsImageScope(scope.Kind, scope.Key) {
+		return codexquota.IsImageUsage(row.QuotaActiveLimit, row.QuotaPath, row.Model, row.BillingModel), false
 	}
 	if len(scope.Models) > 0 {
 		return codexquota.MatchModelScope(row.Model, row.BillingModel, scope.Models)

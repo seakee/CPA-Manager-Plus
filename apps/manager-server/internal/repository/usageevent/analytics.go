@@ -245,6 +245,9 @@ type AccountWindowUsageQuery struct {
 	// lookup.
 	LegacyAccountKey        string
 	LegacyAccountKeyChecked bool
+	// IncludeQuotaAttribution keeps events with different pools from being
+	// combined before an account quota scope can filter them.
+	IncludeQuotaAttribution bool
 }
 
 type AccountWindowModelStat struct {
@@ -253,6 +256,8 @@ type AccountWindowModelStat struct {
 	RequestIndex        int
 	Model               string
 	BillingModel        string
+	QuotaActiveLimit    string
+	QuotaPath           string
 	ServiceTier         string
 	Calls               int64
 	SuccessCalls        int64
@@ -1619,10 +1624,10 @@ func (r *repository) AccountWindowModelStats(ctx context.Context, windows []Acco
 	}
 
 	values := make([]string, 0, len(resolvedWindows))
-	args := make([]any, 0, len(resolvedWindows)*5)
+	args := make([]any, 0, len(resolvedWindows)*6)
 	for _, window := range resolvedWindows {
 		accountKey, legacyAccountKey := accountWindowQueryKeys(window)
-		values = append(values, "(?, ?, ?, ?, ?)")
+		values = append(values, "(?, ?, ?, ?, ?, ?)")
 		args = append(
 			args,
 			window.RequestIndex,
@@ -1630,18 +1635,22 @@ func (r *repository) AccountWindowModelStats(ctx context.Context, windows []Acco
 			window.ToMS,
 			accountKey,
 			legacyAccountKey,
+			window.IncludeQuotaAttribution,
 		)
 	}
 
 	rows, err := tx.QueryContext(ctx, pricingBandedUsageEventsCTE+`, window_targets(
-	request_index, from_ms, to_ms, account_key, legacy_account_key
+	request_index, from_ms, to_ms, account_key, legacy_account_key, include_quota_attribution
 ) as (
 	values `+strings.Join(values, ",")+`
 )
 select
 	w.request_index,
-		e.analytics_model_value as model,
+	e.analytics_model_value as model,
 	e.billing_model_value as billing_model,
+	case when w.include_quota_attribution and json_valid(e.response_metadata_json)
+		then coalesce(cast(json_extract(e.response_metadata_json, '$.quota.active_limit') as text), '') else '' end as quota_active_limit,
+	case when w.include_quota_attribution then coalesce(nullif(e.path, ''), e.endpoint, '') else '' end as quota_path,
 	e.pricing_model_value,
 	e.context_threshold_tokens_value,
 	coalesce(e.service_tier, '') as service_tier,
@@ -1665,7 +1674,8 @@ from window_targets w
 		on e.timestamp_ms >= w.from_ms
 		and e.timestamp_ms < w.to_ms
 		and `+usageidentity.SQLAccountKeyExpression("e")+` in (w.account_key, w.legacy_account_key)
-	group by w.request_index, e.analytics_model_value, billing_model, e.pricing_model_value, e.context_threshold_tokens_value, coalesce(e.service_tier, '')
+	group by w.request_index, e.analytics_model_value, billing_model, quota_active_limit, quota_path,
+		e.pricing_model_value, e.context_threshold_tokens_value, coalesce(e.service_tier, '')
 order by w.request_index, max(e.timestamp_ms) desc`, args...)
 	if err != nil {
 		return nil, err
@@ -1677,6 +1687,8 @@ order by w.request_index, max(e.timestamp_ms) desc`, args...)
 			&stat.RequestIndex,
 			&stat.Model,
 			&stat.BillingModel,
+			&stat.QuotaActiveLimit,
+			&stat.QuotaPath,
 			&stat.PricingModel,
 			&stat.ContextThresholdTokens,
 			&stat.ServiceTier,

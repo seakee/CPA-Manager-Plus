@@ -1530,6 +1530,76 @@ func TestWriteUsageEventsPersistsCodexHeaderWindows(t *testing.T) {
 	}
 }
 
+func TestCodexImageQuotaSeparatesInventoryAndRecoversProvenLegacySnapshot(t *testing.T) {
+	const observedAtMS = int64(1_780_000_000_000)
+	const legacyID = "window-1d-0"
+	const imageID = "imagegen-premium-0-window-1d-0"
+	ctx := context.Background()
+	service := newQuotaSnapshotTestService(t, observedAtMS+5_000)
+	account := quotaSnapshotTestAccount()
+	used, minutes := 99.0, 1440.0
+	end := observedAtMS + 3600_000
+	event := usage.Event{
+		Provider: "codex", Model: "gpt-6-sol", Path: "/v1/responses",
+		TimestampMS: observedAtMS, RequestID: "old-image", EventHash: strings.Repeat("a", 64),
+		AuthFileSnapshot: account.AuthFileSnapshot, AuthIndex: account.AuthIndex,
+		AuthProviderSnapshot: account.AuthProviderSnapshot, AccountSnapshot: account.AccountSnapshot,
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			ActiveLimit: codexquota.ImageScopeKey,
+			Primary:     &usage.HeaderQuotaWindow{UsedPercent: &used, WindowMinutes: &minutes, ResetAtMS: end},
+		}},
+	}
+	write, ok := quotaSnapshotEntryFromUsageEvent(event)
+	if !ok || write.Observation.InventoryScopeKey != "codex:imagegen" || write.Windows[0].ProviderWindowID != imageID {
+		t.Fatalf("image evidence = %#v", write)
+	}
+	write.Observation.InventoryScopeKey = "codex:rate-limits"
+	write.Windows[0].ProviderWindowID = legacyID
+	write.Windows[0].ModelScopeKey = codexquota.MainScopeKey
+	if _, err := service.Write(ctx, WriteRequest{Entries: []WriteEntry{write}}); err != nil {
+		t.Fatal(err)
+	}
+	query := func() []Window {
+		t.Helper()
+		result, err := service.Query(ctx, QueryRequest{IncludeInactive: true, Accounts: []QueryAccount{
+			{RowKey: "row", Provider: "codex", Account: account},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Items[0].Windows
+	}
+	if windows := query(); len(windows) != 1 || windows[0].ProviderWindowID != legacyID {
+		t.Fatalf("daily window without matching image evidence was reclassified: %#v", windows)
+	}
+	if _, err := service.store.InsertEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	if windows := query(); len(windows) != 1 || windows[0].ProviderWindowID != imageID ||
+		windows[0].ModelScopeKey != codexquota.ImageScopeKey || windows[0].UsedPercent == nil || *windows[0].UsedPercent != 99 ||
+		windows[0].CurrentCycle != nil {
+		t.Fatalf("legacy image projection = %#v", windows)
+	}
+
+	event.TimestampMS += 1000
+	event.RequestID = "new-image"
+	if err := service.WriteUsageEvents(ctx, []usage.Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []int64{2000, 3000} {
+		if _, err := service.Write(ctx, WriteRequest{Entries: []WriteEntry{{Provider: "codex", Account: account, Observation: &ObservationInput{
+			Source: "inspection", SourceObservationID: fmt.Sprint(offset), ObservedAtMS: observedAtMS + offset,
+			InventoryScopeKey: "codex:rate-limits", InventoryMode: "complete",
+		}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if windows := query(); len(windows) != 1 || windows[0].ProviderWindowID != imageID || windows[0].Availability != "active" ||
+		windows[0].CurrentCycle == nil || windows[0].SourceObservationID != "new-image" {
+		t.Fatalf("text-only inventory removed or duplicated the image pool: %#v", windows)
+	}
+}
+
 func TestWriteUsageEventsKeepsCodexMainAndSparkHeaderWindowsIndependent(t *testing.T) {
 	const observedAtMS = int64(1_780_000_100_000)
 	service := newQuotaSnapshotTestService(t, observedAtMS+2_000)

@@ -2347,6 +2347,7 @@
     "extra_usage_label": "Extra Usage"
   },
   "codex_quota": {
+    "image_daily_window": "Image generation quota (24h)",
     "title": "Codex Quota",
     "empty_title": "No Codex Auth Files",
     "empty_desc": "Upload a Codex credential to view quota.",

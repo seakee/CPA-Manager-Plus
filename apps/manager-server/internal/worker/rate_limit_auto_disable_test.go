@@ -59,6 +59,12 @@ func TestQuotaAutoDisableCandidateRequiresStrictCodexUsageLimit(t *testing.T) {
 		mutate func(*usage.Event)
 	}{
 		{
+			name: "image pool exhaustion does not disable the credential",
+			mutate: func(event *usage.Event) {
+				event.ResponseMetadataJSON = `{"quota":{"active_limit":"imagegen_premium","used_percent":100}}`
+			},
+		},
+		{
 			name: "broad quota exhausted text is ignored",
 			mutate: func(event *usage.Event) {
 				event.FailBody = `{"error":{"code":"quota_exhausted","message":"quota exhausted","resets_in_seconds":60}}`

@@ -39,4 +39,6 @@ type AccountQuotaSnapshot struct {
 	ResetCreditsJSON      string
 	PlanType              string
 	CreatedAtMS           int64
+	// Query-only evidence; never persisted in the snapshot table.
+	LegacyImageEvidence bool
 }
