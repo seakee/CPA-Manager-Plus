@@ -985,23 +985,6 @@
   min-width: 0;
 }
 
-.accountOverviewSearchWrap {
-  flex: 0 0 auto;
-  width: 220px;
-  min-width: 0;
-}
-
-.accountOverviewSearchWrap :global(.form-group) {
-  margin-bottom: 0;
-}
-
-.accountOverviewSearchInput {
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  padding: 0 36px 0 12px;
-  border-radius: var(--app-radius-sm);
-  font-size: 13px;
-}
 
 .accountOverviewToolButton {
   display: inline-flex;
@@ -2028,10 +2011,6 @@
     justify-content: flex-start;
   }
 
-  .accountOverviewSearchWrap {
-    max-width: none;
-  }
-
   .accountOverviewSortBar,
   .realtimeHeaderActions {
     justify-content: flex-start;
@@ -2331,10 +2310,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-
-  .accountOverviewSearchWrap {
-    flex: 1 1 100%;
   }
 
   .accountOverviewSortBar {

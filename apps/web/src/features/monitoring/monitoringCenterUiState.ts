@@ -1,4 +1,4 @@
-export type MonitoringDataTab = 'accounts' | 'apiKeys' | 'realtime';
+export type MonitoringDataTab = 'realtime' | 'accounts' | 'apiKeys';
 export type MonitoringCenterTimeRange =
   | 'today'
   | 'yesterday'
@@ -10,12 +10,12 @@ export type MonitoringCenterTimeRange =
 export type MonitoringCenterStatusFilter = 'all' | 'success' | 'failed';
 
 export const MONITORING_DATA_TABS: readonly MonitoringDataTab[] = [
+  'realtime',
   'accounts',
   'apiKeys',
-  'realtime',
 ] as const;
 
-export const DEFAULT_MONITORING_DATA_TAB: MonitoringDataTab = 'accounts';
+export const DEFAULT_MONITORING_DATA_TAB: MonitoringDataTab = 'realtime';
 export const DEFAULT_MONITORING_TIME_RANGE: MonitoringCenterTimeRange = 'today';
 export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '30000';
 export const DEFAULT_MONITORING_TABLE_PAGE_SIZE = 12;

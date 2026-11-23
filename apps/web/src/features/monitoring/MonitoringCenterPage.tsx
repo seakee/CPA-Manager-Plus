@@ -1304,6 +1304,18 @@ export function MonitoringCenterPage() {
     const realtimeBadge = realtimeHasFailure ? failureCount : formatCompactNumber(totalCalls);
     return [
       {
+        id: 'realtime',
+        label: shortLabel(t, 'monitoring.data_tab_realtime_short', 'monitoring.data_tab_realtime'),
+        fullLabel: t('monitoring.data_tab_realtime'),
+        icon: 'realtime',
+        badge: realtimeBadge,
+        badgeTone: realtimeHasFailure ? 'failure' : 'default',
+        badgeTitle: t('monitoring.data_tab_realtime_badge_title', {
+          failed: failureCount,
+          total: totalCalls,
+        }),
+      },
+      {
         id: 'accounts',
         label: shortLabel(t, 'monitoring.data_tab_accounts_short', 'monitoring.data_tab_accounts'),
         fullLabel: t('monitoring.data_tab_accounts'),
@@ -1318,18 +1330,6 @@ export function MonitoringCenterPage() {
         icon: 'apiKeys',
         badge: apiKeyCount,
         badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyCount }),
-      },
-      {
-        id: 'realtime',
-        label: shortLabel(t, 'monitoring.data_tab_realtime_short', 'monitoring.data_tab_realtime'),
-        fullLabel: t('monitoring.data_tab_realtime'),
-        icon: 'realtime',
-        badge: realtimeBadge,
-        badgeTone: realtimeHasFailure ? 'failure' : 'default',
-        badgeTitle: t('monitoring.data_tab_realtime_badge_title', {
-          failed: failureCount,
-          total: totalCalls,
-        }),
       },
     ];
   }, [accountCount, apiKeyCount, scopedFailureCount, scopedSummary.totalCalls, t]);
@@ -1888,13 +1888,9 @@ export function MonitoringCenterPage() {
         <AccountOverviewPanelActions
           mode={accountOverviewMode}
           accountDisplayMode={accountDisplayMode}
-          searchInput={searchInput}
           accountSort={accountSort}
           accountSortOptions={accountSortOptions}
-          overallLoading={overallLoading}
           t={t}
-          onSearchChange={setSearchInput}
-          onRefreshAll={refreshAll}
           onAccountSortKeyChange={handleAccountSortKeyChange}
           onModeChange={setAccountOverviewMode}
           onAccountDisplayModeChange={setAccountDisplayMode}
@@ -1926,11 +1922,8 @@ export function MonitoringCenterPage() {
     apiKeyRows.length,
     failedOnlyActive,
     handleAccountSortKeyChange,
-    overallLoading,
     realtimeLogRows.length,
-    refreshAll,
     scopedFailureCount,
-    searchInput,
     t,
     toggleFailedOnly,
   ]);
@@ -2344,7 +2337,6 @@ export function MonitoringCenterPage() {
                 embedded
                 mode={accountOverviewMode}
                 accountDisplayMode={accountDisplayMode}
-                searchInput={searchInput}
                 columns={accountOverviewColumns}
                 rows={sortedAccountRows}
                 pagination={accountPagination}
@@ -2360,12 +2352,9 @@ export function MonitoringCenterPage() {
                 accountPageSizeOptions={accountPageSizeOptions}
                 accountOverviewScopeText={accountOverviewScopeText}
                 hasPrices={hasPrices}
-                overallLoading={overallLoading}
                 locale={i18n.language}
                 emptyState={renderMonitoringEmptyState()}
                 t={t}
-                onSearchChange={setSearchInput}
-                onRefreshAll={refreshAll}
                 onAccountSortKeyChange={handleAccountSortKeyChange}
                 onModeChange={setAccountOverviewMode}
                 onAccountDisplayModeChange={setAccountDisplayMode}

@@ -263,6 +263,18 @@ vi.mock('@/features/monitoring/model/monitoringCenterPageModel', async (importOr
   return actual;
 });
 
+vi.mock('@/features/monitoring/monitoringCenterUiState', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/features/monitoring/monitoringCenterUiState')>();
+  return {
+    ...actual,
+    readMonitoringCenterUiState: () => ({
+      ...actual.getDefaultMonitoringCenterUiState(),
+      activeDataTab: 'accounts' as const,
+    }),
+  };
+});
+
 vi.mock('@/features/monitoring/components/AccountOverviewPanel', () => ({
   AccountOverviewPanel: (props: {
     accountQuotaStatesByRowId: Record<string, AccountQuotaState>;
