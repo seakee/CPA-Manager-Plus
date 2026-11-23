@@ -237,13 +237,33 @@ export function FreshExternalUsage({
             {state.cpaVersion.writeBlocked ? x('usageWritesBlocked') : x('usageWritesAllowed')}
           </dd>
         </div>
-        {state.blockedReason && (
-          <div data-testid="external-usage-blocked">
-            <dt>{x('usageBlockedReason')}</dt>
-            <dd>{blockedReasonText(state.blockedReason)}</dd>
-          </div>
-        )}
       </dl>
+      {state.blockedReason && (
+        <div
+          className={
+            state.blockedReason === 'usage_monitoring_disabled'
+              ? 'fresh-external-usage-blocked is-paused'
+              : 'fresh-external-usage-blocked'
+          }
+          data-testid="external-usage-blocked"
+        >
+          <FullWebIcon
+            name={state.blockedReason === 'usage_monitoring_disabled' ? 'info' : 'alert'}
+            size={14}
+          />
+          <span>
+            <strong>
+              {x(
+                state.blockedReason === 'usage_monitoring_disabled'
+                  ? 'usageMonitoringPausedTitle'
+                  : 'usageBlockedReason'
+              )}
+            </strong>
+            {' · '}
+            {blockedReasonText(state.blockedReason)}
+          </span>
+        </div>
+      )}
       {notice && (
         <p role="status" data-testid="external-usage-notice">
           {notice}

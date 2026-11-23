@@ -141,6 +141,7 @@ const messages = {
   usageWritesBlocked: ['Writes blocked by this version', '该版本阻止写入', '該版本阻止寫入', 'Запись заблокирована этой версией'],
   usageWritesAllowed: ['Writes allowed', '允许写入', '允許寫入', 'Запись разрешена'],
   usageBlockedReason: ['Collection blocked by', '采集中断原因', '擷取中斷原因', 'Причина остановки сбора'],
+  usageMonitoringPausedTitle: ['Collection paused', '采集已暂停', '擷取已暫停', 'Сбор приостановлен'],
   usageBlockedAuthority: [
     'the Manager has no collection authority for this installation',
     'Manager 尚未取得该安装的采集授权',
@@ -160,10 +161,10 @@ const messages = {
     'статистика использования на CPA отключена',
   ],
   usageBlockedMonitoring: [
-    'request monitoring is turned off in Manager',
-    'Manager 的请求监控已关闭',
-    'Manager 的請求監控已關閉',
-    'мониторинг запросов в Manager отключён',
+    'request monitoring is turned off in Manager; collection from CPA is paused',
+    '请求监控未开启，已暂停从外部 CPA 拉取用量',
+    '請求監控未開啟，已暫停從外部 CPA 讀取用量',
+    'мониторинг запросов в Manager отключён; сбор с CPA приостановлен',
   ],
   usageBlockedExternalAuthority: [
     'the external CPA could not complete the usage statistics check or update',
