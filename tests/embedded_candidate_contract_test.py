@@ -66,7 +66,8 @@ def make_oci(destination, role, license_bytes, *,
              bad_descriptor_size=False, bad_descriptor_type=False, bad_diff_id=False,
              source_inventory=SOURCE_BYTES, api_contract=MOCK_API_CONTRACT,
              bad_mode=None, invalid_elf=False, wrong_module=False, wrong_source_stamp=False,
-             wrong_sha_suffix=False, wrong_version_suffix=False, wrong_entrypoint=False,
+             wrong_sha_suffix=False, wrong_version_suffix=False, missing_build_date=False,
+             invalid_build_date=False, wrong_entrypoint=False,
              wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT, mutate_evidence=None):
     cpa_bundled = role == "full"
     files = {
@@ -78,6 +79,8 @@ def make_oci(destination, role, license_bytes, *,
             ROLE_BINARIES["manager_wrong_stamp"] if wrong_source_stamp else
             ROLE_BINARIES["manager_sha_suffix"] if wrong_sha_suffix else
             ROLE_BINARIES["manager_version_suffix"] if wrong_version_suffix else
+            ROLE_BINARIES["manager_missing_build_date"] if missing_build_date else
+            ROLE_BINARIES["manager_invalid_build_date"] if invalid_build_date else
             ROLE_BINARIES["manager"]
         ),
         "/usr/local/bin/cpamp-ingress": ROLE_BINARIES["ingress"],
@@ -158,7 +161,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         cls.addClassCleanup(cls.go_fixture_tmp.cleanup)
         base = Path(cls.go_fixture_tmp.name)
         for key in ("launcher", "manager", "manager_wrong_stamp", "manager_sha_suffix",
-                    "manager_version_suffix", "ingress", "runtime-supervisor"):
+                    "manager_version_suffix", "manager_missing_build_date",
+                    "manager_invalid_build_date", "ingress", "runtime-supervisor"):
             role = "manager" if key.startswith("manager") else key
             module, command = subject.GO_MODULES[role]
             work = base / key
@@ -169,11 +173,11 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 buildinfo = work / "internal/buildinfo"
                 buildinfo.mkdir(parents=True)
                 (buildinfo / "buildinfo.go").write_text(
-                    'package buildinfo\nvar Version = "dev"\nvar SourceCommit = "unknown"\n',
+                    'package buildinfo\nvar Version = "dev"\nvar SourceCommit = "unknown"\nvar BuildDate = "unknown"\n',
                     encoding="utf-8",
                 )
                 source = ('package main\nimport ("fmt"; "' + module + '/internal/buildinfo")\n'
-                          'func main() { fmt.Println(buildinfo.Version, buildinfo.SourceCommit) }\n')
+                          'func main() { fmt.Println(buildinfo.Version, buildinfo.SourceCommit, buildinfo.BuildDate) }\n')
             (work / command / "main.go").write_text(source, encoding="utf-8")
             env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off",
                        GOOS="linux", GOARCH="amd64", CGO_ENABLED="0")
@@ -189,10 +193,14 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 version = subject.CANDIDATE_VERSION
                 if key == "manager_version_suffix":
                     version += "-modified"
-                args += ["-ldflags",
-                         "-X " + module + "/internal/buildinfo.Version=" +
-                         version +
-                         " -X " + module + "/internal/buildinfo.SourceCommit=" + stamp]
+                ldflags = (
+                    "-X " + module + "/internal/buildinfo.Version=" + version +
+                    " -X " + module + "/internal/buildinfo.SourceCommit=" + stamp
+                )
+                if key != "manager_missing_build_date":
+                    build_date = "2026-99-99T00:00:00Z" if key == "manager_invalid_build_date" else "2026-11-23T08:00:00Z"
+                    ldflags += " -X " + module + "/internal/buildinfo.BuildDate=" + build_date
+                args += ["-ldflags", ldflags]
             args += ["./" + command]
             completed = subprocess.run(args, cwd=work, env=env, capture_output=True,
                                        text=True, timeout=75)
@@ -436,6 +444,14 @@ class EmbeddedCandidateContracts(unittest.TestCase):
     def test_reject_manager_version_with_correct_prefix(self):
         with self.assertRaisesRegex(ValueError, "Manager compiled source/version stamp mismatch"):
             self.inspect(wrong_version_suffix=True)
+
+    def test_reject_manager_missing_build_date(self):
+        with self.assertRaisesRegex(ValueError, "Manager compiled source/version stamp mismatch"):
+            self.inspect(missing_build_date=True)
+
+    def test_reject_manager_invalid_build_date(self):
+        with self.assertRaisesRegex(ValueError, "Manager compiled build date stamp invalid"):
+            self.inspect(invalid_build_date=True)
 
     def test_reject_modified_oci_blob(self):
         with self.assertRaisesRegex(ValueError, "digest mismatch"):

@@ -50,6 +50,24 @@ func TestWriteVersion(t *testing.T) {
 	}
 }
 
+func TestStartupLogsBuildIdentity(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "usage.sqlite")
+	process := startManagerServerProcess(t, dataDir, dbPath)
+	process.stop(t)
+
+	logs := process.logs.String()
+	banner := buildinfo.StartupLine()
+	bannerAt := strings.Index(logs, banner)
+	listenAt := strings.Index(logs, "cpa-manager-plus listening on ")
+	if bannerAt < 0 {
+		t.Fatalf("startup logs missing build identity banner %q:\n%s", banner, logs)
+	}
+	if listenAt < 0 || bannerAt > listenAt {
+		t.Fatalf("build identity banner must precede listening log (banner=%d listen=%d):\n%s", bannerAt, listenAt, logs)
+	}
+}
+
 func TestStartupPreflightTimeout(t *testing.T) {
 	for _, test := range []struct {
 		value   string

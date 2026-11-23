@@ -9,6 +9,7 @@ services:
       args:
         VERSION: '${VERSION:-dev}'
         SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
+        BUILD_DATE: '${BUILD_DATE:-}'
     image: seakee/cpa-manager-plus:slim
     restart: unless-stopped
     stop_grace_period: 150s

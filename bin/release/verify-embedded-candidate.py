@@ -5,6 +5,7 @@ Input archives must be produced by one explicitly identified candidate build eve
 A self-asserted build event is NOT protected-producer provenance.
 """
 import argparse
+from datetime import datetime
 import hashlib
 import io
 import importlib.util
@@ -22,6 +23,7 @@ from pathlib import Path, PurePosixPath
 
 ROLES = ("slim", "full")
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
+BUILD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 SOURCE = "https://github.com/seakee/CPA-Manager-Plus"
 CANDIDATE_VERSION = "2.0.0-r1candidate"
 evidence_spec = importlib.util.spec_from_file_location("image_evidence", Path(__file__).with_name("image-evidence.py"))
@@ -199,11 +201,21 @@ def check_manager_linker_identity(raw_flags, module, source_sha):
                 "invalid or duplicate Manager linker assignment")
         assignments[key] = value
         index += 2
-    expected = {
-        module + "/internal/buildinfo.SourceCommit": source_sha,
-        module + "/internal/buildinfo.Version": CANDIDATE_VERSION,
-    }
-    require(assignments == expected, "Manager compiled source/version stamp mismatch")
+    version_key = module + "/internal/buildinfo.Version"
+    commit_key = module + "/internal/buildinfo.SourceCommit"
+    build_date_key = module + "/internal/buildinfo.BuildDate"
+    require(set(assignments) == {version_key, commit_key, build_date_key},
+            "Manager compiled source/version stamp mismatch")
+    require(assignments[commit_key] == source_sha and
+            assignments[version_key] == CANDIDATE_VERSION,
+            "Manager compiled source/version stamp mismatch")
+    build_date = assignments[build_date_key]
+    require(BUILD_DATE_RE.fullmatch(build_date) is not None,
+            "Manager compiled build date stamp invalid")
+    try:
+        datetime.strptime(build_date, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("Manager compiled build date stamp invalid") from exc
 
 
 def check_startup_config(config, role):

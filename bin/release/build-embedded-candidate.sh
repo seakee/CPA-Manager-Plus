@@ -35,6 +35,11 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 source_sha="$(git rev-parse --verify HEAD)"
+build_date="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+if [[ ! "$build_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+  echo "invalid BUILD_DATE: $build_date (expected YYYY-MM-DDTHH:MM:SSZ)" >&2
+  exit 1
+fi
 event="local-r1-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 docker buildx version >/dev/null
 # Final Go binary/module identity is read without execution by go version -m.
@@ -86,6 +91,7 @@ for role in slim full; do
   args=(
     --platform linux/amd64
     --build-arg "SOURCE_COMMIT=$source_sha"
+    --build-arg "BUILD_DATE=$build_date"
     --build-arg VERSION=2.0.0-r1candidate
     --tag "cpamp-r1-$role:candidate"
     --label "org.opencontainers.image.revision=$source_sha"
