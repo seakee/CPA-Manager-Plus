@@ -156,19 +156,20 @@ export function MetricSummaryCard({
 
   return (
     <div className={cardClassName} data-summary-icon={icon} {...dataAttributes}>
-      <div className={styles.header}>
+      <div data-metric-summary-header="true" className={styles.header}>
         {Icon ? (
-          <span className={styles.icon}>
+          <span data-metric-summary-icon="true" className={styles.icon}>
             <Icon size={20} />
           </span>
         ) : null}
-        <span className={styles.label} title={resolvedLabel}>
+        <span data-metric-summary-label="true" className={styles.label} title={resolvedLabel}>
           {label}
         </span>
       </div>
-      <div className={styles.body}>
+      <div data-metric-summary-body="true" className={styles.body}>
         <span className={styles.valueWrap}>
           <strong
+            data-metric-summary-value="true"
             className={`${styles.value} ${tone ? styles[`tone${tone}`] : ''}`}
             tabIndex={hasValueTooltip ? 0 : undefined}
             aria-describedby={hasValueTooltip ? tooltipId : undefined}

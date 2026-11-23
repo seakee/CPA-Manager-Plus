@@ -1953,7 +1953,7 @@
   .summaryCardPrimary,
   .summaryCardSecondary {
     height: auto;
-    min-height: 112px;
+    min-height: 76px;
     border-radius: var(--app-radius-md);
   }
 
@@ -2043,19 +2043,21 @@
   }
 
   .filterGrid,
-  .summaryHero,
-  .summarySub,
-  .summaryGrid,
   .priceGrid {
     grid-template-columns: 1fr;
   }
 
-  .summaryValue {
-    font-size: 22px;
+  .summaryHero,
+  .summarySub,
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: auto;
+    gap: 8px;
   }
 
+  .summaryValue,
   .summaryCardSecondary .summaryValue {
-    font-size: 22px;
+    font-size: 18px;
   }
 
   .priceActionsBar {
@@ -2170,6 +2172,14 @@
 
   .realtimeTable {
     min-width: 1260px;
+  }
+}
+
+@container monitoring-page (max-width: 339px) {
+  .summaryHero,
+  .summarySub,
+  .summaryGrid {
+    grid-template-columns: 1fr;
   }
 }
 

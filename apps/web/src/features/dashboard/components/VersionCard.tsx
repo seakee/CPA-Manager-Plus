@@ -568,7 +568,9 @@ export function VersionCard({
             </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.build_time')}</div>
-              <div className={styles.value}>{buildTimeDisplay}</div>
+              <div className={styles.value} title={buildTimeDisplay}>
+                {buildTimeDisplay}
+              </div>
             </div>
           </div>
 
@@ -578,7 +580,9 @@ export function VersionCard({
             </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.cpa_base')}</div>
-              <div className={styles.value}>{cpaBase || '-'}</div>
+              <div className={styles.value} title={cpaBase || '-'}>
+                {cpaBase || '-'}
+              </div>
             </div>
           </div>
         </div>

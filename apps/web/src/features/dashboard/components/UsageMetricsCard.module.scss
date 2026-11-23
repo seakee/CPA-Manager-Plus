@@ -4,8 +4,11 @@
   gap: 12px;
 
   @media (max-width: 1440px) { grid-template-columns: repeat(3, 1fr); }
-  @media (max-width: 768px) { grid-template-columns: repeat(2, 1fr); }
-  @media (max-width: 480px) { grid-template-columns: 1fr; }
+  @media (max-width: 768px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  @media (max-width: 339px) { grid-template-columns: 1fr; }
 }
 
 .metricCard {
@@ -194,11 +197,48 @@
 @media (max-width: 560px) {
   .metricCard,
   .rankCard {
-    padding: 12px;
+    padding: 10px 12px;
+    gap: 6px;
   }
 
-  .metricCard .metricBody .metricValue {
-    font-size: 22px;
+  .metricCard {
+    .metricHeader {
+      gap: 6px;
+
+      .metricIcon {
+        width: 24px;
+        height: 24px;
+        flex: 0 0 24px;
+
+        svg {
+          width: 14px;
+          height: 14px;
+        }
+      }
+
+      .metricLabel {
+        font-size: 11px;
+      }
+    }
+
+    .metricBody {
+      .metricValue {
+        font-size: 18px;
+        line-height: 1.15;
+      }
+
+      .metricSubValue {
+        margin-top: 2px;
+        font-size: 10.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+
+    .metricBgChart {
+      display: none;
+    }
   }
 }
 

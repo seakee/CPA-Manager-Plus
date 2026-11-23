@@ -955,8 +955,10 @@
   }
 
   .runtime-metric-grid.is-cols-3,
-  .runtime-metric-grid.is-cols-2 {
+  .runtime-metric-grid.is-cols-2,
+  .runtime-collector-counters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
 
   .runtime-collector-heartbeat {
@@ -979,6 +981,13 @@
 }
 
 @media (max-width: 480px) {
+  .runtime-metric-tile,
+  .runtime-collector-counter {
+    padding: 9px 10px;
+  }
+}
+
+@media (max-width: 339px) {
   .runtime-metric-grid.is-cols-3,
   .runtime-metric-grid.is-cols-2,
   .runtime-collector-counters {

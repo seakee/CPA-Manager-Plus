@@ -357,12 +357,63 @@
   }
 
   .bottomSummaryRow .bentoGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bottomSummaryRow .bentoGrid .bentoCard {
+    padding: 12px 14px;
+    gap: 8px;
+    border-right: 1px solid var(--app-border);
+    border-bottom: 1px solid var(--app-border);
+
+    &:nth-child(2n) {
+      border-right: 0;
+    }
+
+    &:nth-last-child(-n + 2) {
+      border-bottom: 0;
+    }
+
+    .bentoIcon {
+      width: 30px;
+      height: 30px;
+    }
+
+    .bentoContent {
+      .bentoValue {
+        font-size: 22px;
+      }
+
+      .bentoLabel {
+        font-size: 12px;
+        margin-top: 0;
+      }
+    }
+
+    .bentoArrow {
+      position: static;
+      align-self: flex-end;
+      font-size: 12px;
+      margin-top: auto;
+    }
+  }
+}
+
+@media (max-width: 339px) {
+  .bottomSummaryRow .bentoGrid {
     grid-template-columns: 1fr;
   }
 
   .bottomSummaryRow .bentoGrid .bentoCard {
     border-right: 0;
-    border-bottom: 1px solid var(--app-border);
+
+    &:nth-last-child(-n + 2) {
+      border-bottom: 1px solid var(--app-border);
+    }
+
+    &:last-child {
+      border-bottom: 0;
+    }
   }
 }
 

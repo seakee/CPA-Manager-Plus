@@ -68,19 +68,19 @@
       border-radius: var(--app-radius-md);
     }
 
-    [class*='summaryCardChart'] {
+    [data-metric-summary-chart='true'] {
       display: none;
     }
 
-    [class*='summaryMeta'] {
+    [data-metric-summary-meta='true'] {
       display: none;
     }
 
-    [class*='summaryCardHeader'] {
+    [data-metric-summary-header='true'] {
       gap: 4px;
     }
 
-    [class*='summaryIcon'] {
+    [data-metric-summary-icon='true'] {
       width: 20px;
       height: 20px;
       flex: 0 0 20px;
@@ -92,16 +92,16 @@
       }
     }
 
-    [class*='summaryLabel'] {
+    [data-metric-summary-label='true'] {
       font-size: 10.5px;
       line-height: 1.2;
     }
 
-    [class*='summaryCardBody'] {
+    [data-metric-summary-body='true'] {
       margin-top: 2px;
     }
 
-    [class*='summaryValue'] {
+    [data-metric-summary-value='true'] {
       font-size: 18px;
       line-height: 1.15;
     }
@@ -121,19 +121,19 @@
       border-radius: var(--app-radius-md);
     }
 
-    [class*='summaryCardChart'] {
+    [data-metric-summary-chart='true'] {
       display: none;
     }
 
-    [class*='summaryMeta'] {
+    [data-metric-summary-meta='true'] {
       display: none;
     }
 
-    [class*='summaryCardHeader'] {
+    [data-metric-summary-header='true'] {
       gap: 4px;
     }
 
-    [class*='summaryIcon'] {
+    [data-metric-summary-icon='true'] {
       width: 20px;
       height: 20px;
       flex: 0 0 20px;
@@ -145,19 +145,25 @@
       }
     }
 
-    [class*='summaryLabel'] {
+    [data-metric-summary-label='true'] {
       font-size: 10.5px;
       line-height: 1.2;
     }
 
-    [class*='summaryCardBody'] {
+    [data-metric-summary-body='true'] {
       margin-top: 2px;
     }
 
-    [class*='summaryValue'] {
+    [data-metric-summary-value='true'] {
       font-size: 18px;
       line-height: 1.15;
     }
+  }
+}
+
+@media (max-width: 359px) {
+  .metricsSection .metricsGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
