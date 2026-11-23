@@ -787,7 +787,22 @@
     "delete_success": "已删除认证文件",
     "confirm_delete_title": "确认删除认证文件？",
     "confirm_delete_message": "将删除认证文件“{{file}}”。该操作不可撤销，确认前请确保该账号无法恢复。",
-    "confirm_delete_button": "确认删除"
+    "confirm_delete_button": "确认删除",
+    "status_pending_pill": "待处理 {{count}} 项",
+    "status_clear_pill": "无待处理异常",
+    "visible_badge": "当前列表：{{count}}",
+    "hits_count": "命中 {{count}} 次",
+    "auto_disabled_badge": "已自动禁用",
+    "empty_filtered_title": "没有匹配的认证异常",
+    "empty_filtered_desc": "未找到匹配“{{query}}”的异常记录，可清空搜索词或切换状态查看。",
+    "reset_filters": "清空搜索",
+    "evidence_copied": "证据已复制",
+    "evidence_status_code": "状态码",
+    "evidence_model": "模型",
+    "evidence_endpoint": "接口",
+    "evidence_trace": "链路",
+    "evidence_first_seen": "首次发现",
+    "evidence_last_seen": "最近发现"
   },
   "dashboard": {
     "title": "仪表盘",

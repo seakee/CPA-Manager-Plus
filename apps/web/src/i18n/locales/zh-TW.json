@@ -787,7 +787,22 @@
     "delete_success": "已刪除驗證檔案",
     "confirm_delete_title": "確認刪除驗證檔案？",
     "confirm_delete_message": "將刪除驗證檔案「{{file}}」。該操作不可復原，確認前請確保該帳號無法恢復。",
-    "confirm_delete_button": "確認刪除"
+    "confirm_delete_button": "確認刪除",
+    "status_pending_pill": "待處理 {{count}} 項",
+    "status_clear_pill": "無待處理異常",
+    "visible_badge": "目前列表：{{count}}",
+    "hits_count": "命中 {{count}} 次",
+    "auto_disabled_badge": "已自動停用",
+    "empty_filtered_title": "沒有符合條件的認證異常",
+    "empty_filtered_desc": "找不到符合「{{query}}」的異常記錄，可清空搜尋或切換狀態查看。",
+    "reset_filters": "清空搜尋",
+    "evidence_copied": "證據已複製",
+    "evidence_status_code": "狀態碼",
+    "evidence_model": "模型",
+    "evidence_endpoint": "介面",
+    "evidence_trace": "追蹤",
+    "evidence_first_seen": "首次發現",
+    "evidence_last_seen": "最近發現"
   },
   "dashboard": {
     "title": "儀表板",

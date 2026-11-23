@@ -787,7 +787,22 @@
     "delete_success": "Auth file deleted",
     "confirm_delete_title": "Delete login file?",
     "confirm_delete_message": "This will delete login file \"{{file}}\". This action cannot be undone. Confirm only when you are sure the account cannot recover.",
-    "confirm_delete_button": "Delete login file"
+    "confirm_delete_button": "Delete login file",
+    "status_pending_pill": "Pending: {{count}}",
+    "status_clear_pill": "No pending issues",
+    "visible_badge": "Showing: {{count}}",
+    "hits_count": "{{count}} hits",
+    "auto_disabled_badge": "Auto-disabled",
+    "empty_filtered_title": "No matching auth issues",
+    "empty_filtered_desc": "No issues matched \"{{query}}\". Clear the search or switch status filter.",
+    "reset_filters": "Clear search",
+    "evidence_copied": "Evidence copied",
+    "evidence_status_code": "Status",
+    "evidence_model": "Model",
+    "evidence_endpoint": "Endpoint",
+    "evidence_trace": "Trace",
+    "evidence_first_seen": "First seen",
+    "evidence_last_seen": "Last seen"
   },
   "dashboard": {
     "title": "Dashboard",

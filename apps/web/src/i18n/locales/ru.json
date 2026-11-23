@@ -791,7 +791,22 @@
     "delete_success": "Файл входа удалён",
     "confirm_delete_title": "Удалить файл входа?",
     "confirm_delete_message": "Будет удалён файл входа \"{{file}}\". Это действие нельзя отменить. Подтверждайте только если аккаунт точно нельзя восстановить.",
-    "confirm_delete_button": "Удалить файл входа"
+    "confirm_delete_button": "Удалить файл входа",
+    "status_pending_pill": "Ожидают: {{count}}",
+    "status_clear_pill": "Нет активных проблем",
+    "visible_badge": "Показано: {{count}}",
+    "hits_count": "Совпадений: {{count}}",
+    "auto_disabled_badge": "Автоотключено",
+    "empty_filtered_title": "Нет подходящих записей",
+    "empty_filtered_desc": "По запросу «{{query}}» ничего не найдено. Очистите поиск или смените фильтр.",
+    "reset_filters": "Сбросить поиск",
+    "evidence_copied": "Данные скопированы",
+    "evidence_status_code": "Код",
+    "evidence_model": "Модель",
+    "evidence_endpoint": "Эндпоинт",
+    "evidence_trace": "Trace",
+    "evidence_first_seen": "Первое",
+    "evidence_last_seen": "Последнее"
   },
   "dashboard": {
     "title": "Панель управления",
