@@ -969,7 +969,6 @@ export function ConfigPage() {
 
       // Keep the global config store in sync so sidebar / other pages reflect YAML changes immediately.
       try {
-        useConfigStore.getState().clearCache();
         await useConfigStore.getState().fetchConfig(undefined, true);
       } catch (refreshError: unknown) {
         const message =

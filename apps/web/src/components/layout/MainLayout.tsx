@@ -306,7 +306,6 @@ function MainLayoutContent({
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const clearCache = useConfigStore((state) => state.clearCache);
   const featureAvailability = usePanelFeatureAvailability();
 
   const theme = useThemeStore((state) => state.theme);
@@ -665,7 +664,6 @@ function MainLayoutContent({
   }, []);
 
   const handleRefreshAll = async () => {
-    clearCache();
     const results = await Promise.allSettled([
       fetchConfig(undefined, true),
       loadPluginResources(),

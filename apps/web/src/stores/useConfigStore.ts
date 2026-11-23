@@ -60,14 +60,18 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
     }
 
-    // 同一时刻合并多个 /config 请求（如 StrictMode 或多个页面同时触发）
-    if (inFlightConfigRequest) {
+    // 同一时刻合并多个 /config 请求（如 StrictMode 或多个页面同时触发）；强制刷新会绕过旧请求并在拉取期间保留现有 config 避免页面闪烁
+    if (!forceRefresh && inFlightConfigRequest) {
       const data = await inFlightConfigRequest.promise;
       return section ? extractConfigSectionValue(data, section) : data;
     }
 
-    // 获取新数据
-    set({ loading: true, error: null });
+    if (forceRefresh) {
+      inFlightConfigRequest = null;
+      set({ cache: new Map(), loading: true, error: null });
+    } else {
+      set({ loading: true, error: null });
+    }
 
     const requestId = (configRequestToken += 1);
     try {
@@ -82,7 +86,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       // 更新缓存
-      const newCache = new Map(cache);
+      const newCache = new Map(get().cache);
       newCache.set('__full__', { data, timestamp: now });
       CONFIG_SECTION_KEYS.forEach((key) => {
         const value = extractConfigSectionValue(data, key);
