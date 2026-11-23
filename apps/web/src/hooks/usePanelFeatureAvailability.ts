@@ -169,16 +169,18 @@ const initialAvailability: PanelFeatureAvailability = {
   reason: 'checking',
 };
 
+let cachedAvailabilityScopeKey = '';
 let cachedAvailabilityKey = '';
 let cachedAvailability: PanelFeatureAvailability | null = null;
 let inFlightAvailabilityRequest: PanelFeatureAvailabilityRequest | null = null;
+let latestAvailabilityScopeKey = '';
 let latestAvailabilityRequestKey = '';
 
 // A Manager config write can change what this panel is allowed to offer (for
 // example switching request monitoring on or off). Consumers refresh through a
 // revision counter instead of keeping the value read at login: the key below
 // changes, so the next render probes again and every mounted consumer sees the
-// new answer.
+// new answer without wiping same-scope availability while the re-probe runs.
 let availabilityRevision = 0;
 const availabilityListeners = new Set<() => void>();
 
@@ -192,25 +194,24 @@ function subscribeAvailability(listener: () => void): () => void {
 export function refreshPanelFeatureAvailability(): void {
   availabilityRevision += 1;
   cachedAvailabilityKey = '';
-  cachedAvailability = null;
   for (const listener of [...availabilityListeners]) listener();
 }
 
-const buildAvailabilityRequestKey = ({
+const buildAvailabilityScopeKey = ({
   apiBase,
   managementKey,
   usageServiceRevision,
   panelBase,
-  revision,
-}: PanelFeatureAvailabilityRequestInput): string =>
+}: Omit<PanelFeatureAvailabilityRequestInput, 'revision'>): string =>
   [
     normalizeBase(panelBase),
     normalizeBase(apiBase),
     managementKey,
     String(usageServiceRevision),
-    String(revision),
   ].join('\u001f');
 
+const buildAvailabilityRequestKey = (input: PanelFeatureAvailabilityRequestInput): string =>
+  `${buildAvailabilityScopeKey(input)}\u001f${String(input.revision)}`;
 const isConfirmedExternalPanelProbeFailure = (error: unknown): boolean =>
   error !== null && typeof error === 'object' && (error as { status?: unknown }).status === 404;
 
@@ -296,7 +297,13 @@ function requestPanelFeatureAvailability(input: PanelFeatureAvailabilityRequestI
   key: string;
   promise: Promise<PanelFeatureAvailability>;
 } {
+  const scopeKey = buildAvailabilityScopeKey(input);
   const key = buildAvailabilityRequestKey(input);
+  if (cachedAvailabilityScopeKey && cachedAvailabilityScopeKey !== scopeKey) {
+    cachedAvailabilityScopeKey = '';
+    cachedAvailabilityKey = '';
+    cachedAvailability = null;
+  }
   if (cachedAvailabilityKey === key && cachedAvailability) {
     return { key, promise: Promise.resolve(cachedAvailability) };
   }
@@ -304,9 +311,11 @@ function requestPanelFeatureAvailability(input: PanelFeatureAvailabilityRequestI
     return inFlightAvailabilityRequest;
   }
 
+  latestAvailabilityScopeKey = scopeKey;
   latestAvailabilityRequestKey = key;
   const promise = detectPanelFeatureAvailability(input).then((availability) => {
-    if (latestAvailabilityRequestKey === key) {
+    if (latestAvailabilityRequestKey === key && latestAvailabilityScopeKey === scopeKey) {
+      cachedAvailabilityScopeKey = scopeKey;
       cachedAvailabilityKey = key;
       cachedAvailability = availability;
     }
@@ -345,14 +354,18 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     }),
     [apiBase, managementKey, panelBase, revision, usageServiceRevision]
   );
+  const scopeKey = useMemo(() => buildAvailabilityScopeKey(requestInput), [requestInput]);
   const requestKey = useMemo(() => buildAvailabilityRequestKey(requestInput), [requestInput]);
   const [state, setState] = useState<{
+    scopeKey: string;
     requestKey: string;
     availability: PanelFeatureAvailability;
   }>(() => ({
+    scopeKey,
     requestKey,
     availability:
-      cachedAvailabilityKey === requestKey && cachedAvailability
+      (cachedAvailabilityKey === requestKey || cachedAvailabilityScopeKey === scopeKey) &&
+      cachedAvailability
         ? cachedAvailability
         : initialAvailability,
   }));
@@ -362,15 +375,20 @@ export function usePanelFeatureAvailability(): PanelFeatureAvailability {
     const request = requestPanelFeatureAvailability(requestInput);
     request.promise.then((availability) => {
       if (cancelled || request.key !== requestKey) return;
-      setState({ requestKey, availability });
+      setState({ scopeKey, requestKey, availability });
     });
 
     return () => {
       cancelled = true;
     };
-  }, [panelBase, requestInput, requestKey]);
+  }, [panelBase, requestInput, requestKey, scopeKey]);
 
-  if (state.requestKey === requestKey) return state.availability;
+  // Same host + credential scope keeps settled availability steady during
+  // refreshPanelFeatureAvailability() re-probes so toggle actions do not
+  // unmount the workspace or sidebar. Scope changes still fail closed below.
+  if (state.requestKey === requestKey || state.scopeKey === scopeKey) {
+    return state.availability;
+  }
 
   return {
     ...initialAvailability,

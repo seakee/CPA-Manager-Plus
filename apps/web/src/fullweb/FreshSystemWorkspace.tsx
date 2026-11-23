@@ -733,17 +733,26 @@ export function FreshSystemWorkspace({
               </div>
               <div className="system-switch-controls" data-testid="system-request-monitoring-switch">
                 <span
-                  className={requestMonitoring.enabled ? 'badge badge-emerald' : 'badge'}
+                  className={
+                    requestMonitoring.saving
+                      ? 'badge'
+                      : requestMonitoring.enabled
+                        ? 'badge badge-emerald'
+                        : 'badge'
+                  }
                   data-testid="system-request-monitoring-state"
                 >
-                  {requestMonitoring.enabled ? c('requestMonitoringOn') : c('requestMonitoringOff')}
+                  {requestMonitoring.saving
+                    ? c('requestMonitoringSaving')
+                    : requestMonitoring.enabled
+                      ? c('requestMonitoringOn')
+                      : c('requestMonitoringOff')}
                 </span>
                 {requestMonitoring.writable ? (
                   <ToggleSwitch
                     checked={requestMonitoring.enabled}
                     disabled={!requestMonitoring.loaded || requestMonitoring.saving}
                     ariaLabel={c('requestMonitoring')}
-                    label={requestMonitoring.saving ? c('requestMonitoringSaving') : undefined}
                     onChange={(next) => {
                       void requestMonitoring.setEnabled(next).then(() => {
                         if (showExternalUsage && mountedRef.current) {
