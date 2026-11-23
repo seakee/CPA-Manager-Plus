@@ -27,6 +27,9 @@ import { useAuthStore, useNotificationStore } from '../stores';
 import { STORAGE_KEY_AUTH, STORAGE_KEY_QUOTA_CACHE } from '../utils/constants';
 import { formatFileSize } from '../utils/format';
 import { FreshRebindDialog } from './FreshRebindDialog';
+import { FreshExternalBlocker } from './FreshExternalBlocker';
+import { FreshExternalUsage } from './FreshExternalUsage';
+import { blockerOf, type ExternalBlocker } from './externalState';
 import type { PublicApiClient } from './publicApi';
 
 type SystemConfigTab = 'monitoring' | 'storage';
@@ -81,6 +84,8 @@ export function FreshSystemWorkspace({
   const [activeTab, setActiveTab] = useState<SystemConfigTab>('monitoring');
   const [recoveryModalOpen, setRecoveryModalOpen] = useState(false);
   const [rebindOpen, setRebindOpen] = useState(false);
+  const [externalUsageReloadToken, setExternalUsageReloadToken] = useState(0);
+  const [usageBlocker, setUsageBlocker] = useState<ExternalBlocker | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
 
   // Manager config (connection + collector + retention)
@@ -136,6 +141,8 @@ export function FreshSystemWorkspace({
   const docsLanguage = i18n.resolvedLanguage?.startsWith('zh') ? '' : 'en/';
   const effectiveKey = authManagementKey || credential || '';
   const managerEditable = Boolean(managerServiceBase && effectiveKey);
+  const showExternalUsage =
+    strategy === 'connect_external' && Boolean(client && credential && onUnauthorized);
   const showQueueAndTlsFields =
     collectorMode === 'auto' || collectorMode === 'resp' || collectorMode === 'subscribe';
   const showPopSideField = collectorMode === 'auto' || collectorMode === 'resp';
@@ -303,6 +310,9 @@ export function FreshSystemWorkspace({
     ) {
       return;
     }
+    if (showExternalUsage) {
+      setExternalUsageReloadToken((token) => token + 1);
+    }
     if (!managerServiceBase || !effectiveKey) {
       return;
     }
@@ -327,6 +337,7 @@ export function FreshSystemWorkspace({
     refreshArchiveData,
     requestMonitoring.saving,
     retentionSaving,
+    showExternalUsage,
   ]);
 
   useHeaderRefresh(handleReload, !isBusy);
@@ -645,9 +656,17 @@ export function FreshSystemWorkspace({
   const collectorOptions = [
     { value: 'auto', label: c('collectorModeAuto') },
     { value: 'http', label: c('collectorModeHttp') },
-    { value: 'resp', label: c('collectorModeResp') },
     { value: 'subscribe', label: c('collectorModeSubscribe') },
+    { value: 'resp', label: c('collectorModeResp') },
   ];
+  const collectorModeHint =
+    collectorMode === 'http'
+      ? c('collectorModeHintHttp')
+      : collectorMode === 'subscribe'
+        ? c('collectorModeHintSubscribe')
+        : collectorMode === 'resp'
+          ? c('collectorModeHintResp')
+          : c('collectorModeHintAuto');
 
   const popSideOptions = [
     { value: 'right', label: c('collectorPopRight') },
@@ -698,6 +717,14 @@ export function FreshSystemWorkspace({
         className="system-tab-panel"
       >
         <div className="stack">
+          {usageBlocker && (
+            <FreshExternalBlocker
+              state={usageBlocker}
+              onRebind={showExternalUsage ? () => setRebindOpen(true) : undefined}
+              onReload={() => setExternalUsageReloadToken((token) => token + 1)}
+              onDismiss={() => setUsageBlocker(null)}
+            />
+          )}
           <section className="card" data-testid="system-request-monitoring-card">
             <div className="system-switch-header">
               <div>
@@ -717,7 +744,13 @@ export function FreshSystemWorkspace({
                     disabled={!requestMonitoring.loaded || requestMonitoring.saving}
                     ariaLabel={c('requestMonitoring')}
                     label={requestMonitoring.saving ? c('requestMonitoringSaving') : undefined}
-                    onChange={(next) => void requestMonitoring.setEnabled(next)}
+                    onChange={(next) => {
+                      void requestMonitoring.setEnabled(next).then(() => {
+                        if (showExternalUsage && mountedRef.current) {
+                          setExternalUsageReloadToken((token) => token + 1);
+                        }
+                      });
+                    }}
                   />
                 ) : (
                   <span className="muted system-inline-note">
@@ -730,6 +763,19 @@ export function FreshSystemWorkspace({
               <div className="notice warn" data-testid="system-request-monitoring-error">
                 {c('requestMonitoringFailed')}
               </div>
+            ) : null}
+
+            {showExternalUsage && client && credential && onUnauthorized ? (
+              <FreshExternalUsage
+                embedded={true}
+                reloadToken={externalUsageReloadToken}
+                client={client}
+                credential={credential}
+                onUnauthorized={onUnauthorized}
+                onBlocker={(code) => {
+                  setUsageBlocker(code ? blockerOf(code) : null);
+                }}
+              />
             ) : null}
 
             {managerEditable && configLoaded ? (
@@ -787,6 +833,10 @@ export function FreshSystemWorkspace({
                     disabled={collectorInputsDisabled}
                   />
                 </div>
+
+                <p className="system-collector-mode-hint" data-testid="system-collector-mode-hint">
+                  {collectorModeHint}
+                </p>
 
                 {showQueueAndTlsFields ? (
                   <div className="system-resp-subcard" data-testid="system-collector-resp-fields">
@@ -1300,6 +1350,8 @@ export function FreshSystemWorkspace({
           credential={credential}
           onClose={() => setRebindOpen(false)}
           onRebound={() => {
+            setUsageBlocker(null);
+            setExternalUsageReloadToken((token) => token + 1);
             void loadManagerConfig();
           }}
           onUnauthorized={onUnauthorized}

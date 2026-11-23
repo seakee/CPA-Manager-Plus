@@ -910,104 +910,7 @@ describe('Fresh client key persistence UI', () => {
   });
 
 
-  it('clears usage-originated external blocker after retry succeeds without clearing key-list blockers', async () => {
-    let usagePostCount = 0;
-    const usageBase = {
-      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-    };
-    const fetchMock = vi.fn<typeof fetch>((input, init) => {
-      const url = String(input);
-      if (url.endsWith('/api-keys')) {
-        return Promise.resolve(
-          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
-        );
-      }
-      if (url.endsWith('/api-keys/usage-summary')) {
-        return Promise.resolve(
-          Response.json({
-            fromMs: 1,
-            toMs: 2,
-            coverage: { state: 'unknown', reason: 'usage_read_failed' },
-            items: [],
-          })
-        );
-      }
-      if (url.endsWith('/external/usage') && init?.method === 'POST') {
-        usagePostCount += 1;
-        if (usagePostCount === 1) {
-          return Promise.resolve(
-            Response.json({
-              ...usageBase,
-              statisticsEnabled: true,
-              collector: 'stopped',
-              collectionStarted: false,
-              blockedReason: 'external_cpa_authority_unavailable',
-            })
-          );
-        }
-        return Promise.resolve(
-          Response.json({
-            ...usageBase,
-            statisticsEnabled: true,
-            collector: 'running',
-            collectionStarted: true,
-            blockedReason: '',
-          })
-        );
-      }
-      if (url.endsWith('/external/usage')) {
-        return Promise.resolve(
-          Response.json({
-            ...usageBase,
-            statisticsEnabled: false,
-            collector: 'stopped',
-            collectionStarted: false,
-            blockedReason: 'usage_statistics_disabled',
-          })
-        );
-      }
-      return Promise.reject(new Error('unexpected url: ' + url));
-    });
-
-    await act(async () => {
-      renderer = create(
-        <FreshApiKeys
-          client={createPublicApiClient(() => context, fetchMock)}
-          credential="admin-test-only"
-          onUnauthorized={unauthorized}
-          onCreationPending={vi.fn()}
-          externalUsage={true}
-        />
-      );
-    });
-
-    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
-    await act(async () => enableBtn.props.onClick());
-    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
-    await act(async () => confirmBtn.props.onClick());
-
-    // First 200 with authority_unavailable blocker shows both page blocker and panel retry.
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
-    ).toHaveLength(1);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })
-    ).toHaveLength(1);
-
-    // Retry succeeds -> page-level authority blocker disappears while collector reports running.
-    const retryBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm-retry' });
-    await act(async () => retryBtn.props.onClick());
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
-    ).toHaveLength(0);
-    const collectorText = renderer.root
-      .findByProps({ 'data-testid': 'external-usage-collector' })
-      .findByType('dd').children;
-    expect(collectorText.join('')).not.toBe('');
-
-    await act(async () => renderer.unmount());
-
-    // A key-list refusal blocker (from GET /api-keys) must NOT be cleared by a healthy usage read.
+  it('surfaces a key-list external blocker when GET /api-keys reports rejected management credentials', async () => {
     const keyListRefusedFetch = vi.fn<typeof fetch>((input) => {
       const url = String(input);
       if (url.endsWith('/api-keys')) {
@@ -1016,17 +919,6 @@ describe('Fresh client key persistence UI', () => {
             { code: 'external_management_key_rejected', detail: '401' },
             { status: 409 }
           )
-        );
-      }
-      if (url.endsWith('/external/usage')) {
-        return Promise.resolve(
-          Response.json({
-            ...usageBase,
-            statisticsEnabled: true,
-            collector: 'running',
-            collectionStarted: true,
-            blockedReason: '',
-          })
         );
       }
       return Promise.reject(new Error('unexpected url: ' + url));
@@ -1039,109 +931,12 @@ describe('Fresh client key persistence UI', () => {
           credential="admin-test-only"
           onUnauthorized={unauthorized}
           onCreationPending={vi.fn()}
-          externalUsage={true}
         />
       );
     });
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
     ).toHaveLength(1);
-  });
-
-  // Ordering 1: the panel's own read is still pending when the operator confirms
-  // collection. That confirmation IS the newest state of the installation, so the
-  // retired read's failure must not wipe the running facts it proved nor put an
-  // authority blocker over them.
-  it('does not let a read retired by a successful confirmation repaint a blocker', async () => {
-    const usageBase = {
-      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-    };
-    const disabled = {
-      ...usageBase,
-      statisticsEnabled: false,
-      collector: 'stopped',
-      collectionStarted: false,
-      blockedReason: 'usage_statistics_disabled',
-    };
-    const running = {
-      ...usageBase,
-      statisticsEnabled: true,
-      collector: 'running',
-      collectionStarted: true,
-      blockedReason: '',
-    };
-    let settlePendingRead: (response: Response) => void = () => undefined;
-    let usageGetCount = 0;
-    const fetchMock = vi.fn<typeof fetch>((input, init) => {
-      const url = String(input);
-      if (url.endsWith('/api-keys')) {
-        return Promise.resolve(
-          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
-        );
-      }
-      if (url.endsWith('/api-keys/usage-summary')) {
-        return Promise.resolve(
-          Response.json({
-            fromMs: 1,
-            toMs: 2,
-            coverage: { state: 'unknown', reason: 'usage_read_failed' },
-            items: [],
-          })
-        );
-      }
-      if (url.endsWith('/external/usage') && init?.method === 'POST') {
-        return Promise.resolve(Response.json(running));
-      }
-      if (url.endsWith('/external/usage')) {
-        usageGetCount += 1;
-        // The first read settles so the enable action is offered; the read issued
-        // with the confirmation is the one held open.
-        if (usageGetCount === 1) return Promise.resolve(Response.json(disabled));
-        return new Promise<Response>((resolve) => {
-          settlePendingRead = resolve;
-        });
-      }
-      return Promise.reject(new Error('unexpected url: ' + url));
-    });
-
-    const client = createPublicApiClient(() => context, fetchMock);
-    const page = (reloadToken: number) => (
-      <FreshApiKeys
-        client={client}
-        credential="admin-test-only"
-        onUnauthorized={unauthorized}
-        onCreationPending={vi.fn()}
-        externalUsage={true}
-        reloadToken={reloadToken}
-      />
-    );
-    await act(async () => {
-      renderer = create(page(0));
-    });
-    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
-    await act(async () => enableBtn.props.onClick());
-    // A reload starts a read that is still pending when the operator confirms.
-    await act(async () => {
-      renderer.update(page(1));
-    });
-    expect(usageGetCount).toBe(2);
-
-    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
-    await act(async () => confirmBtn.props.onClick());
-    expect(view()).toContain(x('usageCollectorRunning'));
-
-    // The read issued before the confirmation now fails with the typed refusal.
-    await act(async () => {
-      settlePendingRead(
-        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
-      );
-    });
-
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
-    ).toHaveLength(0);
-    expect(view()).not.toContain(x('rebindUnavailableHelp'));
-    expect(view()).toContain(x('usageCollectorRunning'));
   });
 
   // A rebind reload can start while a normal read is still in flight. When that
@@ -1250,17 +1045,6 @@ describe('Fresh client key persistence UI', () => {
           })
         );
       }
-      if (url.endsWith('/external/usage')) {
-        return Promise.resolve(
-          Response.json({
-            statisticsEnabled: true,
-            collector: 'running',
-            collectionStarted: true,
-            blockedReason: '',
-            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-          })
-        );
-      }
       return Promise.reject(new Error('unexpected url: ' + url));
     });
     const client = createPublicApiClient(() => context, fetchMock);
@@ -1270,7 +1054,6 @@ describe('Fresh client key persistence UI', () => {
         credential="admin-test-only"
         onUnauthorized={unauthorized}
         onCreationPending={vi.fn()}
-        externalUsage={true}
         reloadToken={reloadToken}
       />
     );
@@ -1327,17 +1110,6 @@ describe('Fresh client key persistence UI', () => {
           })
         );
       }
-      if (url.endsWith('/external/usage')) {
-        return Promise.resolve(
-          Response.json({
-            statisticsEnabled: true,
-            collector: 'running',
-            collectionStarted: true,
-            blockedReason: '',
-            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-          })
-        );
-      }
       return Promise.reject(new Error('unexpected url: ' + url));
     });
     const client = createPublicApiClient(() => context, fetchMock);
@@ -1347,7 +1119,6 @@ describe('Fresh client key persistence UI', () => {
         credential="admin-test-only"
         onUnauthorized={unauthorized}
         onCreationPending={vi.fn()}
-        externalUsage={true}
         reloadToken={reloadToken}
       />
     );
@@ -1367,91 +1138,6 @@ describe('Fresh client key persistence UI', () => {
     });
     expect(unauthorized).not.toHaveBeenCalled();
     expect(view()).toContain(key.id);
-  });
-
-  // Regression: a rebind resolves the blocker, and the shell re-reads the page by
-  // bumping `reloadToken`. The usage panel must not repaint the blocker with an
-  // answer that belongs to the request it issued *before* the rebind: the page
-  // would show the fix and the refusal it resolved in the same frame.
-  it('does not repaint an External blocker from a usage read issued before the rebind', async () => {
-    const usageBase = {
-      cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-    };
-    // The pre-rebind usage read is held open so the test chooses how it settles.
-    let settleStaleRead: (response: Response) => void = () => undefined;
-    let usageGetCount = 0;
-    const health = {
-      ...usageBase,
-      statisticsEnabled: true,
-      collector: 'running',
-      collectionStarted: true,
-      blockedReason: '',
-    };
-    const fetchMock = vi.fn<typeof fetch>((input) => {
-      const url = String(input);
-      if (url.endsWith('/api-keys')) {
-        return Promise.resolve(
-          Response.json({ keys: [key], gatewayPending: false, revocationAvailable: false })
-        );
-      }
-      if (url.endsWith('/api-keys/usage-summary')) {
-        return Promise.resolve(
-          Response.json({
-            fromMs: 1,
-            toMs: 2,
-            coverage: { state: 'unknown', reason: 'usage_read_failed' },
-            items: [],
-          })
-        );
-      }
-      if (url.endsWith('/external/usage')) {
-        usageGetCount += 1;
-        if (usageGetCount === 1)
-          return new Promise<Response>((resolve) => {
-            settleStaleRead = resolve;
-          });
-        return Promise.resolve(Response.json(health));
-      }
-      return Promise.reject(new Error('unexpected url: ' + url));
-    });
-    const client = createPublicApiClient(() => context, fetchMock);
-    const page = (reloadToken: number) => (
-      <FreshApiKeys
-        client={client}
-        credential="admin-test-only"
-        onUnauthorized={unauthorized}
-        onCreationPending={vi.fn()}
-        externalUsage={true}
-        reloadToken={reloadToken}
-      />
-    );
-
-    await act(async () => {
-      renderer = create(page(0));
-    });
-    expect(usageGetCount).toBe(1);
-
-    // The rebind succeeded: the shell re-reads the page and the usage panel.
-    await act(async () => {
-      renderer.update(page(1));
-    });
-    // The retired read answers with the typed authority refusal, the very code
-    // that paints this page's blocker when it belongs to the current state.
-    await act(async () => {
-      settleStaleRead(
-        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
-      );
-    });
-
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
-    ).toHaveLength(0);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
-    ).toHaveLength(0);
-    expect(view()).not.toContain(x('rebindUnavailableHelp'));
-    // The read that replaced it is what the page reports from.
-    expect(view()).toContain(x('usageCollectorRunning'));
   });
 
   it('keeps the page busy when createKey settles while a rebind read is still open', async () => {
@@ -1998,10 +1684,8 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findAllByProps({ 'data-testid': 'key-row-' + key.id })).toHaveLength(0);
   });
 
-  it('clears stale blockers, retires pre-rebind reads, and reloads keys on rebind even while the details drawer is open', async () => {
+  it('reloads keys and clears stale key-list blockers on rebind even while the details drawer is open', async () => {
     const postRebind = { ...key, id: 'c'.repeat(32), requestId: 'd'.repeat(32), name: 'Post Rebind' };
-    let settlePreRebindUsage: (response: Response) => void = () => undefined;
-    let usageReads = 0;
     let keyReads = 0;
     const fetchMock = vi.fn<typeof fetch>((input) => {
       const url = String(input);
@@ -2022,6 +1706,11 @@ describe('Fresh client key persistence UI', () => {
       }
       if (url.endsWith('/api-keys')) {
         keyReads += 1;
+        if (keyReads === 2) {
+          return Promise.resolve(
+            Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+          );
+        }
         return Promise.resolve(
           Response.json({
             keys: keyReads === 1 ? [key] : [key, postRebind],
@@ -2040,28 +1729,6 @@ describe('Fresh client key persistence UI', () => {
           })
         );
       }
-      if (url.endsWith('/external/usage')) {
-        usageReads += 1;
-        if (usageReads === 1) {
-          return Promise.resolve(
-            Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
-          );
-        }
-        if (usageReads === 2) {
-          return new Promise<Response>((resolve) => {
-            settlePreRebindUsage = resolve;
-          });
-        }
-        return Promise.resolve(
-          Response.json({
-            statisticsEnabled: true,
-            collector: 'running',
-            collectionStarted: true,
-            blockedReason: '',
-            cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
-          })
-        );
-      }
       return Promise.reject(new Error('unexpected url: ' + url));
     });
     const client = createPublicApiClient(() => context, fetchMock);
@@ -2071,44 +1738,32 @@ describe('Fresh client key persistence UI', () => {
         credential="admin-test-only"
         onUnauthorized={unauthorized}
         onCreationPending={vi.fn()}
-        externalUsage={true}
         reloadToken={reloadToken}
       />
     );
     await act(async () => {
       renderer = create(page(0));
     });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
+    });
+    // Trigger a failed refresh that records a key-list blocker, then complete rebind while drawer stays open.
+    await act(async () => {
+      renderer.update(page(1));
+    });
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
     ).toHaveLength(1);
 
-    // Open details drawer, click reload on the usage panel so a pre-rebind read stays open,
-    // then complete a rebind while the drawer remains open.
     await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'open-key-' + key.id }).props.onClick();
-    });
-    await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'external-usage-reload' }).props.onClick();
-    });
-    await act(async () => {
-      renderer.update(page(1));
-    });
-    // Pre-rebind read #2 settles late with a key rejection while drawer is still open.
-    await act(async () => {
-      settlePreRebindUsage(
-        Response.json({ code: 'external_management_key_rejected', detail: '401' }, { status: 409 })
-      );
+      renderer.update(page(2));
     });
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
     ).toHaveLength(0);
-    expect(
-      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-key_rejected' })
-    ).toHaveLength(0);
 
     await click(t('keysCloseDetails'));
     expect(view()).toContain(postRebind.id);
-    expect(view()).toContain(x('usageCollectorRunning'));
   });
 
   it('surfaces prominent pending-operation-banner, hides runtime filter on revoked tab, and exposes table ARIA roles', async () => {
@@ -4250,5 +3905,69 @@ describe('Fresh client key persistence UI', () => {
       readText(renderer.root.findByProps({ 'data-testid': `key-usage-${key.id}` }))
     ).toContain('7');
     expect(renderer.root.findByType('section').props['aria-busy']).toBe(false);
+  });
+
+  it('consolidates presenceUnverified into the pending-operation banner instead of stacking two warning banners', async () => {
+    const opId = '2'.repeat(32);
+    const pendingKey = {
+      ...key,
+      runtimeState: 'effect_unknown' as const,
+      operationId: opId,
+      effectCode: 'key_operation_unknown',
+    };
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1,
+            toMs: 2,
+            coverage: { state: 'unknown', reason: 'usage_read_failed' },
+            items: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/operations/latest')) {
+        return Promise.resolve(
+          Response.json({
+            operation: {
+              id: opId,
+              targetId: pendingKey.id,
+              keeperId: '',
+              mode: 'add',
+              outcome: 'unknown',
+              revision: 1,
+              steps: [{ name: 'add', state: 'attempted', returned: true }],
+            },
+            nextStep: '',
+            runtimeState: 'effect_unknown',
+            expiresAtMs: 0,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [pendingKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+            presenceUnverified: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+    await mount(fetchMock);
+    const pendingBanners = renderer.root.findAllByProps({
+      'data-testid': 'pending-operation-banner',
+    });
+    expect(pendingBanners).toHaveLength(1);
+    const unverifiedNotes = renderer.root.findAllByProps({
+      'data-testid': 'keys-presence-unverified',
+    });
+    expect(unverifiedNotes).toHaveLength(1);
+    expect(
+      pendingBanners[0].findAllByProps({ 'data-testid': 'keys-presence-unverified' })
+    ).toHaveLength(1);
   });
 });

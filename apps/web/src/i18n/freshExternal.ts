@@ -113,6 +113,12 @@ const messages = {
     'Перепривязка не завершена. Повторите тот же запрос, не меняя установку.',
   ],
   usageTitle: ['CPA usage collection', 'CPA 用量采集', 'CPA 用量擷取', 'Сбор статистики CPA'],
+  usageSourceTitle: [
+    'External CPA usage source',
+    '外部 CPA 用量源',
+    '外部 CPA 用量來源',
+    'Источник статистики внешнего CPA',
+  ],
   usageHelp: [
     'Collection reads your CPA\'s usage queue over its management API. Manager never writes to your CPA without your confirmation.',
     '采集通过管理 API 读取 CPA 的用量队列。未经你确认，Manager 不会写入你的 CPA。',
@@ -128,6 +134,7 @@ const messages = {
   usageCollectorStopped: ['Stopped', '已停止', '已停止', 'Остановлен'],
   usageCollectorError: ['Failed', '失败', '失敗', 'Сбой'],
   usageCollectorUnknown: ['Unknown', '未知', '未知', 'Неизвестно'],
+  usageCollectionWindow: ['Collection status', '采集状态', '擷取狀態', 'Статус сбора'],
   usageCollectionStarted: ['Collection started', '已开始采集', '已開始擷取', 'Сбор начат'],
   usageNotStarted: ['not started', '尚未开始', '尚未開始', 'не начат'],
   usageVersion: ['CPA version', 'CPA 版本', 'CPA 版本', 'Версия CPA'],

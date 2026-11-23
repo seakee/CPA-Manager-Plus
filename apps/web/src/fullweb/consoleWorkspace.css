@@ -1397,6 +1397,13 @@
   font-size: 12px;
 }
 
+.system-collector-mode-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 
 
 .system-connection-grid {

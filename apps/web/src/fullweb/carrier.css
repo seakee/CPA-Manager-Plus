@@ -1346,10 +1346,41 @@ input {
   flex-direction: column;
   gap: 14px;
   padding: 18px 20px;
-  margin-bottom: 16px;
+  margin: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-lg);
+}
+
+.fresh-external-usage.is-embedded {
+  margin: 16px 0 0;
+  padding: 16px 0 0;
+  gap: 12px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.fresh-external-usage.is-embedded .fresh-external-usage-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fresh-external-usage.is-embedded .fresh-external-usage-head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.fresh-external-usage.is-embedded .key-notice {
+  margin: 0;
+}
+
+.fresh-external-usage-error-row {
+  display: contents;
 }
 
 .fresh-external-usage-head h2 {

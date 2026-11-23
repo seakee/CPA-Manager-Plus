@@ -223,7 +223,8 @@ func TestRuntimeConfiguredInstallSelectsProfileFromCommittedStrategy(t *testing.
 			if target.gatewayAdmissionProven(t.Context()) {
 				t.Fatalf("%s: External installation proved Embedded gateway admission", label)
 			}
-			if keys := call(http.MethodGet, "api-keys", ""); keys.Code != http.StatusOK {
+			if keys := call(http.MethodGet, "api-keys", ""); keys.Code != http.StatusOK ||
+				!strings.Contains(keys.Body.String(), `"gatewayPending":false`) {
 				t.Fatalf("%s: GET api-keys = %d %s", label, keys.Code, keys.Body.String())
 			}
 			if usage := call(http.MethodGet, "external/usage", ""); usage.Code != http.StatusOK {

@@ -5,6 +5,8 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '../i18n';
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
+import { createPublicApiClient } from './publicApi';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import {
   getUsageServiceErrorCode,
@@ -1321,5 +1323,179 @@ describe('FreshSystemWorkspace component', () => {
     expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.usage_service_not_configured);
     expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.request_failed);
     expect(postSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('hosts External CPA usage collection inside the monitoring tab and clears usage blockers after retry', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example/console') });
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0xbb) });
+    try {
+    const context = {
+      basePath: '/console',
+      apiBase: '/console/api/v2',
+      revision: 1,
+    };
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.64', support: 'supported', writeBlocked: false },
+    };
+    let usagePostCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        usagePostCount += 1;
+        if (usagePostCount === 1) {
+          return Promise.resolve(
+            Response.json({
+              ...usageBase,
+              statisticsEnabled: true,
+              collector: 'stopped',
+              collectionStarted: false,
+              blockedReason: 'external_cpa_authority_unavailable',
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: false,
+            collector: 'stopped',
+            collectionStarted: false,
+            blockedReason: 'usage_statistics_disabled',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/console/system']}>
+          <FreshSystemWorkspace
+            basePath="/console"
+            strategy="connect_external"
+            client={client}
+            credential="admin-test-only"
+            onUnauthorized={vi.fn()}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    const monitoringCard = renderer.root.findByProps({
+      'data-testid': 'system-request-monitoring-card',
+    });
+    expect(
+      monitoringCard.findAllByProps({ 'data-testid': 'external-usage' })
+    ).toHaveLength(1);
+    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enableBtn.props.onClick());
+    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmBtn.props.onClick());
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })
+    ).toHaveLength(1);
+
+    const retryBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm-retry' });
+    await act(async () => retryBtn.props.onClick());
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'external-usage-collector' })
+        .findByType('dd')
+        .children.join('')
+    ).toContain(x('usageCollectorRunning'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not repaint an External usage blocker in system monitoring from a read retired by reload', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example/console') });
+    try {
+    const context = {
+      basePath: '/console',
+      apiBase: '/console/api/v2',
+      revision: 1,
+    };
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.64', support: 'supported', writeBlocked: false },
+    };
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let usageGetCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        if (usageGetCount === 1) {
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/console/system']}>
+          <FreshSystemWorkspace
+            basePath="/console"
+            strategy="connect_external"
+            client={client}
+            credential="admin-test-only"
+            onUnauthorized={vi.fn()}
+          />
+        </MemoryRouter>
+      );
+    });
+    expect(usageGetCount).toBe(1);
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'system-reload-btn' }).props.onClick();
+    });
+    expect(usageGetCount).toBe(2);
+
+    await act(async () => {
+      settleStaleRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'external-usage-collector' })
+        .findByType('dd')
+        .children.join('')
+    ).toContain(x('usageCollectorRunning'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

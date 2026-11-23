@@ -135,10 +135,18 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			}
 		}
 		gatewayPending := true
-		if op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
+		switch {
+		case op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy):
 			admitCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
 			gatewayPending = !a.gatewayAdmissionProven(admitCtx)
 			cancel()
+		case op.ProductComplete && op.Routing.Committed &&
+			authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
+			authority.Targets(op, freshkeyapply.SurfaceKeyOperation):
+			// External installs route model traffic directly to the user's CPA
+			// rather than through CPAMP Ingress admission; readiness mirrors
+			// access-info while live observation failures surface via presenceUnverified.
+			gatewayPending = false
 		}
 		writeFreshJSON(w, struct {
 			Keys                []freshkeys.Key `json:"keys"`
