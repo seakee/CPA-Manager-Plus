@@ -15,6 +15,7 @@ const isVisualEffectsMode = (mode: unknown): mode is VisualEffectsMode => {
 };
 
 const applyVisualEffects = (mode: VisualEffectsMode) => {
+  if (typeof document === 'undefined') return;
   document.documentElement.setAttribute('data-visual-effects', mode);
 };
 
@@ -50,6 +51,9 @@ export const useVisualEffectsStore = create<VisualEffectsState>()(
           };
         }
         return currentState;
+      },
+      onRehydrateStorage: () => (state) => {
+        applyVisualEffects(isVisualEffectsMode(state?.mode) ? state.mode : 'full');
       },
     }
   )

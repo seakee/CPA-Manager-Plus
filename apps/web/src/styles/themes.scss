@@ -12,13 +12,24 @@
 :root {
   --app-bg: #eff2f7;
   --app-bg-gradient: linear-gradient(120deg, #f0f7ff 0%, #e7f2ff 50%, #edf7ff 100%);
-  --app-bg-blob-1-start: #7aa2ff;
-  --app-bg-blob-1-end: #b6d4ff;
-  --app-bg-blob-2-start: #6bc5ff;
-  --app-bg-blob-2-end: #7debdc;
-  --app-bg-blob-1-opacity: 0.5;
-  --app-bg-blob-2-opacity: 0.5;
-  --app-bg-blob-blur: 60px;
+  --app-bg-ambient-image:
+    radial-gradient(
+      620px 560px at 90% 10%,
+      rgba(122, 162, 255, 0.36) 0%,
+      rgba(150, 186, 255, 0.24) 24%,
+      rgba(182, 212, 255, 0.12) 48%,
+      rgba(182, 212, 255, 0.03) 72%,
+      transparent 92%
+    ),
+    radial-gradient(
+      540px 490px at 10% 90%,
+      rgba(107, 197, 255, 0.34) 0%,
+      rgba(116, 216, 238, 0.22) 24%,
+      rgba(125, 235, 220, 0.11) 48%,
+      rgba(125, 235, 220, 0.03) 72%,
+      transparent 92%
+    ),
+    var(--app-bg-gradient);
   --app-surface: rgba(255, 255, 255, 0.9);
   --app-surface-strong: #ffffff;
   --app-surface-muted: rgba(255, 255, 255, 0.62);
@@ -50,7 +61,7 @@
   --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65);
   --app-gap: 20px;
   --app-card-padding: 24px;
-  --app-blur: 20px;
+  --app-blur: 14px;
 
   --sidebar-bg-color: rgba(255, 255, 255, 0.54);
   --sidebar-text-color: var(--app-text-regular);
@@ -62,6 +73,7 @@
   --sidebar-collapsed-width-token: 54px;
 
   --primary-gradient: var(--data-blue-base);
+  --card-bg: #ffffff;
   --glass-bg: #ffffff;
   --glass-bg-secondary: rgba(255, 255, 255, 0.58);
   --glass-border: rgba(255, 255, 255, 0.6);
@@ -354,6 +366,7 @@
   --app-surface-muted: rgba(255, 255, 255, 0.68);
   --bg-secondary: var(--app-bg);
   --bg-quinary: #ffffff;
+  --card-bg: #ffffff;
   --glass-bg: #ffffff;
   --glass-bg-secondary: rgba(255, 255, 255, 0.7);
   --sidebar-bg-color: rgba(255, 255, 255, 0.58);
@@ -363,13 +376,24 @@
 [data-theme='dark'] {
   --app-bg: #0a0a0a;
   --app-bg-gradient: linear-gradient(120deg, #0b1324 0%, #0a1426 50%, #091521 100%);
-  --app-bg-blob-1-start: #1b2a55;
-  --app-bg-blob-1-end: #27325c;
-  --app-bg-blob-2-start: #0f3d59;
-  --app-bg-blob-2-end: #0c4a4f;
-  --app-bg-blob-1-opacity: 0.35;
-  --app-bg-blob-2-opacity: 0.3;
-  --app-bg-blob-blur: 70px;
+  --app-bg-ambient-image:
+    radial-gradient(
+      640px 580px at 90% 10%,
+      rgba(39, 50, 92, 0.38) 0%,
+      rgba(33, 46, 88, 0.24) 24%,
+      rgba(27, 42, 85, 0.12) 48%,
+      rgba(27, 42, 85, 0.03) 72%,
+      transparent 92%
+    ),
+    radial-gradient(
+      560px 510px at 10% 90%,
+      rgba(15, 61, 89, 0.34) 0%,
+      rgba(13, 68, 84, 0.21) 24%,
+      rgba(12, 74, 79, 0.1) 48%,
+      rgba(12, 74, 79, 0.03) 72%,
+      transparent 92%
+    ),
+    var(--app-bg-gradient);
   --app-surface: rgba(24, 28, 40, 0.9);
   --app-surface-strong: #1b1f2a;
   --app-surface-muted: rgba(255, 255, 255, 0.08);
@@ -397,6 +421,7 @@
   --sidebar-active-text-color: #ffffff;
   --sidebar-shadow: 2px 0 12px rgba(0, 0, 0, 0.5);
 
+  --card-bg: rgba(24, 28, 40, 0.88);
   --glass-bg: rgba(24, 28, 40, 0.72);
   --glass-bg-secondary: rgba(255, 255, 255, 0.08);
   --glass-border: rgba(255, 255, 255, 0.1);
@@ -652,16 +677,52 @@
   :root {
     --glass-backdrop-filter: none;
     --glass-filter: none;
-    --glass-bg: var(--app-surface);
-    --glass-bg-secondary: var(--app-surface-muted);
+    --glass-bg: var(--app-surface-strong);
+    --card-bg: var(--app-surface-strong);
+    --glass-bg-secondary: var(--surface-subtle);
     --glass-border: var(--app-border);
+    --floating-surface: var(--app-surface-strong);
+    --sidebar-bg-color: rgba(255, 255, 255, 0.96);
+    --sidebar-logo-bg-color: rgba(255, 255, 255, 0.94);
+    --app-surface: #ffffff;
+    --app-surface-muted: rgba(248, 250, 254, 0.95);
+  }
+
+  [data-theme='dark'] {
+    --glass-bg: var(--app-surface-strong);
+    --card-bg: var(--app-surface-strong);
+    --glass-bg-secondary: var(--surface-subtle);
+    --glass-border: var(--app-border);
+    --floating-surface: var(--app-surface-strong);
+    --sidebar-bg-color: rgba(24, 28, 40, 0.96);
+    --sidebar-logo-bg-color: rgba(24, 28, 40, 0.94);
+    --app-surface: var(--app-surface-strong);
+    --app-surface-muted: rgba(30, 36, 52, 0.92);
   }
 }
 
 [data-visual-effects='reduced'] {
   --glass-backdrop-filter: none;
   --glass-filter: none;
-  --glass-bg: var(--app-surface);
-  --glass-bg-secondary: var(--app-surface-muted);
+  --glass-bg: var(--app-surface-strong);
+  --card-bg: var(--app-surface-strong);
+  --glass-bg-secondary: var(--surface-subtle);
   --glass-border: var(--app-border);
+  --floating-surface: var(--app-surface-strong);
+  --sidebar-bg-color: rgba(255, 255, 255, 0.96);
+  --sidebar-logo-bg-color: rgba(255, 255, 255, 0.94);
+  --app-surface: #ffffff;
+  --app-surface-muted: rgba(248, 250, 254, 0.95);
+}
+
+[data-theme='dark'][data-visual-effects='reduced'] {
+  --glass-bg: var(--app-surface-strong);
+  --card-bg: var(--app-surface-strong);
+  --glass-bg-secondary: var(--surface-subtle);
+  --glass-border: var(--app-border);
+  --floating-surface: var(--app-surface-strong);
+  --sidebar-bg-color: rgba(24, 28, 40, 0.96);
+  --sidebar-logo-bg-color: rgba(24, 28, 40, 0.94);
+  --app-surface: var(--app-surface-strong);
+  --app-surface-muted: rgba(30, 36, 52, 0.92);
 }

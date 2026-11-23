@@ -162,8 +162,7 @@
 
   .quickStatsPanel,
   .configCard {
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-backdrop-filter);
+    background: var(--card-bg);
     border: 1px solid var(--glass-border);
     border-radius: var(--app-radius-md);
   }

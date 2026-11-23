@@ -18,16 +18,15 @@
       body {
         background-color: #eff2f7;
         background-image:
-          radial-gradient(600px circle at 90% 10%, rgba(122, 162, 255, 0.34), transparent 70%),
-          radial-gradient(500px circle at 10% 90%, rgba(107, 197, 255, 0.34), transparent 70%),
+          radial-gradient(620px 560px at 90% 10%, rgba(122, 162, 255, 0.36) 0%, rgba(150, 186, 255, 0.24) 24%, rgba(182, 212, 255, 0.12) 48%, rgba(182, 212, 255, 0.03) 72%, transparent 92%),
+          radial-gradient(540px 490px at 10% 90%, rgba(107, 197, 255, 0.34) 0%, rgba(116, 216, 238, 0.22) 24%, rgba(125, 235, 220, 0.11) 48%, rgba(125, 235, 220, 0.03) 72%, transparent 92%),
           linear-gradient(120deg, #f0f7ff 0%, #e7f2ff 50%, #edf7ff 100%);
-        background-attachment: fixed;
       }
       html[data-theme='dark'] body {
         background-color: #0a0a0a;
         background-image:
-          radial-gradient(600px circle at 90% 10%, rgba(39, 50, 92, 0.42), transparent 70%),
-          radial-gradient(500px circle at 10% 90%, rgba(15, 61, 89, 0.38), transparent 70%),
+          radial-gradient(640px 580px at 90% 10%, rgba(39, 50, 92, 0.38) 0%, rgba(33, 46, 88, 0.24) 24%, rgba(27, 42, 85, 0.12) 48%, rgba(27, 42, 85, 0.03) 72%, transparent 92%),
+          radial-gradient(560px 510px at 10% 90%, rgba(15, 61, 89, 0.34) 0%, rgba(13, 68, 84, 0.21) 24%, rgba(12, 74, 79, 0.1) 48%, rgba(12, 74, 79, 0.03) 72%, transparent 92%),
           linear-gradient(120deg, #0b1324 0%, #0a1426 50%, #091521 100%);
       }
     </style>
@@ -79,6 +78,21 @@
               window.matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.classList.toggle('light', !dark);
           document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'white');
+          var ve = 'full';
+          if (!isBootstrap && window.localStorage) {
+            var storedVe = window.localStorage.getItem('cli-proxy-visual-effects');
+            if (storedVe) {
+              if (storedVe.charAt(0) === '{') {
+                var parsedVe = JSON.parse(storedVe);
+                if (parsedVe && parsedVe.state && parsedVe.state.mode === 'reduced') {
+                  ve = 'reduced';
+                }
+              } else if (storedVe === 'reduced') {
+                ve = 'reduced';
+              }
+            }
+          }
+          document.documentElement.setAttribute('data-visual-effects', ve);
         } catch (_e) {}
       })();
     </script>

@@ -39,7 +39,6 @@
   color: var(--text-primary);
   box-shadow: var(--glass-shadow);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: inline-grid;
   place-items: center;
   cursor: pointer;
@@ -74,7 +73,6 @@
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -149,7 +147,6 @@
   background: var(--glass-bg);
   box-shadow: var(--glass-shadow);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   animation: cardEnter 0.48s cubic-bezier(0.16, 1, 0.3, 1);
 
   @media (max-width: $breakpoint-mobile) {

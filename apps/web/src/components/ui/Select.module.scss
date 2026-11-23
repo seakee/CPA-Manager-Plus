@@ -92,7 +92,6 @@
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-xl);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   flex-direction: column;
   gap: 4px;

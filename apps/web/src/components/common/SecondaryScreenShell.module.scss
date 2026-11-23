@@ -21,7 +21,6 @@
   border-radius: var(--app-radius-md);
   box-shadow: var(--app-shadow-soft);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   min-height: 44px;
 }
 
@@ -114,7 +113,6 @@
   --glass-blur: 12px;
   background: var(--glass-bg);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border: 1px solid var(--glass-border);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);

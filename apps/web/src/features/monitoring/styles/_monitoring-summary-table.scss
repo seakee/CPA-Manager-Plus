@@ -49,8 +49,7 @@
     min-height: 112px;
     padding: 12px;
     border-radius: var(--app-radius-md);
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-backdrop-filter);
+    background: var(--card-bg);
     transition:
       transform 0.18s ease,
       border-color 0.18s ease,

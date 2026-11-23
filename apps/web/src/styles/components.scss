@@ -257,12 +257,10 @@ textarea {
 }
 
 .card {
-  background: var(--glass-bg);
+  background: var(--card-bg);
   border: 1px solid var(--glass-border);
   border-radius: var(--app-radius-lg);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   padding: var(--app-card-padding);
 }
 
@@ -407,7 +405,6 @@ textarea {
   background: var(--glass-bg);
   color: var(--text-primary);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   justify-content: space-between;
   align-items: center;

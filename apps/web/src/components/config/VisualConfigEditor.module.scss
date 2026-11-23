@@ -261,10 +261,7 @@
   padding: 12px;
   border-radius: var(--app-radius-lg);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
-  background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
-  --glass-blur: 14px;
-  backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
   box-shadow: none;
   -ms-overflow-style: none;
   scrollbar-width: none;
@@ -278,7 +275,6 @@
   position: fixed;
   left: 0;
   top: 0;
-  will-change: transform, width, max-height;
   border-radius: var(--app-radius-lg);
   z-index: 45;
   opacity: 0;

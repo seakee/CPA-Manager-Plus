@@ -175,7 +175,6 @@ input {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--app-surface-muted);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -322,7 +321,6 @@ input {
   border-radius: var(--app-radius-lg);
   box-shadow: var(--app-specular-highlight);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   overflow: hidden;
 }
 
@@ -803,7 +801,6 @@ input {
   border-radius: var(--app-radius-lg);
   box-shadow: var(--app-specular-highlight);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   overflow: hidden;
   gap: 0;
 }
@@ -821,7 +818,6 @@ input {
   border: 0;
   box-shadow: none;
   backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   overflow: visible;
 }
 
@@ -857,7 +853,6 @@ input {
     transparent 100%
   );
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
 }
 
 .journey-steps {
@@ -2825,6 +2820,26 @@ input {
   .adopt-progress-fill,
   .adopt-group-chevron {
     transition: none;
+  }
+}
+
+[data-visual-effects='reduced'] {
+  .journey-choices,
+  .journey-configuration,
+  .journey-summary,
+  .adopt-inventory,
+  .adopt-migration,
+  .journey-complete-stack,
+  .adopt-group-body,
+  .journey-success-symbol,
+  .adopt-progress-card-running .adopt-progress-fill,
+  .journey-steps li.active .journey-step-dot,
+  .artifact-progress-phase > svg,
+  .artifact-probe-pill.is-checking > svg,
+  .artifact-step .journey-quiet > svg,
+  .artifact-progress-fill.is-pulsing,
+  .journey-stage-mark.is-spinning {
+    animation: none;
   }
 }
 
