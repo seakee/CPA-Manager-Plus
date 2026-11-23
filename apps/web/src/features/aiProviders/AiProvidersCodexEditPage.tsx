@@ -139,13 +139,19 @@ export function AiProvidersCodexEditPage() {
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const disableControls = connectionStatus !== 'connected';
 
+  const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
+  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
 
-  const [configs, setConfigs] = useState<ProviderKeyConfig[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [configs, setConfigs] = useState<ProviderKeyConfig[]>(() => config?.codexApiKeys ?? []);
+  const [loading, setLoading] = useState(
+    () => !(isCacheValid('codex-api-key') || isCacheValid())
+  );
   const [saving, setSaving] = useState(false);
+  const isCacheValidRef = useRef(isCacheValid);
+  isCacheValidRef.current = isCacheValid;
   const [error, setError] = useState('');
   const [form, setForm] = useState<ProviderFormState>(() => buildEmptyForm());
   const [baseline, setBaseline] = useState(() => buildCodexBaseline(buildEmptyForm()));
@@ -204,7 +210,10 @@ export function AiProvidersCodexEditPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const hasValidCache = isCacheValidRef.current('codex-api-key') || isCacheValidRef.current();
+    if (!hasValidCache) {
+      setLoading(true);
+    }
     setError('');
 
     fetchConfig('codex-api-key')
@@ -226,7 +235,6 @@ export function AiProvidersCodexEditPage() {
       cancelled = true;
     };
   }, [fetchConfig, t]);
-
   useEffect(() => {
     if (loading) return;
 
