@@ -1500,19 +1500,23 @@ export function AccountsPage() {
   const inlineNoteSavingRef = useRef(false);
   const inlineNoteInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    if (editingPriorityState && inlinePriorityInputRef.current) {
-      inlinePriorityInputRef.current.focus();
-      inlinePriorityInputRef.current.select();
-    }
-  }, [editingPriorityState]);
+  // Focus/select only when editing starts or changes rows, not when the draft value changes.
+  const editingPriorityRowKey = editingPriorityState?.rowKey ?? null;
+  const editingNoteRowKey = editingNoteState?.rowKey ?? null;
 
   useEffect(() => {
-    if (editingNoteState && inlineNoteInputRef.current) {
-      inlineNoteInputRef.current.focus();
-      inlineNoteInputRef.current.select();
-    }
-  }, [editingNoteState]);
+    if (!editingPriorityRowKey) return;
+    const input = inlinePriorityInputRef.current;
+    input?.focus();
+    input?.select();
+  }, [editingPriorityRowKey]);
+
+  useEffect(() => {
+    if (!editingNoteRowKey) return;
+    const input = inlineNoteInputRef.current;
+    input?.focus();
+    input?.select();
+  }, [editingNoteRowKey]);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(() => initialWorkspaceUrlState.current.pageSize);
