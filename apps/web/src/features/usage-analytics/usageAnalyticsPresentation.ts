@@ -12,39 +12,20 @@ import {
   type UsageSummaryMetrics,
   type UsageTimelinePoint,
 } from './usageAnalyticsModel';
+import type {
+  MetricSummaryCardAccent,
+  MetricSummaryCardIcon,
+  MetricSummaryCardProps,
+  MetricSummaryCardTone,
+} from '@/components/common/MetricSummaryCard';
 
-export type UsageSummaryCardIcon =
-  | 'anomaly'
-  | 'cache'
-  | 'calls'
-  | 'cost'
-  | 'credential'
-  | 'failure'
-  | 'input'
-  | 'key'
-  | 'latency'
-  | 'model'
-  | 'output'
-  | 'success'
-  | 'tokens'
-  | 'trend';
+export type UsageSummaryCardIcon = MetricSummaryCardIcon;
 
-export type UsageSummaryCardAccent = 'amber' | 'blue' | 'cyan' | 'green' | 'red' | 'teal';
+export type UsageSummaryCardAccent = MetricSummaryCardAccent;
 
-export type UsageSummaryCardTone = 'bad' | 'good' | 'warn';
+export type UsageSummaryCardTone = MetricSummaryCardTone;
 
-export type UsageSummaryCard = {
-  accent?: UsageSummaryCardAccent;
-  dataAttributes?: Record<`data-${string}`, string>;
-  fullLabel?: string;
-  icon?: UsageSummaryCardIcon;
-  label: string;
-  meta: string;
-  tone?: UsageSummaryCardTone;
-  value: string;
-  valueTitle?: string;
-  variant?: 'primary' | 'secondary';
-};
+export type UsageSummaryCard = MetricSummaryCardProps;
 
 type CommonSummaryContext = {
   locale: string;

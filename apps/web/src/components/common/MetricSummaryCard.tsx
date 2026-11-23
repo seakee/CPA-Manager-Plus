@@ -1,4 +1,4 @@
-import { useId, type ComponentType } from 'react';
+import { useId, type CSSProperties, type ComponentType } from 'react';
 import {
   IconArrowDownToLine,
   IconArrowUpFromLine,
@@ -11,11 +11,14 @@ import {
   IconDollarSign,
   IconInbox,
   IconKey,
+  IconModelCluster,
   IconPercentCircle,
   IconRefreshCw,
   IconShield,
   IconShieldCheck,
+  IconTimer,
   IconTrash2,
+  IconTrendingUp,
   IconTriangleAlert,
   IconX,
   type IconProps,
@@ -44,7 +47,12 @@ export type MetricSummaryCardIcon =
   | 'attention'
   | 'quota-risk'
   | 'disabled'
-  | 'unconfirmed';
+  | 'unconfirmed'
+  | 'anomaly'
+  | 'key'
+  | 'latency'
+  | 'model'
+  | 'trend';
 
 export type MetricSummaryCardAccent =
   | 'blue'
@@ -57,6 +65,8 @@ export type MetricSummaryCardAccent =
   | 'teal'
   | 'neutral';
 
+export type MetricSummaryDensity = 'default' | 'compact';
+
 export type MetricSummaryCardProps = {
   label: string;
   fullLabel?: string;
@@ -65,8 +75,10 @@ export type MetricSummaryCardProps = {
   meta: string;
   tone?: MetricSummaryCardTone;
   variant?: 'primary' | 'secondary';
+  density?: MetricSummaryDensity;
   icon?: MetricSummaryCardIcon;
   accent?: MetricSummaryCardAccent;
+  dataAttributes?: Record<`data-${string}`, string>;
   className?: string;
 };
 
@@ -91,6 +103,11 @@ const summaryIconMap: Record<MetricSummaryCardIcon, ComponentType<IconProps>> = 
   'quota-risk': IconPercentCircle,
   disabled: IconBan,
   unconfirmed: IconCircleHelp,
+  anomaly: IconShield,
+  key: IconKey,
+  latency: IconTimer,
+  model: IconModelCluster,
+  trend: IconTrendingUp,
 };
 
 const summaryAccentClassMap: Record<MetricSummaryCardAccent, string> = {
@@ -113,20 +130,24 @@ export function MetricSummaryCard({
   meta,
   tone,
   variant = 'primary',
+  density = 'default',
   icon,
   accent = 'blue',
+  dataAttributes,
   className = '',
 }: MetricSummaryCardProps) {
   const Icon = icon ? summaryIconMap[icon] : null;
   const tooltipId = useId();
   const tooltipValue = valueTitle ?? value;
   const resolvedLabel = fullLabel ?? label;
-  const hasValueTooltip = tooltipValue !== value;
+  const isCompact = density === 'compact';
+  const hasValueTooltip = !isCompact && tooltipValue !== value;
 
   const cardClassName = [
     'card',
     styles.card,
     variant === 'secondary' ? styles.cardSecondary : styles.cardPrimary,
+    isCompact ? styles.cardCompact : '',
     summaryAccentClassMap[accent],
     className,
   ]
@@ -134,7 +155,7 @@ export function MetricSummaryCard({
     .join(' ');
 
   return (
-    <div className={cardClassName} data-summary-icon={icon}>
+    <div className={cardClassName} data-summary-icon={icon} {...dataAttributes}>
       <div className={styles.header}>
         {Icon ? (
           <span className={styles.icon}>
@@ -151,6 +172,7 @@ export function MetricSummaryCard({
             className={`${styles.value} ${tone ? styles[`tone${tone}`] : ''}`}
             tabIndex={hasValueTooltip ? 0 : undefined}
             aria-describedby={hasValueTooltip ? tooltipId : undefined}
+            title={valueTitle}
           >
             {value}
           </strong>
@@ -161,15 +183,50 @@ export function MetricSummaryCard({
             </span>
           ) : null}
         </span>
-        <span className={styles.meta} title={meta}>
-          {meta}
-        </span>
+        {!isCompact ? (
+          <span data-metric-summary-meta="true" className={styles.meta} title={meta}>
+            {meta}
+          </span>
+        ) : null}
       </div>
-      <div className={styles.chart} aria-hidden="true">
-        <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-          <path d="M0,25 Q15,5 30,20 T60,10 T100,25" />
-        </svg>
-      </div>
+      {!isCompact ? (
+        <div data-metric-summary-chart="true" className={styles.chart} aria-hidden="true">
+          <svg viewBox="0 0 100 30" preserveAspectRatio="none">
+            <path d="M0,25 Q15,5 30,20 T60,10 T100,25" />
+          </svg>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function MetricSummaryGrid({
+  cards,
+  density = 'default',
+  columns,
+  className = '',
+}: {
+  cards: MetricSummaryCardProps[];
+  density?: MetricSummaryDensity;
+  columns?: number;
+  className?: string;
+}) {
+  const isCompact = density === 'compact';
+  const gridStyle = columns
+    ? ({ '--metric-summary-columns': columns } as CSSProperties)
+    : undefined;
+
+  return (
+    <div
+      className={[styles.grid, isCompact ? styles.gridCompact : '', className]
+        .filter(Boolean)
+        .join(' ')}
+      data-metric-summary-density={density}
+      style={gridStyle}
+    >
+      {cards.map((card) => (
+        <MetricSummaryCard key={`${card.label}-${card.value}`} {...card} density={density} />
+      ))}
     </div>
   );
 }
