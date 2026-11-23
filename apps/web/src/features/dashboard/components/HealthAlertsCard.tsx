@@ -252,6 +252,10 @@ export function HealthAlertsCard({
                     </span>
                     {typeof failure.fail_status_code === 'number' && failure.fail_status_code > 0 ? (
                       <span className={styles.statusCodeBadge}>{failure.fail_status_code}</span>
+                    ) : failure.header_error_code || failure.endpoint ? (
+                      <span className={styles.endpointBadge} title={failure.endpoint || undefined}>
+                        {failure.header_error_code || failure.endpoint}
+                      </span>
                     ) : null}
                   </span>
                   <span className={styles.model} title={failure.model}>

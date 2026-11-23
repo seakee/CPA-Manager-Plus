@@ -145,26 +145,31 @@ export function UsageMetricsCard({
         <div className={styles.rankList}>
           {(modelCostRank?.length ? modelCostRank : topModels)?.slice(0, 5).map((model, index) => {
             const hasCostShare = 'cost_share' in model && typeof model.cost_share === 'number';
-            const share =
+            const barShare =
               hasCostShare
                 ? (model as { cost_share: number }).cost_share
                 : topModels.length
                   ? model.tokens / Math.max(...topModels.map((item) => item.tokens), 1)
                   : 0;
+            const totalCost = today?.total_cost ?? 0;
+            const costShareOfTotal =
+              hasCostShare && totalCost > 0
+                ? Math.min(1, Math.max(0, model.cost / totalCost))
+                : barShare;
             return (
             <div key={model.model} className={styles.rankItem}>
               <div className={styles.rankIndex} data-rank={index + 1}>{index + 1}</div>
               <div className={styles.rankInfo}>
                 <div className={styles.modelName} title={model.model}>{model.model}</div>
                 <div className={styles.rankTrack}>
-                  <div className={styles.rankBar} style={{ '--share': share } as RankStyle} />
+                  <div className={styles.rankBar} style={{ '--share': barShare } as RankStyle} />
                 </div>
               </div>
               <div className={styles.rankValue}>
                 <div className={styles.cost}>{formatUsd(model.cost)}</div>
                 <div className={styles.share}>
                   {hasCostShare
-                    ? `${(share * 100).toFixed(1)}%`
+                    ? `${(costShareOfTotal * 100).toFixed(1)}%`
                     : formatCompactNumber(model.tokens)}
                 </div>
               </div>

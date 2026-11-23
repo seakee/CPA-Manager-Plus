@@ -884,7 +884,7 @@
     "health_status_problem": "Problem",
     "health_status_disabled": "Disabled",
     "health_status_warning": "Warning",
-    "health_queue_status": "Data read status",
+    "health_queue_status": "Usage Write Queue",
     "health_error_log_count": "{{count}} files",
     "today_overview_usage_service": "Today's Overview (Manager Server)",
     "metric_failure_count": "{{value}} failed",

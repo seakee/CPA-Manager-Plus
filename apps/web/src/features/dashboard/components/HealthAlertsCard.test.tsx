@@ -157,6 +157,16 @@ describe('HealthAlertsCard', () => {
                 duration_ms: 420,
                 fail_status_code: 429,
               },
+              {
+                timestamp_ms: Date.UTC(2026, 5, 1, 13, 30, 0),
+                model: 'gpt-5.2-codex',
+                api_key_hash: '',
+                source: 'codex',
+                source_hash: '',
+                auth_index: '',
+                endpoint: 'POST /v1/responses',
+                duration_ms: 310,
+              },
             ]}
             channelHealth={[
               {
@@ -188,6 +198,7 @@ describe('HealthAlertsCard', () => {
     expect(links).toContain('/monitoring?tab=realtime');
     const json = JSON.stringify(renderer.toJSON());
     expect(json).toContain('429');
+    expect(json).toContain('POST /v1/responses');
     expect(json).toContain('1/20');
 
     await act(async () => {

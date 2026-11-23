@@ -884,7 +884,7 @@
     "health_status_problem": "異常",
     "health_status_disabled": "已停用",
     "health_status_warning": "警告",
-    "health_queue_status": "資料讀取狀態",
+    "health_queue_status": "統計寫入佇列",
     "health_error_log_count": "{{count}} 個檔案",
     "today_overview_usage_service": "今日概覽（基於 Manager Server）",
     "metric_failure_count": "失敗 {{value}}",

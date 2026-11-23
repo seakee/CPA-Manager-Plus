@@ -761,7 +761,9 @@ function DashboardPageContent({
                 </span>
               </div>
               <div className={styles.configItem}>
-                <span className={styles.configLabel}>{t('basic_settings.retry_count_label')}</span>
+                <span className={styles.configLabel}>
+                  {t('basic_settings.retry_count_label').replace(/[:：]\s*$/, '')}
+                </span>
                 <span className={styles.configValue}>{config.requestRetry ?? 0}</span>
               </div>
               <div className={styles.configItem}>

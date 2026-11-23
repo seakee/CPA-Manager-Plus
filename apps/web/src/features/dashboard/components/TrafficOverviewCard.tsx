@@ -328,12 +328,8 @@ export function TrafficOverviewCard({
       {/* 2. 请求健康时间线 */}
       <section className={`${styles.chartCard} ${styles.healthTimelineCard}`}>
         <div className={`${styles.cardHeader} ${styles.healthHeader}`}>
-          <div className={styles.healthTitle}>
-            <h3>{t('dashboard.request_health_timeline')}</h3>
-            <p>{t('dashboard.request_health_timeline_desc')}</p>
-          </div>
+          <h3>{t('dashboard.request_health_timeline')}</h3>
           <div className={styles.healthSummary}>
-            <strong>{todayRequestHealthTimeline ? formatPercent(todayRequestHealthTimeline.success_rate) : '-'}</strong>
             <div className={styles.healthCounts}>
               <span>
                 <i className={styles.healthGood} />{' '}
@@ -344,9 +340,11 @@ export function TrafficOverviewCard({
                 {formatCompactNumber(todayRequestHealthTimeline?.failure_calls ?? 0)}
               </span>
             </div>
+            <strong>{todayRequestHealthTimeline ? formatPercent(todayRequestHealthTimeline.success_rate) : '-'}</strong>
           </div>
         </div>
         <div className={styles.cardBody}>
+          <p className={styles.healthDesc}>{t('dashboard.request_health_timeline_desc')}</p>
           <div className={styles.healthMatrix}>
             {healthRows.length > 0 ? (
               <div className={styles.healthHourAxis}>

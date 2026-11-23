@@ -118,11 +118,11 @@
 
   // Failure Item special styling
   .failureItem {
-    padding: 10px 0;
+    padding: 8px 0;
     border-bottom: 1px solid var(--border-subtle);
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
 
     &:last-child {
       border-bottom: none;
@@ -161,6 +161,24 @@
         font-weight: 700;
         font-variant-numeric: tabular-nums;
         line-height: 1;
+        white-space: nowrap;
+      }
+
+      .endpointBadge {
+        display: inline-flex;
+        align-items: center;
+        max-width: 150px;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: var(--app-radius-xs);
+        background: var(--surface-subtle);
+        color: var(--text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
       }
 

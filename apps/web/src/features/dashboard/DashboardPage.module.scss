@@ -261,10 +261,9 @@
 
     .configGrid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0 20px;
-      padding: 4px 16px 12px;
-
+      grid-template-columns: 1fr;
+      gap: 0;
+      padding: 4px 16px 8px;
       .configItem {
         display: flex;
         flex-wrap: wrap;

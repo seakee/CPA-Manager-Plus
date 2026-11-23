@@ -888,7 +888,7 @@
     "health_status_problem": "Проблема",
     "health_status_disabled": "Отключено",
     "health_status_warning": "Предупреждение",
-    "health_queue_status": "Состояние чтения данных",
+    "health_queue_status": "Очередь записи статистики",
     "health_error_log_count": "{{count}} файлов",
     "today_overview_usage_service": "Обзор за сегодня (Manager Server)",
     "metric_failure_count": "Ошибок: {{value}}",

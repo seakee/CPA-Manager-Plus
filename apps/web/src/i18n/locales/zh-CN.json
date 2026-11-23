@@ -884,7 +884,7 @@
     "health_status_problem": "异常",
     "health_status_disabled": "已停用",
     "health_status_warning": "警告",
-    "health_queue_status": "数据读取状态",
+    "health_queue_status": "统计写入队列",
     "health_error_log_count": "{{count}} 个文件",
     "today_overview_usage_service": "今日概览（基于 Manager Server）",
     "metric_failure_count": "失败 {{value}}",
