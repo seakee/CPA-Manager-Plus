@@ -189,7 +189,6 @@ vi.mock('./dashboard/components/VersionCard', () => ({
   ),
 }));
 vi.mock('./dashboard/components/UsageMetricsCard', () => ({ UsageMetricsCard: () => null }));
-vi.mock('./dashboard/components/CollectorStatusCard', () => ({ CollectorStatusCard: () => null }));
 vi.mock('./dashboard/components/HealthAlertsCard', () => ({ HealthAlertsCard: () => null }));
 vi.mock('./dashboard/components/TrafficOverviewCard', () => ({ TrafficOverviewCard: () => null }));
 vi.mock('./plugins/PluginStorePage', () => ({ PluginStorePage: () => null }));

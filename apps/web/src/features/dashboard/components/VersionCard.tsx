@@ -56,6 +56,7 @@ interface HealthItem {
   tone: HealthTone;
   icon: ReactNode;
   to?: string;
+  title?: string;
 }
 
 type ExternalStableLoadResult =
@@ -379,6 +380,26 @@ export function VersionCard({
 
   const collector = collectorStatus?.collector;
   const collectorLastError = collector?.lastError?.trim() || '';
+  const collectorEvents = collectorStatus?.events;
+  const collectorDeadLetters = collectorStatus?.deadLetters ?? collector?.deadLetters;
+  const collectorTitle = collectorLastError
+    ? collectorLastError
+    : collectorStatus
+      ? [
+          Number.isFinite(collectorEvents)
+            ? `${t('dashboard.collector_events')}: ${Number(collectorEvents).toLocaleString(i18n.language)}`
+            : '',
+          Number.isFinite(collectorDeadLetters)
+            ? `${t('dashboard.collector_dead_letters')}: ${Number(collectorDeadLetters).toLocaleString(i18n.language)}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' · ') || undefined
+      : undefined;
+  const queueTitle = collector?.queue
+    ? `${t('dashboard.collector_queue')}: ${collector.queue}`
+    : undefined;
+
   const usageState: HealthItem = usageEnabled
     ? usageError
       ? {
@@ -386,6 +407,7 @@ export function VersionCard({
           value: t('dashboard.health_status_problem'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          title: usageError,
         }
       : {
           label: t('dashboard.health_usage_monitor'),
@@ -413,6 +435,8 @@ export function VersionCard({
           value: t('dashboard.collector_unavailable'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          to: '/system/runtime',
+          title: collectorError,
         }
       : collectorLastError
         ? {
@@ -420,6 +444,8 @@ export function VersionCard({
             value: t('dashboard.health_status_warning'),
             tone: 'warn',
             icon: <IconInfo size={16} />,
+            to: '/system/runtime',
+            title: collectorTitle,
           }
         : {
             label: t('dashboard.collector_status_title'),
@@ -427,6 +453,8 @@ export function VersionCard({
               collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
             tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
             icon: <IconCheck size={16} />,
+            to: '/system/runtime',
+            title: collectorTitle,
           };
 
   const queueState: HealthItem = !usageEnabled
@@ -442,15 +470,24 @@ export function VersionCard({
           value: t('dashboard.collector_unavailable'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          title: queueTitle,
         }
-      : {
-          label: t('dashboard.health_queue_status'),
-          value:
-            collector?.queue ||
-            (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
-          tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
-          icon: <IconCheck size={16} />,
-        };
+      : collectorLastError
+        ? {
+            label: t('dashboard.health_queue_status'),
+            value: t('dashboard.health_status_warning'),
+            tone: 'warn',
+            icon: <IconInfo size={16} />,
+            title: queueTitle,
+          }
+        : {
+            label: t('dashboard.health_queue_status'),
+            value:
+              collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
+            tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
+            icon: <IconCheck size={16} />,
+            title: queueTitle,
+          };
 
   const errorLogValue = errorLogsLoading
     ? '...'
@@ -471,11 +508,12 @@ export function VersionCard({
   };
 
   const healthItems = [usageState, collectorState, queueState, errorLogState];
-
   return (
     <div className={styles.container}>
       <section className={styles.section}>
-        <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
+        <div className={styles.panelHeader}>
+          <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
+        </div>
         <div className={`${styles.grid} ${styles.systemGrid}`}>
           <div className={styles.item}>
             <div className={styles.icon}>
@@ -491,23 +529,8 @@ export function VersionCard({
                       : 'dashboard.app_version'
                   )}
                 >
-                  {t('title.abbr')}
+                  {t('dashboard.app_version')}
                 </div>
-                {externalManagerUpdateFallback && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    iconOnly
-                    className={styles.versionAction}
-                    onClick={() => void handleExternalManagerCheck()}
-                    loading={checkingManagerVersion}
-                    title={t('system_info.version_check_button')}
-                    aria-label={t('system_info.version_check_button')}
-                  >
-                    {!checkingManagerVersion && <IconRefreshCw size={14} />}
-                  </Button>
-                )}
                 {managerUpdateAvailable && (
                   <Link
                     to="/system/updates"
@@ -530,6 +553,21 @@ export function VersionCard({
                   appReleaseUrl
                 )}
                 {renderBadgeValue(externalBadge)}
+                {externalManagerUpdateFallback && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    iconOnly
+                    className={styles.versionAction}
+                    onClick={() => void handleExternalManagerCheck()}
+                    loading={checkingManagerVersion}
+                    title={t('system_info.version_check_button')}
+                    aria-label={t('system_info.version_check_button')}
+                  >
+                    {!checkingManagerVersion && <IconRefreshCw size={14} />}
+                  </Button>
+                )}
               </div>
             </div>
           </div>
@@ -541,6 +579,10 @@ export function VersionCard({
             <div className={styles.content}>
               <div className={styles.versionHeader}>
                 <div className={styles.label}>{t('dashboard.api_version')}</div>
+              </div>
+              <div className={styles.valueWrap}>
+                {renderVersionValue(apiVersion || t('dashboard.version_unknown'), apiReleaseUrl)}
+                {renderBadgeValue(apiBadge)}
                 <Button
                   type="button"
                   variant="ghost"
@@ -554,10 +596,6 @@ export function VersionCard({
                 >
                   {!checkingApiVersion && <IconRefreshCw size={14} />}
                 </Button>
-              </div>
-              <div className={styles.valueWrap}>
-                {renderVersionValue(apiVersion || t('dashboard.version_unknown'), apiReleaseUrl)}
-                {renderBadgeValue(apiBadge)}
               </div>
             </div>
           </div>
@@ -589,7 +627,12 @@ export function VersionCard({
       </section>
 
       <section className={styles.section}>
-        <h2 className={styles.heading}>{t('dashboard.health_status')}</h2>
+        <div className={styles.panelHeader}>
+          <h2 className={styles.heading}>{t('dashboard.health_status')}</h2>
+          <Link to="/system/runtime" className={styles.headerLink}>
+            {t('dashboard.view_details')}
+          </Link>
+        </div>
         <div className={`${styles.grid} ${styles.healthGrid}`}>
           {healthItems.map((item) => {
             const content = (
@@ -608,12 +651,13 @@ export function VersionCard({
               <Link
                 key={item.label}
                 to={item.to}
+                title={item.title}
                 className={`${styles.healthItem} ${styles.healthLink}`}
               >
                 {content}
               </Link>
             ) : (
-              <div key={item.label} className={styles.healthItem}>
+              <div key={item.label} title={item.title} className={styles.healthItem}>
                 {content}
               </div>
             );
