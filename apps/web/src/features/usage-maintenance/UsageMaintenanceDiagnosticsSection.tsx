@@ -266,6 +266,26 @@ export function UsageMaintenanceDiagnosticsSection({
                 : t('common.disabled')}
             </span>
           </div>
+
+          {maintenance ? (
+            <div className={styles.flatRow}>
+              <div className={styles.flatRowCopy}>
+                <span className={styles.flatRowLabel}>
+                  {t('usage_maintenance.online_range_title')}
+                </span>
+                <span className={styles.flatRowMeta}>
+                  {t('usage_maintenance.online_range_subtitle')}
+                </span>
+              </div>
+              <span className={styles.mono}>
+                {maintenance.raw_min_timestamp_ms && maintenance.raw_max_timestamp_ms
+                  ? `${formatTime(maintenance.raw_min_timestamp_ms)} – ${formatTime(
+                      maintenance.raw_max_timestamp_ms
+                    )}`
+                  : t('usage_maintenance.preview_empty_no_data')}
+              </span>
+            </div>
+          ) : null}
         </div>
         <div className={styles.panelFooter}>
           <p className={styles.flatRowMeta}>{t('usage_maintenance.diagnostics_coverage_note')}</p>
@@ -417,6 +437,15 @@ export function UsageMaintenanceDiagnosticsSection({
             />
           </div>
 
+
+          <div className={styles.flatRowCopy}>
+            <span className={styles.flatRowLabel}>
+              {t('usage_maintenance.advanced_step_backup_title')}
+            </span>
+            <span className={styles.flatRowMeta}>
+              {t('usage_maintenance.advanced_step_compact_title')}
+            </span>
+          </div>
           <pre className={styles.commandBox}>{currentCompactCommand}</pre>
 
           <p className={styles.flatRowMeta}>
@@ -426,6 +455,8 @@ export function UsageMaintenanceDiagnosticsSection({
                 ? t('usage_maintenance.advanced_note_docker_run')
                 : t('usage_maintenance.advanced_note_binary')}
           </p>
+
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.advanced_command_note')}</p>
         </div>
 
         <div className={styles.panelFooter}>
@@ -462,6 +493,19 @@ export function UsageMaintenanceDiagnosticsSection({
       </section>
 
       <section className={styles.panel}>
+        <div className={styles.panelHeader}>
+          <div className={styles.panelHeaderCopy}>
+            <h2 className={styles.panelTitle}>
+              {t('usage_maintenance.advanced_retention_title')}
+            </h2>
+          </div>
+        </div>
+        <div className={styles.panelBody}>
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.advanced_retention_note')}</p>
+        </div>
+      </section>
+
+      <section className={styles.panel}>
         <div className={styles.panelBody}>
           <details className={styles.detailsCollapse}>
             <summary>{t('usage_maintenance.advanced_capabilities_title')}</summary>
@@ -493,6 +537,14 @@ export function UsageMaintenanceDiagnosticsSection({
                   </dt>
                   <dd className={styles.inlineMetricValue}>
                     {t('usage_maintenance.advanced_stop_required')}
+                  </dd>
+                </div>
+                <div className={styles.inlineMetric}>
+                  <dt className={styles.inlineMetricLabel}>
+                    {t('usage_maintenance.advanced_maintenance_api')}
+                  </dt>
+                  <dd className={styles.inlineMetricValue}>
+                    {t('usage_maintenance.advanced_manager_authorization')}
                   </dd>
                 </div>
                 <div className={styles.inlineMetric}>
@@ -555,6 +607,84 @@ export function UsageMaintenanceDiagnosticsSection({
               <p className={styles.flatRowMeta}>{t('usage_maintenance.diagnostics_zero_preview')}</p>
             </div>
           </details>
+
+          {maintenance ? (
+            <details className={styles.detailsCollapse}>
+              <summary>{t('usage_maintenance.workspace_technical')}</summary>
+              <div className={styles.detailsCollapseBody}>
+                <dl className={styles.drawerKvGrid}>
+                  <div className={styles.inlineMetric}>
+                    <dt className={styles.inlineMetricLabel}>
+                      {t('usage_maintenance.active_task')}
+                    </dt>
+                    <dd className={styles.inlineMetricValue}>
+                      {maintenance.active_run?.id ?? '—'}
+                    </dd>
+                  </div>
+                  {maintenance.active_lock ? (
+                    <div className={styles.inlineMetric}>
+                      <dt className={styles.inlineMetricLabel}>
+                        {t('usage_maintenance.lock_title')}
+                      </dt>
+                      <dd className={styles.inlineMetricValue}>
+                        {maintenance.active_lock.run_id}
+                      </dd>
+                    </div>
+                  ) : null}
+                  <div className={styles.inlineMetric}>
+                    <dt className={styles.inlineMetricLabel}>
+                      {t('usage_maintenance.raw_events')}
+                    </dt>
+                    <dd className={styles.inlineMetricValue}>
+                      {maintenance.raw_event_count.toLocaleString(i18n.language)}
+                    </dd>
+                  </div>
+                  <div className={styles.inlineMetric}>
+                    <dt className={styles.inlineMetricLabel}>
+                      {t('usage_maintenance.archived_online')}
+                    </dt>
+                    <dd className={styles.inlineMetricValue}>
+                      {maintenance.raw_archived_event_count?.toLocaleString(i18n.language) ?? '—'}
+                    </dd>
+                  </div>
+                  {maintenance.migration
+                    ? Object.entries(maintenance.migration).map(([key, value]) => (
+                        <div key={`migration-${key}`} className={styles.inlineMetric}>
+                          <dt className={styles.inlineMetricLabel}>migration.{key}</dt>
+                          <dd className={styles.inlineMetricValue}>{String(value)}</dd>
+                        </div>
+                      ))
+                    : null}
+                  {maintenance.hourly_aggregate
+                    ? Object.entries(maintenance.hourly_aggregate).map(([key, value]) => (
+                        <div key={`agg-${key}`} className={styles.inlineMetric}>
+                          <dt className={styles.inlineMetricLabel}>hourly_aggregate.{key}</dt>
+                          <dd className={styles.inlineMetricValue}>{String(value)}</dd>
+                        </div>
+                      ))
+                    : null}
+                  {maintenance.migration_coverage
+                    ? Object.entries(maintenance.migration_coverage).map(([key, value]) => (
+                        <div key={`mcov-${key}`} className={styles.inlineMetric}>
+                          <dt className={styles.inlineMetricLabel}>migration_coverage.{key}</dt>
+                          <dd className={styles.inlineMetricValue}>{String(value)}</dd>
+                        </div>
+                      ))
+                    : null}
+                  {maintenance.hourly_aggregate_coverage
+                    ? Object.entries(maintenance.hourly_aggregate_coverage).map(([key, value]) => (
+                        <div key={`acov-${key}`} className={styles.inlineMetric}>
+                          <dt className={styles.inlineMetricLabel}>
+                            hourly_aggregate_coverage.{key}
+                          </dt>
+                          <dd className={styles.inlineMetricValue}>{String(value)}</dd>
+                        </div>
+                      ))
+                    : null}
+                </dl>
+              </div>
+            </details>
+          ) : null}
         </div>
       </section>
     </div>

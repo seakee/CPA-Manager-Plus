@@ -45,7 +45,9 @@ import {
 } from './UsageMaintenanceRunDrawerContent';
 import { UsageMaintenanceTransferSection } from './UsageMaintenanceTransferSection';
 import {
+  actionRequiresMigrationReady,
   archiveHistoryFilterStatus,
+  resumeExpectedStage,
   filterArchiveRunsByQuery,
   getArchiveRunAction,
   getArchiveRunPresentationStage,
@@ -189,6 +191,10 @@ function UsageMaintenancePageContent() {
   const resolveApiError = useCallback(
     (error: unknown, fallbackKey = 'usage_service_errors.request_failed') => {
       const code = getUsageServiceErrorCode(error);
+      const status = extractHttpStatus(error);
+      if (code === 'request_failed' || status === 500) {
+        return t('usage_maintenance.error_server_internal');
+      }
       if (code) {
         return t(`usage_service_errors.${code}`, {
           defaultValue: t(fallbackKey, { defaultValue: 'Request failed.' }),
@@ -567,34 +573,45 @@ function UsageMaintenancePageContent() {
   };
 
   const executeRunAction = async (
-    runId: string,
+    run: UsageArchiveRunSummary,
     action: 'verify' | 'delete' | 'resume' | 'cancel'
   ) => {
     if (!managerBase || !managementKey || actingRunId) return;
-    setActingRunId(runId);
+    const expectedStage = action === 'resume' ? resumeExpectedStage(run) : null;
+    if (action === 'resume' && !expectedStage) {
+      showNotification(t('usage_maintenance.archive_response_invalid'), 'error');
+      return;
+    }
+    setActingRunId(run.id);
     if (action === 'delete') setPostDeleteNoticeVisible(false);
     try {
       let updated: UsageArchiveStatusSummary | null = null;
       if (action === 'verify') {
-        updated = await usageServiceApi.verifyArchive(managerBase, managementKey, runId, true);
+        updated = await usageServiceApi.verifyArchive(managerBase, managementKey, run.id, true);
         showNotification(t('usage_maintenance.verify_success'), 'success');
       } else if (action === 'delete') {
-        updated = await usageServiceApi.deleteArchive(managerBase, managementKey, runId, true);
+        updated = await usageServiceApi.deleteArchive(managerBase, managementKey, run.id, true);
         showNotification(t('usage_maintenance.delete_success'), 'success');
         if (updated?.run.status === 'completed') {
           setPostDeleteNoticeVisible(true);
         }
       } else if (action === 'resume') {
-        updated = await usageServiceApi.resumeArchive(managerBase, managementKey, runId, true);
+        updated = await usageServiceApi.resumeArchive(
+          managerBase,
+          managementKey,
+          run.id,
+          true,
+          undefined,
+          expectedStage ?? undefined
+        );
         showNotification(t('usage_maintenance.resume_success'), 'success');
       } else {
-        updated = await usageServiceApi.cancelArchive(managerBase, managementKey, runId);
+        updated = await usageServiceApi.cancelArchive(managerBase, managementKey, run.id);
         showNotification(t('usage_maintenance.cancel_success'), 'success');
       }
-      if (!mountedRef.current) return;
       if (updated) {
         setOperationArchive(updated);
-        if (selectedRunId === runId) {
+        if (selectedRunId === run.id) {
           setDetailStatus((prev) => pickFreshestArchiveStatus(updated, prev));
         }
       }
@@ -622,17 +639,17 @@ function UsageMaintenancePageContent() {
 
   const handleConfirmDeleteRun = async () => {
     if (!deleteTargetRun || !deleteAcknowledged) return;
-    const runId = deleteTargetRun.id;
+    const target = deleteTargetRun;
     setDeleteTargetRun(null);
     setDeleteAcknowledged(false);
-    await executeRunAction(runId, 'delete');
+    await executeRunAction(target, 'delete');
   };
 
   const handleConfirmCancelRun = async () => {
     if (!cancelTargetRun) return;
-    const runId = cancelTargetRun.id;
+    const target = cancelTargetRun;
     setCancelTargetRun(null);
-    await executeRunAction(runId, 'cancel');
+    await executeRunAction(target, 'cancel');
   };
 
   const handleCopyText = async (text: string, message: string) => {
@@ -652,7 +669,10 @@ function UsageMaintenancePageContent() {
 
   const currentPage = cursorStack.length + 1;
   const totalFromCounts = sumStatusCounts(statusCounts);
-  const totalCount = totalFromCounts ?? runsTotal ?? runs.length;
+  const totalCount =
+    statusFilter === 'all'
+      ? (totalFromCounts ?? runsTotal ?? runs.length)
+      : (statusCounts?.[statusFilter] ?? runsTotal);
   const totalPages = nextCursor ? currentPage + 1 : currentPage;
   const startItem = filteredRuns.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
   const endItem = (currentPage - 1) * pageSize + filteredRuns.length;
@@ -769,12 +789,23 @@ function UsageMaintenancePageContent() {
     };
   });
 
+  const getResumeLabelKey = (run: UsageArchiveRunSummary) => {
+    const stage = run.status === 'failed' ? run.resume_status : run.status;
+    if (stage === 'verifying') return 'usage_maintenance.action_resume_verify';
+    if (stage === 'deleting') return 'usage_maintenance.action_resume_delete';
+    return 'usage_maintenance.action_resume';
+  };
+
   const renderRunActions = (run: UsageArchiveRunSummary, includeDetails = true) => {
     const primaryAction = getArchiveRunAction(run.status);
     const cancellable = isArchiveRunCancellable(run);
     const rowBusy = actingRunId === run.id;
     const deleteBlocked =
       primaryAction === 'delete' && !maintenance?.readiness.archive_delete_enabled;
+    const migrationBlocked =
+      primaryAction !== null &&
+      archiveReadinessBlocked &&
+      actionRequiresMigrationReady(run, primaryAction);
 
     return (
       <div className={styles.rowActions}>
@@ -783,8 +814,9 @@ function UsageMaintenancePageContent() {
             variant="secondary"
             size="xs"
             loading={rowBusy}
-            disabled={Boolean(actingRunId)}
-            onClick={() => void executeRunAction(run.id, 'verify')}
+            disabled={Boolean(actingRunId) || migrationBlocked}
+            title={migrationBlocked ? t('usage_maintenance.archive_readiness_pending') : undefined}
+            onClick={() => void executeRunAction(run, 'verify')}
           >
             {t('usage_maintenance.guided_step_verify')}
           </Button>
@@ -795,6 +827,7 @@ function UsageMaintenancePageContent() {
             size="xs"
             loading={rowBusy}
             disabled={Boolean(actingRunId) || deleteBlocked}
+            title={deleteBlocked ? t('usage_maintenance.delete_disabled') : undefined}
             onClick={() => openDeleteConfirmation(run)}
           >
             <IconTrash2 size={14} aria-hidden="true" />
@@ -806,10 +839,11 @@ function UsageMaintenancePageContent() {
             variant="secondary"
             size="xs"
             loading={rowBusy}
-            disabled={Boolean(actingRunId)}
-            onClick={() => void executeRunAction(run.id, 'resume')}
+            disabled={Boolean(actingRunId) || migrationBlocked}
+            title={migrationBlocked ? t('usage_maintenance.archive_readiness_pending') : undefined}
+            onClick={() => void executeRunAction(run, 'resume')}
           >
-            {t('usage_maintenance.action_resume')}
+            {t(getResumeLabelKey(run))}
           </Button>
         ) : null}
         {cancellable ? (
@@ -948,6 +982,25 @@ function UsageMaintenancePageContent() {
               {t('common.close')}
             </Button>
           </div>
+        </div>
+      ) : null}
+
+      {!postDeleteNoticeVisible &&
+      reclaimableBytes > 50 * 1024 * 1024 &&
+      storageTotalBytes > 0 ? (
+        <div
+          className={`${styles.alertBanner} ${styles.alertInfo}`}
+          data-testid="usage-maintenance-reclaim-banner"
+        >
+          <span>
+            {t('usage_maintenance.reclaim_estimated_benefit', {
+              total: formatFileSize(storageTotalBytes),
+              compacted: formatFileSize(Math.max(0, storageTotalBytes - reclaimableBytes)),
+            })}
+          </span>
+          <Button size="xs" variant="secondary" onClick={() => setActiveTab('diagnostics')}>
+            {t('usage_maintenance.offline_reclaim')}
+          </Button>
         </div>
       ) : null}
 
@@ -1526,7 +1579,7 @@ function UsageMaintenancePageContent() {
         ) : detailError && !freshestDetail ? (
           <EmptyState
             variant="inline"
-            title={t('usage_maintenance.error_title', { defaultValue: 'Failed to load details' })}
+            title={t('usage_maintenance.archive_response_invalid')}
             description={detailError}
           />
         ) : freshestDetail ? (

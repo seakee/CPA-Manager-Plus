@@ -511,6 +511,20 @@ export function UsageMaintenanceTransferSection({
         </div>
       ) : null}
 
+      {activeTask && !['completed', 'cancelled'].includes(activeTask.progress.phase) ? (
+        <div className={`${styles.alertBanner} ${styles.alertInfo}`}>
+          <span>
+            <strong>{activeTask.file.name}</strong> ·{' '}
+            {t(`usage_stats.import_phase_${activeTask.progress.phase}`, {
+              defaultValue: activeTask.progress.phase,
+            })}
+          </span>
+          <Button size="xs" variant="secondary" onClick={() => setDrawerMode({ kind: 'active' })}>
+            {t('usage_maintenance.details')}
+          </Button>
+        </div>
+      ) : null}
+
       <div className={styles.transferGrid}>
         <section className={styles.panel}>
           <div className={styles.panelHeader}>
@@ -588,11 +602,48 @@ export function UsageMaintenanceTransferSection({
             </div>
 
             {sessionList ? (
-              <p className={styles.flatRowMeta}>
-                {t('usage_maintenance.transfer_chunk_note', {
-                  quota: formatFileSize(sessionList.disk_quota_bytes),
-                })}
-              </p>
+              <details className={styles.detailsCollapse}>
+                <summary>{t('usage_maintenance.transfer_upload_details')}</summary>
+                <div className={styles.detailsCollapseBody}>
+                  <dl className={styles.drawerKvGrid}>
+                    <div className={styles.inlineMetric}>
+                      <dt className={styles.inlineMetricLabel}>
+                        {t('usage_maintenance.transfer_chunk')}
+                      </dt>
+                      <dd className={styles.inlineMetricValue}>
+                        {formatFileSize(sessionList.chunk_size_bytes)}
+                      </dd>
+                    </div>
+                    <div className={styles.inlineMetric}>
+                      <dt className={styles.inlineMetricLabel}>
+                        {t('usage_maintenance.transfer_quota')}
+                      </dt>
+                      <dd className={styles.inlineMetricValue}>
+                        {formatFileSize(sessionList.disk_quota_bytes)}
+                      </dd>
+                    </div>
+                    <div className={styles.inlineMetric}>
+                      <dt className={styles.inlineMetricLabel}>
+                        {t('usage_maintenance.transfer_limit')}
+                      </dt>
+                      <dd className={styles.inlineMetricValue}>
+                        {t('usage_maintenance.transfer_session_count', {
+                          current: sessionList.active_sessions,
+                          total: sessionList.max_sessions,
+                        })}
+                      </dd>
+                    </div>
+                    <div className={styles.inlineMetric}>
+                      <dt className={styles.inlineMetricLabel}>
+                        {t('usage_maintenance.transfer_expires')}
+                      </dt>
+                      <dd className={styles.inlineMetricValue}>
+                        {formatTTL(sessionList.ttl_seconds, t)}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              </details>
             ) : null}
 
             {activeProgress ? (

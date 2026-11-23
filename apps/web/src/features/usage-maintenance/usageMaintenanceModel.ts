@@ -444,6 +444,21 @@ export const isResumableImportSession = (session: UsageImportSession): boolean =
 
 export const isActionableImportSession = (session: UsageImportSession): boolean =>
   session.status === 'processing' || isResumableImportSession(session);
+
+export type ArchiveResumeStage = 'archiving' | 'verifying' | 'deleting';
+
+export const resumeExpectedStage = (run: UsageArchiveRunSummary): ArchiveResumeStage | null => {
+  const stage = run.status === 'failed' ? run.resume_status : run.status;
+  if (stage === 'previewed' || stage === 'archiving') return 'archiving';
+  if (stage === 'archived' || stage === 'verifying') return 'verifying';
+  if (stage === 'verified' || stage === 'deleting') return 'deleting';
+  return null;
+};
+
+export const actionRequiresMigrationReady = (
+  run: UsageArchiveRunSummary,
+  action: ArchiveRunAction
+): boolean => action === 'verify' || (action === 'resume' && resumeExpectedStage(run) !== 'deleting');
 export const parseUsageMaintenanceTab = (raw: string | null): UsageMaintenanceTab => {
   if (raw === 'transfer' || raw === 'diagnostics') return raw;
   return 'archives';

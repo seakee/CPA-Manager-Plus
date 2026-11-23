@@ -225,6 +225,14 @@ export function UsageMaintenanceCreateDrawerContent({
           </span>
           <strong className={styles.mono}>{formatTime(resolvedCutoffMS)}</strong>
         </div>
+        {rawRange.kind === 'available' ? (
+          <div className={styles.cutoffSummaryBar}>
+            <span className={styles.flatRowMeta}>{t('usage_maintenance.online_range_title')}</span>
+            <span className={styles.mono}>
+              {formatTime(rawRange.minTimestampMS)} – {formatTime(rawRange.maxTimestampMS)}
+            </span>
+          </div>
+        ) : null}
         <p className={styles.flatRowMeta}>
           {t('usage_maintenance.workspace_once', {
             defaultValue:

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { UsageArchiveRunSummary } from '@/services/api/usageService';
 import type { UsageImportSession } from '@/services/api/usageService';
 import {
+  actionRequiresMigrationReady,
   archiveHistoryFilterStatus,
   getArchiveRunAction,
   getArchiveRunPresentationStage,
@@ -16,6 +17,7 @@ import {
   resolveRetentionCutoff,
   toLocalDateTimeValue,
   computeArchiveSteps,
+  resumeExpectedStage,
   computeCoveragePercent,
   computeRunMilestones,
   filterArchiveRunsByQuery,
@@ -326,6 +328,22 @@ describe('usage maintenance model', () => {
     ).toBe(true);
     expect(
       hasImportIssues({ added: 2, skipped: 0, total: 2, failed: 0 })
+    ).toBe(false);
+  });
+
+  it('resolves expected resume stage and migration readiness requirement per action', () => {
+    expect(resumeExpectedStage(archiveRun({ status: 'failed', resume_status: 'verifying' }))).toBe(
+      'verifying'
+    );
+    expect(resumeExpectedStage(archiveRun({ status: 'failed', resume_status: 'deleting' }))).toBe(
+      'deleting'
+    );
+    expect(resumeExpectedStage(archiveRun({ status: 'previewed' }))).toBe('archiving');
+    expect(
+      actionRequiresMigrationReady(archiveRun({ status: 'failed', resume_status: 'verifying' }), 'resume')
+    ).toBe(true);
+    expect(
+      actionRequiresMigrationReady(archiveRun({ status: 'failed', resume_status: 'deleting' }), 'resume')
     ).toBe(false);
   });
 });

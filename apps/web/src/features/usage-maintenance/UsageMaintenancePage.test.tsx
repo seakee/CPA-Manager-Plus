@@ -27,6 +27,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
+import { Select } from '@/components/ui/Select';
 import enLocale from '@/i18n/locales/en.json';
 import zhCNLocale from '@/i18n/locales/zh-CN.json';
 import {
@@ -563,6 +564,80 @@ describe('UsageMaintenancePage', () => {
     expect(
       renderer!.root.findByProps({ 'data-testid': 'usage-maintenance-open-active-run-btn' })
     ).toBeDefined();
+    const diagText = extractText(
+      renderer!.root.findByProps({ 'data-testid': 'usage-maintenance-diagnostics-tab' })
+    );
+    expect(diagText).toContain(zhCNLocale.usage_maintenance.online_range_title);
+    expect(diagText).toContain(zhCNLocale.usage_maintenance.advanced_retention_title);
+  });
+
+  it('renders >50MB reclaim banner, phase-specific resume label, and filtered pagination total', async () => {
+    await i18n.changeLanguage('zh-CN');
+    const verifyFailedRun = buildRun({
+      id: 'cccc3333000000000000000000000003',
+      status: 'failed',
+      resume_status: 'verifying',
+      has_error: true,
+    });
+    vi.spyOn(usageServiceApi, 'getMaintenanceStatus').mockResolvedValue(
+      buildMaintenanceStatus({
+        storage: {
+          page_size: 4096,
+          page_count: 30000,
+          freelist_count: 15000,
+          reclaimable_bytes: 60 * 1024 * 1024,
+          database_bytes: 120 * 1024 * 1024,
+          wal_bytes: 0,
+          shm_bytes: 0,
+          total_bytes: 120 * 1024 * 1024,
+        },
+      })
+    );
+    vi.spyOn(usageServiceApi, 'listArchives')
+      .mockResolvedValueOnce({
+        runs: [verifyFailedRun],
+        total: 1,
+        status_counts: { failed: 1, completed: 4 },
+      })
+      .mockResolvedValue({
+        runs: [verifyFailedRun],
+        total: 1,
+        status_counts: { failed: 1, completed: 4 },
+      });
+    vi.spyOn(usageServiceApi, 'getStatus').mockResolvedValue({ service: 'usage' });
+
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/usage-maintenance']}>
+          <UsageMaintenancePage />
+        </MemoryRouter>
+      );
+      await flushPromises();
+    });
+
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'usage-maintenance-reclaim-banner' })
+    ).toBeDefined();
+
+    const rowText = extractText(
+      renderer!.root.findByProps({
+        'data-testid': `usage-maintenance-run-row-${verifyFailedRun.id}`,
+      })
+    );
+    expect(rowText).toContain(zhCNLocale.usage_maintenance.action_resume_verify);
+
+    // Select status filter "failed" -> pagination info should show 1-1 / 1 (not 5)
+    const statusSelect = renderer!.root
+      .findAllByType(Select)
+      .find((node) => node.props.ariaLabel === zhCNLocale.usage_maintenance.status_title)!;
+    await act(async () => {
+      statusSelect.props.onChange('failed');
+      await flushPromises();
+    });
+    const cardText = extractText(
+      renderer!.root.findByProps({ 'data-testid': 'usage-maintenance-runs-card' })
+    );
+    expect(cardText).toContain('1-1 / 1');
   });
 
   it('maps real Axios usage_archive_* HTTP errors via usage_service_errors', async () => {
