@@ -45,8 +45,14 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
-  flex: 0 0 auto;
+  max-width: 100%;
+  flex: 0 1 auto;
   margin-left: auto;
+
+  @include mobile {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
 
   :global(svg) {
     display: block;

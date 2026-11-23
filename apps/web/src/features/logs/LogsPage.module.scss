@@ -1069,7 +1069,7 @@ $logs-header-offset: calc(var(--header-height, 64px) + #{$spacing-lg} * 2);
   word-break: normal;
 }
 
-@include tablet {
+@media (max-width: #{$breakpoint-tablet}) {
   .container {
     height: auto;
     min-height: calc(100vh - #{$logs-header-offset});
