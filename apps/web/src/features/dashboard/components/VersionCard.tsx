@@ -514,7 +514,7 @@ export function VersionCard({
         <div className={styles.panelHeader}>
           <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
         </div>
-        <div className={`${styles.grid} ${styles.systemGrid}`}>
+        <div className={styles.systemGrid}>
           <div className={styles.item}>
             <div className={styles.icon}>
               <IconSettings size={18} />
@@ -633,17 +633,17 @@ export function VersionCard({
             {t('dashboard.view_details')}
           </Link>
         </div>
-        <div className={`${styles.grid} ${styles.healthGrid}`}>
+        <div className={styles.healthGrid}>
           {healthItems.map((item) => {
             const content = (
               <>
-                <div className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</div>
-                <div className={styles.content}>
-                  <div className={styles.label}>{item.label}</div>
-                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>
-                    {item.value}
-                  </div>
-                </div>
+                <span className={styles.healthLeft}>
+                  <span className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</span>
+                  <span className={styles.healthLabel}>{item.label}</span>
+                </span>
+                <span className={`${styles.healthValue} ${styles[`${item.tone}Badge`]}`}>
+                  {item.value}
+                </span>
               </>
             );
 
