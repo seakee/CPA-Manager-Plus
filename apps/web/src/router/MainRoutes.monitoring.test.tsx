@@ -116,6 +116,16 @@ describe('MonitoringGate', () => {
     await mount();
 
     expect(renderer!.root.findAllByProps({ 'data-testid': 'monitoring-page' })).toHaveLength(0);
+    expect(
+      renderer!.root.findAll(
+        (node) => typeof node.props.className === 'string' && node.props.className.includes('splash-screen-content')
+      )
+    ).toHaveLength(1);
+    expect(
+      renderer!.root.findAll(
+        (node) => typeof node.props.className === 'string' && node.props.className.includes('loading-spinner')
+      )
+    ).toHaveLength(0);
     expect(pathname).toBe('/monitoring');
   });
 });

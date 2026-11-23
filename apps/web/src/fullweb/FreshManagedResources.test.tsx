@@ -183,13 +183,16 @@ describe('Fresh resources within the original Console', () => {
     const settledText = JSON.stringify(renderer.toJSON());
     expect(settledText).toContain(t('keysUnknown'));
     expect(settledText).toContain(k('pending'));
+    expect(settledText).not.toContain(t('keysExitBlocked'));
     expect(pending).toHaveBeenLastCalledWith(true);
     expect(window.addEventListener).toHaveBeenCalledWith('beforeunload', expect.any(Function));
     await navigate('/console/system/updates');
     expect(panel('keys').props.hidden).toBe(true);
     expect(renderer.root.findAllByType('form')).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).toContain(t('keysExitBlocked'));
     expect(pending).toHaveBeenLastCalledWith(true);
     await navigate('/console/api-keys');
+    expect(JSON.stringify(renderer.toJSON())).not.toContain(t('keysExitBlocked'));
     expect(renderer.root.findAllByType('form')).toHaveLength(1);
     await act(async () => button(t('keysCheck')).props.onClick());
     expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);

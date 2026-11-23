@@ -2,7 +2,7 @@
 @use '@/styles/mixins.scss' as *;
 
 // 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(176px, 0.85fr) 56px 100px;
+$table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(176px, 0.85fr) 68px 104px;
 
 @mixin provider-card-layout {
   @media (max-width: 1280px) {
@@ -14,6 +14,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow-x: auto;
 }
 
 .headerRow {
@@ -21,11 +22,13 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   grid-template-columns: $table-columns;
   align-items: center;
   gap: 12px;
+  min-width: 960px;
   padding: $spacing-sm $spacing-md;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
 
   @include provider-card-layout {
     display: none;
@@ -37,6 +40,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   grid-template-columns: $table-columns;
   align-items: center;
   gap: 12px;
+  min-width: 960px;
   min-height: 58px;
   padding: 10px $spacing-md;
   border-bottom: 1px solid var(--border-subtle);
@@ -54,6 +58,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   }
 
   @include provider-card-layout {
+    min-width: 0;
     grid-template-columns: 1fr auto;
     grid-template-areas:
       'type toggle'

@@ -21,11 +21,11 @@ import {
   formatTimestampTitle,
 } from '@/features/accounts/model/accountsPagePresentation';
 import { formatCompactNumber } from '@/utils/usage';
-import { UsageSummaryGrid } from '@/features/usage-analytics/components/UsageSummaryCards';
-import type {
-  UsageSummaryCard,
-  UsageSummaryCardTone,
-} from '@/features/usage-analytics/usageAnalyticsPresentation';
+import {
+  MetricSummaryGrid,
+  type MetricSummaryCardProps,
+  type MetricSummaryCardTone,
+} from '@/components/common/MetricSummaryCard';
 import { statusBarDataFromRecentRequests } from '@/utils/recentRequests';
 import { AccountDetailFieldValue } from './AccountDetailFieldList';
 import styles from '@/features/accounts/AccountsPage.module.scss';
@@ -53,7 +53,7 @@ function OverviewFieldGrid({ fields }: { fields: AccountDetailField[] }) {
   );
 }
 
-type ActivityCardPresentation = Pick<UsageSummaryCard, 'accent' | 'icon' | 'variant'>;
+type ActivityCardPresentation = Pick<MetricSummaryCardProps, 'accent' | 'icon' | 'variant'>;
 
 const activityCardPresentations: Record<string, ActivityCardPresentation> = {
   requests: { accent: 'blue', icon: 'calls' },
@@ -89,7 +89,7 @@ const formatActivityMetricValue = (metric: AccountDetailField, locale: string): 
   return String(metric.value);
 };
 
-const getActivityMetricTone = (metric: AccountDetailField): UsageSummaryCardTone | undefined => {
+const getActivityMetricTone = (metric: AccountDetailField): MetricSummaryCardTone | undefined => {
   if (metric.key === 'successRate' && typeof metric.value === 'number') {
     return metric.value >= 95 ? 'good' : metric.value >= 85 ? 'warn' : 'bad';
   }
@@ -115,7 +115,7 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
     i18n.language,
     detailView.quota.cooldown?.recoverAtMs
   );
-  const activityCards: UsageSummaryCard[] = activity.metrics.map((metric) => {
+  const activityCards: MetricSummaryCardProps[] = activity.metrics.map((metric) => {
     const presentation =
       activityCardPresentations[metric.key] ?? activityCardPresentations.lastSeenMs;
     const label = t(metric.labelKey, { defaultValue: metric.labelKey });
@@ -316,7 +316,11 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
           </span>
         </div>
         {activity.hasActivity ? (
-          <UsageSummaryGrid cards={activityCards} density="compact" />
+          <MetricSummaryGrid
+            cards={activityCards}
+            density="compact"
+            columns={Math.min(activityCards.length, 5)}
+          />
         ) : (
           <div className={styles.overviewEmptyState}>{t(activity.emptyStateKey)}</div>
         )}

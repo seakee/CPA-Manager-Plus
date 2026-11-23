@@ -1,3 +1,5 @@
+@use '@/styles/mixins' as m;
+
 .chartsGrid {
   --dashboard-chart-card-min-height: clamp(280px, 20vw, 300px);
 
@@ -15,15 +17,18 @@
 }
 
 .chartCard {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop-filter);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--app-radius-md);
-  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
   min-width: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  box-shadow: var(--app-specular-highlight);
+
+  @include m.mobile {
+    border-radius: 16px;
+  }
 
   .cardHeader {
     display: flex;
@@ -31,11 +36,26 @@
     align-items: center;
     gap: 12px;
     min-width: 0;
-    h3 { font-size: 16px; font-weight: 600; margin: 0; }
+    min-height: 45px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-subtle);
 
-    &.healthHeader {
-      align-items: flex-start;
+    h3 {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+      margin: 0;
+      color: var(--text-primary);
     }
+  }
+
+  .cardBody {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px 16px;
+    min-height: 0;
   }
 }
 
@@ -45,7 +65,6 @@
   height: 100%;
   min-height: var(--dashboard-chart-card-min-height);
 }
-
 .activityCard {
   .trafficChart {
     flex: 1 1 auto;
@@ -138,47 +157,30 @@
 }
 
 // 2. Request Health Timeline
-.healthTimelineCard {
-  gap: 12px;
-}
-
 .healthHeader {
-  align-items: flex-start;
+  align-items: center;
 }
 
-.healthTitle {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-
-  h3 {
-    margin-top: 0;
-  }
-
-  p {
-    margin: 6px 0 0;
-    color: var(--text-tertiary);
-    font-size: 12px;
-    line-height: 1.4;
-  }
+.healthDesc {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .healthSummary {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   flex: 0 0 auto;
-  text-align: right;
 
   strong {
-    padding: 5px 10px;
+    padding: 4px 9px;
     border-radius: var(--app-radius-pill);
     border: 1px solid var(--data-badge-success-border);
     background: var(--data-badge-success-bg);
     color: var(--data-badge-success-text);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1;
@@ -187,12 +189,13 @@
 }
 
 .healthCounts {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 
   span {
     display: inline-flex;
@@ -211,9 +214,9 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   flex: 1;
-  gap: 3px;
+  gap: 4px;
   min-height: 112px;
   max-width: 100%;
 }
@@ -291,14 +294,14 @@
   background:
     repeating-linear-gradient(
       -45deg,
-      color-mix(in srgb, var(--app-surface-muted), transparent 30%) 0,
-      color-mix(in srgb, var(--app-surface-muted), transparent 30%) 2px,
+      color-mix(in srgb, var(--surface-subtle-strong), transparent 45%) 0,
+      color-mix(in srgb, var(--surface-subtle-strong), transparent 45%) 2px,
       transparent 2px,
       transparent 5px
     ),
-    color-mix(in srgb, var(--app-surface-muted), transparent 65%);
-  border: 1px solid color-mix(in srgb, var(--app-border), var(--text-muted) 38%);
-  opacity: 0.9;
+    color-mix(in srgb, var(--surface-subtle), transparent 35%);
+  border: 1px solid color-mix(in srgb, var(--border-subtle), transparent 40%);
+  opacity: 0.52;
 }
 
 .healthEmptyState {
@@ -496,12 +499,16 @@
     aspect-ratio: auto;
   }
 }
-
 @media (max-width: 560px) {
   .chartCard {
-    padding: 12px;
-  }
+    .cardHeader {
+      padding: 10px 12px;
+    }
 
+    .cardBody {
+      padding: 12px;
+    }
+  }
   .legend {
     flex-wrap: wrap;
     gap: 8px;
@@ -518,12 +525,9 @@
   }
 
   .healthHeader {
-    flex-direction: column;
-  }
-
-  .healthSummary {
-    align-items: flex-start;
-    text-align: left;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
   }
 
   .healthHourAxis {

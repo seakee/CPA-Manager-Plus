@@ -602,8 +602,8 @@ describe('buildApiKeyDisplayMap', () => {
       maskedPreview: 'cpamp_sk_…2f85',
     });
     expect(map.get('hash-named')?.copyValue).toBeUndefined();
-    expect(map.get('hash-installer')?.displayName).toBe('Installation key (sk-…1234)');
-    expect(map.get('hash-adopted')?.displayName).toBe('Adopted key (…5678)');
+    expect(map.get('hash-installer')?.displayName).toBe('Installer (sk-…1234)');
+    expect(map.get('hash-adopted')?.displayName).toBe('Adopted (…5678)');
     expect(map.get('hash-unnamed')).toMatchObject({
       label: 'cpamp_sk_…9abc',
       masked: 'cpamp_sk_…9abc',

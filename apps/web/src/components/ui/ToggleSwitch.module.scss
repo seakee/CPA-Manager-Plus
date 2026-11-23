@@ -24,6 +24,7 @@
 }
 
 .track {
+  flex-shrink: 0;
   width: 42px;
   height: 24px;
   background: color-mix(in srgb, var(--text-secondary) 20%, var(--surface-subtle));
@@ -57,6 +58,7 @@
 }
 
 .label {
+  min-width: 0;
   color: var(--text-primary);
   font-weight: 600;
 }

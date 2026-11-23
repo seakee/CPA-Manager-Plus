@@ -56,6 +56,7 @@ interface HealthItem {
   tone: HealthTone;
   icon: ReactNode;
   to?: string;
+  title?: string;
 }
 
 type ExternalStableLoadResult =
@@ -379,6 +380,26 @@ export function VersionCard({
 
   const collector = collectorStatus?.collector;
   const collectorLastError = collector?.lastError?.trim() || '';
+  const collectorEvents = collectorStatus?.events;
+  const collectorDeadLetters = collectorStatus?.deadLetters ?? collector?.deadLetters;
+  const collectorTitle = collectorLastError
+    ? collectorLastError
+    : collectorStatus
+      ? [
+          Number.isFinite(collectorEvents)
+            ? `${t('dashboard.collector_events')}: ${Number(collectorEvents).toLocaleString(i18n.language)}`
+            : '',
+          Number.isFinite(collectorDeadLetters)
+            ? `${t('dashboard.collector_dead_letters')}: ${Number(collectorDeadLetters).toLocaleString(i18n.language)}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' · ') || undefined
+      : undefined;
+  const queueTitle = collector?.queue
+    ? `${t('dashboard.collector_queue')}: ${collector.queue}`
+    : undefined;
+
   const usageState: HealthItem = usageEnabled
     ? usageError
       ? {
@@ -386,6 +407,7 @@ export function VersionCard({
           value: t('dashboard.health_status_problem'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          title: usageError,
         }
       : {
           label: t('dashboard.health_usage_monitor'),
@@ -413,6 +435,8 @@ export function VersionCard({
           value: t('dashboard.collector_unavailable'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          to: '/system/runtime',
+          title: collectorError,
         }
       : collectorLastError
         ? {
@@ -420,6 +444,8 @@ export function VersionCard({
             value: t('dashboard.health_status_warning'),
             tone: 'warn',
             icon: <IconInfo size={16} />,
+            to: '/system/runtime',
+            title: collectorTitle,
           }
         : {
             label: t('dashboard.collector_status_title'),
@@ -427,6 +453,8 @@ export function VersionCard({
               collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
             tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
             icon: <IconCheck size={16} />,
+            to: '/system/runtime',
+            title: collectorTitle,
           };
 
   const queueState: HealthItem = !usageEnabled
@@ -442,15 +470,24 @@ export function VersionCard({
           value: t('dashboard.collector_unavailable'),
           tone: 'error',
           icon: <IconInfo size={16} />,
+          title: queueTitle,
         }
-      : {
-          label: t('dashboard.health_queue_status'),
-          value:
-            collector?.queue ||
-            (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
-          tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
-          icon: <IconCheck size={16} />,
-        };
+      : collectorLastError
+        ? {
+            label: t('dashboard.health_queue_status'),
+            value: t('dashboard.health_status_warning'),
+            tone: 'warn',
+            icon: <IconInfo size={16} />,
+            title: queueTitle,
+          }
+        : {
+            label: t('dashboard.health_queue_status'),
+            value:
+              collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
+            tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
+            icon: <IconCheck size={16} />,
+            title: queueTitle,
+          };
 
   const errorLogValue = errorLogsLoading
     ? '...'
@@ -471,43 +508,31 @@ export function VersionCard({
   };
 
   const healthItems = [usageState, collectorState, queueState, errorLogState];
-
   return (
     <div className={styles.container}>
       <section className={styles.section}>
-        <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
+        </div>
         <div className={`${styles.grid} ${styles.systemGrid}`}>
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconSettings size={18} />
-            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
-                <div
-                  className={styles.label}
-                  title={t(
-                    updates.status?.current_version
-                      ? 'manager_updates.server_version'
-                      : 'dashboard.app_version'
-                  )}
-                >
-                  {t('title.abbr')}
-                </div>
-                {externalManagerUpdateFallback && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    iconOnly
-                    className={styles.versionAction}
-                    onClick={() => void handleExternalManagerCheck()}
-                    loading={checkingManagerVersion}
-                    title={t('system_info.version_check_button')}
-                    aria-label={t('system_info.version_check_button')}
+                <div className={styles.labelRow}>
+                  <span className={styles.icon}>
+                    <IconSettings size={14} />
+                  </span>
+                  <div
+                    className={styles.label}
+                    title={t(
+                      updates.status?.current_version
+                        ? 'manager_updates.server_version'
+                        : 'dashboard.app_version'
+                    )}
                   >
-                    {!checkingManagerVersion && <IconRefreshCw size={14} />}
-                  </Button>
-                )}
+                    {t('dashboard.app_version')}
+                  </div>
+                </div>
                 {managerUpdateAvailable && (
                   <Link
                     to="/system/updates"
@@ -530,17 +555,34 @@ export function VersionCard({
                   appReleaseUrl
                 )}
                 {renderBadgeValue(externalBadge)}
+                {externalManagerUpdateFallback && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    iconOnly
+                    className={styles.versionAction}
+                    onClick={() => void handleExternalManagerCheck()}
+                    loading={checkingManagerVersion}
+                    title={t('system_info.version_check_button')}
+                    aria-label={t('system_info.version_check_button')}
+                  >
+                    {!checkingManagerVersion && <IconRefreshCw size={14} />}
+                  </Button>
+                )}
               </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconSatellite size={18} />
-            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
-                <div className={styles.label}>{t('dashboard.api_version')}</div>
+                <div className={styles.labelRow}>
+                  <span className={styles.icon}>
+                    <IconSatellite size={14} />
+                  </span>
+                  <div className={styles.label}>{t('dashboard.api_version')}</div>
+                </div>
                 <Button
                   type="button"
                   variant="ghost"
@@ -563,53 +605,69 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconTimer size={18} />
-            </div>
             <div className={styles.content}>
-              <div className={styles.label}>{t('dashboard.build_time')}</div>
-              <div className={styles.value}>{buildTimeDisplay}</div>
+              <div className={styles.labelRow}>
+                <span className={styles.icon}>
+                  <IconTimer size={14} />
+                </span>
+                <div className={styles.label}>{t('dashboard.build_time')}</div>
+              </div>
+              <div className={styles.value} title={buildTimeDisplay}>
+                {buildTimeDisplay}
+              </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconExternalLink size={18} />
-            </div>
             <div className={styles.content}>
-              <div className={styles.label}>{t('dashboard.cpa_base')}</div>
-              <div className={styles.value}>{cpaBase || '-'}</div>
+              <div className={styles.labelRow}>
+                <span className={styles.icon}>
+                  <IconExternalLink size={14} />
+                </span>
+                <div className={styles.label}>{t('dashboard.cpa_base')}</div>
+              </div>
+              <div className={styles.value} title={cpaBase || '-'}>
+                {cpaBase || '-'}
+              </div>
             </div>
           </div>
         </div>
       </section>
 
       <section className={styles.section}>
-        <h2 className={styles.heading}>{t('dashboard.health_status')}</h2>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.heading}>{t('dashboard.health_status')}</h2>
+          <Link to="/system/runtime" className={styles.headerLink}>
+            {t('dashboard.view_details')}
+          </Link>
+        </div>
         <div className={`${styles.grid} ${styles.healthGrid}`}>
           {healthItems.map((item) => {
             const content = (
-              <>
-                <div className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</div>
-                <div className={styles.content}>
-                  <div className={styles.label}>{item.label}</div>
-                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>
-                    {item.value}
-                  </div>
+              <div className={styles.healthContent}>
+                <div className={styles.healthLabel} title={item.label}>
+                  {item.label}
                 </div>
-              </>
+                <div className={styles.healthStatusRow}>
+                  <span className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</span>
+                  <span className={`${styles.healthValue} ${styles[`${item.tone}Text`]}`}>
+                    {item.value}
+                  </span>
+                </div>
+              </div>
             );
 
             return item.to ? (
               <Link
                 key={item.label}
                 to={item.to}
+                title={item.title}
                 className={`${styles.healthItem} ${styles.healthLink}`}
               >
                 {content}
               </Link>
             ) : (
-              <div key={item.label} className={styles.healthItem}>
+              <div key={item.label} title={item.title} className={styles.healthItem}>
                 {content}
               </div>
             );

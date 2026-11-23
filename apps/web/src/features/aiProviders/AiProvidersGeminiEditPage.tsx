@@ -122,12 +122,18 @@ export function AiProvidersGeminiEditPage() {
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const disableControls = connectionStatus !== 'connected';
 
+  const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
+  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
 
-  const [configs, setConfigs] = useState<GeminiKeyConfig[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [configs, setConfigs] = useState<GeminiKeyConfig[]>(() => config?.geminiApiKeys ?? []);
+  const [loading, setLoading] = useState(
+    () => !(isCacheValid('gemini-api-key') || isCacheValid())
+  );
+  const isCacheValidRef = useRef(isCacheValid);
+  isCacheValidRef.current = isCacheValid;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [form, setForm] = useState<GeminiFormState>(() => buildEmptyForm());
@@ -183,7 +189,10 @@ export function AiProvidersGeminiEditPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const hasValidCache = isCacheValidRef.current('gemini-api-key') || isCacheValidRef.current();
+    if (!hasValidCache) {
+      setLoading(true);
+    }
     setError('');
 
     fetchConfig('gemini-api-key')
@@ -205,7 +214,6 @@ export function AiProvidersGeminiEditPage() {
       cancelled = true;
     };
   }, [fetchConfig, t]);
-
   useEffect(() => {
     if (loading) return;
 

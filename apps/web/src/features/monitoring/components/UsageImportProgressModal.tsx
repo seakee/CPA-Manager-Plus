@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { formatFileSize } from '@/utils/format';
-import type { UsageImportProgress } from '@/features/monitoring/services/usageImportSession';
+import type { UsageImportProgress } from '@/services/usageImportSession';
 import styles from '../MonitoringCenterPage.module.scss';
 
 type UsageImportProgressModalProps = {

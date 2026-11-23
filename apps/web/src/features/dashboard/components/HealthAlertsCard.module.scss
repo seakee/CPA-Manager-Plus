@@ -1,13 +1,18 @@
+@use '@/styles/mixins' as m;
+
 .dataCard {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop-filter);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--app-radius-md);
-  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
   min-width: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  box-shadow: var(--app-specular-highlight);
+
+  @include m.mobile {
+    border-radius: 16px;
+  }
 
   .cardHeader {
     display: flex;
@@ -15,18 +20,27 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+
     h3 {
-      font-size: 16px;
-      font-weight: 600;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
       margin: 0;
+      color: var(--text-primary);
     }
+
     .moreBtn {
       color: var(--primary-text);
       font-size: 12px;
       font-weight: 600;
-      cursor: pointer;
+      text-decoration: none;
+      white-space: nowrap;
+
       &:hover {
         text-decoration: underline;
+        text-underline-offset: 2px;
       }
     }
   }
@@ -34,18 +48,27 @@
   .list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
+    padding: 4px 16px 12px;
   }
 
   .listItem {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-subtle);
     font-size: 13px;
+
+    &:last-child {
+      border-bottom: 0;
+    }
 
     .statusDot {
       width: 8px;
       height: 8px;
+      flex: 0 0 8px;
       border-radius: 50%;
       background: var(--data-slate-light-5);
 
@@ -69,7 +92,14 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .channelFailures {
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-tertiary);
+    }
     .value {
+      flex: 0 0 auto;
       font-weight: 600;
       font-variant-numeric: tabular-nums;
       color: var(--text-primary);
@@ -88,11 +118,11 @@
 
   // Failure Item special styling
   .failureItem {
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--app-border);
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-subtle);
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
 
     &:last-child {
       border-bottom: none;
@@ -101,11 +131,62 @@
     .failureMeta {
       display: flex;
       justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
       font-size: 11px;
+
+      .failureMetaLeft {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+      }
+
       .time {
         color: var(--text-tertiary);
+        font-variant-numeric: tabular-nums;
       }
+
+      .statusCodeBadge {
+        display: inline-flex;
+        align-items: center;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: var(--app-radius-xs);
+        background: var(--data-badge-danger-bg);
+        color: var(--data-badge-danger-text);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .endpointBadge {
+        display: inline-flex;
+        align-items: center;
+        max-width: 150px;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: var(--app-radius-xs);
+        background: var(--surface-subtle);
+        color: var(--text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .model {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-weight: 600;
         color: var(--text-secondary);
       }
@@ -119,13 +200,10 @@
       font-size: 12px;
       color: var(--text-tertiary);
 
-      > span:first-child:not(.failureSourceWithTooltip) {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .failureDuration {
+        flex: 0 0 auto;
+        font-variant-numeric: tabular-nums;
       }
-
       .failureSourceWithTooltip {
         position: relative;
         display: inline-flex;
@@ -200,6 +278,12 @@
 
 @media (max-width: 560px) {
   .dataCard {
-    padding: 12px;
+    .cardHeader {
+      padding: 10px 12px;
+    }
+
+    .list {
+      padding: 4px 12px 10px;
+    }
   }
 }

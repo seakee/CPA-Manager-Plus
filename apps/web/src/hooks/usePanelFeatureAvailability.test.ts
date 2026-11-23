@@ -7,10 +7,10 @@ import { useAuthStore, useUsageServiceStore } from '@/stores';
 import {
   buildPanelManagerServiceCandidates,
   managerConfigMatchesPanel,
+  refreshPanelFeatureAvailability,
   resolvePanelFeatureAvailability,
   usePanelFeatureAvailability,
 } from './usePanelFeatureAvailability';
-
 const buildManagerConfig = (overrides: Partial<ManagerConfig> = {}): ManagerConfig => ({
   cpaConnection: {
     cpaBaseUrl: 'http://cpa.local:8317',
@@ -548,6 +548,113 @@ describe('panel feature availability', () => {
         renderer?.unmount();
       });
       useUsageServiceStore.setState({ revision: originalRevision });
+      getInfoSpy.mockRestore();
+      getManagerConfigSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps same-scope availability steady during refreshPanelFeatureAvailability re-probes', async () => {
+    const originalAuthState = useAuthStore.getState();
+    let resolveRefreshedConfig: ((value: { config: ManagerConfig; source: 'db' }) => void) | null =
+      null;
+    let callCount = 0;
+    const getInfoSpy = vi.spyOn(usageServiceApi, 'getInfo').mockResolvedValue({
+      service: 'cpa-manager-plus',
+    });
+    const getManagerConfigSpy = vi
+      .spyOn(usageServiceApi, 'getManagerConfig')
+      .mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return { config: buildManagerConfig(), source: 'db' };
+        }
+        return new Promise<{ config: ManagerConfig; source: 'db' }>((resolve) => {
+          resolveRefreshedConfig = resolve;
+        });
+      });
+    let renderer: ReactTestRenderer | null = null;
+    const history: ReturnType<typeof usePanelFeatureAvailability>[] = [];
+    vi.stubGlobal('window', {
+      location: {
+        protocol: 'http:',
+        hostname: 'refresh-manager.local',
+        host: 'refresh-manager.local:18317',
+        port: '18317',
+      },
+    });
+    vi.stubGlobal('navigator', { userAgent: 'vitest' });
+    vi.stubGlobal('localStorage', createMemoryStorage());
+
+    function HookConsumer() {
+      const availability = usePanelFeatureAvailability();
+      useLayoutEffect(() => {
+        history.push(availability);
+      }, [availability]);
+      return null;
+    }
+
+    try {
+      useAuthStore.setState({
+        apiBase: 'http://cpa.refresh.local:8317',
+        managementKey: 'refresh-same-scope-key',
+      });
+
+      await act(async () => {
+        renderer = create(createElement(HookConsumer));
+      });
+
+      const settled = history[history.length - 1];
+      expect(settled).toMatchObject({
+        checking: false,
+        managerServiceAvailable: true,
+        requestMonitoringAvailable: true,
+        managerServiceBase: 'http://refresh-manager.local:18317',
+      });
+
+      await act(async () => {
+        refreshPanelFeatureAvailability();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(callCount).toBe(2);
+      // Same-scope refresh must not flash back to initial checking=true / empty managerServiceBase.
+      const whileRefreshing = history[history.length - 1];
+      expect(whileRefreshing).toMatchObject({
+        checking: false,
+        managerServiceAvailable: true,
+        requestMonitoringAvailable: true,
+        managerServiceBase: 'http://refresh-manager.local:18317',
+      });
+
+      await act(async () => {
+        resolveRefreshedConfig?.({
+          config: buildManagerConfig({
+            collector: { ...buildManagerConfig().collector, enabled: false },
+          }),
+          source: 'db',
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const updated = history[history.length - 1];
+      expect(updated).toMatchObject({
+        checking: false,
+        managerServiceAvailable: true,
+        requestMonitoringAvailable: false,
+        reason: 'monitoring_disabled',
+        managerServiceBase: 'http://refresh-manager.local:18317',
+      });
+    } finally {
+      act(() => {
+        renderer?.unmount();
+      });
+      useAuthStore.setState({
+        apiBase: originalAuthState.apiBase,
+        managementKey: originalAuthState.managementKey,
+      });
       getInfoSpy.mockRestore();
       getManagerConfigSpy.mockRestore();
       vi.unstubAllGlobals();

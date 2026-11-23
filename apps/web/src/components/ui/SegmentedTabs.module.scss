@@ -14,9 +14,57 @@
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 
   &::-webkit-scrollbar {
     display: none;
+  }
+
+  &[data-scroll-right='true']:not([data-scroll-left='true']) {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      var(--bg-primary) 0,
+      var(--bg-primary) calc(100% - 24px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      var(--bg-primary) 0,
+      var(--bg-primary) calc(100% - 24px),
+      transparent 100%
+    );
+  }
+
+  &[data-scroll-left='true']:not([data-scroll-right='true']) {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      var(--bg-primary) 24px,
+      var(--bg-primary) 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      var(--bg-primary) 24px,
+      var(--bg-primary) 100%
+    );
+  }
+
+  &[data-scroll-left='true'][data-scroll-right='true'] {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      var(--bg-primary) 24px,
+      var(--bg-primary) calc(100% - 24px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      var(--bg-primary) 24px,
+      var(--bg-primary) calc(100% - 24px),
+      transparent 100%
+    );
   }
 }
 
@@ -56,10 +104,15 @@
     background-color 0.15s ease,
     box-shadow 0.15s ease,
     transform 0.15s ease;
-
   &:hover:not(.disabled) {
     color: var(--primary-text);
     background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+  }
+
+  @include mobile {
+    min-width: 0;
+    padding: 0 11px;
+    font-size: 12px;
   }
 }
 
@@ -132,8 +185,8 @@
 
   @include mobile {
     .item {
-      padding-inline: 12px;
-      font-size: 12px;
+      padding-inline: 8px;
+      font-size: 11.5px;
     }
   }
 }

@@ -48,7 +48,6 @@ import {
   type KeyOperationResult,
 } from './freshKeyMetadata';
 import { blockerOf, type ExternalBlocker } from './externalState';
-import { FreshExternalUsage } from './FreshExternalUsage';
 import { FreshExternalBlocker } from './FreshExternalBlocker';
 
 function extractErrorKey(err: PublicApiError, expectedRequestId?: string): Key | null {
@@ -141,7 +140,6 @@ export function FreshApiKeys({
   pageDescription,
   visible = true,
   onRebind,
-  externalUsage = false,
   reloadToken = 0,
 }: {
   client: PublicApiClient;
@@ -153,8 +151,6 @@ export function FreshApiKeys({
   visible?: boolean;
   /** Opens the Rebind dialog. Present only on an External installation. */
   onRebind?: () => void;
-  /** Shows the External usage panel, which reads `external/usage`. */
-  externalUsage?: boolean;
   /** Bumped by the shell after a successful rebind to re-read this page. */
   reloadToken?: number;
 }) {
@@ -165,8 +161,8 @@ export function FreshApiKeys({
   // A typed External blocker is the page's own contract. It is kept apart from
   // the generic failure so the page names the state and offers its way out
   // instead of collapsing everything into "key state is unavailable".
+  const [accessReloadToken, setAccessReloadToken] = useState(0);
   const [blocker, setBlocker] = useState<ExternalBlocker | null>(null);
-  const [usageBlocker, setUsageBlocker] = useState<ExternalBlocker | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -517,7 +513,6 @@ export function FreshApiKeys({
       setLatestOperationResult(null);
       reportPending();
     }
-    setUsageBlocker(null);
     setBlocker(null);
     setError('');
     setAccessInfo(null);
@@ -1931,7 +1926,10 @@ export function FreshApiKeys({
               size="sm"
               aria-label={t('refresh')}
               disabled={busy || !!selected || detailPending}
-              onClick={() => void refresh()}
+              onClick={() => {
+                setAccessReloadToken((token) => token + 1);
+                void refresh();
+              }}
             >
               <FullWebIcon name="refresh" size={14} />
               {t('refresh')}
@@ -2086,15 +2084,12 @@ export function FreshApiKeys({
           ) : null
         }
       />
-      {(blocker ?? usageBlocker) && (
+      {blocker && (
         <FreshExternalBlocker
-          state={(blocker ?? usageBlocker)!}
+          state={blocker}
           onRebind={onRebind}
           onReload={() => void refresh(true)}
-          onDismiss={() => {
-            if (blocker) setBlocker(null);
-            else setUsageBlocker(null);
-          }}
+          onDismiss={() => setBlocker(null)}
         />
       )}
       {error && !createOpen && !pending && !recoveryKey && (
@@ -2103,85 +2098,91 @@ export function FreshApiKeys({
           <span>{error}</span>
         </p>
       )}
-      {presenceUnverified && (
-        <p role="status" className="key-notice key-notice-warning" data-testid="keys-presence-unverified">
-          <FullWebIcon name="alert" />
-          <span>
-            <strong>{k('presenceUnverifiedTitle')}</strong> — {k('presenceUnverifiedHelp')}
-          </span>
-        </p>
-      )}
-      {externalUsage && (
-        <FreshExternalUsage
-          reloadToken={reloadToken}
-          client={client}
-          credential={credential}
-          onUnauthorized={onUnauthorized}
-          onBlocker={(code) => {
-            setUsageBlocker(code ? blockerOf(code) : null);
-          }}
-        />
-      )}
-      {operationPending &&
-        !revocationOpen &&
-        !regenerateTargetId &&
-        (() => {
-          const pendingOp =
-            latestOperationResult?.operation &&
-            !isTerminalKeyOperationOutcome(latestOperationResult.operation.outcome)
-              ? latestOperationResult.operation
-              : null;
-          const opLabel = pendingOp
-            ? k(
-                pendingOp.mode === 'add'
-                  ? 'pendingBannerOpAdd'
-                  : pendingOp.mode === 'rotate'
-                    ? 'pendingBannerOpRotate'
-                    : pendingOp.mode === 'replace'
-                      ? 'pendingBannerOpReplace'
-                      : 'pendingBannerOpRevoke'
-              )
-            : t('keysOperationPending');
-          const affectedKey = pendingOp
-            ? (keys || []).find((item) => item.id === pendingOp.targetId) || null
+      {(() => {
+        const showPendingOperationBanner =
+          operationPending && !revocationOpen && !regenerateTargetId;
+        const pendingOp =
+          latestOperationResult?.operation &&
+          !isTerminalKeyOperationOutcome(latestOperationResult.operation.outcome)
+            ? latestOperationResult.operation
             : null;
-          const affectedLabel = affectedKey
-            ? `${keyDisplayName(affectedKey, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} (${affectedKey.maskedPreview})`
-            : pendingOp?.targetId || '';
-          return (
-            <div
-              className="key-notice key-notice-warning key-pending-banner"
-              role="status"
-              data-testid="pending-operation-banner"
-            >
-              <FullWebIcon name="alert" size={16} />
-              <div className="key-pending-banner-body">
-                <strong>
-                  {pendingOp
-                    ? `${k('pendingBannerPrefix')} ${opLabel}`
-                    : t('keysOperationPending')}
-                </strong>
-                {affectedLabel && (
-                  <span>
-                    <code>{affectedLabel}</code>
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                data-testid="pending-operation-continue"
-                onClick={() => {
-                  setRevocationPreset(null);
-                  revocationOpenRef.current = true;
-                  setRevocationOpen(true);
-                }}
+        const opLabel = pendingOp
+          ? k(
+              pendingOp.mode === 'add'
+                ? 'pendingBannerOpAdd'
+                : pendingOp.mode === 'rotate'
+                  ? 'pendingBannerOpRotate'
+                  : pendingOp.mode === 'replace'
+                    ? 'pendingBannerOpReplace'
+                    : 'pendingBannerOpRevoke'
+            )
+          : t('keysOperationPending');
+        const affectedKey = pendingOp
+          ? (keys || []).find((item) => item.id === pendingOp.targetId) || null
+          : null;
+        const affectedLabel = affectedKey
+          ? `${keyDisplayName(affectedKey, k('installerOrigin'), k('adoptedOrigin'), t('keysUnnamed'))} (${affectedKey.maskedPreview})`
+          : pendingOp?.targetId || '';
+        return (
+          <>
+            {presenceUnverified && !operationPending && (
+              <p
+                role="status"
+                className="key-notice key-notice-warning"
+                data-testid="keys-presence-unverified"
               >
-                {k('pendingBannerContinue')}
-              </button>
-            </div>
-          );
-        })()}
+                <FullWebIcon name="alert" />
+                <span>
+                  <strong>{k('presenceUnverifiedTitle')}</strong> — {k('presenceUnverifiedHelp')}
+                </span>
+              </p>
+            )}
+            {showPendingOperationBanner && (
+              <div
+                className="key-notice key-notice-warning key-pending-banner"
+                role="status"
+                data-testid="pending-operation-banner"
+              >
+                <FullWebIcon name="alert" size={16} />
+                <div className="key-pending-banner-body">
+                  <div className="key-pending-banner-primary">
+                    <strong>
+                      {pendingOp
+                        ? `${k('pendingBannerPrefix')} ${opLabel}`
+                        : t('keysOperationPending')}
+                    </strong>
+                    {affectedLabel && (
+                      <span>
+                        <code>{affectedLabel}</code>
+                      </span>
+                    )}
+                  </div>
+                  {presenceUnverified && (
+                    <p
+                      className="key-pending-banner-subtext"
+                      data-testid="keys-presence-unverified"
+                    >
+                      {k('presenceUnverifiedTitle')} — {k('presenceUnverifiedHelp')}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  data-testid="pending-operation-continue"
+                  onClick={() => {
+                    setRevocationPreset(null);
+                    revocationOpenRef.current = true;
+                    setRevocationOpen(true);
+                  }}
+                >
+                  {k('pendingBannerContinue')}
+                </button>
+              </div>
+            )}
+          </>
+        );
+      })()}
       <Modal
         open={visible && (createOpen || !!pending || !!secret || !!recoveryKey)}
         title={
@@ -3046,7 +3047,8 @@ export function FreshApiKeys({
           client={client}
           auth={auth}
           onUnauthorized={onUnauthorized}
-          reloadToken={reloadToken}
+          reloadToken={reloadToken + accessReloadToken}
+          hideRefresh={true}
           className="card fresh-keys-access-panel"
           onLoaded={setAccessInfo}
         />

@@ -46,7 +46,7 @@ vi.mock('@/utils/usage', () => ({
   saveModelPriceFallback: vi.fn(),
   clearModelPriceFallback: vi.fn(),
 }));
-vi.mock('@/features/monitoring/services/usageImportSession', () => ({
+vi.mock('@/services/usageImportSession', () => ({
   cancelUsageImportFile: vi.fn(),
   uploadUsageImportFile: vi.fn(),
 }));

@@ -49,6 +49,7 @@ export interface AccessInfoSummaryProps {
   defaultProtocolsCollapsed?: boolean;
   subtitleNote?: string;
   clientOnly?: boolean;
+  hideRefresh?: boolean;
   completionRecovery?: boolean;
 }
 
@@ -386,6 +387,7 @@ export function AccessInfoSummary({
   defaultProtocolsCollapsed = false,
   subtitleNote,
   clientOnly = false,
+  hideRefresh = false,
   completionRecovery = false,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
@@ -1043,19 +1045,21 @@ export function AccessInfoSummary({
             )}
             {info === undefined &&
               (effective.ready ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  iconOnly
-                  aria-label={a('retry', language)}
-                  title={a('retry', language)}
-                  data-testid={`${testIdPrefix}-retry`}
-                  disabled={loading}
-                  onClick={() => setManualRetry((n) => n + 1)}
-                >
-                  <FullWebIcon name="refresh" size={14} />
-                </Button>
+                !hideRefresh && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    iconOnly
+                    aria-label={a('retry', language)}
+                    title={a('retry', language)}
+                    data-testid={`${testIdPrefix}-retry`}
+                    disabled={loading}
+                    onClick={() => setManualRetry((n) => n + 1)}
+                  >
+                    <FullWebIcon name="refresh" size={14} />
+                  </Button>
+                )
               ) : (
                 <Button
                   type="button"

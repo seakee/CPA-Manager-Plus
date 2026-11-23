@@ -1,13 +1,13 @@
-import axios, { AxiosError, type AxiosResponse } from 'axios';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '../i18n';
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
+import { createPublicApiClient } from './publicApi';
+import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import {
-  getUsageServiceErrorCode,
   usageServiceApi,
   type ManagerConfigResponse,
 } from '../services/api/usageService';
@@ -1079,7 +1079,7 @@ describe('FreshSystemWorkspace component', () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
   });
 
-  it('localizes archive operation errors via usage_service_errors, skips unmount state updates, and clears copy timer on unmount', async () => {
+  it('renders a compact archive summary card with jump link to /usage-maintenance and clears copy timer on unmount', async () => {
     await i18n.changeLanguage('en');
     availability.managerServiceAvailable = true;
     availability.managerServiceBase = 'https://manager.test';
@@ -1088,47 +1088,15 @@ describe('FreshSystemWorkspace component', () => {
       raw_event_count: 100,
       raw_min_timestamp_ms: 1,
       raw_max_timestamp_ms: 2,
-      raw_archived_event_count: 0,
-      raw_deleted_event_count: 0,
+      raw_archived_event_count: 40,
+      raw_deleted_event_count: 10,
       readiness: {
         migration_ready: true,
         hourly_aggregate_ready: true,
-        archive_delete_enabled: true,
+        archive_delete_enabled: false,
       },
-      compact_requires_stopped_server: false,
+      compact_requires_stopped_server: true,
     });
-    vi.spyOn(usageServiceApi, 'listArchives').mockResolvedValue({
-      runs: [
-        {
-          id: 'run-1',
-          mode: 'archive',
-          status: 'archived',
-          cutoff_timestamp_ms: 2,
-          target_event_id: 10,
-          event_count: 10,
-          estimated_bytes: 100,
-          last_archived_event_id: 10,
-          archived_event_count: 10,
-          archived_uncompressed_bytes: 100,
-          archived_compressed_bytes: 50,
-          last_deleted_event_id: 0,
-          deleted_event_count: 0,
-          created_at_ms: 1,
-          updated_at_ms: 2,
-          has_error: false,
-        },
-      ],
-      total: 1,
-    });
-    vi.spyOn(usageServiceApi, 'previewArchive').mockRejectedValueOnce({
-      code: 'external_cpa_authority_unavailable',
-    });
-    vi.spyOn(usageServiceApi, 'createArchive').mockRejectedValueOnce(new Error('boom'));
-    let rejectVerify!: (reason?: unknown) => void;
-    const verifyPromise = new Promise<never>((_resolve, reject) => {
-      rejectVerify = reject;
-    });
-    vi.spyOn(usageServiceApi, 'verifyArchive').mockReturnValueOnce(verifyPromise);
 
     const writeText = vi.fn().mockResolvedValue(undefined);
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
@@ -1152,174 +1120,204 @@ describe('FreshSystemWorkspace component', () => {
         renderer.root.findByProps({ id: 'system-config-tabs-storage' }).props.onClick();
       });
 
-      // Known error code maps via usage_service_errors.*
-      await act(async () => {
-        await renderer.root
-          .findByProps({ 'data-testid': 'system-archive-preview-btn' })
-          .props.onClick();
+      const summaryCard = renderer.root.findByProps({
+        'data-testid': 'system-archive-cleanup-card',
       });
-      const previewNotifications = useNotificationStore.getState().notifications;
-      const lastPreviewNotification = previewNotifications[previewNotifications.length - 1];
-      expect(lastPreviewNotification?.message).toBe(
-        enLocale.usage_service_errors.external_cpa_authority_unavailable
-      );
-      expect(lastPreviewNotification?.message).not.toBe(c('collectorSaveFailed'));
+      expect(summaryCard).toBeDefined();
+      const jumpLink = renderer.root.findByProps({
+        'data-testid': 'system-open-usage-maintenance-btn',
+      });
+      expect(jumpLink.props.to).toBe('/usage-maintenance');
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'system-archive-preview-btn' })
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'system-archive-create-btn' })
+      ).toHaveLength(0);
 
-      // Unknown error falls back to usage_service_errors.request_failed
-      await act(async () => {
-        await renderer.root
-          .findByProps({ 'data-testid': 'system-archive-create-btn' })
-          .props.onClick();
-      });
-      const createNotifications = useNotificationStore.getState().notifications;
-      expect(createNotifications[createNotifications.length - 1]?.message).toBe(
-        enLocale.usage_service_errors.request_failed
-      );
-      // Copy entry path schedules timer, then unmount clears it and ignores late archive rejection.
       await act(async () => {
         await renderer.root
           .findByProps({ 'data-testid': 'system-copy-entry-btn' })
           .props.onClick();
       });
-      const verifyBtn = renderer.root
-        .findAllByType('button')
-        .find((node) =>
-          node.findAll((child) => child.props?.children === c('archiveVerifyBtn')).length > 0
-        )!;
-      await act(async () => {
-        verifyBtn.props.onClick();
-      });
-      const notificationsBeforeUnmount = useNotificationStore.getState().notifications.length;
       await act(async () => renderer.unmount());
       expect(clearTimeoutSpy).toHaveBeenCalled();
-      await act(async () => {
-        rejectVerify({ code: 'external_cpa_authority_unavailable' });
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(useNotificationStore.getState().notifications).toHaveLength(
-        notificationsBeforeUnmount
-      );
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it('maps real Axios usage_archive_* HTTP errors to usage_service_errors without falling back to usage_service_not_configured', async () => {
-    await i18n.changeLanguage('en');
-    availability.managerServiceAvailable = true;
-    availability.managerServiceBase = 'https://manager.test';
-    vi.spyOn(usageServiceApi, 'getManagerConfig').mockResolvedValue(buildManagerConfigResponse());
-    vi.spyOn(usageServiceApi, 'getMaintenanceStatus').mockResolvedValue({
-      raw_event_count: 100,
-      raw_min_timestamp_ms: 1,
-      raw_max_timestamp_ms: 2,
-      raw_archived_event_count: 0,
-      raw_deleted_event_count: 0,
-      readiness: {
-        migration_ready: true,
-        hourly_aggregate_ready: true,
-        archive_delete_enabled: true,
-      },
-      compact_requires_stopped_server: false,
+  it('hosts External CPA usage collection inside the monitoring tab and clears usage blockers after retry', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example/console') });
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0xbb) });
+    try {
+    const context = {
+      basePath: '/console',
+      apiBase: '/console/api/v2',
+      revision: 1,
+    };
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.64', support: 'supported', writeBlocked: false },
+    };
+    let usagePostCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage') && init?.method === 'POST') {
+        usagePostCount += 1;
+        if (usagePostCount === 1) {
+          return Promise.resolve(
+            Response.json({
+              ...usageBase,
+              statisticsEnabled: true,
+              collector: 'stopped',
+              collectionStarted: false,
+              blockedReason: 'external_cpa_authority_unavailable',
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      if (url.endsWith('/external/usage')) {
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: false,
+            collector: 'stopped',
+            collectionStarted: false,
+            blockedReason: 'usage_statistics_disabled',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
     });
-    vi.spyOn(usageServiceApi, 'listArchives').mockResolvedValue({
-      runs: [
-        {
-          id: 'run-1',
-          mode: 'archive',
-          status: 'archived',
-          cutoff_timestamp_ms: 2,
-          target_event_id: 10,
-          event_count: 10,
-          estimated_bytes: 100,
-          last_archived_event_id: 10,
-          archived_event_count: 10,
-          archived_uncompressed_bytes: 100,
-          archived_compressed_bytes: 50,
-          last_deleted_event_id: 0,
-          deleted_event_count: 0,
-          created_at_ms: 1,
-          updated_at_ms: 2,
-          has_error: false,
-        },
-      ],
-      total: 1,
-    });
-
-    const makeArchiveAxiosError = (status: number, code: string) =>
-      new AxiosError(`Request failed with status code ${status}`, 'ERR_BAD_REQUEST', undefined, undefined, {
-        status,
-        data: { code, error: `backend ${code}` },
-      } as AxiosResponse);
-
-    const noEventsErr = makeArchiveAxiosError(422, 'usage_archive_no_events');
-    const lockedErr = makeArchiveAxiosError(409, 'usage_archive_maintenance_locked');
-    const notFoundErr = makeArchiveAxiosError(404, 'usage_archive_not_found');
-
-    expect(getUsageServiceErrorCode(noEventsErr)).toBe('usage_archive_no_events');
-    expect(getUsageServiceErrorCode(lockedErr)).toBe('usage_archive_maintenance_locked');
-    expect(getUsageServiceErrorCode(notFoundErr)).toBe('usage_archive_not_found');
-    expect(getUsageServiceErrorCode(notFoundErr)).not.toBe('usage_service_not_configured');
-
-    const postSpy = vi
-      .spyOn(axios, 'post')
-      .mockRejectedValueOnce(noEventsErr)
-      .mockRejectedValueOnce(lockedErr)
-      .mockRejectedValueOnce(notFoundErr);
-
+    const client = createPublicApiClient(() => context, fetchMock);
     await act(async () => {
       renderer = create(
         <MemoryRouter initialEntries={['/console/system']}>
           <FreshSystemWorkspace
             basePath="/console"
-            credential="admin-secret"
+            strategy="connect_external"
+            client={client}
+            credential="admin-test-only"
             onUnauthorized={vi.fn()}
           />
         </MemoryRouter>
       );
-      await Promise.resolve();
     });
 
-    await act(async () => {
-      renderer.root.findByProps({ id: 'system-config-tabs-storage' }).props.onClick();
+    const monitoringCard = renderer.root.findByProps({
+      'data-testid': 'system-request-monitoring-card',
     });
+    expect(
+      monitoringCard.findAllByProps({ 'data-testid': 'external-usage' })
+    ).toHaveLength(1);
+    const enableBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-enable' });
+    await act(async () => enableBtn.props.onClick());
+    const confirmBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm' });
+    await act(async () => confirmBtn.props.onClick());
+
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-usage-confirm-failed' })
+    ).toHaveLength(1);
+
+    const retryBtn = renderer.root.findByProps({ 'data-testid': 'external-usage-confirm-retry' });
+    await act(async () => retryBtn.props.onClick());
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'external-usage-collector' })
+        .findByType('dd')
+        .children.join('')
+    ).toContain(x('usageCollectorRunning'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not repaint an External usage blocker in system monitoring from a read retired by reload', async () => {
+    vi.stubGlobal('window', { location: new URL('https://manager.example/console') });
+    try {
+    const context = {
+      basePath: '/console',
+      apiBase: '/console/api/v2',
+      revision: 1,
+    };
+    const usageBase = {
+      cpaVersion: { version: 'v8.0.64', support: 'supported', writeBlocked: false },
+    };
+    let settleStaleRead: (response: Response) => void = () => undefined;
+    let usageGetCount = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/external/usage')) {
+        usageGetCount += 1;
+        if (usageGetCount === 1) {
+          return new Promise<Response>((resolve) => {
+            settleStaleRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            ...usageBase,
+            statisticsEnabled: true,
+            collector: 'running',
+            collectionStarted: true,
+            blockedReason: '',
+          })
+        );
+      }
+      return Promise.reject(new Error('unexpected url: ' + url));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    await act(async () => {
+      renderer = create(
+        <MemoryRouter initialEntries={['/console/system']}>
+          <FreshSystemWorkspace
+            basePath="/console"
+            strategy="connect_external"
+            client={client}
+            credential="admin-test-only"
+            onUnauthorized={vi.fn()}
+          />
+        </MemoryRouter>
+      );
+    });
+    expect(usageGetCount).toBe(1);
 
     await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'system-archive-preview-btn' }).props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
+      renderer.root.findByProps({ 'data-testid': 'system-reload-btn' }).props.onClick();
     });
-    let notifications = useNotificationStore.getState().notifications;
-    expect(notifications[notifications.length - 1]?.message).toBe(
-      enLocale.usage_service_errors.usage_archive_no_events
-    );
+    expect(usageGetCount).toBe(2);
 
     await act(async () => {
-      renderer.root.findByProps({ 'data-testid': 'system-archive-create-btn' }).props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
+      settleStaleRead(
+        Response.json({ code: 'external_cpa_authority_unavailable' }, { status: 503 })
+      );
     });
-    notifications = useNotificationStore.getState().notifications;
-    expect(notifications[notifications.length - 1]?.message).toBe(
-      enLocale.usage_service_errors.usage_archive_maintenance_locked
-    );
-
-    const verifyBtn = renderer.root
-      .findAllByType('button')
-      .find((node) =>
-        node.findAll((child) => child.props?.children === c('archiveVerifyBtn')).length > 0
-      )!;
-    await act(async () => {
-      verifyBtn.props.onClick();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    notifications = useNotificationStore.getState().notifications;
-    const notFoundMessage = notifications[notifications.length - 1]?.message;
-    expect(notFoundMessage).toBe(enLocale.usage_service_errors.usage_archive_not_found);
-    expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.usage_service_not_configured);
-    expect(notFoundMessage).not.toBe(enLocale.usage_service_errors.request_failed);
-    expect(postSpy).toHaveBeenCalledTimes(3);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'external-blocker-authority_unavailable' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'external-usage-collector' })
+        .findByType('dd')
+        .children.join('')
+    ).toContain(x('usageCollectorRunning'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

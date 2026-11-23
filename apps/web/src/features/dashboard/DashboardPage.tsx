@@ -36,7 +36,6 @@ import { normalizeRoutingStrategy } from '@/utils/routingStrategy';
 import type { AuthFileItem } from '@/types/authFile';
 import { VersionCard } from './components/VersionCard';
 import { UsageMetricsCard } from './components/UsageMetricsCard';
-import { CollectorStatusCard } from './components/CollectorStatusCard';
 import { HealthAlertsCard } from './components/HealthAlertsCard';
 import { TrafficOverviewCard } from './components/TrafficOverviewCard';
 import { useDashboardUsageSummary } from './hooks/useDashboardUsageSummary';
@@ -45,6 +44,7 @@ import { resolveProviderCount } from './providerStats';
 import styles from './DashboardPage.module.scss';
 
 interface QuickStat {
+  id: string;
   label: string;
   value: number | string;
   icon: React.ReactNode;
@@ -77,16 +77,29 @@ export function DashboardPage() {
   const useApiBaseAsCpaBase =
     featureAvailability.panelHostConfirmed &&
     featureAvailability.panelHostMode === 'external_panel';
+  const isFullWebHost =
+    featureAvailability.panelHostConfirmed &&
+    featureAvailability.panelHostMode === 'manager_embedded';
 
   return (
     <DashboardPageContent
       key={`${connectionScope}:${featureAvailability.managerServiceBase}`}
       useApiBaseAsCpaBase={useApiBaseAsCpaBase}
+      isFullWebHost={isFullWebHost}
+      modelPricesAvailable={featureAvailability.modelPricesAvailable}
     />
   );
 }
 
-function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: boolean }) {
+function DashboardPageContent({
+  useApiBaseAsCpaBase,
+  isFullWebHost,
+  modelPricesAvailable,
+}: {
+  useApiBaseAsCpaBase: boolean;
+  isFullWebHost: boolean;
+  modelPricesAvailable: boolean;
+}) {
   const { t, i18n } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -453,32 +466,42 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
       (providerStats.openai ?? 0)
     : 0;
 
+  const providerSummaryParts = (
+    [
+      ['Gemini', providerStats.gemini],
+      ['Codex', providerStats.codex],
+      ['xAI', providerStats.xai],
+      ['Claude', providerStats.claude],
+      ['OpenAI', providerStats.openai],
+    ] as const
+  ).filter(([, count]) => typeof count === 'number' && count > 0);
+  const providerSublabel = !hasProviderStats
+    ? undefined
+    : providerSummaryParts.length > 0
+      ? providerSummaryParts.map(([name, count]) => `${name} ${count}`).join(' · ')
+      : '0';
+
   const quickStats: QuickStat[] = [
     {
-      label: t('dashboard.management_keys'),
+      id: 'api-keys',
+      label: isFullWebHost ? t('nav.api_keys') : t('dashboard.management_keys'),
       value: stats.apiKeys ?? '-',
       icon: <IconKey size={24} />,
-      path: '/config',
+      path: '/api-keys',
       loading: loading && stats.apiKeys === null,
-      sublabel: t('nav.config_management'),
+      sublabel: isFullWebHost ? t('nav.group_clients') : t('nav.config_management'),
     },
     {
+      id: 'ai-providers',
       label: t('nav.ai_providers'),
       value: providerStatsReady ? totalProviderKeys : '-',
       icon: <IconBot size={24} />,
       path: '/ai-providers',
       loading: loading && !hasProviderStats,
-      sublabel: hasProviderStats
-        ? t('dashboard.provider_keys_detail', {
-            gemini: providerStats.gemini ?? '-',
-            codex: providerStats.codex ?? '-',
-            xai: providerStats.xai ?? '-',
-            claude: providerStats.claude ?? '-',
-            openai: providerStats.openai ?? '-',
-          })
-        : undefined,
+      sublabel: providerSublabel,
     },
     {
+      id: 'accounts',
       label: t('nav.accounts'),
       value: stats.authFiles ?? '-',
       icon: <IconFileText size={24} />,
@@ -487,6 +510,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
       sublabel: t('dashboard.oauth_credentials'),
     },
     {
+      id: 'available-models',
       label: t('dashboard.available_models'),
       value: getDashboardModelCountDisplay(
         models.length,
@@ -494,7 +518,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
         modelsCache ? null : modelsError
       ),
       icon: <IconSatellite size={24} />,
-      path: '/system',
+      path: modelPricesAvailable ? '/model-prices' : '/accounts',
       loading: modelsLoading && !modelsCache,
       sublabel: t('dashboard.available_models_desc'),
     },
@@ -523,7 +547,9 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
 
   const navigate = useNavigate();
   const resolvedCpaBase = managerCpaBase || (useApiBaseAsCpaBase ? apiBase : '');
-  const showHeaderApiBase = !useApiBaseAsCpaBase || Boolean(managerCpaBase && managerCpaBase !== apiBase);
+  const showHeaderApiBase =
+    !isFullWebHost &&
+    (!useApiBaseAsCpaBase || Boolean(managerCpaBase && managerCpaBase !== apiBase));
   const formattedRefreshedTime = lastRefreshedAt.toLocaleTimeString(i18n.language, {
     hour: '2-digit',
     minute: '2-digit',
@@ -578,9 +604,9 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
         }
         actions={
           <div className={styles.headerActions}>
-            <span className={styles.refreshedMeta} title={t('common.refresh')}>
+            <span className={styles.refreshedMeta} title={formattedRefreshedTime}>
               <IconClock size={14} aria-hidden="true" />
-              <span>{formattedRefreshedTime}</span>
+              <span>{t('dashboard.last_refreshed_at', { time: formattedRefreshedTime })}</span>
             </span>
             <Button
               variant="secondary"
@@ -631,7 +657,6 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
       {/* 3. Today's Overview (Metrics Cards) */}
       {usageSummary.enabled && (
         <section className={styles.metricsRow}>
-          <h2 className={styles.sectionTitle}>{t('dashboard.today_overview_usage_service')}</h2>
           <UsageMetricsCard
             summary={usageSummary.summary}
             topModels={usageSummary.topModels}
@@ -680,15 +705,6 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
             apiKeyAliasMap={apiKeyAliasMap}
             apiKeyDisplayMap={apiKeyDisplayMap}
           />
-          <CollectorStatusCard
-            enabled={usageSummary.enabled}
-            serviceBase={usageSummary.serviceBase}
-            managementKey={managementKey}
-            refreshSignal={cardRefreshSignal}
-            status={collectorStatus}
-            loading={collectorLoading}
-            error={collectorError}
-          />
         </section>
       )}
 
@@ -700,7 +716,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           <div className={styles.bentoGrid}>
             {quickStats.map((stat, index) => (
               <Link
-                key={stat.path}
+                key={stat.id}
                 to={stat.path}
                 className={styles.bentoCard}
                 style={{ animationDelay: `${index * 80}ms` }}
@@ -723,6 +739,9 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
           <div className={styles.configCard}>
             <div className={styles.configHeader}>
               <h3>{t('dashboard.current_config_summary')}</h3>
+              <Link to="/config" className={styles.configLink}>
+                {t('dashboard.view_full_config')} →
+              </Link>
             </div>
             <div className={styles.configGrid}>
               <div className={styles.configItem}>
@@ -742,7 +761,9 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
                 </span>
               </div>
               <div className={styles.configItem}>
-                <span className={styles.configLabel}>{t('basic_settings.retry_count_label')}</span>
+                <span className={styles.configLabel}>
+                  {t('basic_settings.retry_count_label').replace(/[:：]\s*$/, '')}
+                </span>
                 <span className={styles.configValue}>{config.requestRetry ?? 0}</span>
               </div>
               <div className={styles.configItem}>
@@ -764,9 +785,6 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
                 </div>
               )}
             </div>
-            <Link to="/config" className={styles.configLink}>
-              {t('dashboard.view_full_config')} →
-            </Link>
           </div>
         )}
       </section>

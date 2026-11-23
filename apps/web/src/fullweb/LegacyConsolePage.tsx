@@ -19,7 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { AppLifecycle } from '../app/AppLifecycle';
 import { MainLayout } from '../components/layout/MainLayout';
-import { LoadingSpinner } from '../components/ui/LoadingSpinner';
+import { SplashScreen } from '../components/common/SplashScreen';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { NotificationContainer } from '../components/common/NotificationContainer';
 import { ManagerUpdates } from '../features/system/ManagerUpdates';
@@ -135,11 +135,7 @@ export function LegacyConsolePage({
   useEffect(() => () => browserRouter?.dispose(), [browserRouter]);
 
   if (!activated || !authenticated) {
-    return (
-      <div className="main-content" role="status">
-        <LoadingSpinner />
-      </div>
-    );
+    return <SplashScreen />;
   }
 
   const content = (

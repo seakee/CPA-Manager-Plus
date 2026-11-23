@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { FloatingActionDock } from './FloatingActionDock';
-import { MetricSummaryCard } from './MetricSummaryCard';
+import { MetricSummaryCard, MetricSummaryGrid } from './MetricSummaryCard';
 import { PageControlBar } from './PageControlBar';
 import { PageTransitionLayerContext } from './PageTransitionLayer';
 import { PaginationFooter } from './PaginationFooter';
@@ -185,6 +185,36 @@ describe('Page header and footer primitives', () => {
       customBtn.props.onClick({ preventDefault: vi.fn() });
     });
     expect(onSelect).toHaveBeenCalledWith('custom');
+  });
+
+  it('supports compact MetricSummaryGrid density and custom data attributes without meta or sparklines', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <MetricSummaryGrid
+          density="compact"
+          columns={2}
+          cards={[
+            {
+              label: 'Last Active',
+              value: '08/26 17:44',
+              valueTitle: '2026-08-26 17:44:00',
+              meta: '7d monitoring',
+              icon: 'trend',
+              accent: 'blue',
+              dataAttributes: { 'data-overview-metric-key': 'lastSeenMs' },
+            },
+          ]}
+        />
+      );
+    });
+
+    const grid = renderer.root.findByProps({ 'data-metric-summary-density': 'compact' });
+    expect(grid.findAllByProps({ 'data-metric-summary-meta': 'true' })).toHaveLength(0);
+    expect(grid.findAllByProps({ 'data-metric-summary-chart': 'true' })).toHaveLength(0);
+    expect(grid.findAllByProps({ role: 'tooltip' })).toHaveLength(0);
+    const metric = grid.findByProps({ 'data-overview-metric-key': 'lastSeenMs' });
+    expect(metric.findByType('strong').props.title).toBe('2026-08-26 17:44:00');
   });
 
   it('renders AppFooter with repository, version release, and author links', () => {

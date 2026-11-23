@@ -229,4 +229,36 @@ describe('navRegistry', () => {
     expect(projected.displaySections).toEqual(model.canonicalSections);
     expect(model.dashboardItem.pinnable).toBe(false);
   });
+
+  it('includes /usage-maintenance in the system section for host routes or manager service availability and omits it in pure external panel', () => {
+    const hostModel = buildCanonicalNavModel({
+      t,
+      icons,
+      featureAvailability: { requestMonitoringAvailable: true, modelPricesAvailable: true },
+      hasHostRoutes: true,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => 'plugin-icon',
+    });
+    const hostSystem = hostModel.canonicalSections.find((s) => s.id === 'system')!;
+    expect(hostSystem.items.map((item) => item.path)).toContain('/usage-maintenance');
+
+    const externalPanelModel = buildCanonicalNavModel({
+      t,
+      icons,
+      featureAvailability: {
+        requestMonitoringAvailable: true,
+        modelPricesAvailable: true,
+        managerServiceAvailable: false,
+      },
+      hasHostRoutes: false,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => 'plugin-icon',
+    });
+    const externalSystem = externalPanelModel.canonicalSections.find((s) => s.id === 'system')!;
+    expect(externalSystem.items.map((item) => item.path)).not.toContain('/usage-maintenance');
+  });
 });

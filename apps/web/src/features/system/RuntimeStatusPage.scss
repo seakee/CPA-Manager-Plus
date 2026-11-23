@@ -598,6 +598,9 @@
 }
 
 .runtime-error-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   padding: 10px 12px;
   border: 1px solid var(--failure-badge-border);
   border-radius: var(--app-radius-sm);
@@ -606,6 +609,16 @@
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.runtime-error-note-hint {
+  font-weight: 500;
+}
+
+.runtime-error-note-raw {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  opacity: 0.85;
 }
 
 .runtime-migration-meta {
@@ -942,8 +955,10 @@
   }
 
   .runtime-metric-grid.is-cols-3,
-  .runtime-metric-grid.is-cols-2 {
+  .runtime-metric-grid.is-cols-2,
+  .runtime-collector-counters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
 
   .runtime-collector-heartbeat {
@@ -966,6 +981,13 @@
 }
 
 @media (max-width: 480px) {
+  .runtime-metric-tile,
+  .runtime-collector-counter {
+    padding: 9px 10px;
+  }
+}
+
+@media (max-width: 339px) {
   .runtime-metric-grid.is-cols-3,
   .runtime-metric-grid.is-cols-2,
   .runtime-collector-counters {

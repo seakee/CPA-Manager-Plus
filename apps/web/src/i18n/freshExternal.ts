@@ -113,6 +113,12 @@ const messages = {
     'Перепривязка не завершена. Повторите тот же запрос, не меняя установку.',
   ],
   usageTitle: ['CPA usage collection', 'CPA 用量采集', 'CPA 用量擷取', 'Сбор статистики CPA'],
+  usageSourceTitle: [
+    'External CPA usage source',
+    '外部 CPA 用量源',
+    '外部 CPA 用量來源',
+    'Источник статистики внешнего CPA',
+  ],
   usageHelp: [
     'Collection reads your CPA\'s usage queue over its management API. Manager never writes to your CPA without your confirmation.',
     '采集通过管理 API 读取 CPA 的用量队列。未经你确认，Manager 不会写入你的 CPA。',
@@ -128,12 +134,14 @@ const messages = {
   usageCollectorStopped: ['Stopped', '已停止', '已停止', 'Остановлен'],
   usageCollectorError: ['Failed', '失败', '失敗', 'Сбой'],
   usageCollectorUnknown: ['Unknown', '未知', '未知', 'Неизвестно'],
+  usageCollectionWindow: ['Collection status', '采集状态', '擷取狀態', 'Статус сбора'],
   usageCollectionStarted: ['Collection started', '已开始采集', '已開始擷取', 'Сбор начат'],
   usageNotStarted: ['not started', '尚未开始', '尚未開始', 'не начат'],
   usageVersion: ['CPA version', 'CPA 版本', 'CPA 版本', 'Версия CPA'],
   usageWritesBlocked: ['Writes blocked by this version', '该版本阻止写入', '該版本阻止寫入', 'Запись заблокирована этой версией'],
   usageWritesAllowed: ['Writes allowed', '允许写入', '允許寫入', 'Запись разрешена'],
   usageBlockedReason: ['Collection blocked by', '采集中断原因', '擷取中斷原因', 'Причина остановки сбора'],
+  usageMonitoringPausedTitle: ['Collection paused', '采集已暂停', '擷取已暫停', 'Сбор приостановлен'],
   usageBlockedAuthority: [
     'the Manager has no collection authority for this installation',
     'Manager 尚未取得该安装的采集授权',
@@ -153,10 +161,10 @@ const messages = {
     'статистика использования на CPA отключена',
   ],
   usageBlockedMonitoring: [
-    'request monitoring is turned off in Manager',
-    'Manager 的请求监控已关闭',
-    'Manager 的請求監控已關閉',
-    'мониторинг запросов в Manager отключён',
+    'request monitoring is turned off in Manager; collection from CPA is paused',
+    '请求监控未开启，已暂停从外部 CPA 拉取用量',
+    '請求監控未開啟，已暫停從外部 CPA 讀取用量',
+    'мониторинг запросов в Manager отключён; сбор с CPA приостановлен',
   ],
   usageBlockedExternalAuthority: [
     'the external CPA could not complete the usage statistics check or update',

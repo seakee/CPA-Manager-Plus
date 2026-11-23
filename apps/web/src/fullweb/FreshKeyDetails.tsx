@@ -841,7 +841,6 @@ export function FreshKeyDetails({
   function switchUsageWindow(nextWindow: UsageWindow) {
     if (nextWindow === activeUsageWindow) return;
     setUsageWindowState({ forId: id, window: nextWindow });
-    setUsage(null);
     setUsageFailed(false);
     void readUsage(ownerEpoch.current, nextWindow);
   }

@@ -295,7 +295,9 @@ func TestExternalKeyListRouteAnswersWithoutACPA(t *testing.T) {
 		return response
 	}
 	healthy := call()
-	if healthy.Code != http.StatusOK || strings.Contains(healthy.Body.String(), `"presenceUnverified":true`) {
+	if healthy.Code != http.StatusOK ||
+		strings.Contains(healthy.Body.String(), `"presenceUnverified":true`) ||
+		!strings.Contains(healthy.Body.String(), `"gatewayPending":false`) {
 		t.Fatalf("list with a readable CPA = %d %s", healthy.Code, healthy.Body.String())
 	}
 	// The CPA is unreachable: the Manager's keys are the list, marked unverified.

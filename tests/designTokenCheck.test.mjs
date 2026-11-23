@@ -1297,8 +1297,8 @@ describe('design token checker', () => {
       path.join(repoRoot, 'apps/web/src/features/monitoring/MonitoringCenterPage.module.scss'),
       'utf8'
     );
-    const usagePageRaw = readFileSync(
-      path.join(repoRoot, 'apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss'),
+    const metricSummaryCardRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/components/common/MetricSummaryCard.module.scss'),
       'utf8'
     );
 
@@ -1410,7 +1410,7 @@ describe('design token checker', () => {
     }
 
     expect(monitoringSummaryRaw).toMatch(/\.summaryValue\s*\{[^}]*color:\s*var\(--kpi-value-color\)/);
-    expect(usagePageRaw).toMatch(/\.usageSummaryValue\s*\{[^}]*color:\s*var\(--kpi-value-color\)/);
+    expect(metricSummaryCardRaw).toMatch(/\.value\s*\{[^}]*color:\s*var\(--kpi-value-color\)/);
     expect(monitoringPageRaw).toMatch(
       /\.filterToggleChip\s*\{[^}]*color:\s*var\(--text-secondary\)/
     );

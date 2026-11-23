@@ -17,6 +17,7 @@ import logo from '../assets/brand/cpamp-logo-horizontal-color.svg?inline';
 import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline';
 import { FullWebIcon } from './FullWebIcon';
 import { AppFooter } from '../components/common/AppFooter';
+import { SplashScreen } from '../components/common/SplashScreen';
 import {
   BootstrapTransportClient,
   BootstrapTransportError,
@@ -346,7 +347,7 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
     void executeStart(handoff);
   }, [handoff, executeStart]);
 
-  if (!handoff && discoveryNote?.flow === 'upgrade') return <Suspense fallback={<></>}><UpgradeAuthenticationEntry /></Suspense>;
+  if (!handoff && discoveryNote?.flow === 'upgrade') return <Suspense fallback={<SplashScreen />}><UpgradeAuthenticationEntry /></Suspense>;
 
   return (
     <div className="bootstrap-shell" data-testid="fresh-bootstrap-shell">

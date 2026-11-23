@@ -215,6 +215,7 @@ func runServer() {
 }
 
 func runServerWithOptions(options legacypreflight.Options) {
+	log.Print(buildinfo.StartupLine())
 	inspectionTimeout, err := startupPreflightTimeout()
 	if err != nil {
 		log.Fatalf("configure startup inspection: %v", err)

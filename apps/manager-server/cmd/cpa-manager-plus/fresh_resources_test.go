@@ -234,6 +234,8 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/codex-inspection/runs", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/codex-inspection/runs/12/actions", method: http.MethodPost, allowed: true},
 		{resource: "v0/management/usage/import", method: http.MethodPost, allowed: true},
+		{resource: "v0/management/usage/import-sessions", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/usage/import-sessions", method: http.MethodPost, allowed: true},
 		{resource: "v0/management/usage/import-sessions/abc/chunk", method: http.MethodPut, allowed: true},
 		{resource: "v0/management/usage/import-sessions/abc/complete", method: http.MethodPost, allowed: true},
 		{resource: "v0/management/usage/maintenance", method: http.MethodGet, allowed: true},

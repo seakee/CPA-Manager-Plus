@@ -114,6 +114,7 @@ RUN apk add --no-cache python3
 COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
 ARG TARGETOS
 ARG TARGETARCH
+ARG BUILD_DATE
 WORKDIR /src
 COPY apps/manager-server ./apps/manager-server
 COPY tests/fixtures/r1-embedded-api-transport.json ./apps/manager-server/internal/domain/routing/release-embedded-api-transport.json
@@ -127,9 +128,13 @@ RUN python3 /collect-third-party-licenses.py go --module /src/apps/manager-serve
 # redacts -ldflags from runtime/debug.BuildInfo when -trimpath is set, which would
 # strip the SourceCommit/Version buildinfo stamps verified by `go version -m` below
 # and by bin/release/verify-embedded-candidate.py.
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=$VERSION -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$SOURCE_COMMIT" -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
+RUN set -eu; \
+    BUILT_AT="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"; \
+    case "$BUILT_AT" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;; *) echo "invalid BUILD_DATE: $BUILT_AT" >&2; exit 1 ;; esac; \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=$VERSION -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$SOURCE_COMMIT -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=$BUILT_AT" -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
 # Verify the real output binary carries this source stamp, not just image labels.
 RUN go version -m /out/cpa-manager-plus | grep -F "SourceCommit=$SOURCE_COMMIT"
+RUN go version -m /out/cpa-manager-plus | grep -F "BuildDate="
 
 # Packaging smoke without activating production routing authority. The final
 # image consumes the same compiled artifact only after this check passes.

@@ -1522,7 +1522,10 @@ export function FreshKeyRevocation({
                 </p>
               )}
               <details className="key-record-identifiers">
-                <summary>{k('diagnostics')}</summary>
+                <summary>
+                  <FullWebIcon name="chevron" size={14} className="key-record-identifiers-chevron" />
+                  <span>{k('diagnostics')}</span>
+                </summary>
                 <dl className="key-identifier-list">
                   <div>
                     <dt>{t('keysOperationId')}</dt>
@@ -1899,7 +1902,10 @@ export function FreshKeyRevocation({
             ))}
           </ul>
           <details className="key-record-identifiers">
-            <summary>{k('diagnostics')}</summary>
+            <summary>
+              <FullWebIcon name="chevron" size={14} className="key-record-identifiers-chevron" />
+              <span>{k('diagnostics')}</span>
+            </summary>
             <dl className="key-identifier-list">
               <div>
                 <dt>{t('keysOperationId')}</dt>

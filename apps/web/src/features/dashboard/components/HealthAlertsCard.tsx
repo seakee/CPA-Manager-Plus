@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { DashboardChannelHealth, DashboardRecentFailure } from '@/services/api/usageService';
 import type { CredentialInfo } from '@/types/sourceInfo';
@@ -181,6 +182,9 @@ export function HealthAlertsCard({
       <section className={styles.dataCard}>
         <div className={styles.cardHeader}>
           <h3>{t('dashboard.channel_health_status')}</h3>
+          <Link to="/monitoring?tab=accounts" className={styles.moreBtn}>
+            {t('dashboard.view_all_channels')}
+          </Link>
         </div>
         <div className={styles.list}>
           {channelRows.map(({ channel, key, display }) => {
@@ -191,17 +195,28 @@ export function HealthAlertsCard({
                 : isDuplicateName && display.meta
                   ? `${display.primary} · ${display.meta}`
                   : display.primary;
+            const rateText = formatPercent(channel.success_rate);
+            const summaryTitle = t('dashboard.health_channel_failure_summary', {
+              failures: channel.failures,
+              calls: channel.calls,
+              rate: rateText,
+            });
 
             return (
-              <div key={key} className={styles.listItem}>
+              <div key={key} className={styles.listItem} title={summaryTitle}>
                 <span className={`${styles.statusDot} ${styles[channel.tone] || ''}`} />
                 <span
                   className={styles.label}
-                  title={channel.auth_index === '-' ? undefined : display.title}
+                  title={channel.auth_index === '-' ? summaryTitle : `${display.title} · ${summaryTitle}`}
                 >
                   {label}
                 </span>
-                <span className={styles.value}>{formatPercent(channel.success_rate)}</span>
+                {channel.failures > 0 ? (
+                  <span className={styles.channelFailures}>
+                    {`${channel.failures}/${channel.calls}`}
+                  </span>
+                ) : null}
+                <span className={styles.value}>{rateText}</span>
               </div>
             );
           })}
@@ -217,6 +232,9 @@ export function HealthAlertsCard({
       <section className={styles.dataCard}>
         <div className={styles.cardHeader}>
           <h3>{t('dashboard.recent_failed_requests')}</h3>
+          <Link to="/monitoring?tab=realtime" className={styles.moreBtn}>
+            {t('dashboard.view_all_failures')}
+          </Link>
         </div>
         <div className={styles.list}>
           {recentFailures.slice(0, 5).map((failure) => {
@@ -228,14 +246,27 @@ export function HealthAlertsCard({
                 className={styles.failureItem}
               >
                 <div className={styles.failureMeta}>
-                  <span className={styles.time}>
-                    {new Date(failure.timestamp_ms).toLocaleTimeString(i18n.language)}
+                  <span className={styles.failureMetaLeft}>
+                    <span className={styles.time}>
+                      {new Date(failure.timestamp_ms).toLocaleTimeString(i18n.language)}
+                    </span>
+                    {typeof failure.fail_status_code === 'number' && failure.fail_status_code > 0 ? (
+                      <span className={styles.statusCodeBadge}>{failure.fail_status_code}</span>
+                    ) : failure.header_error_code || failure.endpoint ? (
+                      <span className={styles.endpointBadge} title={failure.endpoint || undefined}>
+                        {failure.header_error_code || failure.endpoint}
+                      </span>
+                    ) : null}
                   </span>
-                  <span className={styles.model}>{failure.model}</span>
+                  <span className={styles.model} title={failure.model}>
+                    {failure.model}
+                  </span>
                 </div>
                 <div className={styles.failureDetail}>
                   {renderFailureName(display, tooltip)}
-                  <span>{formatDurationMs(failure.duration_ms, { locale: i18n.language })}</span>
+                  <span className={styles.failureDuration}>
+                    {formatDurationMs(failure.duration_ms, { locale: i18n.language })}
+                  </span>
                 </div>
               </div>
             );

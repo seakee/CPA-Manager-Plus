@@ -112,6 +112,39 @@ describe('LoginPage language switches', () => {
     vi.unstubAllGlobals();
   });
 
+  it('hides the top-right appearance toolbar while the auto-login splash screen is active', async () => {
+    let resolveRestore!: () => void;
+    await act(async () => {
+      renderer = create(
+        <LoginPage
+          consoleAuth={{
+            address: 'https://manager.example/console',
+            error: '',
+            authenticate: async () => true,
+            restore: () =>
+              new Promise<void>((resolve) => {
+                resolveRestore = resolve;
+              }),
+          }}
+        />
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      renderer!.root.findAll(
+        (node) => typeof node.props.className === 'string' && node.props.className.includes('splash-screen')
+      )
+    ).toHaveLength(1);
+    expect(renderer!.root.findAllByType('button')).toHaveLength(0);
+
+    await act(async () => {
+      resolveRestore();
+      await Promise.resolve();
+    });
+    expect(renderer!.root.findAllByType('button').length).toBeGreaterThanOrEqual(2);
+  });
+
   it('keeps the failure alert and its toast on the same language after a switch', async () => {
     await act(async () => {
       renderer = create(

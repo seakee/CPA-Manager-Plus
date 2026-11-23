@@ -210,7 +210,7 @@
 .filterTabLabel {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
 }
 
 .filterCount {
@@ -297,7 +297,7 @@
 
 .priceTable {
   width: 100%;
-  min-width: 1220px;
+  min-width: 980px;
   border-collapse: collapse;
 }
 
@@ -316,7 +316,8 @@
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .priceTable tr:last-child td {
@@ -324,7 +325,7 @@
 }
 
 .modelCell {
-  min-width: 220px;
+  min-width: 180px;
 }
 
 .modelContent {
@@ -340,7 +341,7 @@
 }
 
 .tierCell {
-  min-width: 220px;
+  min-width: 160px;
 }
 
 .tierList {
@@ -382,7 +383,7 @@
 }
 
 .sourceCell {
-  max-width: 260px;
+  max-width: 200px;
   color: var(--text-secondary);
   font-size: 11px;
 }

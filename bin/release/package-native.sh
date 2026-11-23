@@ -31,6 +31,15 @@ compute_sha256() {
   fi
 }
 
+resolve_build_date() {
+  local value="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+  if [[ ! "${value}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    echo "BUILD_DATE must be UTC RFC3339 (YYYY-MM-DDTHH:MM:SSZ), got: ${value}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${value}"
+}
+
 # Every member timestamp is pinned to the epoch, deepest path first so a
 # directory is never re-stamped after its children. This is what makes the
 # archive independent of when the staging tree happened to be written.
@@ -267,6 +276,8 @@ package_v2_linux_amd64() {
   local cpa_executable_sha256="${CPAMP_CPA_EXECUTABLE_SHA256:-${default_exec_sha}}"
   local cpa_asset_name="${CPAMP_CPA_ASSET_NAME:-CLIProxyAPI_${cpa_version}_linux_amd64.tar.gz}"
   local source_commit="${SOURCE_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
+  local build_date
+  build_date="$(resolve_build_date)"
 
   if [ -z "${cpa_version}" ] || [ -z "${cpa_executable_sha256}" ]; then
     echo "Failed to resolve pinned CPA v8 version/hash for linux/amd64" >&2
@@ -446,7 +457,7 @@ package_v2_linux_amd64() {
   (
     cd "${work_dir}/manager-server"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-      -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${source_commit}" \
+      -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${source_commit} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=${build_date}" \
       -o "${package_dir}/bin/cpa-manager-plus" ./cmd/cpa-manager-plus
   )
   (
@@ -523,6 +534,8 @@ package_v1_matrix() {
     "windows arm64"
   )
 
+  local build_date
+  build_date="$(resolve_build_date)"
   local target goos goarch package_name package_dir exe_name
   for target in "${targets[@]}"; do
     read -r goos goarch <<<"${target}"
@@ -537,7 +550,7 @@ package_v1_matrix() {
     mkdir -p "${package_dir}"
     (
       cd "${work_dir}/manager-server"
-      CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$(git -C "${repo_root}" rev-parse HEAD)" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
+      CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$(git -C "${repo_root}" rev-parse HEAD) -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=${build_date}" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
     )
 
     cp "${repo_root}/README.md" "${package_dir}/README.md"

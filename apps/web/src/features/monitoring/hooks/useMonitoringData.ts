@@ -320,7 +320,7 @@ export function useMonitoringData({
   searchQuery,
   searchApiKeyHash,
   scopeFilters,
-  activeDataTab = 'accounts',
+  activeDataTab = 'realtime',
   language,
   suspendAnalytics = false,
 }: UseMonitoringDataParams): UseMonitoringDataReturn {

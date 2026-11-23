@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { lazy, Suspense, type ReactNode } from 'react';
 import { AppBackground } from '../components/common/AppBackground';
+import { SplashScreen } from '../components/common/SplashScreen';
 import { isInitialRoutingContext, readRoutingContext } from './routingContext';
 import { activateFreshLanguage } from './freshLanguage';
 import { BOOTSTRAP_UI, consumeHandoff, createBootstrapTransport } from './bootstrapTransport';
@@ -61,7 +62,7 @@ if (window.location.pathname === BOOTSTRAP_UI) {
   const basePath = context.basePath.replace(/\/+$/, '');
   const isTechnicalRoute = window.location.pathname === `${basePath}/technical-route`;
   render(
-    <Suspense fallback={<></>}>
+    <Suspense fallback={<SplashScreen />}>
       {isTechnicalRoute ? <ConsoleCarrier /> : <FreshConsolePage context={context} />}
     </Suspense>
   );

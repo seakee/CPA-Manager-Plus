@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_MONITORING_DATA_TAB,
   MONITORING_CENTER_UI_STATE_STORAGE_KEY,
+  MONITORING_DATA_TABS,
   getDefaultMonitoringCenterUiState,
   normalizeMonitoringCenterUiState,
   normalizeMonitoringAutoRefreshMs,
@@ -57,6 +58,8 @@ describe('monitoringCenterUiState', () => {
     expect(normalizeMonitoringDataTab('weird')).toBe(DEFAULT_MONITORING_DATA_TAB);
     expect(normalizeMonitoringDataTab(undefined)).toBe(DEFAULT_MONITORING_DATA_TAB);
     expect(normalizeMonitoringDataTab(42)).toBe(DEFAULT_MONITORING_DATA_TAB);
+    expect(DEFAULT_MONITORING_DATA_TAB).toBe('realtime');
+    expect(MONITORING_DATA_TABS).toEqual(['realtime', 'accounts', 'apiKeys']);
   });
 
   it('keeps known tab ids during normalization', () => {

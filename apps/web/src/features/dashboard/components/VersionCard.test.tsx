@@ -108,7 +108,7 @@ const findManagerRefreshButton = (renderer: ReactTestRenderer) => {
     (node) =>
       node.type === 'div' &&
       node.props.className?.includes(styles.item) &&
-      node.findAll((child) => getText(child).includes('title.abbr')).length > 0
+      node.findAll((child) => getText(child).includes('dashboard.app_version')).length > 0
   );
   return managerSection.find(
     (node) =>
@@ -252,6 +252,40 @@ describe('VersionCard release links', () => {
     for (const label of ['dashboard.collector_status_title', 'dashboard.health_queue_status']) {
       expect(getText(healthItem(label))).not.toContain('dashboard.collector_unavailable');
     }
+  });
+  it('shows readable queue status instead of raw queue identifier and links collector health to runtime', async () => {
+    const renderer = await renderCard({
+      health: {
+        usageEnabled: true,
+        collectorStatus: {
+          events: 120,
+          deadLetters: 2,
+          collector: {
+            collector: 'usage',
+            mode: 'poll',
+            queue: 'usage',
+          },
+        },
+      },
+    });
+    const queueNode = renderer.root.find(
+      (n) =>
+        (n.type === 'div' || n.type === 'a') &&
+        n.props.className?.split(' ').includes(styles.healthItem) &&
+        getText(n).includes('dashboard.health_queue_status')
+    );
+    expect(getText(queueNode)).toContain('dashboard.health_status_normal');
+    expect(getText(queueNode)).not.toContain('usage');
+    expect(queueNode.props.title).toContain('dashboard.collector_queue: usage');
+
+    const collectorNode = renderer.root.find(
+      (n) =>
+        n.type === 'a' &&
+        n.props.className?.split(' ').includes(styles.healthItem) &&
+        getText(n).includes('dashboard.collector_status_title')
+    );
+    expect(collectorNode.props.href).toBe('/system/runtime');
+    expect(collectorNode.props.title).toContain('120');
   });
 
   it('keeps current Manager and Core versions linked to their installed releases', async () => {

@@ -1000,6 +1000,9 @@ describe('External usage confirmation', () => {
       expect(blocked).toContain(x('usageBlockedMonitoring'));
       expect(blocked).not.toContain(x('usageBlockedUnknown'));
       expect(blocked).not.toContain('usage_monitoring_disabled');
+      expect(
+        renderer.root.findByProps({ 'data-testid': 'external-usage-blocked' }).props.className
+      ).toContain('is-paused');
       // While Manager's own monitoring switch is off, the CPA write button is hidden.
       expect(
         renderer.root.findAll((node) => node.props['data-testid'] === 'external-usage-enable')

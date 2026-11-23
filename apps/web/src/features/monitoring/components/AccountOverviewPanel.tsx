@@ -2,7 +2,6 @@ import { Fragment, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { DropdownMenu } from '@/components/ui/DropdownMenu';
-import { Input } from '@/components/ui/Input';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import {
@@ -13,8 +12,6 @@ import {
   IconEyeOff,
   IconInfo,
   IconMoreVertical,
-  IconRefreshCw,
-  IconSearch,
 } from '@/components/ui/icons';
 import {
   AccountExpandedDetails,
@@ -61,7 +58,6 @@ type AccountOverviewPanelProps = {
   embedded?: boolean;
   mode: MonitoringAccountOverviewMode;
   accountDisplayMode: AccountDisplayMode;
-  searchInput: string;
   columns: AccountOverviewColumn[];
   rows: MonitoringAccountRow[];
   pagination: PaginationState<MonitoringAccountRow>;
@@ -77,12 +73,9 @@ type AccountOverviewPanelProps = {
   accountPageSizeOptions: readonly number[];
   accountOverviewScopeText: string;
   hasPrices: boolean;
-  overallLoading: boolean;
   locale: string;
   emptyState: ReactNode;
   t: TFunction;
-  onSearchChange: (value: string) => void;
-  onRefreshAll: () => void | Promise<void>;
   onAccountSortKeyChange: (key: AccountSortKey) => void;
   onModeChange: (mode: MonitoringAccountOverviewMode) => void;
   onAccountDisplayModeChange: (mode: AccountDisplayMode) => void;
@@ -98,13 +91,9 @@ export type AccountOverviewPanelActionsProps = Pick<
   AccountOverviewPanelProps,
   | 'mode'
   | 'accountDisplayMode'
-  | 'searchInput'
   | 'accountSort'
   | 'accountSortOptions'
-  | 'overallLoading'
   | 't'
-  | 'onSearchChange'
-  | 'onRefreshAll'
   | 'onAccountSortKeyChange'
   | 'onModeChange'
   | 'onAccountDisplayModeChange'
@@ -144,13 +133,9 @@ function AccountColumnLabel({ column, t }: { column: AccountOverviewColumn; t: T
 export function AccountOverviewPanelActions({
   mode,
   accountDisplayMode,
-  searchInput,
   accountSort,
   accountSortOptions,
-  overallLoading,
   t,
-  onSearchChange,
-  onRefreshAll,
   onAccountSortKeyChange,
   onModeChange,
   onAccountDisplayModeChange,
@@ -167,28 +152,6 @@ export function AccountOverviewPanelActions({
   return (
     <div className={styles.accountOverviewHeaderActions}>
       <div className={styles.accountOverviewToolbarRow}>
-        <div className={styles.accountOverviewSearchWrap}>
-          <Input
-            value={searchInput}
-            onChange={(event) => onSearchChange(event.target.value)}
-            placeholder={t('monitoring.account_overview_search_placeholder')}
-            className={styles.accountOverviewSearchInput}
-            rightElement={<IconSearch size={16} />}
-            aria-label={t('monitoring.account_overview_search_placeholder')}
-          />
-        </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => void onRefreshAll()}
-          disabled={overallLoading}
-        >
-          <IconRefreshCw
-            size={15}
-            className={overallLoading ? styles.refreshIconSpinning : styles.refreshIcon}
-          />
-          <span>{t('common.refresh')}</span>
-        </Button>
         <Button
           variant="secondary"
           size="sm"
@@ -207,17 +170,19 @@ export function AccountOverviewPanelActions({
             )}
           </span>
         </Button>
-        <div className={styles.accountOverviewSortBar}>
-          <Select
-            className={styles.accountOverviewSortSelect}
-            triggerClassName={styles.accountOverviewSortSelectTrigger}
-            value={accountSort.key}
-            options={accountSortOptions}
-            onChange={(value) => onAccountSortKeyChange(value as AccountSortKey)}
-            ariaLabel={t('monitoring.account_overview_sort_label')}
-            fullWidth={false}
-          />
-        </div>
+        {mode === 'card' ? (
+          <div className={styles.accountOverviewSortBar}>
+            <Select
+              className={styles.accountOverviewSortSelect}
+              triggerClassName={styles.accountOverviewSortSelectTrigger}
+              value={accountSort.key}
+              options={accountSortOptions}
+              onChange={(value) => onAccountSortKeyChange(value as AccountSortKey)}
+              ariaLabel={t('monitoring.account_overview_sort_label')}
+              fullWidth={false}
+            />
+          </div>
+        ) : null}
 
         <SegmentedTabs<MonitoringAccountOverviewMode>
           variant="joined"
@@ -251,7 +216,6 @@ export function AccountOverviewPanel({
   embedded = false,
   mode,
   accountDisplayMode,
-  searchInput,
   columns,
   rows,
   pagination,
@@ -267,12 +231,9 @@ export function AccountOverviewPanel({
   accountPageSizeOptions,
   accountOverviewScopeText,
   hasPrices,
-  overallLoading,
   locale,
   emptyState,
   t,
-  onSearchChange,
-  onRefreshAll,
   onAccountSortKeyChange,
   onModeChange,
   onAccountDisplayModeChange,
@@ -287,13 +248,9 @@ export function AccountOverviewPanel({
     <AccountOverviewPanelActions
       mode={mode}
       accountDisplayMode={accountDisplayMode}
-      searchInput={searchInput}
       accountSort={accountSort}
       accountSortOptions={accountSortOptions}
-      overallLoading={overallLoading}
       t={t}
-      onSearchChange={onSearchChange}
-      onRefreshAll={onRefreshAll}
       onAccountSortKeyChange={onAccountSortKeyChange}
       onModeChange={onModeChange}
       onAccountDisplayModeChange={onAccountDisplayModeChange}

@@ -1,10 +1,23 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
+import { PageControlBar } from '@/components/common/PageControlBar';
+import { PaginationFooter } from '@/components/common/PaginationFooter';
 import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
-import { IconCheck, IconEye, IconRefreshCw, IconSearch, IconTrash2 } from '@/components/ui/icons';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
+import {
+  IconCheck,
+  IconCopy,
+  IconEye,
+  IconRefreshCw,
+  IconSearch,
+  IconTrash2,
+  IconX,
+} from '@/components/ui/icons';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
   usageServiceApi,
@@ -19,7 +32,18 @@ type StatusFilter = 'pending' | 'all' | 'ignored' | 'resolved' | 'deleted';
 
 type CandidateAction = 'ignore' | 'resolve' | 'enable' | 'delete';
 
+interface AccountActionEvidenceFields {
+  headerErrorKind?: unknown;
+  headerErrorCode?: unknown;
+  headerTraceId?: unknown;
+  statusCode?: unknown;
+  model?: unknown;
+  endpoint?: unknown;
+}
+
 const STATUS_FILTERS: StatusFilter[] = ['pending', 'all', 'ignored', 'resolved', 'deleted'];
+const DEFAULT_PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
 
 const formatMs = (value?: number) => {
   if (!value) return '-';
@@ -37,22 +61,26 @@ const stringifyEvidence = (candidate: AccountActionCandidate | null) => {
   }
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value && typeof value === 'object' && !Array.isArray(value));
-
-const readEvidenceString = (candidate: AccountActionCandidate, key: string) => {
+const readEvidenceString = (
+  candidate: AccountActionCandidate | null,
+  key: keyof AccountActionEvidenceFields
+) => {
+  if (!candidate) return '';
   const evidence = candidate.evidence;
-  if (!isRecord(evidence)) return '';
-  const value = evidence[key];
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return '';
+  const value = (evidence as AccountActionEvidenceFields)[key];
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return '';
 };
 
-const getHeaderEvidence = (candidate: AccountActionCandidate) => ({
+const getHeaderEvidence = (candidate: AccountActionCandidate | null) => ({
   errorKind: readEvidenceString(candidate, 'headerErrorKind'),
   errorCode: readEvidenceString(candidate, 'headerErrorCode'),
   traceId: readEvidenceString(candidate, 'headerTraceId'),
+  statusCode: readEvidenceString(candidate, 'statusCode'),
+  model: readEvidenceString(candidate, 'model'),
+  endpoint: readEvidenceString(candidate, 'endpoint'),
 });
 
 export function AccountActionCandidatesPage() {
@@ -72,6 +100,8 @@ function AccountActionCandidatesPageContent() {
   const [pendingCount, setPendingCount] = useState(0);
   const [filter, setFilter] = useState<StatusFilter>('pending');
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
@@ -94,6 +124,7 @@ function AccountActionCandidatesPageContent() {
     setPendingCount(0);
     setError('');
     setLoading(true);
+    setPage(1);
     return () => {
       requestIdRef.current += 1;
     };
@@ -134,16 +165,30 @@ function AccountActionCandidatesPageContent() {
   const loadCandidatesRef = useRef(loadCandidates);
   loadCandidatesRef.current = loadCandidates;
 
+  useHeaderRefresh(loadCandidates, Boolean(managerBase && managementKey));
+
   useEffect(() => {
     if (featureAvailability.checking) return;
     void loadCandidates();
   }, [featureAvailability.checking, loadCandidates]);
 
   const statusCounts = useMemo(() => {
-    const counts: Record<string, number> = { pending: pendingCount };
-    for (const item of items) counts[item.status] = (counts[item.status] || 0) + 1;
+    const counts: Partial<Record<StatusFilter, number>> = { pending: pendingCount };
+    if (filter !== 'pending') {
+      const bucket: Record<string, number> = {};
+      for (const item of items) {
+        bucket[item.status] = (bucket[item.status] || 0) + 1;
+      }
+      if (filter === 'all') {
+        counts.ignored = bucket.ignored ?? 0;
+        counts.resolved = bucket.resolved ?? 0;
+        counts.deleted = bucket.deleted ?? 0;
+      } else {
+        counts[filter] = items.length;
+      }
+    }
     return counts;
-  }, [items, pendingCount]);
+  }, [filter, items, pendingCount]);
 
   const visibleItems = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -159,16 +204,53 @@ function AccountActionCandidatesPageContent() {
         item.authIndex,
         item.actionType,
         item.reason,
+        item.reasonCode,
         item.status,
         item.lastError,
         header.errorKind,
         header.errorCode,
         header.traceId,
+        header.model,
       ]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(term));
     });
   }, [items, search]);
+
+  const totalPages = Math.max(1, Math.ceil(visibleItems.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginationStartIndex = visibleItems.length === 0 ? 0 : (currentPage - 1) * pageSize;
+  const paginationStartItem = visibleItems.length === 0 ? 0 : paginationStartIndex + 1;
+  const paginationEndItem = Math.min(visibleItems.length, paginationStartIndex + pageSize);
+  const paginatedItems = useMemo(
+    () => visibleItems.slice(paginationStartIndex, paginationStartIndex + pageSize),
+    [pageSize, paginationStartIndex, visibleItems]
+  );
+
+  const filterTabItems = useMemo<ReadonlyArray<SegmentedTabItem<StatusFilter>>>(
+    () =>
+      STATUS_FILTERS.map((key) => {
+        if (key === 'all') {
+          return {
+            id: key,
+            label: t(`account_actions.filter_${key}`),
+          };
+        }
+        const count = loaded ? statusCounts[key] : undefined;
+        return {
+          id: key,
+          label: (
+            <span className={styles.filterTabLabel}>
+              <span>{t(`account_actions.filter_${key}`)}</span>
+              {typeof count === 'number' ? (
+                <strong className={styles.filterCount}>{count}</strong>
+              ) : null}
+            </span>
+          ),
+        };
+      }),
+    [loaded, statusCounts, t]
+  );
 
   const runAction = useCallback(
     async (candidate: AccountActionCandidate, action: CandidateAction) => {
@@ -243,156 +325,267 @@ function AccountActionCandidatesPageContent() {
       defaultValue: status || '-',
     });
 
+  const statusPillToneClass = error
+    ? styles.statusPillDanger
+    : !loaded && loading
+      ? styles.statusPillWarning
+      : pendingCount > 0
+        ? styles.statusPillWarning
+        : styles.statusPillSuccess;
+
+  const statusPillText = error
+    ? t('account_actions.load_failed_title')
+    : !loaded && loading
+      ? t('common.loading')
+      : pendingCount > 0
+        ? t('account_actions.status_pending_pill', {
+            count: pendingCount,
+            defaultValue: `Pending: ${pendingCount}`,
+          })
+        : t('account_actions.status_clear_pill', {
+            defaultValue: 'No pending issues',
+          });
+
   const evidenceText = stringifyEvidence(evidenceCandidate);
+  const evidenceHeader = getHeaderEvidence(evidenceCandidate);
+
+  const handleCopyEvidence = useCallback(async () => {
+    if (!evidenceText) return;
+    try {
+      await navigator.clipboard?.writeText(evidenceText);
+      showNotification(
+        t('account_actions.evidence_copied', { defaultValue: 'Evidence copied' }),
+        'success'
+      );
+    } catch {
+      // Clipboard API unavailable in restricted contexts
+    }
+  }, [evidenceText, showNotification, t]);
+
+  const searchPlaceholder = t('account_actions.search_placeholder', {
+    defaultValue: 'Search account, file, reason, or error message',
+  });
 
   return (
     <div className={styles.page}>
-      <section className={styles.hero}>
-        <div className={styles.heroMain}>
-          {featureAvailability.requestMonitoringAvailable ? (
-            <Link to="/monitoring" className={styles.backLink}>
-              {t('account_actions.back_to_monitoring')}
-            </Link>
-          ) : null}
-          <p className={styles.kicker}>{t('account_actions.eyebrow')}</p>
-          <h1 className={styles.title}>{t('account_actions.title')}</h1>
-          <p className={styles.description}>{t('account_actions.description')}</p>
-        </div>
-        <div className={styles.heroStats}>
-          <div className={styles.statCard}>
-            <span className={styles.statValue}>{loaded ? pendingCount : '-'}</span>
-            <span className={styles.statLabel}>{t('account_actions.pending_count')}</span>
+      <PageControlBar
+        ariaLabel={t('account_actions.title')}
+        leading={
+          <>
+            <span className={`${styles.statusPill} ${statusPillToneClass}`}>
+              <span className={styles.statusDot} aria-hidden="true" />
+              <span>{statusPillText}</span>
+            </span>
+            {loaded && visibleItems.length > 0 ? (
+              <span className={styles.metaPill}>
+                {t('account_actions.visible_badge', {
+                  count: visibleItems.length,
+                  defaultValue: `Showing: ${visibleItems.length}`,
+                })}
+              </span>
+            ) : null}
+          </>
+        }
+        actions={
+          <>
+            {featureAvailability.requestMonitoringAvailable ? (
+              <Link to="/monitoring" className="btn btn-secondary btn-sm">
+                {t('account_actions.back_to_monitoring')}
+              </Link>
+            ) : null}
+            <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
+              <IconRefreshCw size={15} />
+              {t('common.refresh')}
+            </Button>
+          </>
+        }
+        toolbar={
+          <div className={styles.toolbarRow}>
+            <SegmentedTabs<StatusFilter>
+              items={filterTabItems}
+              activeTab={filter}
+              onChange={(nextFilter) => {
+                setFilter(nextFilter);
+                setPage(1);
+              }}
+              ariaLabel={t('account_actions.status_filter')}
+              idBase="account-actions-filter"
+              variant="joined"
+              responsiveFullWidth={false}
+              className={styles.filterTabs}
+            />
+            <div className={styles.searchWrap}>
+              <Input
+                className={styles.searchInput}
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+                placeholder={searchPlaceholder}
+                aria-label={searchPlaceholder}
+                rightElement={
+                  search ? (
+                    <button
+                      type="button"
+                      className={styles.searchClear}
+                      onClick={() => {
+                        setSearch('');
+                        setPage(1);
+                      }}
+                      aria-label={t('common.clear', { defaultValue: 'Clear' })}
+                      title={t('common.clear', { defaultValue: 'Clear' })}
+                    >
+                      <IconX size={15} />
+                    </button>
+                  ) : (
+                    <IconSearch size={15} className={styles.searchIcon} />
+                  )
+                }
+              />
+            </div>
           </div>
-          <div className={styles.statCard}>
-            <span className={styles.statValue}>{loaded ? visibleItems.length : '-'}</span>
-            <span className={styles.statLabel}>{t('account_actions.visible_count')}</span>
-          </div>
-        </div>
-      </section>
-
-      <section className={styles.toolbar}>
-        <div className={styles.filterGroup} aria-label={t('account_actions.status_filter')}>
-          {STATUS_FILTERS.map((key) => (
-            <button
-              key={key}
-              type="button"
-              className={[styles.filterButton, filter === key ? styles.filterButtonActive : '']
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => setFilter(key)}
-            >
-              {t(`account_actions.filter_${key}`)}
-              {loaded && key !== 'all' && typeof statusCounts[key] === 'number'
-                ? ` · ${statusCounts[key]}`
-                : ''}
-            </button>
-          ))}
-        </div>
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={t('account_actions.search_placeholder', {
-            defaultValue: 'Search account, file, error or trace',
-          })}
-          rightElement={<IconSearch size={15} />}
-          aria-label={t('account_actions.search_placeholder', {
-            defaultValue: 'Search account, file, error or trace',
-          })}
-        />
-        <div className={styles.actions}>
-          <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
-            <IconRefreshCw size={15} />
-            {t('common.refresh')}
-          </Button>
-        </div>
-      </section>
+        }
+      />
 
       <section className={styles.panel}>
         {error ? (
-          <div className={styles.errorState}>
-            <strong>{t('account_actions.load_failed_title')}</strong>
-            <span>{error}</span>
+          <div className={styles.errorBanner} role="alert">
+            <div className={styles.errorBannerCopy}>
+              <strong>{t('account_actions.load_failed_title')}</strong>
+              <span>{error}</span>
+            </div>
+            <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
+              <IconRefreshCw size={14} />
+              {t('common.refresh')}
+            </Button>
           </div>
         ) : null}
+
         {visibleItems.length === 0 && loaded ? (
-          <div className={styles.emptyState}>
-            <strong>{t('account_actions.empty_title')}</strong>
-            <span>{t('account_actions.empty_desc')}</span>
-          </div>
+          <EmptyState
+            variant="canvas"
+            title={
+              search.trim()
+                ? t('account_actions.empty_filtered_title', {
+                    defaultValue: 'No matching auth issues',
+                  })
+                : t('account_actions.empty_title')
+            }
+            description={
+              search.trim()
+                ? t('account_actions.empty_filtered_desc', {
+                    query: search.trim(),
+                    defaultValue: `No issues matched "${search.trim()}". Clear the search or switch status filter.`,
+                  })
+                : t('account_actions.empty_desc')
+            }
+            action={
+              search.trim() ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSearch('');
+                    setPage(1);
+                  }}
+                >
+                  {t('account_actions.reset_filters', { defaultValue: 'Clear search' })}
+                </Button>
+              ) : (
+                <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
+                  <IconRefreshCw size={15} />
+                  {t('common.refresh')}
+                </Button>
+              )
+            }
+          />
         ) : visibleItems.length === 0 ? null : (
           <div className={styles.tableWrap}>
             <table className={styles.table}>
               <thead>
                 <tr>
                   <th>{t('account_actions.col_account')}</th>
-                  <th>{t('account_actions.col_file')}</th>
                   <th>{t('account_actions.col_action')}</th>
                   <th>{t('account_actions.col_reason')}</th>
                   <th>{t('account_actions.col_seen')}</th>
-                  <th>{t('account_actions.col_hits')}</th>
                   <th>{t('account_actions.col_status')}</th>
-                  <th>{t('account_actions.col_operations')}</th>
+                  <th className={styles.actionsCol}>{t('account_actions.col_operations')}</th>
                 </tr>
               </thead>
               <tbody>
-                {visibleItems.map((candidate) => {
+                {paginatedItems.map((candidate) => {
                   const busy = actingId === candidate.id;
-                  const header = getHeaderEvidence(candidate);
+                  const accountDisplay = candidate.accountSnapshot || candidate.authLabel || '-';
+                  const reasonText = candidate.reasonCode
+                    ? t(`account_actions.reason_${candidate.reasonCode}`, {
+                        defaultValue: candidate.reason || '-',
+                      })
+                    : candidate.reason || '-';
+                  const identityTitle = [
+                    candidate.authFileName,
+                    candidate.accountIdSnapshot,
+                    candidate.authIndex,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
                   return (
                     <tr key={candidate.id}>
-                      <td>
+                      <td data-label={t('account_actions.col_account')}>
                         <div className={styles.accountCell}>
-                          <strong>{candidate.accountSnapshot || candidate.authLabel || '-'}</strong>
-                          <span>{candidate.provider || '-'}</span>
-                          {candidate.accountIdSnapshot ? (
-                            <small>{candidate.accountIdSnapshot}</small>
+                          <div className={styles.accountPrimary}>
+                            <strong title={accountDisplay}>{accountDisplay}</strong>
+                            {candidate.provider ? (
+                              <span className={styles.providerTag}>{candidate.provider}</span>
+                            ) : null}
+                          </div>
+                          <code className={styles.fileName} title={identityTitle}>
+                            {candidate.authFileName}
+                          </code>
+                        </div>
+                      </td>
+                      <td data-label={t('account_actions.col_action')}>
+                        <div className={styles.badgeStack}>
+                          <span
+                            className={[
+                              styles.actionBadge,
+                              candidate.actionType === 'delete' ? styles.actionDelete : '',
+                              candidate.actionType === 'reauth' ? styles.actionReauth : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                          >
+                            {actionLabel(candidate.actionType)}
+                          </span>
+                          {candidate.autoDisabledAtMs ? (
+                            <span className={styles.autoDisabledText}>
+                              {t('account_actions.auto_disabled_badge', {
+                                defaultValue: 'Auto-disabled',
+                              })}
+                            </span>
                           ) : null}
                         </div>
                       </td>
-                      <td>
-                        <div className={styles.fileCell}>
-                          <strong>{candidate.authFileName}</strong>
-                          <span>{candidate.authIndex || candidate.authLabel || '-'}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <span
-                          className={[
-                            styles.actionBadge,
-                            candidate.actionType === 'delete' ? styles.actionDelete : '',
-                            candidate.actionType === 'reauth' ? styles.actionReauth : '',
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
-                        >
-                          {actionLabel(candidate.actionType)}
-                        </span>
-                      </td>
-                      <td>
+                      <td data-label={t('account_actions.col_reason')}>
                         <div className={styles.reasonCell}>
-                          <strong>{candidate.reason || '-'}</strong>
+                          <span className={styles.reasonTitle}>{reasonText}</span>
                           {candidate.lastError ? (
                             <small className={styles.errorText}>{candidate.lastError}</small>
                           ) : null}
-                          {header.errorKind || header.errorCode ? (
-                            <small>
-                              {[header.errorKind, header.errorCode].filter(Boolean).join(' / ')}
-                            </small>
-                          ) : null}
-                          {header.traceId ? <small>{`Trace: ${header.traceId}`}</small> : null}
-                          <small>{t('account_actions.last_updated', { time: formatMs(candidate.updatedAtMs) })}</small>
                         </div>
                       </td>
-                      <td>
+                      <td data-label={t('account_actions.col_seen')}>
                         <div className={styles.timeCell}>
-                          <span>{formatMs(candidate.firstSeenAtMs)}</span>
-                          <small>{formatMs(candidate.lastSeenAtMs)}</small>
+                          <span>{formatMs(candidate.lastSeenAtMs)}</span>
+                          <small>
+                            {t('account_actions.hits_count', {
+                              count: candidate.hitCount,
+                              defaultValue: `${candidate.hitCount} hits`,
+                            })}
+                          </small>
                         </div>
                       </td>
-                      <td>
-                        <span className={styles.metaPill}>{candidate.hitCount}</span>
-                      </td>
-                      <td>
+                      <td data-label={t('account_actions.col_status')}>
                         <span
                           className={[
                             styles.statusBadge,
@@ -404,10 +597,14 @@ function AccountActionCandidatesPageContent() {
                             .filter(Boolean)
                             .join(' ')}
                         >
-                          {statusLabel(candidate.status)}
+                          <span className={styles.statusDot} aria-hidden="true" />
+                          <span>{statusLabel(candidate.status)}</span>
                         </span>
                       </td>
-                      <td>
+                      <td
+                        data-label={t('account_actions.col_operations')}
+                        className={styles.actionsCol}
+                      >
                         <div className={styles.rowActions}>
                           <Button
                             variant="ghost"
@@ -465,20 +662,109 @@ function AccountActionCandidatesPageContent() {
             </table>
           </div>
         )}
+
+        <PaginationFooter
+          variant="flush"
+          currentPage={currentPage}
+          totalPages={totalPages}
+          disabled={!loaded || visibleItems.length === 0}
+          infoText={t('monitoring.pagination_info', {
+            current: currentPage,
+            total: totalPages,
+            start: paginationStartItem,
+            end: paginationEndItem,
+            count: visibleItems.length,
+          })}
+          pageSize={pageSize}
+          pageSizeOptions={PAGE_SIZE_OPTIONS}
+          pageSizeLabel={t('monitoring.page_size_label')}
+          pageSizeTitle={t('monitoring.page_size_label')}
+          pageSizeAriaLabel={t('monitoring.page_size_label')}
+          formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+          prevLabel={t('monitoring.pagination_prev')}
+          nextLabel={t('monitoring.pagination_next')}
+          showPageJump
+          jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
+          jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
+          jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+        />
       </section>
 
       <Modal
         open={Boolean(evidenceCandidate)}
         title={t('account_actions.evidence_title')}
-        width={760}
+        width={780}
         onClose={() => setEvidenceCandidate(null)}
         footer={
-          <Button variant="secondary" onClick={() => setEvidenceCandidate(null)}>
-            {t('common.close')}
-          </Button>
+          <div className={styles.modalFooterActions}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleCopyEvidence()}
+              disabled={!evidenceText}
+            >
+              <IconCopy size={14} />
+              {t('common.copy', { defaultValue: 'Copy' })}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setEvidenceCandidate(null)}>
+              {t('common.close')}
+            </Button>
+          </div>
         }
       >
-        <pre className={styles.evidenceBox}>{evidenceText || t('account_actions.no_evidence')}</pre>
+        {evidenceCandidate ? (
+          <div className={styles.evidenceModalBody}>
+            <div className={styles.evidenceMetaGrid}>
+              <div className={styles.evidenceMetaItem}>
+                <span>{t('account_actions.col_file')}</span>
+                <code>{evidenceCandidate.authFileName}</code>
+              </div>
+              <div className={styles.evidenceMetaItem}>
+                <span>{t('account_actions.evidence_status_code', { defaultValue: 'Status' })}</span>
+                <code>{evidenceHeader.statusCode || '-'}</code>
+              </div>
+              <div className={styles.evidenceMetaItem}>
+                <span>{t('account_actions.evidence_model', { defaultValue: 'Model' })}</span>
+                <code>{evidenceHeader.model || '-'}</code>
+              </div>
+              <div className={styles.evidenceMetaItem}>
+                <span>{t('account_actions.evidence_trace', { defaultValue: 'Trace' })}</span>
+                <code>{evidenceHeader.traceId || '-'}</code>
+              </div>
+              <div className={styles.evidenceMetaItem}>
+                <span>
+                  {t('account_actions.evidence_first_seen', { defaultValue: 'First seen' })}
+                </span>
+                <code>{formatMs(evidenceCandidate.firstSeenAtMs)}</code>
+              </div>
+              <div className={styles.evidenceMetaItem}>
+                <span>
+                  {t('account_actions.evidence_last_seen', { defaultValue: 'Last seen' })}
+                </span>
+                <code>{formatMs(evidenceCandidate.lastSeenAtMs)}</code>
+              </div>
+              {evidenceHeader.endpoint ? (
+                <div className={`${styles.evidenceMetaItem} ${styles.evidenceMetaWide}`}>
+                  <span>
+                    {t('account_actions.evidence_endpoint', { defaultValue: 'Endpoint' })}
+                  </span>
+                  <code>{evidenceHeader.endpoint}</code>
+                </div>
+              ) : null}
+            </div>
+            {evidenceCandidate.lastError ? (
+              <div className={styles.evidenceErrorNote}>{evidenceCandidate.lastError}</div>
+            ) : null}
+            <pre className={styles.evidenceBox}>
+              {evidenceText || t('account_actions.no_evidence')}
+            </pre>
+          </div>
+        ) : null}
       </Modal>
     </div>
   );

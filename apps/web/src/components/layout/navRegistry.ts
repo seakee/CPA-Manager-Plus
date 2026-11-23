@@ -20,6 +20,7 @@ export const CANONICAL_NAV_IDS = {
   modelPrices: 'observe.model_prices',
   systemConfig: 'system.config',
   runtimeStatus: 'system.runtime',
+  usageMaintenance: 'system.usage_maintenance',
   gatewayManagement: 'system.gateway',
   updates: 'system.updates',
   logs: 'system.logs',
@@ -63,6 +64,7 @@ export interface NavSidebarIconSet {
 export interface NavFeatureAvailability {
   requestMonitoringAvailable: boolean;
   modelPricesAvailable: boolean;
+  managerServiceAvailable?: boolean;
   reason?: string;
 }
 
@@ -291,6 +293,21 @@ export function buildCanonicalNavModel({
           icon: icons.system,
           pinnable: true,
         },
+        ...(hasHostRoutes || featureAvailability.managerServiceAvailable
+          ? [
+              {
+                id: CANONICAL_NAV_IDS.usageMaintenance,
+                path: '/usage-maintenance',
+                label: t('nav.usage_maintenance', { defaultValue: 'Usage Maintenance' }),
+                shortLabel: navShortLabel(
+                  'nav.usage_maintenance',
+                  t('nav.usage_maintenance', { defaultValue: 'Maintenance' })
+                ),
+                icon: icons.system,
+                pinnable: true,
+              },
+            ]
+          : []),
         {
           id: CANONICAL_NAV_IDS.gatewayManagement,
           path: '/config',

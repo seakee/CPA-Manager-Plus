@@ -7,7 +7,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-primary);
+  background-color: var(--app-bg);
+  background-image: var(--app-bg-gradient);
   opacity: 1;
   transition: opacity 0.4s ease-out;
 
@@ -17,21 +18,24 @@
   }
 }
 
+.splash-screen-content {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  flex: 1;
+  width: 100%;
+  min-height: clamp(320px, 56vh, 620px);
+  background-color: transparent;
+  background-image: none;
+}
+
 .splash-content {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: $spacing-md;
-  animation: splash-enter 0.6s ease-out;
-}
-
-@keyframes splash-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 .splash-logo {

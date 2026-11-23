@@ -68,19 +68,19 @@
       border-radius: var(--app-radius-md);
     }
 
-    [class*='summaryCardChart'] {
+    [data-metric-summary-chart='true'] {
       display: none;
     }
 
-    [class*='summaryMeta'] {
+    [data-metric-summary-meta='true'] {
       display: none;
     }
 
-    [class*='summaryCardHeader'] {
+    [data-metric-summary-header='true'] {
       gap: 4px;
     }
 
-    [class*='summaryIcon'] {
+    [data-metric-summary-icon='true'] {
       width: 20px;
       height: 20px;
       flex: 0 0 20px;
@@ -92,16 +92,16 @@
       }
     }
 
-    [class*='summaryLabel'] {
+    [data-metric-summary-label='true'] {
       font-size: 10.5px;
       line-height: 1.2;
     }
 
-    [class*='summaryCardBody'] {
+    [data-metric-summary-body='true'] {
       margin-top: 2px;
     }
 
-    [class*='summaryValue'] {
+    [data-metric-summary-value='true'] {
       font-size: 18px;
       line-height: 1.15;
     }
@@ -121,19 +121,19 @@
       border-radius: var(--app-radius-md);
     }
 
-    [class*='summaryCardChart'] {
+    [data-metric-summary-chart='true'] {
       display: none;
     }
 
-    [class*='summaryMeta'] {
+    [data-metric-summary-meta='true'] {
       display: none;
     }
 
-    [class*='summaryCardHeader'] {
+    [data-metric-summary-header='true'] {
       gap: 4px;
     }
 
-    [class*='summaryIcon'] {
+    [data-metric-summary-icon='true'] {
       width: 20px;
       height: 20px;
       flex: 0 0 20px;
@@ -145,19 +145,25 @@
       }
     }
 
-    [class*='summaryLabel'] {
+    [data-metric-summary-label='true'] {
       font-size: 10.5px;
       line-height: 1.2;
     }
 
-    [class*='summaryCardBody'] {
+    [data-metric-summary-body='true'] {
       margin-top: 2px;
     }
 
-    [class*='summaryValue'] {
+    [data-metric-summary-value='true'] {
       font-size: 18px;
       line-height: 1.15;
     }
+  }
+}
+
+@media (max-width: 359px) {
+  .metricsSection .metricsGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -353,8 +359,8 @@
   display: grid;
   grid-template-columns:
     minmax(140px, 1.1fr)
-    76px
-    96px
+    82px
+    114px
     minmax(124px, 0.3fr)
     minmax(160px, 0.35fr)
     minmax(280px, 3fr)
@@ -378,6 +384,7 @@
     min-width: 0;
     padding: 0;
     line-height: 1.25;
+    white-space: nowrap;
   }
 
   > span:nth-child(2),
@@ -1226,8 +1233,8 @@
   .accountCard {
     grid-template-columns:
       minmax(150px, 1.1fr)
-      70px
-      96px
+      82px
+      114px
       minmax(112px, 0.3fr)
       minmax(178px, 0.35fr)
       minmax(300px, 3fr)
@@ -1251,8 +1258,8 @@
   .accountCard {
     grid-template-columns:
       minmax(180px, 1.3fr)
-      80px
-      96px
+      86px
+      114px
       minmax(124px, 0.3fr)
       minmax(186px, 0.35fr)
       minmax(380px, 3fr)
@@ -2527,6 +2534,8 @@
   font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .statusBadgeButton {
@@ -6144,32 +6153,26 @@
   }
 
   .tabs {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: inline-flex;
     width: 100%;
-    overflow: visible;
-    padding-bottom: 4px;
-  }
+    max-width: 100%;
+    overflow-x: auto;
+    padding-bottom: 0;
 
-  .tabs :global([role='tab']) {
-    min-width: 0;
-    padding-inline: 8px;
-    white-space: normal;
-  }
-
-  .tabs :global([role='tab']:last-child:nth-child(odd)) {
-    grid-column: 1 / -1;
-  }
-
-  .tabLabel {
-    gap: 4px;
-    width: 100%;
-
-    > span {
+    :global([role='tab']) {
+      flex: 1 0 auto;
+      width: auto;
       min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      padding-inline: 10px;
+      font-size: 12px;
       white-space: nowrap;
+
+      > span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
     }
   }
 
@@ -6289,18 +6292,36 @@
     }
   }
 
+  .toolbar {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .searchField {
+    grid-column: 1 / -1;
+  }
+
   .toolbar > .filterField {
     display: none;
   }
 
   .mobileToolbarActions {
-    display: grid;
-    grid-template-columns: minmax(118px, auto) minmax(0, 1fr);
+    display: flex;
     align-items: center;
-    gap: 8px;
+    grid-column: 1;
     min-width: 0;
   }
 
+  .mobileFilterSummary {
+    display: none;
+  }
+
+  .toolbarRightActions {
+    grid-column: 2;
+    justify-self: end;
+    width: 100%;
+    min-width: 0;
+  }
   .batchBar,
   .panelHeader {
     align-items: stretch;
@@ -6442,10 +6463,6 @@
       grid-column: 1 / -1;
       margin-left: 46px;
     }
-  }
-
-  .searchField {
-    grid-column: 1;
   }
 
   .batchBarIdle {

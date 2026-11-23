@@ -2,74 +2,8 @@
   position: fixed;
   inset: 0;
   z-index: 0;
-  width: 100%;
-  height: 100%;
   overflow: hidden;
   pointer-events: none;
   background-color: var(--app-bg);
-  background-image: var(--app-bg-gradient);
-}
-
-.app-background__shape {
-  position: absolute;
-  filter: blur(var(--app-bg-blob-blur));
-  opacity: var(--app-bg-blob-1-opacity);
-  animation: app-float 20s infinite ease-in-out alternate;
-}
-
-.app-background__shape-1 {
-  top: -10%;
-  right: -10%;
-  width: 600px;
-  height: 600px;
-  opacity: var(--app-bg-blob-1-opacity);
-}
-
-.app-background__shape-2 {
-  bottom: -10%;
-  left: -10%;
-  width: 500px;
-  height: 500px;
-  opacity: var(--app-bg-blob-2-opacity);
-  animation-delay: -5s;
-}
-
-@keyframes app-float {
-  0% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-
-  50% {
-    transform: translate(30px, 20px) rotate(10deg);
-  }
-
-  100% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-}
-
-[data-visual-effects='reduced'] .app-background__shape {
-  display: none;
-  filter: none;
-  animation: none;
-}
-
-@media (prefers-reduced-motion: reduce), (prefers-reduced-transparency: reduce) {
-  .app-background__shape {
-    display: none;
-    filter: none;
-    animation: none;
-  }
-}
-
-@media (max-width: 768px) {
-  .app-background__shape-1 {
-    width: 420px;
-    height: 420px;
-  }
-
-  .app-background__shape-2 {
-    width: 360px;
-    height: 360px;
-  }
+  background-image: var(--app-bg-ambient-image);
 }

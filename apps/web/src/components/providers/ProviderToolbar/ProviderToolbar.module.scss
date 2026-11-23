@@ -604,3 +604,36 @@ $toolbar-control-height: var(--control-height-sm);
     box-shadow: none;
   }
 }
+
+@media (max-width: 560px) {
+  .controls {
+    gap: 8px;
+  }
+
+  .searchBox {
+    flex: 1 1 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .filterGroup {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-left: 0;
+  }
+
+  .modelMultiSelectWrapper,
+  .modelFilterControl {
+    width: 100%;
+  }
+
+  .sortControls {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .sortTrigger {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}

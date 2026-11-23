@@ -121,7 +121,8 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   display: flex;
   flex-direction: column;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   border-radius: var(--app-radius-lg);
 }
 
@@ -144,7 +145,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   grid-template-columns: $plugin-table-columns;
   gap: 12px;
   align-items: center;
-  min-width: 0;
+  min-width: 960px;
 }
 
 .tableHeader {
@@ -153,6 +154,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .row {
@@ -550,6 +552,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   }
 
   .row {
+    min-width: 0;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       'plugin toggle'

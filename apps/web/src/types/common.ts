@@ -17,6 +17,7 @@ export interface Notification {
   message: string;
   type: NotificationType;
   duration?: number;
+  count?: number;
   /**
    * Rendered with the live translator while the toast is on screen, so a message
    * built from translation keys follows a language switch. `message` stays the

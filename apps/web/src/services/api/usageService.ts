@@ -376,6 +376,31 @@ export interface UsageArchiveList {
   next_cursor?: string;
 }
 
+export interface UsageMaintenanceLock {
+  run_id: string;
+  operation: string;
+  acquired_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface UsageMaintenanceStorage {
+  page_size: number;
+  page_count: number;
+  freelist_count: number;
+  reclaimable_bytes: number;
+  database_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  total_bytes: number;
+}
+
+export interface UsageMaintenanceCoverage {
+  status: string;
+  watermark_event_id: number;
+  target_event_id: number;
+  complete: boolean;
+}
+
 export interface UsageMaintenanceStatus {
   raw_event_count: number;
   raw_min_timestamp_ms: number;
@@ -383,10 +408,22 @@ export interface UsageMaintenanceStatus {
   raw_archived_event_count: number;
   raw_deleted_event_count: number;
   active_run?: UsageArchiveRunSummary;
-  active_lock?: {
-    run_id: string;
-    operation: string;
-    acquired_at_ms: number;
+  active_lock?: UsageMaintenanceLock;
+  migration?: {
+    name: string;
+    status: string;
+    last_event_id: number;
+    target_event_id: number;
+    processed_rows: number;
+    changed_rows: number;
+    updated_at_ms: number;
+  };
+  hourly_aggregate?: {
+    name: string;
+    schema_version: number;
+    status: string;
+    coverage_event_id: number;
+    target_event_id: number;
     updated_at_ms: number;
   };
   readiness: {
@@ -394,6 +431,9 @@ export interface UsageMaintenanceStatus {
     hourly_aggregate_ready: boolean;
     archive_delete_enabled: boolean;
   };
+  migration_coverage?: UsageMaintenanceCoverage;
+  hourly_aggregate_coverage?: UsageMaintenanceCoverage;
+  storage?: UsageMaintenanceStorage;
   compact_requires_stopped_server: boolean;
 }
 
@@ -638,6 +678,24 @@ export interface UsageImportSession {
   retryable?: boolean;
   error?: string;
   result?: UsageImportResponse;
+}
+
+export interface UsageImportSessionListOptions {
+  status?: UsageImportSessionStatus;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface UsageImportSessionList {
+  sessions: UsageImportSession[];
+  total: number;
+  status_counts?: Partial<Record<UsageImportSessionStatus, number>>;
+  next_cursor?: string;
+  active_sessions: number;
+  max_sessions: number;
+  chunk_size_bytes: number;
+  disk_quota_bytes: number;
+  ttl_seconds: number;
 }
 
 export interface UsageExportResponse {
@@ -2071,7 +2129,8 @@ export const usageServiceApi = {
 
   getMaintenanceStatus: async (
     base: string,
-    managementKey?: string
+    managementKey?: string,
+    signal?: AbortSignal
   ): Promise<UsageMaintenanceStatus> => {
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageMaintenanceStatus>(
@@ -2079,6 +2138,7 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -2088,7 +2148,8 @@ export const usageServiceApi = {
   listArchives: async (
     base: string,
     managementKey?: string,
-    params: { limit?: number; status?: string } = {}
+    params: { limit?: number; status?: string; mode?: string; cursor?: string } = {},
+    signal?: AbortSignal
   ): Promise<UsageArchiveList> => {
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageArchiveList>(
@@ -2097,6 +2158,7 @@ export const usageServiceApi = {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
           params,
+          signal,
         }
       );
       return response.data;
@@ -2106,7 +2168,8 @@ export const usageServiceApi = {
   previewArchive: async (
     base: string,
     managementKey: string | undefined,
-    cutoffTimestampMs: number
+    cutoffTimestampMs: number,
+    signal?: AbortSignal
   ): Promise<UsageArchivePreview> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchivePreview>(
@@ -2115,6 +2178,7 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -2124,7 +2188,8 @@ export const usageServiceApi = {
   createArchive: async (
     base: string,
     managementKey: string | undefined,
-    cutoffTimestampMs: number
+    cutoffTimestampMs: number,
+    signal?: AbortSignal
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchiveStatusSummary>(
@@ -2133,6 +2198,7 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -2142,7 +2208,8 @@ export const usageServiceApi = {
   getArchiveStatus: async (
     base: string,
     managementKey: string | undefined,
-    id: string
+    id: string,
+    signal?: AbortSignal
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageArchiveStatusSummary>(
@@ -2150,6 +2217,7 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -2160,7 +2228,8 @@ export const usageServiceApi = {
     base: string,
     managementKey: string | undefined,
     id: string,
-    wait = true
+    wait = true,
+    signal?: AbortSignal
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchiveStatusSummary>(
@@ -2170,6 +2239,7 @@ export const usageServiceApi = {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
           params: { wait },
+          signal,
         }
       );
       return response.data;
@@ -2180,7 +2250,8 @@ export const usageServiceApi = {
     base: string,
     managementKey: string | undefined,
     id: string,
-    wait = true
+    wait = true,
+    signal?: AbortSignal
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchiveStatusSummary>(
@@ -2190,6 +2261,7 @@ export const usageServiceApi = {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
           params: { wait },
+          signal,
         }
       );
       return response.data;
@@ -2200,16 +2272,19 @@ export const usageServiceApi = {
     base: string,
     managementKey: string | undefined,
     id: string,
-    wait = true
+    wait = true,
+    signal?: AbortSignal,
+    expectedStage?: 'archiving' | 'verifying' | 'deleting'
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchiveStatusSummary>(
         buildUrl(base, `/v0/management/usage/archives/${encodeURIComponent(id)}/resume`),
-        undefined,
+        expectedStage ? { expected_stage: expectedStage } : undefined,
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
           params: { wait },
+          signal,
         }
       );
       return response.data;
@@ -2219,7 +2294,8 @@ export const usageServiceApi = {
   cancelArchive: async (
     base: string,
     managementKey: string | undefined,
-    id: string
+    id: string,
+    signal?: AbortSignal
   ): Promise<UsageArchiveStatusSummary> => {
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageArchiveStatusSummary>(
@@ -2228,6 +2304,7 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;
@@ -2721,6 +2798,30 @@ export const usageServiceApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
+  listUsageImportSessions: async (
+    base: string,
+    managementKey?: string,
+    options: UsageImportSessionListOptions = {},
+    signal?: AbortSignal
+  ): Promise<UsageImportSessionList> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageImportSessionList>(
+        buildUrl(base, '/v0/management/usage/import-sessions'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params: {
+            ...(options.status ? { status: options.status } : {}),
+            limit: options.limit ?? 20,
+            ...(options.cursor ? { cursor: options.cursor } : {}),
+          },
           signal,
         }
       );

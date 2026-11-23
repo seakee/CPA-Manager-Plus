@@ -104,7 +104,6 @@
   border-radius: var(--app-radius-lg);
   box-shadow: var(--app-specular-highlight);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   overflow: hidden;
 }
 
@@ -316,6 +315,10 @@
   .upgrade-steps li[data-state='current'] .upgrade-step-index {
     animation: none;
   }
+}
+
+[data-visual-effects='reduced'] .upgrade-steps li[data-state='current'] .upgrade-step-index {
+  animation: none;
 }
 
 .upgrade-steps li[data-state='done'] {

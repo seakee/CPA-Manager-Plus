@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
@@ -101,13 +101,25 @@ export function AiProvidersVertexEditPage() {
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const disableControls = connectionStatus !== 'connected';
 
+  const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
+  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
 
-  const [configs, setConfigs] = useState<ProviderKeyConfig[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [configs, setConfigs] = useState<ProviderKeyConfig[]>(() => config?.vertexApiKeys ?? []);
+  const [loading, setLoading] = useState(
+    () =>
+      !(
+        isCacheValid('vertex-api-key') ||
+        isCacheValid() ||
+        Array.isArray(config?.vertexApiKeys)
+      )
+  );
   const [saving, setSaving] = useState(false);
+  const isCacheValidRef = useRef(isCacheValid);
+  isCacheValidRef.current = isCacheValid;
+  const hasCachedVertexConfigsRef = useRef(Array.isArray(config?.vertexApiKeys));
   const [error, setError] = useState('');
   const [form, setForm] = useState<VertexFormState>(() => buildEmptyForm());
   const [baseline, setBaseline] = useState(() => buildVertexBaseline(buildEmptyForm()));
@@ -151,7 +163,13 @@ export function AiProvidersVertexEditPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const hasValidCache =
+      isCacheValidRef.current('vertex-api-key') ||
+      isCacheValidRef.current() ||
+      hasCachedVertexConfigsRef.current;
+    if (!hasValidCache) {
+      setLoading(true);
+    }
     setError('');
 
     Promise.all([fetchConfig('vertex-api-key'), providersApi.getVertexConfigs()])
@@ -181,7 +199,6 @@ export function AiProvidersVertexEditPage() {
       cancelled = true;
     };
   }, [clearCache, fetchConfig, t, updateConfigValue]);
-
   useEffect(() => {
     if (loading) return;
 

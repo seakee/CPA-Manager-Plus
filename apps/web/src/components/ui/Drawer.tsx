@@ -30,6 +30,8 @@ interface DrawerProps {
   closeDisabled?: boolean;
 }
 
+type DrawerPhase = 'closed' | 'entering' | 'closing';
+
 const CLOSE_ANIMATION_DURATION = 280;
 
 let activeDrawerCount = 0;
@@ -47,8 +49,8 @@ const lockScroll = () => {
 };
 
 const unlockScroll = () => {
-  if (typeof document === 'undefined') return;
-  activeDrawerCount = Math.max(0, activeDrawerCount - 1);
+  if (typeof document === 'undefined' || activeDrawerCount === 0) return;
+  activeDrawerCount -= 1;
   if (activeDrawerCount === 0) {
     document.body.style.overflow = drawerScrollSnapshot.bodyOverflow;
     document.documentElement.style.overflow = drawerScrollSnapshot.htmlOverflow;
@@ -71,31 +73,40 @@ export function Drawer({
   const { t } = useTranslation();
   const titleId = useId();
   const resolvedCloseLabel = closeLabel || t('common.close');
-  const [isVisible, setIsVisible] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
+  const [phase, setPhase] = useState<DrawerPhase>('closed');
+  const phaseRef = useRef<DrawerPhase>(phase);
+  phaseRef.current = phase;
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeRequestPendingRef = useRef(false);
   const closeRequestTokenRef = useRef(0);
+  const internalCloseCompletedRef = useRef(false);
   const previousOpenRef = useRef(open);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const onBeforeCloseRef = useRef(onBeforeClose);
+  onBeforeCloseRef.current = onBeforeClose;
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const overlayPointerIdsRef = useRef<Set<number>>(new Set());
 
-  const startClose = useCallback(
-    (notifyParent: boolean) => {
-      if (closeTimerRef.current !== null) return;
-      setIsClosing(true);
-      closeTimerRef.current = globalThis.setTimeout(() => {
-        setIsVisible(false);
-        setIsClosing(false);
-        closeTimerRef.current = null;
-        if (notifyParent) {
-          onClose();
-        }
-      }, CLOSE_ANIMATION_DURATION);
-    },
-    [onClose]
-  );
+  const startClose = useCallback((notifyParent: boolean) => {
+    if (closeTimerRef.current !== null || phaseRef.current === 'closed') return;
+    setPhase('closing');
+    closeTimerRef.current = globalThis.setTimeout(() => {
+      closeTimerRef.current = null;
+      if (notifyParent && openRef.current) {
+        // Keep closing state until parent flips `open` to false so async `onClose`
+        // (such as URL search-param updates) never flashes the drawer back open.
+        internalCloseCompletedRef.current = true;
+        onCloseRef.current();
+      } else {
+        internalCloseCompletedRef.current = false;
+        setPhase('closed');
+      }
+    }, CLOSE_ANIMATION_DURATION);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,16 +119,22 @@ export function Drawer({
     }
 
     if (open) {
+      internalCloseCompletedRef.current = false;
       if (closeTimerRef.current !== null) {
         globalThis.clearTimeout(closeTimerRef.current);
         closeTimerRef.current = null;
       }
       queueMicrotask(() => {
         if (cancelled) return;
-        setIsVisible(true);
-        setIsClosing(false);
+        setPhase('entering');
       });
-    } else if (isVisible) {
+    } else if (internalCloseCompletedRef.current) {
+      internalCloseCompletedRef.current = false;
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setPhase('closed');
+      });
+    } else if (phaseRef.current === 'entering') {
       queueMicrotask(() => {
         if (cancelled) return;
         startClose(false);
@@ -127,7 +144,7 @@ export function Drawer({
     return () => {
       cancelled = true;
     };
-  }, [open, isVisible, startClose]);
+  }, [open, startClose]);
 
   useEffect(() => {
     return () => {
@@ -139,13 +156,21 @@ export function Drawer({
   }, []);
 
   const handleClose = useCallback(async () => {
-    if (closeDisabled || closeTimerRef.current !== null || closeRequestPendingRef.current) return;
+    if (
+      closeDisabled ||
+      closeTimerRef.current !== null ||
+      closeRequestPendingRef.current ||
+      internalCloseCompletedRef.current
+    ) {
+      return;
+    }
 
     closeRequestPendingRef.current = true;
     const requestToken = closeRequestTokenRef.current + 1;
     closeRequestTokenRef.current = requestToken;
     try {
-      const allowed = onBeforeClose ? await onBeforeClose() : true;
+      const guard = onBeforeCloseRef.current;
+      const allowed = guard ? await guard() : true;
       if (closeRequestTokenRef.current !== requestToken || allowed === false) return;
       startClose(true);
     } catch {
@@ -155,7 +180,7 @@ export function Drawer({
         closeRequestPendingRef.current = false;
       }
     }
-  }, [closeDisabled, onBeforeClose, startClose]);
+  }, [closeDisabled, startClose]);
 
   // 按 pointerId 配对：仅当同一指针在遮罩上按下且在遮罩上释放时才关闭。
   // 避免「面板内拖选到遮罩释放」与多指针交错状态互相覆盖。
@@ -182,7 +207,9 @@ export function Drawer({
     overlayPointerIdsRef.current.delete(event.pointerId);
   }, []);
 
-  const shouldLockScroll = open || isVisible;
+  const isVisible = phase !== 'closed';
+  const isClosing = phase === 'closing';
+  const shouldLockScroll = (open && !isClosing) || (isVisible && !internalCloseCompletedRef.current);
 
   useEffect(() => {
     if (!shouldLockScroll) return;
@@ -223,7 +250,7 @@ export function Drawer({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [handleClose, open]);
 
-  if (!open && !isVisible) return null;
+  if (!isVisible) return null;
 
   const overlayClass = [
     styles.overlay,

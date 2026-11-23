@@ -16,7 +16,6 @@ export function FreshManagedKeysPage({
   onPending,
   visible = true,
   onRebind,
-  externalUsage = false,
   reloadToken = 0,
 }: {
   client: ReturnType<typeof createPublicApiClient>;
@@ -25,7 +24,6 @@ export function FreshManagedKeysPage({
   onPending: (pending: boolean) => void;
   visible?: boolean;
   onRebind?: () => void;
-  externalUsage?: boolean;
   reloadToken?: number;
 }) {
   return (
@@ -39,7 +37,6 @@ export function FreshManagedKeysPage({
         storedBadge={w('stored')}
         pageDescription={w('keysHelp')}
         onRebind={onRebind}
-        externalUsage={externalUsage}
         reloadToken={reloadToken}
       />
     </div>

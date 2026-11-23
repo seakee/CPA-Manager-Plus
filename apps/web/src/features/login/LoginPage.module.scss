@@ -39,7 +39,6 @@
   color: var(--text-primary);
   box-shadow: var(--glass-shadow);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: inline-grid;
   place-items: center;
   cursor: pointer;
@@ -74,7 +73,6 @@
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -149,7 +147,6 @@
   background: var(--glass-bg);
   box-shadow: var(--glass-shadow);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   animation: cardEnter 0.48s cubic-bezier(0.16, 1, 0.3, 1);
 
   @media (max-width: $breakpoint-mobile) {
@@ -546,77 +543,4 @@
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-@keyframes splashEnter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes splashLoading {
-  0% {
-    transform: scaleX(0);
-    transform-origin: left;
-  }
-  50% {
-    transform: scaleX(1);
-    transform-origin: left;
-  }
-  50.01% {
-    transform-origin: right;
-  }
-  100% {
-    transform: scaleX(0);
-    transform-origin: right;
-  }
-}
-
-.splashContent {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: $spacing-md;
-  animation: splashEnter 0.6s ease-out;
-}
-
-.splashLogo {
-  width: 100px;
-  height: 102px;
-  display: block;
-  object-fit: contain;
-}
-
-.splashLogoDark {
-  display: none;
-}
-
-[data-theme='dark'] {
-  .splashLogoLight {
-    display: none;
-  }
-
-  .splashLogoDark {
-    display: block;
-  }
-}
-
-.splashLoader {
-  width: 120px;
-  height: 3px;
-  margin-top: $spacing-md;
-  overflow: hidden;
-  border-radius: var(--app-radius-pill);
-  background: var(--border-color);
-}
-
-.splashLoaderBar {
-  width: 100%;
-  height: 100%;
-  border-radius: var(--app-radius-pill);
-  background: var(--primary-gradient);
-  animation: splashLoading 1.2s ease-in-out infinite;
 }

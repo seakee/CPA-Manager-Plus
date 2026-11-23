@@ -32,7 +32,6 @@
   border-radius: var(--app-radius-lg);
   background: var(--floating-surface);
   backdrop-filter: var(--glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
 }

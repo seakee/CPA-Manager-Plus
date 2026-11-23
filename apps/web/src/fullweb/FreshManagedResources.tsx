@@ -102,6 +102,12 @@ export function FreshManagedResources({
   }, [locks.keys, locks.retry]);
 
   const isPluginResourceRoute = route === '/plugin-pages' || route.startsWith('/plugin-pages/');
+  // Avoid stacking a redundant shell-level alert above <PageControlBar> while the
+  // operator is already on the owning workspace (which renders its own in-page
+  // pending banner or recovery modal). Keep beforeunload + logout lock active and
+  // surface the cross-route reminder immediately when navigating to other routes.
+  const showKeysExitBanner = locks.keys && route !== '/api-keys';
+  const showRetryExitBanner = locks.retry && route !== '/config' && route !== '/gateway';
   const bannerNode = !isPluginResourceRoute ? (
     <>
       {rebound && (
@@ -109,9 +115,9 @@ export function FreshManagedResources({
           {rebound}
         </p>
       )}
-      {(locks.keys || locks.retry) && (
+      {(showKeysExitBanner || showRetryExitBanner) && (
         <p className="alert alert-warn" role="status">
-          {t(locks.keys ? 'keysExitBlocked' : 'retryNeedsReconciliation')}
+          {t(showKeysExitBanner ? 'keysExitBlocked' : 'retryNeedsReconciliation')}
         </p>
       )}
     </>
@@ -137,7 +143,6 @@ export function FreshManagedResources({
           onUnauthorized={onUnauthorized}
           onPending={(value) => reportPending('keys', value)}
           onRebind={externalProfile ? () => setRebindOpen(true) : undefined}
-          externalUsage={externalProfile}
           reloadToken={reloadToken}
         />
       </RetainedRoutePanel>

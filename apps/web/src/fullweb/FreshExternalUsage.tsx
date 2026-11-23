@@ -34,6 +34,7 @@ export function FreshExternalUsage({
   onUnauthorized,
   onBlocker,
   reloadToken = 0,
+  embedded = false,
 }: {
   client: PublicApiClient;
   credential: string;
@@ -41,6 +42,8 @@ export function FreshExternalUsage({
   onBlocker?: (code: string | null) => void;
   /** Bumped by the shell after a successful rebind to re-read this panel. */
   reloadToken?: number;
+  /** Renders as an inline subpanel inside the request-monitoring card. */
+  embedded?: boolean;
 }) {
   const [state, setState] = useState<ExternalUsageState | null>(null);
   const [readError, setReadError] = useState('');
@@ -169,31 +172,48 @@ export function FreshExternalUsage({
 
   if (readError) {
     return (
-      <section className="key-notice key-notice-warning" role="alert" data-testid="external-usage">
-        <FullWebIcon name="alert" />
-        <span>{readError}</span>
-        <button
-          className="btn btn-secondary btn-sm"
-          type="button"
-          data-testid="external-usage-reload"
-          onClick={() => void read()}
-        >
-          {x('usageConfirmRetry')}
-        </button>
+      <section
+        className={
+          embedded
+            ? 'fresh-external-usage is-embedded is-error'
+            : 'key-notice key-notice-warning'
+        }
+        role="alert"
+        data-testid="external-usage"
+      >
+        <div className={embedded ? 'key-notice key-notice-warning' : 'fresh-external-usage-error-row'}>
+          <FullWebIcon name="alert" />
+          <span>{readError}</span>
+          <button
+            className="btn btn-secondary btn-sm"
+            type="button"
+            data-testid="external-usage-reload"
+            onClick={() => void read()}
+          >
+            {x('usageConfirmRetry')}
+          </button>
+        </div>
       </section>
     );
   }
   if (!state) {
     return (
-      <section className="key-notice" role="status" data-testid="external-usage">
-        <span>{x('usageTitle')}</span>
+      <section
+        className={embedded ? 'fresh-external-usage is-embedded' : 'card fresh-external-usage'}
+        role="status"
+        data-testid="external-usage"
+      >
+        <p className="key-field-help">{embedded ? x('usageSourceTitle') : x('usageTitle')}</p>
       </section>
     );
   }
   return (
-    <section className="fresh-external-usage" data-testid="external-usage">
+    <section
+      className={embedded ? 'fresh-external-usage is-embedded' : 'card fresh-external-usage'}
+      data-testid="external-usage"
+    >
       <header className="fresh-external-usage-head">
-        <h2>{x('usageTitle')}</h2>
+        {embedded ? <h3>{x('usageSourceTitle')}</h3> : <h2>{x('usageTitle')}</h2>}
         <p className="key-field-help">{x('usageHelp')}</p>
       </header>
       <dl className="fresh-external-usage-facts">
@@ -206,7 +226,7 @@ export function FreshExternalUsage({
           <dd>{collectorStateText(state.collector)}</dd>
         </div>
         <div data-testid="external-usage-started">
-          <dt>{x('usageCollectionStarted')}</dt>
+          <dt>{x('usageCollectionWindow')}</dt>
           <dd>{collectionStartedText(state)}</dd>
         </div>
         <div data-testid="external-usage-version">
@@ -217,13 +237,33 @@ export function FreshExternalUsage({
             {state.cpaVersion.writeBlocked ? x('usageWritesBlocked') : x('usageWritesAllowed')}
           </dd>
         </div>
-        {state.blockedReason && (
-          <div data-testid="external-usage-blocked">
-            <dt>{x('usageBlockedReason')}</dt>
-            <dd>{blockedReasonText(state.blockedReason)}</dd>
-          </div>
-        )}
       </dl>
+      {state.blockedReason && (
+        <div
+          className={
+            state.blockedReason === 'usage_monitoring_disabled'
+              ? 'fresh-external-usage-blocked is-paused'
+              : 'fresh-external-usage-blocked'
+          }
+          data-testid="external-usage-blocked"
+        >
+          <FullWebIcon
+            name={state.blockedReason === 'usage_monitoring_disabled' ? 'info' : 'alert'}
+            size={14}
+          />
+          <span>
+            <strong>
+              {x(
+                state.blockedReason === 'usage_monitoring_disabled'
+                  ? 'usageMonitoringPausedTitle'
+                  : 'usageBlockedReason'
+              )}
+            </strong>
+            {' · '}
+            {blockedReasonText(state.blockedReason)}
+          </span>
+        </div>
+      )}
       {notice && (
         <p role="status" data-testid="external-usage-notice">
           {notice}

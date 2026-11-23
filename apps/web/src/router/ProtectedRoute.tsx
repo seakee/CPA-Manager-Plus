@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores';
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { SplashScreen } from '@/components/common/SplashScreen';
 import { isUsageServiceId, usageServiceApi } from '@/services/api/usageService';
 import { detectApiBaseFromLocation } from '@/utils/connection';
 
@@ -48,11 +48,7 @@ export function ProtectedRoute({ children }: { children: ReactElement }) {
   }, [apiBase, isAuthenticated, managementKey, navigate, restoreSession]);
 
   if (checking) {
-    return (
-      <div className="main-content">
-        <LoadingSpinner />
-      </div>
-    );
+    return <SplashScreen />;
   }
 
   if (!isAuthenticated) {

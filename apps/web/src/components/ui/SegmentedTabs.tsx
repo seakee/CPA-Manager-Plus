@@ -1,7 +1,9 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
+  useState,
   type ComponentType,
   type KeyboardEvent,
   type MouseEvent,
@@ -70,7 +72,37 @@ export function SegmentedTabs<Id extends string>({
   disabled = false,
   linkComponent: LinkComponent,
 }: SegmentedTabsProps<Id>) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Map<Id, HTMLElement | null>>(new Map());
+  const [scrollFade, setScrollFade] = useState<{ left: boolean; right: boolean }>({
+    left: false,
+    right: false,
+  });
+  const updateScrollFade = useCallback(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    const nextLeft = el.scrollLeft > 2;
+    const nextRight = maxScrollLeft > 2 && el.scrollLeft < maxScrollLeft - 2;
+    setScrollFade((prev) =>
+      prev.left === nextLeft && prev.right === nextRight
+        ? prev
+        : { left: nextLeft, right: nextRight }
+    );
+  }, []);
+  useEffect(() => {
+    updateScrollFade();
+    const el = rootRef.current;
+    if (!el || typeof window === 'undefined') return;
+    window.addEventListener('resize', updateScrollFade);
+    const observer =
+      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollFade) : null;
+    observer?.observe(el);
+    return () => {
+      window.removeEventListener('resize', updateScrollFade);
+      observer?.disconnect();
+    };
+  }, [items, activeTab, updateScrollFade]);
   const enabledItems = useMemo(
     () => items.filter((item) => !disabled && !item.disabled),
     [disabled, items]
@@ -133,11 +165,15 @@ export function SegmentedTabs<Id extends string>({
 
   return (
     <div
+      ref={rootRef}
       className={rootClassName}
       role={isTablist ? 'tablist' : 'group'}
       aria-label={ariaLabel}
       data-variant={variant}
       data-size={size}
+      data-scroll-left={scrollFade.left ? 'true' : undefined}
+      data-scroll-right={scrollFade.right ? 'true' : undefined}
+      onScroll={updateScrollFade}
     >
       {items.map((item) => {
         const isActive = item.id === activeTab;

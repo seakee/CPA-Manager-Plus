@@ -80,9 +80,10 @@ const formatPercent = (value: number | undefined, digits = 1) => {
 
 const formatMinuteLabel = (bucketMs: number | undefined, locale: string) => {
   if (!bucketMs) return '--';
-  return new Date(bucketMs).toLocaleTimeString(locale, {
+  const minute = new Date(bucketMs).toLocaleTimeString(locale, {
     minute: '2-digit',
   });
+  return `:${minute.padStart(2, '0')}`;
 };
 
 const buildHealthTitle = (
@@ -275,7 +276,7 @@ export function TrafficOverviewCard({
         Array.from({ length: 24 }, (_, hourIndex) => healthPoints[hourIndex * healthRowsPerHour + minuteIndex])
       )
     : [];
-  const hourLabelIndexes = [0, 6, 12, 18, 23];
+  const hourLabelIndexes = [0, 4, 8, 12, 16, 20];
   const trafficTrendOption = useMemo(
     () =>
       buildTrafficTrendOption({
@@ -305,19 +306,21 @@ export function TrafficOverviewCard({
             </span>
           </div>
         </div>
-        <div className={styles.trafficChart}>
-          <div className={styles.chartViewport}>
-            {hasData ? (
-              <EChartsView
-                option={trafficTrendOption}
-                className={styles.echartsCanvas}
-                ariaLabel={t('dashboard.traffic_trend_today')}
-              />
-            ) : null}
-            {!hasData && !loading && (
-              <div className={styles.empty}>{t('dashboard.no_traffic_data')}</div>
-            )}
-            {loading && !hasData && <div className={styles.empty}>...</div>}
+        <div className={styles.cardBody}>
+          <div className={styles.trafficChart}>
+            <div className={styles.chartViewport}>
+              {hasData ? (
+                <EChartsView
+                  option={trafficTrendOption}
+                  className={styles.echartsCanvas}
+                  ariaLabel={t('dashboard.traffic_trend_today')}
+                />
+              ) : null}
+              {!hasData && !loading && (
+                <div className={styles.empty}>{t('dashboard.no_traffic_data')}</div>
+              )}
+              {loading && !hasData && <div className={styles.empty}>...</div>}
+            </div>
           </div>
         </div>
       </section>
@@ -325,12 +328,8 @@ export function TrafficOverviewCard({
       {/* 2. 请求健康时间线 */}
       <section className={`${styles.chartCard} ${styles.healthTimelineCard}`}>
         <div className={`${styles.cardHeader} ${styles.healthHeader}`}>
-          <div className={styles.healthTitle}>
-            <h3>{t('dashboard.request_health_timeline')}</h3>
-            <p>{t('dashboard.request_health_timeline_desc')}</p>
-          </div>
+          <h3>{t('dashboard.request_health_timeline')}</h3>
           <div className={styles.healthSummary}>
-            <strong>{todayRequestHealthTimeline ? formatPercent(todayRequestHealthTimeline.success_rate) : '-'}</strong>
             <div className={styles.healthCounts}>
               <span>
                 <i className={styles.healthGood} />{' '}
@@ -341,58 +340,62 @@ export function TrafficOverviewCard({
                 {formatCompactNumber(todayRequestHealthTimeline?.failure_calls ?? 0)}
               </span>
             </div>
+            <strong>{todayRequestHealthTimeline ? formatPercent(todayRequestHealthTimeline.success_rate) : '-'}</strong>
           </div>
         </div>
-        <div className={styles.healthMatrix}>
-          {healthRows.length > 0 ? (
-            <div className={styles.healthHourAxis}>
-              {hourLabelIndexes.map((index) => {
-                const point = healthRows[0]?.[index];
-                return (
-                  <span key={index} style={{ gridColumn: index + 2 }}>
-                    {point ? formatHour(point.bucket_ms, i18n.language).slice(0, 2) : '--'}
-                  </span>
-                );
-              })}
-            </div>
-          ) : null}
-          {healthRows.map((row, minuteIndex) => (
-            <div key={minuteIndex} className={styles.healthDayRow}>
-              <span className={styles.healthDayLabel}>
-                {formatMinuteLabel(row[0]?.bucket_ms, i18n.language)}
-              </span>
-              <div className={styles.healthDayCells}>
-                {row.map((point, hourIndex) =>
-                  point ? (
-                    <div
-                      key={point.bucket_ms}
-                      className={`${styles.healthCell} ${styles[healthToneClassMap[point.tone] ?? 'healthEmpty']}`}
-                      style={{ '--cell-intensity': point.intensity } as HealthCellStyle}
-                      title={buildHealthTitle(point, i18n.language, t)}
-                    />
-                  ) : (
-                    <div
-                      key={`${minuteIndex}-${hourIndex}`}
-                      className={`${styles.healthCell} ${styles.healthFuture}`}
-                    />
-                  )
-                )}
+        <div className={styles.cardBody}>
+          <p className={styles.healthDesc}>{t('dashboard.request_health_timeline_desc')}</p>
+          <div className={styles.healthMatrix}>
+            {healthRows.length > 0 ? (
+              <div className={styles.healthHourAxis}>
+                {hourLabelIndexes.map((index) => {
+                  const point = healthRows[0]?.[index];
+                  return (
+                    <span key={index} style={{ gridColumn: index + 2 }}>
+                      {point ? formatHour(point.bucket_ms, i18n.language).slice(0, 2) : '--'}
+                    </span>
+                  );
+                })}
               </div>
-            </div>
-          ))}
-          {healthPoints.length === 0 && !loading ? (
-            <div className={styles.healthEmptyState}>{t('dashboard.request_health_no_data')}</div>
-          ) : null}
-          {healthPoints.length === 0 && loading ? (
-            <div className={styles.healthEmptyState}>...</div>
-          ) : null}
-        </div>
-        <div className={styles.healthLegend}>
-          <span><i className={styles.healthEmpty} /> {t('dashboard.request_health_no_request')}</span>
-          <span><i className={styles.healthGood} /> {t('dashboard.request_health_success')}</span>
-          <span><i className={styles.healthWarn} /> {t('dashboard.request_health_warning')}</span>
-          <span><i className={styles.healthBad} /> {t('dashboard.request_health_failure')}</span>
-          <span><i className={styles.healthFuture} /> {t('dashboard.request_health_future')}</span>
+            ) : null}
+            {healthRows.map((row, minuteIndex) => (
+              <div key={minuteIndex} className={styles.healthDayRow}>
+                <span className={styles.healthDayLabel}>
+                  {formatMinuteLabel(row[0]?.bucket_ms, i18n.language)}
+                </span>
+                <div className={styles.healthDayCells}>
+                  {row.map((point, hourIndex) =>
+                    point ? (
+                      <div
+                        key={point.bucket_ms}
+                        className={`${styles.healthCell} ${styles[healthToneClassMap[point.tone] ?? 'healthEmpty']}`}
+                        style={{ '--cell-intensity': point.intensity } as HealthCellStyle}
+                        title={buildHealthTitle(point, i18n.language, t)}
+                      />
+                    ) : (
+                      <div
+                        key={`${minuteIndex}-${hourIndex}`}
+                        className={`${styles.healthCell} ${styles.healthFuture}`}
+                      />
+                    )
+                  )}
+                </div>
+              </div>
+            ))}
+            {healthPoints.length === 0 && !loading ? (
+              <div className={styles.healthEmptyState}>{t('dashboard.request_health_no_data')}</div>
+            ) : null}
+            {healthPoints.length === 0 && loading ? (
+              <div className={styles.healthEmptyState}>...</div>
+            ) : null}
+          </div>
+          <div className={styles.healthLegend}>
+            <span><i className={styles.healthEmpty} /> {t('dashboard.request_health_no_request')}</span>
+            <span><i className={styles.healthGood} /> {t('dashboard.request_health_success')}</span>
+            <span><i className={styles.healthWarn} /> {t('dashboard.request_health_warning')}</span>
+            <span><i className={styles.healthBad} /> {t('dashboard.request_health_failure')}</span>
+            <span><i className={styles.healthFuture} /> {t('dashboard.request_health_future')}</span>
+          </div>
         </div>
       </section>
 
@@ -401,7 +404,8 @@ export function TrafficOverviewCard({
         <div className={styles.cardHeader}>
           <h3>{t('dashboard.token_mix_today')}</h3>
         </div>
-        <div className={styles.tokenRankSection}>
+        <div className={styles.cardBody}>
+          <div className={styles.tokenRankSection}>
           <div className={styles.tokenSummary}>
             <span>{t('dashboard.total_tokens')}</span>
             <strong>{loading && !hasTokenMixData ? '...' : formatCompactNumber(displayTotalTokens)}</strong>
@@ -454,6 +458,7 @@ export function TrafficOverviewCard({
               {loading ? '...' : t('dashboard.no_token_mix_data')}
             </div>
           )}
+          </div>
         </div>
       </section>
     </div>

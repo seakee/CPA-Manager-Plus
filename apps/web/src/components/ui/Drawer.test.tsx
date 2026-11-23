@@ -383,4 +383,43 @@ describe('Drawer overlay close guard', () => {
       addSpy.mockRestore();
     }
   });
+
+  it('does not flash back to entering when onClose updates open asynchronously after overlay close', async () => {
+    const onClose = vi.fn(() => {
+      globalThis.setTimeout(() => {
+        renderer?.update(
+          <Drawer open={false} title="Test drawer" onClose={onClose}>
+            <input aria-label="field" />
+          </Drawer>
+        );
+      }, 16);
+    });
+
+    const mounted = await mountDrawer(onClose);
+    const overlay = findOverlay(mounted);
+
+    await act(async () => {
+      overlay.props.onPointerDown(createPointerEvent(overlay, overlay, { pointerId: 1 }));
+      overlay.props.onPointerUp(createPointerEvent(overlay, overlay, { pointerId: 1 }));
+    });
+
+    expect(findOverlay(mounted).props.className).toContain('overlayClosing');
+
+    await act(async () => {
+      vi.advanceTimersByTime(CLOSE_ANIMATION_DURATION);
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Before async parent update flips open=false, drawer must stay in closing state rather than flashing entering.
+    expect(findOverlay(mounted).props.className).toContain('overlayClosing');
+    expect(findOverlay(mounted).props.className).not.toContain('overlayEntering');
+
+    await act(async () => {
+      vi.advanceTimersByTime(16);
+      await Promise.resolve();
+    });
+
+    // Once open becomes false, drawer unmounts immediately without re-running close animation.
+    expect(mounted.root.findAllByProps({ role: 'dialog' })).toHaveLength(0);
+  });
 });

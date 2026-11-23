@@ -778,6 +778,7 @@ class DockerContracts(unittest.TestCase):
             with self.subTest(version=version, commit=commit):
                 self.assertEqual(result.returncode == 0, success, result.stderr)
         self.assertIn('RUN VERSION="$VERSION" npm run build', text)
+        self.assertIn('RUN go version -m /out/cpa-manager-plus | grep -F "BuildDate="', text)
 
     def test_every_network_or_build_stage_validates_identity_first(self):
         stages = self.stages((ROOT / "Dockerfile").read_text())
@@ -822,6 +823,7 @@ class DockerContracts(unittest.TestCase):
         block = text.split("  args=(", 1)[1].split("\n  )", 1)[0]
         self.assertIn('--build-arg "SOURCE_COMMIT=$source_sha"', block)
         self.assertIn("--build-arg VERSION=2.0.0-r1candidate", block)
+        self.assertIn('--build-arg "BUILD_DATE=$build_date"', block)
         subprocess.run(["bash", "-n", "bin/release/build-embedded-candidate.sh"], cwd=ROOT, check=True)
 
 if __name__ == "__main__":

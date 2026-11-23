@@ -704,7 +704,7 @@
 // 表头
 .keyTableHeader {
   display: grid;
-  grid-template-columns: 46px 56px minmax(200px, 1.4fr) 110px minmax(180px, 1.1fr) 180px;
+  grid-template-columns: 46px 68px minmax(200px, 1.4fr) 110px minmax(180px, 1.1fr) 180px;
   gap: $spacing-sm;
   min-width: 900px;
   padding: 10px $spacing-md;
@@ -718,12 +718,13 @@
   text-transform: none;
   align-items: center;
   text-align: center;
+  white-space: nowrap;
 }
 
 // 数据行
 .keyTableRow {
   display: grid;
-  grid-template-columns: 46px 56px minmax(200px, 1.4fr) 110px minmax(180px, 1.1fr) 180px;
+  grid-template-columns: 46px 68px minmax(200px, 1.4fr) 110px minmax(180px, 1.1fr) 180px;
   gap: $spacing-sm;
   min-width: 900px;
   padding: 10px $spacing-md;

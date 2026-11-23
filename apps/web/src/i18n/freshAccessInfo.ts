@@ -66,7 +66,7 @@ const en = {
   protocolsTitle: 'Protocol endpoints',
   protocolsEmpty: 'No verified protocol endpoints are active yet.',
   baseUrlLabel: 'Base URL',
-  exampleEndpointLabel: 'Example endpoint',
+  exampleEndpointLabel: 'Example',
   copyUrl: 'Copy URL',
   copyExample: 'Copy endpoint',
   copied: 'Copied to clipboard.',
@@ -153,9 +153,9 @@ const zh: typeof en = {
   hintAnthropic: 'Anthropic Messages SDK 基址（使用 x-api-key 请求头）。',
   hintGemini: 'Google Gemini API 基址（使用 x-goog-api-key 请求头）。',
   hintGeneric: '该协议对应的专用接入端点。',
-  headerAuthBearer: 'Authorization: Bearer <你的客户端_KEY>',
-  headerAnthropic: 'x-api-key: <你的客户端_KEY>',
-  headerGemini: 'x-goog-api-key: <你的客户端_KEY>',
+  headerAuthBearer: 'Authorization: Bearer <你的客户端密钥>',
+  headerAnthropic: 'x-api-key: <你的客户端密钥>',
+  headerGemini: 'x-goog-api-key: <你的客户端密钥>',
   protocolTabsLabel: '选择客户端协议',
 };
 
@@ -228,9 +228,9 @@ const tw: typeof en = {
   hintAnthropic: 'Anthropic Messages SDK 基址（使用 x-api-key 標頭）。',
   hintGemini: 'Google Gemini API 基址（使用 x-goog-api-key 標頭）。',
   hintGeneric: '該協議對應的專用接入端點。',
-  headerAuthBearer: 'Authorization: Bearer <你的用戶端_KEY>',
-  headerAnthropic: 'x-api-key: <你的用戶端_KEY>',
-  headerGemini: 'x-goog-api-key: <你的用戶端_KEY>',
+  headerAuthBearer: 'Authorization: Bearer <你的用戶端金鑰>',
+  headerAnthropic: 'x-api-key: <你的用戶端金鑰>',
+  headerGemini: 'x-goog-api-key: <你的用戶端金鑰>',
   protocolTabsLabel: '選擇用戶端協議',
 };
 
