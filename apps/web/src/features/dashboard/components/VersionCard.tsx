@@ -511,25 +511,27 @@ export function VersionCard({
   return (
     <div className={styles.container}>
       <section className={styles.section}>
-        <div className={styles.panelHeader}>
+        <div className={styles.sectionHeader}>
           <h2 className={styles.heading}>{t('dashboard.system_overview')}</h2>
         </div>
-        <div className={styles.systemGrid}>
+        <div className={`${styles.grid} ${styles.systemGrid}`}>
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconSettings size={18} />
-            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
-                <div
-                  className={styles.label}
-                  title={t(
-                    updates.status?.current_version
-                      ? 'manager_updates.server_version'
-                      : 'dashboard.app_version'
-                  )}
-                >
-                  {t('dashboard.app_version')}
+                <div className={styles.labelRow}>
+                  <span className={styles.icon}>
+                    <IconSettings size={14} />
+                  </span>
+                  <div
+                    className={styles.label}
+                    title={t(
+                      updates.status?.current_version
+                        ? 'manager_updates.server_version'
+                        : 'dashboard.app_version'
+                    )}
+                  >
+                    {t('dashboard.app_version')}
+                  </div>
                 </div>
                 {managerUpdateAvailable && (
                   <Link
@@ -573,16 +575,14 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconSatellite size={18} />
-            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
-                <div className={styles.label}>{t('dashboard.api_version')}</div>
-              </div>
-              <div className={styles.valueWrap}>
-                {renderVersionValue(apiVersion || t('dashboard.version_unknown'), apiReleaseUrl)}
-                {renderBadgeValue(apiBadge)}
+                <div className={styles.labelRow}>
+                  <span className={styles.icon}>
+                    <IconSatellite size={14} />
+                  </span>
+                  <div className={styles.label}>{t('dashboard.api_version')}</div>
+                </div>
                 <Button
                   type="button"
                   variant="ghost"
@@ -597,15 +597,21 @@ export function VersionCard({
                   {!checkingApiVersion && <IconRefreshCw size={14} />}
                 </Button>
               </div>
+              <div className={styles.valueWrap}>
+                {renderVersionValue(apiVersion || t('dashboard.version_unknown'), apiReleaseUrl)}
+                {renderBadgeValue(apiBadge)}
+              </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconTimer size={18} />
-            </div>
             <div className={styles.content}>
-              <div className={styles.label}>{t('dashboard.build_time')}</div>
+              <div className={styles.labelRow}>
+                <span className={styles.icon}>
+                  <IconTimer size={14} />
+                </span>
+                <div className={styles.label}>{t('dashboard.build_time')}</div>
+              </div>
               <div className={styles.value} title={buildTimeDisplay}>
                 {buildTimeDisplay}
               </div>
@@ -613,11 +619,13 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}>
-              <IconExternalLink size={18} />
-            </div>
             <div className={styles.content}>
-              <div className={styles.label}>{t('dashboard.cpa_base')}</div>
+              <div className={styles.labelRow}>
+                <span className={styles.icon}>
+                  <IconExternalLink size={14} />
+                </span>
+                <div className={styles.label}>{t('dashboard.cpa_base')}</div>
+              </div>
               <div className={styles.value} title={cpaBase || '-'}>
                 {cpaBase || '-'}
               </div>
@@ -627,24 +635,26 @@ export function VersionCard({
       </section>
 
       <section className={styles.section}>
-        <div className={styles.panelHeader}>
+        <div className={styles.sectionHeader}>
           <h2 className={styles.heading}>{t('dashboard.health_status')}</h2>
           <Link to="/system/runtime" className={styles.headerLink}>
             {t('dashboard.view_details')}
           </Link>
         </div>
-        <div className={styles.healthGrid}>
+        <div className={`${styles.grid} ${styles.healthGrid}`}>
           {healthItems.map((item) => {
             const content = (
-              <>
-                <span className={styles.healthLeft}>
+              <div className={styles.healthContent}>
+                <div className={styles.healthLabel} title={item.label}>
+                  {item.label}
+                </div>
+                <div className={styles.healthStatusRow}>
                   <span className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</span>
-                  <span className={styles.healthLabel}>{item.label}</span>
-                </span>
-                <span className={`${styles.healthValue} ${styles[`${item.tone}Badge`]}`}>
-                  {item.value}
-                </span>
-              </>
+                  <span className={`${styles.healthValue} ${styles[`${item.tone}Text`]}`}>
+                    {item.value}
+                  </span>
+                </div>
+              </div>
             );
 
             return item.to ? (
