@@ -5,6 +5,7 @@ import { formatQuotaResetTime, isValidQuotaResetAtMs } from '@/utils/quota/forma
 import {
   getHeaderSnapshotErrorCode,
   getHeaderSnapshotErrorKind,
+  getHeaderSnapshotQuotaMetadata,
   getHeaderSnapshotReachedWindowKind,
   getHeaderSnapshotRecoverAtMs,
   getHeaderSnapshotSummaryWindowKind,
@@ -364,6 +365,7 @@ const isMainCodexHeaderQuota = (snapshot: UsageHeaderSnapshot | undefined): bool
   }
   return isCodexMainQuotaModelScope(
     resolveCodexUsageQuotaScope({
+      activeLimit: getHeaderSnapshotQuotaMetadata(snapshot)?.active_limit,
       model: snapshot.model,
       analyticsModel: snapshot.analytics_model,
       requestedModel: snapshot.requested_model,

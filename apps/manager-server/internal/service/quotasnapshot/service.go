@@ -531,6 +531,9 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (QueryResponse, e
 				return QueryResponse{}, legacyErr
 			}
 		}
+		for index := range candidates {
+			recoverLegacyCodexImageSnapshot(&candidates[index])
+		}
 		stateByID := make(map[int64]model.AccountQuotaWindowState, len(states))
 		for _, state := range states {
 			stateByID[state.ID] = state
@@ -770,6 +773,23 @@ func legacyCodexQuotaBridgeHasPersonalPlan(
 		planType = candidate
 	}
 	return planType != ""
+}
+
+// recoverLegacyCodexImageSnapshot reclassifies only candidates linked back to
+// explicit same-account imagegen_premium evidence. The old lifecycle could
+// have been modified by text inventory, so it is not reused as image evidence.
+func recoverLegacyCodexImageSnapshot(snapshot *model.AccountQuotaSnapshot) {
+	if !snapshot.LegacyImageEvidence {
+		return
+	}
+	scope := codexquota.ImageScope()
+	duration := rollingDaySeconds
+	snapshot.ProviderWindowID = codexHeaderWindowID(&duration, 0, snapshot.PlanType, codexquota.ImageProviderWindowPrefix)
+	snapshot.ModelScopeKind, snapshot.ModelScopeKey, snapshot.ModelIDsJSON = scope.Kind, scope.Key, ""
+	snapshot.ScopeFingerprint = quotasnapshotrepo.ScopeFingerprint(scope.Kind, scope.Key, scope.Models)
+	snapshot.ObservationID, snapshot.LogicalWindowID, snapshot.ActivationID, snapshot.CycleID = 0, 0, 0, 0
+	snapshot.InventoryScopeKey = "codex:imagegen"
+	snapshot.ContainerWindowID, snapshot.RelationshipKind = "", ""
 }
 
 // normalizeCodexSnapshotForQuery is the read-side compatibility shield for

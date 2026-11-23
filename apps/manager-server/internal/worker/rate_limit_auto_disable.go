@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -1115,6 +1116,18 @@ func codexUsageLimitResetTimeFromEvent(event usage.Event, now time.Time) (time.T
 	}
 	provider := strings.ToLower(strings.TrimSpace(firstNonEmpty(event.Provider, event.AuthProviderSnapshot)))
 	if provider != "codex" {
+		return time.Time{}, false
+	}
+	metadata := event.ResponseMetadata
+	if metadata == nil {
+		metadata = usage.ResponseHeaderMetadataFromJSON(event.ResponseMetadataJSON)
+	}
+	if metadata == nil || metadata.Quota == nil {
+		metadata = usage.ParseResponseHeaderMetadataFromRawJSON(event.RawJSON, now)
+	}
+	if metadata != nil && metadata.Quota != nil && codexquota.IsImageLimit(metadata.Quota.ActiveLimit) {
+		// The credential must remain available to text requests when only
+		// its image pool is exhausted.
 		return time.Time{}, false
 	}
 	if resetAt, ok := codexUsageLimitResetTimeFromHeaders(event, now); ok {

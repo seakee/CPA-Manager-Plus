@@ -22,6 +22,17 @@ const MAX_MONTH_SECONDS = 31 * 24 * 60 * 60;
 export const CODEX_QUOTA_BOUNDARY_JITTER_MS = 60_000;
 
 export const CODEX_MAIN_QUOTA_SCOPE_KEY = 'codex_main';
+export const CODEX_IMAGE_QUOTA_SCOPE_KEY = 'imagegen_premium';
+const CODEX_IMAGE_PROVIDER_WINDOW_PREFIX = 'imagegen-premium';
+
+const imageCodexQuotaScope = (): QuotaModelScope => ({
+  kind: 'family',
+  key: CODEX_IMAGE_QUOTA_SCOPE_KEY,
+  complete: true,
+});
+
+export const isCodexImageQuotaLimit = (value?: string | null): boolean =>
+  normalizeFeatureKey(value) === CODEX_IMAGE_QUOTA_SCOPE_KEY;
 export const CODEX_SPARK_MODEL_ID = 'gpt-5.3-codex-spark';
 export const CODEX_CODE_REVIEW_SCOPE_KEY = 'code_review';
 export const CODEX_UNKNOWN_REQUEST_SCOPE_KEY = 'request_scope_unknown';
@@ -86,6 +97,7 @@ export type CodexQuotaScopeResolution = {
 };
 
 export type CodexUsageModelIdentity = {
+  activeLimit?: string | null;
   model?: string | null;
   analyticsModel?: string | null;
   requestedModel?: string | null;
@@ -548,6 +560,12 @@ export const resolveCodexAdditionalQuotaScope = (
   const anonymousIdentity = anonymousCodexAdditionalIdentity(limitItem);
   const key =
     featureKey || nameKey || normalizeFeatureKey(anonymousIdentity) || 'additional_unknown';
+  if (isCodexImageQuotaLimit(key)) {
+    return {
+      modelScope: imageCodexQuotaScope(),
+      providerWindowIdPrefix: CODEX_IMAGE_PROVIDER_WINDOW_PREFIX,
+    };
+  }
   const conflictingKnownName = Boolean(featureKey && CODEX_SPARK_QUOTA_IDENTIFIERS.has(nameKey));
   return {
     modelScope: incompleteCodexFeatureScope(key),
@@ -564,6 +582,12 @@ export const resolveCodexAdditionalQuotaScope = (
 export const resolveCodexUsageQuotaScope = (
   identity: CodexUsageModelIdentity
 ): CodexQuotaScopeResolution => {
+  if (isCodexImageQuotaLimit(identity.activeLimit)) {
+    return {
+      modelScope: imageCodexQuotaScope(),
+      providerWindowIdPrefix: CODEX_IMAGE_PROVIDER_WINDOW_PREFIX,
+    };
+  }
   const resolvedModel = normalizeCodexModelId(identity.resolvedModel);
   const effectiveModel =
     resolvedModel ||
@@ -601,6 +625,12 @@ export const inferCodexQuotaScopeFromProviderWindowId = (
   if (id === 'code-review' || id.startsWith('code-review-')) {
     return incompleteCodexFeatureScope(CODEX_CODE_REVIEW_SCOPE_KEY);
   }
+  if (
+    id === CODEX_IMAGE_PROVIDER_WINDOW_PREFIX ||
+    id.startsWith(`${CODEX_IMAGE_PROVIDER_WINDOW_PREFIX}-`)
+  ) {
+    return imageCodexQuotaScope();
+  }
   const familyMatch = id.match(/^(.*)-(?:five-hour|weekly|monthly)-(\d+)$/);
   const genericMatch = id.match(/^(.*)-window-/);
   return incompleteCodexFeatureScope(familyMatch?.[1] ?? genericMatch?.[1] ?? id);
@@ -613,6 +643,8 @@ export const isCodexKnownScopedProviderWindowId = (providerWindowId: string): bo
     isCodexSparkProviderWindowId(raw) ||
     id === 'code-review' ||
     id.startsWith('code-review-') ||
+    id === CODEX_IMAGE_PROVIDER_WINDOW_PREFIX ||
+    id.startsWith(`${CODEX_IMAGE_PROVIDER_WINDOW_PREFIX}-`) ||
     CODEX_SPARK_LEGACY_PROVIDER_WINDOW_PREFIXES.some(
       (prefix) => raw === prefix || raw.startsWith(`${prefix}-`)
     )
@@ -761,7 +793,12 @@ const addCodexWindowInfo = (
 
   windows.push({
     id,
-    labelKey,
+    labelKey:
+      modelScope.kind === 'family' &&
+      isCodexImageQuotaLimit(modelScope.key) &&
+      getWindowSeconds(window) === 86_400
+        ? 'codex_quota.image_daily_window'
+        : labelKey,
     labelParams,
     usedPercent,
     resetLabel,

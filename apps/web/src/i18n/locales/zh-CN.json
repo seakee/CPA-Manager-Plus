@@ -2345,6 +2345,7 @@
     "extra_usage_label": "额外用量"
   },
   "codex_quota": {
+    "image_daily_window": "绘图额度（24 小时）",
     "title": "Codex 额度",
     "empty_title": "暂无 Codex 认证",
     "empty_desc": "上传 Codex 认证文件后即可查看额度。",

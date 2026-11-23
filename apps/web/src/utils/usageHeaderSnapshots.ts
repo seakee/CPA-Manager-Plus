@@ -523,6 +523,7 @@ export const buildObservedCodexQuotaFromHeaderSnapshot = (
   const quota = getHeaderSnapshotQuotaMetadata(snapshot);
   if (!quota) return null;
   const quotaScope = resolveCodexUsageQuotaScope({
+    activeLimit: readString(quota.active_limit),
     model: snapshot?.model,
     analyticsModel: snapshot?.analytics_model,
     requestedModel: snapshot?.requested_model,

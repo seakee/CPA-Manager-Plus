@@ -10,6 +10,8 @@ import (
 
 const (
 	MainScopeKey              = "codex_main"
+	ImageScopeKey             = "imagegen_premium"
+	ImageProviderWindowPrefix = "imagegen-premium"
 	SparkModelID              = "gpt-5.3-codex-spark"
 	CodeReviewScopeKey        = "code_review"
 	UnknownRequestScopeKey    = "request_scope_unknown"
@@ -62,6 +64,38 @@ var sparkLegacyProviderWindowPrefixes = []string{
 
 func MainScope() ModelScope {
 	return ModelScope{Kind: "family", Key: MainScopeKey, Complete: true}
+}
+
+func ImageScope() ModelScope {
+	return ModelScope{Kind: "family", Key: ImageScopeKey, Complete: true}
+}
+
+func IsImageLimit(activeLimit string) bool {
+	return NormalizeFeatureKey(activeLimit) == ImageScopeKey
+}
+
+func IsImageScope(kind, key string) bool {
+	return strings.EqualFold(strings.TrimSpace(kind), "family") && IsImageLimit(key)
+}
+
+// IsImageUsage uses the reported quota pool when present. In particular, older
+// image requests explicitly reported premium; those consumed the main pool.
+// Use route/model evidence for historical events without a pool identifier.
+func IsImageUsage(activeLimit, path, requestModel, billingModel string) bool {
+	if strings.TrimSpace(activeLimit) != "" {
+		return IsImageLimit(activeLimit)
+	}
+	switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(path)), "post ") {
+	case "/v1/images/generations", "/v1/images/edits", "/v1/images/variations":
+		return true
+	}
+	for _, name := range []string{billingModel, requestModel} {
+		model := NormalizeModelID(name)
+		if model == "gpt-image" || strings.HasPrefix(model, "gpt-image-") {
+			return true
+		}
+	}
+	return false
 }
 
 func SparkScope() ModelScope {
@@ -133,6 +167,9 @@ func ResolveProviderWindowScope(providerWindowID, windowKind string, provided Mo
 	if canonical == "code-review" || strings.HasPrefix(canonical, "code-review-") {
 		return CodeReviewScope()
 	}
+	if canonical == ImageProviderWindowPrefix || strings.HasPrefix(canonical, ImageProviderWindowPrefix+"-") {
+		return ImageScope()
+	}
 	// An arbitrary additional ID is not enough evidence to establish an
 	// account-wide usage mapping. Legacy rows that omitted scope information
 	// therefore fail closed as an incomplete feature scope; the lifecycle layer
@@ -196,6 +233,9 @@ func ResolveAdditionalScope(input AdditionalScopeInput) AdditionalScopeResolutio
 	}
 	if key == "" {
 		key = NormalizeFeatureKey(input.AnonymousIdentity)
+	}
+	if IsImageLimit(key) {
+		return AdditionalScopeResolution{Scope: ImageScope(), ProviderWindowPrefix: ImageProviderWindowPrefix}
 	}
 	prefix := NormalizeProviderWindowPrefix(input.LimitName)
 	if featureKey != "" && isSparkQuotaIdentifier(nameKey) {
@@ -411,6 +451,9 @@ func InferScopeFromProviderWindowID(providerWindowID string) ModelScope {
 	}
 	if id == "code-review" || strings.HasPrefix(id, "code-review-") {
 		return CodeReviewScope()
+	}
+	if id == ImageProviderWindowPrefix || strings.HasPrefix(id, ImageProviderWindowPrefix+"-") {
+		return ImageScope()
 	}
 	return FeatureScope(additionalProviderWindowFamily(id))
 }
